@@ -304,10 +304,28 @@ function validateHostArrayCaps(
   return null
 }
 
+// Strict channel objects: `teams` is rejected until the CRD has a teams block.
+// Unknown keys on the approval object itself still pass through.
+const HostApprovalChannelSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    approvers: z.array(z.string()).optional(),
+    allowModeChange: z.boolean().optional(),
+  })
+  .strict()
+
 const HostApprovalSchema = z
   .object({
     defaultPolicy: z.string().optional(),
-    channels: z.any().optional(),
+    modeCeiling: z.enum(['manual', 'auto', 'allow_all']).optional(),
+    channels: z
+      .object({
+        telegram: HostApprovalChannelSchema.optional(),
+        email: HostApprovalChannelSchema.optional(),
+        slack: HostApprovalChannelSchema.optional(),
+      })
+      .strict()
+      .optional(),
     tools: z.record(z.string(), z.boolean()).optional(),
   })
   .passthrough()

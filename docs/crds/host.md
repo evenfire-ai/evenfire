@@ -26,19 +26,23 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 | `spec.allowedModels[]` | object[] | no | Up to 32 `{provider, model}` pairs users may switch between per session. Each pair must exist in the global allowlist. |
 | `spec.llmPolicy` | object | no | Opt-in provider fallback. `fallbacks[]` (1–8 ordered `{provider, model, credentialSlot?}`), `triggerOn[]` (subset of `insufficient_quota`, `auth`, `provider_unavailable`, `rate_limited`; default all), `cooldownSeconds` (default 300) before the primary is retried. A Host may use at most one subscription provider across primary and fallbacks. |
 | `spec.workflowControl.scopes` | string[] | no | Workflow broker scopes this Host may receive in its mcp-host-control JWT. Valid values: `workflow:list`, `workflow:read`, `workflow:trigger`, `workflow:approval:resolve`, `workflow:approval:decide`. `workflow_status` and `workflow_health` are covered by `workflow:read`; there is no native `workflow_read` tool. `workflow:approval:resolve` is required for provider identity resolution through this first-party Host; `workflow:approval:decide` is required when a bound channel-reader relays provider-originated workflow approval decisions. |
-| `spec.approval` | object | no | Tool approval configuration -- controls who can approve tool executions. |
+| `spec.approval` | object | no | Tool approval configuration -- controls who can approve tool executions, the approval-mode ceiling, and which channels may change the mode. |
 | `spec.approval.defaultPolicy` | string | no | Who can approve tool calls. One of: `cli_only` (HTTP endpoints only), `channel_users` (any authorized channel user), `designated_approvers` (only users in approvers list). |
-| `spec.approval.channels` | object | no | Per-channel-type approval settings. |
+| `spec.approval.modeCeiling` | string | no | Highest interactive approval mode sessions on this Host may run: `manual`, `auto`, or `allow_all`. Absent means `manual`. Read from this CR only. See [Approval mode ceiling](#approval-mode-ceiling). |
+| `spec.approval.channels` | object | no | Per-channel-type approval settings. Only `telegram`, `email`, and `slack`. Teams has no block and stays capped at manual. |
 | `spec.approval.channels.telegram` | object | no | Telegram approval config. |
 | `spec.approval.channels.telegram.enabled` | boolean | no | Whether Telegram users can approve. |
 | `spec.approval.channels.telegram.approvers` | string[] | no | List of Telegram user IDs allowed to approve. |
+| `spec.approval.channels.telegram.allowModeChange` | boolean | no | Default `false`. When `true`, a Telegram session may store `auto` or `allow_all`, up to `modeCeiling`. Absent or `false` caps that channel at `manual`. |
 | `spec.approval.channels.email` | object | no | Email approval config. |
 | `spec.approval.channels.email.enabled` | boolean | no | Whether email users can approve. |
 | `spec.approval.channels.email.approvers` | string[] | no | List of email addresses allowed to approve. |
+| `spec.approval.channels.email.allowModeChange` | boolean | no | Default `false`. When `true`, an email session may store `auto` or `allow_all`, up to `modeCeiling`. Absent or `false` caps that channel at `manual`. Email identity is the From address. |
 | `spec.approval.channels.slack` | object | no | Slack approval config. |
 | `spec.approval.channels.slack.enabled` | boolean | no | Whether Slack users can approve. |
 | `spec.approval.channels.slack.approvers` | string[] | no | List of Slack user IDs allowed to approve. |
-| `spec.approval.tools` | object | no | Per-tool approval override map for native mcp-host tools. Map of tool name (e.g. `http_request`, `shell_exec`) to boolean: `true` forces approval, `false` skips approval. Absent entries fall through to each tool's built-in default. MCP tools (named `serverName__toolName`) are NOT covered. See `mcp-host/README.md#per-tool-approval-overrides` for the v1 tool list and warning behavior. |
+| `spec.approval.channels.slack.allowModeChange` | boolean | no | Default `false`. When `true`, a Slack session may store `auto` or `allow_all`, up to `modeCeiling`. Absent or `false` caps that channel at `manual`. |
+| `spec.approval.tools` | object | no | Per-tool approval override map for native mcp-host tools. Map of tool name (e.g. `http_request`, `shell_exec`) to boolean: `true` forces approval, `false` skips approval. Absent entries fall through to each tool's built-in default. An explicit `shell_exec: true` keeps a card on every shell call in auto. MCP tools (named `serverName__toolName`) are NOT covered. See `mcp-host/README.md#per-tool-approval-overrides` for the v1 tool list and warning behavior. |
 | `spec.desktop` | object | no | Desktop environment configuration. |
 | `spec.desktop.browser` | boolean | no | Enable Playwright browser tools (`browser_open`, `browser_screenshot`, etc.). |
 | `spec.desktop.x11` | boolean | no | Enable X11 desktop tools (`desktop_screenshot`, `desktop_click`, `desktop_type`, etc.). |
@@ -102,14 +106,17 @@ spec:
     - all-channels
   approval:
     defaultPolicy: designated_approvers
+    # Highest mode sessions may run. Absent means manual. Read from this CR only.
+    modeCeiling: manual
     channels:
       telegram:
         enabled: true
         approvers:
           - "123456789"
+        allowModeChange: false
     tools:
       http_request: false   # skip approval — relies on CLERUM_HTTP_ALLOWLIST as the gate
-      shell_exec: true      # explicit (matches code default; documents intent)
+      shell_exec: true      # explicit: in auto this keeps a card on every shell call. Remove it if auto should judge shell.
 ```
 
 The referenced Secret must exist in the same namespace:
@@ -121,6 +128,18 @@ kubectl create secret generic chatllm-api-keys \
   --from-literal=zai-api-key=zai-xxx \
   --from-literal=bailian-api-key=sk-xxx
 ```
+
+## Approval mode ceiling
+
+`spec.approval.modeCeiling` and each channel's `allowModeChange` are read from this Host CR only. The same fields in mcp-host's `CLERUM_APPROVAL_CONFIG` are ignored: that variable is parsed once at startup, so it cannot act as a live kill switch. The exception is dev mode (`CLERUM_DEV_MODE`), which has no Host watch and reads both fields from `CLERUM_APPROVAL_CONFIG`.
+
+An absent ceiling, a Host with no `spec.approval`, or any other value means `manual`. A Telegram, email, or Slack session may rise above manual only while that channel's `allowModeChange` is `true`. Teams has no field and stays at manual. See [Configure approvals](../how-to/configure-approvals.md).
+
+A Host whose approval policy comes only from the ConfigMap has ceiling `manual` and channel cap `manual`. mcp-host uses `spec.approval` or the ConfigMap policy as one whole object, so adding `spec.approval` replaces that policy. Copy `defaultPolicy`, `channels`, and `tools` into the CR in the same edit that sets the ceiling.
+
+An explicit `shell_exec: true`, including the example above, keeps a card on every `shell_exec` in auto, with no classifier and no shell memory. Remove that line if auto should judge shell.
+
+Apply this CRD before any component writes `modeCeiling` or `allowModeChange`. Until it is applied, the API server prunes the new fields and the ceiling stays manual.
 
 ## Related
 

@@ -858,4 +858,59 @@ describe('validateHostSpec', () => {
       expect(getModelAllowlistState).not.toHaveBeenCalled()
     })
   })
+
+  // Approval modes. modeCeiling is the Host ceiling; channels accepts only
+  // telegram, email and slack, each of which may set allowModeChange.
+  describe('spec.approval mode ceiling and channel switch', () => {
+    const deps = () => ({ isModelAllowed: vi.fn() })
+
+    it.each(['manual', 'auto', 'allow_all'] as const)(
+      'round-trips modeCeiling %s',
+      async modeCeiling => {
+        const spec = { approval: { modeCeiling } }
+        expect(await validateHostSpec(spec, deps())).toBeNull()
+        expect(spec.approval.modeCeiling).toBe(modeCeiling)
+      }
+    )
+
+    it('rejects modeCeiling yolo', async () => {
+      const res = await validateHostSpec({ approval: { modeCeiling: 'yolo' } }, deps())
+      expect(res).not.toBeNull()
+      expect(res!.errors.some(error => error.field === 'spec.approval.modeCeiling')).toBe(true)
+    })
+
+    it('rejects channels.teams', async () => {
+      const res = await validateHostSpec(
+        { approval: { channels: { teams: { enabled: true, allowModeChange: true } } } },
+        deps()
+      )
+      expect(res).not.toBeNull()
+      expect(
+        res!.errors.some(
+          error => error.field.includes('teams') || error.message.toLowerCase().includes('teams')
+        )
+      ).toBe(true)
+    })
+
+    it.each(['telegram', 'email', 'slack'] as const)(
+      'accepts %s.allowModeChange true',
+      async channel => {
+        const spec = {
+          approval: { channels: { [channel]: { enabled: true, allowModeChange: true } } },
+        }
+        expect(await validateHostSpec(spec, deps())).toBeNull()
+        expect(spec.approval.channels[channel].allowModeChange).toBe(true)
+      }
+    )
+
+    it('still accepts the existing telegram channel fixture', async () => {
+      expect(
+        await validateHostSpec({ approval: { channels: { telegram: { enabled: true } } } }, deps())
+      ).toBeNull()
+    })
+
+    it('still accepts an empty channels object', async () => {
+      expect(await validateHostSpec({ approval: { channels: {} } }, deps())).toBeNull()
+    })
+  })
 })
