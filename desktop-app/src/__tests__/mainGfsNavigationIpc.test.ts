@@ -245,6 +245,19 @@ function registeredHandler<T extends (...args: never[]) => unknown>(
   return handler
 }
 
+function navigateAndReadRendererChallenge(ownContents: any): { challenge: string } {
+  const didNavigate = ownContents.listeners.get('did-navigate')
+  if (!didNavigate) throw new Error('main.ts did not register document navigation')
+  didNavigate()
+  const handshake = ownContents.mainFrame.send.mock.calls
+    .filter(([channel]: [string]) => channel === 'auth:markdownDocumentHandshake')
+    .at(-1)?.[1] as { challenge?: unknown } | undefined
+  if (typeof handshake?.challenge !== 'string') {
+    throw new Error('main.ts did not issue the current renderer challenge')
+  }
+  return { challenge: handshake.challenge }
+}
+
 describe('main.ts GFS navigation-generation composition', () => {
   beforeAll(async () => {
     await import('../main.js')
@@ -788,11 +801,17 @@ describe('main.ts GFS navigation-generation composition', () => {
       const ownContents = harness.windows[0]?.webContents
       if (!ownContents) throw new Error('cold startup did not create its main BrowserWindow')
       const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
-      await rendererReady(ipcEvent(ownContents))
-
+      const challenge = navigateAndReadRendererChallenge(ownContents)
+      await rendererReady(ipcEvent(ownContents), { challenge: 'obsolete-challenge' })
       const list = registeredHandler(harness.handleHandlers, 'gfs:listPendingDeepLinks') as (
         event: MainEvent
       ) => { links: Array<{ id: number; uri: string }> }
+      expect(list(ipcEvent(ownContents)).links).toEqual([])
+      expect(
+        ownContents.send.mock.calls.filter(([channel]) => channel === 'gfs:deepLink')
+      ).toHaveLength(0)
+      await rendererReady(ipcEvent(ownContents), challenge)
+
       expect(list(ipcEvent(ownContents)).links).toEqual([
         { id: 1, uri, userNavigationGenerationAtActivation: 0 },
       ])
@@ -831,8 +850,8 @@ describe('main.ts GFS navigation-generation composition', () => {
       const ownContents = harness.windows[0]?.webContents
       if (!ownContents) throw new Error('cold startup did not create its main BrowserWindow')
       const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
-      await rendererReady(ipcEvent(ownContents))
-
+      const challenge = navigateAndReadRendererChallenge(ownContents)
+      await rendererReady(ipcEvent(ownContents), { challenge: 'obsolete-challenge' })
       const list = registeredHandler(harness.handleHandlers, 'sandboxUi:listPendingDeepLinks') as (
         event: MainEvent
       ) => {
@@ -843,6 +862,12 @@ describe('main.ts GFS navigation-generation composition', () => {
           userNavigationGenerationAtActivation: number
         }>
       }
+      expect(list(ipcEvent(ownContents)).links).toEqual([])
+      expect(
+        ownContents.send.mock.calls.filter(([channel]) => channel === 'sandboxUi:deepLink')
+      ).toHaveLength(0)
+      await rendererReady(ipcEvent(ownContents), challenge)
+
       expect(list(ipcEvent(ownContents)).links).toEqual([
         {
           id: 1,
