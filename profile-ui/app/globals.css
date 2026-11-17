@@ -108,10 +108,6 @@ code {
   max-width: 940px;
 }
 
-.profile-page--settings {
-  max-width: 1180px;
-}
-
 .center-page {
   display: grid;
   min-height: 100vh;
@@ -1889,10 +1885,6 @@ code {
   color: var(--cu-text-soft);
   font-size: 0.75rem;
   font-weight: 400;
-}
-
-.settings-desktop-setup-button {
-  margin-top: var(--cu-space-3);
 }
 
 .settings-desktop-url-field {

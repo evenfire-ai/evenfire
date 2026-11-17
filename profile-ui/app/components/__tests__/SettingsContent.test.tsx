@@ -71,6 +71,19 @@ vi.mock('@components/ProfileBodySkeleton', () => ({
   ProfileBodySkeleton: () => null,
 }))
 
+vi.mock('@components/ProfileAccessContext', () => ({
+  useProfileAccess: () => ({
+    approvalTargets: [{ id: 'slack-target' }],
+    approvalTargetsLoading: false,
+    canManageMembers: false,
+    manageableTeams: [],
+    manageableTeamsError: false,
+    manageableTeamsLoading: false,
+    refreshApprovalTargets: vi.fn(),
+    refreshManageableTeams: vi.fn(),
+  }),
+}))
+
 vi.mock('@components/ProfileShell', () => ({
   ProfileShell: ({ children }: { children: ReactNode }) => <>{children}</>,
 }))
@@ -118,6 +131,24 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllEnvs()
+})
+
+describe('Settings header structure', () => {
+  it('renders the lean shared header used by the other sections', async () => {
+    render(<SettingsContent />)
+
+    expect(await screen.findByRole('button', { name: 'Refresh settings' })).toBeInTheDocument()
+    expect(screen.queryByText('Profile settings')).toBeNull()
+    expect(screen.queryByText(/Signed in as/)).toBeNull()
+
+    const toolbar = screen
+      .getByRole('button', { name: 'Refresh settings' })
+      .closest('.toolbar') as HTMLElement | null
+    expect(toolbar).not.toBeNull()
+    expect(
+      within(toolbar as HTMLElement).getByRole('button', { name: 'Setup desktop app' })
+    ).toBeInTheDocument()
+  })
 })
 
 describe('Settings desktop setup handoff', () => {
