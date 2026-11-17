@@ -981,7 +981,9 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
     expect(view.effectiveModel).toBe('gpt-5.5')
   })
 
-  it('P1 — the effective model is `intent ?? sessionModel ?? hostDefault` for every provider', async () => {
+  it('P1 — after one fresh read, the effective model is `intent ?? sessionModel ?? hostDefault` for every provider', async () => {
+    // One settled read per run leaves `lastConfirmedModel === sessionModel`, so
+    // the last-confirmed step (stale reads, conflicts, send acks) is not covered.
     const NAME_POOL = ['m-a', 'm-b', 'm-c', 'm-d', 'm-e'] as const
     // No `validUntil`/evidence: the decisions never expire, so the literal
     // oracle below needs no clock.
