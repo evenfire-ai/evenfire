@@ -14,6 +14,7 @@ import { createRpcRouter } from '../routes/rpc.js'
 import { createRpcHostActivityStreamRouter } from '../routes/rpcHostActivityStream.js'
 import { createRpcHostProgressStreamRouter } from '../routes/rpcHostProgressStream.js'
 import { createRpcHostStatusStreamRouter } from '../routes/rpcHostStatusStream.js'
+import { verifyUserDelegationV2 } from '../userDelegationV2.js'
 
 const authMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
 const hostMock = vi.hoisted(() => ({
@@ -349,6 +350,7 @@ describe('public Host-ref validation', () => {
         producerBoundW1Tokens.get(route.name),
         `producer-bound v2 ${route.name} token`
       )
+      expect(verifyUserDelegationV2(token)).not.toBeNull()
       const checkpoint = vi.fn(
         async () =>
           new Response(JSON.stringify({ error: 'checkpoint_should_not_run' }), {
@@ -368,6 +370,7 @@ describe('public Host-ref validation', () => {
       expect(checkpoint).not.toHaveBeenCalled()
       expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
       expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+      expect(authMock.verifyRpcToken).not.toHaveBeenCalled()
     }
   )
 
@@ -419,6 +422,7 @@ describe('public Host-ref validation', () => {
 
   it('rejects a whitespace Host ref after real v2 binding but before the remote checkpoint', async () => {
     const { token } = setupValue(whitespaceHostWakeDelegation, 'whitespace Host wake token')
+    expect(verifyUserDelegationV2(token)).not.toBeNull()
     const remoteCheckpoint = vi.fn(
       async () =>
         new Response(JSON.stringify({ error: 'checkpoint_should_not_run' }), {
@@ -441,6 +445,7 @@ describe('public Host-ref validation', () => {
     expect(remoteCheckpoint).not.toHaveBeenCalled()
     expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
     expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    expect(authMock.verifyRpcToken).not.toHaveBeenCalled()
   })
 
   it('rejects real v2 target substitutions during local binding before W1 or checkpoint I/O', async () => {
@@ -464,6 +469,7 @@ describe('public Host-ref validation', () => {
 
   it('runs message preflight and W1 after exact binding but before the remote checkpoint', async () => {
     const fixture = setupValue(messagePreflightDelegation, 'message preflight token')
+    expect(verifyUserDelegationV2(fixture.token)).not.toBeNull()
     const checkpoint = vi.fn()
     vi.stubGlobal('fetch', checkpoint)
 
@@ -490,6 +496,7 @@ describe('public Host-ref validation', () => {
     expect(invalidMessage.status).toBe(400)
     expect(invalidMessage.body).toEqual({ error: 'Invalid host message request payload' })
     expect(checkpoint).not.toHaveBeenCalled()
+    expect(authMock.verifyRpcToken).not.toHaveBeenCalled()
   })
 
   it('does not convert a missing segment into a captured invalid Host', async () => {
