@@ -24,17 +24,19 @@ const CONTROL_API_WATCH_PATH = '/external/gfs/watch'
 export const GFS_EDGE_WATCH_USER_PER_MIN = 240
 const RETRY_AFTER_SEC = 2
 
-// The statuses the watch contract gives a meaning to; every 5xx is relayed too
-// so a 503's own code and Retry-After reach the client. Anything else (a 3xx,
-// 404, 405, 406, 415, ...) comes from something other than the watch route and
-// becomes a 503 the client retries.
+// The 4xx statuses the watch contract gives a meaning to.
 const PROPAGATED = new Set([400, 401, 403, 409, 426, 429])
 
 /**
- * Relayed only when the watch route wrote it: every non-2xx it sends carries
- * `x-watch-error`. control-api's service-credential gate answers a bare 401
- * when it refuses this edge's credential; relayed, the client would end a
- * session that is still valid and keep it ended after the credential is fixed.
+ * A control-api failure is relayed as is only when the watch route wrote it:
+ * its status is in PROPAGATED or is a 5xx (so a 503's own code and Retry-After
+ * reach the client), and it carries `x-watch-error`, which the route sets on
+ * every non-2xx it sends. Anything else becomes a 503 watch_reopen the client
+ * retries: a 3xx, an unlisted status (404, 405, 415, ...), or a listed one
+ * written elsewhere in control-api, such as a 500 of its global error handler
+ * or the bare 401 of its service-credential gate refusing this edge's
+ * credential. Relayed, that 401 would end a session that is still valid and
+ * keep it ended after the credential is fixed.
  */
 function isWatchRouteFailure(error: ControlApiError): boolean {
   const status = error.status
