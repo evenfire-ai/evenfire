@@ -393,6 +393,90 @@ describe('async progress flow — SSE-driven approval', () => {
     vi.useRealTimers()
   })
 
+  it('omits Always approve on a card the Host cannot allowlist, and does not claim a grant', async () => {
+    streamCalls.length = 0
+    const sentReplies: Array<{ channelId: string; content: string }> = []
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
+    const adapter: ChannelAdapter = {
+      channelType: 'telegram',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async (channelId, content) => {
+        sentReplies.push({ channelId, content })
+        return `bot-msg-${sentReplies.length}`
+      }),
+      editMessage,
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'pending' as const,
+        taskId: 'task-reask-1',
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-reask-1',
+          requestId: 'approval-reask-1',
+          userId: '516801777',
+          notification: 'Tool `shell_exec` was denied and must be approved again.',
+          alwaysApproveAllowed: false as const,
+        },
+      })),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['telegram', adapter]]),
+      channels: [makeChannel()],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([makeMessage('run the denied tool', 'msg-reask')])
+    streamCalls[0].fireSuspended({
+      taskId: 'task-reask-1',
+      requestId: 'approval-reask-1',
+      toolName: 'shell_exec',
+      displayName: 'Shell',
+      reason: 'approval_required',
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const approvalEdit = editMessage.mock.calls.find(call =>
+      call[2].includes('must be approved again')
+    )
+    expect(approvalEdit?.[3]?.telegramInlineKeyboard).toEqual([
+      [
+        expect.objectContaining({
+          text: 'Approve',
+          callbackData: expect.stringMatching(/^tool:a:/),
+        }),
+        expect.objectContaining({ text: 'Deny', callbackData: expect.stringMatching(/^tool:d:/) }),
+      ],
+    ])
+
+    await reader.handleMessages([makeMessage('/approve always', 'msg-reask-always')])
+    expect(rpcClient.sendApproval).toHaveBeenCalledWith(
+      '516801777',
+      'approval-reask-1',
+      true,
+      'telegram',
+      'tg-chat-1'
+    )
+    expect(sentReplies.map(reply => reply.content)).toContain('Approved. Processing...')
+    expect(sentReplies.map(reply => reply.content)).not.toContain(
+      'Approved (always for this tool). Processing...'
+    )
+  })
+
   it('renders Slack tool approval buttons in the originating thread', async () => {
     streamCalls.length = 0
     const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
