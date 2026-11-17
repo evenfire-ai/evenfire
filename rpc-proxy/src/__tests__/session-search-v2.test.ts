@@ -1,6 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import request from 'supertest'
@@ -10,6 +9,13 @@ import {
   hashActionTarget,
   validateActionOperationTarget,
 } from '@clerum/action-context-contracts'
+import {
+  type SetupOutcome,
+  producerBudgetMs,
+  recordSetup,
+  runProducerChild,
+  setupValue,
+} from '../../test/support/producerChild.js'
 import { createRpcRouter } from '../routes/rpc.js'
 import type { UserDelegationV2Claims } from '../userDelegationV2.js'
 
@@ -57,41 +63,54 @@ const claims: UserDelegationV2Claims = {
   effectiveTeamId: null,
 }
 
-function checkpointAllowed() {
+// Setup, not behaviour under test: the control-api checkpoint producer runs in a
+// `tsx` child process. `beforeAll` runs it once, so no test body or mocked
+// request starts a process, and records its output or the error it failed with.
+// A recorded error is rethrown by `checkpointAllowed`: a broken producer fails
+// the tests that read it, with its own error, and the other tests still run.
+// The child is bounded by PRODUCER_CHILD_TIMEOUT_MS.
+let checkpointProducerOutput: SetupOutcome<string> | undefined
+
+beforeAll(async () => {
   const repositoryRoot = resolve(process.cwd(), '..')
-  const output = execFileSync(
-    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
-    [
+  checkpointProducerOutput = await recordSetup(() =>
+    runProducerChild(
+      resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
       resolve(
         repositoryRoot,
         'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
       ),
-      JSON.stringify({
-        request: {
-          version: 2,
-          principal: { sub: userId, sid, sessionVersion: claims.sv },
-          delegationJti: claims.jti,
-          resource,
-          operationId: 'session.read',
-          target,
-          targetHash,
-          accessPathId: claims.accessPathId,
-          authorizationRevision: claims.authorizationRevision,
-          behaviorBindingHash: claims.behaviorBindingHash,
-          domain: { service: 'rpc-proxy', resource, targetHash },
-        },
-        destination: {
-          kind: 'host',
-          ref: 'mcp-host/chatllm',
-          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-        },
-        checkedAt: new Date().toISOString(),
-        validUntil: new Date(Date.now() + 60_000).toISOString(),
-      }),
-    ],
-    { cwd: repositoryRoot, encoding: 'utf8' }
+      [
+        JSON.stringify({
+          request: {
+            version: 2,
+            principal: { sub: userId, sid, sessionVersion: claims.sv },
+            delegationJti: claims.jti,
+            resource,
+            operationId: 'session.read',
+            target,
+            targetHash,
+            accessPathId: claims.accessPathId,
+            authorizationRevision: claims.authorizationRevision,
+            behaviorBindingHash: claims.behaviorBindingHash,
+            domain: { service: 'rpc-proxy', resource, targetHash },
+          },
+          destination: {
+            kind: 'host',
+            ref: 'mcp-host/chatllm',
+            url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+          },
+          checkedAt: new Date().toISOString(),
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+        }),
+      ],
+      { cwd: repositoryRoot }
+    )
   )
-  return JSON.parse(output)
+}, producerBudgetMs(1))
+
+function checkpointAllowed() {
+  return JSON.parse(setupValue(checkpointProducerOutput, 'checkpoint producer output'))
 }
 
 function makeApp() {

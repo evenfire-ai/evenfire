@@ -1,8 +1,14 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { execFileSync } from 'node:child_process'
 import { delimiter, resolve } from 'node:path'
 import request from 'supertest'
+import {
+  type SetupOutcome,
+  producerBudgetMs,
+  recordSetup,
+  runProducerChild,
+  setupValue,
+} from '../../test/support/producerChild.js'
 import { verifyUserDelegationV2 } from '../userDelegationV2.js'
 import { createDesktopRouter } from './desktopProxy.js'
 import { createSandboxUiSessionRouter } from './sandboxUi.js'
@@ -19,24 +25,42 @@ const producer = resolve(
 
 afterEach(() => vi.restoreAllMocks())
 
-function issueToken(operationId: string): string {
-  const output = execFileSync(tsx, [producer, operationId], {
-    cwd: repositoryRoot,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      NODE_PATH: [resolve(repositoryRoot, 'rpc-proxy', 'node_modules'), process.env.NODE_PATH]
-        .filter(Boolean)
-        .join(delimiter),
-    },
-  })
-  return (JSON.parse(output) as { token: string }).token
+// Setup, not behaviour under test: the control-api delegation producer runs in a
+// `tsx` child process, once per distinct operation. `beforeAll` runs both
+// children, so no test body starts a process, and records each output or the
+// error it failed with. A recorded error is rethrown by `issuedToken`: a broken
+// producer fails the tests that read it, with its own error. Each child is
+// bounded by PRODUCER_CHILD_TIMEOUT_MS.
+const issuedTokens = new Map<string, SetupOutcome<string>>()
+
+beforeAll(async () => {
+  for (const operationId of ['remote_desktop.reconnect', 'sandbox.reconnect']) {
+    issuedTokens.set(
+      operationId,
+      await recordSetup(async () => {
+        const output = await runProducerChild(tsx, producer, [operationId], {
+          cwd: repositoryRoot,
+          env: {
+            ...process.env,
+            NODE_PATH: [resolve(repositoryRoot, 'rpc-proxy', 'node_modules'), process.env.NODE_PATH]
+              .filter(Boolean)
+              .join(delimiter),
+          },
+        })
+        return (JSON.parse(output) as { token: string }).token
+      })
+    )
+  }
+}, producerBudgetMs(2))
+
+function issuedToken(operationId: string): string {
+  return setupValue(issuedTokens.get(operationId), `delegation token for ${operationId}`)
 }
 
 describe('Control API-issued derived-view delegation admission', () => {
   it('rejects repeated Desktop and Sandbox views before checkpoint or consumer work', async () => {
-    const desktopToken = issueToken('remote_desktop.reconnect')
-    const sandboxToken = issueToken('sandbox.reconnect')
+    const desktopToken = issuedToken('remote_desktop.reconnect')
+    const sandboxToken = issuedToken('sandbox.reconnect')
     expect(verifyUserDelegationV2(desktopToken)?.operationIds).toEqual(['remote_desktop.reconnect'])
     expect(verifyUserDelegationV2(sandboxToken)?.operationIds).toEqual(['sandbox.reconnect'])
 
