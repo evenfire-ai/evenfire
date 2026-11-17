@@ -20,7 +20,6 @@ function withQuery(path: string, query?: ProfileRouteQuery): string {
 export const PROFILE_ROUTES = {
   root: '/',
   login: (query?: ProfileRouteQuery) => withQuery('/', query),
-  approvalChannels: '/approval-channels',
   channels: {
     root: '/channels',
     channel: (network: string) => `/channels/${segment(network)}`,
@@ -39,5 +38,6 @@ export const PROFILE_ROUTES = {
   settings: {
     root: '/settings/profile',
     profile: '/settings/profile',
+    approvalChannels: '/settings/approval-channels',
   },
 } as const

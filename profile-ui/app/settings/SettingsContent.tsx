@@ -9,10 +9,9 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { FormField } from '@components/FormField'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
-import { ReleaseLabel } from '@components/ReleaseLabel'
 import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
-import { IconCopy, IconRefresh } from '@components/icons'
+import { IconCopy } from '@components/icons'
 import { PROFILE_ROUTES } from '@constants/routes'
 import {
   getConfiguredExternalRestApiBaseUrl,
@@ -40,6 +39,8 @@ import { refreshReleaseIdentity } from '@lib/releaseIdentity'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
 import type { Me } from '@/app/types/profile'
 import { SettingsChannelSection } from './SettingsChannelSection'
+import { SettingsPageHeader } from './SettingsPageHeader'
+import { SettingsTabs } from './SettingsTabs'
 import { EMAIL_CHANNEL_SECTION } from './constants'
 import type {
   ProfileChannelDraft,
@@ -236,36 +237,19 @@ export function SettingsContent() {
 
   return (
     <ProfileShell currentRoute="settings">
-      <div className="profile-page profile-page--settings">
-        <header className="header-row">
-          <div>
-            <p className="eyebrow">Profile settings</p>
-            <h1 className="page-title">Settings</h1>
-            <ReleaseLabel className="small-plus muted" />
-            <div className="small-plus muted">
-              {me ? `Signed in as ${me.email}` : 'Loading user session'}
-            </div>
-            <Button
-              variant="secondary"
-              className="settings-desktop-setup-button"
-              onClick={openDesktopSetupModal}
-              disabled={formDisabled}
-            >
+      <div className="profile-page">
+        <SettingsPageHeader
+          disabled={formDisabled}
+          spinning={state === 'loading'}
+          refreshAriaLabel={state === 'loading' ? 'Refreshing settings' : 'Refresh settings'}
+          onRefresh={() => void loadAll(true)}
+          actions={
+            <Button variant="secondary" onClick={openDesktopSetupModal} disabled={formDisabled}>
               Setup desktop app
             </Button>
-          </div>
-          <div className="toolbar">
-            <Button
-              variant="secondary"
-              className="cu-btn--icon cu-btn--toolbar"
-              onClick={() => void loadAll(true)}
-              disabled={formDisabled}
-              aria-label={state === 'loading' ? 'Refreshing settings' : 'Refresh settings'}
-            >
-              <IconRefresh className={state === 'loading' ? 'cu-spin' : undefined} />
-            </Button>
-          </div>
-        </header>
+          }
+        />
+        <SettingsTabs active="profile" />
 
         {error && <div className="message message--error">{error}</div>}
 

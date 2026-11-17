@@ -17,18 +17,10 @@ export function isPublicProfileUiRequest(pathname: string, searchParams: URLSear
   return getRootInviteToken(pathname, searchParams) !== null
 }
 
-export type ProfileRouteKey =
-  | 'socialChannels'
-  | 'members'
-  | 'approvalChannels'
-  | 'connectedAccounts'
-  | 'settings'
+export type ProfileRouteKey = 'socialChannels' | 'members' | 'connectedAccounts' | 'settings'
 
 export function profileRouteForPathname(pathname: string): ProfileRouteKey {
   if (pathname === '/channels' || pathname.startsWith('/channels/')) return 'socialChannels'
-  if (pathname === '/approval-channels' || pathname.startsWith('/approval-channels/')) {
-    return 'approvalChannels'
-  }
   if (pathname === '/connected-accounts' || pathname.startsWith('/connected-accounts/')) {
     return 'connectedAccounts'
   }

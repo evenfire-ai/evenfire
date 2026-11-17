@@ -69,25 +69,34 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('Profile Sidebar access-controlled entries', () => {
-  it('keeps the active approval-channel entry visible during a known-access refresh', () => {
+  it('keeps the active social-channels entry visible during a known-access refresh', () => {
     profileAccessState.approvalTargets = [{ id: 'slack-target' }]
     profileAccessState.approvalTargetsLoading = true
 
-    const view = render(<Sidebar currentRoute="approvalChannels" onLogout={vi.fn()} />)
+    const view = render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
 
-    const approvalLink = screen.getByRole('link', { name: /Approval Channels/i })
-    expect(approvalLink).toHaveAttribute('aria-current', 'page')
-    expect(approvalLink).toHaveAttribute('data-active', 'true')
+    const socialLink = screen.getByRole('link', { name: /Social channels/i })
+    expect(socialLink).toHaveAttribute('aria-current', 'page')
+    expect(socialLink).toHaveAttribute('data-active', 'true')
     expect(view.container.querySelector('.cu-sidebar__item--loading')).not.toBeInTheDocument()
   })
 
-  it('keeps initial approval-channel access unresolved behind a loading placeholder', () => {
+  it('keeps initial social-channels access unresolved behind a loading placeholder', () => {
     profileAccessState.approvalTargetsLoading = true
 
-    const view = render(<Sidebar currentRoute="approvalChannels" onLogout={vi.fn()} />)
+    const view = render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
+
+    expect(screen.queryByRole('link', { name: /Social channels/i })).not.toBeInTheDocument()
+    expect(view.container.querySelector('.cu-sidebar__item--loading')).toBeInTheDocument()
+  })
+
+  it('does not render an approval-channels entry; it lives under Settings', () => {
+    profileAccessState.approvalTargets = [{ id: 'slack-target' }]
+
+    render(<Sidebar currentRoute="settings" onLogout={vi.fn()} />)
 
     expect(screen.queryByRole('link', { name: /Approval Channels/i })).not.toBeInTheDocument()
-    expect(view.container.querySelector('.cu-sidebar__item--loading')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Settings' })).toBeInTheDocument()
   })
 })
 
@@ -100,7 +109,6 @@ describe('Profile Sidebar navigation order', () => {
 
     expect(screen.getAllByRole('link').map(link => link.textContent?.trim())).toEqual([
       'Social channels',
-      'Approval Channels',
       'Connected Accounts',
       'Members',
       'Settings',
@@ -113,7 +121,7 @@ describe('Profile Sidebar navigation order', () => {
     const view = render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
 
     expect(screen.queryByRole('link', { name: /Social channels/i })).not.toBeInTheDocument()
-    expect(view.container.querySelectorAll('.cu-sidebar__item--loading')).toHaveLength(2)
+    expect(view.container.querySelectorAll('.cu-sidebar__item--loading')).toHaveLength(1)
   })
 
   it('hides the Social channels entry when the account has no external channel access', () => {

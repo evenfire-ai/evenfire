@@ -1,3 +1,4 @@
+import React from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
@@ -8,16 +9,21 @@ import type {
   WorkflowApprovalMediumAccount,
 } from '@/app/types/approvalChannels'
 import type { NotificationPreferences } from '@/app/types/profile'
-import ApprovalChannelsPage from '../../approval-channels/page'
+import { ApprovalChannelsContent } from '../../settings/ApprovalChannelsContent'
 
 const mocks = vi.hoisted(() => ({
-  getMe: vi.fn(),
   getNotificationPreferences: vi.fn(),
   listWorkflowApprovalMediums: vi.fn(),
-  refreshApprovalTargets: vi.fn(),
   routerPush: vi.fn(),
+  routerReplace: vi.fn(),
   showToast: vi.fn(),
   updateNotificationPreferences: vi.fn(),
+}))
+
+const profileAccess = vi.hoisted(() => ({
+  approvalTargets: [] as ApprovalChannelTarget[],
+  approvalTargetsLoading: false,
+  refreshApprovalTargets: vi.fn(),
 }))
 
 const target: ApprovalChannelTarget = {
@@ -51,21 +57,38 @@ const selectedPreferences: NotificationPreferences = {
 }
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: mocks.routerPush }),
+  useRouter: () => ({ push: mocks.routerPush, replace: mocks.routerReplace }),
 }))
 
-vi.mock('@components/AuthGate', () => ({
-  AuthGate: ({ children }: { children: ReactNode }) => children,
+vi.mock('next/link', () => ({
+  default: ({
+    children,
+    href,
+    ...props
+  }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) => (
+    <a href={href} {...props}>
+      {children}
+    </a>
+  ),
 }))
 
 vi.mock('@components/ProfileShell', () => ({
   ProfileShell: ({ children }: { children: ReactNode }) => <>{children}</>,
 }))
 
+vi.mock('@components/ProfileBodySkeleton', () => ({
+  ProfileBodySkeleton: () => null,
+}))
+
+vi.mock('@components/ReleaseLabel', () => ({
+  ReleaseLabel: () => null,
+}))
+
 vi.mock('@components/ProfileAccessContext', () => ({
   useProfileAccess: () => ({
-    approvalTargets: [target],
-    refreshApprovalTargets: mocks.refreshApprovalTargets,
+    approvalTargets: profileAccess.approvalTargets,
+    approvalTargetsLoading: profileAccess.approvalTargetsLoading,
+    refreshApprovalTargets: profileAccess.refreshApprovalTargets,
   }),
 }))
 
@@ -74,7 +97,6 @@ vi.mock('@components/Toast', () => ({
 }))
 
 vi.mock('@lib/api', () => ({
-  getMe: mocks.getMe,
   getNotificationPreferences: mocks.getNotificationPreferences,
   isSilentApiError: () => false,
   updateNotificationPreferences: mocks.updateNotificationPreferences,
@@ -85,21 +107,60 @@ vi.mock('@lib/approvalChannels', async importOriginal => {
   return { ...original, listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums }
 })
 
-function renderPage() {
-  return render(<ApprovalChannelsPage />)
+function renderTab() {
+  return render(<ApprovalChannelsContent />)
 }
 
 beforeEach(() => {
   vi.clearAllMocks()
-  mocks.getMe.mockResolvedValue({ id: 'user-1', email: 'user@example.com' })
-  mocks.refreshApprovalTargets.mockResolvedValue(undefined)
+  profileAccess.approvalTargets = [target]
+  profileAccess.approvalTargetsLoading = false
+  profileAccess.refreshApprovalTargets.mockResolvedValue(undefined)
   mocks.listWorkflowApprovalMediums.mockResolvedValue([slackAccount])
   mocks.getNotificationPreferences.mockResolvedValue(selectedPreferences)
 })
 
 afterEach(cleanup)
 
-describe('ApprovalChannelsPage preferred channel editing', () => {
+describe('Settings approval channels tab structure', () => {
+  it('renders the settings tabs with the approval channels tab active', async () => {
+    renderTab()
+
+    const tabs = await screen.findByRole('tablist', { name: 'Settings sections' })
+    expect(within(tabs).getByRole('tab', { name: 'Profile' })).toHaveAttribute(
+      'href',
+      '/settings/profile'
+    )
+    const approvalTab = within(tabs).getByRole('tab', { name: 'Approval channels' })
+    expect(approvalTab).toHaveAttribute('href', '/settings/approval-channels')
+    expect(approvalTab).toHaveAttribute('aria-selected', 'true')
+    expect(within(tabs).getByRole('tab', { name: 'Profile' })).toHaveAttribute(
+      'aria-selected',
+      'false'
+    )
+  })
+
+  it('does not render the removed preferred-channel section head or Manage redirect', async () => {
+    renderTab()
+
+    await screen.findByText(preferredAccountOptionLabel(slackAccount))
+    expect(screen.queryByRole('heading', { name: 'Preferred approval channel' })).toBeNull()
+    expect(screen.queryByText('Manage')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Manage' })).toBeNull()
+    expect(mocks.routerPush).not.toHaveBeenCalled()
+  })
+
+  it('renders the settings header with refresh and the approval channels refresh contract', async () => {
+    renderTab()
+
+    const refreshButton = await screen.findByRole('button', { name: 'Refresh approval channels' })
+    expect(refreshButton).toBeInTheDocument()
+    expect(screen.queryByText('Profile settings')).toBeNull()
+    expect(screen.queryByText(/Signed in as/)).toBeNull()
+  })
+})
+
+describe('Approval channels preferred channel editing', () => {
   it('stages an automatic preference and persists it only after Save', async () => {
     const automaticPreferences: NotificationPreferences = {
       ...selectedPreferences,
@@ -107,7 +168,7 @@ describe('ApprovalChannelsPage preferred channel editing', () => {
       preferredAccountId: null,
     }
     mocks.updateNotificationPreferences.mockResolvedValue(automaticPreferences)
-    renderPage()
+    renderTab()
 
     const expectedLabel = preferredAccountOptionLabel(slackAccount)
     expect(await screen.findByText(expectedLabel)).toBeInTheDocument()
@@ -141,7 +202,7 @@ describe('ApprovalChannelsPage preferred channel editing', () => {
 
   it('keeps a failed draft open and discards it on cancel', async () => {
     mocks.updateNotificationPreferences.mockRejectedValue(new Error('preferred_account_not_found'))
-    renderPage()
+    renderTab()
 
     const expectedLabel = preferredAccountOptionLabel(slackAccount)
     await screen.findByText(expectedLabel)
@@ -163,5 +224,12 @@ describe('ApprovalChannelsPage preferred channel editing', () => {
     expect(await screen.findByRole('combobox', { name: 'Preferred channel' })).toHaveValue(
       slackAccount.id
     )
+  })
+
+  it('returns to the Profile tab when the account has no external channel access', async () => {
+    profileAccess.approvalTargets = []
+    renderTab()
+
+    await waitFor(() => expect(mocks.routerReplace).toHaveBeenCalledWith('/settings/profile'))
   })
 })
