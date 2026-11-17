@@ -561,6 +561,38 @@ function jsonPatchOpAt(body: unknown, path: string): JsonPatchOperation | undefi
   return (body as JsonPatchOperation[]).find(operation => operation.path === path)
 }
 
+/**
+ * A StatefulSet as kube-apiserver returns it after a create: the defaults a
+ * v1.35.1 server stored on the probe object of 2026-11-14 (issue #1349, P-1),
+ * applied to the fields this manifest has. `resources: {}` and the pod
+ * `securityContext: {}` are the two the template comparison does not strip, so
+ * the stored template differs from the rendered one on every update.
+ */
+function withApiServerDefaults(statefulSet: k8s.V1StatefulSet): k8s.V1StatefulSet {
+  const stored = structuredClone(statefulSet)
+  const spec = stored.spec!
+  spec.podManagementPolicy ??= 'OrderedReady'
+  spec.revisionHistoryLimit ??= 10
+  spec.persistentVolumeClaimRetentionPolicy ??= { whenDeleted: 'Retain', whenScaled: 'Retain' }
+  spec.updateStrategy ??= {
+    type: 'RollingUpdate',
+    rollingUpdate: { maxUnavailable: 1, partition: 0 },
+  }
+  const pod = spec.template.spec!
+  pod.dnsPolicy ??= 'ClusterFirst'
+  pod.restartPolicy ??= 'Always'
+  pod.schedulerName ??= 'default-scheduler'
+  pod.securityContext ??= {}
+  pod.terminationGracePeriodSeconds ??= 30
+  for (const container of [...pod.containers, ...(pod.initContainers ?? [])]) {
+    container.imagePullPolicy ??= 'IfNotPresent'
+    container.resources ??= {}
+    container.terminationMessagePath ??= '/dev/termination-log'
+    container.terminationMessagePolicy ??= 'File'
+  }
+  return stored
+}
+
 const LIVE_CLUSTER_IP = '10.0.0.7'
 
 // StatefulSet double used by every test unless a test overrides it: reads are
@@ -4684,6 +4716,91 @@ describe('WorkflowRecipeReconciler', () => {
         expect(options.middleware).toHaveLength(1)
         options.middleware[0].pre({ setHeaderParam })
         expect(setHeaderParam).toHaveBeenCalledWith('Content-Type', 'application/json-patch+json')
+      })
+
+      // R1-M2 — `kubectl rollout restart` writes restartedAt on the stored pod
+      // template. The update carries it over, so replacing the template does not
+      // remove it and start one more rollout.
+      for (const shape of ['as WRC sent it', 'as the API server stores it'] as const) {
+        it(`T-R3-M2-1: a replicas-only update keeps restartedAt on a template stored ${shape} (issue #1349)`, async () => {
+          const RESTARTED_AT = 'kubectl.kubernetes.io/restartedAt'
+          const one: StsWorkload = {
+            id: 'db',
+            type: 'statefulset',
+            image: 'postgres:16',
+            replicas: 1,
+          }
+          const name = stsNameOf(one)
+          await ensure(one)
+          const created = await stored(name)
+          const live = shape === 'as WRC sent it' ? created : withApiServerDefaults(created)
+          live.spec!.template.metadata = {
+            ...live.spec!.template.metadata,
+            annotations: {
+              ...live.spec!.template.metadata?.annotations,
+              [RESTARTED_AT]: '2026-11-16T10:00:00Z',
+            },
+          }
+          await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+          mockAppsApi.patchNamespacedStatefulSet.mockClear()
+
+          await ensure({ ...one, replicas: 2 })
+
+          // Witness: the update was sent and stored.
+          expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+          const after = await stored(name)
+          expect(after.spec!.replicas).toBe(2)
+          expect(after.spec!.template.metadata?.annotations?.[RESTARTED_AT]).toBe(
+            '2026-11-16T10:00:00Z'
+          )
+          const body = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
+          const templateOp = jsonPatchOpAt(body, '/spec/template')
+          if (shape === 'as the API server stores it') {
+            // The defaults keep the template in the patch: the replace value
+            // itself carries the annotation.
+            expect(templateOp?.op).toBe('replace')
+            expect(
+              (templateOp!.value as k8s.V1PodTemplateSpec).metadata?.annotations?.[RESTARTED_AT]
+            ).toBe('2026-11-16T10:00:00Z')
+          } else {
+            expect(templateOp).toBeUndefined()
+          }
+          // The annotation is not part of the hashed manifest: the same spec
+          // again is a no-op.
+          await ensure({ ...one, replicas: 2 })
+          expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+        })
+      }
+
+      it('T-R3-M2-2: the template replace still drops every other annotation only the stored template has (issue #1349)', async () => {
+        const one: StsWorkload = {
+          id: 'db',
+          type: 'statefulset',
+          image: 'postgres:16',
+          replicas: 1,
+        }
+        const name = stsNameOf(one)
+        await ensure(one)
+        const live = withApiServerDefaults(await stored(name))
+        live.spec!.template.metadata = {
+          ...live.spec!.template.metadata,
+          annotations: {
+            ...live.spec!.template.metadata?.annotations,
+            'kubectl.kubernetes.io/restartedAt': '2026-11-16T10:00:00Z',
+            'example.com/injected': 'by-another-writer',
+          },
+        }
+        await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+        mockAppsApi.patchNamespacedStatefulSet.mockClear()
+
+        await ensure({ ...one, replicas: 2 })
+
+        // Witness: the template was replaced, and restartedAt came through it.
+        const body = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
+        expect(jsonPatchOpAt(body, '/spec/template')?.op).toBe('replace')
+        const annotations = (await stored(name)).spec!.template.metadata?.annotations ?? {}
+        expect(annotations['kubectl.kubernetes.io/restartedAt']).toBe('2026-11-16T10:00:00Z')
+        expect(annotations).not.toHaveProperty('example.com/injected')
       })
 
       it('T-P1-4: an existing StatefulSet without annotations gets the hash annotation', async () => {

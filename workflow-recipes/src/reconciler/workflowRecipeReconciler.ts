@@ -178,6 +178,8 @@ const PARENT_RECIPE_LABEL = 'clerum.io/parent-recipe'
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
 const WORKFLOW_ACTOR_ID_LABEL = 'clerum.io/workflow-actor-id'
 const WORKFLOW_ACTOR_TYPE_LABEL = 'clerum.io/workflow-actor-type'
+/** Written on a pod template by `kubectl rollout restart`. */
+const RESTARTED_AT_ANNOTATION = 'kubectl.kubernetes.io/restartedAt'
 /**
  * Returned by a replaceFn that re-read the live object after a 409 and chose not
  * to write it; `replaceResource` then skips its "Updated resource" log.
@@ -5197,6 +5199,28 @@ export class WorkflowRecipeReconciler {
     return fields
   }
 
+  /**
+   * The desired pod template with the live template's
+   * `kubectl.kubernetes.io/restartedAt` carried over, on a copy, so the hashed
+   * manifest never contains it. `kubectl rollout restart` writes that annotation;
+   * a `replace /spec/template` without it would remove it and roll the Pods once
+   * more. Every other live-only template key is still dropped by the replace.
+   */
+  private withLiveRestartedAt(
+    desired: k8s.V1PodTemplateSpec | undefined,
+    existing: k8s.V1PodTemplateSpec | undefined
+  ): k8s.V1PodTemplateSpec | undefined {
+    const restartedAt = existing?.metadata?.annotations?.[RESTARTED_AT_ANNOTATION]
+    if (desired === undefined || restartedAt === undefined) return desired
+    return {
+      ...desired,
+      metadata: {
+        ...desired.metadata,
+        annotations: { ...desired.metadata?.annotations, [RESTARTED_AT_ANNOTATION]: restartedAt },
+      },
+    }
+  }
+
   private buildStatefulSetMutableSpecPatch(
     desired: k8s.V1StatefulSet,
     existing: k8s.V1StatefulSet
@@ -5210,14 +5234,15 @@ export class WorkflowRecipeReconciler {
     if (!this.equalComparable(desiredSpec.replicas, existingSpec.replicas)) {
       patch.replicas = desiredSpec.replicas
     }
+    const desiredTemplate = this.withLiveRestartedAt(desiredSpec.template, existingSpec.template)
     if (
-      desiredSpec.template !== undefined &&
+      desiredTemplate !== undefined &&
       !this.equalComparable(
-        this.normalizePodTemplate(desiredSpec.template),
+        this.normalizePodTemplate(desiredTemplate),
         this.normalizePodTemplate(existingSpec.template)
       )
     ) {
-      patch.template = desiredSpec.template
+      patch.template = desiredTemplate
     }
     for (const key of [
       'ordinals',
@@ -5350,7 +5375,9 @@ export class WorkflowRecipeReconciler {
     // by key and keeps what the patch omits. The patch is applied atomically, so
     // the hash and the template land together. client-node 1.4.0 already defaults
     // this operation to application/json-patch+json; the middleware keeps the
-    // content type explicit and independent of the client version.
+    // content type explicit and independent of the client version. The stored
+    // `kubectl.kubernetes.io/restartedAt` annotation is the one exception: the patch
+    // value carries it over ({@link withLiveRestartedAt}).
     const specPatch = this.buildStatefulSetMutableSpecPatch(statefulSet, existing)
     const operations: Array<{ op: 'add' | 'replace'; path: string; value: unknown }> = []
     for (const [key, value] of Object.entries(specPatch)) {
