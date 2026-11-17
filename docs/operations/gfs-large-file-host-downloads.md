@@ -481,37 +481,34 @@ reads the room the bounds leave; a file larger than the room is refused before
 anything is written, so an earlier file of that name stays. Where the turn has
 `clerum__kept_files_delete`, the refusal offers the user's own kept files,
 oldest first, to delete after approval; otherwise it says why it cannot make
-room. The user approves the delete on a card that shows each file's name, size
-and creation date. Desktop shows the card of any call the delete accepts, with
-a note when the 64 KiB bound cut it. A channel shows a card longer than one
-message as several messages, split between its lines (Telegram 4096
-characters, Slack 3000 characters, Teams 12,000 bytes of the JSON-encoded
-text), with the approval buttons on the last one; the approval can be given,
-by button or by `/approve`, only after the last message was sent. While those
-messages are being sent, a typed `/approve` or `/deny` from the same user in
-the same chat does not decide an earlier request there and is answered with a
-notice; the buttons of the earlier request keep working. The card is
-not offered when a message cannot be sent, when one line is longer than a
-message (a card the delete accepts reaches this only when redaction lengthens
-a name; Telegram and Slack then refuse it and Teams shows it), when a message
-would have no visible text, when the card would need more than 24 messages, or
-when channel-reader cannot read the card from the Host. channel-reader then
-denies the request at the Host and tells the user. If the Host does not accept
+room. The user approves the delete on a card that lists each file with its
+kind, name, size and creation date. Desktop shows the card of any call the
+delete accepts, with a note when the 64 KiB bound cut it. In Telegram, Slack
+and Teams the Host fits the card to one message: Telegram 4096 characters,
+Slack 3000 characters once `&`, `<` and `>` are escaped, and Teams 12,000
+bytes of the JSON-encoded text, each measured on the whole card including its
+instruction line. When the card is longer, the Host shortens long names in the
+middle, keeping their start and their extension, as `"start"…"end"`, and adds
+a line that says so; every file is still listed with its size and date. A
+request the delete accepts (at most 20 files) is always listed in full this
+way, unless redaction lengthened a name or left a configured secret's
+`[REDACTED:<name>]` marker in the kept start or end of a name. Only then, or
+when the request lists more files than the delete accepts, the card names the
+first files that fit and says how many of the total are listed by name;
+approving covers every file in the request, and the delete itself still
+refuses more than 20 files. channel-reader shows every tool approval as one
+message. When channel-reader cannot read the card from the Host, it shows no
+buttons, denies the request at the Host and tells the user. If the Host does not accept
 the denial, the user is told that the request is still waiting on the Host and
 that an operator must deny it. On the progress stream, nothing is sent for a
 task that has already ended; if the task ends while the denial is on its way,
 no message follows it, unless the Host accepted the denial and the task ended
 because of it; the user is then told the request could not be shown; and when the Host holds no
 stored approval for the request and rejects the denial, that is only logged.
-The buttons are removed from the last message when the approval is decided,
-when another approval replaces it and when this channel stops offering it, 10
-minutes after it was sent. A task followed on the progress stream also loses
-them when it ends; an approval delivered in a synchronous response has no
-stream, so it keeps them until one of the first three. If a removal fails, the
-buttons stay visible but no longer act: a press is answered with 'No pending
-approval found'. On Teams the messages before the last, and the last one once
-its buttons are removed, are plain text. A card cut at 64 KiB says so before
-the instruction and gives the total.
+A press on a card whose approval was decided, replaced, ended with its task or
+dropped after 10 minutes is answered with 'No pending approval found'. Where
+the card has no channel limit (the email and RPC replies), a card cut at 64 KiB
+says so before the instruction and gives the total.
 While the download store is closed or not initialized, no file is
 generated. When the volume cannot be measured, the Host reads it once more and
 then generates without this check (the folder quota and the free-space floor
