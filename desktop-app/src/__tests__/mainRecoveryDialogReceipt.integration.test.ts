@@ -385,4 +385,90 @@ describe('main.ts recovery dialog and renderer receipt ordering', () => {
     expect(completeReceipt).toHaveBeenCalledOnce()
     expect(service.pendingSessionPreclear).toBeNull()
   })
+
+  it('hides and retires a renderer when a projected session arrives after logout clears', async () => {
+    const service = harness.service as any
+    const mainWindow = harness.windows[0] as any
+    const ownContents = mainWindow?.webContents
+    if (!service || !mainWindow || !ownContents || !harness.registeredLogout) {
+      throw new Error('main.ts did not create its production session/logout owners')
+    }
+
+    const view = registeredHandler(harness.handleHandlers, 'auth:getRendererSessionView') as any
+    const commitView = registeredHandler(
+      harness.handleHandlers,
+      'auth:commitRendererSessionView'
+    ) as any
+    const getSessionState = registeredHandler(harness.handleHandlers, 'auth:getSessionState') as any
+    const acknowledgePreclear = registeredHandler(
+      harness.handleHandlers,
+      'auth:acknowledgeSessionPreclear'
+    ) as any
+    const didNavigate = ownContents.listeners.get('did-navigate')
+    const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady') as any
+    if (!didNavigate) throw new Error('main.ts did not register document navigation')
+
+    const staleReceipt = await view(ipcEvent(ownContents))
+    if (!staleReceipt?.state?.authenticated) {
+      throw new Error('the test requires a current authenticated renderer projection')
+    }
+    const originalGetSessionState = service.getSessionState.bind(service)
+    let releaseProjection!: (state: unknown) => void
+    let reportProjection!: (state: unknown) => void
+    const delayedDelivery = new Promise<unknown>(resolve => {
+      releaseProjection = resolve
+    })
+    const projected = new Promise<unknown>(resolve => {
+      reportProjection = resolve
+    })
+    vi.spyOn(service, 'getSessionState').mockImplementation(async () => {
+      const state = await originalGetSessionState()
+      reportProjection(state)
+      return delayedDelivery
+    })
+
+    const delayedSessionRead = getSessionState(ipcEvent(ownContents))
+    const oldSnapshot = await projected
+    expect(oldSnapshot).toMatchObject({ authenticated: true })
+
+    mainWindow.hide.mockClear()
+    mainWindow.show.mockClear()
+    ownContents.reload.mockClear()
+    ownContents.send.mockClear()
+    ownContents.mainFrame.send.mockClear()
+    const logout = harness.registeredLogout()
+    const preclearMessage = ownContents.send.mock.calls.find(
+      ([channel]: unknown[]) => channel === 'auth:sessionWillClear'
+    )
+    if (!preclearMessage) throw new Error('logout did not publish the registered preclear')
+    const preclearNotice = preclearMessage[1]
+    await expect(acknowledgePreclear(ipcEvent(ownContents), preclearNotice)).resolves.toBe(true)
+    await logout
+
+    expect(mainWindow.hide).toHaveBeenCalled()
+    expect(ownContents.reload).toHaveBeenCalledOnce()
+    expect(mainWindow.show).not.toHaveBeenCalled()
+    releaseProjection(oldSnapshot)
+    await expect(delayedSessionRead).resolves.toEqual(oldSnapshot)
+    vi.restoreAllMocks()
+
+    didNavigate()
+    const handshake = ownContents.mainFrame.send.mock.calls.find(
+      ([channel]: unknown[]) => channel === 'auth:markdownDocumentHandshake'
+    )
+    if (!handshake) throw new Error('the fresh document did not receive its challenge')
+    const readyState = rendererReady(ipcEvent(ownContents), handshake[1]) as any
+    expect(readyState.sessionTransitionRevealPending).toBe(true)
+
+    const currentReceipt = await view(ipcEvent(ownContents))
+    expect(currentReceipt.state).toMatchObject({
+      authenticated: false,
+      me: null,
+      sessionGeneration: service.getSessionGeneration(),
+    })
+    await expect(commitView(ipcEvent(ownContents), currentReceipt)).resolves.toBe(true)
+    expect(mainWindow.show).toHaveBeenCalledOnce()
+    await expect(commitView(ipcEvent(ownContents), staleReceipt)).resolves.toBe(false)
+    expect(service.sessionToken).toBeNull()
+  })
 })

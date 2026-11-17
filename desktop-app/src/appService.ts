@@ -4713,14 +4713,20 @@ export class AppService {
   }
 
   async getSessionState(): Promise<SessionState> {
+    const projectCurrentSession = (): SessionState => {
+      const me = this.sessionToken && this.me ? this.me : null
+      return {
+        authenticated: me !== null,
+        me,
+        sessionGeneration: this.sessionGeneration,
+        authorityBinding: this.captureSessionAuthorityBinding(),
+      }
+    }
+
     if (!this.sessionToken || !this.me) {
       if (this.restoreSavedSessionInFlight) {
-        const restored = await this.restoreSavedSession()
-        return {
-          ...restored,
-          sessionGeneration: this.sessionGeneration,
-          authorityBinding: this.captureSessionAuthorityBinding(),
-        }
+        await this.restoreSavedSession()
+        return projectCurrentSession()
       }
       // createWindow() already performs the saved-token restore before showing
       // the renderer. Do not immediately repeat a failed 60-second network
@@ -4737,12 +4743,8 @@ export class AppService {
           authorityBinding: this.captureSessionAuthorityBinding(),
         }
       }
-      const restored = await this.restoreSavedSession()
-      return {
-        ...restored,
-        sessionGeneration: this.sessionGeneration,
-        authorityBinding: this.captureSessionAuthorityBinding(),
-      }
+      await this.restoreSavedSession()
+      return projectCurrentSession()
     }
     return {
       authenticated: true,
