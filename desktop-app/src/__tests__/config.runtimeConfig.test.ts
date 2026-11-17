@@ -83,12 +83,16 @@ describe('desktop runtime config', () => {
   })
 
   it('uses the explicit Profile origin for its matching custom REST binding', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(tempUserDataDir, 'desktop-config.json')
     process.env.EXTERNAL_REST_API_BASE_URL =
       'https://customer-rest.example.test:9443/api?tenant=one'
     process.env.PROFILE_UI_BASE_URL = 'https://profile.customer.example.test:9444'
     vi.doMock('electron', () => ({
       app: {
-        getPath: () => '/tmp/evenfire',
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
         isPackaged: false,
         isReady: () => false,
         setName: vi.fn(),
@@ -123,11 +127,15 @@ describe('desktop runtime config', () => {
   })
 
   it('uses the paired configured local Profile port for real App and GFS share links', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(tempUserDataDir, 'desktop-config.json')
     process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:27191'
     process.env.PROFILE_UI_BASE_URL = 'https://127.0.0.1:27101'
     vi.doMock('electron', () => ({
       app: {
-        getPath: () => '/tmp/evenfire',
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
         isPackaged: false,
         isReady: () => false,
         setName: vi.fn(),
