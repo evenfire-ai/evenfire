@@ -1438,44 +1438,63 @@ else
   fail "a valid covering Host-watch recovery pass was rejected"
 fi
 
-{
+# A rejected fixture alone also passes when the matcher can never match. Each
+# negative case below therefore also runs its corrected twin, the same lines
+# with the one defect removed, and passes only when the twin is accepted.
+expect_rejected_with_accepted_twin() {
+  local defective=$1 corrected=$2 accepted_message=$3 pass_message=$4
+  "$defective" >"$MOCK_LOG_FILE"
+  if recovery_cycle_used_fresh_host_inventory 1 5; then
+    fail "$accepted_message"
+    return
+  fi
+  "$corrected" >"$MOCK_LOG_FILE"
+  if ! recovery_cycle_used_fresh_host_inventory 1 5; then
+    fail "the corrected twin of '${pass_message}' was rejected too, so the rejection proves nothing"
+    return
+  fi
+  pass "$pass_message"
+}
+
+fx_channel_cycle() {
   fx_ended
   fx_listed
-  fx_reconciling '5 Host(s) after Host watch recovery convergence'
   fx_recovered 2 2
-  fx_completed 'Host watch recovery convergence' full
-} >"$MOCK_LOG_FILE"
-if recovery_cycle_used_fresh_host_inventory 1 5; then
-  fail "a Host-watch pass selected before CC recovery satisfied the covering assertion"
-else
-  pass "covering Host-watch recovery requires recovered CC state before pass selection"
-fi
-
-{
+  fx_reconciling "${1:-5} Host(s) for lifecycle after CommunicationChannel recovery"
+  fx_completed 'CommunicationChannel recovery' lifecycle 2
+}
+fx_channel_cycle_stale_count() { fx_channel_cycle 4; }
+fx_channel_cycle_list_before_end() {
   fx_listed
   fx_ended
   fx_recovered 2 2
   fx_reconciling '5 Host(s) for lifecycle after CommunicationChannel recovery'
   fx_completed 'CommunicationChannel recovery' lifecycle 2
-} >"$MOCK_LOG_FILE"
-if recovery_cycle_used_fresh_host_inventory 1 5; then
-  fail "a Host LIST from before the interruption satisfied the recovery assertion"
-else
-  pass "a stale pre-interruption Host LIST cannot satisfy recovery"
-fi
-
-{
+}
+fx_host_cycle() {
   fx_ended
   fx_listed
   fx_recovered 2 2
-  fx_reconciling '4 Host(s) for lifecycle after CommunicationChannel recovery'
-  fx_completed 'CommunicationChannel recovery' lifecycle 2
-} >"$MOCK_LOG_FILE"
-if recovery_cycle_used_fresh_host_inventory 1 5; then
-  fail "a stale Host inventory count satisfied recovery"
-else
-  pass "recovery requires the exact fresh Host inventory count"
-fi
+  fx_reconciling '5 Host(s) after Host watch recovery convergence'
+  fx_completed 'Host watch recovery convergence' full
+}
+fx_host_cycle_selected_before_recovery() {
+  fx_ended
+  fx_listed
+  fx_reconciling '5 Host(s) after Host watch recovery convergence'
+  fx_recovered 2 2
+  fx_completed 'Host watch recovery convergence' full
+}
+
+expect_rejected_with_accepted_twin fx_host_cycle_selected_before_recovery fx_host_cycle \
+  "a Host-watch pass selected before CC recovery satisfied the covering assertion" \
+  "covering Host-watch recovery requires recovered CC state before pass selection"
+expect_rejected_with_accepted_twin fx_channel_cycle_list_before_end fx_channel_cycle \
+  "a Host LIST from before the interruption satisfied the recovery assertion" \
+  "a stale pre-interruption Host LIST cannot satisfy recovery"
+expect_rejected_with_accepted_twin fx_channel_cycle_stale_count fx_channel_cycle \
+  "a stale Host inventory count satisfied recovery" \
+  "recovery requires the exact fresh Host inventory count"
 
 {
   fx_ended
