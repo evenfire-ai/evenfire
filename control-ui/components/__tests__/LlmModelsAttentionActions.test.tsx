@@ -462,6 +462,48 @@ describe('catalog attention dialog actions', () => {
     expect(screen.getByText(`${items.length} reviewed`)).toBeInTheDocument()
     expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
   })
+  it('keeps the error of an item still in the feed when another errored item leaves it', async () => {
+    vi.mocked(ackAdminAttention)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockRejectedValueOnce(new Error('Gateway timeout'))
+    renderSurface()
+    const dialog = await openReview()
+
+    fireEvent.click(
+      within(pendingRow(dialog, deprecated)).getByRole('button', {
+        name: `Mark reviewed: ${itemName(deprecated)}`,
+      })
+    )
+    expect(await within(pendingRow(dialog, deprecated)).findByRole('alert')).toHaveTextContent(
+      'Network error'
+    )
+    fireEvent.click(
+      within(pendingRow(dialog, otherStale)).getByRole('button', {
+        name: `Mark reviewed: ${itemName(otherStale)}`,
+      })
+    )
+    expect(await within(pendingRow(dialog, otherStale)).findByRole('alert')).toHaveTextContent(
+      'Gateway timeout'
+    )
+
+    // Only one errored item leaves the feed, so the reload prunes, and must prune
+    // that item alone. `serveFeed` reads `items` on every call.
+    items.splice(items.indexOf(deprecated), 1)
+    fireEvent.click(
+      within(pendingRow(dialog, stale)).getByRole('button', {
+        name: `Mark reviewed: ${itemName(stale)}`,
+      })
+    )
+    await within(dialog).findByRole('button', { name: `Undo review: ${itemName(stale)}` })
+    expect(
+      within(dialog).queryByRole('button', { name: `Mark reviewed: ${itemName(deprecated)}` })
+    ).not.toBeInTheDocument()
+
+    expect(within(pendingRow(dialog, otherStale)).getByRole('alert')).toHaveTextContent(
+      'Gateway timeout'
+    )
+  })
+
   it("drops an item's error once the feed stops listing it, so it does not return with the item", async () => {
     vi.mocked(ackAdminAttention).mockRejectedValueOnce(new Error('Network error'))
     renderSurface()
