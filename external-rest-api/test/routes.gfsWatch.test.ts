@@ -75,6 +75,8 @@ type Scenario = {
   raw?: RawUpstream
   /** Holds the open's 200 back, as a slow open op would. */
   openDelayMs?: number
+  /** Puts control-api's own service-credential gate in front of the watch router. */
+  serviceGate?: boolean
 }
 
 /** The upstream side of the last stream the fake registry opened. */
@@ -193,6 +195,8 @@ describe('GFS watch through external-rest-api', () => {
     const watchRoutes = await import('../../control-api/src/routes/external/gfsWatch.routes.js')
     const gfsRoutes = await import('../../control-api/src/routes/external/gfs.js')
     const authority = await import('../../control-api/src/gfs/externalAuthority.js')
+    const { requireInternalToken, requireInternalService } =
+      await import('../../control-api/src/middleware/internalServiceAuth.js')
     resetIngress = gfsRoutes.__resetExternalGfsIngressRateLimitForTests
     ;(globalThis as { __watchAuthority?: unknown }).__watchAuthority = authority
 
@@ -213,6 +217,13 @@ describe('GFS watch through external-rest-api', () => {
       for (const [name, value] of Object.entries(raw.headers ?? {})) res.setHeader(name, value)
       res.end(raw.body ?? '')
     })
+    // The gates control-api's app mounts ahead of every /external route.
+    app.use((req, res, next) =>
+      scenario.serviceGate ? requireInternalToken(req, res, next) : next()
+    )
+    app.use('/external', (req, res, next) =>
+      scenario.serviceGate ? requireInternalService('external-rest-api')(req, res, next) : next()
+    )
     app.use(express.json())
     app.use(
       watchRoutes.createExternalGfsWatchRouter({
@@ -439,6 +450,33 @@ describe('GFS watch through external-rest-api', () => {
       })
     }
 
+    it('relays a 401 or 403 the watch route wrote, with its x-watch-error', async () => {
+      scenario.auth = { status: 'invalid' }
+      const open = await call(watchUrl(), 'GET', { headers: bearer() })
+      const put = await call(watchUrl(), 'PUT', { headers: bearer(), body: putBody })
+      for (const r of [open, put]) {
+        expect(watchError(r)).toEqual({
+          status: 401,
+          header: 'session_invalid',
+          body: { error: 'session_invalid' },
+        })
+      }
+
+      scenario = defaultScenario()
+      const { ExternalGfsAuthorityError } = (
+        globalThis as {
+          __watchAuthority: typeof import('../../control-api/src/gfs/externalAuthority.js')
+        }
+      ).__watchAuthority
+      scenario.authorityError = new ExternalGfsAuthorityError(403, 'desktop_user_retired')
+      const retired = await call(watchUrl(), 'PUT', { headers: bearer(), body: putBody })
+      expect(watchError(retired)).toEqual({
+        status: 403,
+        header: 'desktop_user_retired',
+        body: { error: 'desktop_user_retired' },
+      })
+    })
+
     it('relays 426 upgrade_required on both routes instead of turning it into a reopen', async () => {
       scenario.auth = { status: 'upgrade_required' }
       const open = await call(watchUrl(), 'GET', { headers: bearer() })
@@ -497,6 +535,35 @@ describe('GFS watch through external-rest-api', () => {
         expect(redirectTargetHits).toBe(0)
       })
     }
+
+    it('turns the 401 of control-api refusing this edge’s credential into 503 watch_reopen', async () => {
+      // A rotated credential the funnel does not accept yet: the user's session
+      // is still valid, so the client must retry instead of ending it.
+      const originalServiceToken = config.controlApiServiceToken
+      config.controlApiServiceToken = `rotated-${'x'.repeat(32)}`
+      scenario.serviceGate = true
+      try {
+        const direct = await call(`${urlOf(upstream)}/external/gfs/watch`, 'GET', {
+          headers: {
+            authorization: `Bearer ${config.controlApiServiceToken}`,
+            'x-service-token': config.controlApiServiceName,
+          },
+          record: false,
+        })
+        expect(direct.status).toBe(401)
+        expect(direct.headers['x-watch-error']).toBeUndefined()
+
+        const open = await call(watchUrl(), 'GET', { headers: bearer() })
+        const put = await call(watchUrl(), 'PUT', { headers: bearer(), body: putBody })
+        for (const r of [open, put]) {
+          expect(watchError(r)).toEqual(reopen)
+          expect(r.headers['retry-after']).toBe('2')
+        }
+        expect(watchCalls().length).toBeGreaterThanOrEqual(3)
+      } finally {
+        config.controlApiServiceToken = originalServiceToken
+      }
+    })
 
     it('PUT: any answer with a non-JSON body is 503 watch_reopen, never a 502, 500 or 200', async () => {
       const html = { 'content-type': 'text/html' }

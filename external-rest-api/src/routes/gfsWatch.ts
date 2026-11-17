@@ -30,8 +30,16 @@ const RETRY_AFTER_SEC = 2
 // becomes a 503 the client retries.
 const PROPAGATED = new Set([400, 401, 403, 409, 426, 429])
 
-function isPropagated(status: number): boolean {
-  return PROPAGATED.has(status) || (status >= 500 && status <= 599)
+/**
+ * Relayed only when the watch route wrote it: every non-2xx it sends carries
+ * `x-watch-error`. control-api's service-credential gate answers a bare 401
+ * when it refuses this edge's credential; relayed, the client would end a
+ * session that is still valid and keep it ended after the credential is fixed.
+ */
+function isWatchRouteFailure(error: ControlApiError): boolean {
+  const status = error.status
+  const propagated = PROPAGATED.has(status) || (status >= 500 && status <= 599)
+  return propagated && Boolean(error.headers['x-watch-error'])
 }
 
 function clientGone(req: Request, res: Response): boolean {
@@ -74,7 +82,7 @@ function answerControlApiFailure(
     return true
   }
   if (error instanceof ControlApiError) {
-    if (isPropagated(error.status)) {
+    if (isWatchRouteFailure(error)) {
       if (!res.headersSent && !clientGone(req, res)) relayControlApiError(error, res)
     } else {
       watchReopen(req, res)
