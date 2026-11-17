@@ -180,15 +180,28 @@ export function createWatchRuntime<C extends GuardedConn>(deps: WatchRuntimeDeps
   }
 
   /** One log line per key every ten seconds, carrying how many were suppressed. */
-  function logSampledError(key: string, obj: Record<string, unknown>, msg: string): void {
+  function logSampled(
+    level: 'error' | 'warn',
+    key: string,
+    obj: Record<string, unknown>,
+    msg: string
+  ): void {
     const t = now()
     const entry = sampled.get(key)
     if (entry && t - entry.lastAt < SAMPLED_LOG_INTERVAL_MS) {
       entry.suppressed += 1
       return
     }
-    log.error({ ...obj, suppressed: entry?.suppressed ?? 0 }, msg)
+    log[level]({ ...obj, suppressed: entry?.suppressed ?? 0 }, msg)
     sampled.set(key, { lastAt: t, suppressed: 0 })
+  }
+
+  function logSampledError(key: string, obj: Record<string, unknown>, msg: string): void {
+    logSampled('error', key, obj, msg)
+  }
+
+  function logSampledWarn(key: string, obj: Record<string, unknown>, msg: string): void {
+    logSampled('warn', `warn:${key}`, obj, msg)
   }
 
   /**
@@ -279,6 +292,7 @@ export function createWatchRuntime<C extends GuardedConn>(deps: WatchRuntimeDeps
     bestEffort,
     total,
     logSampledError,
+    logSampledWarn,
     raceAbort,
     step,
   }

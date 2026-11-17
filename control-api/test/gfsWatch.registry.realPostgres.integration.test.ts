@@ -104,6 +104,23 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
 
   const until = (f: () => boolean) => b.settle(f)
 
+  async function deferredBy(): Promise<Record<string, number>> {
+    const { values } = await h.modules.metrics.gfsWatchKeyDeferredTotal.get()
+    const out: Record<string, number> = {}
+    for (const v of values)
+      out[String(v.labels.cause)] = (out[String(v.labels.cause)] ?? 0) + v.value
+    return out
+  }
+
+  function deferredSince(before: Record<string, number>, after: Record<string, number>) {
+    const out: Record<string, number> = {}
+    for (const [cause, n] of Object.entries(after)) {
+      const d = n - (before[cause] ?? 0)
+      if (d !== 0) out[cause] = d
+    }
+    return out
+  }
+
   it('accepts granted keys of both kinds and reports the whole set in ready (T-SB104, T-SB92)', async () => {
     b = await h.build()
     const user = await h.createUser()
@@ -172,6 +189,22 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(new Set(socket.last('subscriptions')!.accepted as string[])).toEqual(
       new Set([h.key('file', c), h.key('file', d)])
     )
+  })
+
+  it('counts every key deferred on a transient gfsc read, and only under that cause', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const a = await h.tree.add('file')
+    const c = await h.tree.add('file')
+    const ok = await h.tree.add('file')
+    h.decisions.set(h.toRid(a), 'unavailable')
+    h.decisions.set(h.toRid(c), 'unavailable')
+    const before = await deferredBy()
+    const { socket } = await ready(user, [h.key('file', a), h.key('file', c), h.key('file', ok)])
+    expect(new Set(socket.last('ready')!.deferred as string[])).toEqual(
+      new Set([h.key('file', a), h.key('file', c)])
+    )
+    expect(deferredSince(before, await deferredBy())).toEqual({ gfsc_transient: 2 })
   })
 
   it('delivers a rename of an accepted file and of a child to its directory, after the window (T-SB28)', async () => {
@@ -535,6 +568,26 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     })
     expect(o.socket.last('ready')).toMatchObject({ deferred: [h.key('file', f)] })
     h.releaseHanging()
+  })
+
+  it('counts the keys deferred at T_auth under auth_deadline', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    h.decisions.set(h.toRid(f), 'hang')
+    h.decisions.set(h.toRid(g), 'hang')
+    const before = await deferredBy()
+    const o = b.open(user, [h.key('file', f), h.key('file', g)])
+    await until(
+      () => h.reads.filter(r => r.rid32 === h.toRid(f) || r.rid32 === h.toRid(g)).length === 2
+    )
+    await b.advance(6_000)
+    expect(await o.outcome).toEqual({ kind: 'stream' })
+    expect((o.socket.last('ready')!.deferred as string[]).length).toBe(2)
+    h.releaseHanging()
+    await b.settle()
+    expect(deferredSince(before, await deferredBy())).toEqual({ auth_deadline: 2 })
   })
 
   it('ends the op at T_auth while the mint waits, and reads nothing after a close during the mint (T-SB107)', async () => {

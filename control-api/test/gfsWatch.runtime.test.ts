@@ -244,6 +244,19 @@ describe('total', () => {
     ).toBe(defectBefore + 1)
   })
 
+  it('logSampledWarn samples at warn level, apart from the error samples of the same key', () => {
+    const { rt, log, clock } = setup()
+    const warn = log.warn as ReturnType<typeof vi.fn>
+    for (let i = 0; i < 3; i += 1) rt.logSampledWarn('k', { i }, 'w')
+    rt.logSampledError('k', {}, 'e')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(log.error).toHaveBeenCalledTimes(1)
+    clock.advance(10_000)
+    rt.logSampledWarn('k', { i: 3 }, 'w')
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(warn.mock.calls[1]![0]).toMatchObject({ i: 3, suppressed: 2 })
+  })
+
   it('samples defect logs to one every 10 s per label, carrying the suppressed count', async () => {
     const { rt, log, clock } = setup()
     for (let i = 0; i < 5; i += 1)

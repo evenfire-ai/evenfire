@@ -18,6 +18,7 @@ import {
   gfsWatchConnectionsActive,
   gfsWatchDisconnectsTotal,
   gfsWatchFramesSentTotal,
+  gfsWatchKeyDeferredTotal,
 } from '../../observability/metrics.js'
 import { STREAM_HEADERS } from '../../routes/streamHeaders.js'
 import {
@@ -149,6 +150,17 @@ const CLOSING_FRAME_REASONS: ReadonlySet<WatchCloseReason> = new Set([
   'session_expired',
   'server_shutdown',
 ])
+
+/** Why an op left a key deferred; the label of gfs_watch_key_deferred_total. */
+export type DeferCause =
+  | 'auth_budget'
+  | 'ancestry_failed'
+  | 'mint_failed'
+  | 'totality'
+  | 'no_chain'
+  | 'gfsc_transient'
+  | 'auth_deadline'
+  | 'suspect'
 
 export type WatchBinding = { userId: Uuid; authGeneration: number }
 
@@ -684,7 +696,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       if (!gate(conn, op)) return
       if (!stillAuthorizing(conn, k)) continue
       if (d === FAILED || d.outcome !== 'allowed') {
-        deferKey(conn, op, k)
+        deferKey(conn, op, k, 'auth_budget')
         const floor =
           d === FAILED
             ? 0
@@ -710,7 +722,8 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       }, 'cte')
       if (!gate(conn, op)) return
       if (res === FAILED) {
-        for (const k of toAuth) if (stillAuthorizing(conn, k)) deferKey(conn, op, k)
+        for (const k of toAuth)
+          if (stillAuthorizing(conn, k)) deferKey(conn, op, k, 'ancestry_failed')
       } else {
         const chains = groupBy(
           res.rows as { requested_id?: unknown; ancestor_id?: unknown }[],
@@ -747,7 +760,9 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
           }
           if (t === FAILED) {
             for (const k of toAuth) {
-              if (keyDrive(k) === d && stillAuthorizing(conn, k)) deferKey(conn, op, k)
+              if (keyDrive(k) === d && stillAuthorizing(conn, k)) {
+                deferKey(conn, op, k, 'mint_failed')
+              }
             }
             op.loadDeferred = true
           } else op.tokens.set(d, t.token)
@@ -764,7 +779,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       }
     }
     // Totality: no key leaves the op still authorizing.
-    for (const k of op.added) if (stillAuthorizing(conn, k)) deferKey(conn, op, k)
+    for (const k of op.added) if (stillAuthorizing(conn, k)) deferKey(conn, op, k, 'totality')
     finishOp(conn, op)
   }
 
@@ -806,7 +821,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
             rec.state = 'rejected'
             unindex(conn, k)
           } else if (op.noChain.has(k)) {
-            deferKey(conn, op, k)
+            deferKey(conn, op, k, 'no_chain')
           } else {
             rec.state = 'accepted'
           }
@@ -832,7 +847,12 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
           closeConn(conn, 'internal')
           return
         default:
-          deferKey(conn, op, k)
+          rt.logSampledWarn(
+            'deferred:gfsc_transient',
+            { connId: conn.connId, opId: op.opId, httpStatus: r.httpStatus },
+            'gfs watch key deferred on a transient gfsc read'
+          )
+          deferKey(conn, op, k, 'gfsc_transient')
           op.loadDeferred = true
       }
     } finally {
@@ -847,21 +867,31 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
     // clearing it, this stops a stale deadline from deferring the keys of
     // the op that replaced it.
     if (!gate(conn, op)) return
+    let deferred = 0
     for (const k of op.added) {
       if (stillAuthorizing(conn, k)) {
-        deferKey(conn, op, k)
+        deferKey(conn, op, k, 'auth_deadline')
         op.loadDeferred = true
+        deferred += 1
       }
+    }
+    if (deferred > 0) {
+      rt.logSampledWarn(
+        'deferred:auth_deadline',
+        { connId: conn.connId, opId: op.opId, deferred },
+        'gfs watch op reached its authorization deadline'
+      )
     }
     // Aborts reads, queued read permits and the mint wait; the connection stays open.
     op.authCtl.abort()
   }
 
-  function deferKey(conn: WatchConnection, op: WatchOp, k: GfsKey): void {
+  function deferKey(conn: WatchConnection, op: WatchOp, k: GfsKey, cause: DeferCause): void {
     unindex(conn, k)
     conn.keys.delete(k)
     conn.pending.delete(k)
     op.deferred.add(k)
+    rt.bestEffort(() => gfsWatchKeyDeferredTotal.inc({ cause }))
   }
 
   function endOp(conn: WatchConnection, op: WatchOp): void {
@@ -889,7 +919,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       if (conn.keys.get(k)?.state !== 'accepted') continue
       const chain = op.chains.get(k) ?? []
       if (op.dirtyOverflow || op.dirtyRids.has(rid(k)) || chain.some(a => op.dirtyRids.has(a))) {
-        deferKey(conn, op, k)
+        deferKey(conn, op, k, 'suspect')
         op.retryFloorMs = Math.max(op.retryFloorMs, SUSPECT_RETRY_FLOOR_MS)
       }
     }
