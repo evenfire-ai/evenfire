@@ -147,7 +147,9 @@ function mergeStatusPatch(
 
 /**
  * Issue #1349 — a one-recipe CR store: the status patch merges into it and
- * GET answers from it, so pass 2 of a test reads what pass 1 stored. `prune`
+ * GET answers from it, so pass 2 of a test reads what pass 1 stored. A JSON
+ * Patch status body (an array) is applied atomically with `applyJsonPatch`; an
+ * operation that does not apply throws `{ code: 422 }` and stores nothing. `prune`
  * drops status keys as an API server with an older CRD does; a dotted key
  * (`terminalRunTeardown.noSecretBearingWorkloads`) drops one field of a record.
  * `onGet` is called with a copy of the stored recipe on every GET of it: it
@@ -172,6 +174,26 @@ function installRecipeStore(
     return options.onGet?.(structuredClone(live)) ?? structuredClone(live)
   })
   mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }) => {
+    if (Array.isArray(body)) {
+      // A JSON Patch on the status subresource: applied atomically to the stored
+      // object; an operation that does not apply (a failed `test`, a missing
+      // parent) is a 422, as from the API server, and stores nothing.
+      let patched: { status?: Record<string, unknown> }
+      try {
+        patched = applyJsonPatch({ status: structuredClone(live.status ?? {}) }, body)
+      } catch (error) {
+        throw { code: 422, message: (error as Error).message }
+      }
+      const status = patched.status ?? {}
+      for (const key of options.prune ?? []) {
+        const [field, member] = key.split('.')
+        if (member === undefined) delete status[field]
+        else delete (status[field] as Record<string, unknown> | undefined)?.[member]
+      }
+      live.status = status as unknown as WorkflowRecipeCRD['status']
+      live.metadata.resourceVersion = String(Number(live.metadata.resourceVersion) + 1)
+      return structuredClone(live)
+    }
     if (body.metadata?.uid && body.metadata.uid !== live.metadata.uid) throw { code: 409 }
     const patch: Record<string, unknown> = { ...(body.status ?? {}) }
     for (const key of options.prune ?? []) {
@@ -468,7 +490,9 @@ type JsonPatchOperation = { op: string; path: string; value?: unknown }
  * RFC 6902 on a copy of `target`, returned only when every operation applied
  * (§5: the document is atomic). Supported: `add` (the parent must exist; sets
  * the member whether or not it exists), `replace` and `remove` (the target must
- * exist). Pointer tokens are decoded per RFC 6901 (`~1` → `/`, then `~0` → `~`).
+ * exist) and `test` (the target must exist and equal the value; scalars and
+ * objects with members in the same order, which is all the callers send).
+ * Pointer tokens are decoded per RFC 6901 (`~1` → `/`, then `~0` → `~`).
  * Anything else — another operation, an array parent, a missing parent or
  * target — throws, as a 422 from the apiserver would fail the call.
  */
@@ -502,6 +526,13 @@ function applyJsonPatch<T>(target: T, operations: JsonPatchOperation[]): T {
       }
       if (operation.op === 'replace') container[member] = structuredClone(operation.value)
       else delete container[member]
+    } else if (operation.op === 'test') {
+      if (
+        !(member in container) ||
+        JSON.stringify(container[member]) !== JSON.stringify(operation.value)
+      ) {
+        throw new Error(`JSON Patch: test failed at "${operation.path}"`)
+      }
     } else {
       throw new Error(`JSON Patch: unsupported operation "${operation.op}"`)
     }
@@ -559,6 +590,24 @@ function strategicMergePodTemplate(live: unknown, patch: unknown, field?: string
 function jsonPatchOpAt(body: unknown, path: string): JsonPatchOperation | undefined {
   expect(Array.isArray(body)).toBe(true)
   return (body as JsonPatchOperation[]).find(operation => operation.path === path)
+}
+
+const NO_SECRET_BEARING_FACT_PATH = '/status/terminalRunTeardown/noSecretBearingWorkloads'
+
+/**
+ * The bodies of the status patches that write the terminal
+ * `noSecretBearingWorkloads` fact, as a JSON Patch operation or as a merge-patch
+ * member, so "no fact was written" holds whichever way a write would be sent.
+ */
+function noSecretBearingFactWrites(): unknown[] {
+  return mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls
+    .map(([arg]) => (arg as { body?: unknown }).body)
+    .filter(body =>
+      Array.isArray(body)
+        ? (body as JsonPatchOperation[]).some(op => op.path === NO_SECRET_BEARING_FACT_PATH)
+        : (body as { status?: { terminalRunTeardown?: { noSecretBearingWorkloads?: unknown } } })
+            ?.status?.terminalRunTeardown?.noSecretBearingWorkloads !== undefined
+    )
 }
 
 /**
@@ -14585,16 +14634,13 @@ describe('WorkflowRecipeReconciler', () => {
       expect(store.current().status?.terminalRunTeardown).not.toHaveProperty(
         'noSecretBearingWorkloads'
       )
-      expect(
-        mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
-          ([arg]) => arg.body?.status?.terminalRunTeardown?.noSecretBearingWorkloads !== undefined
-        )
-      ).toHaveLength(0)
+      expect(noSecretBearingFactWrites()).toHaveLength(0)
       expect(workflowNeedsOwnershipBackstop(store.current())).toBe(true)
     })
 
     it('T4.2 the terminal pass records the no-Secret-bearing fact for a denied Deployment and not for one whose Secret is accessible (issue #1349)', async () => {
       stubWorkflowReconciler()
+      vi.mocked(k8s.setHeaderMiddleware).mockClear()
       const denied = installRecipeStore(secretBearingTerminalRun('wf-run-denied', 'parent-recipe'))
 
       const deniedResult = await reconciler.reconcile(denied.current())
@@ -14604,6 +14650,23 @@ describe('WorkflowRecipeReconciler', () => {
         noSecretBearingWorkloads: true,
       })
       expect(deniedResult.requeueAfterMs).toBeUndefined()
+      // The fact is a JSON Patch that the API server applies only to a record
+      // whose completedAt is the one this pass holds.
+      expect(noSecretBearingFactWrites()).toEqual([
+        [
+          {
+            op: 'test',
+            path: '/status/terminalRunTeardown/completedAt',
+            value: denied.current().status!.terminalRunTeardown!.completedAt,
+          },
+          { op: 'add', path: NO_SECRET_BEARING_FACT_PATH, value: true },
+        ],
+      ])
+      // No StatefulSet is patched in this pass, so the only JSON Patch is the fact.
+      expect(vi.mocked(k8s.setHeaderMiddleware).mock.calls).toContainEqual([
+        'Content-Type',
+        'application/json-patch+json',
+      ])
 
       // Same child, but its Secret is owned by the run: accessible, so not written.
       mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
@@ -14622,11 +14685,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(accessible.current().status?.terminalRunTeardown).not.toHaveProperty(
         'noSecretBearingWorkloads'
       )
-      expect(
-        mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
-          ([arg]) => arg.body?.status?.terminalRunTeardown?.noSecretBearingWorkloads !== undefined
-        )
-      ).toHaveLength(0)
+      expect(noSecretBearingFactWrites()).toHaveLength(0)
       expect(accessibleResult.requeueAfterMs).toBeUndefined()
     })
 
@@ -14665,11 +14724,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(store.current().status?.terminalRunTeardown).not.toHaveProperty(
         'noSecretBearingWorkloads'
       )
-      expect(
-        mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
-          ([arg]) => arg.body?.status?.terminalRunTeardown?.noSecretBearingWorkloads !== undefined
-        )
-      ).toHaveLength(0)
+      expect(noSecretBearingFactWrites()).toHaveLength(0)
     })
 
     it('T4.6 a terminal pass whose ownership recheck is deferred does not record the fact (issue #1349)', async () => {
@@ -14699,6 +14754,60 @@ describe('WorkflowRecipeReconciler', () => {
       )
     })
 
+    // R1-L7 — the fact is added only to the record the pass saw. A pass that ran
+    // on an object read before a re-deploy removed the record (or before a later
+    // terminal entry wrote another one) must not leave the fact behind.
+    for (const row of [
+      { state: 'no record (removed by a re-deploy)', storedRecord: undefined },
+      {
+        state: 'the record of a later terminal entry',
+        storedRecord: { completedAt: '2026-11-16T09:00:00.000Z' },
+      },
+    ]) {
+      it(`T-R3-L7-1: a terminal pass on an older object does not add the fact when the store holds ${row.state} (issue #1349)`, async () => {
+        stubWorkflowReconciler()
+        // The Secret is labeled for the parent recipe, so the run child is denied
+        // and its only Secret-bearing workload is deleted: the fact is due.
+        const live = secretBearingTerminalRun('wf-run-stale', 'parent-recipe')
+        const stale = structuredClone(live)
+        stale.status = {
+          ...stale.status,
+          terminalRunTeardown: { completedAt: '2026-11-16T08:00:00.000Z' },
+        } as WorkflowRecipeCRD['status']
+        live.status = {
+          ...live.status,
+          ...(row.storedRecord ? { terminalRunTeardown: row.storedRecord } : {}),
+        } as WorkflowRecipeCRD['status']
+        const store = installRecipeStore(live)
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+        const errorLog = captureLogger('error')
+
+        const result = await reconciler.reconcile(stale)
+        const notStored = errorLog.mock.calls.find(
+          ([message]) => message === 'Run status record was not stored; requeueing'
+        )
+        errorLog.mockRestore()
+
+        // Witness: the pass sent the fact, guarded by the completedAt it holds.
+        expect(noSecretBearingFactWrites()).toEqual([
+          [
+            {
+              op: 'test',
+              path: '/status/terminalRunTeardown/completedAt',
+              value: '2026-11-16T08:00:00.000Z',
+            },
+            { op: 'add', path: NO_SECRET_BEARING_FACT_PATH, value: true },
+          ],
+        ])
+        // The API server refused it: nothing was stored, the pass is retried.
+        expect(store.current().status?.terminalRunTeardown).toEqual(row.storedRecord)
+        expect(notStored).toBeDefined()
+        expect((notStored![1] as { err: { code?: number } }).err.code).toBe(422)
+        expect(stale.status?.terminalRunTeardown).not.toHaveProperty('noSecretBearingWorkloads')
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      })
+    }
+
     it('a fact the API server pruned (older CRD) is not reported as stored (issue #1349, T1.8 L-1)', async () => {
       stubWorkflowReconciler()
       const store = installRecipeStore(
@@ -14713,12 +14822,8 @@ describe('WorkflowRecipeReconciler', () => {
       const result = await reconciler.reconcile(recipe)
       errorLog.mockRestore()
 
-      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
-        expect.objectContaining({
-          body: { status: { terminalRunTeardown: { noSecretBearingWorkloads: true } } },
-        }),
-        expect.anything()
-      )
+      // Witness: the fact was sent.
+      expect(noSecretBearingFactWrites()).toHaveLength(1)
       const notStored = errorLog.mock.calls.find(
         ([message]) => message === 'Run status record was not stored; requeueing'
       )

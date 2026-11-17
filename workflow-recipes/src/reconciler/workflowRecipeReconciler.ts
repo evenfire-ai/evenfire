@@ -4562,6 +4562,8 @@ export class WorkflowRecipeReconciler {
    * Issue #1349 — write a record fragment (`terminalRunTeardown` and/or
    * `secretOwnershipRevocations`) with a merge patch that names only that
    * fragment, so no other status writer can strip it and it strips nothing.
+   * The `noSecretBearingWorkloads` fact has its own writer,
+   * {@link publishNoSecretBearingWorkloads}.
    *
    * The apiserver answers with the stored object. When a key that was sent is
    * missing from the answer, the cluster's CRD predates these fields and the
@@ -4574,7 +4576,7 @@ export class WorkflowRecipeReconciler {
   private async publishStatusRecord(
     recipe: WorkflowRecipeCRD,
     fragment: {
-      terminalRunTeardown?: Partial<NonNullable<WorkflowRecipeStatus['terminalRunTeardown']>>
+      terminalRunTeardown?: { completedAt: string }
       secretOwnershipRevocations?: Record<string, string>
     }
   ): Promise<boolean> {
@@ -7505,6 +7507,9 @@ export class WorkflowRecipeReconciler {
    * is left deployed with it, so the ownership backstop can skip this run child.
    * Only the terminal block calls this, and only after the enforcer: the record
    * lives inside `terminalRunTeardown`, which is removed before any re-deploy.
+   * The fact is added with a JSON Patch that the API server applies only while the
+   * stored `completedAt` is the one this pass holds
+   * ({@link publishNoSecretBearingWorkloads}).
    * Returns false when the write was due and was not stored, so the caller requeues.
    */
   private async recordNoSecretBearingWorkloads(
@@ -7512,8 +7517,9 @@ export class WorkflowRecipeReconciler {
     outcome: SteadyOwnershipOutcome
   ): Promise<boolean> {
     if (!recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()) return true
+    const completedAt = recipe.status?.terminalRunTeardown?.completedAt
     if (
-      !hasTerminalRunTeardownRecord(recipe) ||
+      typeof completedAt !== 'string' ||
       outcome.needsRequeue ||
       outcome.revocationRecordPending
     ) {
@@ -7525,9 +7531,61 @@ export class WorkflowRecipeReconciler {
       return true
     }
     if (!noSecretBearingWorkloadsRemain(recipe, outcome.deniedWorkloadIds)) return true
-    return this.publishStatusRecord(recipe, {
-      terminalRunTeardown: { noSecretBearingWorkloads: true },
-    })
+    return this.publishNoSecretBearingWorkloads(recipe, completedAt)
+  }
+
+  /**
+   * Issue #1349 — add `noSecretBearingWorkloads` to the stored terminal teardown
+   * record, and only to the record this pass saw: a JSON Patch whose `test`
+   * operation requires the stored `completedAt` to be the one in memory. When the
+   * pass ran on an object read before a re-deploy removed the record, or before
+   * a later terminal entry wrote another one, the API server rejects the patch
+   * and nothing is written, so the fact is never stored without its record.
+   *
+   * Returns `true` only when the fact is stored; the in-memory status is updated
+   * only then. A failure is logged here and never thrown, as in
+   * {@link publishStatusRecord}: the caller asks for a requeue.
+   */
+  private async publishNoSecretBearingWorkloads(
+    recipe: WorkflowRecipeCRD,
+    completedAt: string
+  ): Promise<boolean> {
+    try {
+      const stored = (await this.customApi.patchNamespacedCustomObjectStatus(
+        {
+          group: CRD_GROUP,
+          version: CRD_VERSION,
+          namespace: recipe.metadata.namespace,
+          plural: WORKFLOWRECIPE_PLURAL,
+          name: recipe.metadata.name,
+          body: [
+            {
+              op: 'test',
+              path: '/status/terminalRunTeardown/completedAt',
+              value: completedAt,
+            },
+            {
+              op: 'add',
+              path: '/status/terminalRunTeardown/noSecretBearingWorkloads',
+              value: true,
+            },
+          ],
+        },
+        { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/json-patch+json')] }
+      )) as WorkflowRecipeCRD | undefined
+      if (stored?.status?.terminalRunTeardown?.noSecretBearingWorkloads !== true) {
+        throw new StatusRecordPrunedError('terminalRunTeardown.noSecretBearingWorkloads')
+      }
+    } catch (error) {
+      createLogger('wrc', recipe.metadata.name).error(
+        'Run status record was not stored; requeueing',
+        { name: recipe.metadata.name, value2: 'terminalRunTeardown', err: error }
+      )
+      return false
+    }
+    const status = recipe.status as WorkflowRecipeStatus
+    status.terminalRunTeardown = { completedAt, noSecretBearingWorkloads: true }
+    return true
   }
 
   /**
