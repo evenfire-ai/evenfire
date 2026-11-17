@@ -12,6 +12,12 @@ const DECIMAL_EXPONENTS: Record<string, number> = {
   E: 18,
 }
 const PLAIN_QUANTITY = /^([0-9]+)(?:\.([0-9]+))?(n|u|m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$/
+/**
+ * Longest value that is parsed. Far above any Kubernetes quantity (an int64 has
+ * 19 digits); the reduction below costs about the square of the digit count, and
+ * nothing at admission limits the length of a claim template size.
+ */
+export const MAX_QUANTITY_LENGTH = 64
 
 function greatestCommonDivisor(left: bigint, right: bigint): bigint {
   while (right !== 0n) [left, right] = [right, left % right]
@@ -26,9 +32,12 @@ function greatestCommonDivisor(left: bigint, right: bigint): bigint {
  * Kubernetes quantity grammar (a "plain" quantity). Every other value returns
  * undefined and the caller keeps comparing it as text: a sign, exponent notation,
  * a fraction without digits on one side (`.5Gi`, `1.`), all of which Kubernetes
- * accepts, and text that is not a quantity.
+ * accepts, and text that is not a quantity. A value longer than
+ * {@link MAX_QUANTITY_LENGTH} characters also returns undefined, before it is
+ * parsed, so it keeps the text comparison too.
  */
 export function canonicalKubernetesQuantity(value: string): string | undefined {
+  if (value.length > MAX_QUANTITY_LENGTH) return undefined
   const match = PLAIN_QUANTITY.exec(value)
   if (!match) return undefined
   const fraction = match[2] ?? ''

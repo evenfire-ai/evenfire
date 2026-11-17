@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canonicalKubernetesQuantity } from './kubernetesQuantity'
+import { MAX_QUANTITY_LENGTH, canonicalKubernetesQuantity } from './kubernetesQuantity'
 
 describe('canonicalKubernetesQuantity', () => {
   it.each([
@@ -48,4 +48,16 @@ describe('canonicalKubernetesQuantity', () => {
       expect(canonicalKubernetesQuantity(value)).toBeUndefined()
     }
   )
+
+  it('a plain quantity longer than MAX_QUANTITY_LENGTH is not parsed and is left to a text comparison', () => {
+    const atBound = `1.${'0'.repeat(MAX_QUANTITY_LENGTH - 4)}Gi`
+    const overBound = `1.${'0'.repeat(MAX_QUANTITY_LENGTH - 3)}Gi`
+    expect(MAX_QUANTITY_LENGTH).toBe(64)
+    expect(atBound).toHaveLength(64)
+    expect(overBound).toHaveLength(65)
+    // Witness: the same amount written within the bound is parsed, as 1Gi.
+    expect(canonicalKubernetesQuantity(atBound)).toEqual(expect.stringMatching(/^[0-9]+\/[0-9]+$/))
+    expect(canonicalKubernetesQuantity(atBound)).toBe(canonicalKubernetesQuantity('1Gi'))
+    expect(canonicalKubernetesQuantity(overBound)).toBeUndefined()
+  })
 })
