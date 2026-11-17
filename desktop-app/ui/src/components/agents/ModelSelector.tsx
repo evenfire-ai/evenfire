@@ -25,7 +25,9 @@ const APPLIED_BADGE_MS = 4000
  * Defensive label for a broker-backed host with no model to name. control-api
  * rejects an empty `spec.model.name`, but a Host written directly (kubectl,
  * GitOps) with `name: ""` still reports `''` as its default; the chip then
- * shows a prompt instead of a blank.
+ * shows a prompt instead of a blank. A Host with no `spec.model.name` at all
+ * reports the literal `'unknown'`, which the chip shows as-is: that Host
+ * cannot run turns either.
  */
 const SELECT_MODEL_LABEL = 'Select model'
 
@@ -43,9 +45,9 @@ function modelLabel(name: string, options: HostModelOption[]): string {
 
 /**
  * Per-session model selector for the chat indicators row (R2), sat next to the
- * agent title and context-window chip. Shows the effective model
- * (`sessionModel ?? hostDefault`, for broker-backed hosts too) and, on click,
- * a popover listing the allowed models.
+ * agent title and context-window chip. Shows the store's effective model
+ * (a pending pick, else the session selection, else `hostDefault`, for
+ * broker-backed hosts too) and, on click, a popover listing the allowed models.
  * Stale/disabled catalog rows stay hidden from new picks unless they are the
  * saved session selection. Choosing one applies it to the NEXT task
  * ("applies to your next message" — R2.5).
