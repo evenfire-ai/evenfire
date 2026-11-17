@@ -2087,7 +2087,9 @@ export class ChannelReader {
    *   sent instead as several messages below the bubble, the controls on the
    *   last, and registered only after the last one was sent; the controls are
    *   removed from that message when the approval is decided or replaced, the
-   *   task ends or the entry expires.
+   *   task ends or the entry expires. Neither a one-message card nor parts are
+   *   offered for a task that already ended, including one whose final result
+   *   is still being written.
    * - On `tool_start`/`tool_complete` after approval: keeps editing the
    *   bubble with progress.
    * - On `terminal`: fetch final response via getTaskResult, edit bubble.
@@ -2172,6 +2174,9 @@ export class ChannelReader {
         return operation
       }
 
+      // How the task ended, set as soon as it is known and before the bubble edit
+      // that shows it. finalDelivered below is set only once that edit was written.
+      let taskEnd: 'completed' | 'cancelled' | 'failed' | undefined
       let finalDelivered = false
       let finalDeliveryInFlight: Promise<boolean> | null = null
       let resultPollingFallbackStarted = false
@@ -2193,23 +2198,26 @@ export class ChannelReader {
       // Denies a request this stream did not show and tells the user when the
       // denial was accepted; a rejected denial is told only with
       // `noticeOnRejected`, and logged with the ids otherwise. Returns
-      // 'task_ended' when the task ended first or while the denial was in
-      // flight: the bubble already shows the outcome, so no notice follows, and
-      // when the task ended first no denial is sent. It denies as msg.sender,
-      // the user the Host's approval is bound to. Never rejects: sendDenial and
-      // sendReply catch.
+      // 'task_ended', and no notice follows, when the task ended first (no
+      // denial is sent then), when it was cancelled or failed while the denial
+      // was in flight, or when it completed and the denial was rejected: the
+      // bubble shows the outcome. A completion with the denial accepted is the
+      // denial's own and gets the notice. A task has ended as soon as its
+      // outcome is known, while its final result may still be being written.
+      // It denies as msg.sender, the user the Host's approval is bound to.
+      // Never rejects: sendDenial and sendReply catch.
       const denyUnshownApproval = async (params: {
         requestId: string
         noticeOnRejected: boolean
       }): Promise<'task_ended' | 'denied' | 'denial_rejected'> => {
-        if (finalDelivered) return 'task_ended'
+        if (taskEnd) return 'task_ended'
         const denial = await this.rpcClient.sendDenial(
           msg.sender,
           params.requestId,
           msg.channelType,
           msg.channelId
         )
-        if (finalDelivered) return 'task_ended'
+        if (taskEnd && !(taskEnd === 'completed' && denial.success)) return 'task_ended'
         if (denial.success) {
           await this.sendReply(msg, TOOL_APPROVAL_NOT_SHOWN_DENIED)
           return 'denied'
@@ -2254,10 +2262,14 @@ export class ChannelReader {
         const parts = limit ? splitToolApprovalText(delivery.content, limit) : [delivery.content]
 
         if (parts?.length === 1) {
-          // Fits in one message: the status bubble becomes the approval.
+          // Fits in one message: the status bubble becomes the approval, unless
+          // the task already ended.
           approvalPromptDelivered = true
           acceptProgressUpdates = false
           console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${params.requestId})`)
+          // The task ended, its final result possibly still being written: the
+          // bubble keeps its outcome, and no entry is registered.
+          if (taskEnd) return
           this.registerPendingApproval(approvalKey, {
             taskId,
             requestId: params.requestId,
@@ -2290,9 +2302,9 @@ export class ChannelReader {
             requestId: params.requestId,
             noticeOnRejected: true,
           })
-          // The task ended during the delivery: the bubble already shows the
-          // outcome, so progress stays off.
-          if (outcome === 'task_ended') return
+          // The task ended during the delivery, or the accepted denial ended
+          // it: the bubble shows the outcome, so progress stays off.
+          if (outcome === 'task_ended' || taskEnd) return
           acceptProgressUpdates = true
           approvalPromptDelivered = false
         }
@@ -2301,8 +2313,9 @@ export class ChannelReader {
           return
         }
 
-        // The task ended before the approval could be shown: the bubble keeps its outcome.
-        if (finalDelivered) return
+        // The task ended before the approval could be shown, its final result
+        // possibly still being written: the bubble keeps its outcome.
+        if (taskEnd) return
         await editStatus('Approval needed. The request is in the messages below.')
         let outcome: { stopped: false; last: ToolApprovalLastPart } | { stopped: true }
         try {
@@ -2311,15 +2324,15 @@ export class ChannelReader {
             adapter,
             parts,
             actionToken,
-            () => finalDelivered
+            () => taskEnd !== undefined
           )
         } catch (err) {
           // No approval is offered below any more, so the bubble shows the
           // progress again. This runs before the denial: an accepted denial
           // completes the task at the Host, and its final text must not be
-          // overwritten. A cancel or failure that already arrived has set
-          // finalDelivered.
-          if (!finalDelivered) {
+          // overwritten. A task that already ended, its final result possibly
+          // still being written, keeps its outcome.
+          if (!taskEnd) {
             await editStatus(
               stream.steps.length > 0 ? formatProgressUpdate(stream.steps) : PROCESSING_STATUS_TEXT
             )
@@ -2330,9 +2343,10 @@ export class ChannelReader {
         const clearControls = outcome.stopped
           ? undefined
           : this.toolApprovalControlsClearer(adapter, responseChannelId, outcome.last, ids)
-        if (outcome.stopped || finalDelivered) {
-          // A terminal event or the final result overtook the delivery: register
-          // nothing and remove the controls if they were sent.
+        if (outcome.stopped || taskEnd) {
+          // The task ended during the delivery, its final result possibly still
+          // being written: register nothing and remove the controls if they
+          // were sent.
           await clearControls?.()
           return
         }
@@ -2374,6 +2388,7 @@ export class ChannelReader {
           acceptProgressUpdates = false
 
           if (result.success && result.response) {
+            taskEnd = 'completed'
             const finalText = formatFinalMessage(stream.steps, result.response)
             try {
               await editStatus(finalText, true)
@@ -2396,6 +2411,7 @@ export class ChannelReader {
               )
             }
           } else if (result.error) {
+            taskEnd = 'failed'
             const errorText = `Error: ${result.error.message ?? 'Unknown error'}`
             try {
               await editStatus(errorText, true)
@@ -2410,6 +2426,7 @@ export class ChannelReader {
             this.clearPendingApprovalForTask(msg, taskId)
             console.log(`[Main] Final error delivered for task ${taskId} via ${msg.channelType}`)
           } else {
+            taskEnd = 'completed'
             const finalText = formatFinalMessage(stream.steps, 'Done.')
             try {
               await editStatus(finalText, true)
@@ -2537,11 +2554,13 @@ export class ChannelReader {
           }
           if (terminal.status === 'cancelled') {
             acceptProgressUpdates = false
+            taskEnd = 'cancelled'
             finalDelivered = true
             await editStatus('Request cancelled.')
             this.clearPendingApprovalForTask(msg, taskId)
           } else if (terminal.status === 'failed' && terminal.error) {
             acceptProgressUpdates = false
+            taskEnd = 'failed'
             finalDelivered = true
             await editStatus(`Error: ${terminal.error.message}`)
             this.clearPendingApprovalForTask(msg, taskId)

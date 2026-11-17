@@ -13,6 +13,7 @@ interface StreamCall {
   fireSuspended: (data: unknown) => Promise<void>
   fireTerminal: (data: unknown) => Promise<void>
   fireError: (msg: string) => Promise<void>
+  fireProgress: (steps: ProgressStep[]) => void
   closed: boolean
   /** What the stream reports as its steps; a test may push to it. */
   steps: ProgressStep[]
@@ -26,6 +27,7 @@ vi.mock('../src/progressClient', () => ({
       fireSuspended: options.onSuspended as never,
       fireTerminal: options.onTerminal as never,
       fireError: options.onError as never,
+      fireProgress: options.onProgress as never,
       closed: false,
       steps: [],
     }
@@ -1709,5 +1711,529 @@ describe('tool approval text parts on Teams', () => {
     expect(clears[0]![2]).toBe(last[1])
     expect(clears[0]![3]).toEqual({ teamsTextFormat: 'plain' })
     await h.end()
+  })
+})
+
+describe('a task that ends while its approval is delivered or denied', () => {
+  const SHORT = `Delete these files permanently:\n${fileLine('notes.txt')}\nTotal files: 1\n${INSTRUCTION}`
+  const STEP: ProgressStep = {
+    toolCallId: 'call-ended',
+    toolName: 'kept_files_list',
+    displayName: 'List kept files',
+    intentSummary: 'List the kept files',
+    iteration: 1,
+    stepIndex: 1,
+    totalSteps: 1,
+    state: 'completed',
+    durationMs: 120,
+  }
+  const PROGRESS = formatProgressUpdate([STEP])
+
+  type Started = Awaited<ReturnType<typeof startAsync>>
+
+  function bubbleEdits(rec: ReturnType<typeof recordingAdapter>): string[] {
+    return rec.editMessage.mock.calls
+      .filter(call => call[1] === 'telegram-msg-1')
+      .map(call => call[2])
+  }
+
+  /** Settles until `done` holds, at most `rounds` times. */
+  async function settleUntil(done: () => boolean, rounds = 25): Promise<void> {
+    for (let i = 0; i < rounds && !done(); i++) await settle()
+  }
+
+  /** Holds the first bubble edit with `content`; `entered` resolves when it starts. */
+  function holdEdit(h: Started, content: string) {
+    const held = gate()
+    const entered = gate()
+    h.rec.editHolds.set(content, { gate: held.promise, entered: entered.release })
+    return { release: held.release, entered: entered.promise }
+  }
+
+  /** The approval fetch of `onSuspended` answers with `notification` once released. */
+  function holdFetch(h: Started, taskId: string, notification: string) {
+    const held = gate()
+    h.rpc.getTaskResult.mockImplementationOnce(async () => {
+      await held.promise
+      return {
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId,
+          requestId: `approval-${taskId}`,
+          userId: SENDER.telegram,
+          notification,
+        },
+      }
+    })
+    return held
+  }
+
+  /** The Host's stored result from now on: the task completed with `response`. */
+  function completeWith(h: Started, response?: string) {
+    h.rpc.getTaskResult.mockResolvedValue({
+      success: true,
+      status: 'completed' as const,
+      ...(response === undefined ? {} : { response }),
+    } as never)
+  }
+
+  function logged(spy: { mock: { calls: unknown[][] } }, text: string): boolean {
+    return spy.mock.calls.some(call => String(call[0]).includes(text))
+  }
+
+  function noticeSent(rec: ReturnType<typeof recordingAdapter>): boolean {
+    return sentContents(rec).some(content => content.includes('could not be shown'))
+  }
+
+  it('A49 neither restores the bubble nor denies when a part fails while the final result is written', async () => {
+    const errors = silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a49')
+    const partHeld = gate()
+    h.rec.hooks.set(3, async () => {
+      await partHeld.promise
+      throw new Error('provider refused the message')
+    })
+    void h.suspend()
+    await settle()
+    // Witness: pointer written, part 1 sent, part 2 in flight.
+    expect(bubbleEdits(h.rec)).toEqual([POINTER])
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(3)
+    const finalText = 'The approval was decided elsewhere; done.'
+    completeWith(h, finalText)
+    const finalEdit = holdEdit(h, finalText)
+    void h.stream.fireTerminal({ taskId: 'task-a49', status: 'completed' })
+    await finalEdit.entered
+    partHeld.release()
+    await settle()
+    finalEdit.release()
+    await settle()
+    await settle()
+
+    // Witnesses: the failed part was logged and the final text was written.
+    expect(errorLines(errors).some(line => line.includes('was not shown: part 2 of 4'))).toBe(true)
+    expect(bubbleEdits(h.rec)).toContain(finalText)
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(3)
+    expect(bubbleEdits(h.rec)).toEqual([POINTER, finalText])
+    expect(h.rpc.sendDenial).not.toHaveBeenCalled()
+    expect(noticeSent(h.rec)).toBe(false)
+  })
+
+  it('A50 writes no pointer when the task completed while the approval was fetched', async () => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a50')
+    const fetchHeld = holdFetch(h, 'task-a50', CARD_600)
+    void h.suspend()
+    await settle()
+    const finalText = 'Finished without the approval.'
+    completeWith(h, finalText)
+    const finalEdit = holdEdit(h, finalText)
+    void h.stream.fireTerminal({ taskId: 'task-a50', status: 'completed' })
+    await finalEdit.entered
+    fetchHeld.release()
+    await settle()
+    finalEdit.release()
+    await settle()
+    await settle()
+
+    // Witnesses: the multi-part branch ran, and the final text was written.
+    expect(logged(logs, 'Tool approval needed (task: task-a50, request: approval-task-a50)')).toBe(
+      true
+    )
+    expect(bubbleEdits(h.rec)).toContain(finalText)
+    expect(bubbleEdits(h.rec)).toEqual([finalText])
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('A50b writes no pointer over a "Done." final result', async () => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a50b')
+    const fetchHeld = holdFetch(h, 'task-a50b', CARD_600)
+    void h.suspend()
+    await settle()
+    // A completed result with no response is shown as "Done.".
+    completeWith(h)
+    const finalEdit = holdEdit(h, 'Done.')
+    void h.stream.fireTerminal({ taskId: 'task-a50b', status: 'completed' })
+    await finalEdit.entered
+    fetchHeld.release()
+    await settle()
+    finalEdit.release()
+    await settle()
+    await settle()
+
+    expect(
+      logged(logs, 'Tool approval needed (task: task-a50b, request: approval-task-a50b)')
+    ).toBe(true)
+    expect(bubbleEdits(h.rec)).toContain('Done.')
+    expect(bubbleEdits(h.rec)).toEqual(['Done.'])
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('A51 stops sending parts when the task completes during the delivery', async () => {
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a51')
+    const partHeld = gate()
+    h.rec.hooks.set(3, async () => {
+      await partHeld.promise
+      return 'telegram-msg-3'
+    })
+    void h.suspend()
+    await settle()
+    // Witness: part 2's call was made.
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(3)
+    const finalText = 'Finished without the approval.'
+    completeWith(h, finalText)
+    const finalEdit = holdEdit(h, finalText)
+    void h.stream.fireTerminal({ taskId: 'task-a51', status: 'completed' })
+    await finalEdit.entered
+    partHeld.release()
+    await settle()
+    finalEdit.release()
+    await settle()
+    await settle()
+
+    // Witness: the final text is the last bubble edit.
+    expect(bubbleEdits(h.rec).at(-1)).toBe(finalText)
+    // Status, part 1, part 2: parts 3 and 4 (and the controls) are never sent.
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(3)
+    await h.send('/approve')
+    expect(sentContents(h.rec).at(-1)).toBe(NO_PENDING)
+    expect(h.rpc.sendApproval).not.toHaveBeenCalled()
+  })
+
+  it('A52 registers nothing and clears the controls of a last part sent while the task completed', async () => {
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_255, 'task-a52')
+    const lastHeld = gate()
+    h.rec.hooks.set(3, async () => {
+      await lastHeld.promise
+      return 'telegram-msg-3'
+    })
+    void h.suspend()
+    await settle()
+    const finalText = 'Finished without the approval.'
+    completeWith(h, finalText)
+    const finalEdit = holdEdit(h, finalText)
+    void h.stream.fireTerminal({ taskId: 'task-a52', status: 'completed' })
+    await finalEdit.entered
+    lastHeld.release()
+    await settle()
+
+    // Witness: the last part was sent with a keyboard.
+    expect(h.rec.sendMessage.mock.calls[2]![4]?.telegramInlineKeyboard).toBeDefined()
+    // The typed command is answered while the final edit is still held.
+    const typed = h.send('/approve')
+    await settle()
+    expect(sentContents(h.rec).at(-1)).toBe(NO_PENDING)
+    expect(h.rpc.sendApproval).not.toHaveBeenCalled()
+    const clears = clearEditsOf(h.rec, 'telegram-msg-3')
+    expect(clears).toHaveLength(1)
+    expect(clears[0]![3]).toBeUndefined()
+    finalEdit.release()
+    await typed
+    await settle()
+    expect(bubbleEdits(h.rec).at(-1)).toBe(finalText)
+  })
+
+  it('A52b treats a task whose final delivery failed as ended while the result is retried', async () => {
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a52b')
+    const partHeld = gate()
+    h.rec.hooks.set(3, async () => {
+      await partHeld.promise
+      return 'telegram-msg-3'
+    })
+    void h.suspend()
+    await settle()
+    // Witness: pointer written, part 1 sent, part 2 in flight.
+    expect(bubbleEdits(h.rec)).toEqual([POINTER])
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(3)
+    const finalText = 'Finished without the approval.'
+    completeWith(h, finalText)
+    // The final edit and its fallback send (call 4) both throw.
+    h.rec.editFailures.add('telegram-msg-1')
+    h.rec.hooks.set(4, async () => {
+      throw new Error('provider refused the message')
+    })
+    await h.stream.fireTerminal({ taskId: 'task-a52b', status: 'completed' })
+    // Witnesses: the final edit and the fallback send were attempted.
+    expect(
+      h.rec.editMessage.mock.calls.some(
+        call => call[1] === 'telegram-msg-1' && call[2] === finalText
+      )
+    ).toBe(true)
+    expect(h.rec.sendMessage.mock.calls[3]?.[1]).toBe(finalText)
+    partHeld.release()
+    await settle()
+
+    // Status, part 1, part 2, the fallback send: parts 3 and 4 are never sent.
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(4)
+    await h.send('/approve')
+    expect(sentContents(h.rec).at(-1)).toBe(NO_PENDING)
+    expect(h.rpc.sendApproval).not.toHaveBeenCalled()
+
+    // End the result poll the failure started: the retry delivers the final text.
+    h.rec.editFailures.delete('telegram-msg-1')
+    await h.stream.fireTerminal({ taskId: 'task-a52b', status: 'completed' })
+    expect(bubbleEdits(h.rec).at(-1)).toBe(finalText)
+  })
+
+  for (const path of ['part-failed', 'fetch-failed'] as const) {
+    const id = path === 'part-failed' ? 'A53' : 'A54'
+    it(`${id} ${path}: tells the user when the accepted denial completes the task first`, async () => {
+      silenceErrors()
+      vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      const taskId = `task-${id.toLowerCase()}`
+      const h = await startAsync('telegram', CARD_600, taskId)
+      if (path === 'part-failed') {
+        h.rec.hooks.set(3, async () => {
+          throw new Error('provider refused the message')
+        })
+      } else {
+        h.rpc.getTaskResult.mockRejectedValueOnce(new Error('approval fetch failed'))
+      }
+      const finalText = 'Tool kept_files_delete was denied by the user.'
+      h.rpc.sendDenial.mockImplementationOnce(async () => {
+        // The Host completes the task, and its final text is written, before the deny call answers.
+        completeWith(h, finalText)
+        await h.stream.fireTerminal({ taskId, status: 'completed' })
+        return { success: true }
+      })
+      void h.suspend()
+      await settleUntil(() => sentContents(h.rec).includes(DENIED))
+
+      expect(h.rpc.sendDenial).toHaveBeenCalledTimes(1)
+      expect(sentContents(h.rec).filter(content => content === DENIED)).toHaveLength(1)
+      expect(bubbleEdits(h.rec).at(-1)).toBe(finalText)
+    })
+  }
+
+  it('A55 sends no notice when the denial is rejected after the task completed', async () => {
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a55')
+    h.rec.hooks.set(3, async () => {
+      throw new Error('provider refused the message')
+    })
+    const finalText = 'Finished without the approval.'
+    h.rpc.sendDenial.mockImplementationOnce(async () => {
+      completeWith(h, finalText)
+      await h.stream.fireTerminal({ taskId: 'task-a55', status: 'completed' })
+      return { success: false }
+    })
+    void h.suspend()
+    await settleUntil(() => bubbleEdits(h.rec).includes(finalText))
+    await settle()
+
+    // Witnesses: the denial was sent and the final text was written.
+    expect(h.rpc.sendDenial).toHaveBeenCalledTimes(1)
+    expect(bubbleEdits(h.rec).at(-1)).toBe(finalText)
+    expect(noticeSent(h.rec)).toBe(false)
+  })
+
+  it('A55b sends no notice when the denial is rejected while the final result is written', async () => {
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a55b')
+    h.rec.hooks.set(3, async () => {
+      throw new Error('provider refused the message')
+    })
+    const finalText = 'Finished without the approval.'
+    const finalEdit = holdEdit(h, finalText)
+    h.rpc.sendDenial.mockImplementationOnce(async () => {
+      completeWith(h, finalText)
+      void h.stream.fireTerminal({ taskId: 'task-a55b', status: 'completed' })
+      // The Host answers while the final edit is in flight.
+      await finalEdit.entered
+      return { success: false }
+    })
+    void h.suspend()
+    await settleUntil(() => h.rpc.sendDenial.mock.calls.length > 0)
+    await settle()
+    await settle()
+    finalEdit.release()
+    await settle()
+    await settle()
+
+    // Witnesses: the denial was sent and the final text was written after the release.
+    expect(h.rpc.sendDenial).toHaveBeenCalledTimes(1)
+    expect(bubbleEdits(h.rec).at(-1)).toBe(finalText)
+    expect(noticeSent(h.rec)).toBe(false)
+  })
+
+  it('A55c sends no denial when the approval fetch fails while the final result is written', async () => {
+    const errors = silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a55c')
+    const fetchHeld = gate()
+    h.rpc.getTaskResult.mockImplementationOnce(async () => {
+      await fetchHeld.promise
+      throw new Error('approval fetch failed')
+    })
+    void h.suspend()
+    await settle()
+    const finalText = 'Finished without the approval.'
+    completeWith(h, finalText)
+    const finalEdit = holdEdit(h, finalText)
+    void h.stream.fireTerminal({ taskId: 'task-a55c', status: 'completed' })
+    await finalEdit.entered
+    fetchHeld.release()
+    await settle()
+    await settle()
+    finalEdit.release()
+    await settle()
+    await settle()
+
+    // Witnesses: the failed fetch was logged and the final text was written.
+    expect(
+      errorLines(errors).some(line =>
+        line.includes('Failed to fetch approval notification for task task-a55c')
+      )
+    ).toBe(true)
+    expect(bubbleEdits(h.rec).at(-1)).toBe(finalText)
+    expect(h.rpc.sendDenial).not.toHaveBeenCalled()
+    expect(noticeSent(h.rec)).toBe(false)
+  })
+
+  it('A56 sends no notice when an accepted denial is followed by an error result', async () => {
+    // A pin: the Host completes an accepted denial with a success result.
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a56')
+    h.rec.hooks.set(3, async () => {
+      throw new Error('provider refused the message')
+    })
+    h.rpc.sendDenial.mockImplementationOnce(async () => {
+      h.rpc.getTaskResult.mockResolvedValue({
+        success: false,
+        status: 'completed' as const,
+        error: {
+          code: 'tool_failed',
+          message: 'the tool failed',
+          retryable: false,
+          provider: 'host',
+        },
+      } as never)
+      await h.stream.fireTerminal({ taskId: 'task-a56', status: 'completed' })
+      return { success: true }
+    })
+    void h.suspend()
+    await settleUntil(() => bubbleEdits(h.rec).includes('Error: the tool failed'))
+    await settle()
+
+    // Witnesses: the error is on the bubble and the denial was sent.
+    expect(bubbleEdits(h.rec).at(-1)).toBe('Error: the tool failed')
+    expect(h.rpc.sendDenial).toHaveBeenCalledTimes(1)
+    expect(noticeSent(h.rec)).toBe(false)
+  })
+
+  it('A64a keeps progress off after the notice of a denial that completed the task', async () => {
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a64a')
+    // Control: before the suspension, a progress event edits the bubble.
+    h.stream.fireProgress([STEP])
+    await settle()
+    expect(bubbleEdits(h.rec)).toEqual([PROGRESS])
+    h.rec.hooks.set(3, async () => {
+      throw new Error('provider refused the message')
+    })
+    const finalText = 'Tool kept_files_delete was denied by the user.'
+    h.rpc.sendDenial.mockImplementationOnce(async () => {
+      completeWith(h, finalText)
+      await h.stream.fireTerminal({ taskId: 'task-a64a', status: 'completed' })
+      return { success: true }
+    })
+    void h.suspend()
+    await settleUntil(() => bubbleEdits(h.rec).includes(finalText))
+    await settle()
+    h.stream.fireProgress([STEP])
+    await settle()
+
+    expect(bubbleEdits(h.rec).at(-1)).toBe(finalText)
+  })
+
+  it('A64b keeps progress off after the notice of a denial answered while the final result is written', async () => {
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a64b')
+    // Control: before the suspension, a progress event edits the bubble.
+    h.stream.fireProgress([STEP])
+    await settle()
+    expect(bubbleEdits(h.rec)).toEqual([PROGRESS])
+    h.rec.hooks.set(3, async () => {
+      throw new Error('provider refused the message')
+    })
+    const finalText = 'Tool kept_files_delete was denied by the user.'
+    const finalEdit = holdEdit(h, finalText)
+    h.rpc.sendDenial.mockImplementationOnce(async () => {
+      completeWith(h, finalText)
+      void h.stream.fireTerminal({ taskId: 'task-a64b', status: 'completed' })
+      await finalEdit.entered
+      return { success: true }
+    })
+    void h.suspend()
+    await settleUntil(() => sentContents(h.rec).includes(DENIED))
+    // Witness: the notice was sent while the final edit was held.
+    expect(sentContents(h.rec)).toContain(DENIED)
+    h.stream.fireProgress([STEP])
+    finalEdit.release()
+    await settle()
+    await settle()
+
+    const edits = bubbleEdits(h.rec)
+    expect(edits).toContain(finalText)
+    expect(edits.at(-1)).toBe(finalText)
+    expect(edits.slice(edits.lastIndexOf(finalText) + 1)).toEqual([])
+  })
+
+  it('A65 writes no one-message card when the task completed while the approval was fetched', async () => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    silenceErrors()
+    const h = await startAsync('telegram', SHORT, 'task-a65')
+    const fetchHeld = holdFetch(h, 'task-a65', SHORT)
+    void h.suspend()
+    await settle()
+    const finalText = 'Finished without the approval.'
+    completeWith(h, finalText)
+    const finalEdit = holdEdit(h, finalText)
+    void h.stream.fireTerminal({ taskId: 'task-a65', status: 'completed' })
+    await finalEdit.entered
+    fetchHeld.release()
+    await settle()
+    finalEdit.release()
+    await settle()
+    await settle()
+
+    // Witnesses: the one-message branch ran, and the final text was written.
+    expect(logged(logs, 'Tool approval needed (task: task-a65, request: approval-task-a65)')).toBe(
+      true
+    )
+    expect(bubbleEdits(h.rec)).toContain(finalText)
+    expect(bubbleEdits(h.rec)).toEqual([finalText])
+    await h.send('/approve')
+    expect(sentContents(h.rec).at(-1)).toBe(NO_PENDING)
+    expect(h.rpc.sendApproval).not.toHaveBeenCalled()
+  })
+
+  it('A66 writes no one-message card and registers nothing when the task was cancelled first', async () => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    silenceErrors()
+    const h = await startAsync('telegram', SHORT, 'task-a66')
+    const fetchHeld = holdFetch(h, 'task-a66', SHORT)
+    void h.suspend()
+    await settle()
+    await h.end()
+    fetchHeld.release()
+    await settle()
+    await settle()
+
+    // Witnesses: the one-message branch ran after the cancel reached the bubble.
+    expect(logged(logs, 'Tool approval needed (task: task-a66, request: approval-task-a66)')).toBe(
+      true
+    )
+    expect(bubbleEdits(h.rec)).toContain('Request cancelled.')
+    expect(bubbleEdits(h.rec).at(-1)).toBe('Request cancelled.')
+    expect(h.rec.editMessage.mock.calls.some(call => call[2] === SHORT)).toBe(false)
+    await h.send('/approve')
+    expect(sentContents(h.rec).at(-1)).toBe(NO_PENDING)
+    expect(h.rpc.sendApproval).not.toHaveBeenCalled()
   })
 })
