@@ -462,6 +462,47 @@ describe('catalog attention dialog actions', () => {
     expect(screen.getByText(`${items.length} reviewed`)).toBeInTheDocument()
     expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
   })
+  it("drops an item's error once the feed stops listing it, so it does not return with the item", async () => {
+    vi.mocked(ackAdminAttention).mockRejectedValueOnce(new Error('Network error'))
+    renderSurface()
+    const dialog = await openReview()
+
+    fireEvent.click(
+      within(pendingRow(dialog, deprecated)).getByRole('button', {
+        name: `Mark reviewed: ${itemName(deprecated)}`,
+      })
+    )
+    expect(await within(pendingRow(dialog, deprecated)).findByRole('alert')).toHaveTextContent(
+      'Network error'
+    )
+
+    // The server stops listing the item; another item's action brings that feed in.
+    // `serveFeed` reads `items` on every call, so editing it in place is the server change.
+    items.splice(items.indexOf(deprecated), 1)
+    fireEvent.click(
+      within(pendingRow(dialog, stale)).getByRole('button', {
+        name: `Mark reviewed: ${itemName(stale)}`,
+      })
+    )
+    await waitFor(() =>
+      expect(
+        within(dialog).queryByRole('button', { name: `Mark reviewed: ${itemName(deprecated)}` })
+      ).not.toBeInTheDocument()
+    )
+
+    // The item comes back without the operator acting on it, which would clear its error anyway.
+    items.push(deprecated)
+    fireEvent.click(
+      within(pendingRow(dialog, otherStale)).getByRole('button', {
+        name: `Mark reviewed: ${itemName(otherStale)}`,
+      })
+    )
+    await within(dialog).findByRole('button', { name: `Undo review: ${itemName(otherStale)}` })
+
+    const returned = pendingRow(dialog, deprecated)
+    expect(within(returned).queryByRole('alert')).not.toBeInTheDocument()
+    expect(within(dialog).queryByText('Network error')).not.toBeInTheDocument()
+  })
 })
 
 describe('catalog attention from a control-api without acknowledgements', () => {
