@@ -325,7 +325,8 @@ async function main() {
     '--path-format=absolute',
     '--git-common-dir',
   ]).trim()
-  assertCanonicalEvenfireCheckout(fs.realpathSync(path.dirname(commonDir)))
+  const canonical = fs.realpathSync(path.dirname(commonDir))
+  assertCanonicalEvenfireCheckout(canonical)
   const branchMake = path.join(root, 'scripts/minikube-profiles/branch.mk')
   const info = command('make', ['-f', branchMake, 'branch-profile-info'])
   if (!info.includes(`profile: ${profile}\n`) || !info.includes(`repo: ${root}\n`))
