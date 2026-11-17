@@ -988,26 +988,38 @@ describe('WorkflowService step spillover — iteration limit', () => {
     expect(offeredTools(llm)[2]).toEqual([])
   })
 
-  it('still stores a result on the last iteration of a required step, where no call follows', async () => {
+  it('keeps a result inline on the last iteration of a required step', async () => {
     const persisted = () =>
       metricTotal('clerum_workflow_step_spillover_persisted_total', { tool: 'srv__read' })
-    const before = await persisted()
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(big(200 * 1024)) } })
-    const llm = mockLlmProvider([
-      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
-    ])
+    const content = sdk(big(200 * 1024))
+    const run = async (maxIterations: number) => {
+      const client = mockMcpClient([{ name: 'read' }], { read: { content } })
+      const llm = mockLlmProvider([
+        { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+        { content: 'final', tool_calls: null },
+      ])
+      const before = await persisted()
+      const res = await service(llm, client).executeStep({
+        stepId: STEP_ID,
+        instruction: 'review',
+        mcpServers: SERVERS,
+        maxIterations,
+        toolChoice: 'required',
+      })
+      return { res, llm, client, delta: (await persisted()) - before }
+    }
 
-    const res = await service(llm, client).executeStep({
-      stepId: STEP_ID,
-      instruction: 'review',
-      mcpServers: SERVERS,
-      maxIterations: 1,
-      toolChoice: 'required',
-    })
-
-    expect(res.status).toBe('completed')
-    expect(providerCalls(llm)).toHaveLength(1)
-    expect(await persisted()).toBe(before + 1)
+    const last = await run(1)
+    expect(last.res.status).toBe('completed')
+    expect(last.res.output).toContain('iteration limit (1 iterations, 1 tool calls: srv__read)')
+    expect(last.res.toolsCalled?.[0]?.result).toEqual(content)
+    expect(last.client.callTool).toHaveBeenCalledTimes(1)
+    expect(providerCalls(last.llm)).toHaveLength(1)
+    expect(last.delta).toBe(0)
+    // Witness: the same result is stored when a later call can read it back.
+    const three = await run(3)
+    expect(three.delta).toBe(1)
+    expect(toolResultMessages(three.llm)[0]).toContain(`"spillover_ref":"${FIRST_REF}"`)
   })
 })
 

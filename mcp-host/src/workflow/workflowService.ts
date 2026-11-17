@@ -1373,13 +1373,12 @@ export class WorkflowService {
                 // chance (64 bits). Advisory, like the frame itself.
                 frameTag = `tool-result-${randomBytes(8).toString('hex')}`
               }
-              // A result fetched when the next call is sent without tools stays
-              // inline: nothing could read a stored result back. On the last
-              // iteration no call follows, and the store is consulted as before.
-              const nextCallHasNoTools = i + 1 < MAX_ITERATIONS && forcesFinalText(i + 1)
+              // A result that no later call can read back stays inline: the next call is
+              // sent without tools, or this is the last iteration and no call follows.
+              const noLaterCallCanRead = i + 1 >= MAX_ITERATIONS || forcesFinalText(i + 1)
               // JSON.stringify(undefined) is not a string; such a result stays
               // inline and is never passed to persist().
-              if (stepSpillover && !nextCallHasNoTools && typeof serialized === 'string') {
+              if (stepSpillover && !noLaterCallCanRead && typeof serialized === 'string') {
                 // The store keeps the tool text of an MCP text result (so the
                 // summary and the byte ranges index that text) and the
                 // serialized result otherwise. The decision uses the size of

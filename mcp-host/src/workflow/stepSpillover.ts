@@ -18,8 +18,9 @@
  *     and `release` drops them when the execution ends, however it ends. A
  *     process that dies loses them with the process.
  *   - A step whose results all stay under the threshold is unchanged. A result
- *     fetched when the next call is sent without tools stays inline too,
- *     because nothing could read it back; the step loop does not offer it.
+ *     fetched when the next call is sent without tools, or on the last
+ *     iteration, stays inline too, because nothing could read it back; the
+ *     step loop does not offer it.
  *   - The read tool only accepts refs of the same step, finds only results of
  *     the same execution, and reads at most the threshold in bytes of the
  *     stored string per call, which is what the read adds to the prompt apart
