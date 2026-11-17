@@ -106,7 +106,7 @@ function registry(
     undefined,
     undefined,
     withRoot ? ({ root, room } as { root: string; room: () => Promise<number> }) : undefined,
-    deleteConfirmed
+    deleteConfirmed ? { approveInChannel: true, secretEntries: () => [] } : undefined
   )
 }
 

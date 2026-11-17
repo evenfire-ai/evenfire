@@ -797,9 +797,15 @@ export interface KeptFileToDelete {
   kind: 'generated' | 'upload'
   id: string
   name: string
-  /** The listing's `createdAt`; the approval card shows it on every file line it has room for. */
+  /**
+   * The listing's `createdAt`; the approval card shows it, unless Desktop cut
+   * a card over 64 KiB and said so.
+   */
   createdAt: string
-  /** The listing's `sizeBytes`; the approval card shows it on every file line it has room for. */
+  /**
+   * The listing's `sizeBytes`; the approval card shows it, unless Desktop cut
+   * a card over 64 KiB and said so.
+   */
   sizeBytes: number
 }
 
@@ -829,8 +835,8 @@ function deletableNow(entry: KeptEntry): boolean {
  * the uncut list, so a file the listing tool's first entries do not show can
  * still be deleted. Every name must equal its entry's, and the creation date
  * and size of every file the call would delete must equal the listed ones (the
- * approval card showed them for every file line it had room for), or nothing
- * is deleted.
+ * approval card showed them, unless Desktop cut a card over 64 KiB and said
+ * so), or nothing is deleted.
  * Each removal is one synchronous block that removes only the file listed
  * (same dev and inode), file then record. A file with no record, a file that
  * expired or was regenerated since the listing, and another caller's id are

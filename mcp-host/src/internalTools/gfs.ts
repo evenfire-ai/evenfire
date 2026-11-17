@@ -3,6 +3,12 @@ import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import { attachmentSaveName } from '../core/attachments/attachmentSave'
 import type { Attachment } from '../core/types'
 import { logger } from '../logger'
+import {
+  APPROVAL_REQUEST_ID_SAMPLE,
+  keptFilesDeleteInstruction,
+  keptFilesDeleteNotification,
+  keptFilesDeleteRedactor,
+} from '../progress/approvalInputPreview'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
 import { VisualInputError } from '../visualInput/policy'
 import type { MemoryReservation } from '../visualInput/policy'
@@ -1650,26 +1656,73 @@ export const KEPT_FILES_DELETE_TOOL = 'clerum__kept_files_delete'
 export const ATTACH_AGAIN_SENTENCE =
   'the attachments of this message were not kept; ask the user to attach them again'
 
+/** Where a delete's approval card is shown, and what it is measured with. */
+interface KeptFilesDeleteCard {
+  channelType: string | undefined
+  approveInChannel: boolean
+  secretEntries: () => Array<{ name: string; value: string }>
+}
+
+/**
+ * Why a delete is refused because its approval card does not fit one message
+ * of its channel, or undefined when it fits (always on a channel with no
+ * message limit). The card is the one the approval notification builds
+ * ({@link keptFilesDeleteNotification}), with the request id measured by
+ * {@link APPROVAL_REQUEST_ID_SAMPLE}. The refusal gives the largest count of
+ * leading files whose card fits, found by building those cards from the
+ * longest down; the card's size never decreases as files are added. It
+ * carries constants and integers only, never a name.
+ */
+function keptFilesDeleteCardRefusal(
+  args: Record<string, unknown>,
+  card: KeptFilesDeleteCard
+): string | undefined {
+  const redact = keptFilesDeleteRedactor(card.secretEntries)
+  const instruction = keptFilesDeleteInstruction({
+    approveInChannel: card.approveInChannel,
+    channelType: card.channelType,
+    requestId: APPROVAL_REQUEST_ID_SAMPLE,
+  })
+  const whole = keptFilesDeleteNotification(args, redact, instruction, card.channelType)
+  if (!whole || whole.fits) return undefined
+  const files = args.files as unknown[]
+  const fitsFirst = (count: number): boolean =>
+    keptFilesDeleteNotification(
+      { ...args, files: files.slice(0, count) },
+      redact,
+      instruction,
+      card.channelType
+    )!.fits
+  let leading = files.length - 1
+  while (leading > 0 && !fitsFirst(leading)) leading -= 1
+  if (leading === 0) {
+    return 'kept_files_card_too_long: the approval card for the first file of the list does not fit one message of this channel even alone; nothing was deleted. That file cannot be deleted from this channel: tell the user. The other files can be requested without it.'
+  }
+  return `kept_files_card_too_long: the approval card for these ${files.length} files does not fit one message of this channel; nothing was deleted. Leading files of the list that fit one card: ${leading}. Call clerum__kept_files_delete again with only those, then again for the rest; the user approves each call.`
+}
+
 /**
  * `clerum__kept_files_delete`: deletes files the Host keeps for this user,
  * named by kind, id, name, creation date and size from the listing, after the
- * user approves the call on a card that lists the files with their names,
- * sizes and dates. In Telegram, Slack and Teams the card is one message: long
- * names are shortened in the middle, and a card that still does not fit lists
- * only its first files by name and says how many files the request covers.
+ * user approves the call on a card that lists the files with their whole
+ * names, sizes and dates. In Telegram, Slack and Teams the card must fit one
+ * message: validateParams refuses a call whose card does not fit, before the
+ * approval and again when the call runs, and tells the model how many leading
+ * files fit.
  * It cannot name a GFS file, a download copy, a workspace file, a file with no
  * record or another user's file: it has no path and no GFS client.
  */
 export function buildKeptFilesDeleteTool(
   callerRoot: string | undefined,
-  options: { keepRefused: boolean }
+  options: { keepRefused: boolean; card: KeptFilesDeleteCard }
 ): InternalToolDefinition {
   return {
     name: KEPT_FILES_DELETE_TOOL,
     description:
       'Delete files this Host keeps for this user, to make room. Name each file by kind, id, name, createdAt and sizeBytes exactly as clerum__kept_files_list gives them; only files with an id can be deleted. ' +
-      'Call it only with the files the user agreed to delete; the user approves the call itself on an approval card that shows each file with its name, size and creation date; in a chat channel the card is one message, so long names are shortened in the middle. Deleted files cannot be recovered.',
+      'Call it only with the files the user agreed to delete; the user approves the call itself on an approval card that shows each file with its whole name, size and creation date. In a chat channel the card must fit one message: a call whose card does not fit is refused before the user is asked, and the refusal says how many of the first files fit. Deleted files cannot be recovered.',
     requiresApproval: true,
+    validateParams: args => keptFilesDeleteCardRefusal(args, options.card),
     parameters: {
       type: 'object',
       required: ['files'],

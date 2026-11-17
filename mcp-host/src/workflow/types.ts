@@ -262,6 +262,14 @@ export interface InternalToolDefinition {
   spilloverExempt?: boolean
   /** The chat adapter asks for the user's approval before every call. */
   requiresApproval?: boolean
+  /**
+   * Why a call must be refused, or undefined to admit it. Only the chat tool
+   * loop calls it (through `InternalToolAdapter`), with the arguments its
+   * schema accepted: before the approval, and again when the call runs. The
+   * workflow runtime does not call it. A tool with it is schema-checked before
+   * the approval; a tool without it only in `execute`.
+   */
+  validateParams?: (args: Record<string, unknown>) => string | undefined
   execute: (
     args: Record<string, unknown>,
     outputDir: string,

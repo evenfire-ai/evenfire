@@ -117,6 +117,9 @@ function generated(
   return { id, file, record }
 }
 
+/** A delete measured for a task with no channel budget. */
+const NO_BUDGET_CARD = { channelType: undefined, approveInChannel: true, secretEntries: () => [] }
+
 /**
  * Deletes as the model does after a listing: each file's createdAt and
  * sizeBytes, when a test does not give them, are the listed ones for its id
@@ -136,7 +139,10 @@ async function del(
       sizeBytes: file.sizeBytes ?? entry?.sizeBytes ?? 0,
     }
   })
-  return buildKeptFilesDeleteTool(root, { keepRefused }).execute({ files: complete }, '')
+  return buildKeptFilesDeleteTool(root, { keepRefused, card: NO_BUDGET_CARD }).execute(
+    { files: complete },
+    ''
+  )
 }
 
 function payload(result: { success: boolean; content?: string; error?: string }) {
@@ -173,7 +179,7 @@ function registryFor(root: string, deleteConfirmed: boolean): NativeToolRegistry
     undefined,
     undefined,
     { root: root, room: async () => Number.MAX_SAFE_INTEGER },
-    deleteConfirmed
+    deleteConfirmed ? { approveInChannel: true, secretEntries: () => [] } : undefined
   )
 }
 
@@ -327,10 +333,10 @@ describe('clerum__kept_files_delete', () => {
   it('refuses a call without the creation date and size before touching any file', async () => {
     const root = rootOf('user-a')
     const kept = generated(root, 'a.md', 10)
-    const result = await buildKeptFilesDeleteTool(root, { keepRefused: false }).execute(
-      { files: [{ kind: 'generated', id: kept.id, name: 'a.md' }] },
-      ''
-    )
+    const result = await buildKeptFilesDeleteTool(root, {
+      keepRefused: false,
+      card: NO_BUDGET_CARD,
+    }).execute({ files: [{ kind: 'generated', id: kept.id, name: 'a.md' }] }, '')
     expect(result.error).toBe(
       'files must be 1 to 20 entries of kind, id, name, createdAt and sizeBytes from clerum__kept_files_list'
     )
@@ -776,29 +782,20 @@ describe('the delete approval names every file', () => {
     expect(generic).toMatch(/^Tool `other_tool` requires approval\. Parameters: /)
   })
 
-  it('shows twenty long names whole in Desktop, and on twenty distinct shortened lines in Slack', () => {
+  it('shows twenty long names whole, on twenty distinct lines', () => {
     const files = Array.from({ length: 20 }, (_, n) => ({
       kind: 'upload',
       name: `${'x'.repeat(250)}${String(n).padStart(5, '0')}`,
     }))
-    const desktop = preview(files).text.split('\n')
-    const whole = desktop.filter(line => line.startsWith('upload: '))
-    expect(whole).toHaveLength(20)
-    whole.forEach((line, n) => expect(line).toContain(`"${files[n]!.name}"`))
-    expect(desktop.join('\n')).not.toContain('…')
-    expect(desktop).toContain('Total files: 20')
+    for (const lines of [preview(files).text.split('\n'), notification(files).split('\n')]) {
+      const named = lines.filter(line => line.startsWith('upload: '))
+      expect(named).toHaveLength(20)
+      expect(new Set(named).size).toBe(20)
+      named.forEach((line, n) => expect(line).toContain(`"${files[n]!.name}"`))
+      expect(lines.join('\n')).not.toContain('…')
+      expect(lines).toContain('Total files: 20')
+    }
     expect(preview(files).truncated).toBe(false)
-    // One Slack message cannot carry the 20 names whole: each keeps its start
-    // and its distinct end around the marker.
-    const slack = notification(files).split('\n')
-    const shortened = slack.filter(line => line.startsWith('upload: '))
-    expect(shortened).toHaveLength(20)
-    expect(new Set(shortened).size).toBe(20)
-    shortened.forEach((line, n) => {
-      expect(line).toMatch(/^upload: "x+"…"x*\d{5}" — /)
-      expect(line).toContain(`${String(n).padStart(5, '0')}"${VALUES}`)
-    })
-    expect(slack.slice(-2)).toEqual(['Total files: 20', SLACK_TRAILER])
   })
 
   it('tells apart files with the same name by size and creation date', () => {
@@ -969,10 +966,11 @@ describe('the delete approval names every file', () => {
     expect(desktop.text.split('\n')[0]).toBe('Delete these files permanently:')
     expect(fileLines(desktop.text).length).toBeGreaterThan(0)
     const marker = 'The list above is cut: it is too long to show whole. Total files: 300.'
-    // A channel with no message limit gets the Desktop card and the marker.
     for (const [channelType, policy, trailer] of [
       ['rpc', 'channel_users', REPLY_TRAILER],
       ['email', 'cli_only', CLI_TRAILER],
+      ['slack', 'channel_users', SLACK_TRAILER],
+      ['slack', 'cli_only', CLI_TRAILER],
     ] as const) {
       const channel = notification(files, channelType, policy)
       expect(channel).toBe(`${desktop.text}\n${marker}\n${trailer}`)
@@ -981,16 +979,6 @@ describe('the delete approval names every file', () => {
       const card = channel.slice(0, -(marker.length + 1 + trailer.length + 1))
       expect(Buffer.byteLength(card, 'utf8')).toBeLessThanOrEqual(APPROVAL_INPUT_PREVIEW_BYTES)
     }
-    // One Slack message names the first files and says how many the request covers.
-    const slack = notification(files, 'slack').split('\n')
-    const named = fileLines(slack.join('\n'))
-    expect(named.length).toBeGreaterThan(0)
-    expect(named.length).toBeLessThan(300)
-    expect(slack.slice(-2)).toEqual([
-      `Only ${named.length} of 300 files are listed by name here: the list is too long for one message. Approving covers all 300 files in the request. To see every name, deny and ask to delete fewer files at a time.`,
-      SLACK_TRAILER,
-    ])
-    expect(slack).not.toContain(marker)
   })
 
   it('marks a schema-valid card that redaction pushed past the bound', () => {
@@ -1010,23 +998,14 @@ describe('the delete approval names every file', () => {
     expect(desktop.truncated).toBe(true)
     expect(Buffer.byteLength(desktop.text, 'utf8')).toBe(APPROVAL_INPUT_PREVIEW_BYTES)
     expect(desktop.text.endsWith('Total files: 20')).toBe(false)
-    const email = notification(files, 'email', 'channel_users', [entry]).split('\n')
-    expect(email.slice(-2)).toEqual([
-      'The list above is cut: it is too long to show whole. Total files: 20.',
-      REPLY_TRAILER,
-    ])
-    expect(email.slice(0, -2).join('\n')).toBe(desktop.text)
-    // One Telegram message names the first files and says how many the request covers.
-    const telegram = notification(files, 'telegram', 'channel_users', [entry])
-    const named = telegram.split('\n').filter(line => /^(generated|upload): "/.test(line))
-    expect(named.length).toBeGreaterThan(0)
-    expect(named.length).toBeLessThan(20)
-    expect(telegram.split('\n').slice(-2)).toEqual([
-      `Only ${named.length} of 20 files are listed by name here: the list is too long for one message. Approving covers all 20 files in the request. To see every name, deny and ask to delete fewer files at a time.`,
-      REPLY_TRAILER,
-    ])
-    expect(telegram.length).toBeLessThanOrEqual(4096)
-    expect(telegram).not.toContain(value)
+    for (const channelType of ['email', 'telegram']) {
+      const lines = notification(files, channelType, 'channel_users', [entry]).split('\n')
+      expect(lines.slice(-2)).toEqual([
+        'The list above is cut: it is too long to show whole. Total files: 20.',
+        REPLY_TRAILER,
+      ])
+      expect(lines.slice(0, -2).join('\n')).toBe(desktop.text)
+    }
   })
 
   it('adds no line to a card under the bound, whatever the trailer', () => {
@@ -1036,11 +1015,13 @@ describe('the delete approval names every file', () => {
     }))
     const desktop = preview(files)
     expect(desktop.truncated).toBe(false)
-    // Channels with no message limit: the Desktop card and the trailer.
     for (const [channelType, policy, trailer] of [
       ['rpc', 'channel_users', REPLY_TRAILER],
       ['email', 'channel_users', REPLY_TRAILER],
       ['email', 'cli_only', CLI_TRAILER],
+      ['slack', 'channel_users', SLACK_TRAILER],
+      ['telegram', 'channel_users', REPLY_TRAILER],
+      ['slack', 'cli_only', CLI_TRAILER],
     ] as const) {
       const lines = notification(files, channelType, policy).split('\n')
       expect(lines).toHaveLength(23)
@@ -1048,29 +1029,13 @@ describe('the delete approval names every file', () => {
       expect(lines[21]).toBe('Total files: 20')
       expect(lines[22]).toBe(trailer)
     }
-    // One Slack or Telegram message: the names are shortened, and the card
-    // adds the notice before the total.
-    for (const [channelType, policy, trailer] of [
-      ['slack', 'channel_users', SLACK_TRAILER],
-      ['telegram', 'channel_users', REPLY_TRAILER],
-      ['slack', 'cli_only', CLI_TRAILER],
-    ] as const) {
-      const lines = notification(files, channelType, policy).split('\n')
-      expect(lines).toHaveLength(24)
-      expect(lines[0]).toBe('Delete these files permanently:')
-      for (const line of lines.slice(1, 21)) expect(line).toMatch(/^upload: "x+"…"x*\d{5}" — /)
-      expect(lines.slice(21)).toEqual([
-        'Some names are shortened: "…" between two quoted parts marks the missing middle.',
-        'Total files: 20',
-        trailer,
-      ])
-    }
   })
 
   it('keeps every line of the widest unredacted schema-valid Desktop card under 2,400 characters', () => {
     // The widest schema-valid name: each character escapes to `\u{E0001}`.
-    // The bound is per line; the channels' one-message cards are tested in
-    // `progress/__tests__/keptFilesDeleteChannelCard.test.ts`.
+    // The bound is per line; whether a channel's card fits one message is
+    // tested in `progress/__tests__/keptFilesDeleteChannelCard.test.ts` and in
+    // the delete's validateParams tests below (H8).
     const files = Array.from({ length: 20 }, () => ({
       kind: 'generated',
       name: '\u{E0001}'.repeat(255),
@@ -1082,5 +1047,259 @@ describe('the delete approval names every file', () => {
     expect(desktop.text.split('\n').filter(line => line.startsWith('generated: '))).toHaveLength(20)
     const longest = Math.max(...desktop.text.split('\n').map(line => line.length))
     expect(longest).toBeLessThanOrEqual(2_400)
+  })
+})
+
+describe('the delete refuses a call whose approval card does not fit one channel message', () => {
+  // Channel limits and counting rules are written out here, as channel-reader
+  // sends the text, not imported from production.
+  const RULES = {
+    telegram: { max: 4096, size: (text: string) => text.length },
+    slack: {
+      max: 3000,
+      size: (text: string) =>
+        text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').length,
+    },
+    teams: {
+      max: 12_000,
+      size: (text: string) => Buffer.byteLength(JSON.stringify(text), 'utf8'),
+    },
+  } as const
+  type Budgeted = keyof typeof RULES
+  const REPLY = 'Reply /approve or /deny to this message.'
+  const CONTROLS = 'Use the approval controls to continue or cancel.'
+  const CLI =
+    'Request ID: 00000000-0000-0000-0000-000000000000. Please approve via CLI: POST /v1/runtime/approvals/approve'
+  const VALUES = ' — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC'
+  const MANY = (files: number, leading: number) =>
+    `kept_files_card_too_long: the approval card for these ${files} files does not fit one message of this channel; nothing was deleted. Leading files of the list that fit one card: ${leading}. Call clerum__kept_files_delete again with only those, then again for the rest; the user approves each call.`
+  const SINGLE =
+    'kept_files_card_too_long: the approval card for the first file of the list does not fit one message of this channel even alone; nothing was deleted. That file cannot be deleted from this channel: tell the user. The other files can be requested without it.'
+  const SECRET_ENTRY = { name: 'P', value: 'Qz7vXk9pWm3tLr8J' }
+  /** A short protected value whose marker is 68 characters: redaction lengthens it. */
+  const GROWING_ENTRY = {
+    name: 'A_VERY_LONG_OPERATOR_SECRET_ENTRY_NAME_FOR_THE_PROBE_0001',
+    value: 'q7Zx',
+  }
+  const ALL_CHANNELS = ['telegram', 'slack', 'teams', 'email', 'rpc', undefined] as const
+
+  type CardFile = { kind: string; name: string; createdAt?: string; sizeBytes?: number }
+  type Entry = { name: string; value: string }
+
+  const withValues = (files: CardFile[]) =>
+    files.map((file, n) => ({
+      createdAt: '2026-11-10T09:12:45.123Z',
+      sizeBytes: 1_234_567,
+      ...file,
+      id: String(n).padStart(12, '0'),
+    }))
+
+  /** The delete's validateParams, as the registry builds it for one task. */
+  function refusal(
+    files: CardFile[],
+    channelType: string | undefined,
+    options: { approveInChannel?: boolean; entries?: Entry[] } = {}
+  ): string | undefined {
+    const tool = buildKeptFilesDeleteTool(undefined, {
+      keepRefused: false,
+      card: {
+        channelType,
+        approveInChannel: options.approveInChannel ?? true,
+        secretEntries: () => options.entries ?? [],
+      },
+    })
+    return tool.validateParams!({ files: withValues(files) })
+  }
+
+  /** A card of ASCII names (no escape, no `& < >`), rendered by the written-out rule. */
+  function asciiCard(files: CardFile[], instruction: string): string {
+    return [
+      'Delete these files permanently:',
+      ...files.map(file => `${file.kind}: "${file.name}"${VALUES}`),
+      `Total files: ${files.length}`,
+      instruction,
+    ].join('\n')
+  }
+
+  /** The largest count below the whole list whose leading files fit, by the written-out rule. */
+  function leadingFit(files: CardFile[], channel: Budgeted, instruction: string): number {
+    let count = files.length - 1
+    while (
+      count > 0 &&
+      RULES[channel].size(asciiCard(files.slice(0, count), instruction)) > RULES[channel].max
+    ) {
+      count -= 1
+    }
+    return count
+  }
+
+  const longNames = (): CardFile[] =>
+    Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `${'x'.repeat(250)}${String(n).padStart(5, '0')}`,
+    }))
+  const small: CardFile[] = [
+    { kind: 'generated', name: 'report.md' },
+    { kind: 'upload', name: 'contract.pdf' },
+  ]
+
+  it('H1 admits a list that fits on every channel value, and refuses one that does not', () => {
+    for (const channel of ALL_CHANNELS) {
+      for (const approveInChannel of [true, false]) {
+        expect(refusal(small, channel, { approveInChannel })).toBeUndefined()
+      }
+    }
+    // Positive control: the same hook refuses a list whose card does not fit.
+    const files = longNames()
+    expect(refusal(files, 'slack')).toBe(MANY(20, leadingFit(files, 'slack', CONTROLS)))
+  })
+
+  it('H2 gives the largest count of leading files that fit, on Slack and Telegram, and admits Teams', () => {
+    const files = longNames()
+    for (const [channel, instruction] of [
+      ['slack', CONTROLS],
+      ['telegram', REPLY],
+    ] as const) {
+      const leading = leadingFit(files, channel, instruction)
+      expect(leading).toBeGreaterThan(0)
+      expect(leading).toBeLessThan(20)
+      // Witness: the rule measures the whole card over the limit.
+      expect(RULES[channel].size(asciiCard(files, instruction))).toBeGreaterThan(RULES[channel].max)
+      expect(refusal(files, channel)).toBe(MANY(20, leading))
+      // Maximal on both sides: the leading files fit, one more does not.
+      expect(refusal(files.slice(0, leading), channel)).toBeUndefined()
+      expect(refusal(files.slice(0, leading + 1), channel)).toBe(MANY(leading + 1, leading))
+    }
+    expect(RULES.teams.size(asciiCard(files, REPLY))).toBeLessThanOrEqual(RULES.teams.max)
+    expect(refusal(files, 'teams')).toBeUndefined()
+  })
+
+  it('H2b counts the leading files of the list, in its order', () => {
+    const long: CardFile = { kind: 'upload', name: 'l'.repeat(255) }
+    const shorts: CardFile[] = Array.from({ length: 19 }, (_, n) => ({
+      kind: 'upload',
+      name: `${'s'.repeat(72)}${String(n).padStart(2, '0')}`,
+    }))
+    const longFirst = [long, ...shorts]
+    const longLast = [...shorts, long]
+    // Witness: neither whole list fits, and all 19 short files fit together.
+    expect(RULES.slack.size(asciiCard(longFirst, CONTROLS))).toBeGreaterThan(3000)
+    expect(RULES.slack.size(asciiCard(shorts, CONTROLS))).toBeLessThanOrEqual(3000)
+    const first = leadingFit(longFirst, 'slack', CONTROLS)
+    const last = leadingFit(longLast, 'slack', CONTROLS)
+    expect(last).toBe(19)
+    expect(first).toBeLessThan(19)
+    expect(first).toBeGreaterThan(1)
+    expect(refusal(longFirst, 'slack')).toBe(MANY(20, first))
+    expect(refusal(longLast, 'slack')).toBe(MANY(20, last))
+  })
+
+  it('H3 refuses a first file that redaction lengthened past the limit, and only then', () => {
+    const grown: CardFile = { kind: 'upload', name: `${GROWING_ENTRY.value.repeat(63)}abc` }
+    for (const channel of ['telegram', 'slack'] as const) {
+      expect(refusal([grown], channel, { entries: [GROWING_ENTRY] })).toBe(SINGLE)
+      // Witness that redaction ran: without the entry the same file fits.
+      expect(refusal([grown], channel, { entries: [] })).toBeUndefined()
+      expect(refusal([grown, ...small], channel, { entries: [GROWING_ENTRY] })).toBe(SINGLE)
+    }
+  })
+
+  it('H4 names no file and no protected value in the refusal', () => {
+    const files: CardFile[] = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `${SECRET_ENTRY.value}${'y'.repeat(237)}${String(n).padStart(2, '0')}`,
+    }))
+    const redacted = files.map(file => ({
+      ...file,
+      name: file.name.replace(SECRET_ENTRY.value, `[REDACTED:${SECRET_ENTRY.name}]`),
+    }))
+    const text = refusal(files, 'slack', { entries: [SECRET_ENTRY] })
+    expect(text).toBe(MANY(20, leadingFit(redacted, 'slack', CONTROLS)))
+    expect(text).not.toContain(SECRET_ENTRY.value)
+    expect(text).not.toContain('yyyy')
+    expect(text).not.toContain('REDACTED')
+  })
+
+  it('H5 sets no message limit on rpc, email or no channel type', () => {
+    const lists: Array<[CardFile[], Entry[]]> = [
+      [longNames(), []],
+      [
+        Array.from({ length: 20 }, () => ({
+          kind: 'upload',
+          name: `${GROWING_ENTRY.value.repeat(63)}abc`,
+        })),
+        [GROWING_ENTRY],
+      ],
+    ]
+    // Witness: redaction pushed the second list past the 64 KiB bound.
+    const safety = new BasicSafety(() => [GROWING_ENTRY])
+    expect(
+      projectApprovalInputPreview(
+        KEPT_FILES_DELETE_APPROVAL_TOOL,
+        { files: withValues(lists[1]![0]) },
+        text => safety.sanitizeOutput(KEPT_FILES_DELETE_APPROVAL_TOOL, text).content
+      )!.truncated
+    ).toBe(true)
+    for (const [files, entries] of lists) {
+      for (const channel of ['rpc', 'email', undefined]) {
+        for (const approveInChannel of [true, false]) {
+          expect(refusal(files, channel, { entries, approveInChannel })).toBeUndefined()
+        }
+      }
+      // Witness: the same list is refused on Slack.
+      expect(refusal(files, 'slack', { entries })).toMatch(/^kept_files_card_too_long: /)
+    }
+  })
+
+  it('H6 measures the CLI instruction when the channel cannot approve', () => {
+    // 20 files whose controls card is 40 characters under the Slack limit,
+    // so the CLI card, with its request id, is 20 over it.
+    const files = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `-${String(n).padStart(2, '0')}`,
+    }))
+    let deficit = 3000 - 40 - RULES.slack.size(asciiCard(files, CONTROLS))
+    for (const file of files) {
+      const grow = Math.min(deficit, 255 - file.name.length)
+      file.name = `${'n'.repeat(grow)}${file.name}`
+      deficit -= grow
+    }
+    expect(RULES.slack.size(asciiCard(files, CONTROLS))).toBe(2960)
+    expect(RULES.slack.size(asciiCard(files, CLI))).toBe(3020)
+    expect(refusal(files, 'slack', { approveInChannel: true })).toBeUndefined()
+    expect(refusal(files, 'slack', { approveInChannel: false })).toBe(
+      MANY(20, leadingFit(files, 'slack', CLI))
+    )
+  })
+
+  it('H7 admits two entries with the same name, size and second', () => {
+    const twins: CardFile[] = [
+      { kind: 'upload', name: 'same.pdf', createdAt: '2026-11-10T09:12:45.123Z' },
+      { kind: 'upload', name: 'same.pdf', createdAt: '2026-11-10T09:12:45.987Z' },
+    ]
+    // Witness: the card shows them on two identical lines.
+    const lines = projectApprovalInputPreview(
+      KEPT_FILES_DELETE_APPROVAL_TOOL,
+      { files: withValues(twins) },
+      text => text
+    )!.text.split('\n')
+    expect(lines[1]).toBe(`upload: "same.pdf"${VALUES}`)
+    expect(lines[2]).toBe(lines[1])
+    for (const channel of ALL_CHANNELS) expect(refusal(twins, channel)).toBeUndefined()
+    // Positive control: the same hook refuses a list whose card does not fit.
+    expect(refusal(longNames(), 'telegram')).toBe(
+      MANY(20, leadingFit(longNames(), 'telegram', REPLY))
+    )
+  })
+
+  it('H8 admits the widest schema-valid file alone on every budgeted channel and instruction', () => {
+    const widest: CardFile[] = [
+      { kind: 'generated', name: '\u{E0001}'.repeat(255), sizeBytes: Number.MAX_SAFE_INTEGER },
+    ]
+    for (const channel of ['telegram', 'slack', 'teams'] as const) {
+      for (const approveInChannel of [true, false]) {
+        expect(refusal(widest, channel, { approveInChannel })).toBeUndefined()
+      }
+    }
   })
 })

@@ -102,6 +102,10 @@ interface Options {
   approvalTools?: Record<string, boolean>
   keepRefusal?: { code: string; neededBytes?: number }
   attachments?: Attachment[]
+  channelType?: NonNullable<Task['sourceMessage']>['channelType']
+  /** Read on every call: a test may add an entry while the task is suspended. */
+  secretEntries?: Array<{ name: string; value: string }>
+  defaultPolicy?: 'channel_users' | 'cli_only'
 }
 
 /** A generated file and its save record in the caller's outputs folder, an hour old. */
@@ -161,7 +165,7 @@ async function scenario(options: Options) {
     sourceMessage: {
       sender: 'kept-files-caller',
       content: 'Clean up my kept files',
-      channelType: 'rpc',
+      channelType: options.channelType ?? 'rpc',
       channelId: 'kept-delete-channel',
       messageId: 'kept-delete-message',
       timestamp: new Date().toISOString(),
@@ -212,6 +216,7 @@ async function scenario(options: Options) {
   })
   conversation.auto_approved_tools = new Set(options.autoApproved ?? [])
 
+  const secretEntries = options.secretEntries ?? []
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
   const onApprovalNeeded = vi.fn()
@@ -225,7 +230,7 @@ async function scenario(options: Options) {
     gfsCallerWorkspacePath: callerRoot,
     modelName: 'fixture-model',
     approvalConfig: {
-      defaultPolicy: 'channel_users',
+      defaultPolicy: options.defaultPolicy ?? 'channel_users',
       channels: {},
       ...(options.approvalTools ? { tools: options.approvalTools } : {}),
     },
@@ -243,6 +248,7 @@ async function scenario(options: Options) {
     onComplete: vi.fn(),
     onFail,
     dynamicEnvProvider: () => ({}),
+    secretEntriesProvider: () => secretEntries,
   }
   return {
     executor: new TaskExecutor(task, deps),
@@ -460,12 +466,167 @@ describe('the delete card shows the file the call deletes', () => {
     }
     const s = await scenario({ calls: [oldShape, null] })
     await s.executor.run()
-    // Recorded: the card is asked first; the argument check refuses after approval.
-    expect(s.executor.pendingApproval).toMatchObject({ tool_name: DELETE })
-    await s.executor.resumeAfterApproval(false)
     expect(s.onFail).not.toHaveBeenCalled()
-    // The registry's schema check refuses the call before the tool runs.
-    expect(toolResult(s, oldShape.id)).toContain('Invalid arguments')
+    expect(s.executor.executorState).toBe('completed')
+    // The delete's schema check refuses the call at admission: no card is asked.
+    expect(toolResult(s, oldShape.id)).toMatch(/^Parameter validation failed: Invalid arguments: /)
+    expect(s.onApprovalNeeded).not.toHaveBeenCalled()
     expect(fs.existsSync(s.kept.file)).toBe(true)
+  })
+})
+
+// Channel limits and counting rules, written out as channel-reader sends the text.
+const SLACK_MAX = 3000
+const slackSize = (text: string) =>
+  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').length
+const CONTROLS = 'Use the approval controls to continue or cancel.'
+const CLI =
+  'Request ID: 00000000-0000-0000-0000-000000000000. Please approve via CLI: POST /v1/runtime/approvals/approve'
+const VALUES = ' — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC'
+const REFUSED = 'Parameter validation failed: kept_files_card_too_long: '
+const MANY = (files: number, leading: number) =>
+  `${REFUSED}the approval card for these ${files} files does not fit one message of this channel; nothing was deleted. Leading files of the list that fit one card: ${leading}. Call clerum__kept_files_delete again with only those, then again for the rest; the user approves each call.`
+const SINGLE = `${REFUSED}the approval card for the first file of the list does not fit one message of this channel even alone; nothing was deleted. That file cannot be deleted from this channel: tell the user. The other files can be requested without it.`
+
+type CardFile = { kind: string; name: string }
+
+/** A card of ASCII names (no escape, no `& < >`), rendered by the written-out rule. */
+function asciiCard(files: CardFile[], instruction: string): string {
+  return [
+    'Delete these files permanently:',
+    ...files.map(file => `${file.kind}: "${file.name}"${VALUES}`),
+    `Total files: ${files.length}`,
+    instruction,
+  ].join('\n')
+}
+
+function leadingFit(files: CardFile[], instruction: string): number {
+  let count = files.length - 1
+  while (count > 0 && slackSize(asciiCard(files.slice(0, count), instruction)) > SLACK_MAX) {
+    count -= 1
+  }
+  return count
+}
+
+function deleteOf(id: string, files: CardFile[]): ToolCall {
+  return {
+    id,
+    name: DELETE,
+    arguments: {
+      files: files.map((file, n) => ({
+        ...file,
+        id: String(n).padStart(12, '0'),
+        createdAt: '2026-11-10T09:12:45.123Z',
+        sizeBytes: 1_234_567,
+      })),
+    },
+  }
+}
+
+const longNames = (): CardFile[] =>
+  Array.from({ length: 20 }, (_, n) => ({
+    kind: 'upload',
+    name: `${'x'.repeat(250)}${String(n).padStart(5, '0')}`,
+  }))
+
+/** 20 files whose Slack card is 2960 under the controls and 3020 under the CLI instruction. */
+function controlsFitCliDoesNot(): CardFile[] {
+  const files = Array.from({ length: 20 }, (_, n) => ({
+    kind: 'upload',
+    name: `-${String(n).padStart(2, '0')}`,
+  }))
+  let deficit = SLACK_MAX - 40 - slackSize(asciiCard(files, CONTROLS))
+  for (const file of files) {
+    const grow = Math.min(deficit, 255 - file.name.length)
+    file.name = `${'n'.repeat(grow)}${file.name}`
+    deficit -= grow
+  }
+  expect(slackSize(asciiCard(files, CONTROLS))).toBe(2960)
+  expect(slackSize(asciiCard(files, CLI))).toBe(3020)
+  return files
+}
+
+describe('a delete whose approval card does not fit one channel message, in a real task', () => {
+  it('I1 refuses it in Slack before the approval, and asks for the next call that fits', async () => {
+    const tooLong = deleteOf('delete-too-long', longNames())
+    const s = await scenario({ calls: [tooLong, deleteCall, null], channelType: 'slack' })
+    await s.executor.run()
+
+    expect(toolResult(s, tooLong.id)).toBe(MANY(20, leadingFit(longNames(), CONTROLS)))
+    // Witness that the gate is live and ran after the hook: the one-file call asks.
+    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
+    expect(s.executor.pendingApproval).toMatchObject({
+      tool_name: DELETE,
+      parameters: deleteCall.arguments,
+    })
+    expect(fs.existsSync(s.kept.file)).toBe(true)
+    expect(s.onFail).not.toHaveBeenCalled()
+  })
+
+  it('I2 asks for the same call in rpc, which has no message limit', async () => {
+    const tooLong = deleteOf('delete-too-long', longNames())
+    const s = await scenario({ calls: [tooLong, deleteCall, null], channelType: 'rpc' })
+    await s.executor.run()
+
+    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
+    expect(s.executor.pendingApproval).toMatchObject({
+      tool_name: DELETE,
+      parameters: tooLong.arguments,
+    })
+    expect(toolResult(s, tooLong.id)).toBeUndefined()
+    expect(fs.existsSync(s.kept.file)).toBe(true)
+  })
+
+  it('I3 checks the card again when the approved call runs', async () => {
+    const secretEntries: Array<{ name: string; value: string }> = []
+    const s = await scenario({
+      calls: [transformCall, deleteCall, null],
+      channelType: 'slack',
+      secretEntries,
+    })
+    await s.executor.run()
+    expect(s.executor.pendingApproval).toMatchObject({ tool_name: DELETE })
+    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
+
+    // A secret configured while the task waits lengthens the name past one Slack message.
+    secretEntries.push({ name: 'S'.repeat(SLACK_MAX), value: 'report' })
+    await s.executor.resumeAfterApproval(false)
+
+    expect(s.onFail).not.toHaveBeenCalled()
+    expect(toolResult(s, deleteCall.id)).toBe(SINGLE)
+    expect(fs.existsSync(s.kept.file)).toBe(true)
+    expect(fs.existsSync(s.kept.record)).toBe(true)
+  })
+
+  it('I3 witness: the same Slack flow with no secret added deletes the file', async () => {
+    const s = await scenario({
+      calls: [transformCall, deleteCall, null],
+      channelType: 'slack',
+      secretEntries: [],
+    })
+    await expectDeleteAsksThenDeletes(s)
+  })
+
+  it('I5 measures the CLI instruction when the policy is cli_only', async () => {
+    const files = controlsFitCliDoesNot()
+    const cli = await scenario({
+      calls: [deleteOf('delete-cli', files), null],
+      channelType: 'slack',
+      defaultPolicy: 'cli_only',
+    })
+    await cli.executor.run()
+    expect(toolResult(cli, 'delete-cli')).toBe(MANY(20, leadingFit(files, CLI)))
+    expect(cli.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(cli.executor.executorState).toBe('completed')
+
+    const inChannel = await scenario({
+      calls: [deleteOf('delete-in-channel', files), null],
+      channelType: 'slack',
+      defaultPolicy: 'channel_users',
+    })
+    await inChannel.executor.run()
+    expect(inChannel.onApprovalNeeded).toHaveBeenCalledTimes(1)
+    expect(inChannel.executor.pendingApproval).toMatchObject({ tool_name: DELETE })
+    expect(toolResult(inChannel, 'delete-in-channel')).toBeUndefined()
   })
 })
