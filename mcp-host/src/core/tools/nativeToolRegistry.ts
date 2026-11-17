@@ -58,7 +58,7 @@ import { keepOfferLines } from '../orchestration/turnContext'
 import { BasicSafety } from '../safety/safety'
 import type { SessionSearchService } from '../sessionSearch'
 import type { SpilloverStorage } from '../spillover'
-import { ToolDefinition, ToolOutput } from '../types'
+import { ToolDefinition, ToolOutput, type ValidationResult } from '../types'
 import { AttachmentReadTool } from './attachmentRead'
 import { CronManageTool } from './cronManage'
 import { DocumentReadTool } from './documentRead'
@@ -212,6 +212,21 @@ class InternalToolAdapter implements Tool {
 
   joinsAbortSettlement(): boolean {
     return this.def.name === 'clerum__gfs_download' || this.def.name === 'clerum__gfs_read'
+  }
+  /**
+   * The tool's own admission check (InternalToolDefinition.validateParams),
+   * run by the tool loop before the approval and again when the call runs.
+   * Only a tool that has one is schema-checked here; every other tool is valid
+   * here and schema-checked in `execute`, as before.
+   */
+  validateParams(params: Record<string, unknown>): ValidationResult {
+    if (!this.def.validateParams) return { is_valid: true, errors: [] }
+    const checked = checkToolArguments(this.def, params)
+    if (!checked.ok) return { is_valid: false, errors: [checked.error] }
+    const refusal = this.def.validateParams(checked.input)
+    return refusal === undefined
+      ? { is_valid: true, errors: [] }
+      : { is_valid: false, errors: [refusal] }
   }
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
@@ -523,11 +538,18 @@ export class NativeToolRegistry implements ToolRegistry {
     // falling back to a folder shared by the Host. A root without a room is
     // refused at construction. Trailing optional; only taskExecutor passes it.
     callerOutputs?: { root: string; room: () => Promise<number> },
-    // True when every call of the kept-files delete will ask the user first:
-    // approval enabled, a channel task, no Host override turning it off. The
-    // delete exists only then, and only with the listing (`gfs.write`).
-    // Trailing optional; only taskExecutor passes it.
-    keptFilesDeleteConfirmed?: boolean
+    // Present when every call of the kept-files delete will ask the user
+    // first: approval enabled, a channel task, no Host override turning it
+    // off. The delete exists only then, and only with the listing
+    // (`gfs.write`). Its members are the inputs of the delete's approval card
+    // that the delete measures before the approval: whether the channel's
+    // users approve in the channel (otherwise the card ends with the CLI
+    // instruction) and the configured secrets the card redacts. The channel
+    // type is `sourceMessage`'s. Trailing optional; only taskExecutor passes it.
+    keptFilesDelete?: {
+      approveInChannel: boolean
+      secretEntries: () => Array<{ name: string; value: string }>
+    }
   ) {
     if (callerOutputs !== undefined && typeof callerOutputs.room !== 'function')
       throw new Error('A caller outputs root needs the kept-files room of the download store')
@@ -603,7 +625,7 @@ export class NativeToolRegistry implements ToolRegistry {
                 editText: gfsScopes.has('gfs.write'),
                 saveBySourcePath: gfsScopes.has('gfs.write'),
               },
-              keptFilesDelete: gfsScopes.has('gfs.write') && keptFilesDeleteConfirmed === true,
+              keptFilesDelete: gfsScopes.has('gfs.write') && keptFilesDelete !== undefined,
             })
           : []),
         ...(gfsScopes.has('gfs.write')
@@ -614,10 +636,15 @@ export class NativeToolRegistry implements ToolRegistry {
                 secretEntries: () => attachmentOptions?.secretEntriesProvider?.() ?? [],
               }),
               buildKeptFilesListTool(callerOutputRoot),
-              ...(keptFilesDeleteConfirmed
+              ...(keptFilesDelete !== undefined
                 ? [
                     buildKeptFilesDeleteTool(callerOutputRoot, {
                       keepRefused: sourceMessage?.keepRefusal !== undefined,
+                      card: {
+                        channelType: sourceMessage?.channelType,
+                        approveInChannel: keptFilesDelete.approveInChannel,
+                        secretEntries: keptFilesDelete.secretEntries,
+                      },
                     }),
                   ]
                 : []),
@@ -779,8 +806,7 @@ export class NativeToolRegistry implements ToolRegistry {
           tool.name.startsWith(GENERATOR_PREFIX) ? callerOutputLookup : undefined,
           {
             saveIdShown: gfsScopes?.has('gfs.write') === true,
-            spaceSentence:
-              gfsScopes?.has('gfs.write') === true && keptFilesDeleteConfirmed === true,
+            spaceSentence: gfsScopes?.has('gfs.write') === true && keptFilesDelete !== undefined,
           },
           tool.name.startsWith(GENERATOR_PREFIX) ? callerOutputs : undefined
         )

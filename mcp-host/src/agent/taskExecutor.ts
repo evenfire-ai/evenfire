@@ -26,7 +26,7 @@ import { ConversationManager } from '../core/conversation/conversation'
 import { deriveAutoTitle } from '../core/conversation/sessionTitle'
 import { LlmError, LlmErrorCode } from '../core/errors'
 import { ApprovalController } from '../core/extensions/approvalController'
-import type { ApprovalConfig } from '../core/extensions/approvalTypes'
+import { type ApprovalConfig, approvalInChannel } from '../core/extensions/approvalTypes'
 import {
   COMPACTION_PRESSURE_THRESHOLD,
   PressureContextManager,
@@ -2476,6 +2476,11 @@ export class TaskExecutor {
       gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined,
       this.callerOutputs(),
       this.keptFilesDeleteConfirmed()
+        ? {
+            approveInChannel: approvalInChannel(this.deps.approvalConfig),
+            secretEntries: () => this.deps.secretEntriesProvider?.() ?? [],
+          }
+        : undefined
     )
     await registerDesktopTools(nativeRegistry)
     // Eagerly open this caller's remote OAuth partitions before the catalog is

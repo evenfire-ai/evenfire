@@ -18,7 +18,7 @@ import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
 import { LlmErrorCode } from '../core/errors'
 // Phase 6 imports
-import type { ApprovalConfig } from '../core/extensions/approvalTypes'
+import { type ApprovalConfig, approvalInChannel } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { STATELESS_CRON_APPROVAL_PROMPT } from '../core/extensions/mcpApprovalGateController'
 import type { GuardrailsConfig } from '../core/guardrails/config'
@@ -48,9 +48,9 @@ import { logger } from '../logger'
 import { McpManager } from '../mcp'
 import {
   KEPT_FILES_DELETE_APPROVAL_TOOL,
-  approvalCardBudget,
-  keptFilesDeleteApprovalCard,
-  keptFilesDeleteChannelNotification,
+  keptFilesDeleteInstruction,
+  keptFilesDeleteNotification,
+  keptFilesDeleteRedactor,
 } from '../progress/approvalInputPreview'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
@@ -1633,8 +1633,7 @@ export class AgentStateMachine extends EventEmitter {
         : 'none'
 
     // Check if the user's channel can approve
-    const canApproveViaChannel =
-      this.approvalConfig && this.approvalConfig.defaultPolicy !== 'cli_only'
+    const canApproveViaChannel = approvalInChannel(this.approvalConfig)
 
     if (workflowName && canApproveViaChannel) {
       return [
@@ -1653,45 +1652,31 @@ export class AgentStateMachine extends EventEmitter {
     }
 
     if (approval.tool_name === KEPT_FILES_DELETE_APPROVAL_TOOL) {
-      // The user approves a permanent delete by the files it lists, one line
-      // each with kind, name, size and date (redacted and escaped), followed
-      // by the instruction.
-      // - Telegram, Slack and Teams show the approval as one message: the
-      //   card is fitted to the channel's limit, measured with the
-      //   instruction, by shortening long names in the middle
-      //   (keptFilesDeleteChannelNotification).
-      // - Any other channel gets the Desktop preview text, cut at
-      //   APPROVAL_INPUT_PREVIEW_BYTES before the instruction. A cut card has
-      //   lost its last lines, the total among them, so a line between the
-      //   card and the instruction says the list is cut and gives the total,
-      //   as Desktop marks it `truncated`.
-      const safety = new BasicSafety(this.secretEntriesProvider)
-      const redact = (text: string) => safety.sanitizeOutput(approval.tool_name, text).content
-      const instruction = canApproveViaChannel
-        ? channelType === 'slack'
-          ? 'Use the approval controls to continue or cancel.'
-          : 'Reply /approve or /deny to this message.'
-        : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`
-      const budget = approvalCardBudget(channelType)
-      if (budget) {
-        const text = keptFilesDeleteChannelNotification(
-          approval.parameters,
-          redact,
-          instruction,
-          budget
-        )
-        if (text !== undefined) return text
-      } else {
-        const card = keptFilesDeleteApprovalCard(approval.parameters, redact)
-        if (card) {
-          return [
-            card.text,
-            ...(card.cut
-              ? [`The list above is cut: it is too long to show whole. Total files: ${card.files}.`]
-              : []),
-            instruction,
-          ].join('\n')
+      // The user approves a permanent delete by the files it lists: the
+      // Desktop card text (one line per file with kind, whole name, size and
+      // date, redacted and escaped, cut at APPROVAL_INPUT_PREVIEW_BYTES with a
+      // line that says so), followed by the instruction. The delete's
+      // validateParams refused the call before this point when the card does
+      // not fit one message of the channel; if the inputs changed since, the
+      // card is still sent whole and the mismatch is logged.
+      const card = keptFilesDeleteNotification(
+        approval.parameters,
+        keptFilesDeleteRedactor(this.secretEntriesProvider),
+        keptFilesDeleteInstruction({
+          approveInChannel: canApproveViaChannel,
+          channelType,
+          requestId: approval.request_id,
+        }),
+        channelType
+      )
+      if (card) {
+        if (!card.fits) {
+          logger.error(
+            { requestId: approval.request_id, channelType, size: card.size, max: card.max },
+            'Kept-files delete card is over the one-message limit of its channel; the card is sent whole'
+          )
         }
+        return card.text
       }
     }
 
