@@ -126,13 +126,25 @@ function installTeamSession(catalogForTeam: (teamId: string) => AccessCatalog) {
     teamDirectory: { items: [], currentTeamId: 'team-a' },
   })
   let currentTeamId = 'team-a'
+  let currentGeneration = 1
+  handle.getSessionState.mockImplementation(async () => ({
+    authenticated: true,
+    me: {
+      ...HARNESS_ME,
+      teamId: currentTeamId,
+      teamName: currentTeamId === 'team-a' ? 'Team A' : 'Team B',
+    },
+    sessionGeneration: currentGeneration,
+  }))
   const refreshCatalog = vi.fn(async () => catalogForTeam(currentTeamId))
   Object.assign(window.clerum.team, {
     switch: vi.fn(async (teamId: string) => {
       currentTeamId = teamId
+      currentGeneration += 1
       return {
         authenticated: true,
         me: { ...HARNESS_ME, teamId, teamName: teamId === 'team-a' ? 'Team A' : 'Team B' },
+        sessionGeneration: currentGeneration,
       }
     }),
   })
@@ -148,9 +160,11 @@ function installTeamSession(catalogForTeam: (teamId: string) => AccessCatalog) {
       })
     } else {
       currentTeamId = 'team-b'
+      currentGeneration += 1
       handle.getSessionState.mockResolvedValue({
         authenticated: true,
         me: { ...HARNESS_ME, teamId: 'team-b', teamName: 'Team B' },
+        sessionGeneration: currentGeneration,
       })
       await act(async () => {
         await app.result.current.loadSession({ preserveNav: true })

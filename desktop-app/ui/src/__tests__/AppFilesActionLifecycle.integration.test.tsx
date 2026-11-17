@@ -4136,7 +4136,11 @@ describe('App → Files action lifecycle integration', () => {
       getWorkspaceTabButtons(markdown.name).find(tab => tab.getAttribute('aria-pressed') === 'true')
     ).toBeTruthy()
     expect(gfs.download).not.toHaveBeenCalled()
-    expect(gfs.downloadPreview).toHaveBeenCalledWith(markdown.gfsUri, expect.any(Number))
+    expect(gfs.downloadPreview).toHaveBeenCalledWith(
+      markdown.gfsUri,
+      expect.any(Number),
+      expect.any(Number)
+    )
   })
 
   it('lets a confirmed GFS deep link replace the action owner expected location', async () => {
