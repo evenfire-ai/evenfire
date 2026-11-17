@@ -2,10 +2,10 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { RPCClient } from '../src/rpcClient'
 import type { ChannelAdapter, CommunicationChannelCRD, Message, ProgressStep } from '../src/types'
 
-// A tool approval is one message: the card, whole, with the channel's
-// controls. mcp-host fits a delete card to the channel's limit, so these tests
-// drive approvals at that limit through the real channel adapters with faked
-// provider clients.
+// A tool approval at the channel's limit arrives as one message: the card,
+// whole, with the channel's controls. mcp-host refuses a delete whose card
+// does not fit one message of its channel, so these tests drive approvals at
+// that limit through the real channel adapters with faked provider clients.
 
 interface StreamCall {
   taskId: string
@@ -338,60 +338,58 @@ function hasSlackActions(call: SlackCall | undefined): boolean {
   return call?.blocks?.some(block => block.type === 'actions') ?? false
 }
 
-// The widest bounded delete cards mcp-host sends, in its format: 20 files,
-// long names shortened as "head"…"tail", the notice, the total and the
-// trailer. The Telegram card is 4096 chars; the Slack card is 3000 chars once
-// `&`, `<` and `>` are escaped.
+// Delete cards at the limit, in the format mcp-host sends: the header, one
+// line per file with its kind, whole name, size and creation date, the total
+// and the instruction. The Telegram card is 4096 chars; the Slack card is 3000
+// chars once `&`, `<` and `>` are escaped.
 const TELEGRAM_CARD = [
   'Delete these files permanently:',
-  'generated: "quarterly-board-report-00-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "quarterly-board-report-01-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 845.3 KB (865,598 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "quarterly-board-report-02-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 12.0 GB (12,884,901,888 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "quarterly-board-report-03-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 3.4 TB (3,738,339,534,848 bytes), created 2026-11-10 09:12:45 UTC',
-  'generated: "quarterly-board-report-04-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 512 B (512 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "quarterly-board-report-05-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "quarterly-board-report-06-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 845.3 KB (865,598 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "quarterly-board-report-07-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 12.0 GB (12,884,901,888 bytes), created 2026-10-02 17:40:03 UTC',
-  'generated: "quarterly-board-report-08-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 3.4 TB (3,738,339,534,848 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "quarterly-board-report-09-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 512 B (512 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "quarterly-board-report-10-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 1.2 MB (1,234,567 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "quarterly-board-report-11-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 845.3 KB (865,598 bytes), created 2026-11-14 23:59:59 UTC',
-  'generated: "quarterly-board-report-12-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 12.0 GB (12,884,901,888 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "quarterly-board-report-13-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 3.4 TB (3,738,339,534,848 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "quarterly-board-report-14-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 512 B (512 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "quarterly-board-report-15-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC',
-  'generated: "quarterly-board-report-16-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 845.3 KB (865,598 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "quarterly-board-report-17-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 12.0 GB (12,884,901,888 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "quarterly-board-report-18-final-reviewed-by-finance-and-legal-with-appendix-tables-a"…"archive-copy-archive-copy-archive-copy.pdf" — 3.4 TB (3,738,339,534,848 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "meeting-notes" — 512 B (512 bytes), created 2026-10-02 17:40:03 UTC',
-  'Some names are shortened: "…" between two quoted parts marks the missing middle.',
+  'generated: "quarterly-board-report-00-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "quarterly-board-report-01-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 865.6 KB (865,598 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "quarterly-board-report-02-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 12.9 GB (12,884,901,888 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "quarterly-board-report-03-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 3.7 TB (3,738,339,534,848 bytes), created 2026-11-10 09:12:45 UTC',
+  'generated: "quarterly-board-report-04-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 512 B (512 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "quarterly-board-report-05-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "quarterly-board-report-06-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 865.6 KB (865,598 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "quarterly-board-report-07-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 12.9 GB (12,884,901,888 bytes), created 2026-10-02 17:40:03 UTC',
+  'generated: "quarterly-board-report-08-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 3.7 TB (3,738,339,534,848 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "quarterly-board-report-09-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 512 B (512 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "quarterly-board-report-10-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 1.2 MB (1,234,567 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "quarterly-board-report-11-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 865.6 KB (865,598 bytes), created 2026-11-14 23:59:59 UTC',
+  'generated: "quarterly-board-report-12-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 12.9 GB (12,884,901,888 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "quarterly-board-report-13-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 3.7 TB (3,738,339,534,848 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "quarterly-board-report-14-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 512 B (512 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "quarterly-board-report-15-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC',
+  'generated: "quarterly-board-report-16-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 865.6 KB (865,598 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "quarterly-board-report-17-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 12.9 GB (12,884,901,888 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "quarterly-board-report-18-final-reviewed-by-finance-and-legal-with-appendix-tables-signed-copy-for-the-audit-committee-archive.pdf" — 3.7 TB (3,738,339,534,848 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "board-minutes-of-the-steering-committee-meeting-held-in-the-main-office-.md" — 512 B (512 bytes), created 2026-10-02 17:40:03 UTC',
   'Total files: 20',
   'Reply /approve or /deny to this message.',
 ].join('\n')
 
 const SLACK_CARD = [
   'Delete these files permanently:',
-  'generated: "R&D <draft> q00 supplier-contracts-and-"…"rchive-archive.xlsx" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "R&D <draft> q01 supplier-contracts-and-"…"rchive-archive.xlsx" — 845.3 KB (865,598 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "R&D <draft> q02 supplier-contracts-and-"…"rchive-archive.xlsx" — 12.0 GB (12,884,901,888 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "R&D <draft> q03 supplier-contracts-and-"…"rchive-archive.xlsx" — 3.4 TB (3,738,339,534,848 bytes), created 2026-11-10 09:12:45 UTC',
-  'generated: "R&D <draft> q04 supplier-contracts-and-"…"rchive-archive.xlsx" — 512 B (512 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "R&D <draft> q05 supplier-contracts-and-"…"rchive-archive.xlsx" — 1.2 MB (1,234,567 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "R&D <draft> q06 supplier-contracts-and-"…"rchive-archive.xlsx" — 845.3 KB (865,598 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "R&D <draft> q07 supplier-contracts-and-"…"rchive-archive.xlsx" — 12.0 GB (12,884,901,888 bytes), created 2026-10-02 17:40:03 UTC',
-  'generated: "R&D <draft> q08 supplier-contracts-and-"…"rchive-archive.xlsx" — 3.4 TB (3,738,339,534,848 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "R&D <draft> q09 supplier-contracts-and-"…"rchive-archive.xlsx" — 512 B (512 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "R&D <draft> q10 supplier-contracts-and-"…"rchive-archive.xlsx" — 1.2 MB (1,234,567 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "R&D <draft> q11 supplier-contracts-and-"…"rchive-archive.xlsx" — 845.3 KB (865,598 bytes), created 2026-11-14 23:59:59 UTC',
-  'generated: "R&D <draft> q12 supplier-contracts-and-"…"rchive-archive.xlsx" — 12.0 GB (12,884,901,888 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "R&D <draft> q13 supplier-contracts-and-"…"rchive-archive.xlsx" — 3.4 TB (3,738,339,534,848 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "R&D <draft> q14 supplier-contracts-and-"…"rchive-archive.xlsx" — 512 B (512 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "R&D <draft> q15 supplier-contracts-and-"…"rchive-archive.xlsx" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC',
-  'generated: "R&D <draft> q16 supplier-contracts-and-"…"rchive-archive.xlsx" — 845.3 KB (865,598 bytes), created 2026-10-02 17:40:03 UTC',
-  'upload: "R&D <draft> q17 supplier-contracts-and-"…"rchive-archive.xlsx" — 12.0 GB (12,884,901,888 bytes), created 2026-11-14 23:59:59 UTC',
-  'upload: "R&D <draft> q18 supplier-contracts-and-"…"rchive-archive.xlsx" — 3.4 TB (3,738,339,534,848 bytes), created 2026-11-10 09:12:45 UTC',
-  'upload: "notes&o" — 512 B (512 bytes), created 2026-10-02 17:40:03 UTC',
-  'Some names are shortened: "…" between two quoted parts marks the missing middle.',
+  'generated: "R&D <draft> q00 supplier-contracts & renewals (v2).xlsx" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "R&D <draft> q01 supplier-contracts & renewals (v2).xlsx" — 865.6 KB (865,598 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "R&D <draft> q02 supplier-contracts & renewals (v2).xlsx" — 12.9 GB (12,884,901,888 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "R&D <draft> q03 supplier-contracts & renewals (v2).xlsx" — 3.7 TB (3,738,339,534,848 bytes), created 2026-11-10 09:12:45 UTC',
+  'generated: "R&D <draft> q04 supplier-contracts & renewals (v2).xlsx" — 512 B (512 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "R&D <draft> q05 supplier-contracts & renewals (v2).xlsx" — 1.2 MB (1,234,567 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "R&D <draft> q06 supplier-contracts & renewals (v2).xlsx" — 865.6 KB (865,598 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "R&D <draft> q07 supplier-contracts & renewals (v2).xlsx" — 12.9 GB (12,884,901,888 bytes), created 2026-10-02 17:40:03 UTC',
+  'generated: "R&D <draft> q08 supplier-contracts & renewals (v2).xlsx" — 3.7 TB (3,738,339,534,848 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "R&D <draft> q09 supplier-contracts & renewals (v2).xlsx" — 512 B (512 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "R&D <draft> q10 supplier-contracts & renewals (v2).xlsx" — 1.2 MB (1,234,567 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "R&D <draft> q11 supplier-contracts & renewals (v2).xlsx" — 865.6 KB (865,598 bytes), created 2026-11-14 23:59:59 UTC',
+  'generated: "R&D <draft> q12 supplier-contracts & renewals (v2).xlsx" — 12.9 GB (12,884,901,888 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "R&D <draft> q13 supplier-contracts & renewals (v2).xlsx" — 3.7 TB (3,738,339,534,848 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "R&D <draft> q14 supplier-contracts & renewals (v2).xlsx" — 512 B (512 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "R&D <draft> q15 supplier-contracts & renewals (v2).xlsx" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC',
+  'generated: "R&D <draft> q16 supplier-contracts & renewals (v2).xlsx" — 865.6 KB (865,598 bytes), created 2026-10-02 17:40:03 UTC',
+  'upload: "R&D <draft> q17 supplier-contracts & renewals (v2).xlsx" — 12.9 GB (12,884,901,888 bytes), created 2026-11-14 23:59:59 UTC',
+  'upload: "R&D <draft> q18 supplier-contracts & renewals (v2).xlsx" — 3.7 TB (3,738,339,534,848 bytes), created 2026-11-10 09:12:45 UTC',
+  'upload: "notes & minutes-of-the-steering-committee-meeting-held-in-the-main-office-with-every-regional-lead-present-minutes-of-the-.txt" — 512 B (512 bytes), created 2026-10-02 17:40:03 UTC',
   'Total files: 20',
   'Use the approval controls to continue or cancel.',
 ].join('\n')
@@ -456,10 +454,10 @@ describe('a tool approval is one message at the channel maximum', () => {
     await expectRegistered(sl, 'task-k2-slack')
   })
 
-  it('K6 carries every line of the widest bounded delete card in one provider call', async () => {
+  it('K6 carries every line of a delete card at the limit in one provider call', async () => {
     // Witnesses: the cards are at each channel's limit, and the Slack one is escaped.
     expect(TELEGRAM_CARD).toHaveLength(TELEGRAM_LIMIT)
-    expect(TELEGRAM_CARD.split('\n')).toHaveLength(24)
+    expect(TELEGRAM_CARD.split('\n')).toHaveLength(23)
     expect(escapeSlack(SLACK_CARD)).toHaveLength(SLACK_SECTION_LIMIT)
     expect(escapeSlack(SLACK_CARD)).not.toBe(SLACK_CARD)
 

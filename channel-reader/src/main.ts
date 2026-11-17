@@ -1814,8 +1814,10 @@ export class ChannelReader {
 
   /**
    * Offer a tool approval that mcp-host returned in a synchronous response:
-   * register it, then send it as one reply with the channel's approval
-   * controls. Slack gets the text escaped (toolApprovalDelivery).
+   * register it, then send it with one sendReply call and the channel's
+   * approval controls (the Telegram adapter splits a text over 4096
+   * characters into several messages, controls on the first). Slack gets the
+   * text escaped (toolApprovalDelivery).
    */
   private async deliverSyncToolApproval(
     msg: Message,
