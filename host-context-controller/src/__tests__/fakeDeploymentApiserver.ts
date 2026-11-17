@@ -1,6 +1,7 @@
 import { vi } from 'vitest'
 import type { V1Deployment, V1DeploymentList } from '@kubernetes/client-node'
 import type { WatchLike } from '../informers/secretInformer'
+import { fakeWatchStream } from './fakeWatchStream'
 
 /**
  * A fake apiserver for one namespace's managed Deployments with real watch
@@ -25,22 +26,12 @@ type Change = {
   name: string
 } & StoredRollout
 
-/**
- * client-node 1.4.0 attaches its line listeners and returns; the replayed
- * events arrive from the response stream after watch() resolved. Deliver the
- * replay after the caller's await resumed, never inside watch().
- */
-async function afterWatchResolves(deliver: () => void): Promise<void> {
-  for (let hop = 0; hop < 3; hop++) await Promise.resolve()
-  deliver()
-}
-
 export function fakeDeploymentApiserver(namespace: string, initial: Record<string, StoredRollout>) {
   let revision = 100
   const objects = new Map<string, StoredRollout>(Object.entries(initial))
   const changes: Change[] = []
   const watchCalls: FakeDeploymentWatchCall[] = []
-  let live: FakeDeploymentWatchCall | null = null
+  let live: ReturnType<typeof fakeWatchStream> | null = null
   let expireNextResume = false
   let watchFailure: (() => Error) | null = null
   const listFailures: Array<() => unknown> = []
@@ -85,10 +76,10 @@ export function fakeDeploymentApiserver(namespace: string, initial: Record<strin
     const replay = changes
       .filter(change => change.revision > Number(queryParams.resourceVersion))
       .map(change => [change.type, deployment(change.name, change, change.revision)] as const)
-    void afterWatchResolves(() => {
-      for (const [type, object] of replay) cb(type, object)
-    })
-    live = call
+    // The replay is written to the stream first; live changes follow it.
+    const stream = fakeWatchStream(cb, done)
+    for (const [type, object] of replay) stream.cb(type, object)
+    live = stream
     return { abort } as unknown as AbortController
   })
 
