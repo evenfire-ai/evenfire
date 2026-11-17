@@ -157,7 +157,13 @@ the sync never prunes or re-enables it again, when an operator changes its
 (`PUT /admin/llm-models/:id`). With the pin the PUT applies the `enabled` it
 sends, whether or not it differs from the current value, and fixes the row to
 the operator; `pinEnabled` without `enabled` is rejected. At most `LLM_CATALOG_PRUNE_MAX_PER_RUN` models (default 50, 1–1000) are
-disabled per run; the rest wait for the next run. Each one is audited as
+disabled per run; the rest wait for the next run. The cap is per run, not
+per interval: a manual sync (`POST /admin/llm-models/discovery/sync`) that
+overlaps a scheduled or boot run, on any replica, can disable up to twice the
+cap between them, never the same model twice. This matters most one grace
+period after the upgrade that adds the prune, when every model already stale at
+the upgrade reaches the grace at once; avoid manual syncs around then if you
+want the per-run pace. Each disabled model is audited as
 `auto_disable` (actor `system:catalog-sync`). Each prune of a run that could
 decide (live and plausible) appends a row to `llm_catalog_prune_runs`; a run
 that could not decide only counts in

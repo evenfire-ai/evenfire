@@ -265,6 +265,13 @@ export async function pruneStaleCatalogModels(
     return result
   }
   const graceMs = deps.graceMs ?? config.llmCatalogPruneStaleGraceMs
+  // The cap bounds one run, not a time window. The prune runs after the sync's
+  // COMMIT, outside its transaction lock, and the manual sync route does not
+  // take the cron's session lock, so a manual sync overlapping a scheduled or
+  // boot run (on any replica) can disable up to twice the cap between them.
+  // Not locked on purpose: the locked UPDATE re-checks the row, so no model is
+  // disabled or audited twice, and the overlap only matters when many models
+  // reach the grace together (rows already stale at the upgrade all do).
   const maxPerRun = deps.maxPerRun ?? config.llmCatalogPruneMaxPerRun
   const txPool = deps.txPool ?? (pool as unknown as Pool)
   const hooks = deps.hooks ?? {}
