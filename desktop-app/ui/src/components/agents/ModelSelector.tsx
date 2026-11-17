@@ -46,8 +46,9 @@ function modelLabel(name: string, options: HostModelOption[]): string {
 /**
  * Per-session model selector for the chat indicators row (R2), sat next to the
  * agent title and context-window chip. Shows the store's effective model
- * (a pending pick, else the session selection, else `hostDefault`, for
- * broker-backed hosts too) and, on click, a popover listing the allowed models.
+ * (a pending pick, else the session selection, else the last model a write
+ * or send confirmed, else `hostDefault`, for broker-backed hosts too) and, on
+ * click, a popover listing the allowed models.
  * Stale/disabled catalog rows stay hidden from new picks unless they are the
  * saved session selection. Choosing one applies it to the NEXT task
  * ("applies to your next message" — R2.5).
