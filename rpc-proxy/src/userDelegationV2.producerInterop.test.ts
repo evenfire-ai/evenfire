@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { producerBudgetMs, runProducerChild } from '../test/support/producerChild.js'
 import { actionAuthorityCheckpointRequest, authorizeActionV2 } from './actionAuthorityV2.js'
 import { verifyRpcToken } from './authToken.js'
 import type { AuthedRequest } from './middleware/auth.js'
@@ -117,121 +117,132 @@ const runtimeRoutes = [
   ],
 ] as const
 
+// Setup, not behaviour under test: each test starts its own Control API producer
+// children in a `tsx` child process, one after another, so every token is verified
+// right after the child that minted it. Each child is awaited and bounded by the
+// helper's per-child limit (240 s); a failing child fails its own test with its own
+// error. Each test declares `producerBudgetMs(<its children>)` as its timeout, above
+// the sum of the child limits, so a slow child is reported by that limit.
 describe('Control API delegation producer to rpc-proxy verifier interoperability', () => {
-  it('carries a producer-built team path through route binding and the MCP runtime effect gate', async () => {
-    const output = execFileSync(tsx, [teamDerivedProducer], {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-      env: process.env,
-    })
-    const fixture = JSON.parse(output) as {
-      token: string
-      userId: string
-      teamId: string
-      sid: string
-      accessPathId: string
-    }
-    const claims = verifyUserDelegationV2(fixture.token)
-    expect(claims).toMatchObject({
-      sub: fixture.userId,
-      sid: fixture.sid,
-      pathKind: 'team',
-      effectiveTeamId: fixture.teamId,
-      accessPathId: fixture.accessPathId,
-      operationIds: ['host.status.read'],
-    })
-    expect(verifyRpcToken(fixture.token)).toBeNull()
-    if (!claims) throw new Error('producer_team_delegation_invalid')
+  it(
+    'carries a producer-built team path through route binding and the MCP runtime effect gate',
+    async () => {
+      const output = await runProducerChild(tsx, teamDerivedProducer, [], {
+        cwd: repositoryRoot,
+        env: process.env,
+      })
+      const fixture = JSON.parse(output) as {
+        token: string
+        userId: string
+        teamId: string
+        sid: string
+        accessPathId: string
+      }
+      const claims = verifyUserDelegationV2(fixture.token)
+      expect(claims).toMatchObject({
+        sub: fixture.userId,
+        sid: fixture.sid,
+        pathKind: 'team',
+        effectiveTeamId: fixture.teamId,
+        accessPathId: fixture.accessPathId,
+        operationIds: ['host.status.read'],
+      })
+      expect(verifyRpcToken(fixture.token)).toBeNull()
+      if (!claims) throw new Error('producer_team_delegation_invalid')
 
-    const request = {
-      route: { path: '/rpc/hosts/:hostRef/status' },
-      method: 'GET',
-      params: { hostRef: 'chatllm' },
-      query: {},
-      body: undefined,
-      userDelegationV2: claims,
-    } as unknown as AuthedRequest
-    const bound = bindRouteActionV2(request, claims)
-    const checkpointFixture = execFileSync(
-      tsx,
-      [
+      const request = {
+        route: { path: '/rpc/hosts/:hostRef/status' },
+        method: 'GET',
+        params: { hostRef: 'chatllm' },
+        query: {},
+        body: undefined,
+        userDelegationV2: claims,
+      } as unknown as AuthedRequest
+      const bound = bindRouteActionV2(request, claims)
+      const checkpointFixture = await runProducerChild(
+        tsx,
         checkpointProducer,
-        JSON.stringify({
-          request: actionAuthorityCheckpointRequest(claims, bound),
-          destination: {
-            kind: 'host',
-            ref: 'mcp-host/chatllm',
-            url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-          },
-          pathKind: claims.pathKind,
-          effectiveTeamId: claims.effectiveTeamId,
-        }),
-      ],
-      { cwd: repositoryRoot, encoding: 'utf8', env: process.env }
-    )
-    const checkpointResponse = JSON.parse(checkpointFixture)
-    const authorized = await authorizeActionV2(claims, bound, {
-      fetchImpl: async () =>
-        new Response(JSON.stringify(checkpointResponse), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-    })
-    const runtimeOutput = execFileSync(
-      tsx,
-      [
+        [
+          JSON.stringify({
+            request: actionAuthorityCheckpointRequest(claims, bound),
+            destination: {
+              kind: 'host',
+              ref: 'mcp-host/chatllm',
+              url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+            },
+            pathKind: claims.pathKind,
+            effectiveTeamId: claims.effectiveTeamId,
+          }),
+        ],
+        { cwd: repositoryRoot, env: process.env }
+      )
+      const checkpointResponse = JSON.parse(checkpointFixture)
+      const authorized = await authorizeActionV2(claims, bound, {
+        fetchImpl: async () =>
+          new Response(JSON.stringify(checkpointResponse), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      })
+      const runtimeOutput = await runProducerChild(
+        tsx,
         runtimeEffectConsumer,
-        JSON.stringify({
-          context: authorized.trustedEdgeContext,
-          operationId: 'host.status.read',
-        }),
-      ],
-      { cwd: repositoryRoot, encoding: 'utf8', env: process.env }
-    )
-    expect(JSON.parse(runtimeOutput)).toEqual({
-      result: 'authorized',
-      bindings: [
-        expect.objectContaining({
-          userId: fixture.userId,
-          sid: fixture.sid,
-          operationId: 'host.status.read',
-          pathKind: 'team',
-          effectiveTeamId: fixture.teamId,
-          accessPathId: fixture.accessPathId,
-        }),
-      ],
-      effects: 1,
-    })
-    expect(authorized.trustedEdgeContext.userId).toBe(fixture.userId)
-    expect(authorized.trustedEdgeContext.userId).not.toBe(fixture.teamId)
-  })
+        [
+          JSON.stringify({
+            context: authorized.trustedEdgeContext,
+            operationId: 'host.status.read',
+          }),
+        ],
+        { cwd: repositoryRoot, env: process.env }
+      )
+      expect(JSON.parse(runtimeOutput)).toEqual({
+        result: 'authorized',
+        bindings: [
+          expect.objectContaining({
+            userId: fixture.userId,
+            sid: fixture.sid,
+            operationId: 'host.status.read',
+            pathKind: 'team',
+            effectiveTeamId: fixture.teamId,
+            accessPathId: fixture.accessPathId,
+          }),
+        ],
+        effects: 1,
+      })
+      expect(authorized.trustedEdgeContext.userId).toBe(fixture.userId)
+      expect(authorized.trustedEdgeContext.userId).not.toBe(fixture.teamId)
+    },
+    producerBudgetMs(3)
+  )
 
-  it('consumes a token emitted at test time by the real Control producer', () => {
-    const output = execFileSync(tsx, [producer], {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-      env: process.env,
-    })
-    const fixture = JSON.parse(output) as { token: string }
+  it(
+    'consumes a token emitted at test time by the real Control producer',
+    async () => {
+      const output = await runProducerChild(tsx, producer, [], {
+        cwd: repositoryRoot,
+        env: process.env,
+      })
+      const fixture = JSON.parse(output) as { token: string }
 
-    expect(verifyUserDelegationV2(fixture.token)).toMatchObject({
-      typ: 'user_delegation',
-      ver: 2,
-      operationIds: ['host.wake'],
-      scopes: ['action:host.wake'],
-      accessPathId: `ap1_${'a'.repeat(43)}`,
-      authorizationRevision: `ar1_${'b'.repeat(43)}`,
-      behaviorBindingHash: `bh2_${'c'.repeat(43)}`,
-    })
-    expect(verifyRpcToken(fixture.token)).toBeNull()
-  })
+      expect(verifyUserDelegationV2(fixture.token)).toMatchObject({
+        typ: 'user_delegation',
+        ver: 2,
+        operationIds: ['host.wake'],
+        scopes: ['action:host.wake'],
+        accessPathId: `ap1_${'a'.repeat(43)}`,
+        authorizationRevision: `ar1_${'b'.repeat(43)}`,
+        behaviorBindingHash: `bh2_${'c'.repeat(43)}`,
+      })
+      expect(verifyRpcToken(fixture.token)).toBeNull()
+    },
+    producerBudgetMs(1)
+  )
 
   it.each(['sandbox.open', 'sandbox.reconnect', 'remote_desktop.open', 'remote_desktop.reconnect'])(
     'consumes a real exact derived-view delegation for %s',
-    operationId => {
-      const output = execFileSync(tsx, [derivedViewProducer, operationId], {
+    async operationId => {
+      const output = await runProducerChild(tsx, derivedViewProducer, [operationId], {
         cwd: repositoryRoot,
-        encoding: 'utf8',
         env: process.env,
       })
       const fixture = JSON.parse(output) as { token: string; operationId: string }
@@ -242,15 +253,15 @@ describe('Control API delegation producer to rpc-proxy verifier interoperability
         operationIds: [operationId],
         scopes: [`action:${operationId}`],
       })
-    }
+    },
+    producerBudgetMs(1)
   )
 
   it.each(['sandbox.oauth.vend', 'sandbox.oauth.disconnect'])(
     'consumes a real exact recipe-client delegation for %s',
-    operationId => {
-      const output = execFileSync(tsx, [sandboxOAuthProducer, operationId], {
+    async operationId => {
+      const output = await runProducerChild(tsx, sandboxOAuthProducer, [operationId], {
         cwd: repositoryRoot,
-        encoding: 'utf8',
         env: process.env,
       })
       const fixture = JSON.parse(output) as { token: string; operationId: string }
@@ -268,15 +279,15 @@ describe('Control API delegation producer to rpc-proxy verifier interoperability
           },
         },
       })
-    }
+    },
+    producerBudgetMs(1)
   )
 
   it.each(runtimeRoutes)(
     'binds a real runtime-session producer delegation for %s',
-    (operationId, request) => {
-      const output = execFileSync(tsx, [runtimeSessionProducer, operationId], {
+    async (operationId, request) => {
+      const output = await runProducerChild(tsx, runtimeSessionProducer, [operationId], {
         cwd: repositoryRoot,
-        encoding: 'utf8',
         env: process.env,
       })
       const fixture = JSON.parse(output) as { token: string }
@@ -287,6 +298,7 @@ describe('Control API delegation producer to rpc-proxy verifier interoperability
         operationId,
         target: { hostRef: 'mcp-host/chatllm' },
       })
-    }
+    },
+    producerBudgetMs(1)
   )
 })

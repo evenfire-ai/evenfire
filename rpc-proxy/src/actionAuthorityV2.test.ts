@@ -1,5 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import {
@@ -8,6 +7,13 @@ import {
   hashActionTarget,
   validateActionOperationTarget,
 } from '@clerum/action-context-contracts'
+import {
+  type SetupOutcome,
+  producerBudgetMs,
+  recordSetup,
+  runProducerChild,
+  setupValue,
+} from '../test/support/producerChild.js'
 import { actionAuthorityCacheKey, authorizeActionV2 } from './actionAuthorityV2.js'
 import { config } from './config.js'
 import type { UserDelegationV2Claims } from './userDelegationV2.js'
@@ -81,15 +87,12 @@ const behavior = {
   audit: { state: 'known' as const, value: 'audit-1' },
 }
 
-function producerCheckpoint(delegation: UserDelegationV2Claims) {
+async function producerCheckpoint(delegation: UserDelegationV2Claims) {
   const repositoryRoot = resolve(process.cwd(), '..')
-  const output = execFileSync(
+  const output = await runProducerChild(
     resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    resolve(repositoryRoot, 'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'),
     [
-      resolve(
-        repositoryRoot,
-        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
-      ),
       JSON.stringify({
         request: {
           version: 2,
@@ -112,7 +115,7 @@ function producerCheckpoint(delegation: UserDelegationV2Claims) {
         checkedAt: new Date().toISOString(),
       }),
     ],
-    { cwd: repositoryRoot, encoding: 'utf8' }
+    { cwd: repositoryRoot }
   )
   return JSON.parse(output)
 }
@@ -143,7 +146,7 @@ function messageClaims(): UserDelegationV2Claims {
   }
 }
 
-function producerMessageCheckpoint(
+async function producerMessageCheckpoint(
   delegation: UserDelegationV2Claims,
   hostMessageAdmission: { sendNonce: string; delegationExpiresAt: number; receipt?: string }
 ) {
@@ -163,13 +166,10 @@ function producerMessageCheckpoint(
     hostMessageAdmission,
     domain: { service: 'rpc-proxy', resource, targetHash },
   }
-  const output = execFileSync(
+  const output = await runProducerChild(
     resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    resolve(repositoryRoot, 'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'),
     [
-      resolve(
-        repositoryRoot,
-        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
-      ),
       JSON.stringify({
         request: requestBody,
         destination: {
@@ -179,10 +179,60 @@ function producerMessageCheckpoint(
         },
       }),
     ],
-    { cwd: repositoryRoot, encoding: 'utf8' }
+    { cwd: repositoryRoot }
   )
   return JSON.parse(output)
 }
+
+type MessageSendContext = { sendNonce: string; delegationExpiresAt: number }
+
+// Setup, not behaviour under test: the Control API checkpoint producer runs in a
+// `tsx` child process, one child per distinct input (the non-message checkpoint,
+// the message checkpoint and its retry with the receipt), awaited one after
+// another in this hook, so no child runs inside a request under test. Each child
+// is bounded by the helper's per-child limit (240 s) and the hook declares
+// `producerBudgetMs(3)`. A failing child is recorded and rethrown by `setupValue`
+// in the test that reads it, with its own error; the other tests still run. The
+// message claims and send context are built just before their children, because
+// the send context carries the claims' `exp`.
+let directCheckpoint: SetupOutcome<{ jti: string; response: unknown }> | undefined
+let messageCheckpoint:
+  | SetupOutcome<{
+      delegation: UserDelegationV2Claims
+      sendContext: MessageSendContext
+      response: { hostMessageAdmissionReceipt: string }
+    }>
+  | undefined
+let retryMessageCheckpoint: SetupOutcome<unknown> | undefined
+
+beforeAll(async () => {
+  directCheckpoint = await recordSetup(async () => {
+    const delegation = claims('direct', null)
+    return { jti: delegation.jti, response: await producerCheckpoint(delegation) }
+  })
+  messageCheckpoint = await recordSetup(async () => {
+    const delegation = messageClaims()
+    const sendContext = {
+      sendNonce: randomBytes(32).toString('base64url'),
+      delegationExpiresAt: delegation.exp,
+    }
+    return {
+      delegation,
+      sendContext,
+      response: await producerMessageCheckpoint(delegation, sendContext),
+    }
+  })
+  retryMessageCheckpoint = await recordSetup(async () => {
+    const { sendContext, delegation, response } = setupValue(
+      messageCheckpoint,
+      'message checkpoint'
+    )
+    return producerMessageCheckpoint(delegation, {
+      ...sendContext,
+      receipt: response.hostMessageAdmissionReceipt,
+    })
+  })
+}, producerBudgetMs(3))
 
 describe('action authority checkpoint and cache isolation', () => {
   it('uses every authority-relevant path dimension in the cache key', () => {
@@ -197,10 +247,11 @@ describe('action authority checkpoint and cache isolation', () => {
   })
 
   it('posts the exact delegation binding and emits trusted server context', async () => {
-    const delegation = claims('direct', null)
+    const { jti, response } = setupValue(directCheckpoint, 'direct checkpoint')
+    const delegation = { ...claims('direct', null), jti }
     const fetchImpl = vi.fn(
       async () =>
-        new Response(JSON.stringify(producerCheckpoint(delegation)), {
+        new Response(JSON.stringify(response), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         })
@@ -235,18 +286,23 @@ describe('action authority checkpoint and cache isolation', () => {
   })
 
   it('keeps the server nonce and Control API receipt request-local across live rechecks', async () => {
-    const delegation = messageClaims()
-    const sendContext = {
-      sendNonce: randomBytes(32).toString('base64url'),
-      delegationExpiresAt: delegation.exp,
-    }
-    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
-      const requestBody = JSON.parse(String(init?.body))
-      return new Response(
-        JSON.stringify(producerMessageCheckpoint(delegation, requestBody.hostMessageAdmission)),
-        { status: 200, headers: { 'content-type': 'application/json' } }
-      )
-    })
+    const {
+      delegation,
+      sendContext,
+      response: initialResponse,
+    } = setupValue(messageCheckpoint, 'message checkpoint')
+    const responses = [
+      initialResponse,
+      setupValue(retryMessageCheckpoint, 'retry message checkpoint'),
+    ]
+    let checkpointCalls = 0
+    const fetchImpl = vi.fn(
+      async (_url: string, _init?: RequestInit) =>
+        new Response(JSON.stringify(responses[checkpointCalls++]), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
 
     let initialReceipt: string | undefined
     const initial = await authorizeActionV2(delegation, messageBound, {
