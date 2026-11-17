@@ -1094,6 +1094,9 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
           })
       )
 
+    // Liveness witnesses: a generator that stopped producing one precedence
+    // branch would leave the property vacuously green for it.
+    const resolvedThrough = { intent: 0, sessionModel: 0, hostDefault: 0, brokerHostDefault: 0 }
     await fc.assert(
       fc.asyncProperty(
         caseArb,
@@ -1112,6 +1115,14 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
           await loadHostModels(transport, AGENT, CHAT)
 
           const ref = intent ?? sessionModel ?? hostDefault
+          if (intent) resolvedThrough.intent++
+          else if (sessionModel) resolvedThrough.sessionModel++
+          else {
+            resolvedThrough.hostDefault++
+            if ((BROKER_PROVIDERS as readonly string[]).includes(provider)) {
+              resolvedThrough.brokerHostDefault++
+            }
+          }
           const view = getHostModelSelectionSnapshot(AGENT, CHAT)
           expect(view.effectiveModel).toBe(ref)
           // Independent reference: the generated row's own state, or unknown
@@ -1124,5 +1135,9 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
       ),
       { numRuns: 500 }
     )
+    expect(resolvedThrough.intent).toBeGreaterThan(0)
+    expect(resolvedThrough.sessionModel).toBeGreaterThan(0)
+    expect(resolvedThrough.hostDefault).toBeGreaterThan(0)
+    expect(resolvedThrough.brokerHostDefault).toBeGreaterThan(0)
   })
 })
