@@ -21,7 +21,12 @@ export interface ModelSelectorProps {
 /** How long the "applies to your next message" confirmation badge stays up. */
 const APPLIED_BADGE_MS = 4000
 
-/** Shown only if a broker-backed host ever reports no default to fall back to. */
+/**
+ * Defensive label for a broker-backed host with no model to name. control-api
+ * rejects an empty `spec.model.name`, but a Host written directly (kubectl,
+ * GitOps) with `name: ""` still reports `''` as its default; the chip then
+ * shows a prompt instead of a blank.
+ */
 const SELECT_MODEL_LABEL = 'Select model'
 
 function isOfferedForNewPick(option: HostModelOption, sessionModel: string | null): boolean {

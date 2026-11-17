@@ -345,7 +345,9 @@ describe('ModelSelector', () => {
     expect(chip.textContent).toBe('gpt-5.5')
   })
 
-  it('keeps a "Select model" placeholder if a broker-backed Host reports no model', () => {
+  it('defensive guard: shows "Select model" if a broker-backed Host reports an empty model', () => {
+    // Only reachable for a Host written outside control-api with an empty
+    // `spec.model.name`: the Host forwards it as `hostDefault: ''`.
     setHook({
       data: baseData({ provider: 'codex-subscription', hostDefault: '', sessionModel: null }),
       effectiveModel: '',
