@@ -4,7 +4,7 @@ import type { ExecutionContext } from '../../../interfaces'
 import { DocumentReadTool } from '../index'
 import * as pdfLoad from '../pdfLoad'
 import { parsePdfText } from '../pdfText'
-import type { PdfTextJob, PdfTextOutcome, RunDocumentJob } from '../types'
+import type { DocumentJobOutcome, PdfTextJob, PdfTextOutcome, RunDocumentJob } from '../types'
 import { runDocumentJob } from '../workerRunner'
 import {
   admittedFile,
@@ -160,7 +160,7 @@ describe('PDF text cuts', () => {
     const file = admittedFile('surrogate-pdf', await textPdf(['placeholder']), 'application/pdf')
     const runJob: RunDocumentJob = async job => {
       if (job.kind !== 'pdf_text') throw new Error(`unexpected document job ${job.kind}`)
-      return parsePdfText(job)
+      return (await parsePdfText(job)) as DocumentJobOutcome<typeof job>
     }
     const measureResult = (raw: string): number => Math.ceil(Buffer.byteLength(raw, 'utf8') / 4) + 4
     const context: ExecutionContext = { onOutput: () => undefined, measureResult }
