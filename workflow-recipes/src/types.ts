@@ -785,6 +785,22 @@ export interface WorkflowRecipeStatus {
    */
   resourceInstances?: Record<string, string>
 
+  // ─── Run-scoped teardown and revocation records (issue #1349) ───────
+  /**
+   * Written when a run-scoped recipe's terminal compute teardown completed.
+   * Removed (whole object) before the run is deployed again.
+   * `noSecretBearingWorkloads` is set by the terminal pass when no workload that
+   * names a Secret remained deployed with it.
+   */
+  terminalRunTeardown?: { completedAt: string; noSecretBearingWorkloads?: boolean }
+  /**
+   * Workload id → digest of the denied Secret versions the workload was torn down
+   * for. An entry is removed before its workload is rendered with the denied refs
+   * again. A denied StatefulSet is kept and still follows the spec, without the
+   * denied refs.
+   */
+  secretOwnershipRevocations?: Record<string, string>
+
   // ─── Plugin Workload SDK ────────────────────────────────────────────
   /** Validated SDK capability projection — read by control-api at runtime. */
   pluginWorkloadSdk?: PluginWorkloadSdkCapabilityStatus

@@ -1,16 +1,25 @@
 'use client'
 
 import React from 'react'
+import { formatHostRoles } from '@lib/llmModelAttention'
 import type { ModelReferencesProps } from './types'
 
+const NO_RECIPES: NonNullable<ModelReferencesProps['recipesAffected']> = []
+
 /**
- * Renders the live Host/grant references to a (provider, model) pair. Shared by
- * the catalog-attention banner (Fase 5, Pieza C) and the 409 `model_in_use`
- * impact confirm (Fase 3) so both surfaces list the references identically.
- * Renders nothing when there are no references.
+ * Renders the live Host/grant/recipe references to a (provider, model) pair.
+ * Shared by the catalog-attention dialog and the 409 `model_in_use` impact
+ * confirm so both surfaces list the references identically. Renders nothing
+ * when there are no references.
  */
-export function ModelReferences({ hostsAffected, grantsAffected }: ModelReferencesProps) {
-  if (hostsAffected.length === 0 && grantsAffected.length === 0) return null
+export function ModelReferences({
+  hostsAffected,
+  grantsAffected,
+  recipesAffected = NO_RECIPES,
+}: ModelReferencesProps) {
+  if (hostsAffected.length === 0 && grantsAffected.length === 0 && recipesAffected.length === 0) {
+    return null
+  }
 
   return (
     <div className="cu-model-refs">
@@ -26,7 +35,7 @@ export function ModelReferences({ hostsAffected, grantsAffected }: ModelReferenc
                   {host.namespace}/{host.name}
                 </span>
                 {host.roles.length > 0 ? (
-                  <span className="cu-model-refs__meta"> ({host.roles.join(', ')})</span>
+                  <span className="cu-model-refs__meta"> ({formatHostRoles(host.roles)})</span>
                 ) : null}
               </li>
             ))}
@@ -45,6 +54,20 @@ export function ModelReferences({ hostsAffected, grantsAffected }: ModelReferenc
                   {grant.recipeNamespace}/{grant.recipeName}
                 </span>
                 <span className="cu-model-refs__meta"> · {grant.capabilityFamily}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {recipesAffected.length > 0 ? (
+        <div>
+          <span className="cu-model-refs__label">
+            {recipesAffected.length} recipe{recipesAffected.length === 1 ? '' : 's'}
+          </span>
+          <ul className="cu-model-refs__list">
+            {recipesAffected.map(recipe => (
+              <li key={`${recipe.namespace}/${recipe.name}`} className="cu-model-refs__item">
+                {recipe.namespace}/{recipe.name}
               </li>
             ))}
           </ul>
