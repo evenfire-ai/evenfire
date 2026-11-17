@@ -151,6 +151,9 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
         <header className="header-row">
           <div>
             <h1 className="page-title">Social channels</h1>
+            <div className="small-plus muted">
+              Connect Telegram, Slack, or Teams to receive approval notifications.
+            </div>
           </div>
           <div className="toolbar">
             <Button
