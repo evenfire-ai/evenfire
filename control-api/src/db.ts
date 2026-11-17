@@ -55,6 +55,10 @@ import {
   applyLlmProviderAttemptsGrokBrokerSchema,
 } from './services/grokSubscriptionSchema.js'
 import {
+  applyLlmCatalogPruneColumnsSchema,
+  applyLlmCatalogPruneStateSchema,
+} from './services/llmCatalogPruneStateSchema.js'
+import {
   applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptConnectionIntegritySchema,
   applyLlmProviderAttemptSchema,
@@ -6646,30 +6650,42 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: backfillLegacyPasswordSecurityEpochs,
   },
   {
-    // PR2 follows dev's last migration, 0138_legacy_password_security_epoch_backfill,
-    // in consecutive slots. No shared database recorded an earlier PR2 name, so
+    version: '0139_llm_catalog_prune_columns',
+    // The alias is the version an earlier head of this change applied both
+    // parts under, in one migration; such a database already has the columns
+    // and the CHECK, and the next migration is idempotent over it.
+    legacyVersions: ['0139_llm_catalog_prune_state'],
+    apply: applyLlmCatalogPruneColumnsSchema,
+  },
+  {
+    version: '0140_llm_catalog_prune_episodes',
+    apply: applyLlmCatalogPruneStateSchema,
+  },
+  {
+    // PR2 follows dev's last migration, 0140_llm_catalog_prune_episodes, in
+    // consecutive slots. No shared database recorded an earlier PR2 name, so
     // none is carried as an alias.
-    version: '0139_workflow_authority_bindings',
+    version: '0141_workflow_authority_bindings',
     apply: applyWorkflowAuthorityBindingsSchema,
   },
   {
-    version: '0140_gfs_upload_authority_bindings',
+    version: '0142_gfs_upload_authority_bindings',
     apply: applyGfsUploadAuthorityBindingSchema,
   },
   {
-    version: '0141_pr2_readiness_evidence',
+    version: '0143_pr2_readiness_evidence',
     apply: applyPr2ReadinessEvidenceSchema,
   },
   {
-    version: '0142_pr2_runtime_privileges',
+    version: '0144_pr2_runtime_privileges',
     apply: applyPr2RuntimePrivilegesSchema,
   },
   {
-    version: '0143_workflow_run_failure_reason',
+    version: '0145_workflow_run_failure_reason',
     apply: applyWorkflowRunFailureReasonSchema,
   },
   {
-    version: '0144_workflow_authorization_pause',
+    version: '0146_workflow_authorization_pause',
     apply: applyWorkflowRunAuthorizationPauseSchema,
   },
 ]
@@ -6684,9 +6700,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
  *   pairs an operator added by hand (Azure deployments, Bedrock inference
  *   profiles), which the sync would then mark stale. Pairs models.dev does not
  *   list stay `manual` for the same reason. `enabled`, display name and context
- *   window are not written here. The sync never changes `enabled` on an
- *   existing row, and never the display name or context window of an enabled
- *   one; on a disabled one it only fills them while they are NULL.
+ *   window are not written here. The sync changes `enabled` on an existing
+ *   row only through the catalog prune and its re-enable, and only on rows it
+ *   manages (`enabled_managed_by = 'catalog'`), which these pairs are not. It
+ *   never changes the display name or context window of an enabled row; on a
+ *   disabled one it only fills them while they are NULL.
  * - 0044's placeholder prices are left in place. The sync loads a catalog
  *   price only when it inserts the model, and never over an existing price
  *   row. Half of these pairs are seeded allowlist rows the sync will never

@@ -5,6 +5,8 @@ import { hasPostSchemaWork, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0137_user_access_foundation',
   '0138_legacy_password_security_epoch_backfill',
+  '0139_llm_catalog_prune_columns',
+  '0140_llm_catalog_prune_episodes',
 ] as const)
 
 // The one bound between initDb's single dev batch and this runner: every migration
@@ -53,12 +55,12 @@ const EARLIER_PR1_HEAD_CLEANUP_REFERENCE =
   'see docs/deploy/user-access-foundation-upgrade.md#databases-that-ran-an-earlier-head-of-this-change'
 
 export const PR2_MIGRATION_VERSIONS = Object.freeze([
-  '0139_workflow_authority_bindings',
-  '0140_gfs_upload_authority_bindings',
-  '0141_pr2_readiness_evidence',
-  '0142_pr2_runtime_privileges',
-  '0143_workflow_run_failure_reason',
-  '0144_workflow_authorization_pause',
+  '0141_workflow_authority_bindings',
+  '0142_gfs_upload_authority_bindings',
+  '0143_pr2_readiness_evidence',
+  '0144_pr2_runtime_privileges',
+  '0145_workflow_run_failure_reason',
+  '0146_workflow_authorization_pause',
 ])
 
 export const RUNNER_MIGRATION_VERSIONS = Object.freeze([

@@ -83,7 +83,9 @@ describe('0056_llm_allowed_models migration', () => {
     // Backfill of existing rows is via the DEFAULT ('manual'), not a data UPDATE.
     // The only statement that rewrites `source` is 0135's reclassification, and
     // it is bound to an explicit pair list.
-    const sourceUpdates = sqls.filter(sql => /UPDATE llm_allowed_models[\s\S]*source/.test(sql))
+    const sourceUpdates = sqls.filter(sql =>
+      /UPDATE llm_allowed_models[\s\S]*SET\s+source\b/.test(sql)
+    )
     expect(sourceUpdates).toHaveLength(1)
     expect(sourceUpdates[0]).toMatch(
       /FROM unnest\(\$1::text\[\], \$2::text\[\]\) AS s\(provider, model\)/

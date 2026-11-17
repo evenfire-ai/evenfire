@@ -52,20 +52,22 @@ const FRESH_TABLE_INDEXES = Object.freeze([
 const USER_ACCESS_FOUNDATION_VERSION = '0137_user_access_foundation'
 
 describe('D34 migration execution policy', () => {
-  it('classifies the two PR1 migrations that follow the dev batch', () => {
+  it('classifies the post-dev migrations that follow the dev batch', () => {
     expect(PR1_MIGRATION_VERSIONS).toEqual([
       '0137_user_access_foundation',
       '0138_legacy_password_security_epoch_backfill',
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
     ])
-    // PR2 follows dev's last migration (0138) in consecutive slots. No read
+    // PR2 follows dev's last migration (0140) in consecutive slots. No read
     // binding entity migration remains (WF-14, A6 E1).
     expect(PR2_MIGRATION_VERSIONS).toEqual([
-      '0139_workflow_authority_bindings',
-      '0140_gfs_upload_authority_bindings',
-      '0141_pr2_readiness_evidence',
-      '0142_pr2_runtime_privileges',
-      '0143_workflow_run_failure_reason',
-      '0144_workflow_authorization_pause',
+      '0141_workflow_authority_bindings',
+      '0142_gfs_upload_authority_bindings',
+      '0143_pr2_readiness_evidence',
+      '0144_pr2_runtime_privileges',
+      '0145_workflow_run_failure_reason',
+      '0146_workflow_authorization_pause',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -128,13 +130,13 @@ describe('D34 migration execution policy', () => {
       ])
     ).toEqual([
       [
-        '0139_workflow_authority_bindings',
+        '0141_workflow_authority_bindings',
         'workflow_runs_initiating_authority_binding',
         'after-schema',
         undefined,
       ],
-      ['0144_workflow_authorization_pause', 'idx_wr_phase_v2', 'after-schema', 'idx_wr_phase'],
-      ['0144_workflow_authorization_pause', 'idx_wr_owner_v2', 'after-schema', 'idx_wr_owner'],
+      ['0146_workflow_authorization_pause', 'idx_wr_phase_v2', 'after-schema', 'idx_wr_phase'],
+      ['0146_workflow_authorization_pause', 'idx_wr_owner_v2', 'after-schema', 'idx_wr_owner'],
     ])
     expect(
       PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => [
@@ -144,41 +146,41 @@ describe('D34 migration execution policy', () => {
       ])
     ).toEqual([
       [
-        '0139_workflow_authority_bindings',
+        '0141_workflow_authority_bindings',
         'workflow_runs',
         'workflow_runs_initiating_authority_binding_id_fkey',
       ],
       [
-        '0139_workflow_authority_bindings',
+        '0141_workflow_authority_bindings',
         'workflow_approval_requests',
         'workflow_approval_requests_trigger_authority_binding_id_fkey',
       ],
       [
-        '0139_workflow_authority_bindings',
+        '0141_workflow_authority_bindings',
         'workflow_approval_requests',
         'workflow_approval_requests_decision_authority_binding_id_fkey',
       ],
       [
-        '0139_workflow_authority_bindings',
+        '0141_workflow_authority_bindings',
         'workflow_approval_requests',
         'workflow_approval_requests_consume_authority_binding_id_fkey',
       ],
       [
-        '0140_gfs_upload_authority_bindings',
+        '0142_gfs_upload_authority_bindings',
         'gfs_upload_sessions',
         'gfs_upload_sessions_action_authority_object',
       ],
-      ['0143_workflow_run_failure_reason', 'workflow_runs', 'workflow_runs_failure_reason_check'],
-      ['0144_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_phase_check'],
-      ['0144_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+      ['0145_workflow_run_failure_reason', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+      ['0146_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_phase_check'],
+      ['0146_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_failure_reason_check'],
     ])
-    // A version with only constraint validations (0140, 0143) still has
+    // A version with only constraint validations (0142, 0145) still has
     // post-schema work; the versions without either have none.
     expect(PR2_MIGRATION_VERSIONS.filter(version => hasPostSchemaWork(version))).toEqual([
-      '0139_workflow_authority_bindings',
-      '0140_gfs_upload_authority_bindings',
-      '0143_workflow_run_failure_reason',
-      '0144_workflow_authorization_pause',
+      '0141_workflow_authority_bindings',
+      '0142_gfs_upload_authority_bindings',
+      '0145_workflow_run_failure_reason',
+      '0146_workflow_authorization_pause',
     ])
     expect(PR1_MIGRATION_VERSIONS.filter(version => hasPostSchemaWork(version))).toEqual([])
   })
@@ -395,11 +397,11 @@ describe('D34 PR1 migration runner', () => {
     })
 
     expect(applied).toEqual([...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS])
-    // One transaction per version without post-schema work (0137, 0138,
-    // 0141-0142); a version with it commits its schema, each validation and
-    // its receipt separately: 0139 1 + 4 + 1, 0140 1 + 1 + 1, 0143 1 + 1 + 1,
-    // 0144 1 + 2 + 1.
-    const transactions = 4 + 6 + 3 + 3 + 4
+    // One transaction per version without post-schema work (0137-0140,
+    // 0143-0144); a version with it commits its schema, each validation and
+    // its receipt separately: 0141 1 + 4 + 1, 0142 1 + 1 + 1, 0145 1 + 1 + 1,
+    // 0146 1 + 2 + 1.
+    const transactions = 6 + 6 + 3 + 3 + 4
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
@@ -435,7 +437,7 @@ describe('D34 PR1 migration runner', () => {
         return { rows: [], rowCount: 0 }
       }),
     }
-    const pendingVersion = '0139_workflow_authority_bindings'
+    const pendingVersion = '0141_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
@@ -469,8 +471,8 @@ describe('D34 PR1 migration runner', () => {
   })
 
   it.each([
-    ['0140_gfs_upload_authority_bindings', ['gfs_upload_sessions_action_authority_object']],
-    ['0143_workflow_run_failure_reason', ['workflow_runs_failure_reason_check']],
+    ['0142_gfs_upload_authority_bindings', ['gfs_upload_sessions_action_authority_object']],
+    ['0145_workflow_run_failure_reason', ['workflow_runs_failure_reason_check']],
   ])(
     'validates the constraints of %s, which has no online index, after its schema commits',
     async (pendingVersion, constraints) => {
@@ -554,7 +556,7 @@ describe('D34 PR1 migration runner', () => {
       }
       return { rows: [], rowCount: 0 }
     })
-    const pendingVersion = '0143_workflow_run_failure_reason'
+    const pendingVersion = '0145_workflow_run_failure_reason'
     const appliedVersions = new Set<string>([
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
@@ -600,7 +602,7 @@ describe('D34 PR1 migration runner', () => {
       if (sql.startsWith('CREATE INDEX CONCURRENTLY')) throw new Error('online index failed')
       return { rows: [], rowCount: 0 }
     })
-    const pendingVersion = '0139_workflow_authority_bindings'
+    const pendingVersion = '0141_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
@@ -854,7 +856,11 @@ describe('PR1 earlier-head guard', () => {
     })
 
     expect(queries.filter(({ sql }) => sql.includes(EARLIER_HEAD_GUARD_MARKER))).toHaveLength(1)
-    expect(recorded).toEqual(['0138_legacy_password_security_epoch_backfill'])
+    expect(recorded).toEqual([
+      '0138_legacy_password_security_epoch_backfill',
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
+    ])
   })
 })
 

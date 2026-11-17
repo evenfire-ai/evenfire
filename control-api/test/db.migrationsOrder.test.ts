@@ -71,11 +71,14 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     const incomingDev = '0129_workflow_schedules_concurrency_policy'
     const passwordAdmission = '0130_password_login_success_admission'
     const lastDev = '0136_llm_catalog_dismissed_backfill'
-    // PR1's two versions, then PR2's in consecutive slots after dev's last.
+    // The runner's post-dev versions (PR1's two, then dev's two catalog-prune
+    // versions), then PR2's in consecutive slots after dev's last.
     const task106 = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]
-    expect(task106.slice(0, 2)).toEqual([
+    expect(task106.slice(0, 4)).toEqual([
       '0137_user_access_foundation',
       '0138_legacy_password_security_epoch_backfill',
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
     ])
 
     expect(

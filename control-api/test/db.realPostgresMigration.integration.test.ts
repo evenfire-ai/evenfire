@@ -1734,15 +1734,15 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       REVOKE ALL ON TABLE pr2_readiness_activations FROM control_api_runtime;
       REVOKE ALL ON TABLE pr2_readiness_evidence FROM control_api_runtime;
       DELETE FROM schema_migrations
-       WHERE version = '0142_pr2_runtime_privileges';
+       WHERE version = '0144_pr2_runtime_privileges';
     `)
     await initDb(connector)
     const upgradedPr2Corrections = await dbPool.query<{ version: string }>(
       `SELECT version FROM schema_migrations
-        WHERE version = '0142_pr2_runtime_privileges'`
+        WHERE version = '0144_pr2_runtime_privileges'`
     )
     expect(upgradedPr2Corrections.rows.map(row => row.version)).toEqual([
-      '0142_pr2_runtime_privileges',
+      '0144_pr2_runtime_privileges',
     ])
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0063_workflow_approval_trace_binding'
@@ -2027,6 +2027,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'llm_allowed_models',
       'llm_allowed_models_audit',
       'llm_catalog_sync_runs',
+      'llm_catalog_prune_runs',
       'llm_provider_attempt_tickets',
       'llm_provider_attempts',
       'codex_subscription_connections',
@@ -2053,6 +2054,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       llm_allowed_models: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models_audit: ['INSERT', 'SELECT'],
       llm_catalog_sync_runs: ['INSERT', 'SELECT'],
+      llm_catalog_prune_runs: ['INSERT', 'SELECT'],
       llm_provider_attempt_tickets: ['INSERT', 'SELECT', 'UPDATE'],
       llm_provider_attempts: ['INSERT', 'SELECT', 'UPDATE'],
       codex_subscription_connections: ['INSERT', 'SELECT', 'UPDATE'],

@@ -311,10 +311,10 @@ Read the notes for every release you skip over, not only the target release.
    Job, then External REST and Profile UI, and only then control-api.
    gfs-controller images that include the upload authority change write
    `gfs_upload_sessions.action_authority`, so control-api migration
-   `0140_gfs_upload_authority_bindings` must be applied first; do not bump
+   `0142_gfs_upload_authority_bindings` must be applied first; do not bump
    `CONTEXT_MAPPER_GFSC_IMAGE` on its own ahead of control-api. v0.12.1 does
    not include that change. workflow-recipes images of the same release need
-   `0139_workflow_authority_bindings` and `0143_workflow_run_failure_reason` to
+   `0141_workflow_authority_bindings` and `0145_workflow_run_failure_reason` to
    start a run: roll workflow-recipes after the control-api migration Job. If
    it rolls first, runs already in progress continue, and new runs stay
    `Pending` and are retried on each run poll until the migrations are

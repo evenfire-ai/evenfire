@@ -175,8 +175,8 @@ export interface DiscoveredModel {
    * Whether the entry carries ANY `status`, known or not. An unknown tag is
    * stored as `null` above but still blocks auto-enable: a tag models.dev
    * starts using is far more likely to mark something not generally available
-   * than the opposite, and a model enabled by mistake stays enabled, because
-   * the sync never changes `enabled` on an existing row.
+   * than the opposite, and a model enabled by mistake stays enabled: the sync
+   * only turns off an existing row once it is stale and nobody uses it.
    */
   status_present: boolean
   /** `null` = unpriced. Never a fabricated zero; see `sanitizeModelCost`. */
