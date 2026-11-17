@@ -97,6 +97,8 @@ export async function step<T>(p: Promise<T>, signal: AbortSignal): Promise<StepR
 }
 
 const SAMPLED_LOG_INTERVAL_MS = 10_000
+/** The largest delay Node's setTimeout honours; above it, or NaN, it fires after 1 ms. */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
 
 type HandleKey<H> = {
   [K in keyof H]-?: H[K] extends TimerHandle | null ? K : never
@@ -132,14 +134,23 @@ export function createWatchRuntime<C extends GuardedConn>(deps: WatchRuntimeDeps
   const now = (): number => clock.now()
   const wallNow = (): number => clock.wallNow()
 
-  /** `ms` is always a delay. An instant goes through `timerAt`. */
+  /**
+   * `ms` is always a delay. An instant goes through `timerAt`. A delay Node
+   * would turn into 1 ms fires late instead: every watch timer is a deadline
+   * or a retry, and firing it at once would expire a session or spin.
+   */
   function timer(ms: number, f: () => void): TimerHandle {
-    return clock.setTimeout(f, ms)
+    let delay = ms
+    if (!Number.isFinite(delay)) {
+      log.error({ ms }, 'gfs watch timer with a non-finite delay')
+      delay = MAX_TIMER_DELAY_MS
+    }
+    return clock.setTimeout(f, Math.min(Math.max(0, delay), MAX_TIMER_DELAY_MS))
   }
 
   /**
-   * Node clamps a delay above 2^31-1 ms to 1 ms, so passing a monotonic
-   * instant to `timer` would fire almost immediately.
+   * A monotonic instant is not a delay: passed to `timer` as one, it would
+   * fire at the wrong time (at the 2^31-1 ms ceiling once it outgrows it).
    */
   function timerAt(at: number, f: () => void): TimerHandle {
     return timer(Math.max(0, at - now()), f)
@@ -169,15 +180,28 @@ export function createWatchRuntime<C extends GuardedConn>(deps: WatchRuntimeDeps
   }
 
   /** One log line per key every ten seconds, carrying how many were suppressed. */
-  function logSampledError(key: string, obj: Record<string, unknown>, msg: string): void {
+  function logSampled(
+    level: 'error' | 'warn',
+    key: string,
+    obj: Record<string, unknown>,
+    msg: string
+  ): void {
     const t = now()
     const entry = sampled.get(key)
     if (entry && t - entry.lastAt < SAMPLED_LOG_INTERVAL_MS) {
       entry.suppressed += 1
       return
     }
-    log.error({ ...obj, suppressed: entry?.suppressed ?? 0 }, msg)
+    log[level]({ ...obj, suppressed: entry?.suppressed ?? 0 }, msg)
     sampled.set(key, { lastAt: t, suppressed: 0 })
+  }
+
+  function logSampledError(key: string, obj: Record<string, unknown>, msg: string): void {
+    logSampled('error', key, obj, msg)
+  }
+
+  function logSampledWarn(key: string, obj: Record<string, unknown>, msg: string): void {
+    logSampled('warn', `warn:${key}`, obj, msg)
   }
 
   /**
@@ -268,6 +292,7 @@ export function createWatchRuntime<C extends GuardedConn>(deps: WatchRuntimeDeps
     bestEffort,
     total,
     logSampledError,
+    logSampledWarn,
     raceAbort,
     step,
   }

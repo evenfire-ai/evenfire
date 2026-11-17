@@ -12,6 +12,7 @@ import type {
   TestUser,
 } from './helpers/gfsWatchRegistryHarness.js'
 import { type Loaded, loadHelpers } from './helpers/gfsWatchRegistryLoad.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 
 // src/db.ts reads its connection string when first evaluated, and the
@@ -104,6 +105,23 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
 
   const until = (f: () => boolean) => b.settle(f)
 
+  async function deferredBy(): Promise<Record<string, number>> {
+    const { values } = await h.modules.metrics.gfsWatchKeyDeferredTotal.get()
+    const out: Record<string, number> = {}
+    for (const v of values)
+      out[String(v.labels.cause)] = (out[String(v.labels.cause)] ?? 0) + v.value
+    return out
+  }
+
+  function countDelta(before: Record<string, number>, after: Record<string, number>) {
+    const out: Record<string, number> = {}
+    for (const [cause, n] of Object.entries(after)) {
+      const d = n - (before[cause] ?? 0)
+      if (d !== 0) out[cause] = d
+    }
+    return out
+  }
+
   it('accepts granted keys of both kinds and reports the whole set in ready (T-SB104, T-SB92)', async () => {
     b = await h.build()
     const user = await h.createUser()
@@ -172,6 +190,22 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(new Set(socket.last('subscriptions')!.accepted as string[])).toEqual(
       new Set([h.key('file', c), h.key('file', d)])
     )
+  })
+
+  it('counts every key deferred on a transient gfsc read, and only under that cause', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const a = await h.tree.add('file')
+    const c = await h.tree.add('file')
+    const ok = await h.tree.add('file')
+    h.decisions.set(h.toRid(a), 'unavailable')
+    h.decisions.set(h.toRid(c), 'unavailable')
+    const before = await deferredBy()
+    const { socket } = await ready(user, [h.key('file', a), h.key('file', c), h.key('file', ok)])
+    expect(new Set(socket.last('ready')!.deferred as string[])).toEqual(
+      new Set([h.key('file', a), h.key('file', c)])
+    )
+    expect(countDelta(before, await deferredBy())).toEqual({ gfsc_transient: 2 })
   })
 
   it('delivers a rename of an accepted file and of a child to its directory, after the window (T-SB28)', async () => {
@@ -537,6 +571,26 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     h.releaseHanging()
   })
 
+  it('counts the keys deferred at T_auth under auth_deadline', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    h.decisions.set(h.toRid(f), 'hang')
+    h.decisions.set(h.toRid(g), 'hang')
+    const before = await deferredBy()
+    const o = b.open(user, [h.key('file', f), h.key('file', g)])
+    await until(
+      () => h.reads.filter(r => r.rid32 === h.toRid(f) || r.rid32 === h.toRid(g)).length === 2
+    )
+    await b.advance(6_000)
+    expect(await o.outcome).toEqual({ kind: 'stream' })
+    expect((o.socket.last('ready')!.deferred as string[]).length).toBe(2)
+    h.releaseHanging()
+    await b.settle()
+    expect(countDelta(before, await deferredBy())).toEqual({ auth_deadline: 2 })
+  })
+
   it('ends the op at T_auth while the mint waits, and reads nothing after a close during the mint (T-SB107)', async () => {
     b = await h.build()
     const user = await h.createUser()
@@ -689,8 +743,16 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     b.gates.observe.releaseAll()
   })
 
+  async function disconnectsBy(): Promise<Record<string, number>> {
+    const { values } = await h.modules.metrics.gfsWatchDisconnectsTotal.get()
+    const out: Record<string, number> = {}
+    for (const v of values) out[String(v.labels.reason)] = v.value
+    return out
+  }
+
   it('answers 401 when the session is revoked between authentication and admission (A4)', async () => {
     b = await h.build()
+    const before = await disconnectsBy()
     const user = await h.createUser()
     const authentication = await user.authenticate()
     const userSessions = await import('../src/services/auth/userSessionService.js')
@@ -707,6 +769,56 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     })
     expect(outcome).toEqual({ kind: 'reply', status: 401, code: 'session_invalid' })
     expect(b.registry.state.byConnId.size).toBe(0)
+    expect(countDelta(before, await disconnectsBy())).toEqual({ session_invalid: 1 })
+  })
+
+  it('labels a session whose state cannot be read at the open session_unavailable, not internal', async () => {
+    const { observeExternalSessionCurrentness } =
+      await import('../src/services/auth/externalSessionCurrentnessObserver.js')
+    const unreachable = new Pool({
+      connectionString: 'postgresql://postgres@127.0.0.1:1/unreachable',
+      connectionTimeoutMillis: 500,
+    })
+    try {
+      b = await h.build({
+        observeCurrentness: a => observeExternalSessionCurrentness(a, { db: unreachable }),
+      })
+      const user = await h.createUser()
+      const before = await disconnectsBy()
+      const o = b.open(user, [])
+      expect(await o.outcome).toMatchObject({ kind: 'classify', origin: 'session' })
+      expect(countDelta(before, await disconnectsBy())).toEqual({ session_unavailable: 1 })
+      expect(o.socket.frames).toEqual([])
+    } finally {
+      await endPoolAndWaitForClients(unreachable)
+    }
+  })
+
+  it('keeps a session check that throws instead of reporting an outage labelled internal', async () => {
+    const { observeExternalSessionCurrentness } =
+      await import('../src/services/auth/externalSessionCurrentnessObserver.js')
+    // A schema that does not exist hides the session tables, so the real
+    // observer gets undefined_table (42P01): not an outage class, so it throws.
+    const broken = new Pool({
+      connectionString: h.connectionString,
+      options: '-c search_path=gfs_watch_no_such_schema',
+      max: 1,
+    })
+    try {
+      b = await h.build({
+        observeCurrentness: a => observeExternalSessionCurrentness(a, { db: broken }),
+      })
+      const user = await h.createUser()
+      const before = await disconnectsBy()
+      const o = b.open(user, [])
+      const outcome = await o.outcome
+      expect(outcome).toMatchObject({ kind: 'classify', origin: 'session' })
+      expect((outcome as { error: { code?: unknown } }).error.code).toBe('42P01')
+      expect(countDelta(before, await disconnectsBy())).toEqual({ internal: 1 })
+      expect(o.socket.frames).toEqual([])
+    } finally {
+      await endPoolAndWaitForClients(broken)
+    }
   })
 
   it('answers watch_reauthorize to a retained user without spending budget, query or reads (T-SB76)', async () => {

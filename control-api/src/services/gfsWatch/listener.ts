@@ -189,17 +189,33 @@ export function createGfsWatchListener<C extends ListenerConn>(deps: GfsWatchLis
     pingCounter: 0,
   }
 
+  /**
+   * Entered only from start and from the reconnection timer, with no client
+   * current and nothing armed: a throw here is caught in place, because
+   * guardedTick would swallow it with nothing left to bring the listener back.
+   */
   async function connectListener(): Promise<void> {
     const e = ++s.listenerEpoch
-    const c = createClient({ connectionString: deps.connectionString, ...LISTENER_CLIENT_OPTIONS })
+    let built: ListenerClient | null = null
+    try {
+      built = createClient({ connectionString: deps.connectionString, ...LISTENER_CLIENT_OPTIONS })
+      const cc = built
+      // Permanent until the client is disposed: pg emits 'error' after an
+      // unexpected end, and an EventEmitter with no 'error' listener throws.
+      cc.on('error', () => rt.guardedTick('listener-error', () => onListenerLost(cc, e)))
+      cc.on('end', () => rt.guardedTick('listener-end', () => onListenerLost(cc, e)))
+      cc.on('notification', n => {
+        if (s.listenerClient === cc) dispatch(n, e)
+      })
+    } catch (err) {
+      rt.log.error({ err, epoch: e }, 'gfs watch listener client construction failed')
+      if (built) disposeListener(built)
+      scheduleReconnect()
+      return
+    }
+    const c = built
+    // Only a client with all its handlers becomes current.
     s.listenerClient = c
-    // Permanent until the client is disposed: pg emits 'error' after an
-    // unexpected end, and an EventEmitter with no 'error' listener throws.
-    c.on('error', () => rt.guardedTick('listener-error', () => onListenerLost(c, e)))
-    c.on('end', () => rt.guardedTick('listener-end', () => onListenerLost(c, e)))
-    c.on('notification', n => {
-      if (s.listenerClient === c) dispatch(n, e)
-    })
     // Safety net over connectionTimeoutMillis, which does not cover the LISTEN.
     s.tConnect = rt.timer(CONNECT_DEADLINE_MS, () =>
       rt.guardedTick('listener-connect', () => {
@@ -233,25 +249,30 @@ export function createGfsWatchListener<C extends ListenerConn>(deps: GfsWatchLis
     s.listenerClient = null
     rt.cancel(s, 'tConnect')
     disposeListener(c)
-    if (!s.shuttingDown) {
-      s.reconnectAttempt += 1
-      // 1 s → 8 s cap plus up to 20 % jitter: the next attempt is ≤ 9.6 s away.
-      const d = rt.jitter(
-        Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** (s.reconnectAttempt - 1))
-      )
-      s.reconnectTimer = rt.timer(d, () =>
-        rt.guardedTick('listener-reconnect', () => {
-          s.reconnectTimer = null
-          return connectListener()
-        })
-      )
-    }
+    scheduleReconnect()
     rt.log.warn({ epoch: e, reconnectAttempt: s.reconnectAttempt }, 'gfs watch listener lost')
     // Every connection closes below, so what the windows hold describes
     // connections that will no longer exist. Guarded: a failure here must not
     // keep the connections open over a dead LISTEN.
     rt.guardedTick('listener-reset-windows', deps.resetWindows)
     closeAllOnCopy('listener_lost')
+  }
+
+  /** The only writer that arms `reconnectTimer`. */
+  function scheduleReconnect(): void {
+    if (s.shuttingDown) return
+    rt.cancel(s, 'reconnectTimer')
+    s.reconnectAttempt += 1
+    // 1 s → 8 s cap plus up to 20 % jitter: the next attempt is ≤ 9.6 s away.
+    const d = rt.jitter(
+      Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** (s.reconnectAttempt - 1))
+    )
+    s.reconnectTimer = rt.timer(d, () =>
+      rt.guardedTick('listener-reconnect', () => {
+        s.reconnectTimer = null
+        return connectListener()
+      })
+    )
   }
 
   function closeAllOnCopy(reason: ListenerLostReason): void {
