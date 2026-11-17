@@ -2,11 +2,13 @@
 import { describe, expect, it } from 'vitest'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT } from '@clerum/llm-providers'
+import { catalogPruneFromGateway } from '../src/services/llmCatalogPrune.js'
 import {
   type CatalogSyncProviderCount,
   type CatalogSyncResult,
   syncDiscoveredModels,
 } from '../src/services/llmCatalogSync.js'
+import type { ConsumerGateway } from '../src/services/llmModelConsumers.js'
 import type { RawModelsDevCatalog } from '../src/services/modelsDevClient.js'
 import { makeFakeDb } from './helpers/llmCatalogSyncFakeDb.js'
 import {
@@ -15,6 +17,7 @@ import {
   loadStub,
   trimLiveCatalog,
 } from './helpers/modelsDevFixtures.js'
+import { MockGateway } from './mockGateway.js'
 
 /**
  * The `POST /admin/llm-models/discovery/sync` body, consumed by control-ui's
@@ -26,6 +29,20 @@ import {
  * The catalog holds two providers whose auto-enable is ON by default (anthropic,
  * openai) and a slice of one that is OFF (groq), so a consumer that reads only
  * one provider's counts cannot pass.
+ *
+ * The first five cases are single runs without a prune, so their bodies carry
+ * no `pruned` / `pruneAborted` (the shape a caller that injects no prune gets).
+ * Production always runs the prune, so the `prune_*` cases replay a sequence
+ * on one table with the real production prune (`catalogPruneFromGateway`, an
+ * empty cluster: nobody uses any model) and keep the LAST run's body:
+ *   - the catalog drops enabled anthropic models, which the prune disables
+ *     (`pruned > 0`);
+ *   - the same, with the cluster's LISTs failing, so the prune aborts
+ *     (`pruneAborted: true`);
+ *   - a later run lists the pruned models again with cap room (`reEnabled`)
+ *     or with a per-provider cap of one (`reEnableDeferredByCap`).
+ * The grace is zero because the fake's clock moves one second per commit; the
+ * per-run prune ceiling is pinned so a config default cannot move the counts.
  */
 
 const UPDATE = process.env.UPDATE_WIRE_GOLDENS === '1'
@@ -47,26 +64,60 @@ function wholeLive(keys: string[]): TrimSpec {
 
 const MIXED_CATALOG = trimLiveCatalog({ ...wholeLive(['anthropic', 'openai']), groq: 4 })
 const OFF_ONLY_CATALOG = trimLiveCatalog({ groq: 4 })
+/** The anthropic models dropped from the mixed catalog (all auto-enabled by it). */
+const DROPPED_ANTHROPIC = 3
+const SHRUNK_CATALOG = trimLiveCatalog({
+  ...wholeLive(['openai']),
+  anthropic: Object.keys(LIVE_MODELS_DEV_CATALOG.anthropic.models).length - DROPPED_ANTHROPIC,
+  groq: 4,
+})
+
+/** The Kubernetes API with every LIST failing, as an unreachable apiserver does. */
+const FAILING_CLUSTER: ConsumerGateway = {
+  listResource: async () => {
+    throw Object.assign(new Error('apiserver unavailable'), { statusCode: 503 })
+  },
+}
 
 type RunOptions = {
   catalog: RawModelsDevCatalog
   source: 'live' | 'vendored'
   minPlausibleLiveTotal: number
   autoEnableMaxPerProviderPerRun?: number
+  /** Run the production prune after the sync, reading consumers from this cluster. */
+  pruneCluster?: ConsumerGateway
 }
 
 async function run(opts: RunOptions): Promise<CatalogSyncResult> {
+  return runSequence([opts])
+}
+
+/** Every run on one table, in order; the body is the last run's. */
+async function runSequence(steps: RunOptions[]): Promise<CatalogSyncResult> {
   const db = makeFakeDb()
-  const result = await syncDiscoveredModels(
-    {
-      materializer: db.materializer,
-      loadCatalog: loadStub(opts.catalog, opts.source),
-      minPlausibleLiveTotal: opts.minPlausibleLiveTotal,
-      autoEnableMaxPerProviderPerRun: opts.autoEnableMaxPerProviderPerRun ?? LARGE_CAP,
-      autoEnableMaxPerRun: LARGE_CAP,
-    },
-    db.connector
-  )
+  let result: CatalogSyncResult | undefined
+  for (const opts of steps) {
+    result = await syncDiscoveredModels(
+      {
+        materializer: db.materializer,
+        loadCatalog: loadStub(opts.catalog, opts.source),
+        minPlausibleLiveTotal: opts.minPlausibleLiveTotal,
+        autoEnableMaxPerProviderPerRun: opts.autoEnableMaxPerProviderPerRun ?? LARGE_CAP,
+        autoEnableMaxPerRun: LARGE_CAP,
+        ...(opts.pruneCluster
+          ? {
+              prune: catalogPruneFromGateway(opts.pruneCluster, {
+                graceMs: 0,
+                maxPerRun: LARGE_CAP,
+                txPool: db.pool('prune'),
+              }),
+            }
+          : {}),
+      },
+      db.connector
+    )
+  }
+  if (!result) throw new Error('runSequence: no steps')
   expect(Number.isNaN(Date.parse(result.fetchedAt))).toBe(false)
   expect(Number.isNaN(Date.parse(result.ranAt))).toBe(false)
   // A JSON round trip, so the cases are what a consumer parses.
@@ -103,7 +154,32 @@ async function buildContract(): Promise<{ cases: Record<string, CatalogSyncResul
         source: 'live',
         minPlausibleLiveTotal: 1_000_000,
       }),
+      prune_disabled: await runSequence([live(MIXED_CATALOG), live(SHRUNK_CATALOG)]),
+      prune_aborted: await runSequence([
+        live(MIXED_CATALOG),
+        { ...live(SHRUNK_CATALOG), pruneCluster: FAILING_CLUSTER },
+      ]),
+      prune_re_enabled: await runSequence([
+        live(MIXED_CATALOG),
+        live(SHRUNK_CATALOG),
+        live(MIXED_CATALOG),
+      ]),
+      prune_re_enable_capped: await runSequence([
+        live(MIXED_CATALOG),
+        live(SHRUNK_CATALOG),
+        { ...live(MIXED_CATALOG), autoEnableMaxPerProviderPerRun: 1 },
+      ]),
     },
+  }
+}
+
+/** A live, plausible run followed by the production prune over an empty cluster. */
+function live(catalog: RawModelsDevCatalog): RunOptions {
+  return {
+    catalog,
+    source: 'live',
+    minPlausibleLiveTotal: 1,
+    pruneCluster: new MockGateway(),
   }
 }
 
@@ -113,7 +189,13 @@ function counts(r: CatalogSyncResult): CatalogSyncProviderCount[] {
   )
 }
 
-type CountField = 'inserted' | 'autoEnabled' | 'skippedUndecidable' | 'deferredByCap'
+type CountField =
+  | 'inserted'
+  | 'autoEnabled'
+  | 'skippedUndecidable'
+  | 'deferredByCap'
+  | 'reEnabled'
+  | 'reEnableDeferredByCap'
 
 function sum(r: CatalogSyncResult, field: CountField): number {
   return counts(r).reduce((n, c) => n + c[field], 0)
@@ -164,6 +246,47 @@ describe('catalog-sync result wire contract', () => {
     expect(implausible.source).toBe('live')
     expect(implausible.decidable).toBe(false)
     expect(providersWith(implausible, 'skippedUndecidable')).toBeGreaterThanOrEqual(2)
+
+    // Without a prune the body has no prune fields; with one, both are present.
+    for (const key of [
+      'decidable_auto_enabled',
+      'decidable_capped',
+      'decidable_none_enabled',
+      'undecidable_vendored',
+      'undecidable_implausible',
+    ]) {
+      expect(cases[key]).not.toHaveProperty('pruned')
+      expect(cases[key]).not.toHaveProperty('pruneAborted')
+    }
+    for (const [key, r] of Object.entries(cases)) {
+      expect(r.reEnabled, key).toBe(sum(r, 'reEnabled'))
+      expect(r.reEnableDeferredByCap, key).toBe(sum(r, 'reEnableDeferredByCap'))
+    }
+
+    const pruned = cases.prune_disabled
+    expect(pruned.decidable).toBe(true)
+    expect(pruned.staled).toBe(DROPPED_ANTHROPIC)
+    expect(pruned.pruned).toBe(DROPPED_ANTHROPIC)
+    expect(pruned.pruneAborted).toBe(false)
+
+    const aborted = cases.prune_aborted
+    expect(aborted.staled).toBe(DROPPED_ANTHROPIC)
+    expect(aborted.pruned).toBe(0)
+    expect(aborted.pruneAborted).toBe(true)
+
+    const reEnabled = cases.prune_re_enabled
+    expect(reEnabled.reEnabled).toBe(DROPPED_ANTHROPIC)
+    expect(reEnabled.reEnableDeferredByCap).toBe(0)
+    expect(reEnabled.added).toBe(0)
+    expect(reEnabled.pruned).toBe(0)
+    expect(reEnabled.pruneAborted).toBe(false)
+
+    const reEnableCapped = cases.prune_re_enable_capped
+    expect(reEnableCapped.reEnabled).toBe(1)
+    expect(reEnableCapped.reEnableDeferredByCap).toBe(DROPPED_ANTHROPIC - 1)
+    expect(providersWith(reEnableCapped, 'reEnableDeferredByCap')).toBe(1)
+    expect(reEnableCapped.pruned).toBe(0)
+    expect(reEnableCapped.pruneAborted).toBe(false)
   })
 
   it('matches the committed fixture', async () => {

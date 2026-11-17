@@ -1,189 +1,263 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
-import Link from 'next/link'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '@components/AuthContext'
-import { ModelReferences } from '@components/ModelReferences'
-import { CONTROL_ROUTES } from '@constants/routes'
-import { type AdminAttentionItem, getAdminAttention, isSilentApiError } from '@lib/api'
-import { getProviderDisplayLabel } from '@lib/llm'
-import { attentionPairKey, buildModelIdsByPair, groupAttentionItems } from '@lib/llmModelAttention'
-import type {
-  AttentionReviewLinkProps,
-  CatalogAttentionBannerProps,
-  CatalogModelAttentionGroupProps,
-} from './types'
+import { useToast } from '@components/Toast'
+import { Button } from '@components/ui'
+import {
+  type AdminAckableAttentionItem,
+  type AdminAttentionItem,
+  type AdminModelAttentionItem,
+  ackAdminAttention,
+  getAdminAttention,
+  isAttentionEpisodeChanged,
+  isLlmModelConfigMapDeferred,
+  isSilentApiError,
+  unackAdminAttention,
+  updateLlmModel,
+} from '@lib/api'
+import {
+  attentionItemKey,
+  attentionPairKey,
+  buildModelIdsByPair,
+  groupAttentionItems,
+  splitAcknowledged,
+} from '@lib/llmModelAttention'
+import { CatalogAttentionDialog } from './CatalogAttentionDialog'
+import type { CatalogAttentionBannerProps } from './types'
 
 const NO_MODELS: NonNullable<CatalogAttentionBannerProps['models']> = []
 
-function plural(count: number): string {
-  return count === 1 ? '' : 's'
-}
+const EPISODE_CHANGED_NOTICE = 'This item changed, review it again.'
 
-function isAre(count: number): string {
-  return count === 1 ? 'is' : 'are'
-}
-
-function itOrEach(count: number): string {
-  return count === 1 ? 'it' : 'each one'
-}
-
-/** Link to the model's edit page; nothing while its allowlist row is not loaded. */
-function AttentionReviewLink({ item, modelIdsByPair }: AttentionReviewLinkProps) {
-  const modelId = modelIdsByPair.get(attentionPairKey(item))
-  if (!modelId) return null
-  const label = item.displayName ?? item.model
-  return (
-    <>
-      {' '}
-      <Link
-        className="cu-link"
-        href={CONTROL_ROUTES.llmModels.edit(modelId)}
-        aria-label={`Review ${label} (${getProviderDisplayLabel(item.provider)} · ${item.model})`}
-      >
-        Review
-      </Link>
-    </>
-  )
-}
-
-/** One group of reference-free items: a lede, then each model with its review link. */
-function CatalogModelAttentionGroup({
-  items,
-  lede,
-  modelIdsByPair,
-}: CatalogModelAttentionGroupProps) {
-  return (
-    <div className="cu-model-attention__group">
-      <p className="cu-model-attention__lede">{lede(items.length)}</p>
-      <ul className="cu-model-attention__list">
-        {items.map(item => {
-          const label = item.displayName ?? item.model
-          const providerLabel = getProviderDisplayLabel(item.provider)
-          return (
-            <li key={`${item.kind}/${item.provider}/${item.model}`}>
-              <span className="cu-model-attention__head">
-                <span className="cu-model-attention__name">{label}</span>{' '}
-                <span className="cu-model-attention__meta">
-                  ({item.displayName ? `${providerLabel} · ${item.model}` : providerLabel})
-                </span>
-                <AttentionReviewLink item={item} modelIdsByPair={modelIdsByPair} />
-              </span>
-            </li>
-          )
-        })}
-      </ul>
-    </div>
-  )
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback
 }
 
 /**
- * Self-contained inline alert on the /llm-models catalog surface. Fetches
- * `GET /admin/attention` and lists, one group per kind:
- * - each `stale` catalog model still referenced by a live Host/grant, so the
- *   operator disables it (impact-gated PUT) or repoints those references;
- * - each enabled model the catalog marks deprecated;
- * - each enabled discovered model the latest catalog no longer lists.
- * The last two only inform: the operator reviews the model and disables it,
- * replaces it, or keeps it. A fetch failure degrades softly — the banner stays
- * hidden and never tumbles the surface.
+ * Self-contained one-line alert on the /llm-models catalog surface. Fetches
+ * `GET /admin/attention?includeAcknowledged=1` and counts the items still to
+ * review, one segment per kind (the detail opens in CatalogAttentionDialog):
+ * - each enabled model the catalog no longer lists while somebody uses it;
+ * - each enabled model the catalog marks deprecated while somebody uses it;
+ * - each `stale_discovery_enabled` item, a kind only an older control-api still
+ *   sends; it keeps its segment so that server's feed is not undercounted.
+ * Items the operator already reviewed sit in the dialog's Reviewed section and
+ * never count here. A fetch failure degrades softly — the banner stays hidden
+ * and never tumbles the surface.
+ *
+ * The server is the only state: every action ends in a reload of the feed, with
+ * no optimistic update, and only the buttons of the item in flight are locked.
  */
 export function CatalogAttentionBanner({
   refreshSignal,
   models = NO_MODELS,
+  returnFocusRef,
 }: CatalogAttentionBannerProps = {}) {
   const { authState } = useAuth()
+  const { showToast } = useToast()
   const [items, setItems] = useState<AdminAttentionItem[]>([])
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const [focusOrphaned, setFocusOrphaned] = useState(false)
+  const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set())
+  const [itemErrors, setItemErrors] = useState<ReadonlyMap<string, string>>(() => new Map())
+  // The feed read that may still land: a newer read supersedes it, so an older
+  // response arriving late can never overwrite a newer one.
+  const currentLoad = useRef<AbortController | null>(null)
+
+  async function loadFeed() {
+    currentLoad.current?.abort()
+    const controller = new AbortController()
+    currentLoad.current = controller
+    try {
+      const report = await getAdminAttention({
+        includeAcknowledged: true,
+        signal: controller.signal,
+      })
+      if (currentLoad.current !== controller) return
+      setItems(report.items)
+      // An error belongs to an item; once the item leaves the feed it points at nothing.
+      const present = new Set(report.items.map(attentionItemKey))
+      setItemErrors(current =>
+        [...current.keys()].every(key => present.has(key))
+          ? current
+          : new Map([...current].filter(([key]) => present.has(key)))
+      )
+    } catch (err) {
+      if (currentLoad.current !== controller || isSilentApiError(err)) return
+      // Advisory banner: a failure must never break the models surface.
+      setItems([])
+    }
+  }
 
   // Re-fetches on mount and whenever `refreshSignal` changes — the surface bumps
   // it after a successful mutation so a just-resolved item stops showing. On
   // demand only; there is no polling.
   useEffect(() => {
     if (!(authState.isLoggedIn && !authState.isLoading)) return
-    let cancelled = false
-    async function load() {
-      try {
-        const report = await getAdminAttention()
-        if (!cancelled) setItems(report.items)
-      } catch (err) {
-        if (isSilentApiError(err)) return
-        // Advisory banner: a failure must never break the models surface.
-        if (!cancelled) setItems([])
-      }
-    }
-    void load()
+    void loadFeed()
     return () => {
-      cancelled = true
+      currentLoad.current?.abort()
+      currentLoad.current = null
     }
   }, [authState.isLoggedIn, authState.isLoading, refreshSignal])
 
-  const modelIdsByPair = useMemo(() => buildModelIdsByPair(models), [models])
-  // Unknown kinds never reach here: the fetch layer drops them while parsing.
-  const { staleReferenced, deprecated, staleDiscovery } = groupAttentionItems(items)
-  if (staleReferenced.length + deprecated.length + staleDiscovery.length === 0) return null
+  function setBusy(key: string, busy: boolean) {
+    setBusyKeys(current => {
+      const next = new Set(current)
+      if (busy) next.add(key)
+      else next.delete(key)
+      return next
+    })
+  }
 
+  function setItemError(key: string, message: string | null) {
+    setItemErrors(current => {
+      if (message === null && !current.has(key)) return current
+      const next = new Map(current)
+      if (message === null) next.delete(key)
+      else next.set(key, message)
+      return next
+    })
+  }
+
+  /**
+   * Runs one item's action and then reloads the feed. A 409
+   * `attention_episode_changed` reloads too, so the operator sees the item as it
+   * is now. Any other failure leaves the feed alone and shows the error on the
+   * item, which stays where it was so the operator can retry.
+   */
+  async function runItemAction(
+    item: AdminAttentionItem,
+    action: () => Promise<void>,
+    describeFailure: (err: unknown) => string
+  ) {
+    const key = attentionItemKey(item)
+    setBusy(key, true)
+    setItemError(key, null)
+    try {
+      await action()
+      await loadFeed()
+    } catch (err) {
+      if (isSilentApiError(err)) return
+      if (isAttentionEpisodeChanged(err)) {
+        showToast(EPISODE_CHANGED_NOTICE, { tone: 'info' })
+        await loadFeed()
+        return
+      }
+      setItemError(key, describeFailure(err))
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
+  function markReviewed(item: AdminAckableAttentionItem) {
+    void runItemAction(
+      item,
+      () => ackAdminAttention(item),
+      err => errorMessage(err, 'Failed to mark the model as reviewed')
+    )
+  }
+
+  // The pin must land before the acknowledgement: the ack only records that the
+  // operator decided, the PUT is the decision. A failed ack after a successful
+  // PUT keeps the PUT; retrying repeats both, and repeating the pin is harmless.
+  function keepEnabled(item: AdminAckableAttentionItem, modelId: string) {
+    let pinned = false
+    void runItemAction(
+      item,
+      async () => {
+        try {
+          await updateLlmModel(modelId, { enabled: true, pinEnabled: true })
+        } catch (err) {
+          // The row was saved; only the cluster propagation is delayed.
+          if (!isLlmModelConfigMapDeferred(err)) throw err
+        }
+        pinned = true
+        await ackAdminAttention(item)
+      },
+      err =>
+        pinned
+          ? `Kept enabled, but marking it as reviewed failed: ${errorMessage(err, 'request failed')}. Try again.`
+          : errorMessage(err, 'Failed to keep the model enabled')
+    )
+  }
+
+  function undoReviewed(item: AdminModelAttentionItem) {
+    void runItemAction(
+      item,
+      () => unackAdminAttention(item),
+      err => errorMessage(err, 'Failed to undo the review')
+    )
+  }
+
+  const modelIdsByPair = useMemo(() => buildModelIdsByPair(models), [models])
+  const { pending, reviewed } = splitAcknowledged(items)
+  // The dialog restores focus to its opener, but an emptied feed removes the
+  // opener in the same commit, which would drop focus to <body>.
+  useEffect(() => {
+    if (!focusOrphaned) return
+    setFocusOrphaned(false)
+    returnFocusRef?.current?.focus()
+  }, [focusOrphaned, returnFocusRef])
+  // Unknown kinds never reach here: the fetch layer drops them while parsing.
+  const groups = groupAttentionItems(pending)
+  const { staleReferenced, deprecated, staleDiscovery } = groups
+  const nothingPending = staleReferenced.length + deprecated.length + staleDiscovery.length === 0
+  const empty = nothingPending && reviewed.length === 0
+  // `return null` does not unmount this component, so without this reset a
+  // dialog left open when the feed empties (an empty or a failed refetch) would
+  // reappear on its own the next time the feed has items. Reviewed items keep it
+  // open: they are where the operator undoes a review.
+  if (empty && reviewOpen) {
+    setReviewOpen(false)
+    setFocusOrphaned(true)
+  }
+  if (empty) return null
+
+  // No total: one model can sit in two groups (deprecated and then dropped, or
+  // dropped while still referenced), so a sum would overcount.
+  const segments = [
+    staleReferenced.length > 0 ? `${staleReferenced.length} still referenced` : null,
+    deprecated.length > 0 ? `${deprecated.length} deprecated` : null,
+    staleDiscovery.length > 0 ? `${staleDiscovery.length} no longer listed` : null,
+  ].filter((segment): segment is string => segment !== null)
+
+  // One element for both lines, so the dialog stays mounted (and open) when the
+  // last pending item moves to Reviewed.
   return (
-    <div className="cu-banner cu-banner--warning cu-model-attention" role="status">
-      {staleReferenced.length > 0 ? (
-        <div className="cu-model-attention__group">
-          <p className="cu-model-attention__lede">
-            <strong>{staleReferenced.length}</strong> model{plural(staleReferenced.length)}{' '}
-            disappeared from the provider catalog but {isAre(staleReferenced.length)} still
-            referenced. Disable {itOrEach(staleReferenced.length)} or update the references pointing
-            at it.
-          </p>
-          <ul className="cu-model-attention__list">
-            {staleReferenced.map(item => {
-              const label = item.displayName ?? item.model
-              const hostCount = item.hostsAffected.length
-              const grantCount = item.grantsAffected.length
-              return (
-                <li key={`${item.provider}/${item.model}`}>
-                  <span className="cu-model-attention__head">
-                    <span className="cu-model-attention__name">{label}</span>{' '}
-                    <span className="cu-model-attention__meta">
-                      ({getProviderDisplayLabel(item.provider)})
-                    </span>{' '}
-                    — {hostCount} Host{plural(hostCount)} / {grantCount} grant
-                    {plural(grantCount)} still use it.
-                    <AttentionReviewLink item={item} modelIdsByPair={modelIdsByPair} />
-                  </span>
-                  <ModelReferences
-                    hostsAffected={item.hostsAffected}
-                    grantsAffected={item.grantsAffected}
-                  />
-                </li>
-              )
-            })}
-          </ul>
-        </div>
-      ) : null}
-      {deprecated.length > 0 ? (
-        <CatalogModelAttentionGroup
-          items={deprecated}
-          modelIdsByPair={modelIdsByPair}
-          lede={count => (
-            <>
-              <strong>{count}</strong> enabled model{plural(count)} {isAre(count)} marked deprecated
-              in the provider catalog. Review {itOrEach(count)}: disable it, replace it with a newer
-              model, or keep it enabled.
-            </>
-          )}
-        />
-      ) : null}
-      {staleDiscovery.length > 0 ? (
-        <CatalogModelAttentionGroup
-          items={staleDiscovery}
-          modelIdsByPair={modelIdsByPair}
-          lede={count => (
-            <>
-              <strong>{count}</strong> enabled discovered model{plural(count)} {isAre(count)} no
-              longer listed in the provider catalog. Review {itOrEach(count)}: disable it, replace
-              it, or keep it if the provider still serves it.
-            </>
-          )}
-        />
-      ) : null}
+    <div
+      className={
+        nothingPending
+          ? 'cu-banner cu-llm-models-banner cu-llm-models-banner--quiet'
+          : 'cu-banner cu-banner--warning cu-llm-models-banner'
+      }
+      role="status"
+    >
+      {nothingPending ? (
+        // Counts items, not models: one model can be reviewed under two kinds.
+        <span>{reviewed.length} reviewed</span>
+      ) : (
+        <span>Models need review: {segments.join(' · ')}</span>
+      )}{' '}
+      <Button type="button" variant="ghost" size="sm" onClick={() => setReviewOpen(true)}>
+        {nothingPending ? 'Show reviewed' : 'Review models'}
+      </Button>
+      <CatalogAttentionDialog
+        open={reviewOpen}
+        onDismiss={() => setReviewOpen(false)}
+        groups={groups}
+        reviewed={reviewed}
+        modelIdsByPair={modelIdsByPair}
+        busyKeys={busyKeys}
+        itemErrors={itemErrors}
+        onKeepEnabled={item => {
+          const modelId = modelIdsByPair.get(attentionPairKey(item))
+          if (modelId) keepEnabled(item, modelId)
+        }}
+        onMarkReviewed={markReviewed}
+        onUndoReviewed={undoReviewed}
+      />
     </div>
   )
 }
