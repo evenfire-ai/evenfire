@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { WorkflowApprovalMediumAccount } from '@/app/types/approvalChannels'
+import type {
+  ApprovalChannelTarget,
+  WorkflowApprovalMediumAccount,
+} from '@/app/types/approvalChannels'
 import { TelegramVerificationPanel } from '../../channels/TelegramVerificationPanel'
 import { ToastProvider } from '../Toast'
 
@@ -113,5 +116,29 @@ describe('TelegramVerificationPanel empty state', () => {
     )
 
     expect(screen.getByText('No Slack channels set up yet.')).toBeInTheDocument()
+  })
+
+  it('keeps the one-line empty state while connectable targets exist but nothing is connected', () => {
+    render(
+      <ToastProvider>
+        <TelegramVerificationPanel
+          accounts={[]}
+          disabled={false}
+          medium="telegram"
+          onAccountsRefresh={vi.fn()}
+          onRemoveAccount={() => undefined}
+          targets={[
+            {
+              id: 'target-1',
+              medium: 'telegram',
+              agentName: 'Ops agent',
+            } as ApprovalChannelTarget,
+          ]}
+        />
+      </ToastProvider>
+    )
+
+    expect(screen.getByText('No Telegram channels set up yet.')).toBeInTheDocument()
+    expect(screen.queryByRole('list')).not.toBeInTheDocument()
   })
 })

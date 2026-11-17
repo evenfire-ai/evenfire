@@ -208,13 +208,12 @@ export function TelegramVerificationPanel({
   return (
     <div className="settings-social-channel-content">
       {error && !modalOpen ? <div className="message message--error">{error}</div> : null}
-      {targets.length === 0 ? (
+
+      {accounts.length === 0 ? (
         <div className="message message--warning message--plain">
           No {providerLabel} channels set up yet.
         </div>
-      ) : null}
-
-      {accounts.length > 0 ? (
+      ) : (
         <RecordList className="settings-target-list">
           {accounts.map(account => (
             <RecordListRow className="settings-target-row" key={account.id}>
@@ -248,7 +247,7 @@ export function TelegramVerificationPanel({
             </RecordListRow>
           ))}
         </RecordList>
-      ) : null}
+      )}
 
       {modalOpen ? (
         <div
