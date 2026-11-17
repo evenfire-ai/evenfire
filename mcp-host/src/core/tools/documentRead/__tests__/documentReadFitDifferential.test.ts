@@ -11,7 +11,7 @@ import { laterSheetScenarios, runFitScenarios } from './fitScenarios'
  * reads, and needs its own justification.
  *
  * The production token measure does not always grow with the result: one
- * more character can cost one token less. Where the cost dips, the aimed
+ * more character can cost up to two tokens less. Where the cost dips, the aimed
  * search and a bisection can settle on different sizes, so a result can hold
  * a few characters more or fewer than before; it never exceeds the allowance
  * (independent review round 2, N1).
@@ -45,7 +45,8 @@ describe('document read results are unchanged by the M2 measure cuts', () => {
 
   it('decides rows that are all too wide with about one measure each', async () => {
     // 600 rows, each emitted as []: every one needs its own exact probe, and
-    // halving alone spent about two (1,340 measures; review round 2, P2).
+    // halving alone spent about two. On this fixture that was 1,340 measures.
+    // Round 2 measured 703 on its own workbook (P2).
     // `decided(to, probeBase + 1)` is what keeps the turn chain at 516.
     // Removing it leaves 707 turn measures, still under the old 750 bound,
     // so the exact turn count is the liveness witness. The fresh chain stays

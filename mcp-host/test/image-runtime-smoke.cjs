@@ -103,8 +103,8 @@ async function documentReaderSmoke() {
   assert.equal(visual.images.length, 1)
   // A PNG signature, and a page with ink on it: the canvas binding drew the
   // text instead of leaving the page blank. Ink does not show which face drew
-  // it: when the standard font data cannot be read, pdf.js falls back to a
-  // built-in face that also draws ink.
+  // it. When the standard font data cannot be read, the canvas library's
+  // fallback face also draws ink. That face does not come from pdf.js.
   assert.deepEqual([...visual.images[0].png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
   const { ink, pixels } = await inkPixels(visual.images[0].png)
   assert.ok(ink > 0 && ink < pixels, `rendered page ink: ${ink} of ${pixels} pixels`)

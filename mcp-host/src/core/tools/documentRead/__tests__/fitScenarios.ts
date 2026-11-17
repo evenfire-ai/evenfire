@@ -253,7 +253,7 @@ function scenarios(): Scenario[] {
         name: `xlsx ${name} (${ledger})`,
         file: xlsx,
         runJob: workbookRunner(model, window),
-        // The long list sizes its page to the list plus about 1.5 rows.
+        // The long list sizes its page to the list plus about 0.56 of a row.
         windowTokens: tokens || (measureResult(JSON.stringify(model.sheetNames)) + 420) * 10,
         ledger,
         maxCalls: 60,
