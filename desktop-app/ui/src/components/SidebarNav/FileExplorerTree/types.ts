@@ -36,8 +36,12 @@ export interface FileExplorerNodeProps {
   level: number
   /** Sibling index of this node and of each ancestor, root first: its on-screen order. */
   visibleOrder: readonly number[]
-  /** An expanded folder reports itself while rendered, and `null` when collapsed or unmounted. */
-  onExpandedFolderVisibility: (resourceId: string, folder: VisibleExpandedFolder | null) => void
+  /**
+   * An expanded folder reports itself while rendered, and `null` when collapsed
+   * or unmounted. `instanceKey` names the rendered copy, not the resource: one
+   * folder can appear more than once in the forest.
+   */
+  onExpandedFolderVisibility: (instanceKey: string, folder: VisibleExpandedFolder | null) => void
   /** Cache-scope key shared with the Files page's TanStack queries. */
   scope: string
   /** Published main-process generation that owns this authority query. */

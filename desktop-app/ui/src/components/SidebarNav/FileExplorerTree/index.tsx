@@ -125,8 +125,11 @@ function FileExplorerNode({
   const visibleOrderKey = visibleOrder.join('.')
   useEffect(() => {
     if (!isExpanded) return
-    onExpandedFolderVisibility(node.resourceId, { gfsUri: node.gfsUri, order: visibleOrder })
-    return () => onExpandedFolderVisibility(node.resourceId, null)
+    // Keyed per rendered copy: nested grants render one folder both as a root
+    // and as a child, and one copy unmounting must not drop the other's entry.
+    const instanceKey = `${visibleOrderKey}|${node.resourceId}`
+    onExpandedFolderVisibility(instanceKey, { gfsUri: node.gfsUri, order: visibleOrder })
+    return () => onExpandedFolderVisibility(instanceKey, null)
     // visibleOrder is a fresh array each render; its content is visibleOrderKey.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isExpanded, node.gfsUri, node.resourceId, onExpandedFolderVisibility, visibleOrderKey])
@@ -519,24 +522,24 @@ export function FileExplorerTree({
     ReadonlyMap<string, VisibleExpandedFolder>
   >(() => new Map())
   const handleExpandedFolderVisibility = useCallback(
-    (resourceId: string, folder: VisibleExpandedFolder | null) => {
+    (instanceKey: string, folder: VisibleExpandedFolder | null) => {
       setVisibleExpandedFolders(current => {
-        if (!folder && !current.has(resourceId)) return current
+        if (!folder && !current.has(instanceKey)) return current
         const next = new Map(current)
-        if (folder) next.set(resourceId, folder)
-        else next.delete(resourceId)
+        if (folder) next.set(instanceKey, folder)
+        else next.delete(instanceKey)
         return next
       })
     },
     []
   )
-  const visibleExpandedFolderUris = useMemo(
-    () =>
-      [...visibleExpandedFolders.values()]
-        .sort((left, right) => compareVisibleOrder(left.order, right.order))
-        .map(folder => folder.gfsUri),
-    [visibleExpandedFolders]
-  )
+  const visibleExpandedFolderUris = useMemo(() => {
+    // Copies of one folder share its gfsUri; the first on screen sets its priority.
+    const onScreen = [...visibleExpandedFolders.values()].sort((left, right) =>
+      compareVisibleOrder(left.order, right.order)
+    )
+    return [...new Set(onScreen.map(folder => folder.gfsUri))]
+  }, [visibleExpandedFolders])
   const visibleExpandedFolderSignature = visibleExpandedFolderUris.join('\n')
   const onVisibleExpandedFoldersChangeRef = useRef(onVisibleExpandedFoldersChange)
   onVisibleExpandedFoldersChangeRef.current = onVisibleExpandedFoldersChange

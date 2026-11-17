@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useRef, useState } from 'react'
+import { StrictMode, useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -219,6 +219,191 @@ describe('FileExplorerTree — expanded folders on screen', () => {
 
     cleanup()
     expect(last()).toEqual([])
+  })
+})
+
+// Nested grants on /Alpha and /Alpha/Beta render Beta twice: as a root and as
+// Alpha's child. Both copies share one `expandedIds` entry, and every rendered
+// copy must keep the folder published until the LAST copy goes away.
+describe('FileExplorerTree — a folder rendered twice under nested grants', () => {
+  type Rid = 'alpha' | 'beta' | 'gamma' | 'aaron'
+  const NAMES: Record<Rid, string> = {
+    aaron: 'Aaron',
+    alpha: 'Alpha',
+    beta: 'Beta',
+    gamma: 'Gamma',
+  }
+  const PATHS: Record<Rid, string> = {
+    aaron: '/Aaron',
+    alpha: '/Alpha',
+    beta: '/Alpha/Beta',
+    gamma: '/Alpha/Beta/Gamma',
+  }
+  const PARENT: Record<Rid, Rid | null> = { aaron: null, alpha: null, beta: 'alpha', gamma: 'beta' }
+  const uri = (rid: Rid) => `gfs://main/${rid}`
+
+  function installForest(server: {
+    roots: Rid[]
+    children: Partial<Record<Rid, Rid[]>>
+    failing?: boolean
+  }) {
+    const node = (rid: Rid) => ({ parentResourceId: PARENT[rid], path: PATHS[rid] })
+    const failure = gfsRouteFailureMessage(
+      client => client.listAccessible('session', { drive: 'main' }),
+      500,
+      { code: 'internal', message: 'discovery unavailable' }
+    )
+    installClerum({
+      listAccessible: vi.fn(async () => {
+        if (server.failing) throw new Error(await failure)
+        return listAccessiblePage(
+          server.roots.map(rid => accessibleResource(rid, NAMES[rid], 'directory', node(rid)))
+        )
+      }),
+      listChildren: vi.fn(async (resourceId: string) =>
+        listChildrenPage(
+          (server.children[resourceId as Rid] ?? []).map(rid =>
+            childView(rid, NAMES[rid], 'directory', node(rid))
+          )
+        )
+      ),
+    })
+  }
+
+  function renderForest(options: { strict?: boolean } = {}) {
+    const published: string[][] = []
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const tree = (
+      <QueryClientProvider client={queryClient}>
+        <FileExplorerTree
+          onOpenFolder={vi.fn()}
+          onOpenPreview={vi.fn()}
+          pushToast={vi.fn()}
+          onVisibleExpandedFoldersChange={uris => published.push(uris)}
+        />
+      </QueryClientProvider>
+    )
+    render(options.strict ? <StrictMode>{tree}</StrictMode> : tree)
+    return { published, last: () => published.at(-1) }
+  }
+
+  function refocusWindow() {
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+  }
+
+  afterEach(() => focusManager.setFocused(undefined))
+
+  async function expandBothCopiesOfBeta(last: () => string[] | undefined) {
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Alpha' }))
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Expand Beta' })).toHaveLength(2)
+    )
+    fireEvent.click(screen.getAllByRole('button', { name: 'Expand Beta' })[0]!)
+    await waitFor(() => expect(last()).toEqual([uri('alpha'), uri('beta')]))
+  }
+
+  it('keeps the root copy published after collapsing the ancestor of the child copy', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'] } })
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Alpha' }))
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Beta' })).toHaveLength(1))
+    expect(last()).toEqual([uri('beta')])
+  })
+
+  it('keeps an expanded descendant of the surviving copy published', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'], beta: ['gamma'] } })
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Expand Gamma' })).toHaveLength(2)
+    )
+    fireEvent.click(screen.getAllByRole('button', { name: 'Expand Gamma' })[0]!)
+    await waitFor(() => expect(last()).toEqual([uri('alpha'), uri('beta'), uri('gamma')]))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Alpha' }))
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Gamma' })).toHaveLength(1))
+    expect(last()).toEqual([uri('beta'), uri('gamma')])
+  })
+
+  it('follows roots that shift position, and a root that takes over a removed root’s index', async () => {
+    const server = { roots: ['alpha', 'beta'] as Rid[], children: { alpha: ['beta'] as Rid[] } }
+    installForest(server)
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    // A new grant sorts above every expanded root and shifts their positions.
+    server.roots = ['aaron', 'alpha', 'beta']
+    refocusWindow()
+    await screen.findByRole('button', { name: 'Aaron' })
+    await waitFor(() => expect(last()).toEqual([uri('alpha'), uri('beta')]))
+
+    // Revoking Alpha unmounts Beta's child copy in the same commit that moves
+    // the root copy of Beta into Alpha's old index.
+    server.roots = ['aaron', 'beta']
+    refocusWindow()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Alpha' })).toBeNull())
+    await waitFor(() => expect(last()).toEqual([uri('beta')]))
+  })
+
+  it('publishes a folder once however many copies of it are expanded', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'] } })
+    const { published, last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    expect(last()).toEqual([uri('alpha'), uri('beta')])
+    for (const list of published) expect(new Set(list).size).toBe(list.length)
+  })
+
+  it('publishes nothing while a failed focus refetch hides the forest, and the list once it recovers', async () => {
+    const server = {
+      roots: ['alpha', 'beta'] as Rid[],
+      children: { alpha: ['beta'] as Rid[] },
+      failing: false,
+    }
+    installForest(server)
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    server.failing = true
+    refocusWindow()
+    await waitFor(() => expect(screen.queryByRole('tree', { name: 'Shared files' })).toBeNull())
+    await waitFor(() => expect(last()).toEqual([]))
+
+    server.failing = false
+    refocusWindow()
+    await screen.findByRole('tree', { name: 'Shared files' })
+    await waitFor(() => expect(last()).toEqual([uri('alpha'), uri('beta')]))
+  })
+
+  it('drops the folder once every copy of it collapses', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'] } })
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Collapse Beta' })[1]!)
+
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Expand Beta' })).toHaveLength(2)
+    )
+    expect(last()).toEqual([uri('alpha')])
+  })
+
+  it('keeps the root copy published under StrictMode effect replays', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'] } })
+    const { last } = renderForest({ strict: true })
+    await expandBothCopiesOfBeta(last)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Alpha' }))
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Beta' })).toHaveLength(1))
+    expect(last()).toEqual([uri('beta')])
   })
 })
 
