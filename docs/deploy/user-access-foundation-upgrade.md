@@ -113,16 +113,20 @@ to a catalog-managed row leaves the row catalog-managed:
   image never produces. After rolling forward again the prune can turn it off
   once more, and if the catalog lists it, its `stale` marker does not clear.
 - A discovered model that was off and never pruned (its provider's auto-enable
-  was off, or it was not eligible), turned on by hand under the old image, or a
-  discovered model renamed under the old image, is still catalog-managed after
-  rolling forward. Once it is stale for the grace period and nobody uses it, the
-  prune turns it off.
+  was off, or it was not eligible) and was turned on by hand under the old image
+  is still catalog-managed after rolling forward. Once it is stale for the grace
+  period and nobody uses it, the prune turns it off.
+- The same holds for a discovered model renamed under an image released before
+  renamed discovered models became manual (v0.12.x): the row keeps
+  `source = 'discovery'`. Under an image that has that rule, the rename makes
+  the row `manual`, and the prune never touches it.
 
 Before or right after rolling forward, re-pin each such model as the
 operator's choice (`PUT /admin/llm-models/:id` with `enabled: true` and
-`pinEnabled: true`). These are the rows this query returns: the pruned ones by
-their `auto_disabled_at`, the others by an admin audit entry written after
-`0140` was applied (sync entries have no `detail`). It can also list a row
+`pinEnabled: true`). The query below finds them among the discovered rows,
+the only ones the prune acts on: the pruned ones by their `auto_disabled_at`,
+the others by an admin audit entry written after `0140` was applied (sync
+entries have no `detail`). It can also list a row
 whose `enabled` an admin of the new image resent unchanged; re-pinning that one
 only makes it the operator's.
 
@@ -130,6 +134,7 @@ only makes it the operator's.
 SELECT t.id, t.provider, t.model
   FROM llm_allowed_models t
  WHERE t.enabled
+   AND t.source = 'discovery'
    AND t.enabled_managed_by = 'catalog'
    AND (t.auto_disabled_at IS NOT NULL
         OR EXISTS (

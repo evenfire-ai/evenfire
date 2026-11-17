@@ -222,8 +222,7 @@ const PRUNE_STATE_COLUMNS = [
 /*
  * A frozen copy of the statements the image before this change runs on
  * llm_allowed_models: the catalog sync's INSERT and mark-stale UPDATE, and the
- * row lock plus SET list the admin PUT builds for an `enabled`-only body, and
- * the UPDATE plus audit INSERT it issues for a `model`-only rename. That
+ * row lock plus SET list the admin PUT builds for an `enabled`-only body. That
  * image keeps running beside the migrated schema during a rollout, so these
  * strings are the contract the migrations must stay compatible with; they are
  * not re-read from git because CI checks out a shallow clone without that commit.
@@ -258,9 +257,11 @@ const PREVIOUS_PUT_LOCK_ROW = `SELECT ${PREVIOUS_MODEL_COLUMNS} FROM llm_allowed
 const PREVIOUS_PUT_ENABLED = `UPDATE llm_allowed_models
           SET enabled = $1, updated_at = NOW()
         WHERE id = $2`
-// A rename sent straight to the API with only `model` in the body, as that
-// image's updateAllowedModel issues it: it keeps source='discovery' and
-// discovered_at, and its audit row (under the new pair) has no `enabled`.
+// Not the image above: the released v0.12.x image, from before a renamed
+// discovered row became manual, which a rollback can still land on. Its
+// updateAllowedModel, for a rename sent straight to the API with only `model`
+// in the body, keeps source='discovery' and discovered_at, and writes an audit
+// row (under the new pair) without `enabled`.
 const PREVIOUS_PUT_RENAME_MODEL = `UPDATE llm_allowed_models
           SET model = $1, image_input = NULL, updated_at = NOW()
         WHERE id = $2

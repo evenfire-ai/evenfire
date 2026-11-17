@@ -93,8 +93,9 @@ export async function applyLlmCatalogPruneStateSchema(db: DbClient): Promise<voi
   // stores the request body, not the previous value) and the sync writes no
   // per-model audit, so any audit row that names `enabled`, or any disable,
   // keeps the row the operator's. So does one that names `provider` or
-  // `model`: images before the rename-to-manual rule kept a renamed discovered
-  // row as source='discovery' with its discovered_at, and a rename sent without
+  // `model`: an image released before renamed discovered rows became manual
+  // (v0.12.x) kept a renamed discovered row as source='discovery' with its
+  // discovered_at, and a rename sent without
   // `enabled` is otherwise indistinguishable from a row the sync inserted (the
   // audit is written under the new pair, so it matches the renamed row).
   // `discovered_at` is written only by the sync's INSERT: the seeded rows 0135
