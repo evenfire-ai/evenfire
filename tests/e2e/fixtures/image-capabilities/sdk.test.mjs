@@ -142,6 +142,7 @@ test('the production ZAI serializer and pinned SDK complete an attachment read a
       model: 'glm-5.3-flash',
       imageSha256: null,
       responseKind: 'document-read-requested',
+      documentReader: 'text',
       documentSha256: null,
       documentByteLength: Buffer.byteLength(documentText),
     },
@@ -149,6 +150,7 @@ test('the production ZAI serializer and pinned SDK complete an attachment read a
       model: 'glm-5.3-flash',
       imageSha256: null,
       responseKind: 'document-answer',
+      documentReader: 'text',
       documentSha256: digest,
       byteRange: { offset: 0, length: Buffer.byteLength(documentText) },
       truncated: false,
@@ -201,6 +203,11 @@ for (const declaredMediaType of ['text/plain', 'text/plain; charset="utf-8"']) {
         description: 'Read an attached file.',
         parameters: { type: 'object', properties: { attachmentId: { type: 'string' } } },
       },
+      {
+        name: 'clerum__document_read',
+        description: 'Read an attached PDF or XLSX document.',
+        parameters: { type: 'object', properties: { attachmentId: { type: 'string' } } },
+      },
     ]
     const user = { role: 'user', content: `${block}\n\nSummarize the attached file.` }
 
@@ -215,12 +222,14 @@ for (const declaredMediaType of ['text/plain', 'text/plain; charset="utf-8"']) {
         model: 'glm-5.3-flash',
         imageSha256: null,
         responseKind: 'document-read-requested',
+        documentReader: 'pdf',
         documentSha256: null,
         documentByteLength: byteLength,
       },
     ])
     assert.equal(settled.value.finish_reason, 'tool_use')
     assert.equal(settled.value.tool_calls?.length, 1)
+    assert.equal(settled.value.tool_calls[0].name, 'clerum__document_read')
     assert.deepEqual(settled.value.tool_calls[0].arguments, { attachmentId })
   })
 }
