@@ -188,8 +188,8 @@ test('optional QA recorder: Desktop model selector lists models without capabili
 
     await test.step('restore the original selection', async () => {
       if (!originalModel || originalModel === otherModel) {
-        // Broker-backed host with no prior selection, or the pick was already
-        // the original. Nothing to hand back.
+        // The chip named no model (the Host reports an empty default), or the
+        // pick was already the original. Nothing to hand back.
         await ui.keyboard.press('Escape')
         await expect(modelMenu(ui)).toBeHidden({ timeout: 20_000 })
         return
