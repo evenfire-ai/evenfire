@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { type Mock, afterEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
+import { resolveImageInputDecision } from '../../../../src/imageInputDecision'
 import type { HostModelsResult, SetHostModelResult } from '../../../../src/types'
 import {
   getPendingModelIntent,
@@ -885,5 +886,171 @@ describe('hostModelSelectionStore — reset', () => {
       intentModel: null,
       effectiveModel: '',
     })
+  })
+})
+
+/**
+ * Broker-backed Hosts (`codex-subscription`, `grok-subscription`) report their
+ * `spec.model.name` as `hostDefault`, never `''`, and the runtime dispatches
+ * that default for a session without a selection even when the catalog does
+ * not list it. The fixtures below follow that producer shape.
+ */
+describe('hostModelSelectionStore — broker-backed Host default', () => {
+  const BROKER_PROVIDERS = ['codex-subscription', 'grok-subscription'] as const
+  const SUPPORTED = { state: 'supported', reason: 'supported' } as const
+
+  function brokerResult(overrides: Partial<HostModelsResult> = {}): HostModelsResult {
+    return {
+      provider: 'codex-subscription',
+      hostDefault: 'gpt-5.5',
+      sessionModel: null,
+      degraded: false,
+      modelSelectionRevision: 0,
+      // The default is deliberately NOT the first row, so a view that seeded
+      // `models[0]` would be told apart from one that names the default.
+      models: [
+        { name: 'gpt-5.3', displayName: 'GPT-5.3', imageInput: SUPPORTED },
+        { name: 'gpt-5.5', displayName: 'GPT-5.5', imageInput: SUPPORTED },
+      ],
+      ...overrides,
+    }
+  }
+
+  // S4 was dropped from the spec: stale/disabled rows never reach the wire.
+  it('S1 — a Codex chat without a selection uses the Host default, not the first row', async () => {
+    const { transport } = makeTransport({ getHostModels: async () => brokerResult() })
+    await loadHostModels(transport, AGENT, CHAT)
+
+    const view = getHostModelSelectionSnapshot(AGENT, CHAT)
+    expect(view.effectiveModel).toBe('gpt-5.5')
+    expect(view.pending).toBe(false)
+  })
+
+  it('S2 — a Grok default with supported image input allows images', async () => {
+    const { transport } = makeTransport({
+      getHostModels: async () =>
+        brokerResult({
+          provider: 'grok-subscription',
+          hostDefault: 'grok-4.6',
+          models: [{ name: 'grok-4.6', displayName: 'Grok 4.6', imageInput: SUPPORTED }],
+        }),
+    })
+    await loadHostModels(transport, AGENT, CHAT)
+
+    const view = getHostModelSelectionSnapshot(AGENT, CHAT)
+    expect(view.effectiveModel).toBe('grok-4.6')
+    expect(view.imageInput.state).toBe('supported')
+    expect(view.canAttachImages).toBe(true)
+    expect(view.imageBlockMessage).toBeNull()
+  })
+
+  it('S3 — a default absent from the catalog is still named, and its images stay blocked', async () => {
+    const { transport } = makeTransport({
+      getHostModels: async () =>
+        brokerResult({
+          models: [{ name: 'gpt-5.3', displayName: 'GPT-5.3', imageInput: SUPPORTED }],
+        }),
+    })
+    await loadHostModels(transport, AGENT, CHAT)
+
+    const view = getHostModelSelectionSnapshot(AGENT, CHAT)
+    expect(view.effectiveModel).toBe('gpt-5.5')
+    expect(view.imageInput).toEqual({ state: 'unknown', reason: 'model_unknown' })
+    expect(view.canAttachImages).toBe(false)
+    expect(view.imageBlockMessage).toContain('"gpt-5.5"')
+  })
+
+  it('S5 — a rejected pick during a superseded load falls back to the Host default', async () => {
+    const read = deferred<HostModelsResult>()
+    const { transport } = makeTransport({
+      getHostModels: () => read.promise,
+      setHostModel: vi.fn(async () => {
+        throw new Error('Set host model rejected (model_not_allowed)')
+      }),
+    })
+    // Race: gpt-5.3 leaves the allowlist between the read and the pick.
+    const load = loadHostModels(transport, AGENT, CHAT)
+    // The pick bumps the generation, so the read below lands superseded.
+    expect(await selectHostModel(transport, AGENT, CHAT, 'gpt-5.3')).toBe(false)
+    read.resolve(brokerResult({ sessionModel: 'gpt-5.3' }))
+    await load
+
+    const view = getHostModelSelectionSnapshot(AGENT, CHAT)
+    // Preconditions of the row: no intent survived and the read was withheld.
+    expect(view.intentModel).toBeNull()
+    expect(view.data?.sessionModel).toBe('gpt-5.3')
+    expect(view.effectiveModel).toBe('gpt-5.5')
+  })
+
+  it('P1 — the effective model is `intent ?? sessionModel ?? hostDefault` for every provider', async () => {
+    const NAME_POOL = ['m-a', 'm-b', 'm-c', 'm-d', 'm-e'] as const
+    const imageInputArb = fc.constantFrom(
+      undefined,
+      SUPPORTED,
+      { state: 'unsupported', reason: 'model_unsupported' } as const,
+      { state: 'unknown', reason: 'model_unknown' } as const
+    )
+    const rowArb = fc.record({ name: fc.constantFrom(...NAME_POOL), imageInput: imageInputArb })
+    const caseArb = fc
+      .record({
+        provider: fc.constantFrom(...BROKER_PROVIDERS, 'claude', 'zai', 'openai'),
+        catalog: fc.uniqueArray(rowArb, { selector: row => row.name, maxLength: NAME_POOL.length }),
+        degraded: fc.boolean(),
+        // Outside the pool, so the default can also be absent from the catalog.
+        outsideDefault: fc.constantFrom('m-outside', 'm-retired'),
+      })
+      .chain(base =>
+        fc
+          .constantFrom(base.outsideDefault, ...base.catalog.map(row => row.name))
+          .chain(hostDefault => {
+            // Degraded is mcp-host's `projectModels` shape without an allowlist:
+            // only the default, with unknown image input.
+            const models: HostModelsResult['models'] = base.degraded
+              ? [{ name: hostDefault, imageInput: { state: 'unknown', reason: 'model_unknown' } }]
+              : base.catalog.map(row =>
+                  row.imageInput
+                    ? { name: row.name, imageInput: row.imageInput }
+                    : { name: row.name }
+                )
+            const names = models.map(row => row.name)
+            return fc.record({
+              provider: fc.constant(base.provider),
+              degraded: fc.constant(base.degraded),
+              hostDefault: fc.constant(hostDefault),
+              models: fc.constant(models),
+              sessionModel: fc.constantFrom(null, ...names),
+              intent: fc.constantFrom(null, 'm-intent', ...names),
+            })
+          })
+      )
+
+    await fc.assert(
+      fc.asyncProperty(
+        caseArb,
+        async ({ provider, degraded, hostDefault, models, sessionModel, intent }) => {
+          resetHostModelSelectionStore()
+          if (intent) setPendingModelIntent(AGENT, CHAT, intent)
+          const result: HostModelsResult = {
+            provider,
+            hostDefault,
+            sessionModel,
+            degraded,
+            modelSelectionRevision: 0,
+            models,
+          }
+          const { transport } = makeTransport({ getHostModels: async () => result })
+          await loadHostModels(transport, AGENT, CHAT)
+
+          const ref = intent ?? sessionModel ?? hostDefault
+          const view = getHostModelSelectionSnapshot(AGENT, CHAT)
+          expect(view.effectiveModel).toBe(ref)
+          const row = models.find(model => model.name === ref)
+          expect(view.canAttachImages).toBe(
+            row !== undefined && resolveImageInputDecision(row.imageInput).state === 'supported'
+          )
+        }
+      ),
+      { numRuns: 500 }
+    )
   })
 })

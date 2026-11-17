@@ -242,16 +242,16 @@ describe('useHostModels — one shared selection source (selector + composer)', 
   })
 })
 
-describe('useHostModels — Codex subscription (no silent default)', () => {
-  it('does not seed a Codex session from the first catalog model when hostDefault is empty', async () => {
+describe('useHostModels — broker-backed Host default', () => {
+  it('uses the Codex Host default for a session without a selection, not the first catalog row', async () => {
     const getHostModels = vi.fn(async () =>
       baseModels({
         provider: 'codex-subscription',
-        hostDefault: '',
+        hostDefault: 'gpt-5.5',
         sessionModel: null,
         models: [
           { name: 'gpt-5.3', displayName: 'GPT-5.3' },
-          { name: 'gpt-5.2', displayName: 'GPT-5.2' },
+          { name: 'gpt-5.5', displayName: 'GPT-5.5' },
         ],
       })
     )
@@ -261,7 +261,7 @@ describe('useHostModels — Codex subscription (no silent default)', () => {
     await waitFor(() => expect(result.current.data).toBeTruthy())
 
     expect(result.current.data?.provider).toBe('codex-subscription')
-    expect(result.current.data?.sessionModel).toBeNull()
-    expect(result.current.data?.hostDefault).toBe('')
+    expect(result.current.effectiveModel).toBe('gpt-5.5')
+    expect(result.current.pending).toBe(false)
   })
 })
