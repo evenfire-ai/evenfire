@@ -675,6 +675,7 @@ workloads:
         storageClass: do-block-storage
         accessMode: ReadWriteOnce
         size: 10Gi
+        # Immutable once the StatefulSet exists. WRC compares it with the stored value by amount when written as digits, an optional fraction and an optional suffix in at most 64 characters (1024Mi equals a stored 1Gi), and as text otherwise.
     # PVCs created from volumeClaimTemplates include WorkflowRecipe labels for queryability:
     # - clerum.io/workload: <workload-id>
     # - clerum.io/recipe: <recipe-name>
