@@ -64,6 +64,11 @@ export interface IncomingMessage {
   fileReferences?: FileReferenceV1[]
   /** Server-owned: admission's resolution of `fileReferences`; callers cannot set it. */
   fileReferenceResolutions?: FileReferenceResolution[]
+  /**
+   * What the Desktop draws in a reply, such as `mermaid`; rpc-proxy forwards
+   * known values only. Read for the `rpc` channel only (`clientDrawsMermaid`).
+   */
+  displayCapabilities?: string[]
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'

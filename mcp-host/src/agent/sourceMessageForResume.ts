@@ -1,5 +1,6 @@
 import type { Attachment, ResumeFileAttachment, ResumeSourceMessage } from '../core/types'
 import type { IncomingMessage } from '../server'
+import { clientDrawsMermaid } from './displayCapabilities'
 
 /**
  * #666 R4-M2 — what a cold restart needs from the suspended turn's message, and
@@ -8,6 +9,7 @@ import type { IncomingMessage } from '../server'
  * - `sender`, `channelType`, `channelId`, `threadId`: the approval binding, the
  *   workspace root, `session_search`, `cron_manage` ownership and the rpc scope.
  * - `metadata.teamId`: rpc team scope and budget attribution.
+ * - `displayCapabilities`: the diagram guidance a Desktop that draws Mermaid gets.
  * - `content`: the provider-workflow access gate and the tool registry.
  * - `hostRef`, `messageId`, `timestamp`: Host attribution and the pins' identity.
  * - `imageModel`: the visual model the turn was pinned to.
@@ -36,6 +38,7 @@ export function sourceMessageForResume(
     hostRef: message.hostRef,
     ...(message.threadId !== undefined ? { threadId: message.threadId } : {}),
     ...(typeof teamId === 'string' ? { metadata: { teamId } } : {}),
+    ...(clientDrawsMermaid(message) ? { displayCapabilities: ['mermaid'] } : {}),
     ...(message.imageModel ? { imageModel: message.imageModel } : {}),
     ...(files.length ? { attachments: files.map(fileWithoutBytes) } : {}),
     ...(message.fileReferenceResolutions
