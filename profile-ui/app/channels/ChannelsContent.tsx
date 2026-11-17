@@ -165,10 +165,10 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
             >
               <IconRefresh className={state === 'loading' ? 'cu-spin' : undefined} />
             </Button>
-            {currentChannel ? (
+            {currentChannel && currentTargets.length > 0 ? (
               <Button
                 onClick={() => setConnectRequestCount(count => count + 1)}
-                disabled={formDisabled || currentTargets.length === 0}
+                disabled={formDisabled}
               >
                 Connect {currentChannel.label}
               </Button>
@@ -236,9 +236,9 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
                 />
               ) : null}
             </>
-          ) : (
+          ) : state === 'ready' ? (
             <p className="body-copy">No social channels are set up yet.</p>
-          )}
+          ) : null}
         </section>
 
         {confirmDialog}
