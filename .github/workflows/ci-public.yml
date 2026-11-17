@@ -307,8 +307,9 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm run typecheck:jwt-contract
 
-      # The native Electron fixtures do not run in CI; typecheck them so they
-      # cannot drift from the src/ contracts they drive.
+      # The native Electron fixtures do not run in CI. The TypeScript one
+      # (test/native/*.ts) is typechecked so it cannot drift from the src/
+      # contracts it drives; the .cjs fixtures are not covered.
       - name: Typecheck Desktop native test fixtures
         if: matrix.service == 'desktop-app'
         working-directory: desktop-app
