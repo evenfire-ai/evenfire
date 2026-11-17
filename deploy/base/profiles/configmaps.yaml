@@ -14,6 +14,15 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: desktop-profile-ui-config
+  namespace: profiles
+data:
+  # Root Kustomize projects the final Control API setting here after overlays.
+  CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: $(CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: profile-control-funnel-nginx
   namespace: profiles
 data:

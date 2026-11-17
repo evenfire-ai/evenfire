@@ -3,20 +3,27 @@ import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 
+const desktopPackageAliases = {
+  ...Object.fromEntries(
+    [
+      '@clerum/grok-provider-attempt-contract',
+      '@clerum/llm-provider-attempt-contract',
+      '@clerum/llm-providers',
+      'pino',
+    ].map(name => [name, require.resolve(name)])
+  ),
+  // Cross-service Desktop tests load the real consumer without installing the
+  // Desktop dependency tree in the isolated Control API CI job.
+  '@clerum/desktop-app-links': require.resolve('../packages/desktop-app-links/index.cjs'),
+}
+
 export default defineConfig({
   resolve: {
     // The image authorization integration imports the real Host and proxy
     // sources. CI installs this package alone; resolve their shared runtime
     // imports from Control API's declared dependencies, without requiring
     // unrelated sibling node_modules or replacing the implementation.
-    alias: Object.fromEntries(
-      [
-        '@clerum/grok-provider-attempt-contract',
-        '@clerum/llm-provider-attempt-contract',
-        '@clerum/llm-providers',
-        'pino',
-      ].map(name => [name, require.resolve(name)])
-    ),
+    alias: desktopPackageAliases,
   },
   test: {
     environment: 'node',

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { canonicalizeDesktopRestEndpoint } from '../../../src/desktopEnvironmentUrl'
 import type {
   AccessCatalog,
   PendingWorkflowApproval,
+  ProfileUiDispatchFailure,
   WorkflowApprovalDecisionResult,
   WorkflowRecipeListResult,
   WorkflowRecipeResource,
@@ -142,7 +144,20 @@ export function useAppController() {
   // ─── Global status state (owned by coordinator, not auth) ───
   const [statusText, setStatusText] = useState('Ready.')
   const [statusTone, setStatusTone] = useState<Tone>('info')
+  const [profileUiDispatchFailure, setProfileUiDispatchFailure] =
+    useState<ProfileUiDispatchFailure | null>(null)
+  const [mainSessionGeneration, setMainSessionGeneration] = useState<number | null>(null)
   const [postPaintDataReady, setPostPaintDataReady] = useState(false)
+  const refreshMainSessionGeneration = useCallback(async () => {
+    try {
+      const currentGeneration = await window.clerum.auth.getSessionGeneration()
+      setMainSessionGeneration(
+        Number.isSafeInteger(currentGeneration) && currentGeneration >= 0 ? currentGeneration : null
+      )
+    } catch {
+      setMainSessionGeneration(null)
+    }
+  }, [])
 
   // Build fullSetStatus using refs to avoid circular dependencies
   const setStatusTextRef = useRef(setStatusText)
@@ -157,10 +172,18 @@ export function useAppController() {
       message: string,
       tone: Tone = 'info',
       payload?: unknown,
-      options: { global?: boolean; toast?: boolean; toastDurationMs?: number } = {}
+      options: {
+        global?: boolean
+        toast?: boolean
+        toastDurationMs?: number
+        profileUiCorrelationId?: string
+      } = {}
     ) => {
       const { global: updateGlobal = true, toast = true } = options
       if (updateGlobal) {
+        setProfileUiDispatchFailure(current =>
+          current?.correlationId === options.profileUiCorrelationId ? current : null
+        )
         setStatusTextRef.current(payload ? `${message}\n${toPrettyJson(payload)}` : message)
         setStatusToneRef.current(tone)
       }
@@ -183,6 +206,8 @@ export function useAppController() {
   const onExternalSessionEnded = useCallback(() => {
     sessionGenerationRef.current = null
     setPublishedSessionGeneration(null)
+    setMainSessionGeneration(null)
+    setProfileUiDispatchFailure(null)
     activeAuthenticatedSessionIdentityRef.current = null
     authenticatedSessionIdentityRef.current = null
     setPostPaintDataReady(false)
@@ -201,10 +226,19 @@ export function useAppController() {
   // ─── Auth ───
   const auth = useAuthController({
     setStatus: fullSetStatus,
+    onMainSessionGenerationChanged: refreshMainSessionGeneration,
     onSessionNeedsLoad,
     onSessionEnded: onExternalSessionEnded,
     logoutForEnvironmentMismatch,
   })
+
+  useEffect(
+    () =>
+      window.clerum.auth.onProfileUiDispatchFailed?.(failure => {
+        setProfileUiDispatchFailure(failure)
+      }),
+    []
+  )
 
   // ─── First-run onboarding ───
   const onboarding = useOnboardingController()
@@ -711,6 +745,7 @@ export function useAppController() {
           (sessionState.sessionGeneration ?? -1) >= 0
             ? sessionState.sessionGeneration!
             : null
+        setMainSessionGeneration(sessionState.sessionGeneration ?? null)
         // Team is a data scope, not a principal boundary. Terminate Team A's
         // task/FSM/reconcile ownership while preserving workspace tabs, focus,
         // selection, and local drafts for this same principal.
@@ -834,6 +869,7 @@ export function useAppController() {
           (sessionState.sessionGeneration ?? -1) >= 0
             ? sessionState.sessionGeneration!
             : null
+        setMainSessionGeneration(nextSessionGeneration)
         const sessionIdentity =
           authenticated && sessionState.me
             ? `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
@@ -1022,6 +1058,8 @@ export function useAppController() {
       authenticatedSessionIdentityRef.current = null
       sessionGenerationRef.current = null
       setPublishedSessionGeneration(null)
+      setMainSessionGeneration(logoutGeneration)
+      setProfileUiDispatchFailure(null)
       await attemptCleanup(() => nav.resetSessionNavigation())
       await attemptCleanup(() => auth.setDesktopReleaseStatus(null))
       await attemptCleanup(() => setPostPaintDataReady(false))
@@ -1056,6 +1094,12 @@ export function useAppController() {
         )
         return logoutGeneration
       }
+      // A native logout can advance its session generation before secure
+      // token cleanup rejects. In that case the session may remain
+      // authenticated, but late Profile UI dispatch reports now carry the
+      // new main-owned generation. Keep the renderer's report filter aligned
+      // with that still-live session.
+      await refreshMainSessionGeneration()
       fullSetStatus(
         `Logout failed: ${error instanceof Error ? error.message : String(error)}`,
         'error'
@@ -1081,6 +1125,7 @@ export function useAppController() {
     notif.resetNotifications,
     queryClient,
     resetWorkflowsData,
+    refreshMainSessionGeneration,
     teamsData.reset,
   ])
   const handleLogout = useCallback(async (): Promise<void> => {
@@ -1610,6 +1655,44 @@ export function useAppController() {
   // These guards are handled by useNavigationController's state + the coordinator logic.
   // We replicate the original behavior by watching nav state changes.
 
+  const activeProfileOption = auth.runtimeConfigState?.options.find(
+    option => option.id === auth.runtimeConfigState?.activeOptionId
+  )
+  const profileUiDispatchEnvironmentIsCurrent = (() => {
+    if (!profileUiDispatchFailure) return false
+    const runtimeConfigState = auth.runtimeConfigState
+    const activeOptionId = runtimeConfigState?.activeOptionId ?? null
+    if (profileUiDispatchFailure.binding.profileId === null) {
+      const currentRestBaseUrl = runtimeConfigState?.currentConfig?.externalRestApiBaseUrl
+      return (
+        activeOptionId === null &&
+        profileUiDispatchFailure.binding.profileIncarnation === null &&
+        (!currentRestBaseUrl ||
+          canonicalizeDesktopRestEndpoint(currentRestBaseUrl) ===
+            profileUiDispatchFailure.binding.restBaseUrl)
+      )
+    }
+    return (
+      activeOptionId === profileUiDispatchFailure.binding.profileId &&
+      activeProfileOption?.profileIncarnation ===
+        profileUiDispatchFailure.binding.profileIncarnation &&
+      canonicalizeDesktopRestEndpoint(activeProfileOption.externalRestApiBaseUrl) ===
+        profileUiDispatchFailure.binding.restBaseUrl
+    )
+  })()
+  const profileUiDispatchFailureIsCurrent = Boolean(
+    profileUiDispatchFailure &&
+    (mainSessionGeneration === null ||
+      mainSessionGeneration === profileUiDispatchFailure.binding.sessionGeneration) &&
+    profileUiDispatchEnvironmentIsCurrent
+  )
+
+  useEffect(() => {
+    if (profileUiDispatchFailure && !profileUiDispatchFailureIsCurrent) {
+      setProfileUiDispatchFailure(null)
+    }
+  }, [profileUiDispatchFailure, profileUiDispatchFailureIsCurrent])
+
   return {
     // Auth
     booting: auth.booting,
@@ -1620,8 +1703,11 @@ export function useAppController() {
       agentsData.loading &&
       !agentsData.accessCatalog,
     busy: auth.busy,
-    statusText,
-    statusTone,
+    statusText: profileUiDispatchFailureIsCurrent
+      ? 'Profile UI could not be opened in your browser.'
+      : statusText,
+    statusTone: profileUiDispatchFailureIsCurrent ? 'error' : statusTone,
+    profileUiDispatchFailureVisible: profileUiDispatchFailureIsCurrent,
     isAuthenticated: auth.isAuthenticated,
     me: auth.me,
     currentTeamId,

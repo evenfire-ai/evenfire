@@ -145,6 +145,7 @@ export interface AppControllerClerumHandle {
   logout: Fn
   getSessionGeneration: Fn
   getRuntimeConfigState: () => Promise<DesktopRuntimeConfigState>
+  setRuntimeConfigState: (state: DesktopRuntimeConfigState) => void
   selectRuntimeConfigForHandoff: Fn
   onDesktopEnvironmentSetup: Fn
   emitDesktopEnvironmentSetup: (payload: {
@@ -327,6 +328,8 @@ export function extendMockClerumForAppController(
       getRuntimeConfigState,
       getSessionGeneration,
       selectRuntimeConfigForHandoff,
+      completeDesktopSetup: vi.fn(async () => runtimeConfigState),
+      saveRuntimeConfig: vi.fn(async () => runtimeConfigState),
       getDesktopReleaseStatus,
       openDesktopRelease: vi.fn(async () => undefined),
       passwordLogin,
@@ -408,6 +411,9 @@ export function extendMockClerumForAppController(
     logout,
     getSessionGeneration,
     getRuntimeConfigState,
+    setRuntimeConfigState(state) {
+      runtimeConfigState = state
+    },
     selectRuntimeConfigForHandoff,
     onDesktopEnvironmentSetup,
     async emitDesktopEnvironmentSetup(payload) {

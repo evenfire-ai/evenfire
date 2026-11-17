@@ -13,7 +13,7 @@ build: install
 	npm run build
 
 dev: install
-	CLERUM_DEV_MODE=true npm run dev
+	CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL="$${CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL-http://127.0.0.1:3001}" CLERUM_DEV_MODE=true npm run dev
 
 docker-build:
 	docker build -f "$(PROJECT_ROOT)/external-rest-api/Dockerfile" -t $(REGISTRY)/$(IMAGE_NAME):$(TAG) "$(PROJECT_ROOT)"

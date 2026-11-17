@@ -42,6 +42,9 @@ See `.env.example`.
 Environment variables:
 
 - `EXTERNAL_REST_API_PORT`: HTTP port the service listens on (default `8091`).
+- `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`: the canonical Profile UI origin shared with
+  Control API. Local development uses `http://127.0.0.1:3001`; deployed services receive the
+  operator-configured value from the final Kustomize projection.
 - `EXTERNAL_REST_API_CORS_ORIGIN`: Allowed CORS origin for browser requests (`*` allows all origins).
 - `EXTERNAL_REST_API_GOOGLE_CLIENT_ID`: Google OAuth client ID used to verify incoming Google ID tokens.
 - `EXTERNAL_REST_API_CONTROL_API_BASE_URL`: Base URL for internal calls to `control-api` (typically through the profile control funnel).
@@ -105,7 +108,14 @@ npm install
 CLERUM_DEV_MODE=true npm run dev
 ```
 
-`make dev` also opts into this local mode. It is rejected with
+Set the canonical local Profile UI origin when using the command directly:
+
+```bash
+CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL=http://127.0.0.1:3001 \
+  CLERUM_DEV_MODE=true npm run dev
+```
+
+`make dev` supplies that local origin and opts into this local mode. It is rejected with
 `NODE_ENV=production`. Without this opt-in, set
 `EXTERNAL_REST_API_JWT_PUBLIC_KEY` explicitly.
 

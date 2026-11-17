@@ -1,4 +1,5 @@
 import { config } from './config.js'
+import { desktopEnvironmentDiscoveryUrl } from './desktopEnvironmentUrl.js'
 import { ApiError, requestJson } from './httpClient.js'
 import {
   DesktopEnvironmentDiscovery,
@@ -27,6 +28,34 @@ import {
   WorkflowRunsResult,
 } from './types.js'
 import { boundedErrorExcerpt } from './upstreamErrors.js'
+
+const DESKTOP_ENVIRONMENT_RESPONSE_MAX_BYTES = 64 * 1024
+
+async function readDesktopEnvironmentResponseText(response: Response): Promise<string> {
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('Desktop environment discovery returned an empty response')
+
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    totalBytes += value.byteLength
+    if (totalBytes > DESKTOP_ENVIRONMENT_RESPONSE_MAX_BYTES) {
+      await reader.cancel().catch(() => undefined)
+      throw new Error('Desktop environment discovery response exceeded the size limit')
+    }
+    chunks.push(value)
+  }
+
+  const bytes = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+}
 
 function url(path: string): string {
   return `${config.externalRestApiBaseUrl.replace(/\/+$/, '')}${path}`
@@ -377,7 +406,42 @@ export class AuthClient {
   }
 
   async getDesktopEnvironment(): Promise<DesktopEnvironmentDiscovery> {
-    return requestJson<DesktopEnvironmentDiscovery>('GET', url('/api/v1/desktop/environment'))
+    const endpoint = config.externalRestApiBaseUrl
+    return this.getDesktopEnvironmentForEndpoint(endpoint)
+  }
+
+  async getDesktopEnvironmentForEndpoint(
+    externalRestApiBaseUrl: string,
+    signal?: AbortSignal
+  ): Promise<DesktopEnvironmentDiscovery> {
+    const target = desktopEnvironmentDiscoveryUrl(externalRestApiBaseUrl)
+    const response = await fetch(target, {
+      method: 'GET',
+      redirect: 'error',
+      signal: signal || AbortSignal.timeout(10_000),
+      headers: { accept: 'application/json' },
+    })
+    const raw = await readDesktopEnvironmentResponseText(response)
+    if (!response.ok) {
+      throw new ApiError(
+        `Desktop environment discovery failed: ${response.status} ${response.statusText}`,
+        response.status,
+        boundedErrorExcerpt(raw)
+      )
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      throw new Error('Desktop environment discovery returned invalid JSON')
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Desktop environment discovery returned an invalid response')
+    }
+    return {
+      ...(parsed as DesktopEnvironmentDiscovery),
+      responseUrl: response.url,
+    }
   }
 
   async getDesktopReleasePolicy(token: string): Promise<DesktopReleasePolicy> {

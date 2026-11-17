@@ -39,6 +39,16 @@ spec:
           name: http
           protocol: TCP
         env:
+        - name: CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
+        - name: CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL
         - name: CONTROL_API_SESSION_JWT_PRIVATE_KEY
           valueFrom:
             secretKeyRef:

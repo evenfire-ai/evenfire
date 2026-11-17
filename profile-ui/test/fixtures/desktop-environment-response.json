@@ -1,5 +1,6 @@
 {
   "appName": "Example Tenant",
   "externalRestApiBaseUrl": "https://api.example.com",
-  "rpcProxyBaseUrl": "https://rpc.example.com"
+  "rpcProxyBaseUrl": "https://rpc.example.com",
+  "profileUiBaseUrl": "https://profile.example.com"
 }

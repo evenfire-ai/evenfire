@@ -28,7 +28,12 @@ vi.mock('../appService.js', () => ({ AppService: class {} }))
 const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
 const sharedUrl = buildGfsResourceWebLink('https://profile.example', uri)
 const service = {
-  createGfsResourceDeepLink: vi.fn(async () => ({ url: sharedUrl })),
+  createGfsResourceDeepLink: vi.fn(
+    async (_uri: string, writeClipboard?: (url: string) => Promise<void>) => {
+      if (writeClipboard) await writeClipboard(sharedUrl)
+      return { url: sharedUrl }
+    }
+  ),
 }
 const trusted = { senderFrame: { url: 'file:///app/index.html' } }
 
@@ -53,7 +58,7 @@ describe('gfs:copyDeepLink trusted clipboard handoff', () => {
     await expect(copyHandler()(trusted, { uri: ` ${uri} ` })).resolves.toEqual({ url: sharedUrl })
 
     expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
-    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri, expect.any(Function))
     expect(electron.writeText).toHaveBeenCalledOnce()
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
@@ -80,7 +85,7 @@ describe('gfs:copyDeepLink trusted clipboard handoff', () => {
     await expect(result).resolves.toEqual({ url: sharedUrl })
     expect(settled).toBe(true)
     expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
-    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri, expect.any(Function))
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
 
@@ -90,7 +95,7 @@ describe('gfs:copyDeepLink trusted clipboard handoff', () => {
     await expect(copyHandler()(trusted, { uri })).rejects.toThrow('clipboard unavailable')
 
     expect(service.createGfsResourceDeepLink).toHaveBeenCalledOnce()
-    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri)
+    expect(service.createGfsResourceDeepLink).toHaveBeenCalledWith(uri, expect.any(Function))
     expect(electron.writeText).toHaveBeenCalledOnce()
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
