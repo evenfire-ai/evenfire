@@ -222,7 +222,8 @@ const PRUNE_STATE_COLUMNS = [
 /*
  * A frozen copy of the statements the image before this change runs on
  * llm_allowed_models: the catalog sync's INSERT and mark-stale UPDATE, and the
- * row lock plus SET list the admin PUT builds for an `enabled`-only body. That
+ * row lock plus SET list the admin PUT builds for an `enabled`-only body, and
+ * the UPDATE plus audit INSERT it issues for a `model`-only rename. That
  * image keeps running beside the migrated schema during a rollout, so these
  * strings are the contract the migrations must stay compatible with; they are
  * not re-read from git because CI checks out a shallow clone without that commit.
@@ -257,6 +258,15 @@ const PREVIOUS_PUT_LOCK_ROW = `SELECT ${PREVIOUS_MODEL_COLUMNS} FROM llm_allowed
 const PREVIOUS_PUT_ENABLED = `UPDATE llm_allowed_models
           SET enabled = $1, updated_at = NOW()
         WHERE id = $2`
+// A rename sent straight to the API with only `model` in the body, as that
+// image's updateAllowedModel issues it: it keeps source='discovery' and
+// discovered_at, and its audit row (under the new pair) has no `enabled`.
+const PREVIOUS_PUT_RENAME_MODEL = `UPDATE llm_allowed_models
+          SET model = $1, image_input = NULL, updated_at = NOW()
+        WHERE id = $2
+      RETURNING ${PREVIOUS_MODEL_COLUMNS}`
+const PREVIOUS_WRITE_AUDIT = `INSERT INTO llm_allowed_models_audit (actor, action, provider, model, detail)
+     VALUES ($1, $2, $3, $4, $5)`
 
 describeRealPostgres('0139/0140 enabled authority and episodes (real PostgreSQL)', () => {
   const database = `control_api_prune_state_${randomBytes(6).toString('hex')}`
@@ -695,6 +705,7 @@ describeRealPostgres('0139/0140 enabled authority and episodes (real PostgreSQL)
     const enabledByOperator = { provider: PROVIDER, model: '' }
     const reinsertedTombstone = { provider: PROVIDER, model: '' }
     const staleBefore = { provider: PROVIDER, model: '' }
+    const renamedByOperator = { provider: PROVIDER, model: '' }
 
     beforeAll(async () => {
       const name = `control_api_prune_backfill_${randomBytes(6).toString('hex')}`
@@ -733,9 +744,9 @@ describeRealPostgres('0139/0140 enabled authority and episodes (real PostgreSQL)
       )
       const enabledRows = synced.rows.filter(r => r.enabled)
       const disabledRows = synced.rows.filter(r => !r.enabled)
-      expect(enabledRows.length).toBeGreaterThanOrEqual(4)
+      expect(enabledRows.length).toBeGreaterThanOrEqual(5)
       expect(disabledRows.length).toBeGreaterThanOrEqual(1)
-      const [a, b, d, e] = enabledRows
+      const [a, b, d, e, f] = enabledRows
       const c = disabledRows[0]
       clean.model = a!.model
       disabledByOperator.model = b!.model
@@ -788,13 +799,30 @@ describeRealPostgres('0139/0140 enabled authority and episodes (real PostgreSQL)
       // Back to the schema before 0139, keeping every row: the producers above
       // run the current code, which writes 0139's columns.
       await undoPruneStateMigrations(pool)
+
+      // The previous image renames an enabled discovered row on that schema.
+      renamedByOperator.model = `${f!.model}-operator-profile`
+      const renamed = await pool.query<{ source: string; discovered_at: Date | null }>(
+        PREVIOUS_PUT_RENAME_MODEL,
+        [renamedByOperator.model, f!.id]
+      )
+      expect(renamed.rows[0]).toMatchObject({ source: 'discovery' })
+      expect(renamed.rows[0]!.discovered_at).not.toBeNull()
+      await pool.query(PREVIOUS_WRITE_AUDIT, [
+        'test-admin',
+        'update',
+        PROVIDER,
+        renamedByOperator.model,
+        JSON.stringify({ model: renamedByOperator.model }),
+      ])
+
       await mod.initDb({ connect: () => pool.connect() })
 
       const all = await pool.query<Record<string, unknown>>(`SELECT * FROM llm_allowed_models`)
       rows = new Map(all.rows.map(r => [key(r.provider, r.model), r]))
       const flagged = await pool.query<{ provider: string; model: string }>(
         `SELECT DISTINCT provider, model FROM llm_allowed_models_audit
-          WHERE action = 'disable' OR detail ? 'enabled'`
+          WHERE action = 'disable' OR detail ?| ARRAY['enabled', 'provider', 'model']`
       )
       auditFlagged = new Set(flagged.rows.map(r => key(r.provider, r.model)))
       const tomb = await pool.query<{ provider: string; model: string }>(
@@ -824,6 +852,15 @@ describeRealPostgres('0139/0140 enabled authority and episodes (real PostgreSQL)
 
     it('an operator enable (audit `update` with `enabled`) stays operator', () => {
       expect(at(enabledByOperator)).toMatchObject({ enabled: true, enabled_managed_by: 'operator' })
+    })
+
+    it('a discovered row the previous image renamed (audit without `enabled`) stays operator', () => {
+      expect(at(renamedByOperator)).toMatchObject({
+        enabled: true,
+        source: 'discovery',
+        enabled_managed_by: 'operator',
+      })
+      expect(at(renamedByOperator).discovered_at).not.toBeNull()
     })
 
     it('a pair with a tombstone the sync re-inserted stays operator', () => {
