@@ -14,6 +14,7 @@ import type { FilesPageProps } from '@pages/FilesPage.types'
 import { App } from '@/App'
 import type { GfsResourceDeepLinkEnvelope } from '@/App.types'
 import {
+  previewDownloadResult,
   resolveDeniedMessage,
   resolvedDirectory,
   resolvedFile,
@@ -259,6 +260,7 @@ type Fixture = {
   gfsAck: ReturnType<typeof vi.fn>
   gfsResolve: ReturnType<typeof vi.fn>
   gfsResolveStacks: string[]
+  gfsDownloadPreview: ReturnType<typeof vi.fn>
   resourceReadIdentities: Array<string | null>
   appList: ReturnType<typeof vi.fn>
   appLinkList: ReturnType<typeof vi.fn>
@@ -423,6 +425,17 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
         ? resolvedDirectory(resourceId, 'Cold folder', { gfsUri: resourceUri })
         : resolvedFile(resourceId, 'Cold file.md', { gfsUri: resourceUri })
     })
+    const gfsDownloadPreview = vi.fn(
+      async (resourceUri: string, maxBytes: number, _expectedSessionGeneration?: number) => {
+        const resourceId = resourceUri.split('/').at(-1)!
+        const resource = resolvedFile(resourceId, 'Cold file.md', { gfsUri: resourceUri })
+        return previewDownloadResult(
+          resource,
+          new TextEncoder().encode('# Cold file preview\n').buffer,
+          maxBytes
+        )
+      }
+    )
     const onGfsLink = vi.fn((listener: (link: GfsResourceDeepLinkEnvelope) => void) =>
       main!.onGfsDeepLink(link => {
         deliveredGfsEvents += 1
@@ -449,6 +462,7 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
         listPendingDeepLinks: gfsList,
         onDeepLink: onGfsLink,
         resolve: gfsResolve,
+        downloadPreview: gfsDownloadPreview,
         listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
         listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
         affordances: vi.fn(async () => ({
@@ -570,6 +584,7 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
       gfsAck,
       gfsResolve,
       gfsResolveStacks,
+      gfsDownloadPreview,
       resourceReadIdentities,
       appList,
       appLinkList,
@@ -1512,6 +1527,7 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
     const link = fixture.gfsLink
     if (!link) throw new Error('the native queue did not produce the transient file envelope')
     fixture.gfsResolve.mockImplementationOnce(async () => {
+      fixture.gfsResolveStacks.push(new Error('GFS resolve call site').stack ?? '')
       throw new Error(transientMessage)
     })
 
@@ -1533,7 +1549,22 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
     fireEvent.click(retry)
 
     await waitFor(() => expect(destination(fixture.getController())).toBe(uri))
-    expect(fixture.gfsResolve).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(screen.getByText('Cold file preview')).toBeTruthy())
+    expect(fixture.gfsDownloadPreview).toHaveBeenCalledExactlyOnceWith(uri, 2_097_152, 1)
+    expect(fixture.gfsResolve).toHaveBeenCalledTimes(5)
+    expect(fixture.gfsResolve.mock.calls.map(([resolvedUri]) => resolvedUri)).toEqual(
+      Array(5).fill(uri)
+    )
+    expect(fixture.gfsResolve.mock.calls.filter(([, generation]) => generation === 1)).toHaveLength(
+      3
+    )
+    expect(fixture.gfsResolveStacks.filter(stack => stack.includes('FilesPage'))).toHaveLength(2)
+    expect(
+      fixture.gfsResolveStacks.filter(stack => stack.includes('GfsMarkdownPreview/Body'))
+    ).toHaveLength(2)
+    expect(
+      fixture.gfsResolveStacks.filter(stack => stack.includes('useFilePreviewResourceActions'))
+    ).toHaveLength(1)
     expect(screen.getAllByText('Cold file.md').length).toBeGreaterThan(0)
     await waitFor(() => expect(fixture.gfsAck).toHaveBeenCalledWith(link.id))
     await waitFor(() => expect(fixture.gfsQueue.list()).toEqual([]))
@@ -1651,6 +1682,7 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
     transition(model, { kind: 'confirm', id: reopenedLink.id })
     fixture.releaseResource()
     await waitFor(() => expect(destination(fixture.getController())).toBe(uri))
+    await waitFor(() => expect(screen.getByText('Cold file preview')).toBeTruthy())
     transition(model, { kind: 'resolve', id: reopenedLink.id, result: 'file' })
     await waitFor(() => expect(fixture.gfsAck).toHaveBeenCalledWith(reopenedLink.id))
     const reopenedAck = await fixture.gfsAck.mock.results.at(-1)?.value
@@ -1997,18 +2029,28 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
     transition(model, { kind: 'ack', id: link.id, applied: true })
     const finalObservation = await observe(fixture, link)
     expect(finalObservation.actualResolverEntriesById.get(link.id)).toBe(
-      uri.endsWith('f'.repeat(32)) ? 1 : 2
+      uri.endsWith('f'.repeat(32)) ? 1 : 4
     )
     expect(finalObservation.previewFetchesById.get(link.id)).toBe(
       uri.endsWith('f'.repeat(32)) ? 0 : 1
     )
     assertObservation(model, finalObservation, true)
     if (!uri.endsWith('f'.repeat(32))) {
-      expect(fixture.gfsResolve).toHaveBeenCalledTimes(2)
+      expect(fixture.gfsResolve).toHaveBeenCalledTimes(4)
+      expect(fixture.gfsResolve.mock.calls.map(([resolvedUri]) => resolvedUri)).toEqual(
+        Array(4).fill(uri)
+      )
+      expect(
+        fixture.gfsResolve.mock.calls.filter(([, generation]) => generation === 1)
+      ).toHaveLength(3)
       expect(fixture.gfsResolveStacks.filter(stack => stack.includes('FilesPage'))).toHaveLength(1)
+      expect(
+        fixture.gfsResolveStacks.filter(stack => stack.includes('GfsMarkdownPreview/Body'))
+      ).toHaveLength(2)
       expect(
         fixture.gfsResolveStacks.filter(stack => stack.includes('useFilePreviewResourceActions'))
       ).toHaveLength(1)
+      expect(fixture.gfsDownloadPreview).toHaveBeenCalledExactlyOnceWith(uri, 2_097_152, 1)
     }
     fixture.queryClient.clear()
   })
