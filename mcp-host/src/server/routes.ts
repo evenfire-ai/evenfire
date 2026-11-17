@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express'
 import { parseIncomingFileReferences } from '../agent/fileReferenceResolver'
 import { config } from '../config'
+import type { ShellAction } from '../core/approval/shellCard'
 import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
@@ -552,6 +553,11 @@ export async function handleApprovalRoute(
       badRequest(res, 'alwaysApprove must be a boolean')
       return
     }
+    const shellAction = readShellAction(parsed.shellAction)
+    if (shellAction === 'invalid') {
+      badRequest(res, 'shellAction must be once, command, or shell')
+      return
+    }
 
     const decision: ApprovalDecision = {
       userId,
@@ -560,6 +566,7 @@ export async function handleApprovalRoute(
       alwaysApprove: approved && alwaysApprove,
       channelType,
       channelId,
+      ...(approved && shellAction ? { shellAction } : {}),
     }
 
     logger.info(
@@ -578,6 +585,12 @@ export async function handleApprovalRoute(
       error: error instanceof Error ? error.message : 'Unknown error',
     })
   }
+}
+
+function readShellAction(value: unknown): ShellAction | undefined | 'invalid' {
+  if (value === undefined) return undefined
+  if (value === 'once' || value === 'command' || value === 'shell') return value
+  return 'invalid'
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

@@ -125,7 +125,11 @@ import {
 } from './mcp/grantExistenceClient'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
-import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
+import {
+  IncomingMessageHandler,
+  PendingTaskEntry,
+  projectTaskResultApproval,
+} from './messageHandler'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
   resolvePluginWorkloadSdkBootstrapCapabilityFamily,
@@ -2249,23 +2253,7 @@ async function handleTaskResult(
       return {
         success: true,
         status: 'waiting_approval',
-        approval: {
-          taskId,
-          requestId: result.approval.requestId,
-          userId: result.approval.userId,
-          notification: result.approval.notification,
-          // U5 — surface the connect_required discriminator on the REST poll so a
-          // reconnecting desktop rebuilds a "Connect <server>" suspension, not a
-          // generic approval. Omitted for generic approvals (back-compat).
-          ...(result.approval.reason ? { reason: result.approval.reason } : {}),
-          // mcpServerName rides ONLY connect_required, matching the SSE producer.
-          ...(result.approval.reason === 'connect_required' && result.approval.mcpServerName
-            ? { mcpServerName: result.approval.mcpServerName }
-            : {}),
-          ...(result.approval.alwaysApproveAllowed === false
-            ? { alwaysApproveAllowed: false as const }
-            : {}),
-        },
+        approval: projectTaskResultApproval(taskId, result.approval),
         model: result.model,
       }
     }
@@ -2325,7 +2313,8 @@ async function handleApprovalDecision(
         decision.requestId,
         decision.alwaysApprove,
         decision.channelType,
-        decision.channelId
+        decision.channelId,
+        decision.shellAction
       )
     : await agent.handleDenial(
         decision.userId,

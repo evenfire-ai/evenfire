@@ -4,6 +4,7 @@ import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
 import { type ApprovalMode, effectiveApprovalMode } from '../approval/approvalMode'
 import { approvalLogId, syncEffectiveMode } from '../approval/grantMemory'
+import { type ShellAction, resolveShellAnswer } from '../approval/shellCard'
 import { ConversationError, ConversationErrorCode } from '../errors'
 import { SESSION_SCOPED_APPROVAL_TOOLS } from '../extensions/approvalController'
 import {
@@ -645,17 +646,26 @@ export class ConversationManager {
    * turns, and a plain approval of a SESSION_SCOPED_APPROVAL_TOOLS tool lasts
    * for the current task. Exact-invocation and legacy unknown scopes (forced
    * gates, denial re-asks, guardrail and live-tool cards) authorize only the
-   * frozen call being resumed. Approving this tool lifts its denial only when
-   * the approver is the user who denied it (or the denier is unknown); another
-   * user's approval runs this call once, keeps the denial and grants nothing
-   * (denialPolicy).
+   * frozen call being resumed. When `shell` is present, a non-cron name grant
+   * also requires effectiveMode manual. cron_manage may still store in every
+   * effective mode. A shell card stores a command or whole-tool grant only
+   * while the effective mode is auto and the descriptor flag for the answering
+   * surface is true; otherwise that frozen call runs once and stores nothing.
+   * Approving this tool lifts its denial only when the approver is the user who
+   * denied it (or the denier is unknown); another user's approval runs this
+   * call once, keeps the denial and grants nothing (denialPolicy).
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
   async approve(
     conversation: Conversation,
     alwaysApprove: boolean,
-    userId?: string
+    userId?: string,
+    shell?: {
+      shellAction?: ShellAction
+      effectiveMode: ApprovalMode
+      surface: 'desktop' | 'channel'
+    }
   ): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
@@ -669,7 +679,14 @@ export class ConversationManager {
       const toolName = conversation.pending_approval.tool_name
       const approval = conversation.pending_approval
       const lifted = liftDenial(conversation, toolName, userId)
-      const grantable = mayStoreGrant(approval)
+      const shellAnswer = shell
+        ? resolveShellAnswer(approval, {
+            shellAction: shell.shellAction,
+            alwaysApprove,
+            effectiveMode: shell.effectiveMode,
+            surface: shell.surface,
+          })
+        : null
       if (lifted === 'kept_for_denier') {
         if (alwaysApprove) {
           logger.info(
@@ -677,18 +694,10 @@ export class ConversationManager {
             'Always approve ignored: another user denied this tool'
           )
         }
-      } else if (!grantable) {
-        if (alwaysApprove) {
-          logger.info(
-            { event: 'always_approve_ignored', toolName, reason: 'exact_invocation' },
-            'Always approve ignored: this card authorizes only its own call'
-          )
-        }
-      } else if (alwaysApprove) {
-        conversation.auto_approved_tools.add(toolName)
-      } else if (SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)) {
-        // A plain approval of a session-scoped tool lasts for the current task.
-        ;(conversation.task_approved_tools ??= new Set()).add(toolName)
+      } else if (shell && shellAnswer) {
+        storeShellGrant(conversation, approval, shellAnswer)
+      } else {
+        storeNameGrant(conversation, approval, alwaysApprove, shell?.effectiveMode, toolName)
       }
     }
 
@@ -855,5 +864,50 @@ export class ConversationManager {
     }
 
     return messages
+  }
+}
+
+function storeShellGrant(
+  conversation: Conversation,
+  approval: PendingApproval,
+  action: ShellAction
+): void {
+  if (action === 'shell') {
+    conversation.auto_shell_grants.wholeTool = true
+    return
+  }
+  if (action !== 'command') return
+  const command = approval.parameters.command
+  if (typeof command !== 'string') return
+  conversation.auto_shell_grants.commands.add(command)
+}
+
+function storeNameGrant(
+  conversation: Conversation,
+  approval: PendingApproval,
+  alwaysApprove: boolean,
+  effectiveMode: ApprovalMode | undefined,
+  toolName: string
+): void {
+  const grantable = mayStoreGrant(approval)
+  // Callers that do not pass an answer-time mode keep dev plus #726.
+  const modeAllows =
+    effectiveMode === undefined || effectiveMode === 'manual' || toolName === 'cron_manage'
+  if (!grantable) {
+    if (alwaysApprove) {
+      logger.info(
+        { event: 'always_approve_ignored', toolName, reason: 'exact_invocation' },
+        'Always approve ignored: this card authorizes only its own call'
+      )
+    }
+    return
+  }
+  if (!modeAllows) return
+  if (alwaysApprove) {
+    conversation.auto_approved_tools.add(toolName)
+    return
+  }
+  if (SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)) {
+    ;(conversation.task_approved_tools ??= new Set()).add(toolName)
   }
 }

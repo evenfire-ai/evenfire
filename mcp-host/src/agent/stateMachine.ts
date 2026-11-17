@@ -23,6 +23,7 @@ import {
   readModeCeiling,
 } from '../core/approval/approvalMode'
 import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
+import type { ShellAction } from '../core/approval/shellCard'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
 import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
@@ -98,6 +99,7 @@ export interface PendingApprovalInfo {
   mcpServerName?: string
   /** false when the card must not offer "Always approve". Omitted when allowed. */
   alwaysApproveAllowed?: false
+  shellCard?: PendingApproval['shellCard']
 }
 
 /**
@@ -1168,7 +1170,8 @@ export class AgentStateMachine extends EventEmitter {
     requestId: string,
     alwaysApprove: boolean,
     channelType?: string,
-    channelId?: string
+    channelId?: string,
+    shellAction?: ShellAction
   ): Promise<{ success: boolean; error?: string }> {
     const entry = this.approvalMap.get(requestId)
     if (!entry) {
@@ -1229,9 +1232,27 @@ export class AgentStateMachine extends EventEmitter {
 
     // Resume execution (fire and forget).
     // Session release happens in onComplete/onFail callbacks.
-    executor.resumeAfterApproval(alwaysApprove, userId).catch(err => {
-      logger.error({ err: err }, `Resume after approval failed:`)
-    })
+    // The effective mode is the live answer-time value, not the mode that
+    // opened the card. rpc is the desktop surface; every other channel uses
+    // the channel descriptor flag.
+    const conversation = executor.sessionKey
+      ? this.conversationManager.getSessionByKey(executor.sessionKey)
+      : undefined
+    const live = this.approvalSnapshot()
+    const effectiveMode = effectiveApprovalMode(
+      normalizeApprovalMode(conversation?.approval_mode),
+      readModeCeiling(live),
+      readChannelCap(live, conversation?.channel_type)
+    )
+    executor
+      .resumeAfterApproval(alwaysApprove, userId, {
+        ...(shellAction ? { shellAction } : {}),
+        effectiveMode,
+        surface: channelType === 'rpc' ? 'desktop' : 'channel',
+      })
+      .catch(err => {
+        logger.error({ err: err }, `Resume after approval failed:`)
+      })
 
     return { success: true }
   }

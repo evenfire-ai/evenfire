@@ -17,12 +17,14 @@ import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAd
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../core/adapters/toolRegistryAdapter'
 import {
   type ApprovalConfigSnapshot,
+  type ApprovalMode,
   normalizeApprovalMode,
   readChannelCap,
   readModeCeiling,
 } from '../core/approval/approvalMode'
 import type { ApprovalModeInputs } from '../core/approval/gateCause'
 import { approvalLogId } from '../core/approval/grantMemory'
+import type { ShellAction } from '../core/approval/shellCard'
 import {
   classifyToolCall,
   classifierAvailable as isClassifierAvailable,
@@ -666,7 +668,15 @@ export class TaskExecutor {
   /**
    * Resume execution after approval was granted.
    */
-  async resumeAfterApproval(alwaysApprove: boolean, userId?: string): Promise<void> {
+  async resumeAfterApproval(
+    alwaysApprove: boolean,
+    userId?: string,
+    shell?: {
+      shellAction?: ShellAction
+      effectiveMode: ApprovalMode
+      surface: 'desktop' | 'channel'
+    }
+  ): Promise<void> {
     if (this.state !== 'waiting_approval' || !this.conversation) {
       throw new Error(`Cannot resume: executor state is ${this.state}`)
     }
@@ -708,7 +718,7 @@ export class TaskExecutor {
         this.legacyApprovalBudget = false
         return
       }
-      await this.deps.conversationManager.approve(this.conversation, alwaysApprove, userId)
+      await this.deps.conversationManager.approve(this.conversation, alwaysApprove, userId, shell)
       if (approvalBeforeResolution?.tool_call_id) {
         this.approvedToolCorrelation = {
           toolCallId: approvalBeforeResolution.tool_call_id,
@@ -1465,13 +1475,15 @@ export class TaskExecutor {
           // U5 — carry the reason (+ mcpServerName for connect_required)
           // so the desktop distinguishes an OAuth-consent suspension from the
           // default HITL gate. Absent reason → 'approval_required' (back-compat).
+          const wire = pendingApprovalWireFields(result.approval)
           reporter.emitSuspended(
             getDisplayName(result.approval.tool_name),
             result.approval.request_id,
             {
               reason: result.approval.reason ?? 'approval_required',
               mcpServerName: result.approval.mcpServerName,
-              alwaysApproveAllowed: pendingApprovalWireFields(result.approval).alwaysApproveAllowed,
+              alwaysApproveAllowed: wire.alwaysApproveAllowed,
+              shellCard: wire.shellCard,
               toolName: result.approval.tool_name,
               parameters: result.approval.parameters,
             }

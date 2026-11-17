@@ -10,6 +10,7 @@
  * `alwaysApproveAllowed: false` for them, the same decision approve() enforces.
  */
 import type { PendingApprovalRow } from '../../db/worker/protocol'
+import type { ShellCardDescriptor } from '../approval/shellCard'
 import type { PendingApproval } from '../types'
 import { normalizeAuthorizationScope, normalizeConnectReason } from './persistence/reconstruct'
 
@@ -52,14 +53,16 @@ export function mayStoreGrant(approval: Pick<PendingApproval, 'authorization_sco
 /**
  * The client-facing fields of a pending approval. `mcpServerName` rides only a
  * connect_required card; `alwaysApproveAllowed` is present (false) only when the
- * card cannot store a grant.
+ * card cannot store a grant. `shellCard` is in-memory only: a restarted card
+ * has no descriptor and is answered as once.
  */
 export function pendingApprovalWireFields(
-  approval: Pick<PendingApproval, 'reason' | 'mcpServerName' | 'authorization_scope'>
+  approval: Pick<PendingApproval, 'reason' | 'mcpServerName' | 'authorization_scope' | 'shellCard'>
 ): {
   reason?: 'approval_required' | 'connect_required'
   mcpServerName?: string
   alwaysApproveAllowed?: false
+  shellCard?: ShellCardDescriptor
 } {
   return {
     ...(approval.reason ? { reason: approval.reason } : {}),
@@ -67,5 +70,6 @@ export function pendingApprovalWireFields(
       ? { mcpServerName: approval.mcpServerName }
       : {}),
     ...(mayStoreGrant(approval) ? {} : { alwaysApproveAllowed: false as const }),
+    ...(approval.shellCard ? { shellCard: approval.shellCard } : {}),
   }
 }

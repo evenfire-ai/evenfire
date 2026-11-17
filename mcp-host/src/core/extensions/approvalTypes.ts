@@ -6,6 +6,7 @@
  *     -> Channel-level permission (telegram/email/slack/teams)
  *       -> Per-user approval permission
  */
+import type { ShellAction } from '../approval/shellCard'
 
 // ─── Approval Policy ───────────────────────────────────────
 
@@ -75,6 +76,8 @@ export interface ApprovalDecision {
   alwaysApprove: boolean
   channelType?: string
   channelId?: string
+  /** Present only for an approve whose body named once, command, or shell. */
+  shellAction?: ShellAction
 }
 
 // ─── Approval Request (HTTP body) ──────────────────────────
@@ -88,4 +91,5 @@ export interface ApprovalRequest {
   alwaysApprove?: boolean
   channelType?: string
   channelId?: string
+  shellAction?: ShellAction
 }

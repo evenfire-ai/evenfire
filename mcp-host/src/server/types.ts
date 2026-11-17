@@ -6,6 +6,7 @@
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import type { ModelWireEntry } from '../config/modelResolution.js'
+import type { ShellCardDescriptor } from '../core/approval/shellCard'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import type { Attachment, TraceContextV1 } from '../core/types'
 import type { McpServerStatusEntry } from '../mcp/serverStatus'
@@ -147,6 +148,8 @@ export interface MessageResponse {
     mcpServerName?: string
     /** false when the card must not offer "Always approve". */
     alwaysApproveAllowed?: false
+    /** Shell card buttons. Omitted when this suspension is not a shell card. */
+    shellCard?: ShellCardDescriptor
   }
 }
 
