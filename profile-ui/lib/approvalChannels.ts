@@ -124,23 +124,36 @@ export function channelTableRows(
   targets: ApprovalChannelTarget[],
   accounts: WorkflowApprovalMediumAccount[]
 ): ChannelTableRow[] {
+  const representedAccounts = new Set<string>()
   const rows: ChannelTableRow[] = targets.map(target => {
     const linked = accounts.filter(account =>
       (account.targets || []).some(item => item.id === target.id)
     )
-    const active = linked.find(account => !account.disabledAt) ?? null
+    const active =
+      linked.find(account => !account.disabledAt && !representedAccounts.has(account.id)) ?? null
     const disconnectedRecord = linked.find(account => account.disabledAt) ?? null
     const key = `target:${target.id}`
-    if (active) return { key, target, account: active, status: 'Verified' }
+    if (active) {
+      representedAccounts.add(active.id)
+      return { key, target, account: active, status: 'Verified' }
+    }
+    if (linked.some(account => !account.disabledAt)) {
+      return { key, target, account: null, status: 'Verified' }
+    }
     if (disconnectedRecord) {
+      if (representedAccounts.has(disconnectedRecord.id)) {
+        return { key, target, account: null, status: 'Disconnected' }
+      }
+      representedAccounts.add(disconnectedRecord.id)
       return { key, target, account: disconnectedRecord, status: 'Disconnected' }
     }
     return { key, target, account: null, status: 'Not connected' }
   })
   for (const account of accounts) {
-    if ((account.targets || []).some(item => targets.some(target => target.id === item.id))) {
+    if (representedAccounts.has(account.id)) {
       continue
     }
+    representedAccounts.add(account.id)
     rows.push({
       key: `account:${account.id}`,
       target: null,

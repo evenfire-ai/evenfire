@@ -209,9 +209,10 @@ test('channelTableRows prefers the active record over a stale disabled one', () 
 
   const rows = channelTableRows([target], [disabled, active])
 
-  assert.equal(rows.length, 1)
+  assert.equal(rows.length, 2)
   assert.equal(rows[0]!.status, 'Verified')
   assert.equal(rows[0]!.account, active)
+  assert.equal(rows[1]!.account, disabled)
 })
 
 test('channelTableRows keeps accounts that no longer map to a known target', () => {
