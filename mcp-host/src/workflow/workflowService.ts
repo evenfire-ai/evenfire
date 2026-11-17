@@ -36,7 +36,7 @@ import {
 } from './failoverProvider'
 import { getOutputDir, resolveInternalTools } from './internalTools'
 import { createMcpHostRuntimeAuth } from './runtimeAuthFactory'
-import { McpClientFactory, StepMcpRouter } from './stepRouter'
+import { McpClientFactory, StepMcpRouter, assertNoReservedServerName } from './stepRouter'
 import {
   STEP_SPILLOVER_READ_TOOL_NAME,
   type StepSpillover,
@@ -1001,9 +1001,13 @@ export class WorkflowService {
     }
 
     try {
+      // A step that binds a server named `clerum` can never run: fail it before
+      // it reserves budget or asks a human for approval.
+      assertNoReservedServerName(req.mcpServers ?? [])
       // P3 token budgets (§5.1, §7) — pre-step budget check reusing the EXACT
-      // P1 endpoint/contract with source_kind='workflow'. Runs FIRST so a denied
-      // step neither waits on a human approval nor connects to any MCP server.
+      // P1 endpoint/contract with source_kind='workflow'. Runs after the
+      // reserved-name check and before anything else, so a denied step neither
+      // waits on a human approval nor connects to any MCP server.
       // No-op + fail-open when the flag is off or the check itself breaks; the
       // finally block handles clearTimeout / router.disconnect / soul revert.
       const budgetCheck = await this.runStepBudgetCheck(

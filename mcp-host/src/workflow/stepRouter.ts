@@ -58,6 +58,17 @@ export class StepRouterReservedServerNameError extends Error {
   }
 }
 
+/**
+ * Throws StepRouterReservedServerNameError if a server is named `clerum`.
+ * `connect()` and `WorkflowService.executeStep` (before its budget check and
+ * approval gate) share this one check.
+ */
+export function assertNoReservedServerName(servers: StepMcpServerRef[]): void {
+  if (servers.some(server => server.name === RESERVED_INTERNAL_SERVER_NAME)) {
+    throw new StepRouterReservedServerNameError()
+  }
+}
+
 export class ToolDispatchError extends Error {
   toolName: string
   constructor(toolName: string) {
@@ -161,16 +172,15 @@ export class StepMcpRouter {
   /**
    * Connect to all servers declared for this step.
    * Throws StepRouterReservedServerNameError, before connecting anything, if a
-   * server is named `clerum` (the internal tools' name space).
+   * server is named `clerum` (the internal tools' name space), through
+   * assertNoReservedServerName.
    * Throws StepRouterConnectionError if any server is unreachable.
    */
   async connect(
     servers: StepMcpServerRef[],
     options: { timeoutMs?: number; signal?: AbortSignal } = {}
   ): Promise<void> {
-    if (servers.some(server => server.name === RESERVED_INTERNAL_SERVER_NAME)) {
-      throw new StepRouterReservedServerNameError()
-    }
+    assertNoReservedServerName(servers)
     if (this.readBudget.isClosed) this.readBudget = new VisualInputBudget()
     if (servers.length === 0) return
 

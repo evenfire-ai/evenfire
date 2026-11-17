@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { BudgetClient } from '../budget/budgetClient'
 import { config } from '../config'
 import { FinishReason } from '../core/types'
 import { createGfscClient } from '../internalTools/gfsClient'
 import type { SingleTurnProvider } from '../llm'
 import { getMcpHostJwtStateFilePath } from './mcpHostJwtState'
+import { type McpClientConnection, StepRouterReservedServerNameError } from './stepRouter'
 import { gateStep } from './userApprovalRequester'
 import { WorkflowService } from './workflowService'
 
@@ -331,6 +333,82 @@ describe('WorkflowService approval gating', () => {
         baseUrl: 'http://gateway:8092',
       })
     )
+  })
+  describe('reserved server name', () => {
+    const originalBudgetsEnabled = config.budgetsEnabled
+
+    afterEach(() => {
+      config.budgetsEnabled = originalBudgetsEnabled
+    })
+
+    // One step with an approval gate, a budget check and one MCP server named
+    // `serverName`; reports what the step reached before it ended.
+    async function runGatedStep(serverName: string) {
+      const checkBodies: unknown[] = []
+      const fetchImpl = vi.fn().mockImplementation((url: string, init: { body: string }) => {
+        if (url.endsWith('/budgets/check')) {
+          checkBodies.push(JSON.parse(init.body))
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ allowed: true }) })
+        }
+        if (url.endsWith('/budgets/release')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ released: 1 }) })
+        }
+        return Promise.reject(new Error(`unexpected url: ${url}`))
+      })
+      const mcpClientFactory = vi.fn(
+        (): McpClientConnection => ({
+          connect: vi.fn().mockResolvedValue(undefined),
+          listTools: vi.fn().mockResolvedValue([]),
+          callTool: vi.fn(),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+        })
+      )
+      const gateCallsBefore = vi.mocked(gateStep).mock.calls.length
+      vi.mocked(gateStep).mockResolvedValueOnce({ status: 'approved' })
+      const service = new WorkflowService('recipe-1', {
+        llmFactory: () => makeProvider(),
+        mcpClientFactory,
+        budgetClient: new BudgetClient({
+          baseUrl: 'http://gw',
+          getAccessToken: () => 't',
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        }),
+      })
+      service.configure({ provider: 'openai', apiKey: 'test-key', model: 'gpt-4o' })
+      const result = await service.executeStep({
+        stepId: 'reserved-name',
+        instruction: 'Explain the result',
+        requiresApproval: { target: { userId: 'user-1' }, message: 'approve' },
+        mcpServers: [{ name: serverName, url: `http://${serverName}` }],
+        contextVars: { workflowExecutionId: 'exec-123' },
+      })
+      return {
+        result,
+        checkBodies,
+        gateCalls: vi.mocked(gateStep).mock.calls.length - gateCallsBefore,
+        mcpClientFactory,
+      }
+    }
+
+    it('fails a step bound to a clerum server before its budget check and its approval gate', async () => {
+      config.budgetsEnabled = true
+
+      const reserved = await runGatedStep('clerum')
+
+      expect(reserved.result.status).toBe('failed')
+      expect(reserved.result.error).toContain(new StepRouterReservedServerNameError().message)
+      expect(reserved.result.toolsCalled).toEqual([])
+      expect(reserved.gateCalls).toBe(0)
+      expect(reserved.checkBodies).toHaveLength(0)
+      expect(reserved.mcpClientFactory).not.toHaveBeenCalled()
+      // Witness: the same step with another server name reaches the budget
+      // check, the approval gate and the server connection.
+      const control = await runGatedStep('srv')
+      expect(control.result.status).toBe('completed')
+      expect(control.gateCalls).toBe(1)
+      expect(control.checkBodies).toHaveLength(1)
+      expect(control.mcpClientFactory).toHaveBeenCalledTimes(1)
+    })
   })
 })
 
