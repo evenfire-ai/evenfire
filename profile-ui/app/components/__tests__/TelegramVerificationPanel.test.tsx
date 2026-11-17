@@ -100,6 +100,79 @@ describe('TelegramVerificationPanel display name editing', () => {
   })
 })
 
+describe('TelegramVerificationPanel channel table', () => {
+  const telegramTarget: ApprovalChannelTarget = {
+    id: 'target-1',
+    medium: 'telegram',
+    agentName: 'Ops agent',
+    channelName: 'Ops chat',
+    channelNamespace: 'ops',
+    botLabel: 'Ops bot',
+    botUsername: 'ops_bot',
+    botDeepLink: null,
+    status: 'ready',
+  }
+  const telegramAccount: WorkflowApprovalMediumAccount = {
+    id: 'account-2',
+    userId: 'user-1',
+    medium: 'telegram',
+    providerUserId: 'provider-user',
+    providerWorkspaceId: null,
+    providerChannelId: 'chat-1',
+    providerChannelType: 'supergroup',
+    providerChannelTitle: 'Ops chat',
+    targets: [telegramTarget],
+  }
+
+  it('renders telegram connections with name, chat type, bot handle, and status columns', () => {
+    render(
+      <ToastProvider>
+        <TelegramVerificationPanel
+          accounts={[telegramAccount]}
+          disabled={false}
+          medium="telegram"
+          onAccountsRefresh={vi.fn()}
+          onRemoveAccount={() => undefined}
+          targets={[telegramTarget]}
+        />
+      </ToastProvider>
+    )
+
+    const table = screen.getByRole('table')
+    expect(within(table).getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'Chat type' })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'Bot handle' })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'Status' })).toBeInTheDocument()
+
+    expect(within(table).getByRole('cell', { name: 'Ops chat' })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: 'Supergroup' })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: '@ops_bot' })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: 'Verified' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Actions for Ops chat' })).toBeInTheDocument()
+  })
+
+  it('renders slack connections with the table styling but no header row', () => {
+    render(
+      <ToastProvider>
+        <TelegramVerificationPanel
+          accounts={[account]}
+          disabled={false}
+          medium="slack"
+          onAccountsRefresh={vi.fn()}
+          onRemoveAccount={() => undefined}
+          targets={[]}
+        />
+      </ToastProvider>
+    )
+
+    expect(screen.getByRole('table')).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader')).not.toBeInTheDocument()
+    expect(
+      within(screen.getByRole('table')).getByRole('cell', { name: 'Operations approvals' })
+    ).toBeInTheDocument()
+  })
+})
+
 describe('TelegramVerificationPanel empty state', () => {
   it('says the selected channel has nothing set up yet', () => {
     render(

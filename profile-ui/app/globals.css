@@ -1599,8 +1599,7 @@ code {
   border-bottom: 0;
 }
 
-.settings-channel-rows,
-.settings-target-list {
+.settings-channel-rows {
   display: grid;
   gap: 0.6rem;
 }
@@ -1737,44 +1736,6 @@ code {
 .settings-help {
   color: var(--cu-text-soft);
   font-size: 0.75rem;
-}
-
-.settings-target-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.75rem 0;
-  border-top: 1px solid var(--cu-border-subtle);
-}
-
-.settings-target-row:first-child {
-  border-top: 0;
-}
-
-.settings-target-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem 0.65rem;
-  margin-top: 0.35rem;
-  color: var(--cu-text-soft);
-  font-size: 0.75rem;
-}
-
-.settings-target-meta span {
-  overflow-wrap: anywhere;
-}
-
-.settings-target-list--separated {
-  margin-top: 0.75rem;
-  border-top: 1px solid var(--cu-border-subtle);
-}
-
-.settings-target-actions {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 0.5rem;
 }
 
 .settings-status-pill {
@@ -2088,9 +2049,7 @@ code {
   .invite-row,
   .member-summary,
   .inline-row,
-  .settings-section-head,
-  .settings-target-row,
-  .settings-target-actions {
+  .settings-section-head {
     align-items: stretch;
     flex-direction: column;
   }

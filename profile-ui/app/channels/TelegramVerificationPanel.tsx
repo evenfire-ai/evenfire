@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import {
-  RecordList,
-  RecordListRow,
+  DataTable,
   RowActionMenu,
   SingleValueEditDialog,
+  TableHeaderCell,
+  TableViewport,
 } from '@clerum/frontend-components'
 import { Button } from '@components/Button'
 import { CheckboxField } from '@components/CheckboxField'
@@ -15,7 +16,8 @@ import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
 import { IconCopy, IconPencil, IconTrash } from '@components/icons'
 import {
-  approvalAccountDetailLabels,
+  approvalAccountBotLabel,
+  approvalAccountConversationTypeLabel,
   approvalAccountDisplayName,
   approvalAccountStatusLabel,
   challengeCountdownLabel,
@@ -214,39 +216,51 @@ export function TelegramVerificationPanel({
           No {providerLabel} channels set up yet.
         </div>
       ) : (
-        <RecordList className="settings-target-list">
-          {accounts.map(account => (
-            <RecordListRow className="settings-target-row" key={account.id}>
-              <div>
-                <div className="settings-target-title">{approvalAccountDisplayName(account)}</div>
-                <div className="settings-target-meta">
-                  <span>{approvalAccountStatusLabel(account)}</span>
-                  {approvalAccountDetailLabels(account).map(label => (
-                    <span key={label}>{label}</span>
-                  ))}
-                </div>
-              </div>
-              <RowActionMenu
-                ariaLabel={`Actions for ${approvalAccountDisplayName(account)}`}
-                actions={[
-                  {
-                    key: 'edit',
-                    label: 'Edit display name',
-                    disabled,
-                    onSelect: () => openDisplayNameModal(account),
-                  },
-                  {
-                    key: 'delete',
-                    label: account.disabledAt ? 'Remove record' : 'Delete connection',
-                    danger: true,
-                    disabled,
-                    onSelect: () => onRemoveAccount(account.id, Boolean(account.disabledAt)),
-                  },
-                ]}
-              />
-            </RecordListRow>
-          ))}
-        </RecordList>
+        <TableViewport>
+          <DataTable className="eft-table eft-table--wide">
+            {medium === 'telegram' ? (
+              <thead>
+                <tr>
+                  <TableHeaderCell label="Name" />
+                  <TableHeaderCell label="Chat type" />
+                  <TableHeaderCell label="Bot handle" />
+                  <TableHeaderCell label="Status" />
+                  <th></th>
+                </tr>
+              </thead>
+            ) : null}
+            <tbody>
+              {accounts.map(account => (
+                <tr key={account.id}>
+                  <td>{approvalAccountDisplayName(account)}</td>
+                  <td>{approvalAccountConversationTypeLabel(account)}</td>
+                  <td>{approvalAccountBotLabel(account)}</td>
+                  <td>{approvalAccountStatusLabel(account)}</td>
+                  <td className="eft-table__cell--actions">
+                    <RowActionMenu
+                      ariaLabel={`Actions for ${approvalAccountDisplayName(account)}`}
+                      actions={[
+                        {
+                          key: 'edit',
+                          label: 'Edit display name',
+                          disabled,
+                          onSelect: () => openDisplayNameModal(account),
+                        },
+                        {
+                          key: 'delete',
+                          label: account.disabledAt ? 'Remove record' : 'Delete connection',
+                          danger: true,
+                          disabled,
+                          onSelect: () => onRemoveAccount(account.id, Boolean(account.disabledAt)),
+                        },
+                      ]}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </DataTable>
+        </TableViewport>
       )}
 
       {modalOpen ? (
