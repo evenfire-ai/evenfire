@@ -4,6 +4,7 @@
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
 import { NETPOL_PASS_OVERRUN_WARN_MS } from './constants'
 import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
+import { kubernetesQuantitiesEqual } from './kubernetesQuantity'
 import { hccLogger } from './logger'
 import { ContextCRD, McpServerCRD } from './types'
 
@@ -304,6 +305,22 @@ export interface Config {
 
 function getEnv(key: string, defaultValue?: string): string | undefined {
   return process.env[key] ?? defaultValue
+}
+
+/**
+ * A Host resource quantity is read on every reconcile. An empty or invalid
+ * value used to pass config load and throw only when a Host was reconciled.
+ */
+function requireQuantity(name: string, value: string): string {
+  try {
+    kubernetesQuantitiesEqual(value, value)
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Invalid Kubernetes quantity') {
+      throw new Error(`${name} must be a Kubernetes quantity, got '${value}'`)
+    }
+    throw error
+  }
+  return value
 }
 
 function getEnvInt(key: string, defaultValue: number): number {
@@ -822,12 +839,28 @@ export const config: Config = {
   hostWorkspacePath: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_PATH', '/workspace')!,
   hostResources: {
     requests: {
-      memory: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_MEMORY', '128Mi')!,
-      cpu: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU', '100m')!,
+      memory: requireQuantity(
+        'CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_MEMORY',
+        getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_MEMORY', '128Mi')!
+      ),
+      cpu: requireQuantity(
+        'CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU',
+        getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU', '100m')!
+      ),
     },
     limits: {
-      memory: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY', '512Mi')!,
-      cpu: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU', '500m')!,
+      // 2Gi leaves mcp-host's document reader room beside the Host's working
+      // set (documentRead/MEMORY_MODEL.md); at 512Mi every read was refused.
+      // v0.12.0 and v0.12.1 still default this to 512Mi. The request stays
+      // 128Mi, so the limit/request ratio is 16 rather than the old 4.
+      memory: requireQuantity(
+        'CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY',
+        getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY', '2Gi')!
+      ),
+      cpu: requireQuantity(
+        'CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU',
+        getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU', '500m')!
+      ),
     },
   },
 
@@ -836,12 +869,24 @@ export const config: Config = {
   desktopPort: getEnvInt('CONTEXT_MAPPER_DESKTOP_PORT', 3000),
   desktopResources: {
     requests: {
-      memory: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_MEMORY', '256Mi')!,
-      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_CPU', '250m')!,
+      memory: requireQuantity(
+        'CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_MEMORY',
+        getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_MEMORY', '256Mi')!
+      ),
+      cpu: requireQuantity(
+        'CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_CPU',
+        getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_CPU', '250m')!
+      ),
     },
     limits: {
-      memory: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY', '4Gi')!,
-      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU', '1')!,
+      memory: requireQuantity(
+        'CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY',
+        getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY', '4Gi')!
+      ),
+      cpu: requireQuantity(
+        'CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU',
+        getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU', '1')!
+      ),
     },
   },
 
