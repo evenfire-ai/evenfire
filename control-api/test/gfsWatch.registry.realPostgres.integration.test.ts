@@ -67,8 +67,9 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
   })
 
   afterEach(async () => {
-    const violations = b?.violations() ?? []
+    // After stop: its stream.closing writes are checked like any other frame.
     await b?.stop()
+    const violations = b?.violations() ?? []
     h.decisions.clear()
     expect(violations).toEqual([])
     expect(unhandled).toEqual([])
