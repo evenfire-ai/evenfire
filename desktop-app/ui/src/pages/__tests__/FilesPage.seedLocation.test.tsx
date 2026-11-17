@@ -390,10 +390,11 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
 
     renderHarness()
     await waitFor(() => expect(sourceCalls).toBe(1))
+    const options = await screen.findByRole('button', { name: 'Options for notes.txt' })
     await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
+      fireEvent.click(options)
     })
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
     await act(async () => {
       fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
