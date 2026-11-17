@@ -18,7 +18,13 @@ import {
 import type { NotificationDeliveryClient } from './notificationDeliveryClient'
 import { createProgressStream } from './progressClient'
 import { formatFinalMessage, formatProgressUpdate } from './progressFormatter'
-import { type ChannelReaderRuntimeSource, MessageResponse, RPCClient } from './rpcClient'
+import {
+  type ChannelReaderRuntimeSource,
+  type MessageResponse,
+  RPCClient,
+  type ShellAction,
+  type ShellCardDescriptor,
+} from './rpcClient'
 import { type TraceContextV1, mintChannelTraceContext } from './traceContext'
 import {
   Attachment,
@@ -165,7 +171,9 @@ export const UNRESOLVED_NOTICE_GLOBAL_CAP = 50
  */
 const UNRESOLVED_NOTICE_NO_WORKSPACE_KEY = 'no-workspace'
 const SLACK_VERIFICATION_SCAN_INTERVAL_MS = 60 * 1000
-const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
+const TOOL_APPROVAL_ACTION_RE = /^tool:([alcsd]):([A-Za-z0-9_-]{16})$/
+const UNKNOWN_TOOL_APPROVAL_RE = /^tool:[A-Za-z]+:[A-Za-z0-9_-]{16}$/
+const SHELL_CARD_ONCE_NOTICE = '/approve allows this command once.'
 /**
  * Periodic CommunicationChannel resync interval (production mode only).
  * Even when no watch event fires, a re-list every 60 s self-heals missed
@@ -174,29 +182,62 @@ const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
 export const CHANNEL_RESYNC_INTERVAL_MS = 60_000 // 60 seconds
 
 type ToolApprovalDecision = '/approve' | '/approve always' | '/deny'
+type ParsedToolApproval =
+  | { rejected: true }
+  | {
+      command: ToolApprovalDecision
+      actionToken: string
+      shellAction?: ShellAction
+    }
 
 function newToolApprovalActionToken(): string {
   return randomBytes(12).toString('base64url')
 }
 
-function toolApprovalActionValue(
-  decision: 'approve' | 'approveAlways' | 'deny',
-  actionToken: string
-): string {
-  const code = decision === 'approve' ? 'a' : decision === 'approveAlways' ? 'l' : 'd'
+function toolApprovalActionValue(code: 'a' | 'l' | 'c' | 's' | 'd', actionToken: string): string {
   return `tool:${code}:${actionToken}`
 }
 
-function parseToolApprovalAction(content: string): {
-  command: ToolApprovalDecision
-  actionToken: string
-} | null {
-  const match = TOOL_APPROVAL_ACTION_RE.exec(content.trim())
-  if (!match) return null
-  return {
-    command: match[1] === 'a' ? '/approve' : match[1] === 'l' ? '/approve always' : '/deny',
-    actionToken: match[2],
+function parseToolApprovalAction(content: string): ParsedToolApproval | null {
+  const trimmed = content.trim()
+  const match = TOOL_APPROVAL_ACTION_RE.exec(trimmed)
+  if (!match) return UNKNOWN_TOOL_APPROVAL_RE.test(trimmed) ? { rejected: true } : null
+  const actionToken = match[2]
+  switch (match[1]) {
+    case 'a':
+      return { command: '/approve', actionToken, shellAction: 'once' }
+    case 'l':
+      return { command: '/approve always', actionToken }
+    case 'c':
+      return { command: '/approve', actionToken, shellAction: 'command' }
+    case 's':
+      return { command: '/approve', actionToken, shellAction: 'shell' }
+    case 'd':
+      return { command: '/deny', actionToken }
+    default:
+      return { rejected: true }
   }
+}
+
+function readShellCard(value: unknown): ShellCardDescriptor | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const card = value as { channelCommandOffered?: unknown; desktopCommandOffered?: unknown }
+  if (
+    typeof card.channelCommandOffered !== 'boolean' ||
+    typeof card.desktopCommandOffered !== 'boolean'
+  ) {
+    return undefined
+  }
+  return {
+    channelCommandOffered: card.channelCommandOffered,
+    desktopCommandOffered: card.desktopCommandOffered,
+  }
+}
+
+function withShellCardNotice(notification: string, shellCard?: ShellCardDescriptor): string {
+  if (!shellCard || notification.includes(SHELL_CARD_ONCE_NOTICE)) return notification
+  const trimmed = notification.trimEnd()
+  return trimmed ? `${trimmed} ${SHELL_CARD_ONCE_NOTICE}` : SHELL_CARD_ONCE_NOTICE
 }
 
 /** Absent on the wire means the card may store a grant. Only explicit false hides it. */
@@ -210,15 +251,102 @@ function lastingGrantState(approval: { alwaysApproveAllowed?: false } | undefine
   return approval?.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false } : {}
 }
 
+function shellCardMessageOptions(
+  channelType: Message['channelType'],
+  notification: string,
+  actionToken: string,
+  offerCommand: boolean
+): SendMessageOptions | undefined {
+  const once = toolApprovalActionValue('a', actionToken)
+  const command = toolApprovalActionValue('c', actionToken)
+  const shell = toolApprovalActionValue('s', actionToken)
+  const deny = toolApprovalActionValue('d', actionToken)
+  if (channelType === 'telegram') {
+    const rows = [
+      [
+        { text: 'Allow once', callbackData: once },
+        { text: 'Deny', callbackData: deny },
+      ],
+    ]
+    if (offerCommand) rows.push([{ text: 'Allow this command', callbackData: command }])
+    rows.push([{ text: 'Always allow shell', callbackData: shell }])
+    return { telegramInlineKeyboard: rows }
+  }
+  if (channelType === 'slack') {
+    return {
+      slackBlocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: notification } },
+        {
+          type: 'actions',
+          block_id: `tool_approval_${actionToken}`,
+          elements: [
+            {
+              type: 'button',
+              action_id: 'tool_approval_approve',
+              text: { type: 'plain_text', text: 'Allow once' },
+              value: once,
+              style: 'primary',
+            },
+            ...(offerCommand
+              ? [
+                  {
+                    type: 'button' as const,
+                    action_id: 'tool_approval_command',
+                    text: { type: 'plain_text' as const, text: 'Allow this command' },
+                    value: command,
+                  },
+                ]
+              : []),
+            {
+              type: 'button',
+              action_id: 'tool_approval_shell',
+              text: { type: 'plain_text', text: 'Always allow shell' },
+              value: shell,
+            },
+            {
+              type: 'button',
+              action_id: 'tool_approval_deny',
+              text: { type: 'plain_text', text: 'Deny' },
+              value: deny,
+              style: 'danger',
+            },
+          ],
+        },
+      ],
+    }
+  }
+  if (channelType === 'teams') {
+    return {
+      teamsActions: [
+        { title: 'Allow once', value: once, style: 'positive' },
+        ...(offerCommand ? [{ title: 'Allow this command', value: command }] : []),
+        { title: 'Always allow shell', value: shell },
+        { title: 'Deny', value: deny, style: 'destructive' },
+      ],
+    }
+  }
+  return undefined
+}
+
 function toolApprovalMessageOptions(
   channelType: Message['channelType'],
   notification: string,
   actionToken: string,
-  lastingGrant: boolean
+  lastingGrant: boolean,
+  shellCard?: ShellCardDescriptor,
+  notificationRendered = false
 ): SendMessageOptions | undefined {
-  const approve = toolApprovalActionValue('approve', actionToken)
-  const approveAlways = toolApprovalActionValue('approveAlways', actionToken)
-  const deny = toolApprovalActionValue('deny', actionToken)
+  if (shellCard) {
+    return shellCardMessageOptions(
+      channelType,
+      notification,
+      actionToken,
+      shellCard.channelCommandOffered && notificationRendered
+    )
+  }
+  const approve = toolApprovalActionValue('a', actionToken)
+  const approveAlways = toolApprovalActionValue('l', actionToken)
+  const deny = toolApprovalActionValue('d', actionToken)
   if (channelType === 'telegram') {
     const rows = [
       [
@@ -276,6 +404,30 @@ function toolApprovalMessageOptions(
     }
   }
   return undefined
+}
+
+function renderedApprovalPrompt(
+  channelType: Message['channelType'],
+  approval: {
+    notification: string
+    alwaysApproveAllowed?: false
+    shellCard?: ShellCardDescriptor
+  },
+  actionToken: string
+): { notification: string; options?: SendMessageOptions } {
+  const shellCard = readShellCard(approval.shellCard)
+  const notification = withShellCardNotice(approval.notification, shellCard)
+  return {
+    notification,
+    options: toolApprovalMessageOptions(
+      channelType,
+      notification,
+      actionToken,
+      lastingGrantAllowed(approval),
+      shellCard,
+      Boolean(approval.notification)
+    ),
+  }
 }
 
 function supportedTelegramOperationalChatType(value: unknown): TelegramProviderChatType | null {
@@ -1522,11 +1674,16 @@ export class ChannelReader {
       const runtimeMsg = runtimeContent === msg.content ? msg : { ...msg, content: runtimeContent }
       const trimmed = runtimeContent.trim().toLowerCase()
       const toolApprovalAction = parseToolApprovalAction(runtimeContent)
+      if (toolApprovalAction && 'rejected' in toolApprovalAction) {
+        await this.sendReply(msg, 'That approval choice is not supported.')
+        continue
+      }
       if (toolApprovalAction) {
         await this.handleApprovalCommand(
           msg,
           toolApprovalAction.command,
-          toolApprovalAction.actionToken
+          toolApprovalAction.actionToken,
+          toolApprovalAction.shellAction
         )
         continue
       }
@@ -1565,7 +1722,7 @@ export class ChannelReader {
           // Fall back to synchronous
           const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
           if (response.success && response.status === 'waiting_approval' && response.approval) {
-            const { taskId, requestId, userId, notification } = response.approval
+            const { taskId, requestId, userId } = response.approval
             console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
             const approvalKey = this.pendingApprovalKey(msg)
             const actionToken = newToolApprovalActionToken()
@@ -1580,17 +1737,8 @@ export class ChannelReader {
               actionToken,
               ...lastingGrantState(response.approval),
             })
-            await this.sendReply(
-              msg,
-              notification,
-              undefined,
-              toolApprovalMessageOptions(
-                msg.channelType,
-                notification,
-                actionToken,
-                lastingGrantAllowed(response.approval)
-              )
-            )
+            const prompt = renderedApprovalPrompt(msg.channelType, response.approval, actionToken)
+            await this.sendReply(msg, prompt.notification, undefined, prompt.options)
           } else if (response.success && response.response) {
             console.log('[Main] mcp-host response:')
             console.log(`[Main]   Model: ${response.model}`)
@@ -1612,7 +1760,7 @@ export class ChannelReader {
         const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
 
         if (response.success && response.status === 'waiting_approval' && response.approval) {
-          const { taskId, requestId, userId, notification } = response.approval
+          const { taskId, requestId, userId } = response.approval
           console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
           const approvalKey = this.pendingApprovalKey(msg)
           const actionToken = newToolApprovalActionToken()
@@ -1627,17 +1775,8 @@ export class ChannelReader {
             actionToken,
             ...lastingGrantState(response.approval),
           })
-          await this.sendReply(
-            msg,
-            notification,
-            undefined,
-            toolApprovalMessageOptions(
-              msg.channelType,
-              notification,
-              actionToken,
-              lastingGrantAllowed(response.approval)
-            )
-          )
+          const prompt = renderedApprovalPrompt(msg.channelType, response.approval, actionToken)
+          await this.sendReply(msg, prompt.notification, undefined, prompt.options)
         } else if (response.success && response.response) {
           console.log('[Main] mcp-host response:')
           console.log(`[Main]   Model: ${response.model}`)
@@ -1885,7 +2024,7 @@ export class ChannelReader {
     if (!response.taskId) {
       console.log('[Main] No taskId returned from async send, falling back to sync')
       if (response.success && response.status === 'waiting_approval' && response.approval) {
-        const { taskId, requestId, userId, notification } = response.approval
+        const { taskId, requestId, userId } = response.approval
         console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
         const approvalKey = this.pendingApprovalKey(msg)
         const actionToken = newToolApprovalActionToken()
@@ -1900,17 +2039,8 @@ export class ChannelReader {
           actionToken,
           ...lastingGrantState(response.approval),
         })
-        await this.sendReply(
-          msg,
-          notification,
-          undefined,
-          toolApprovalMessageOptions(
-            msg.channelType,
-            notification,
-            actionToken,
-            lastingGrantAllowed(response.approval)
-          )
-        )
+        const prompt = renderedApprovalPrompt(msg.channelType, response.approval, actionToken)
+        await this.sendReply(msg, prompt.notification, undefined, prompt.options)
       } else if (response.success && response.response) {
         await this.sendReply(msg, response.response, response.attachments)
       } else if (response.error) {
@@ -1986,6 +2116,8 @@ export class ChannelReader {
         userId: string
         notification: string
         alwaysApproveAllowed?: false
+        shellCard?: ShellCardDescriptor
+        notificationRendered: boolean
       }): Promise<void> => {
         const approvalKey = this.pendingApprovalKey(msg)
         const existing = this.pendingApprovals.get(approvalKey)
@@ -2015,14 +2147,17 @@ export class ChannelReader {
             return editStatus(content)
           },
         })
+        const notification = withShellCardNotice(params.notification, params.shellCard)
         await editStatus(
-          params.notification,
+          notification,
           false,
           toolApprovalMessageOptions(
             msg.channelType,
-            params.notification,
+            notification,
             actionToken,
-            lastingGrantAllowed(params)
+            lastingGrantAllowed(params),
+            params.shellCard,
+            params.notificationRendered
           )
         )
       }
@@ -2038,6 +2173,8 @@ export class ChannelReader {
               requestId: result.approval.requestId,
               userId: result.approval.userId,
               notification: result.approval.notification,
+              notificationRendered: Boolean(result.approval.notification),
+              shellCard: readShellCard(result.approval.shellCard),
               ...lastingGrantState(result.approval),
             })
             return false
@@ -2153,7 +2290,9 @@ export class ChannelReader {
               : msg.channelType === 'teams'
                 ? `Reply approve or deny to this message.`
                 : `Reply /approve or /deny to this message.`)
+          let notificationRendered = false
           let grantState: { alwaysApproveAllowed?: false } = {}
+          let shellCard = readShellCard(suspended.shellCard)
           try {
             const result = await this.rpcClient.getTaskResult(taskId, msg)
             if (
@@ -2162,7 +2301,9 @@ export class ChannelReader {
               result.approval?.notification
             ) {
               notification = result.approval.notification
+              notificationRendered = true
               grantState = lastingGrantState(result.approval)
+              shellCard = readShellCard(result.approval.shellCard)
             }
           } catch (err) {
             console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
@@ -2171,6 +2312,8 @@ export class ChannelReader {
             requestId: suspended.requestId,
             userId: msg.sender,
             notification,
+            notificationRendered,
+            shellCard,
             ...grantState,
           })
           // Release handleMessages's for loop. The stream stays open; the next
@@ -2280,7 +2423,8 @@ export class ChannelReader {
   private async handleApprovalCommand(
     msg: Message,
     command: ToolApprovalDecision,
-    actionToken?: string
+    actionToken?: string,
+    shellAction?: ShellAction
   ): Promise<void> {
     const contextualKey = this.pendingApprovalKey(msg)
     const matched = actionToken
@@ -2327,13 +2471,22 @@ export class ChannelReader {
     const alwaysApprove = command === '/approve always'
     console.log(`[Main] User approved (request: ${requestId}, always: ${alwaysApprove})`)
 
-    const result = await this.rpcClient.sendApproval(
-      userId,
-      requestId,
-      alwaysApprove,
-      pending.channelType,
-      pending.channelId
-    )
+    const result = shellAction
+      ? await this.rpcClient.sendApproval(
+          userId,
+          requestId,
+          alwaysApprove,
+          pending.channelType,
+          pending.channelId,
+          { shellAction }
+        )
+      : await this.rpcClient.sendApproval(
+          userId,
+          requestId,
+          alwaysApprove,
+          pending.channelType,
+          pending.channelId
+        )
     if (!result.success) {
       await this.sendReply(msg, `Failed to send approval: ${result.error ?? 'unknown error'}`)
       return

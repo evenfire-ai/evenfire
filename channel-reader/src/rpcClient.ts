@@ -42,6 +42,13 @@ export interface TaskError {
 /**
  * Response from mcp-host.
  */
+export interface ShellCardDescriptor {
+  channelCommandOffered: boolean
+  desktopCommandOffered: boolean
+}
+
+export type ShellAction = 'once' | 'command' | 'shell'
+
 export interface MessageResponse {
   success: boolean
   /** "completed" for normal responses, "waiting_approval" when a tool needs user approval, "pending" when polling for a result. */
@@ -67,6 +74,8 @@ export interface MessageResponse {
      * means the card may. The Host is the authority; channel buttons follow it.
      */
     alwaysApproveAllowed?: false
+    /** Present on an auto shell card. Absent means today's approve / always / deny buttons. */
+    shellCard?: ShellCardDescriptor
   }
 }
 
@@ -278,9 +287,15 @@ export class RPCClient {
     requestId: string,
     alwaysApprove: boolean,
     channelType: string,
-    channelId: string
+    channelId: string,
+    options?: { shellAction?: ShellAction }
   ): Promise<{ success: boolean; error?: string }> {
     console.log(`[RPC] Sending approval for request ${requestId}`)
+    const shellAction = options?.shellAction
+    const forwardedShellAction =
+      shellAction === 'once' || shellAction === 'command' || shellAction === 'shell'
+        ? shellAction
+        : undefined
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/approvals/approve`, {
         method: 'POST',
@@ -295,6 +310,7 @@ export class RPCClient {
           alwaysApprove,
           channelType,
           channelId,
+          ...(forwardedShellAction ? { shellAction: forwardedShellAction } : {}),
         }),
       })
       return (await response.json()) as { success: boolean; error?: string }
