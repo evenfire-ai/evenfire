@@ -4,7 +4,7 @@
  * The Context Mapper provides McpServer CRDs via REST API, so mcp-host
  * doesn't need direct K8s access to McpServer resources.
  */
-import { config } from './config'
+import { CONTEXT_MAPPER_REQUEST_TIMEOUT_MS, config } from './config'
 import { McpServerInfo } from './types'
 
 export interface McpServersResponse {
@@ -17,7 +17,6 @@ export interface AuthTokenResponse {
   credentialRevision: string
 }
 
-const DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = 10_000
 const MCP_SERVER_NAME_PATTERN = /^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$/
 
 export type ContextMapperRequestKind = 'inventory' | 'credential'
@@ -208,13 +207,15 @@ export class ContextMapperClient {
 
   constructor(
     baseUrl: string,
-    options: number | ContextMapperClientOptions = DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS
+    // The authority staleness rule (validateHccAuthorityTiming in ./config) is
+    // derived from this shared request timeout.
+    options: number | ContextMapperClientOptions = CONTEXT_MAPPER_REQUEST_TIMEOUT_MS
   ) {
     this.baseUrl = baseUrl.replace(/\/$/, '') // Remove trailing slash
     this.requestTimeoutMs =
       typeof options === 'number'
         ? options
-        : (options.requestTimeoutMs ?? DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS)
+        : (options.requestTimeoutMs ?? CONTEXT_MAPPER_REQUEST_TIMEOUT_MS)
     this.authentication = typeof options === 'number' ? undefined : options.authentication
   }
 
