@@ -1,8 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import request from 'supertest'
 import type { ActionOperationId } from '@clerum/action-context-contracts'
+import { producerBudgetMs, runProducerChild } from '../../test/support/producerChild.js'
 import { ActionAuthorityCheckpointError } from '../actionAuthorityV2.js'
 import { createApp } from '../app.js'
 
@@ -125,12 +125,17 @@ const cases: Case[] = [
 
 const produced = new Map<string, { token: string; messageId: string | null }>()
 
-beforeAll(() => {
+// Setup, not behaviour under test: the Control API delegation producer runs in
+// a `tsx` child process, one child per case, one after another. Each child is
+// bounded by `runProducerChild`, and the hook budget covers every child. A child
+// that fails, or prints output that is not JSON, fails this hook: the file is
+// red and its tests do not run.
+beforeAll(async () => {
   for (const testCase of cases) {
-    const output = execFileSync(
+    const output = await runProducerChild(
       tsx,
+      producer,
       [
-        producer,
         JSON.stringify({
           operationId: testCase.operationId,
           resourceType: testCase.resourceType,
@@ -138,11 +143,11 @@ beforeAll(() => {
           target: testCase.target,
         }),
       ],
-      { cwd: repositoryRoot, encoding: 'utf8', env: process.env }
+      { cwd: repositoryRoot, env: process.env }
     )
     produced.set(testCase.name, JSON.parse(output))
   }
-})
+}, producerBudgetMs(cases.length))
 
 beforeEach(() => {
   authority.authorizeActionV2.mockReset()

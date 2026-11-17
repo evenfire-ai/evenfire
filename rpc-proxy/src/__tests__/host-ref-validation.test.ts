@@ -1,13 +1,20 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import request from 'supertest'
+import {
+  type SetupOutcome,
+  producerBudgetMs,
+  recordSetup,
+  runProducerChild,
+  setupValue,
+} from '../../test/support/producerChild.js'
 import { createRpcRouter } from '../routes/rpc.js'
 import { createRpcHostActivityStreamRouter } from '../routes/rpcHostActivityStream.js'
 import { createRpcHostProgressStreamRouter } from '../routes/rpcHostProgressStream.js'
 import { createRpcHostStatusStreamRouter } from '../routes/rpcHostStatusStream.js'
+import { verifyUserDelegationV2 } from '../userDelegationV2.js'
 
 const authMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
 const hostMock = vi.hoisted(() => ({
@@ -134,11 +141,128 @@ const invalidCapturedRefs = [
   'h'.repeat(64),
 ]
 
+// Body-bound v2 delegations for W1 payload routes, one producer child per row.
+const producerBoundW1Routes = [
+  {
+    name: 'approval approve',
+    operationId: 'task.manage',
+    resourceType: 'runtime_session',
+    resourceId: 'session-a',
+    target: {
+      hostRef: 'mcp-host/chatllm',
+      taskId: '60000000-0000-4000-8000-000000000006',
+      action: 'approve',
+      approvalRequestId: '70000000-0000-4000-8000-000000000007',
+    },
+    suffix: '/approvals/approve',
+    body: {
+      taskId: '60000000-0000-4000-8000-000000000006',
+      toolCallId: '70000000-0000-4000-8000-000000000007',
+    },
+  },
+  {
+    name: 'approval deny',
+    operationId: 'task.manage',
+    resourceType: 'runtime_session',
+    resourceId: 'session-a',
+    target: {
+      hostRef: 'mcp-host/chatllm',
+      taskId: '60000000-0000-4000-8000-000000000006',
+      action: 'deny',
+      approvalRequestId: '70000000-0000-4000-8000-000000000007',
+    },
+    suffix: '/approvals/deny',
+    body: {
+      taskId: '60000000-0000-4000-8000-000000000006',
+      toolCallId: '70000000-0000-4000-8000-000000000007',
+    },
+  },
+  {
+    name: 'model write',
+    operationId: 'model.select',
+    resourceType: 'runtime_session',
+    resourceId: 'session-a',
+    target: {
+      hostRef: 'mcp-host/chatllm',
+      agent: 'agent',
+      chatId: 'chat',
+      provider: 'openai',
+      model: 'model',
+    },
+    suffix: '/model',
+    body: { agent: 'agent', chatId: 'chat', provider: 'openai', model: 'model' },
+  },
+]
+
 async function callRoute(app: express.Express, route: Route, encodedHostRef: string) {
   const path = `/rpc/hosts/${encodedHostRef}${route.suffix}`
   const call = request(app)[route.method](path).set('authorization', 'Bearer legacy-token')
   return route.body === undefined ? call : call.send(route.body)
 }
+
+type ProducedDelegation = { token: string }
+type ProducedMessageDelegation = { token: string; messageId: string }
+
+const producerBoundW1Tokens = new Map<string, SetupOutcome<ProducedDelegation>>()
+let whitespaceHostWakeDelegation: SetupOutcome<ProducedDelegation> | undefined
+let substitutedHostWakeDelegation: SetupOutcome<ProducedDelegation> | undefined
+let messagePreflightDelegation: SetupOutcome<ProducedMessageDelegation> | undefined
+
+async function produce<T>(script: string, args: readonly string[]): Promise<T> {
+  const output = await runProducerChild(tsx, script, args, {
+    cwd: repositoryRoot,
+    env: process.env,
+  })
+  return JSON.parse(output) as T
+}
+
+// Setup, not behaviour under test: the Control API delegation producers run in
+// a `tsx` child process. `beforeAll` starts one child for each test that reads
+// a token, one after another, so no test body starts a process and no token is
+// shared between two tests. Each child is bounded by `runProducerChild`, and the
+// hook budget covers every child. A child that fails is recorded, and
+// `setupValue` rethrows its error in the test that reads it: that test fails
+// with the child's own error, and the other tests still run.
+beforeAll(
+  async () => {
+    for (const route of producerBoundW1Routes) {
+      producerBoundW1Tokens.set(
+        route.name,
+        await recordSetup(() =>
+          produce<ProducedDelegation>(bodyBoundDelegationProducer, [
+            JSON.stringify({
+              operationId: route.operationId,
+              resourceType: route.resourceType,
+              resourceId: route.resourceId,
+              target: route.target,
+            }),
+          ])
+        )
+      )
+    }
+    whitespaceHostWakeDelegation = await recordSetup(() =>
+      produce<ProducedDelegation>(hostWakeDelegationProducer, [])
+    )
+    substitutedHostWakeDelegation = await recordSetup(() =>
+      produce<ProducedDelegation>(hostWakeDelegationProducer, [])
+    )
+    messagePreflightDelegation = await recordSetup(() =>
+      produce<ProducedMessageDelegation>(bodyBoundDelegationProducer, [
+        JSON.stringify({
+          operationId: 'chat.message.invoke',
+          resourceType: 'host',
+          resourceId: 'mcp-host/chatllm',
+          target: {
+            hostRef: 'mcp-host/chatllm',
+            channelType: 'rpc',
+            channelId: 'chatllm',
+          },
+        }),
+      ])
+    )
+  },
+  producerBudgetMs(producerBoundW1Routes.length + 3)
+)
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -219,91 +343,36 @@ describe('public Host-ref validation', () => {
     }
   )
 
-  it.each([
-    {
-      name: 'approval approve',
-      operationId: 'task.manage',
-      resourceType: 'runtime_session',
-      resourceId: 'session-a',
-      target: {
-        hostRef: 'mcp-host/chatllm',
-        taskId: '60000000-0000-4000-8000-000000000006',
-        action: 'approve',
-        approvalRequestId: '70000000-0000-4000-8000-000000000007',
-      },
-      suffix: '/approvals/approve',
-      body: {
-        taskId: '60000000-0000-4000-8000-000000000006',
-        toolCallId: '70000000-0000-4000-8000-000000000007',
-      },
-    },
-    {
-      name: 'approval deny',
-      operationId: 'task.manage',
-      resourceType: 'runtime_session',
-      resourceId: 'session-a',
-      target: {
-        hostRef: 'mcp-host/chatllm',
-        taskId: '60000000-0000-4000-8000-000000000006',
-        action: 'deny',
-        approvalRequestId: '70000000-0000-4000-8000-000000000007',
-      },
-      suffix: '/approvals/deny',
-      body: {
-        taskId: '60000000-0000-4000-8000-000000000006',
-        toolCallId: '70000000-0000-4000-8000-000000000007',
-      },
-    },
-    {
-      name: 'model write',
-      operationId: 'model.select',
-      resourceType: 'runtime_session',
-      resourceId: 'session-a',
-      target: {
-        hostRef: 'mcp-host/chatllm',
-        agent: 'agent',
-        chatId: 'chat',
-        provider: 'openai',
-        model: 'model',
-      },
-      suffix: '/model',
-      body: { agent: 'agent', chatId: 'chat', provider: 'openai', model: 'model' },
-    },
-  ])('rejects producer-bound v2 $name at W1 before checkpoint or effects', async route => {
-    const producerOutput = execFileSync(
-      tsx,
-      [
-        bodyBoundDelegationProducer,
-        JSON.stringify({
-          operationId: route.operationId,
-          resourceType: route.resourceType,
-          resourceId: route.resourceId,
-          target: route.target,
-        }),
-      ],
-      { cwd: repositoryRoot, encoding: 'utf8', env: process.env }
-    )
-    const { token } = JSON.parse(producerOutput) as { token: string }
-    const checkpoint = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ error: 'checkpoint_should_not_run' }), {
-          status: 503,
-          headers: { 'content-type': 'application/json' },
-        })
-    )
-    vi.stubGlobal('fetch', checkpoint)
+  it.each(producerBoundW1Routes)(
+    'rejects producer-bound v2 $name at W1 before checkpoint or effects',
+    async route => {
+      const { token } = setupValue(
+        producerBoundW1Tokens.get(route.name),
+        `producer-bound v2 ${route.name} token`
+      )
+      expect(verifyUserDelegationV2(token)).not.toBeNull()
+      const checkpoint = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'checkpoint_should_not_run' }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          })
+      )
+      vi.stubGlobal('fetch', checkpoint)
 
-    const response = await request(mountedApp())
-      .post(`/rpc/hosts/%20chatllm%20${route.suffix}`)
-      .set('authorization', `Bearer ${token}`)
-      .send(route.body)
+      const response = await request(mountedApp())
+        .post(`/rpc/hosts/%20chatllm%20${route.suffix}`)
+        .set('authorization', `Bearer ${token}`)
+        .send(route.body)
 
-    expect(response.status).toBe(400)
-    expect(response.body).toEqual({ error: 'Invalid hostRef' })
-    expect(checkpoint).not.toHaveBeenCalled()
-    expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
-    expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
-  })
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'Invalid hostRef' })
+      expect(checkpoint).not.toHaveBeenCalled()
+      expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+      expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+      expect(authMock.verifyRpcToken).not.toHaveBeenCalled()
+    }
+  )
 
   it.each(['a', 'a'.repeat(63), 'valid-host-1'])(
     'allows valid boundary %s to reach the existing live authority path',
@@ -352,12 +421,8 @@ describe('public Host-ref validation', () => {
   })
 
   it('rejects a whitespace Host ref after real v2 binding but before the remote checkpoint', async () => {
-    const producerOutput = execFileSync(tsx, [hostWakeDelegationProducer], {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-      env: process.env,
-    })
-    const { token } = JSON.parse(producerOutput) as { token: string }
+    const { token } = setupValue(whitespaceHostWakeDelegation, 'whitespace Host wake token')
+    expect(verifyUserDelegationV2(token)).not.toBeNull()
     const remoteCheckpoint = vi.fn(
       async () =>
         new Response(JSON.stringify({ error: 'checkpoint_should_not_run' }), {
@@ -380,15 +445,11 @@ describe('public Host-ref validation', () => {
     expect(remoteCheckpoint).not.toHaveBeenCalled()
     expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
     expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    expect(authMock.verifyRpcToken).not.toHaveBeenCalled()
   })
 
   it('rejects real v2 target substitutions during local binding before W1 or checkpoint I/O', async () => {
-    const producerOutput = execFileSync(tsx, [hostWakeDelegationProducer], {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-      env: process.env,
-    })
-    const { token } = JSON.parse(producerOutput) as { token: string }
+    const { token } = setupValue(substitutedHostWakeDelegation, 'substituted Host wake token')
     const remoteCheckpoint = vi.fn()
     vi.stubGlobal('fetch', remoteCheckpoint)
 
@@ -407,24 +468,8 @@ describe('public Host-ref validation', () => {
   })
 
   it('runs message preflight and W1 after exact binding but before the remote checkpoint', async () => {
-    const producerOutput = execFileSync(
-      tsx,
-      [
-        bodyBoundDelegationProducer,
-        JSON.stringify({
-          operationId: 'chat.message.invoke',
-          resourceType: 'host',
-          resourceId: 'mcp-host/chatllm',
-          target: {
-            hostRef: 'mcp-host/chatllm',
-            channelType: 'rpc',
-            channelId: 'chatllm',
-          },
-        }),
-      ],
-      { cwd: repositoryRoot, encoding: 'utf8', env: process.env }
-    )
-    const fixture = JSON.parse(producerOutput) as { token: string; messageId: string }
+    const fixture = setupValue(messagePreflightDelegation, 'message preflight token')
+    expect(verifyUserDelegationV2(fixture.token)).not.toBeNull()
     const checkpoint = vi.fn()
     vi.stubGlobal('fetch', checkpoint)
 
@@ -451,6 +496,7 @@ describe('public Host-ref validation', () => {
     expect(invalidMessage.status).toBe(400)
     expect(invalidMessage.body).toEqual({ error: 'Invalid host message request payload' })
     expect(checkpoint).not.toHaveBeenCalled()
+    expect(authMock.verifyRpcToken).not.toHaveBeenCalled()
   })
 
   it('does not convert a missing segment into a captured invalid Host', async () => {
