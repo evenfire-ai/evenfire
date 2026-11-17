@@ -11,8 +11,12 @@ export type LlmModelTableProps = {
   onCreate: () => void
   onEdit: (id: string) => void
   onDelete: (model: LlmAllowedModel) => Promise<void>
+  // Pins a row the catalog sync turned off (`auto_disabled_at`) as disabled, so
+  // a later sync that lists it again does not turn it back on.
+  onKeepDisabled: (model: LlmAllowedModel) => Promise<void>
   onRefresh: () => void
   deletingId: string | null
+  keepingDisabledId: string | null
   refreshing: boolean
   loading?: boolean
 }
