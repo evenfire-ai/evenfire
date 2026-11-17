@@ -1584,6 +1584,7 @@ assert_control_api_runtime_access_contract_is_exact() {
     $'llm_allowed_models_audit\tappend'
     $'llm_catalog_sync_runs\tappend'
     $'llm_catalog_dismissed\tappend'
+    $'llm_catalog_prune_runs\tappend'
     $'llm_provider_catalog_settings\tupsert'
     $'plugin_workload_sdk_spend_outcomes\tappend'
     $'gfs_desktop_operator_links\tlink_lifecycle'
