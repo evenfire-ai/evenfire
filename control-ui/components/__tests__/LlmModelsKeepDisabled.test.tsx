@@ -222,6 +222,11 @@ describe('Keep disabled on a row the catalog sync turned off', () => {
     await waitFor(() =>
       expect(screen.queryByText('Turned off by catalog sync')).not.toBeInTheDocument()
     )
+    // The row is still listed, so the marker's absence comes from the reload.
+    const row = screen
+      .getByRole('button', { name: 'Actions for model claude/claude-old' })
+      .closest('tr')!
+    expect(within(row).getByText('Disabled')).toBeInTheDocument()
     expect(await screen.findByText(/Models need review/)).toHaveTextContent('1 deprecated')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(1)
