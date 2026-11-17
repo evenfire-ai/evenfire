@@ -1,5 +1,13 @@
 import { randomUUID } from 'node:crypto'
+import { logger } from '../../logger'
+import { APPROVAL_INPUT_PREVIEW_BYTES } from '../../progress/approvalInputPreview'
+import { effectiveApprovalMode } from '../approval/approvalMode'
+import type { ApprovalMode } from '../approval/approvalMode'
+import { type ModeDecision, decideApproval } from '../approval/decideApproval'
 import type { GateCause } from '../approval/gateCause'
+import { approvalLogId, syncEffectiveMode } from '../approval/grantMemory'
+import { shellCardDescriptor } from '../approval/shellCard'
+import type { ShellVerdict } from '../approval/shellClassifier'
 import { isDenied } from '../conversation/denialPolicy'
 import { oneShotMatches } from '../extensions/approvalMatch'
 import {
@@ -12,8 +20,10 @@ import type { PendingApproval, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
 import { executeSingleTool } from './toolUseLoopSingleTool'
 
+const CANCELLED_TEXT = 'Not executed: the task was cancelled.'
+
 export type ToolCallAdmission =
-  | { kind: 'result'; toolResult: ToolResult }
+  | { kind: 'result'; toolResult: ToolResult; stopBatch?: boolean }
   | { kind: 'suspend'; approval: PendingApproval; cause?: GateCause }
   | { kind: 'execute'; call: ToolCall; toolIdentity?: ToolIdentity; cause?: GateCause }
 
@@ -70,6 +80,7 @@ export async function admitToolCall(
       data: { toolName: call.name, errors: validation.errors, iteration },
       timestamp: new Date(),
     })
+    noteEffectiveMode(config)
     return {
       kind: 'result',
       toolResult: {
@@ -101,6 +112,7 @@ export async function admitToolCall(
         },
         timestamp: new Date(),
       })
+      noteEffectiveMode(config)
       return {
         kind: 'result',
         toolResult: {
@@ -127,6 +139,7 @@ export async function admitToolCall(
     const mode = config.executionMode ?? 'interactive'
     if (decision.decision === 'deny') {
       recordDecision('tool', 'deny', decision.source, 'denied', decision.reasonCode, mode)
+      noteEffectiveMode(config)
       return {
         kind: 'result',
         toolResult: {
@@ -149,9 +162,11 @@ export async function admitToolCall(
       if (!denied && pending && oneShotMatches(pending, call.name, call.arguments, call.id)) {
         config.conversation.pending_approval = undefined
         recordDecision('tool', 'ask', decision.source, 'executed', decision.reasonCode, mode)
+        noteEffectiveMode(config)
         return { kind: 'execute', call, toolIdentity, cause: 'none' }
       } else if (mode === 'unattended') {
         recordDecision('tool', 'deny', decision.source, 'denied', 'approval_unavailable', mode)
+        noteEffectiveMode(config)
         return {
           kind: 'result',
           toolResult: {
@@ -184,25 +199,190 @@ export async function admitToolCall(
     gate = config.loopController.beforeTool(call.name, call.arguments, call.id)
   }
 
-  if (gate === 'skip') {
-    return {
-      kind: 'result',
-      toolResult: {
-        tool_call_id: call.id,
-        name: call.name,
-        content: 'Tool execution skipped',
-        is_error: false,
+  if (!config.approvalMode) {
+    if (gate === 'skip') return skipped(call)
+    if (typeof gate === 'object' && gate.type === 'suspend') {
+      return {
+        kind: 'suspend',
+        approval: gate.approval,
+        ...(gate.cause !== undefined ? { cause: gate.cause } : {}),
+      }
+    }
+    return { kind: 'execute', call, toolIdentity }
+  }
+  return applyApprovalMode(call, config, gate, toolIdentity)
+}
+
+function skipped(call: ToolCall): ToolCallAdmission {
+  return {
+    kind: 'result',
+    toolResult: {
+      tool_call_id: call.id,
+      name: call.name,
+      content: 'Tool execution skipped',
+      is_error: false,
+    },
+  }
+}
+
+function stopAdmission(call: ToolCall): ToolCallAdmission {
+  return {
+    kind: 'result',
+    stopBatch: true,
+    toolResult: {
+      tool_call_id: call.id,
+      name: call.name,
+      content: CANCELLED_TEXT,
+      is_error: true,
+    },
+  }
+}
+
+/** Sync the effective mode. Returns it. Logs L2 when a later value differs. */
+function noteEffectiveMode(config: LoopConfig): ApprovalMode | undefined {
+  const inputs = config.approvalMode
+  if (!inputs) return undefined
+  const stored = inputs.storedMode()
+  const ceiling = inputs.ceiling()
+  const cap = inputs.channelCap()
+  const effective = effectiveApprovalMode(stored, ceiling, cap)
+  const synced = syncEffectiveMode(config.conversation, effective)
+  if (synced.changed) {
+    logger.info(
+      {
+        event: 'L2',
+        session: approvalLogId(config.conversation.id),
+        storedMode: stored,
+        previousEffectiveMode: synced.previous,
+        effectiveApprovalMode: effective,
       },
-    }
+      'Effective approval mode changed'
+    )
   }
-  if (typeof gate === 'object' && gate.type === 'suspend') {
-    return {
-      kind: 'suspend',
-      approval: gate.approval,
-      ...(gate.cause !== undefined ? { cause: gate.cause } : {}),
-    }
+  return effective
+}
+
+function shellPreviewFlags(
+  config: LoopConfig,
+  toolName: string,
+  parameters: Record<string, unknown>
+): { truncated: boolean; redacted: boolean } {
+  const command = parameters.command
+  if (typeof command !== 'string') return { truncated: true, redacted: true }
+  const redacted = config.safety.sanitizeOutput(toolName, command).content
+  return {
+    truncated: Buffer.from(redacted, 'utf8').byteLength > APPROVAL_INPUT_PREVIEW_BYTES,
+    redacted: redacted !== command,
   }
-  return { kind: 'execute', call, toolIdentity }
+}
+
+/**
+ * Read every mode getter and decide. Nothing is awaited in here.
+ * Callers must not await between this and the table.
+ */
+function readDecision(
+  config: LoopConfig,
+  call: ToolCall,
+  cause: GateCause | undefined,
+  verdict?: ShellVerdict
+): ModeDecision {
+  const mode = noteEffectiveMode(config) ?? 'manual'
+  const inputs = config.approvalMode!
+  const command = typeof call.arguments.command === 'string' ? call.arguments.command : undefined
+  return decideApproval({
+    mode,
+    toolName: call.name,
+    cause,
+    grants: {
+      task: config.conversation.task_approved_tools ?? new Set<string>(),
+      always: config.conversation.auto_approved_tools ?? new Set<string>(),
+      autoShell: config.conversation.auto_shell_grants ?? {
+        wholeTool: false,
+        commands: new Set<string>(),
+      },
+    },
+    ...(command !== undefined ? { command } : {}),
+    classifierAvailable: inputs.classifierAvailable(call.arguments),
+    ...(verdict ? { verdict } : {}),
+  })
+}
+
+function materialize(
+  decision: ModeDecision,
+  call: ToolCall,
+  config: LoopConfig,
+  cause: GateCause | undefined,
+  approval: PendingApproval | undefined,
+  toolIdentity: ToolIdentity | undefined
+): ToolCallAdmission {
+  if (decision.kind === 'stop' || decision.kind === 'classify') return stopAdmission(call)
+  if (decision.kind === 'run') {
+    if (decision.cell === 'X1') {
+      logger.info(
+        {
+          event: 'L4',
+          session: approvalLogId(config.conversation.id),
+          tool: call.name,
+          cause,
+          mode: 'allow_all',
+        },
+        'Allow-all tool execution'
+      )
+    }
+    return { kind: 'execute', call, toolIdentity, ...(cause !== undefined ? { cause } : {}) }
+  }
+  if (decision.cell === 'U1') {
+    logger.warn(
+      { event: 'U1', session: approvalLogId(config.conversation.id), tool: call.name },
+      'Approval suspension had no cause'
+    )
+  }
+  const card: PendingApproval = {
+    ...(approval ?? {
+      request_id: randomUUID(),
+      tool_name: call.name,
+      parameters: call.arguments,
+      description: `Tool "${call.name}" requires approval before execution`,
+      tool_call_id: call.id,
+      context_snapshot: [],
+      authorization_scope: 'turn_tools' as const,
+    }),
+  }
+  if (decision.scope === 'exact_invocation') card.authorization_scope = 'exact_invocation'
+  if (decision.shellCard) {
+    card.shellCard = shellCardDescriptor(
+      card.parameters,
+      shellPreviewFlags(config, card.tool_name, card.parameters)
+    )
+  }
+  return { kind: 'suspend', approval: card, ...(cause !== undefined ? { cause } : {}) }
+}
+
+async function applyApprovalMode(
+  call: ToolCall,
+  config: LoopConfig,
+  gate: 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval; cause?: GateCause },
+  toolIdentity: ToolIdentity | undefined
+): Promise<ToolCallAdmission> {
+  if (gate === 'skip') return skipped(call)
+  let cause: GateCause | undefined = gate === 'proceed' ? 'none' : gate.cause
+  let approval = gate === 'proceed' ? undefined : gate.approval
+  let decision = readDecision(config, call, cause)
+  if (decision.kind === 'classify') {
+    const verdict = await config.approvalMode!.classify(call, approval?.description ?? '')
+    if (verdict === 'CANCELLED') return stopAdmission(call)
+    const fresh = config.loopController.beforeTool(call.name, call.arguments, call.id)
+    if (fresh === 'skip') return skipped(call)
+    if (fresh === 'proceed') {
+      cause = 'none'
+      approval = undefined
+    } else {
+      cause = fresh.cause
+      approval = fresh.approval
+    }
+    decision = readDecision(config, call, cause, verdict)
+  }
+  return materialize(decision, call, config, cause, approval, toolIdentity)
 }
 
 export async function executeAdmittedTool(

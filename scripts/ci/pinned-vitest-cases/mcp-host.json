@@ -205,11 +205,11 @@
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: meta.json validation 'V2: meta one byte over the size limit…'"
+    "fullName": "GFS download store boundaries: meta.json validation 'V2: meta one byte over the size limit\u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: meta.json validation 'V3: meta exactly at the size limit is…'"
+    "fullName": "GFS download store boundaries: meta.json validation 'V3: meta exactly at the size limit is\u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
@@ -217,31 +217,31 @@
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: meta.json validation 'V5: meta id that differs from its dir…'"
+    "fullName": "GFS download store boundaries: meta.json validation 'V5: meta id that differs from its dir\u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: meta.json validation 'V6: expiresAt before createdAt is inc…'"
+    "fullName": "GFS download store boundaries: meta.json validation 'V6: expiresAt before createdAt is inc\u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: meta.json validation 'V7: meta exactly at the retention bou…'"
+    "fullName": "GFS download store boundaries: meta.json validation 'V7: meta exactly at the retention bou\u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: meta.json validation 'V8: meta past the retention bound by …'"
+    "fullName": "GFS download store boundaries: meta.json validation 'V8: meta past the retention bound by \u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: meta.json validation 'V9: createdAt exactly one minute ahea…'"
+    "fullName": "GFS download store boundaries: meta.json validation 'V9: createdAt exactly one minute ahea\u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: meta.json validation 'V10: createdAt more than one minute a…'"
+    "fullName": "GFS download store boundaries: meta.json validation 'V10: createdAt more than one minute a\u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: meta.json validation 'V12: sizeBytes different from the sou…'"
+    "fullName": "GFS download store boundaries: meta.json validation 'V12: sizeBytes different from the sou\u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
@@ -353,7 +353,7 @@
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: integrity 'I4: source replaced by a directory on…'"
+    "fullName": "GFS download store boundaries: integrity 'I4: source replaced by a directory on\u2026'"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
@@ -361,7 +361,7 @@
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: integrity 'I5: source replaced by a directory on…'"
+    "fullName": "GFS download store boundaries: integrity 'I5: source replaced by a directory on\u2026'"
   },
   {
     "suite": "gfsDownloadStoreProvenance.test.ts",
@@ -629,11 +629,11 @@
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
-    "fullName": "GFS download store adversarial round: caller identity (ADV-1) two channels with the same sender never see each other’s copy"
+    "fullName": "GFS download store adversarial round: caller identity (ADV-1) two channels with the same sender never see each other\u2019s copy"
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
-    "fullName": "GFS download store adversarial round: caller identity (ADV-1) refuses an identity that is not the caller root’s key"
+    "fullName": "GFS download store adversarial round: caller identity (ADV-1) refuses an identity that is not the caller root\u2019s key"
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
@@ -673,11 +673,11 @@
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
-    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) readManagedFile logs a non-ENOENT failure of the owner’s copy and still answers download_missing"
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) readManagedFile logs a non-ENOENT failure of the owner\u2019s copy and still answers download_missing"
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
-    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) readManagedFilePrefix logs a non-ENOENT failure of the owner’s copy and still answers download_missing"
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) readManagedFilePrefix logs a non-ENOENT failure of the owner\u2019s copy and still answers download_missing"
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
@@ -769,7 +769,7 @@
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
-    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged duplicates of another caller’s ids whose removal fails stay charged against the Host budget"
+    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged duplicates of another caller\u2019s ids whose removal fails stay charged against the Host budget"
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
@@ -1505,31 +1505,31 @@
   },
   {
     "suite": "conversation.test.ts",
-    "fullName": "ConversationManager — session-scoped tool approvals a plain approve() of shell_exec stores the tool for the current task only, without a wildcard"
+    "fullName": "ConversationManager \u2014 session-scoped tool approvals a plain approve() of shell_exec stores the tool for the current task only, without a wildcard"
   },
   {
     "suite": "conversation.test.ts",
-    "fullName": "ConversationManager — session-scoped tool approvals an \"always\" approve() of shell_exec stores the tool for later tasks, without a wildcard"
+    "fullName": "ConversationManager \u2014 session-scoped tool approvals an \"always\" approve() of shell_exec stores the tool for later tasks, without a wildcard"
   },
   {
     "suite": "conversation.test.ts",
-    "fullName": "ConversationManager — session-scoped tool approvals a plain approve() of http_request stores the tool for the current task only, without a wildcard"
+    "fullName": "ConversationManager \u2014 session-scoped tool approvals a plain approve() of http_request stores the tool for the current task only, without a wildcard"
   },
   {
     "suite": "conversation.test.ts",
-    "fullName": "ConversationManager — session-scoped tool approvals an \"always\" approve() of http_request stores the tool for later tasks, without a wildcard"
+    "fullName": "ConversationManager \u2014 session-scoped tool approvals an \"always\" approve() of http_request stores the tool for later tasks, without a wildcard"
   },
   {
     "suite": "conversation.test.ts",
-    "fullName": "ConversationManager — session-scoped tool approvals a plain approve() of cron_manage stores the tool for the current task only, without a wildcard"
+    "fullName": "ConversationManager \u2014 session-scoped tool approvals a plain approve() of cron_manage stores the tool for the current task only, without a wildcard"
   },
   {
     "suite": "conversation.test.ts",
-    "fullName": "ConversationManager — session-scoped tool approvals an \"always\" approve() of cron_manage stores the tool for later tasks, without a wildcard"
+    "fullName": "ConversationManager \u2014 session-scoped tool approvals an \"always\" approve() of cron_manage stores the tool for later tasks, without a wildcard"
   },
   {
     "suite": "conversation.test.ts",
-    "fullName": "ConversationManager — session-scoped tool approvals startTurn clears plain session-scoped approvals and keeps \"always\" ones"
+    "fullName": "ConversationManager \u2014 session-scoped tool approvals startTurn clears plain session-scoped approvals and keeps \"always\" ones"
   },
   {
     "suite": "approvalController.test.ts",
@@ -1581,23 +1581,23 @@
   },
   {
     "suite": "workflowService.security.test.ts",
-    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) never runs srv__write outside include, returns a tool error to the model, and completes the step"
+    "fullName": "workflow tool allowlist enforced at call time (spec \u00a73.1.2) never runs srv__write outside include, returns a tool error to the model, and completes the step"
   },
   {
     "suite": "workflowService.security.test.ts",
-    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) never runs clerum__trigger_workflow outside include, returns a tool error to the model, and completes the step"
+    "fullName": "workflow tool allowlist enforced at call time (spec \u00a73.1.2) never runs clerum__trigger_workflow outside include, returns a tool error to the model, and completes the step"
   },
   {
     "suite": "workflowService.security.test.ts",
-    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) never runs clerum__read_workflow outside include, returns a tool error to the model, and completes the step"
+    "fullName": "workflow tool allowlist enforced at call time (spec \u00a73.1.2) never runs clerum__read_workflow outside include, returns a tool error to the model, and completes the step"
   },
   {
     "suite": "workflowService.security.test.ts",
-    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) rejects every forbidden call in one turn while the allowlisted call still dispatches"
+    "fullName": "workflow tool allowlist enforced at call time (spec \u00a73.1.2) rejects every forbidden call in one turn while the allowlisted call still dispatches"
   },
   {
     "suite": "workflowService.security.test.ts",
-    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) does not let a rejected call satisfy toolChoice=required"
+    "fullName": "workflow tool allowlist enforced at call time (spec \u00a73.1.2) does not let a rejected call satisfy toolChoice=required"
   },
   {
     "suite": "approvalScopeDurability.test.ts",
@@ -1617,10 +1617,514 @@
   },
   {
     "suite": "sessionRouteHandlers.test.ts",
-    "fullName": "createSessionRouteHandlers — Always approve eligibility on every view (RP726-03) hides Always approve for a forced card on hot and cold list/messages views"
+    "fullName": "createSessionRouteHandlers \u2014 Always approve eligibility on every view (RP726-03) hides Always approve for a forced card on hot and cold list/messages views"
   },
   {
     "suite": "sessionRouteHandlers.test.ts",
-    "fullName": "createSessionRouteHandlers — Always approve eligibility on every view (RP726-03) offers Always approve for an ordinary card on the same views"
+    "fullName": "createSessionRouteHandlers \u2014 Always approve eligibility on every view (RP726-03) offers Always approve for an ordinary card on the same views"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission A5 suspends without classify"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission a denied http_request still cards after reconstruct and a mode change"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission A2 runs HTTP with an empty and a non-empty allowlist and does not classify"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission A1 runs an exact post-rewrite command without classify and classifies a different command"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission A3 APPROVE stores nothing, ESCALATE cards with the descriptor, and an unavailable classifier does not call classify"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission A3 re-reads the mode and the tools override after classify"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission A6 cards MCP, browser_open, and workflow_trigger exactly, including an MCP Always grant"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission X1 runs shell, MCP, live download, admin_forced, denied, denials_active, and guardrail ask without classify"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission C1 honors a cron task grant in auto and cards allow-all creates that manual would card"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission a cron-sourced stateless task runs shell and suspends only cron create"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission channel cap at admission decides the next call as manual"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "grant memory through admission a ceiling drop and a kill-switch dip both make the next shell call classify"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "grant memory through admission allowModeChange off and back on, with no tool call, makes the next shell call classify"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "grant memory through admission PATCH manual then auto clears the shell grant, and the same mode twice keeps it"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "grant memory through admission a shell denial clears the command grant and a timeout keeps it"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "grant memory through admission a non-shell Always grant survives a mode change and is honored again in manual"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "grant memory through admission a cron task grant survives a mode change and does not log L4 in auto or allow-all"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "L2 and L4 emits L2 once when the ceiling changes at admission"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "L2 and L4 emits L4 once for an allow-all run"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "L2 and L4 U1 warns and cards when a suspension has no cause"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approval mode live config setApprovalConfig changes the ceiling, the tools override, and the live set for the next admission"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approval mode live config a same-batch ceiling drop decides the second call under the new mode"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approval mode live config reads the ceiling after a guardrail hook resolves, so the HTTP call is a manual card"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approval mode live config a stale host event leaves the next admission, and the channel cap, on manual"
+  },
+  {
+    "suite": "taskExecutor.test.ts",
+    "fullName": "approval mode cancel during classify a user cancel during classify ends the task cancelled"
+  },
+  {
+    "suite": "taskExecutor.test.ts",
+    "fullName": "approval mode cancel during classify a cancel during classify does not admit the rest of the batch"
+  },
+  {
+    "suite": "taskExecutor.test.ts",
+    "fullName": "approval mode cancel during classify a duration trip during classify fails the task with TASK_DURATION_LIMIT"
+  },
+  {
+    "suite": "approvalGolden.test.ts",
+    "fullName": "approval admission golden records today's admitToolCall for the reference inputs"
+  },
+  {
+    "suite": "approvalGolden.test.ts",
+    "fullName": "approval admission golden matches the golden when the mode is manual"
+  },
+  {
+    "suite": "approvalSuitesBothPaths.test.ts",
+    "fullName": "admission suites on the unset path an MCP approval suspends that call only"
+  },
+  {
+    "suite": "approvalSuitesBothPaths.test.ts",
+    "fullName": "admission suites on the unset path a shell task grant covers shell only, and workflow grants nothing until Always"
+  },
+  {
+    "suite": "approvalSuitesBothPaths.test.ts",
+    "fullName": "admission suites on the unset path a denied tool and an unapproved sibling suspend after another tool was approved"
+  },
+  {
+    "suite": "approvalSuitesBothPaths.test.ts",
+    "fullName": "admission suites on the unset path an approved-catalog MCP call suspends before execution"
+  },
+  {
+    "suite": "approvalSuitesBothPaths.test.ts",
+    "fullName": "admission suites on the manual path an MCP approval suspends that call only"
+  },
+  {
+    "suite": "approvalSuitesBothPaths.test.ts",
+    "fullName": "admission suites on the manual path a shell task grant covers shell only, and workflow grants nothing until Always"
+  },
+  {
+    "suite": "approvalSuitesBothPaths.test.ts",
+    "fullName": "admission suites on the manual path a denied tool and an unapproved sibling suspend after another tool was approved"
+  },
+  {
+    "suite": "approvalSuitesBothPaths.test.ts",
+    "fullName": "admission suites on the manual path an approved-catalog MCP call suspends before execution"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'manual' 'shell_exec' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'manual' 'http_request' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'manual' 'cron_manage' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'manual' 'browser_open' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'auto' 'shell_exec' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'auto' 'http_request' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'auto' 'cron_manage' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'auto' 'browser_open' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'allow_all' 'shell_exec' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'allow_all' 'http_request' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'allow_all' 'cron_manage' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval N1 'allow_all' 'browser_open' runs when the cause is none"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval U1 cards a missing cause for http in auto and for any tool in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval CANCELLED is A4 before the second cell ('manual' 'http_request' 'ordinary')"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval CANCELLED is A4 before the second cell ('manual' 'shell_exec' 'admin_forced')"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval CANCELLED is A4 before the second cell ('allow_all' 'browser_open' 'ordinary')"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval CANCELLED is A4 before the second cell ('auto' 'shell_exec' 'admin_forced')"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M1 'shell_exec' 'ordinary' runs on a name grant and otherwise keeps the producer scope"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M1 'shell_exec' 'admin_forced' runs on a name grant and otherwise keeps the producer scope"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M1 'http_request' 'ordinary' runs on a name grant and otherwise keeps the producer scope"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M1 'http_request' 'admin_forced' runs on a name grant and otherwise keeps the producer scope"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M1 'browser_open' 'ordinary' runs on a name grant and otherwise keeps the producer scope"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M1 'browser_open' 'admin_forced' runs on a name grant and otherwise keeps the producer scope"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'shell_exec' 'cron_forced' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'shell_exec' 'live' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'shell_exec' 'denied' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'shell_exec' 'denials_active' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'shell_exec' 'guardrail_ask' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'http_request' 'cron_forced' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'http_request' 'live' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'http_request' 'denied' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'http_request' 'denials_active' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'http_request' 'guardrail_ask' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'browser_open' 'cron_forced' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'browser_open' 'live' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'browser_open' 'denied' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'browser_open' 'denials_active' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval M2 'browser_open' 'guardrail_ask' is an exact card even with a name grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval C1 manual uses the manual column for cron and is not an allow-all run"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval C1 auto uses the manual column for cron and is not an allow-all run"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval C1 allow_all uses the manual column for cron and is not an allow-all run"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A1 runs an exact command or the whole tool and does not classify"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A2 runs ordinary HTTP without using a verdict or a grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A3 classifies, runs APPROVE, and cards ESCALATE or an unavailable classifier"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval a verdict is ignored unless the second read is still A3"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'shell_exec' 'admin_forced' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'shell_exec' 'live' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'shell_exec' 'denied' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'shell_exec' 'denials_active' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'shell_exec' 'guardrail_ask' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'http_request' 'admin_forced' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'http_request' 'live' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'http_request' 'denied' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'http_request' 'denials_active' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'http_request' 'guardrail_ask' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'browser_open' 'admin_forced' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'browser_open' 'live' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'browser_open' 'denied' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'browser_open' 'denials_active' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A5 'browser_open' 'guardrail_ask' is an exact card with no shell shortcut"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A6 cards ordinary browser_open exactly, even with an Always grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A6 cards ordinary workflow_trigger exactly, even with an Always grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval A6 cards ordinary acme__search exactly, even with an Always grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'shell_exec' 'ordinary' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'shell_exec' 'admin_forced' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'shell_exec' 'cron_forced' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'shell_exec' 'live' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'shell_exec' 'denied' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'shell_exec' 'denials_active' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'shell_exec' 'guardrail_ask' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'http_request' 'ordinary' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'http_request' 'admin_forced' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'http_request' 'cron_forced' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'http_request' 'live' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'http_request' 'denied' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'http_request' 'denials_active' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'http_request' 'guardrail_ask' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'browser_open' 'ordinary' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'browser_open' 'admin_forced' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'browser_open' 'cron_forced' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'browser_open' 'live' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'browser_open' 'denied' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'browser_open' 'denials_active' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X1 'browser_open' 'guardrail_ask' runs in allow-all"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "shellCardDescriptor offers the desktop command only when the preview is neither redacted nor truncated"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "shellCardDescriptor drops the channel command at 201 characters of parameters"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "shellCardDescriptor keeps shellCard on the suspension allowlist"
+  },
+  {
+    "suite": "guardrailGate.test.ts",
+    "fullName": "mode-set guardrail rewrite and redaction a mode-set manual task grant keeps the rewrite and redacts via post_tool_use"
+  },
+  {
+    "suite": "guardrailGate.test.ts",
+    "fullName": "mode-set guardrail rewrite and redaction an X1 run keeps the rewrite and redacts via post_tool_use"
   }
 ]

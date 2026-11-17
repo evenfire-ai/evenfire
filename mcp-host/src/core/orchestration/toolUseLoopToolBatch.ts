@@ -225,6 +225,27 @@ export async function executeToolCalls(
     call = rewritten
 
     const admission = await admitToolCall(call, config, iteration)
+    if (config.abortSignal?.aborted || (admission.kind === 'result' && admission.stopBatch)) {
+      if (admission.kind === 'result') toolResults.push(admission.toolResult)
+      else {
+        toolResults.push({
+          tool_call_id: call.id,
+          name: call.name,
+          content: 'Not executed: the task was cancelled.',
+          is_error: true,
+        })
+      }
+      for (let k = i + 1; k < calls.length; k++) {
+        const skipped = calls[k]
+        toolResults.push({
+          tool_call_id: skipped.id,
+          name: skipped.name,
+          content: 'Not executed: the task was cancelled.',
+          is_error: true,
+        })
+      }
+      return { toolResults, cancelled: true }
+    }
     if (admission.kind === 'result') {
       toolResults.push(admission.toolResult)
       continue

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config as appConfig } from '../../config'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
@@ -78,6 +78,15 @@ vi.mock('../../core/tools/workflowEffectiveTargets', async importOriginal => {
     requestEffectiveWorkflowList: vi.fn(),
     resolveEffectiveWorkflowTarget: vi.fn(),
   }
+})
+
+let realRunToolUseLoop: typeof runToolUseLoop
+
+beforeAll(async () => {
+  const actual = await vi.importActual<typeof import('../../core/orchestration/toolUseLoop')>(
+    '../../core/orchestration/toolUseLoop'
+  )
+  realRunToolUseLoop = actual.runToolUseLoop
 })
 
 function createTask(content: string = 'Test', sender: string = 'user-1'): Task {
@@ -2991,5 +3000,201 @@ describe('TaskExecutor hands the system prompt to the loop (R9-14)', () => {
     } finally {
       appConfig.promptCacheEnabled = previous
     }
+  })
+})
+
+describe('approval mode cancel during classify', () => {
+  const previousApproval = appConfig.enableApproval
+
+  afterEach(() => {
+    appConfig.enableApproval = previousApproval
+    vi.mocked(runToolUseLoop).mockReset()
+  })
+
+  function shellTask(content = 'printf admission-ok'): ReturnType<typeof createTask> {
+    const task = createTask(content, 'cancel-user')
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.channelId = 'cancel-channel'
+    return task
+  }
+
+  async function executorFor(
+    task: ReturnType<typeof createTask>,
+    classify: (options?: { signal?: AbortSignal }) => Promise<{ content: string }>,
+    maxTaskDuration = 30_000
+  ) {
+    appConfig.enableApproval = true
+    Object.assign(appConfig.nativeTool, {
+      workspacePath: '/tmp',
+      shellTimeout: 5000,
+      toolTimeout: 5000,
+      toolProgressInterval: 0,
+      httpAllowlist: [],
+      envAllowlist: ['PATH'],
+      memoryMaxSize: 1000,
+    })
+    const deps = createDeps({
+      llmProvider: {
+        getProviderType: () => 'claude',
+        classifyError: () => {
+          throw new Error('unused')
+        },
+        completeSingleTurn: vi.fn((_messages: unknown, options?: { signal?: AbortSignal }) =>
+          classify(options)
+        ),
+        completeSingleTurnWithTools: vi.fn(),
+      } as never,
+      approvalConfig: {
+        defaultPolicy: 'channel_users',
+        modeCeiling: 'allow_all',
+        channels: {},
+      },
+      approvalConfigProvider: () => ({
+        effective: {
+          defaultPolicy: 'channel_users',
+          modeCeiling: 'allow_all' as const,
+          channels: {},
+        },
+        hostSpec: {
+          defaultPolicy: 'channel_users',
+          modeCeiling: 'allow_all' as const,
+          channels: {},
+        },
+      }),
+      config: {
+        maxTaskDuration,
+        maxToolCallsPerTask: 4,
+        autoStart: false,
+        taskDelay: 0,
+        approvalTimeout: 0,
+      },
+    })
+    vi.mocked(runToolUseLoop).mockImplementation(realRunToolUseLoop)
+    const conversation = await deps.conversationManager.getOrCreate(
+      'cancel-user:rpc:cancel-channel:default',
+      { userId: 'cancel-user', channelType: 'rpc', approvalMode: 'auto' }
+    )
+    conversation.last_effective_approval_mode = 'auto'
+    deps.taskLifecycle.register(task)
+    deps.taskLifecycle.transition(task.id, 'processing', 'dispatched')
+    const executor = new TaskExecutor(task, deps)
+    return { executor, deps, conversation }
+  }
+
+  function hangUntilAbort(options?: { signal?: AbortSignal }): Promise<{ content: string }> {
+    return new Promise((_resolve, reject) => {
+      const signal = options?.signal
+      if (signal?.aborted) {
+        reject(signal.reason)
+        return
+      }
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+  }
+
+  it('a user cancel during classify ends the task cancelled', async () => {
+    const task = shellTask()
+    let started!: () => void
+    const classifyStarted = new Promise<void>(resolve => {
+      started = resolve
+    })
+    const { executor, deps } = await executorFor(task, options => {
+      started()
+      return hangUntilAbort(options)
+    })
+    vi.mocked(deps.llmProvider.completeSingleTurnWithTools).mockResolvedValue({
+      content: null,
+      tool_calls: [
+        { id: 'sh-cancel', name: 'shell_exec', arguments: { command: 'printf admission-ok' } },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'tool_use' as never,
+    })
+    const running = executor.run()
+    await Promise.race([
+      classifyStarted,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('classify did not start')), 500)
+      ),
+    ])
+    executor.abort()
+    await running
+    expect(deps.taskLifecycle.getStatus(task.id)).toBe('cancelled')
+    expect(deps.onFail).not.toHaveBeenCalled()
+    expect(deps.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(executor.pendingApproval).toBeUndefined()
+  })
+
+  it('a cancel during classify does not admit the rest of the batch', async () => {
+    const task = shellTask()
+    let started!: () => void
+    const classifyStarted = new Promise<void>(resolve => {
+      started = resolve
+    })
+    const { executor, deps } = await executorFor(task, options => {
+      started()
+      return hangUntilAbort(options)
+    })
+    vi.mocked(deps.llmProvider.completeSingleTurnWithTools).mockResolvedValue({
+      content: null,
+      tool_calls: [
+        { id: 'sh-batch', name: 'shell_exec', arguments: { command: 'printf admission-ok' } },
+        { id: 'mcp-batch', name: 'acme__search', arguments: { q: 'n' } },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'tool_use' as never,
+    })
+    const running = executor.run()
+    await Promise.race([
+      classifyStarted,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('classify did not start')), 500)
+      ),
+    ])
+    executor.abort()
+    await running
+    expect(deps.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(executor.pendingApproval).toBeUndefined()
+    expect(vi.mocked(deps.llmProvider.completeSingleTurnWithTools)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(deps.mcpManager!.callTool)).not.toHaveBeenCalled()
+    expect(deps.taskLifecycle.getStatus(task.id)).toBe('cancelled')
+  })
+
+  it('a duration trip during classify fails the task with TASK_DURATION_LIMIT', async () => {
+    const task = shellTask()
+    let started!: () => void
+    const classifyStarted = new Promise<void>(resolve => {
+      started = resolve
+    })
+    const { executor, deps } = await executorFor(
+      task,
+      options => {
+        started()
+        return hangUntilAbort(options)
+      },
+      200
+    )
+    vi.mocked(deps.llmProvider.completeSingleTurnWithTools).mockResolvedValue({
+      content: null,
+      tool_calls: [
+        { id: 'sh-limit', name: 'shell_exec', arguments: { command: 'printf admission-ok' } },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'tool_use' as never,
+    })
+    const running = executor.run()
+    await Promise.race([
+      classifyStarted,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('classify did not start')), 500)
+      ),
+    ])
+    await running
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({ code: 'TASK_DURATION_LIMIT' })
+    )
+    expect(deps.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(executor.pendingApproval).toBeUndefined()
   })
 })

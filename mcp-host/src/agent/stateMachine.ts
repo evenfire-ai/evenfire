@@ -64,6 +64,7 @@ import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClien
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveCallerRootBinding } from '../workspace/callerRootBinding'
 import type { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
+import { APPROVAL_NOTIFICATION_PARAMETER_LIMIT } from './approvalNotificationLimit'
 import { CronScheduler } from './cronScheduler'
 import { TaskExecutor, resolveTaskSessionKey } from './taskExecutor'
 import {
@@ -76,6 +77,8 @@ import {
   type FailoverSupportProvider,
   type TaskModelResolver,
 } from './types'
+
+export { approvalParametersWithinNotificationLimit } from './approvalNotificationLimit'
 
 /**
  * Pending approval info exposed via /status endpoint.
@@ -1937,7 +1940,7 @@ function approvalNotificationBody(
 
   const paramSummary =
     Object.keys(approval.parameters).length > 0
-      ? JSON.stringify(approval.parameters).substring(0, 200)
+      ? JSON.stringify(approval.parameters).substring(0, APPROVAL_NOTIFICATION_PARAMETER_LIMIT)
       : 'none'
 
   // Check if the user's channel can approve

@@ -63,6 +63,11 @@ export interface ApprovalControllerOptions {
   liveApprovalTools?: ReadonlySet<string> | (() => ReadonlySet<string> | undefined)
   /** Forced approvals ask on every call, before any stored approval. */
   forcedApprovalGate?: ForcedApprovalGate
+  /**
+   * When the approval mode is set, name grants are read by `decideApproval`
+   * instead of this gate. One-shot matches stay here.
+   */
+  modeAware?: boolean
 }
 
 /** cron_manage actions that start or schedule autonomous work. */
@@ -98,6 +103,7 @@ export class ApprovalController implements LoopController {
   private readonly toolRegistry?: ToolRegistry
   private readonly readLiveApprovalTools: () => ReadonlySet<string>
   private readonly forcedApprovalGate: ForcedApprovalGate | undefined
+  private readonly modeAware: boolean
 
   constructor(
     conversation: Conversation,
@@ -114,6 +120,7 @@ export class ApprovalController implements LoopController {
         ? () => live() ?? new Set<string>()
         : () => live ?? new Set<string>()
     this.forcedApprovalGate = options?.forcedApprovalGate
+    this.modeAware = options?.modeAware === true
   }
 
   shouldAccept(content: string, iteration: number): boolean {
@@ -180,10 +187,11 @@ export class ApprovalController implements LoopController {
     }
 
     // Exact-name grants: "always" approvals, then this task's plain
-    // session-scoped approvals.
+    // session-scoped approvals. A mode-aware admission reads them in the table.
     if (
-      this.conversation.auto_approved_tools.has(toolName) ||
-      this.conversation.task_approved_tools?.has(toolName) === true
+      !this.modeAware &&
+      (this.conversation.auto_approved_tools.has(toolName) ||
+        this.conversation.task_approved_tools?.has(toolName) === true)
     ) {
       return 'proceed'
     }

@@ -11,6 +11,7 @@ import type { LlmProviderId } from '@clerum/llm-providers'
 import type { IncomingMessage as HostIncomingMessage } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
 import type { ApprovalMode } from './approval/approvalMode'
+import type { ShellCardDescriptor } from './approval/shellCard'
 import type { AttachmentReadLedgerSnapshot } from './attachments/attachmentReadBudget'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
@@ -787,6 +788,11 @@ export interface PendingApproval {
    * persisted.
    */
   reask?: 'denied' | 'denials_active'
+  /**
+   * Shell card projection. Absent after a restart; that card is answered as once.
+   * Not a database column.
+   */
+  shellCard?: ShellCardDescriptor
 }
 
 // ─── Loop Types ─────────────────────────────────────────────

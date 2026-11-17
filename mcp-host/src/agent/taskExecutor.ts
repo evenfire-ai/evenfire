@@ -2481,6 +2481,7 @@ export class TaskExecutor {
           // The same gate's forced approvals (stateless cron create/enable) run
           // before any stored approval, so none of them can cover such a call.
           forcedApprovalGate: approvalGate,
+          modeAware: interactiveApprovalApplies,
         })
       : new DefaultLoopController()
 

@@ -14,6 +14,7 @@ import type { Tool, ToolRegistry } from '../../interfaces'
 import type { LoopConfig } from '../../orchestration/loopConfig'
 import { admitToolCall } from '../../orchestration/toolCallPolicy'
 import type { Conversation, PendingApproval, ToolCall } from '../../types'
+import type { ApprovalModeInputs } from '../gateCause'
 
 const FIXTURE = join(__dirname, 'fixtures', 'approvalGolden.json')
 
@@ -184,7 +185,17 @@ function project(
   }
 }
 
-async function collectRows(): Promise<Array<{ input: GoldenInput; admission: GoldenAdmission }>> {
+const manualMode: ApprovalModeInputs = {
+  storedMode: () => 'manual',
+  ceiling: () => 'manual',
+  channelCap: () => 'allow_all',
+  classifierAvailable: () => false,
+  classify: async () => 'ESCALATE',
+}
+
+async function collectRows(
+  mode: 'unset' | 'manual'
+): Promise<Array<{ input: GoldenInput; admission: GoldenAdmission }>> {
   const native = registry(TOOLS.filter(tool => tool.native).map(tool => toolOf(tool.name)))
   const all = registry(TOOLS.map(tool => toolOf(tool.name)))
   const rows: Array<{ input: GoldenInput; admission: GoldenAdmission }> = []
@@ -222,6 +233,7 @@ async function collectRows(): Promise<Array<{ input: GoldenInput; admission: Gol
                       ? new Set(['clerum__gfs_download'])
                       : undefined,
                   forcedApprovalGate: gate,
+                  ...(mode === 'manual' ? { modeAware: true } : {}),
                 })
                 const config = {
                   reasoning: {} as never,
@@ -239,6 +251,7 @@ async function collectRows(): Promise<Array<{ input: GoldenInput; admission: Gol
                   maxIterations: 3,
                   toolTimeout: 1000,
                   toolProgressInterval: 0,
+                  ...(mode === 'manual' ? { approvalMode: manualMode } : {}),
                 } as LoopConfig
                 const call: ToolCall = {
                   id: `tc-${spec.name}`,
@@ -261,33 +274,42 @@ async function collectRows(): Promise<Array<{ input: GoldenInput; admission: Gol
   }>
 }
 
+function assertMatchesGolden(
+  rows: Array<{ input: GoldenInput; admission: GoldenAdmission }>,
+  saved: unknown
+): void {
+  const executeRows = rows.filter(row => row.admission.kind === 'execute')
+  const rewritten = executeRows.filter(row => row.input.guardrail === 'allow_rewrite')
+  expect(executeRows.length).toBeGreaterThan(0)
+  expect(rewritten.length).toBeGreaterThan(0)
+  expect(executeRows.every(row => Object.hasOwn(row.admission, 'toolIdentity'))).toBe(true)
+  expect(rewritten.every(row => row.admission.arguments?.rewritten === true)).toBe(true)
+  expect(rewritten.every(row => row.admission.toolIdentity !== null)).toBe(true)
+  expect(
+    rewritten.some(row => JSON.stringify(row.admission.arguments) !== JSON.stringify(row.input))
+  ).toBe(true)
+  expect(rows.some(row => JSON.stringify(row).includes('request_id'))).toBe(false)
+  expect(rows).toEqual(saved)
+}
+
 describe('approval admission golden', () => {
   beforeAll(() => {
     vi.spyOn(logger, 'info').mockImplementation(() => undefined)
   })
 
   it("records today's admitToolCall for the reference inputs", async () => {
-    const rows = await collectRows()
-    const executeRows = rows.filter(row => row.admission.kind === 'execute')
-    expect(executeRows.length).toBeGreaterThan(0)
-    expect(executeRows.every(row => Object.hasOwn(row.admission, 'toolIdentity'))).toBe(true)
-    expect(
-      rows.some(
-        row =>
-          row.admission.kind === 'execute' &&
-          row.admission.arguments?.rewritten === true &&
-          row.admission.toolIdentity !== null &&
-          row.input.guardrail === 'allow_rewrite'
-      )
-    ).toBe(true)
-    expect(rows.some(row => JSON.stringify(row).includes('request_id'))).toBe(false)
-
+    const rows = await collectRows('unset')
     if (process.env.APPROVAL_GOLDEN_RECORD === '1') {
       mkdirSync(dirname(FIXTURE), { recursive: true })
       writeFileSync(FIXTURE, `${JSON.stringify(rows, null, 2)}\n`)
     }
-
     const saved = JSON.parse(readFileSync(FIXTURE, 'utf8')) as unknown
-    expect(rows).toEqual(saved)
+    assertMatchesGolden(rows, saved)
+  })
+
+  it('matches the golden when the mode is manual', async () => {
+    const rows = await collectRows('manual')
+    const saved = JSON.parse(readFileSync(FIXTURE, 'utf8')) as unknown
+    assertMatchesGolden(rows, saved)
   })
 })
