@@ -39,7 +39,9 @@ function errorMessage(err: unknown, fallback: string): string {
  * `GET /admin/attention?includeAcknowledged=1` and counts the items still to
  * review, one segment per kind (the detail opens in CatalogAttentionDialog):
  * - each enabled model the catalog no longer lists while somebody uses it;
- * - each enabled model the catalog marks deprecated while somebody uses it.
+ * - each enabled model the catalog marks deprecated while somebody uses it;
+ * - each `stale_discovery_enabled` item, a kind only an older control-api still
+ *   sends; it keeps its segment so that server's feed is not undercounted.
  * Items the operator already reviewed sit in the dialog's Reviewed section and
  * never count here. A fetch failure degrades softly — the banner stays hidden
  * and never tumbles the surface.
