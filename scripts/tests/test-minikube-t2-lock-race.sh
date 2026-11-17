@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "${TMP_DIR}"' EXIT
 
 LOCK_ROOT="${TMP_DIR}/locks"
 LOCK_DIR="${LOCK_ROOT}/race-profile.lock"
@@ -11,6 +10,24 @@ RECLAIM_DIR="${LOCK_ROOT}/race-profile.reclaim"
 READY_FILE="${TMP_DIR}/ready"
 RESULT_FILE="${TMP_DIR}/result"
 RELEASE_FILE="${TMP_DIR}/release"
+cleanup() {
+  : >"${RELEASE_FILE}"
+  for pid in "${worker_1:-}" "${worker_2:-}"; do
+    [[ -z "${pid}" ]] || wait "${pid}" 2>/dev/null || true
+  done
+  rm -rf "${TMP_DIR}"
+}
+trap cleanup EXIT
+
+show_diagnostics() {
+  local file
+  for file in "${RESULT_FILE}" "${TMP_DIR}"/worker-*.out "${TMP_DIR}/trace"; do
+    [[ -f "${file}" ]] || continue
+    printf '%s\n' "--- ${file##*/} ---" >&2
+    cat "${file}" >&2
+  done
+}
+
 mkdir -p "${LOCK_DIR}"
 : >"${READY_FILE}"
 : >"${RESULT_FILE}"
@@ -55,6 +72,29 @@ T2_PROFILE=race-profile
 T2_CONTEXT=race-profile
 T2_WORKTREE_ID=lock-race-worktree
 
+# Do not let the trace wrappers hide a different inherited command. The shared
+# trace records both sides of each operation so CI shows their order on failure.
+for operation in mkdir rm rmdir; do
+  command_type="$(type -t "${operation}" || true)"
+  command_path="$(type -P "${operation}" || true)"
+  printf 'pid=%s command=%s type=%s path=%s\n' "$$" "${operation}" "${command_type}" "${command_path}" >>"${TEST_TRACE_DIR}/trace"
+  if [[ "${command_type}" != file ]]; then
+    printf 'FAIL: fixture command %s resolves as %s instead of a file\n' "${operation}" "${command_type:-missing}" >&2
+    exit 1
+  fi
+done
+trace_fs() {
+  local operation="$1" status=0
+  shift
+  printf 'pid=%s operation=%s phase=begin args=%s\n' "$$" "${operation}" "$*" >>"${TEST_TRACE_DIR}/trace"
+  command "${operation}" "$@" || status=$?
+  printf 'pid=%s operation=%s phase=end status=%s args=%s\n' "$$" "${operation}" "${status}" "$*" >>"${TEST_TRACE_DIR}/trace"
+  return "${status}"
+}
+mkdir() { trace_fs mkdir "$@"; }
+rm() { trace_fs rm "$@"; }
+rmdir() { trace_fs rmdir "$@"; }
+
 # Force both contenders to classify the same original owner as stale before
 # either can claim it. A replacement owner is judged by liveness so the loser
 # cannot remove the winner's newly acquired lock.
@@ -92,6 +132,7 @@ worker_env=(
   TEST_READY_FILE="${READY_FILE}"
   TEST_RESULT_FILE="${RESULT_FILE}"
   TEST_RELEASE_FILE="${RELEASE_FILE}"
+  TEST_TRACE_DIR="${TMP_DIR}"
   T2_LOCK_ROOT="${LOCK_ROOT}"
   T2_PROFILE=race-profile
   T2_CONTEXT=race-profile
@@ -118,12 +159,48 @@ while [[ "$(wc -l <"${RESULT_FILE}" | tr -d ' ')" -lt 1 ]]; do
 done
 
 [[ "$(wc -l <"${RESULT_FILE}" | tr -d ' ')" -eq 1 ]] || {
-  cat "${RESULT_FILE}" >&2
+  show_diagnostics
   echo 'FAIL: two stale-lock reclaimers entered the critical section' >&2
   exit 1
 }
 winner_pid="$(awk '{print $2}' "${RESULT_FILE}")"
+if [[ "${winner_pid}" == "${worker_1}" ]]; then
+  loser_pid="${worker_2}"
+elif [[ "${winner_pid}" == "${worker_2}" ]]; then
+  loser_pid="${worker_1}"
+else
+  show_diagnostics
+  echo 'FAIL: acquired lock was reported by an unexpected worker' >&2
+  exit 1
+fi
+
+# Keep the winner inside the critical section until the loser has finished.
+# Otherwise a delayed contender could acquire after a one-line snapshot.
+deadline=$((SECONDS + 10))
+while kill -0 "${loser_pid}" >/dev/null 2>&1; do
+  if [[ "$(wc -l <"${RESULT_FILE}" | tr -d ' ')" -ne 1 ]]; then
+    show_diagnostics
+    echo 'FAIL: two stale-lock reclaimers entered the critical section' >&2
+    exit 1
+  fi
+  if [[ "${SECONDS}" -ge "${deadline}" ]]; then
+    show_diagnostics
+    echo 'FAIL: stale-lock contender did not finish while the winner held the lock' >&2
+    exit 1
+  fi
+  sleep 0.02
+done
+set +e
+wait "${loser_pid}"; loser_rc=$?
+set -e
+if [[ "${loser_rc}" -eq 0 ]] || [[ "$(wc -l <"${RESULT_FILE}" | tr -d ' ')" -ne 1 ]] ||
+  ! kill -0 "${winner_pid}" >/dev/null 2>&1; then
+  show_diagnostics
+  echo 'FAIL: contender outcome or winner liveness did not match the held lock' >&2
+  exit 1
+fi
 [[ "$(sed -n 's/^PID=//p' "${LOCK_DIR}/owner.env")" == "${winner_pid}" ]] || {
+  show_diagnostics
   echo 'FAIL: active lock owner does not match the sole reclaimer' >&2
   exit 1
 }
@@ -132,18 +209,18 @@ winner_pid="$(awk '{print $2}' "${RESULT_FILE}")"
   exit 1
 }
 [[ -d "${RECLAIM_DIR}" ]] || {
+  show_diagnostics
   echo 'FAIL: winning reclaimer dropped the sibling claim before releasing the lock' >&2
   exit 1
 }
 
 : >"${RELEASE_FILE}"
 set +e
-wait "${worker_1}"; rc_1=$?
-wait "${worker_2}"; rc_2=$?
+wait "${winner_pid}"; winner_rc=$?
 set -e
-if ! { [[ "${rc_1}" -eq 0 && "${rc_2}" -ne 0 ]] || [[ "${rc_2}" -eq 0 && "${rc_1}" -ne 0 ]]; }; then
-  cat "${TMP_DIR}/worker-1.out" "${TMP_DIR}/worker-2.out" >&2
-  echo "FAIL: expected one successful reclaimer and one fail-closed contender (rc=${rc_1},${rc_2})" >&2
+if [[ "${winner_rc}" -ne 0 ]]; then
+  show_diagnostics
+  echo "FAIL: expected the winner to release the lock (rc=${winner_rc})" >&2
   exit 1
 fi
 [[ ! -e "${LOCK_DIR}" ]] || {
