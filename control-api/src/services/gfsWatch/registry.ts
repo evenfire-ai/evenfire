@@ -142,8 +142,10 @@ export type WatchCloseReason =
   | 'internal'
   | 'slow_consumer'
   // Only at the open, before any frame: the revalidated session is not
-  // current, or its state could not be read. Kept apart from `internal` so a
-  // revocation or a session store outage is not counted as a defect.
+  // current, or the session store reported an outage. Kept apart from
+  // `internal` so a revocation or an outage is not counted as a defect. The
+  // observer reports every outage as a status, so one that throws is a defect
+  // and stays `internal`.
   | 'session_invalid'
   | 'session_unavailable'
 
@@ -1162,7 +1164,8 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
         return reply(503, 'watch_reopen', DEFAULT_CLOSE_RETRY_AFTER_SEC)
       }
       if (!current.ok) {
-        closeConn(c, 'session_unavailable')
+        // Not an outage: those come back as status 'unavailable' below.
+        closeConn(c, 'internal')
         return { kind: 'classify', origin: 'session', error: (current as { error: unknown }).error }
       }
       if (current.value.status === 'unavailable') {

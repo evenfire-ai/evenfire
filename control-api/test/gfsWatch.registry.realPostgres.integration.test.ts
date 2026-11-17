@@ -794,6 +794,33 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     }
   })
 
+  it('keeps a session check that throws instead of reporting an outage labelled internal', async () => {
+    const { observeExternalSessionCurrentness } =
+      await import('../src/services/auth/externalSessionCurrentnessObserver.js')
+    // A schema that does not exist hides the session tables, so the real
+    // observer gets undefined_table (42P01): not an outage class, so it throws.
+    const broken = new Pool({
+      connectionString: h.connectionString,
+      options: '-c search_path=gfs_watch_no_such_schema',
+      max: 1,
+    })
+    try {
+      b = await h.build({
+        observeCurrentness: a => observeExternalSessionCurrentness(a, { db: broken }),
+      })
+      const user = await h.createUser()
+      const before = await disconnectsBy()
+      const o = b.open(user, [])
+      const outcome = await o.outcome
+      expect(outcome).toMatchObject({ kind: 'classify', origin: 'session' })
+      expect((outcome as { error: { code?: unknown } }).error.code).toBe('42P01')
+      expect(countDelta(before, await disconnectsBy())).toEqual({ internal: 1 })
+      expect(o.socket.frames).toEqual([])
+    } finally {
+      await endPoolAndWaitForClients(broken)
+    }
+  })
+
   it('answers watch_reauthorize to a retained user without spending budget, query or reads (T-SB76)', async () => {
     let hits = 0
     const budget = new ProcessMemoryRateLimiter(240)
