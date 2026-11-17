@@ -12,13 +12,14 @@
 // drift is the exact defect that caused #637). The K8s-client-aware classification
 // below (classifySecretAccess / combineSecretAccess) stays here because it depends
 // on a caller-injected Secret reader.
+import { createHash } from 'node:crypto'
 import {
   OWNER_RECIPE_LABEL_KEY,
   SHARED_LABEL_KEY,
   isSecretAccessibleByRecipe,
   parseSecretOwnership,
 } from '@clerum/workflow-runtime-core'
-import type { SecretAccess } from './resourceBuilder'
+import type { SecretAccess, SecretKeysByName } from './resourceBuilder'
 
 // Re-export the shared predicate so in-service consumers keep importing it from
 // this module unchanged (single import surface for the reconciler).
@@ -32,7 +33,7 @@ export type { SecretOwnership } from '@clerum/workflow-runtime-core'
 
 /** Minimal shape of a read Secret needed to classify access. */
 interface ReadSecretLike {
-  metadata?: { labels?: Record<string, string> }
+  metadata?: { labels?: Record<string, string>; resourceVersion?: string }
   data?: Record<string, string>
   stringData?: Record<string, string>
 }
@@ -61,7 +62,12 @@ export async function classifySecretAccess(
   try {
     const secret = await read(secretName, namespace)
     if (!isSecretAccessibleByRecipe(secret.metadata?.labels, recipeName)) {
-      return { state: 'denied' }
+      // Issue #1349 — the denied version identifies this denial, so a revocation
+      // is recorded once per denied Secret version (no extra read).
+      const resourceVersion = secret.metadata?.resourceVersion
+      return resourceVersion
+        ? { state: 'denied', versions: [`${namespace}/${resourceVersion}`] }
+        : { state: 'denied' }
     }
     const keys = new Set<string>([
       ...Object.keys(secret.data ?? {}),
@@ -98,5 +104,35 @@ export function combineSecretAccess(a: SecretAccess, b: SecretAccess): SecretAcc
   if (worst.state === 'accessible' && other.state === 'accessible') {
     return { state: 'accessible', keys: new Set<string>([...worst.keys, ...other.keys]) }
   }
+  if (worst.state === 'denied' && other.state === 'denied') {
+    // Issue #1349 — keep every denied version; one read without a version makes
+    // the combined denial unversioned, so its revocation is never skipped.
+    return worst.versions && other.versions
+      ? { state: 'denied', versions: [...worst.versions, ...other.versions] }
+      : { state: 'denied' }
+  }
   return worst
+}
+
+/**
+ * Issue #1349 — identity of a workload's Secret denial: sha256 over the names of
+ * its denied Secret refs, each with its sorted denied versions. A revocation is
+ * recorded under this digest and skipped while the digest is unchanged.
+ *
+ * `undefined` when a denied ref carries no version: an undefined digest never
+ * matches a record, so the revocation runs as it did before the record existed.
+ */
+export function deniedSecretRevocationDigest(
+  refNames: readonly string[],
+  secretKeys: SecretKeysByName
+): string | undefined {
+  const parts: string[] = []
+  for (const name of [...new Set(refNames)].sort()) {
+    const access = secretKeys.get(name)
+    if (access?.state !== 'denied') continue
+    if (!access.versions || access.versions.length === 0) return undefined
+    parts.push(`${name}=${[...access.versions].sort().join(',')}`)
+  }
+  if (parts.length === 0) return undefined
+  return `sha256:${createHash('sha256').update(parts.join('\n')).digest('hex')}`
 }
