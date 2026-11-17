@@ -92,8 +92,12 @@ and tells the user.
 ## Rollback residue
 
 Session revocations and password epochs written by the new control-api are
-ignored by the old one. The release installs no database triggers and no
-revision functions, so nothing keeps running against the old image.
+ignored by the old one. The release installs one database trigger and its
+function (`gfs_resource_changed_notify` on `gfs_resources`, from `0139`), and
+they stay after a rollback: every write to `gfs_resources` still sends one
+`pg_notify` on the `gfs_resource_changed` channel. The old image does not
+listen on that channel and the function only notifies, so no write fails
+because of it.
 
 Logout revokes only the token it receives. A V1 token issued before a team
 switch stays valid until its own expiry (at most 7 days, 604800 s), as on `dev`. A new
@@ -105,20 +109,21 @@ before this release.
 - The target database has no migration version and no object from an earlier
   head of this change; the migration Job stops otherwise (see
   [Databases that ran an earlier head of this change](#databases-that-ran-an-earlier-head-of-this-change)).
-  The release adds `0137_user_access_foundation` and
-  `0138_legacy_password_security_epoch_backfill`.
+  The release adds `0137_user_access_foundation`,
+  `0138_legacy_password_security_epoch_backfill` and
+  `0139_gfs_resource_changed_notify`.
 - PostgreSQL 14 or later on Linux, or 15 or later on macOS, illumos or BSD (not
   Windows). The migration session sets `client_connection_check_interval`,
   which the server rejects on other platforms, so that a killed Job pod does
   not leave its backend holding the migration advisory lock.
-- For a database already at `0136`, every statement of `0137` and `0138`
-  waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
+- For a database already at `0136`, every statement of `0137`, `0138` and
+  `0139` waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
   bounded at 15 s (`statement_timeout`); the online index builds have their own
   120 s bound (below). The whole Job is bounded at 300 s
   (`activeDeadlineSeconds`).
 - For a database at `0130` through `0135`, the missing versions through `0136`
   commit in one transaction under the 10 s lock and 15 s statement bounds, with
-  no fence, then `0137`, then `0138`.
+  no fence, then `0137`, then `0138`, then `0139`.
 - An existing database below `0130` must already have `0126` to `0128`; the
   Job stops with an error otherwise. For such a database the 10 s lock bound
   does not hold before `0137`. The Job first sets the `0130` password-login
@@ -168,13 +173,26 @@ before this release.
   when a first password was set from an invitation, and the session from which
   a user changed their password in Profile UI. No other session is affected by
   the backfill.
+- `0139_gfs_resource_changed_notify` creates (or replaces) the function
+  `gfs_resource_changed_notify()` and the `AFTER INSERT OR UPDATE OR DELETE`
+  row trigger of the same name on the existing table `gfs_resources`, in one
+  bounded transaction. `CREATE OR REPLACE FUNCTION` and the `REVOKE` on it take
+  no table lock. `CREATE OR REPLACE TRIGGER` takes `SHARE ROW EXCLUSIVE` on
+  `gfs_resources` until `0139`'s transaction commits: inserts, updates and
+  deletes on `gfs_resources` (from control-api and the GFS controller) are
+  blocked for that time, plain reads are not. The wait for that lock is bounded
+  at 10 s (`lock_timeout`), with no retry inside the Job, so a transaction
+  that has written to `gfs_resources` and stays open longer fails that Job
+  attempt. While the migration waits, later writes to `gfs_resources` queue
+  behind it. The migration neither scans nor rewrites the table, so its duration
+  does not depend on its size.
 - After the Job, `verify_db_migration_state` checks the grants of
   `workflow_recipes_runtime` against
   `deploy/scripts/workflow-recipes-runtime-access-profiles.tsv` (one row per
   relation; `dev` had 7) and
   `deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv` (6
-  column rows; new in this release). A mismatch stops the deploy after `0137`
-  and `0138` have committed, while the old control-api keeps serving. Compare
+  column rows; new in this release). A mismatch stops the deploy after `0137`,
+  `0138` and `0139` have committed, while the old control-api keeps serving. Compare
   the target database's grants with both files before step 1.
 - `deploy/scripts/run-control-api-db-migration.sh` requires `--timeout` (or
   `TIMEOUT`) to be a number with a unit (`s`, `m` or `h`) and at least `360s`;
