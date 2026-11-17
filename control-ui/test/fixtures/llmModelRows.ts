@@ -43,6 +43,10 @@ export function llmModelWireRow(enabled: boolean): LlmAllowedModel {
  */
 export function llmModelConfigMapDeferredError(): Error {
   const capture = WIRE.create_configmap_write_failed
-  const res = { status: capture.status, statusText: 'Error' } as Response
-  return formatApiError(res, JSON.stringify(capture.body))
+  const text = JSON.stringify(capture.body)
+  const res = new Response(text, {
+    status: capture.status,
+    headers: { 'content-type': 'application/json' },
+  })
+  return formatApiError(res, text)
 }
