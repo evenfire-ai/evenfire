@@ -19,6 +19,24 @@ export type RpcScope =
   | 'sandbox:ui:view'
 export type RpcAccessScope = 'team' | 'user'
 
+export type MarkdownTabCloseState =
+  | 'unknown'
+  | 'pending'
+  | 'granted'
+  | 'denied'
+  | 'consumed'
+  | 'cancelled'
+  | 'expired'
+
+export type MarkdownTabCloseBinding = Readonly<{
+  requestId: string
+  documentEpoch: string
+  sequence: number
+  tabId: string
+  sessionGeneration: number
+  ownerIdentities: readonly string[]
+}>
+
 export type DeepLinkAcknowledgmentAuthority = {
   sessionGeneration: number
   userNavigationGeneration: number
@@ -695,7 +713,15 @@ export type SessionState = {
   me: SessionMe | null
   /** Main-process authentication epoch captured with this identity snapshot. */
   sessionGeneration?: number
+  /** Current configured REST plus discovered effective RPC authority. */
+  authorityBinding?: SessionAuthorityBinding
 }
+
+export type SessionAuthorityBinding = Readonly<{
+  environmentKey: string
+  restBaseUrl: string
+  rpcBaseUrl: string
+}>
 
 export type PasswordLoginResult = SessionState
 

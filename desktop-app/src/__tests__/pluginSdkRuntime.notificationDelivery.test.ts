@@ -170,4 +170,39 @@ describe('PluginSdkRuntime notification delivery mapping', () => {
     notification.emit('show')
     await expect(pending).resolves.toEqual({ delivered: true })
   })
+
+  it('does not focus or show a window while main visibility eligibility is fenced', async () => {
+    const userDataDir = await mkdtemp(path.join(os.tmpdir(), 'evenfire-plugin-notification-'))
+    tempDirs.push(userDataDir)
+    const window = {
+      isDestroyed: vi.fn(() => false),
+      isVisible: vi.fn(() => false),
+      isMinimized: vi.fn(() => false),
+      isFocused: vi.fn(() => false),
+      restore: vi.fn(),
+      show: vi.fn(),
+      focus: vi.fn(),
+      webContents: { send: vi.fn() },
+    }
+    const runtime = new PluginSdkRuntime({
+      service: {} as unknown as AppService,
+      getMainWindow: () => window as never,
+      canRevealWindow: () => false,
+      userDataDir,
+    })
+    const source = (runtime as unknown as { dataSource(): PluginSdkDataSource }).dataSource()
+    const pending = source.showPluginNotification({
+      pluginId: 'plugin-1',
+      pluginTitle: 'Demo Plugin',
+      title: 'Hello',
+    })
+    const notification = latestNotification()
+    notification.emit('show')
+    await expect(pending).resolves.toEqual({ delivered: true })
+    notification.emit('click')
+
+    expect(window.restore).not.toHaveBeenCalled()
+    expect(window.show).not.toHaveBeenCalled()
+    expect(window.focus).not.toHaveBeenCalled()
+  })
 })

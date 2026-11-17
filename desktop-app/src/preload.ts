@@ -7,6 +7,8 @@ import type {
   EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
   HostMessageRequest,
+  MarkdownTabCloseBinding,
+  MarkdownTabCloseState,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
   SandboxUiReleasedEvent,
@@ -40,6 +42,23 @@ function parseSandboxUiSessionInvalidation(value: unknown): SandboxUiSessionInva
     gfsDeepLinkMinimumId: Number(event.gfsDeepLinkMinimumId),
   }
 }
+
+let rendererDocumentEpoch: string | null = null
+let rendererReadyChallenge: string | null = null
+
+ipcRenderer.on('auth:markdownDocumentHandshake', (_event, payload: unknown) => {
+  if (!payload || typeof payload !== 'object') return
+  const value = payload as Record<string, unknown>
+  if (
+    typeof value.documentEpoch !== 'string' ||
+    !/^[a-f0-9-]{36}$/i.test(value.documentEpoch) ||
+    typeof value.challenge !== 'string' ||
+    !/^[a-f0-9-]{36}$/i.test(value.challenge)
+  )
+    return
+  rendererDocumentEpoch = value.documentEpoch
+  rendererReadyChallenge = value.challenge
+})
 
 // Sandboxed Electron preloads cannot load relative runtime modules. Keep this
 // allowlist self-contained and pin it to the authoritative registry in
@@ -126,6 +145,10 @@ const clerum = Object.freeze({
   },
   auth: {
     getSessionState: () => ipcRenderer.invoke('auth:getSessionState'),
+    getRendererSessionView: () => ipcRenderer.invoke('auth:getRendererSessionView'),
+    commitRendererSessionView: (receipt: { documentEpoch: string; receiptId: string }) =>
+      ipcRenderer.invoke('auth:commitRendererSessionView', receipt) as Promise<boolean>,
+    getMarkdownTabCloseDocumentEpoch: (): string | null => rendererDocumentEpoch,
     getSessionGeneration: () => ipcRenderer.invoke('auth:getSessionGeneration'),
     getDependenciesHealth: () => ipcRenderer.invoke('auth:getDependenciesHealth'),
     getRuntimeConfigState: () => ipcRenderer.invoke('auth:getRuntimeConfigState'),
@@ -192,6 +215,56 @@ const clerum = Object.freeze({
     getDesktopAppInfo: () => ipcRenderer.invoke('auth:getDesktopAppInfo'),
     openDesktopRelease: (releaseUrl: string) =>
       ipcRenderer.invoke('auth:openDesktopRelease', { releaseUrl }),
+    prepareSessionClear: () => ipcRenderer.invoke('auth:prepareSessionClear'),
+    acknowledgeSessionPreclear: (notice: {
+      transitionId: number
+      sessionGeneration: number
+      reason: 'logout' | 'session-ended' | 'environment-change'
+    }) => ipcRenderer.invoke('auth:acknowledgeSessionPreclear', notice),
+    authorizeMarkdownTabClose: (binding: MarkdownTabCloseBinding): Promise<MarkdownTabCloseState> =>
+      ipcRenderer.invoke('auth:authorizeMarkdownTabClose', binding),
+    getMarkdownTabClosePermitStatus: (
+      binding: MarkdownTabCloseBinding
+    ): Promise<MarkdownTabCloseState> =>
+      ipcRenderer.invoke('auth:getMarkdownTabClosePermitStatus', binding),
+    cancelMarkdownTabClosePermit: (
+      binding: MarkdownTabCloseBinding
+    ): Promise<MarkdownTabCloseState> =>
+      ipcRenderer.invoke('auth:cancelMarkdownTabClosePermit', binding),
+    consumeMarkdownTabClosePermit: (
+      binding: MarkdownTabCloseBinding
+    ): Promise<MarkdownTabCloseState> =>
+      ipcRenderer.invoke('auth:consumeMarkdownTabClosePermit', binding),
+    acknowledgeMarkdownTabClose: (binding: MarkdownTabCloseBinding): Promise<number | null> =>
+      ipcRenderer.invoke('auth:acknowledgeMarkdownTabClose', binding),
+    onSessionPreclear: (
+      callback: (notice: {
+        transitionId: number
+        sessionGeneration: number
+        reason: 'logout' | 'session-ended' | 'environment-change'
+      }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        notice: Parameters<typeof callback>[0]
+      ) => callback(notice)
+      ipcRenderer.on('auth:sessionWillClear', listener)
+      return () => ipcRenderer.off('auth:sessionWillClear', listener)
+    },
+    onSessionPreclearCancelled: (
+      callback: (notice: {
+        transitionId: number
+        sessionGeneration: number
+        reason: 'logout' | 'session-ended' | 'environment-change'
+      }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        notice: Parameters<typeof callback>[0]
+      ) => callback(notice)
+      ipcRenderer.on('auth:sessionClearCancelled', listener)
+      return () => ipcRenderer.off('auth:sessionClearCancelled', listener)
+    },
     onExternalLogout: (callback: () => void) => {
       const listener = () => callback()
       ipcRenderer.on('auth:externalLogout', listener)
@@ -201,6 +274,11 @@ const clerum = Object.freeze({
       const listener = () => callback()
       ipcRenderer.on('auth:sessionCleared', listener)
       return () => ipcRenderer.off('auth:sessionCleared', listener)
+    },
+    onMarkdownDraftLost: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('auth:markdownDraftLost', listener)
+      return () => ipcRenderer.off('auth:markdownDraftLost', listener)
     },
     logout: () => ipcRenderer.invoke('auth:logout'),
   },
@@ -229,11 +307,12 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('gfs:deepLink', listener)
     },
     copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
-    resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
+    resolve: (uri: string, expectedSessionGeneration?: number) =>
+      ipcRenderer.invoke('gfs:resolve', { uri, expectedSessionGeneration }),
     download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
       cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
-    downloadPreview: (uri: string, maxBytes: number) =>
-      ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
+    downloadPreview: (uri: string, maxBytes: number, expectedSessionGeneration?: number) =>
+      ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes, expectedSessionGeneration }),
     listAccessible: (drive?: string, cursor?: string) =>
       ipcRenderer.invoke('gfs:listAccessible', { drive, cursor }),
     listChildren: (
@@ -242,8 +321,8 @@ const clerum = Object.freeze({
       cursor?: string,
       options?: { signal?: AbortSignal }
     ) => cancellableGfsInvoke('gfs:listChildren', { resourceId, drive, cursor }, options?.signal),
-    affordances: (resourceId: string, drive?: string) =>
-      ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
+    affordances: (resourceId: string, drive?: string, expectedSessionGeneration?: number) =>
+      ipcRenderer.invoke('gfs:affordances', { resourceId, drive, expectedSessionGeneration }),
     zipStream: {
       start: () => ipcRenderer.invoke('gfs:zipStream:start'),
       append: (jobId: string, name: string, bytes: ArrayBuffer) =>
@@ -314,8 +393,20 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
     cancelUpload: (uploadId: string, drive = 'main') =>
       ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
-    replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
-      ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
+    replaceFile: (
+      resourceId: string,
+      encodedData: string,
+      drive?: string,
+      ifMatch?: number,
+      expectedSessionGeneration?: number
+    ) =>
+      ipcRenderer.invoke('gfs:replaceFile', {
+        resourceId,
+        encodedData,
+        drive,
+        ifMatch,
+        expectedSessionGeneration,
+      }),
     replaceFileFromPath: (resourceId: string, filePath: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:replaceFileFromPath', { resourceId, filePath, drive, ifMatch }),
     getPathForFile: (file: File) => webUtils.getPathForFile(file),
@@ -700,7 +791,15 @@ const clerum = Object.freeze({
   },
   app: {
     openUrl: (url: string) => ipcRenderer.invoke('app:openUrl', { url }),
-    rendererReady: () => ipcRenderer.invoke('app:rendererReady'),
+    rendererReady: () => {
+      const challenge = rendererReadyChallenge
+      if (!challenge) return Promise.reject(new Error('Current renderer handshake is unavailable'))
+      rendererReadyChallenge = null
+      return ipcRenderer.invoke('app:rendererReady', { challenge }) as Promise<{
+        documentEpoch: string
+        sessionTransitionRevealPending: boolean
+      }>
+    },
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),

@@ -517,6 +517,112 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.gfsTransientTeamHopDepth).toBe(0)
   })
 
+  it('defers an unrelated preview read until the committed team token is restored', async () => {
+    const service = new AppService() as any
+    const meA = {
+      id: 'user-1',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.sessionToken = 'team-a-token'
+    service.me = meA
+    service.gfsScopeIdentity = {
+      ownerId: 'user-1',
+      teamId: 'team-a',
+      environmentKey: 'test-env',
+      baseUrl: 'https://external.example',
+    }
+    service.authClient = {
+      getMe: vi
+        .fn()
+        .mockResolvedValueOnce({ ...meA, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(meA),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
+        token: `${teamId}-test-token`,
+        team: { id: teamId, name: teamId, role: 'member' },
+      })),
+    }
+    service.tokenStore = { setSessionToken: vi.fn() }
+    const hopStarted = new Promise<void>(resolve => {
+      service.signalHopStarted = resolve
+    })
+    let releaseHop!: () => void
+    const holdHop = new Promise<void>(resolve => {
+      releaseHop = resolve
+    })
+    const gfsClient = {
+      resolveUri: vi.fn(async (_uri: string, _token: string) => ({ id: 'resource-a' })),
+      download: vi.fn(async (_uri: string, _token: string) => ({ bytes: new Uint8Array([1]) })),
+      affordances: vi.fn(async (_resourceId: string, _token: string) => ({
+        held: ['read', 'write'],
+        isOperator: false,
+      })),
+      replaceFile: vi.fn(async () => ({ resource: { id: 'resource-a' } })),
+    }
+    service.gfsClient = gfsClient
+
+    const hop = service.runWithTeamContext('team-b', async () => {
+      service.signalHopStarted()
+      await holdHop
+    })
+    await hopStarted
+    const expectedGeneration = service.getSessionGeneration()
+    let previewReadCompleted = false
+    const previewRead = service.resolveGfsUri('gfs://main/resource-a', expectedGeneration).then(
+      value => {
+        previewReadCompleted = true
+        return { value }
+      },
+      error => {
+        previewReadCompleted = true
+        return { error }
+      }
+    )
+    const observe = <T>(promise: Promise<T>) =>
+      promise.then(
+        value => ({ value }),
+        error => ({ error })
+      )
+    const previewDownload = observe(
+      service.downloadGfsUri('gfs://main/resource-a', 1024, undefined, expectedGeneration)
+    )
+    const menuAffordances = observe(
+      service.gfsAffordances('resource-a', 'main', expectedGeneration)
+    )
+    const editorSave = observe(
+      service.replaceGfsFile('resource-a', 'bWFya2Rvd24=', 'main', undefined, expectedGeneration)
+    )
+
+    await Promise.resolve()
+    expect(previewReadCompleted).toBe(false)
+    expect(gfsClient.resolveUri).not.toHaveBeenCalled()
+    expect(gfsClient.download).not.toHaveBeenCalled()
+    expect(gfsClient.affordances).not.toHaveBeenCalled()
+    expect(gfsClient.replaceFile).not.toHaveBeenCalled()
+    releaseHop()
+    await expect(hop).resolves.toBeUndefined()
+    await expect(previewRead).resolves.toEqual({ value: { id: 'resource-a' } })
+    await expect(previewDownload).resolves.toEqual({ value: { bytes: new Uint8Array([1]) } })
+    await expect(menuAffordances).resolves.toEqual({
+      value: expect.objectContaining({ held: ['read', 'write'], canDelegate: false }),
+    })
+    await expect(editorSave).resolves.toEqual({ value: { resource: { id: 'resource-a' } } })
+    expect(gfsClient.resolveUri).toHaveBeenCalledWith('gfs://main/resource-a', 'team-a-test-token')
+    expect(gfsClient.download).toHaveBeenCalledWith('gfs://main/resource-a', 'team-a-test-token', {
+      maxBytes: 1024,
+      signal: undefined,
+    })
+    expect(gfsClient.affordances).toHaveBeenCalledWith('resource-a', 'team-a-test-token', 'main')
+    expect(gfsClient.replaceFile).toHaveBeenCalledWith(
+      { resourceId: 'resource-a', drive: 'main', encodedData: 'bWFya2Rvd24=', ifMatch: undefined },
+      'team-a-test-token'
+    )
+  })
+
   it('keeps existing GFS controls usable through the real team-hop lifecycle', async () => {
     const service = new AppService() as any
     const statePath = path.join(chatStoreBaseDir, 'gfs-upload-state.json')

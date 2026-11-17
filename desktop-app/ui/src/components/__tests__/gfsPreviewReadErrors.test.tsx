@@ -64,7 +64,7 @@ describe('GFS preview read failures', () => {
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { downloadPreview } },
+      value: { gfs: { downloadPreview, resolve: vi.fn(async () => ({ version: 1 })) } },
     })
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,

@@ -153,7 +153,7 @@ async function openShareDialogWithInheritedAccess(producers: InheritedAccessProd
   )
 
   expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
-  await waitFor(() => expect(affordances).toHaveBeenCalledWith(resourceId, 'main'))
+  await waitFor(() => expect(affordances).toHaveBeenCalledWith(resourceId, 'main', 1))
   const menu = openMenu()
   fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
   const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
@@ -264,19 +264,19 @@ describe('FilePreviewPage permission-derived actions', () => {
     expect(within(readOnlyShareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
     expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
     expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
-    expect(readOnly.affordances).toHaveBeenCalledWith(resourceId, 'main')
+    expect(readOnly.affordances).toHaveBeenCalledWith(resourceId, 'main', 1)
     readOnly.view.unmount()
 
     const parentAuthorized = renderWithPermissions(['read'], ['read', 'write', 'delete'])
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() =>
-      expect(parentAuthorized.affordances).toHaveBeenCalledWith('preview-parent', 'main')
+      expect(parentAuthorized.affordances).toHaveBeenCalledWith('preview-parent', 'main', 1)
     )
     const parentAuthorizedMenu = openMenu()
     expect(within(parentAuthorizedMenu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
     expect(within(parentAuthorizedMenu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
     expect(within(parentAuthorizedMenu).queryByRole('menuitem', { name: 'Delete' })).toBeNull()
-    expect(parentAuthorized.affordances).toHaveBeenCalledWith('preview-parent', 'main')
+    expect(parentAuthorized.affordances).toHaveBeenCalledWith('preview-parent', 'main', 1)
     parentAuthorized.view.unmount()
 
     const ownerAuthorized = renderWithPermissions(
@@ -286,7 +286,7 @@ describe('FilePreviewPage permission-derived actions', () => {
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await screen.findByRole('button', { name: 'Options for diagram.png' })
     await waitFor(() =>
-      expect(ownerAuthorized.affordances).toHaveBeenCalledWith(resourceId, 'main')
+      expect(ownerAuthorized.affordances).toHaveBeenCalledWith(resourceId, 'main', 1)
     )
     const ownerMenu = openMenu()
     expect(within(ownerMenu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()

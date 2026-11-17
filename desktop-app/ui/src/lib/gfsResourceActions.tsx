@@ -27,6 +27,7 @@ export type GfsResourceActionId =
   | 'upload-file'
   | 'share'
   | 'copy-content'
+  | 'edit-markdown'
   | 'preview'
   | 'download'
   | 'download-zip'
@@ -89,6 +90,7 @@ export type GfsResourceActionOptions = {
   canUpload?: boolean
   canShare?: boolean
   canCopyContent?: boolean
+  canEditMarkdown?: boolean
   canPreview?: boolean
   canDownload?: boolean
   canDownloadZip?: boolean
@@ -202,6 +204,16 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       menu: true,
       eligible: Boolean(options.kind === 'file' && options.handlers['copy-content']),
       disabled: !options.canCopyContent,
+    },
+    {
+      id: 'edit-markdown',
+      label: 'Edit',
+      icon: <IconEdit />,
+      menu: true,
+      eligible: Boolean(
+        options.kind === 'file' && options.canEditMarkdown && options.handlers['edit-markdown']
+      ),
+      disabled: mutating,
     },
     {
       id: 'preview',

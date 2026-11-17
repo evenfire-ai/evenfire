@@ -65,12 +65,29 @@ async function selectSiblingAfterIndexFailure() {
   chat.__setChatStoreBaseDirForTests(path.join(directory, 'chats'))
   closeStore = chat.unbindChatStore
   const store = new TokenStore({ isolatedUserDataPath: directory })
-  const service = new AppService()
+  let service!: InstanceType<typeof AppService>
+  let recoveryNotice: import('../appService.js').SessionPreclearNotice | null = null
+  let resolveReceipt!: (accepted: boolean) => void
+  const receiptAccepted = new Promise<boolean>(resolve => {
+    resolveReceipt = resolve
+  })
+  service = new AppService({
+    onSessionPreclear: () => false,
+    onSessionPreclearRecoveryRequired: notice => {
+      recoveryNotice = notice
+    },
+    onSessionPreclearAwaitingReceipt: () => {
+      resolveReceipt(
+        service.completeSessionPreclearRendererReceipt(service.getSessionAuthorityBinding())
+      )
+    },
+  })
   ;(service as unknown as { tokenStore: InstanceType<typeof TokenStore> }).tokenStore = store
   const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment')
   discovery.mockRejectedValueOnce(new Error('initial optional discovery unavailable'))
   discovery.mockResolvedValue({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: rpc, appName: 'A' })
   vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue(testLoginResult())
+  vi.spyOn(AuthClient.prototype, 'getMe').mockResolvedValue(testLoginResult().me)
   vi.spyOn(AuthClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
   const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
     // Native fetch rejects the relative /health URL when no transport is configured.
@@ -82,6 +99,10 @@ async function selectSiblingAfterIndexFailure() {
   const generation = service.getSessionGeneration()
   const chatGeneration = chat.getChatStoreBindingGeneration()
   await service.getDependenciesHealth()
+  if (!recoveryNotice || !service.retrySessionPreclearRecovery(recoveryNotice)) {
+    throw new Error('effective-RPC recovery Retry was not accepted')
+  }
+  if (!(await receiptAccepted)) throw new Error('current authority receipt was rejected')
   expect(fetch).toHaveBeenCalledWith(`${rpc}/health`, expect.any(Object))
   discovery.mockRejectedValue(new Error('subsequent optional discovery unavailable'))
   const index = path.join(saved.storagePath, 'index.json')

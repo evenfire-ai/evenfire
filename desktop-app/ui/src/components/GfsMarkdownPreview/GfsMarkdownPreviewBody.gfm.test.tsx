@@ -5,9 +5,10 @@ import { GfsMarkdownPreviewBody } from './Body'
 
 function stubDownload(text: string) {
   const downloadPreview = vi.fn(async () => ({ bytes: new TextEncoder().encode(text).buffer }))
+  const resolve = vi.fn(async () => ({ version: 1 }))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { downloadPreview } },
+    value: { gfs: { downloadPreview, resolve } },
   })
   return downloadPreview
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
@@ -67,6 +67,8 @@ import {
   HostRuntimeStatus,
   HostStatusStreamEvent,
   LoginBackendHint,
+  MarkdownTabCloseBinding,
+  MarkdownTabCloseState,
   PasswordLoginResult,
   PendingWorkflowApproval,
   PrewarmHostResult,
@@ -74,6 +76,7 @@ import {
   RpcAllowedServersResult,
   RpcConnectorsResult,
   RpcScope,
+  SessionAuthorityBinding,
   SessionMe,
   SessionMessagesQuery,
   SessionMessagesResult,
@@ -882,7 +885,83 @@ export interface AppServiceOptions {
   tokenStore?: TokenStore
   onSandboxUiSessionInvalidated?: () => void
   onSessionCleared?: () => void
+  onSessionPreclear?: (notice: SessionPreclearNotice) => boolean | void
+  onSessionPreclearTimeout?: (notice: SessionPreclearNotice) => void
+  onSessionPreclearCancelled?: (notice: SessionPreclearNotice) => void
+  onSessionPreclearRecoveryRequired?: (
+    notice: SessionPreclearNotice,
+    state: { attemptsRemaining: number; retryAvailable: boolean }
+  ) => void
+  onSessionPreclearAuthorityChanging?: (notice: SessionPreclearNotice) => void
+  onSessionPreclearAuthorityChanged?: (notice: SessionPreclearNotice) => void
+  onSessionPreclearAwaitingReceipt?: (
+    notice: SessionPreclearNotice,
+    state: { attemptsRemaining: number; retryAvailable: false }
+  ) => void
+  onSessionPreclearReceiptCommitted?: (notice: SessionPreclearNotice) => void
+  onSessionPreclearRetired?: (notice: SessionPreclearNotice) => void
 }
+
+export type SessionPreclearReason = 'logout' | 'session-ended' | 'environment-change'
+
+export interface SessionPreclearNotice {
+  transitionId: number
+  sessionGeneration: number
+  reason: SessionPreclearReason
+}
+
+type MarkdownTabCloseStoredBinding = Omit<MarkdownTabCloseBinding, 'ownerIdentities'>
+
+type MarkdownTabCloseRequest = {
+  binding: MarkdownTabCloseStoredBinding
+  ownerIdentityDigest: string
+  state: Exclude<MarkdownTabCloseState, 'unknown'>
+  expiresAt: number
+}
+
+type MarkdownTabCloseReceipt = {
+  binding: MarkdownTabCloseStoredBinding
+  ownerIdentityDigest: string
+  terminalState: Exclude<MarkdownTabCloseState, 'unknown' | 'pending' | 'granted'>
+  nextSequence: number
+}
+
+type MarkdownTabCloseDocument = {
+  epoch: string
+  nextSequence: number
+  slot:
+    | { kind: 'active'; request: MarkdownTabCloseRequest }
+    | { kind: 'ack'; receipt: MarkdownTabCloseReceipt }
+    | null
+}
+
+interface PendingSessionPreclear {
+  notice: SessionPreclearNotice
+  sessionToken: string
+  sessionTokenFingerprint: string
+  principalId: string
+  teamId: string
+  environmentKey: string
+  authorityBinding: SessionAuthorityBinding
+  recoveryAttemptBinding: SessionAuthorityBinding | null
+  authorityChangeInProgress: boolean
+  requiresCurrentDocumentReceipt: boolean
+  awaitingCurrentDocumentReceipt: boolean
+  rendererReceiptWaiter: { promise: Promise<boolean>; resolve: (ready: boolean) => void } | null
+  promise: Promise<boolean>
+  resolve: (acknowledged: boolean) => void
+  settled: boolean
+  logoutQueued: boolean
+  recoveryAttempts: number
+  recoveryAttemptId: number
+  recoveryChecking: boolean
+  recoveryTerminal: boolean
+  recoveryExited: boolean
+}
+
+const SESSION_PRECLEAR_RECOVERY_DEADLINE_MS = 3_000
+const SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS = 3
+const SESSION_PRECLEAR_MAX_UNRESOLVED_READS = 3
 
 export class AppService {
   private readonly authClient = new AuthClient()
@@ -900,6 +979,16 @@ export class AppService {
   private readonly tokenStore: TokenStore
   private readonly onSandboxUiSessionInvalidated?: () => void
   private readonly onSessionCleared?: () => void
+  private readonly onSessionPreclear?: (notice: SessionPreclearNotice) => boolean | void
+  private readonly onSessionPreclearTimeout?: (notice: SessionPreclearNotice) => void
+  private readonly onSessionPreclearCancelled?: (notice: SessionPreclearNotice) => void
+  private readonly onSessionPreclearRecoveryRequired?: AppServiceOptions['onSessionPreclearRecoveryRequired']
+  private readonly onSessionPreclearAuthorityChanging?: AppServiceOptions['onSessionPreclearAuthorityChanging']
+  private readonly onSessionPreclearAuthorityChanged?: AppServiceOptions['onSessionPreclearAuthorityChanged']
+  private readonly onSessionPreclearAwaitingReceipt?: AppServiceOptions['onSessionPreclearAwaitingReceipt']
+  private readonly onSessionPreclearReceiptCommitted?: AppServiceOptions['onSessionPreclearReceiptCommitted']
+  private readonly onSessionPreclearRetired?: AppServiceOptions['onSessionPreclearRetired']
+  private readonly unresolvedSessionPreclearReads = new Set<symbol>()
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -923,8 +1012,10 @@ export class AppService {
   private gfsDispatchBlocked = true
   // A transient runWithTeamContext hop temporarily installs another team's
   // token in sessionToken. Existing GFS jobs keep their captured token and
-  // scope, but new GFS operations must not capture that temporary token.
+  // scope. New unrelated GFS operations wait until the committed team is
+  // restored before capturing a token.
   private gfsTransientTeamHopDepth = 0
+  private readonly gfsTransientTeamHopWaiters = new Set<() => void>()
   // While a `runWithTeamContext` hop that will restore the original team is in
   // flight, `me.teamId` holds the borrowed team. The chat store (and the delete
   // fence derived from it) stays on the original team: rebinding it for the hop
@@ -954,6 +1045,10 @@ export class AppService {
     promise: Promise<unknown>
   }>()
   private sessionGeneration = 0
+  private nextSessionPreclearId = 0
+  private pendingSessionPreclear: PendingSessionPreclear | null = null
+  private pendingLogout: Promise<number> | null = null
+  private readonly markdownTabCloseDocuments = new Map<number, MarkdownTabCloseDocument>()
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
@@ -1007,6 +1102,15 @@ export class AppService {
     this.tokenStore = options.tokenStore ?? new TokenStore()
     this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
     this.onSessionCleared = options.onSessionCleared
+    this.onSessionPreclear = options.onSessionPreclear
+    this.onSessionPreclearTimeout = options.onSessionPreclearTimeout
+    this.onSessionPreclearCancelled = options.onSessionPreclearCancelled
+    this.onSessionPreclearRecoveryRequired = options.onSessionPreclearRecoveryRequired
+    this.onSessionPreclearAuthorityChanging = options.onSessionPreclearAuthorityChanging
+    this.onSessionPreclearAuthorityChanged = options.onSessionPreclearAuthorityChanged
+    this.onSessionPreclearAwaitingReceipt = options.onSessionPreclearAwaitingReceipt
+    this.onSessionPreclearReceiptCommitted = options.onSessionPreclearReceiptCommitted
+    this.onSessionPreclearRetired = options.onSessionPreclearRetired
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1130,6 +1234,33 @@ export class AppService {
     }
   }
 
+  private captureSessionAuthorityBinding(): SessionAuthorityBinding {
+    return {
+      environmentKey: getActiveEnvKey(),
+      restBaseUrl: canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl),
+      rpcBaseUrl: this.getEffectiveRpcProxyBaseUrl().trim().replace(/\/+$/, ''),
+    }
+  }
+
+  getSessionAuthorityBinding(): SessionAuthorityBinding {
+    return this.captureSessionAuthorityBinding()
+  }
+
+  isSessionAuthorityBindingCurrent(binding: SessionAuthorityBinding): boolean {
+    return this.sameSessionAuthorityBinding(binding, this.captureSessionAuthorityBinding())
+  }
+
+  private sameSessionAuthorityBinding(
+    left: SessionAuthorityBinding,
+    right: SessionAuthorityBinding
+  ): boolean {
+    return (
+      left.environmentKey === right.environmentKey &&
+      sameDesktopRestEndpoint(left.restBaseUrl, right.restBaseUrl) &&
+      left.rpcBaseUrl === right.rpcBaseUrl
+    )
+  }
+
   private assertAuthEnvironmentBinding(binding: {
     environmentKey: string
     profileId: string | null
@@ -1163,8 +1294,31 @@ export class AppService {
   /** Caller must hold the native auth/environment commit owner. */
   private setEffectiveRuntimeRpcEndpoint(discovery: RuntimeConfigDiscovery): void {
     const previousEndpoint = this.getEffectiveRpcProxyBaseUrl()
+    if (
+      previousEndpoint.trim().replace(/\/+$/, '') ===
+      discovery.rpcProxyBaseUrl.trim().replace(/\/+$/, '')
+    ) {
+      this.effectiveRuntimeRpcEndpoint = discovery
+      return
+    }
+    let pending: PendingSessionPreclear | null = null
+    if (this.sessionToken && this.me) {
+      pending = this.reserveSessionPreclear('environment-change')
+      if (pending) {
+        pending.authorityChangeInProgress = true
+        pending.requiresCurrentDocumentReceipt = true
+        pending.awaitingCurrentDocumentReceipt = false
+        this.onSessionPreclearAuthorityChanging?.(pending.notice)
+      }
+    }
     this.effectiveRuntimeRpcEndpoint = discovery
     if (previousEndpoint !== discovery.rpcProxyBaseUrl) this.rpcTokenManager.clear()
+    if (pending) {
+      pending.authorityBinding = this.captureSessionAuthorityBinding()
+      pending.authorityChangeInProgress = false
+      this.onSessionPreclearAuthorityChanged?.(pending.notice)
+      this.publishSessionPreclearRecoveryRequired(pending)
+    }
   }
 
   /** Caller must hold the native auth/environment commit owner. */
@@ -1310,13 +1464,30 @@ export class AppService {
         this.entityChangeSessionExpiryDeferred = false
         this.emitEntityChangeSessionExpired()
       }
+      if (this.gfsTransientTeamHopDepth === 0) {
+        for (const resolve of this.gfsTransientTeamHopWaiters) resolve()
+        this.gfsTransientTeamHopWaiters.clear()
+      }
     }
   }
 
-  private assertGfsDispatchAllowed(): void {
-    if (this.gfsTransientTeamHopDepth > 0) {
-      throw new Error('GFS upload dispatch is unavailable during a transient team hop')
+  private assertGfsDispatchAllowed(expectedSessionGeneration?: number): void {
+    if (this.pendingSessionPreclear) throw new Error('session_clear_pending')
+    if (expectedSessionGeneration !== undefined) {
+      if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+        throw new Error('invalid_session_generation')
+      }
+      this.assertSessionGeneration(expectedSessionGeneration)
     }
+  }
+
+  private async captureGfsDispatchToken(expectedSessionGeneration = this.sessionGeneration) {
+    this.assertGfsDispatchAllowed(expectedSessionGeneration)
+    while (this.gfsTransientTeamHopDepth > 0) {
+      await new Promise<void>(resolve => this.gfsTransientTeamHopWaiters.add(resolve))
+    }
+    this.assertGfsDispatchAllowed(expectedSessionGeneration)
+    return this.requireSessionToken()
   }
 
   private runWithTeamContext<T>(
@@ -1585,7 +1756,10 @@ export class AppService {
   }
 
   private clearAuthenticatedSessionState(): void {
+    const pendingPreclear = this.pendingSessionPreclear
+    if (pendingPreclear) this.resolveSessionPreclearRendererReceiptWaiter(pendingPreclear, false)
     this.sessionGeneration += 1
+    this.markdownTabCloseDocuments.clear()
     this.updateEntityChangeSessionToken(null)
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = true
@@ -1603,6 +1777,778 @@ export class AppService {
     this.rpcTokenManager.clear()
     unbindChatStore()
     this.invalidateSandboxUiSession()
+    this.pendingSessionPreclear = null
+  }
+
+  private reserveSessionPreclear(reason: SessionPreclearReason): PendingSessionPreclear | null {
+    if (!this.sessionToken || !this.me) return null
+    let current = this.pendingSessionPreclear
+    if (current) {
+      if (current.notice.sessionGeneration !== this.sessionGeneration) {
+        this.cancelStaleSessionPreclear(current)
+        current = this.pendingSessionPreclear
+      }
+      if (current) {
+        if (reason === 'logout') current.logoutQueued = true
+        return current
+      }
+    }
+
+    let resolve!: (acknowledged: boolean) => void
+    const promise = new Promise<boolean>(done => {
+      resolve = done
+    })
+    const pending: PendingSessionPreclear = {
+      notice: {
+        transitionId: ++this.nextSessionPreclearId,
+        sessionGeneration: this.sessionGeneration,
+        reason,
+      },
+      sessionToken: this.sessionToken,
+      sessionTokenFingerprint: createHash('sha256').update(this.sessionToken).digest('hex'),
+      principalId: this.me.id,
+      teamId: String(this.me.teamId || ''),
+      environmentKey: getActiveEnvKey(),
+      authorityBinding: this.captureSessionAuthorityBinding(),
+      recoveryAttemptBinding: null,
+      authorityChangeInProgress: false,
+      requiresCurrentDocumentReceipt: false,
+      awaitingCurrentDocumentReceipt: false,
+      rendererReceiptWaiter: null,
+      promise,
+      resolve,
+      settled: false,
+      logoutQueued: reason === 'logout',
+      recoveryAttempts: 0,
+      recoveryAttemptId: 0,
+      recoveryChecking: false,
+      recoveryTerminal: false,
+      recoveryExited: false,
+    }
+    this.pendingSessionPreclear = pending
+    this.cancelMarkdownTabCloseGrantsForPreclear()
+
+    // In tests and startup paths without an authenticated renderer, there is no
+    // visible surface to neutralize. Production main always supplies a sender.
+    if (!this.onSessionPreclear) {
+      pending.settled = true
+      pending.resolve(true)
+      return pending
+    }
+    try {
+      const delivered = this.onSessionPreclear(pending.notice)
+      if (delivered === false) {
+        pending.settled = true
+        pending.resolve(true)
+      }
+    } catch {
+      // Fail closed until the bounded deadline invokes the hide-window fallback.
+    }
+    return pending
+  }
+
+  private async awaitSessionPreclear(
+    pending: PendingSessionPreclear,
+    rearmFor?: { reason: SessionPreclearReason; principalId: string }
+  ): Promise<PendingSessionPreclear> {
+    let current = pending
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    while (true) {
+      const timeout = new Promise<boolean>(resolve => {
+        timeoutId = setTimeout(() => resolve(false), 3000)
+      })
+      const acknowledged = await Promise.race([current.promise, timeout])
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+      timeoutId = undefined
+      if (this.sessionGeneration !== current.notice.sessionGeneration) {
+        this.cancelStaleSessionPreclear(current)
+        if (rearmFor && this.sessionToken && this.me?.id === rearmFor.principalId) {
+          const replacement = this.reserveSessionPreclear(rearmFor.reason)
+          if (replacement) {
+            current = replacement
+            continue
+          }
+        }
+        throw new Error('stale_session_generation')
+      }
+      if (!acknowledged) {
+        current.settled = true
+        this.onSessionPreclearTimeout?.(current.notice)
+      }
+      return current
+    }
+  }
+
+  private cancelStaleSessionPreclear(pending: PendingSessionPreclear): void {
+    if (
+      this.pendingSessionPreclear !== pending ||
+      pending.notice.sessionGeneration === this.sessionGeneration
+    )
+      return
+    this.beginSessionPreclearRecovery(pending)
+  }
+
+  private releaseSessionPreclear(
+    pending: PendingSessionPreclear,
+    releasingReason: SessionPreclearReason = pending.notice.reason
+  ): void {
+    if (this.pendingSessionPreclear !== pending) return
+    if (pending.logoutQueued && releasingReason !== 'logout') return
+    if (!this.onSessionPreclear) {
+      this.finishSessionPreclearUnchanged(pending)
+      return
+    }
+    this.beginSessionPreclearRecovery(pending)
+  }
+
+  completeSessionPreclearRendererReceipt(binding: SessionAuthorityBinding): boolean {
+    const pending = this.pendingSessionPreclear
+    if (!pending) return true
+    const currentToken = this.sessionToken
+    if (
+      !pending.awaitingCurrentDocumentReceipt ||
+      pending.authorityChangeInProgress ||
+      !this.sameSessionAuthorityBinding(binding, this.captureSessionAuthorityBinding()) ||
+      !this.sameSessionAuthorityBinding(binding, pending.authorityBinding) ||
+      !currentToken ||
+      createHash('sha256').update(currentToken).digest('hex') !== pending.sessionTokenFingerprint ||
+      this.me?.id !== pending.principalId ||
+      String(this.me.teamId || '') !== pending.teamId ||
+      this.sessionGeneration !== pending.notice.sessionGeneration
+    )
+      return false
+    const notice = pending.notice
+    pending.recoveryTerminal = true
+    pending.awaitingCurrentDocumentReceipt = false
+    this.pendingSessionPreclear = null
+    pending.settled = true
+    pending.resolve(false)
+    this.onSessionPreclearReceiptCommitted?.(notice)
+    return true
+  }
+
+  /** Keep the existing main receipt request pending until this P may accept D2. */
+  waitForSessionPreclearRendererReceipt(): Promise<boolean> {
+    const pending = this.pendingSessionPreclear
+    if (!pending) return Promise.resolve(true)
+    if (pending.awaitingCurrentDocumentReceipt) return Promise.resolve(true)
+    if (pending.recoveryTerminal || pending.recoveryExited) return Promise.resolve(false)
+    if (pending.rendererReceiptWaiter) return pending.rendererReceiptWaiter.promise
+    let resolve!: (ready: boolean) => void
+    const promise = new Promise<boolean>(done => {
+      resolve = done
+    })
+    pending.rendererReceiptWaiter = { promise, resolve }
+    return promise
+  }
+
+  private resolveSessionPreclearRendererReceiptWaiter(
+    pending: PendingSessionPreclear,
+    ready: boolean
+  ): void {
+    const waiter = pending.rendererReceiptWaiter
+    pending.rendererReceiptWaiter = null
+    waiter?.resolve(ready)
+  }
+
+  /** Retry the server-backed authority check after an unreadable preclear recovery. */
+  retrySessionPreclearRecovery(notice: SessionPreclearNotice): boolean {
+    const pending = this.pendingSessionPreclear
+    if (
+      !pending ||
+      pending.notice.transitionId !== notice.transitionId ||
+      pending.notice.sessionGeneration !== notice.sessionGeneration ||
+      pending.recoveryTerminal ||
+      pending.recoveryExited ||
+      pending.recoveryChecking ||
+      pending.authorityChangeInProgress ||
+      pending.awaitingCurrentDocumentReceipt ||
+      pending.recoveryAttempts >= SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS ||
+      this.unresolvedSessionPreclearReads.size >= SESSION_PRECLEAR_MAX_UNRESOLVED_READS
+    )
+      return false
+    this.beginSessionPreclearRecovery(pending)
+    return true
+  }
+
+  /** End an unresolved recovery without revealing its captured renderer. */
+  exitSessionPreclearRecovery(notice: SessionPreclearNotice): boolean {
+    const pending = this.pendingSessionPreclear
+    if (
+      !pending ||
+      pending.notice.transitionId !== notice.transitionId ||
+      pending.notice.sessionGeneration !== notice.sessionGeneration ||
+      pending.recoveryTerminal
+    )
+      return false
+    pending.recoveryExited = true
+    pending.recoveryTerminal = true
+    this.resolveSessionPreclearRendererReceiptWaiter(pending, false)
+    this.pendingSessionPreclear = null
+    pending.settled = true
+    pending.resolve(false)
+    return true
+  }
+
+  private beginSessionPreclearRecovery(pending: PendingSessionPreclear): void {
+    if (
+      this.pendingSessionPreclear !== pending ||
+      pending.recoveryTerminal ||
+      pending.recoveryExited ||
+      pending.recoveryChecking ||
+      pending.authorityChangeInProgress ||
+      pending.awaitingCurrentDocumentReceipt
+    )
+      return
+    if (
+      pending.recoveryAttempts >= SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS ||
+      this.unresolvedSessionPreclearReads.size >= SESSION_PRECLEAR_MAX_UNRESOLVED_READS
+    ) {
+      this.onSessionPreclearRecoveryRequired?.(pending.notice, {
+        attemptsRemaining: SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS - pending.recoveryAttempts,
+        retryAvailable: false,
+      })
+      return
+    }
+
+    const attemptId = ++pending.recoveryAttemptId
+    pending.recoveryAttempts += 1
+    pending.recoveryChecking = true
+    const attemptBinding = this.captureSessionAuthorityBinding()
+    pending.recoveryAttemptBinding = attemptBinding
+    const readId = Symbol('session-preclear-authority-read')
+    this.unresolvedSessionPreclearReads.add(readId)
+    const controller = new AbortController()
+    let timedOut = false
+    let settled = false
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const request = this.authClient.getMe(pending.sessionToken, controller.signal).then(
+      me => ({ kind: 'ok' as const, me }),
+      error => ({ kind: 'error' as const, error })
+    )
+    void request.then(() => {
+      settled = true
+      this.unresolvedSessionPreclearReads.delete(readId)
+      const recovery = this.pendingSessionPreclear
+      if (
+        recovery &&
+        !recovery.recoveryTerminal &&
+        !recovery.recoveryExited &&
+        (recovery !== pending || recovery.recoveryAttemptId !== attemptId || timedOut)
+      ) {
+        this.publishSessionPreclearRecoveryRequired(recovery)
+      }
+    })
+    const timeout = new Promise<{ kind: 'timeout' }>(resolve => {
+      timeoutId = setTimeout(
+        () => resolve({ kind: 'timeout' }),
+        SESSION_PRECLEAR_RECOVERY_DEADLINE_MS
+      )
+    })
+
+    void Promise.race([request, timeout]).then(result => {
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+      if (
+        this.pendingSessionPreclear !== pending ||
+        pending.recoveryTerminal ||
+        pending.recoveryExited ||
+        pending.recoveryAttemptId !== attemptId
+      )
+        return
+      if (pending.authorityChangeInProgress) {
+        pending.recoveryChecking = false
+        return
+      }
+      if (result.kind === 'timeout') {
+        timedOut = true
+        pending.recoveryChecking = false
+        controller.abort()
+        this.publishSessionPreclearRecoveryRequired(pending)
+        return
+      }
+      if (!settled) {
+        // The wrapped request settles before this continuation; this is defensive.
+        return
+      }
+      if (
+        !this.sameSessionAuthorityBinding(attemptBinding, this.captureSessionAuthorityBinding()) ||
+        !this.sameSessionAuthorityBinding(attemptBinding, pending.authorityBinding)
+      ) {
+        pending.recoveryChecking = false
+        pending.authorityBinding = this.captureSessionAuthorityBinding()
+        this.publishSessionPreclearRecoveryRequired(pending)
+        return
+      }
+      if (result.kind === 'error') {
+        pending.recoveryChecking = false
+        if (AppService.isSessionEndedByMe(result.error)) {
+          this.retireSessionPreclearAuthority(pending)
+        } else {
+          this.publishSessionPreclearRecoveryRequired(pending)
+        }
+        return
+      }
+      pending.recoveryChecking = false
+      if (
+        !this.sameSessionAuthorityBinding(attemptBinding, this.captureSessionAuthorityBinding())
+      ) {
+        pending.authorityBinding = this.captureSessionAuthorityBinding()
+        this.publishSessionPreclearRecoveryRequired(pending)
+        return
+      }
+      this.resolveSessionPreclearAuthority(pending, attemptBinding, result.me)
+    })
+  }
+
+  private publishSessionPreclearRecoveryRequired(pending: PendingSessionPreclear): void {
+    if (
+      this.pendingSessionPreclear !== pending ||
+      pending.recoveryTerminal ||
+      pending.recoveryExited ||
+      pending.authorityChangeInProgress ||
+      pending.awaitingCurrentDocumentReceipt
+    )
+      return
+    this.onSessionPreclearRecoveryRequired?.(pending.notice, {
+      attemptsRemaining: SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS - pending.recoveryAttempts,
+      retryAvailable:
+        !pending.recoveryChecking &&
+        !pending.authorityChangeInProgress &&
+        !pending.awaitingCurrentDocumentReceipt &&
+        pending.recoveryAttempts < SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS &&
+        this.unresolvedSessionPreclearReads.size < SESSION_PRECLEAR_MAX_UNRESOLVED_READS,
+    })
+  }
+
+  private resolveSessionPreclearAuthority(
+    pending: PendingSessionPreclear,
+    attemptBinding: SessionAuthorityBinding,
+    me: SessionMe
+  ): void {
+    const currentMe = this.me
+    const currentToken = this.sessionToken
+    const currentBinding = this.captureSessionAuthorityBinding()
+    const currentMatchesCaptured =
+      currentToken !== null &&
+      createHash('sha256').update(currentToken).digest('hex') === pending.sessionTokenFingerprint &&
+      currentMe?.id === pending.principalId &&
+      String(currentMe.teamId || '') === pending.teamId &&
+      this.sameSessionAuthorityBinding(currentBinding, pending.authorityBinding) &&
+      this.sameSessionAuthorityBinding(attemptBinding, pending.authorityBinding)
+    if (!me?.id || me.teamId === undefined) {
+      this.publishSessionPreclearRecoveryRequired(pending)
+      return
+    }
+    if (
+      currentMatchesCaptured &&
+      me.id === pending.principalId &&
+      String(me.teamId || '') === pending.teamId
+    ) {
+      if (pending.requiresCurrentDocumentReceipt) {
+        pending.awaitingCurrentDocumentReceipt = true
+        this.resolveSessionPreclearRendererReceiptWaiter(pending, true)
+        this.onSessionPreclearAwaitingReceipt?.(pending.notice, {
+          attemptsRemaining: SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS - pending.recoveryAttempts,
+          retryAvailable: false,
+        })
+        return
+      }
+      this.finishSessionPreclearUnchanged(pending)
+      return
+    }
+    if (currentMatchesCaptured) {
+      pending.recoveryTerminal = true
+      this.resolveSessionPreclearRendererReceiptWaiter(pending, false)
+      pending.settled = true
+      pending.resolve(false)
+      this.clearAuthenticatedSessionState()
+      this.onSessionCleared?.()
+    } else {
+      pending.recoveryTerminal = true
+      if (this.pendingSessionPreclear === pending) this.pendingSessionPreclear = null
+      pending.settled = true
+      pending.resolve(false)
+      this.onSessionPreclearRetired?.(pending.notice)
+    }
+  }
+
+  private retireSessionPreclearAuthority(pending: PendingSessionPreclear): void {
+    const currentToken = this.sessionToken
+    const currentMe = this.me
+    const stillCaptured =
+      currentToken !== null &&
+      createHash('sha256').update(currentToken).digest('hex') === pending.sessionTokenFingerprint &&
+      currentMe?.id === pending.principalId &&
+      String(currentMe.teamId || '') === pending.teamId
+    pending.recoveryTerminal = true
+    this.resolveSessionPreclearRendererReceiptWaiter(pending, false)
+    if (stillCaptured) {
+      pending.settled = true
+      pending.resolve(false)
+      this.clearAuthenticatedSessionState()
+      this.onSessionCleared?.()
+      return
+    }
+    if (this.pendingSessionPreclear === pending) this.pendingSessionPreclear = null
+    pending.settled = true
+    pending.resolve(false)
+    this.onSessionPreclearRetired?.(pending.notice)
+  }
+
+  private finishSessionPreclearUnchanged(pending: PendingSessionPreclear): void {
+    if (this.pendingSessionPreclear !== pending || pending.recoveryTerminal) return
+    try {
+      if (this.sessionToken && this.me) this.activateGfsAuthScope()
+    } catch {
+      pending.recoveryChecking = false
+      this.publishSessionPreclearRecoveryRequired(pending)
+      return
+    }
+    pending.recoveryTerminal = true
+    this.pendingSessionPreclear = null
+    pending.settled = true
+    pending.resolve(false)
+    this.onSessionPreclearCancelled?.(pending.notice)
+  }
+
+  private async clearLiveSessionAfterPreclear(reason: SessionPreclearReason): Promise<void> {
+    const pending = this.reserveSessionPreclear(reason)
+    if (pending) await this.awaitSessionPreclear(pending)
+    if (pending && this.sessionGeneration !== pending.notice.sessionGeneration) {
+      throw new Error('stale_session_generation')
+    }
+    this.clearAuthenticatedSessionState()
+    this.onSessionCleared?.()
+  }
+
+  /** Reserve a renderer-neutral barrier before renderer-initiated logout IPC. */
+  async prepareSessionClear(): Promise<SessionPreclearNotice | null> {
+    const pending = this.reserveSessionPreclear('logout')
+    if (!pending) return null
+    const principalId = this.me?.id
+    const current = principalId
+      ? await this.awaitSessionPreclear(pending, { reason: 'logout', principalId })
+      : await this.awaitSessionPreclear(pending)
+    return current.notice
+  }
+
+  acknowledgeSessionPreclear(notice: SessionPreclearNotice): boolean {
+    const pending = this.pendingSessionPreclear
+    if (
+      !pending ||
+      pending.settled ||
+      pending.notice.transitionId !== notice.transitionId ||
+      pending.notice.sessionGeneration !== notice.sessionGeneration ||
+      pending.notice.sessionGeneration !== this.sessionGeneration
+    ) {
+      return false
+    }
+    pending.settled = true
+    pending.resolve(true)
+    return true
+  }
+
+  /** Main-process linearization point for a renderer tab-close attempt. */
+  beginMarkdownTabCloseDocument(senderWebContentsId: number, documentEpoch: string): boolean {
+    if (
+      !Number.isSafeInteger(senderWebContentsId) ||
+      senderWebContentsId <= 0 ||
+      typeof documentEpoch !== 'string' ||
+      !/^[a-f0-9-]{36}$/i.test(documentEpoch)
+    )
+      return false
+    this.markdownTabCloseDocuments.set(senderWebContentsId, {
+      epoch: documentEpoch,
+      nextSequence: 1,
+      slot: null,
+    })
+    return true
+  }
+
+  retireMarkdownTabCloseDocument(senderWebContentsId: number, documentEpoch?: string): void {
+    const document = this.markdownTabCloseDocuments.get(senderWebContentsId)
+    if (!document || (documentEpoch !== undefined && document.epoch !== documentEpoch)) return
+    this.markdownTabCloseDocuments.delete(senderWebContentsId)
+  }
+
+  authorizeMarkdownTabClose(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseState {
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    if (!binding || !Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0)
+      return 'denied'
+
+    const document = this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    if (!document) return 'unknown'
+    const current = this.ensureMarkdownTabCloseSequence(document, binding)
+    if (current === 'invalid') return 'unknown'
+    if (current && typeof current === 'object' && current.kind === 'replay')
+      return current.terminalState
+    if (current && typeof current === 'object' && current.kind === 'active') {
+      this.expireMarkdownTabCloseRequest(current.request)
+      return current.request.state
+    }
+
+    const state =
+      this.pendingSessionPreclear || binding.sessionGeneration !== this.sessionGeneration
+        ? 'denied'
+        : 'granted'
+    document.slot = {
+      kind: 'active',
+      request: this.createMarkdownTabCloseRequest(binding, state),
+    }
+    return state
+  }
+
+  getMarkdownTabClosePermitStatus(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseState {
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    const document = binding && this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    if (!binding || !document) return 'unknown'
+    const slot = document.slot
+    if (slot?.kind === 'ack' && this.sameMarkdownTabCloseReceipt(slot.receipt, binding)) {
+      return slot.receipt.terminalState
+    }
+    if (slot?.kind !== 'active' || !this.sameMarkdownTabCloseBinding(slot.request, binding))
+      return 'unknown'
+    this.expireMarkdownTabCloseRequest(slot.request)
+    return slot.request.state
+  }
+
+  cancelMarkdownTabClosePermit(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseState {
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    if (!binding || !Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0)
+      return 'unknown'
+
+    const document = this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    if (!document) return 'unknown'
+    const current = this.ensureMarkdownTabCloseSequence(document, binding)
+    if (current === 'invalid') return 'unknown'
+    if (current && typeof current === 'object' && current.kind === 'replay')
+      return current.terminalState
+    if (!current) {
+      document.slot = {
+        kind: 'active',
+        request: this.createMarkdownTabCloseRequest(binding, 'cancelled'),
+      }
+      return 'cancelled'
+    }
+    if (current.kind !== 'active' || !this.sameMarkdownTabCloseBinding(current.request, binding))
+      return 'unknown'
+
+    this.expireMarkdownTabCloseRequest(current.request)
+    if (current.request.state === 'pending') current.request.state = 'cancelled'
+    return current.request.state
+  }
+
+  consumeMarkdownTabClosePermit(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseState {
+    const request = this.findMarkdownTabCloseRequest(senderWebContentsId, input)
+    if (!request) return 'unknown'
+    this.expireMarkdownTabCloseRequest(request)
+    if (request.state === 'granted') {
+      if (
+        this.pendingSessionPreclear ||
+        request.binding.sessionGeneration !== this.sessionGeneration
+      ) {
+        request.state = 'cancelled'
+      } else {
+        request.state = 'consumed'
+      }
+    }
+    return request.state
+  }
+
+  clearMarkdownTabCloseRequests(senderWebContentsId: number): void {
+    this.retireMarkdownTabCloseDocument(senderWebContentsId)
+  }
+
+  acknowledgeMarkdownTabClose(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): number | null {
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    const document = binding && this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    if (!binding || !document) return null
+    const slot = document.slot
+    if (slot?.kind === 'ack') {
+      return this.sameMarkdownTabCloseReceipt(slot.receipt, binding)
+        ? slot.receipt.nextSequence
+        : null
+    }
+    if (slot?.kind !== 'active' || !this.sameMarkdownTabCloseBinding(slot.request, binding))
+      return null
+    this.expireMarkdownTabCloseRequest(slot.request)
+    if (slot.request.state === 'pending' || slot.request.state === 'granted') return null
+
+    const nextSequence = binding.sequence + 1
+    const receipt: MarkdownTabCloseReceipt = {
+      binding: slot.request.binding,
+      ownerIdentityDigest: slot.request.ownerIdentityDigest,
+      terminalState: slot.request.state,
+      nextSequence,
+    }
+    document.nextSequence = nextSequence
+    document.slot = { kind: 'ack', receipt }
+    return nextSequence
+  }
+
+  private normalizeMarkdownTabCloseBinding(
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseBinding | null {
+    if (
+      !input ||
+      typeof input.requestId !== 'string' ||
+      !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.requestId) ||
+      typeof input.documentEpoch !== 'string' ||
+      !/^[a-f0-9-]{36}$/i.test(input.documentEpoch) ||
+      !Number.isSafeInteger(input.sequence) ||
+      input.sequence < 1 ||
+      typeof input.tabId !== 'string' ||
+      !input.tabId.trim() ||
+      input.tabId.length > 256 ||
+      !Number.isSafeInteger(input.sessionGeneration) ||
+      input.sessionGeneration < 0 ||
+      !Array.isArray(input.ownerIdentities) ||
+      input.ownerIdentities.length < 1 ||
+      input.ownerIdentities.length > 256 ||
+      input.ownerIdentities.some(
+        identity => typeof identity !== 'string' || !identity || identity.length > 512
+      ) ||
+      new Set(input.ownerIdentities).size !== input.ownerIdentities.length
+    )
+      return null
+    return Object.freeze({
+      requestId: input.requestId,
+      documentEpoch: input.documentEpoch,
+      sequence: input.sequence,
+      tabId: input.tabId,
+      sessionGeneration: input.sessionGeneration,
+      ownerIdentities: Object.freeze([...input.ownerIdentities].sort()),
+    })
+  }
+
+  private createMarkdownTabCloseRequest(
+    binding: MarkdownTabCloseBinding,
+    state: Exclude<MarkdownTabCloseState, 'unknown'>
+  ): MarkdownTabCloseRequest {
+    return {
+      binding: {
+        requestId: binding.requestId,
+        documentEpoch: binding.documentEpoch,
+        sequence: binding.sequence,
+        tabId: binding.tabId,
+        sessionGeneration: binding.sessionGeneration,
+      },
+      ownerIdentityDigest: createHash('sha256')
+        .update(JSON.stringify(binding.ownerIdentities))
+        .digest('hex'),
+      state,
+      expiresAt: Date.now() + 30_000,
+    }
+  }
+
+  private findMarkdownTabCloseRequest(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseRequest | null {
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    if (!binding || !Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0)
+      return null
+    const document = this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    const slot = document?.slot
+    return slot?.kind === 'active' && this.sameMarkdownTabCloseBinding(slot.request, binding)
+      ? slot.request
+      : null
+  }
+
+  private getMarkdownTabCloseDocument(
+    senderWebContentsId: number,
+    binding: MarkdownTabCloseBinding
+  ): MarkdownTabCloseDocument | null {
+    if (!Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0) return null
+    const document = this.markdownTabCloseDocuments.get(senderWebContentsId)
+    return document?.epoch === binding.documentEpoch ? document : null
+  }
+
+  private ensureMarkdownTabCloseSequence(
+    document: MarkdownTabCloseDocument,
+    binding: MarkdownTabCloseBinding
+  ):
+    | { kind: 'active'; request: MarkdownTabCloseRequest }
+    | { kind: 'replay'; terminalState: MarkdownTabCloseReceipt['terminalState'] }
+    | null
+    | 'invalid' {
+    const slot = document.slot
+    if (slot?.kind === 'active') {
+      return this.sameMarkdownTabCloseBinding(slot.request, binding)
+        ? { kind: 'active', request: slot.request }
+        : 'invalid'
+    }
+    if (slot?.kind === 'ack') {
+      if (this.sameMarkdownTabCloseReceipt(slot.receipt, binding)) {
+        return { kind: 'replay', terminalState: slot.receipt.terminalState }
+      }
+      if (binding.sequence !== document.nextSequence) return 'invalid'
+      document.slot = null
+      return null
+    }
+    return binding.sequence === document.nextSequence ? null : 'invalid'
+  }
+
+  private sameMarkdownTabCloseBinding(
+    request: MarkdownTabCloseRequest,
+    binding: MarkdownTabCloseBinding
+  ): boolean {
+    return (
+      request.binding.requestId === binding.requestId &&
+      request.binding.documentEpoch === binding.documentEpoch &&
+      request.binding.sequence === binding.sequence &&
+      request.binding.tabId === binding.tabId &&
+      request.binding.sessionGeneration === binding.sessionGeneration &&
+      request.ownerIdentityDigest ===
+        createHash('sha256').update(JSON.stringify(binding.ownerIdentities)).digest('hex')
+    )
+  }
+
+  private cancelMarkdownTabCloseGrantsForPreclear(): void {
+    for (const document of this.markdownTabCloseDocuments.values()) {
+      if (document.slot?.kind !== 'active') continue
+      const request = document.slot.request
+      if (request.state === 'pending' || request.state === 'granted') request.state = 'cancelled'
+    }
+  }
+
+  private sameMarkdownTabCloseReceipt(
+    receipt: MarkdownTabCloseReceipt,
+    binding: MarkdownTabCloseBinding
+  ): boolean {
+    return (
+      receipt.binding.requestId === binding.requestId &&
+      receipt.binding.documentEpoch === binding.documentEpoch &&
+      receipt.binding.sequence === binding.sequence &&
+      receipt.binding.tabId === binding.tabId &&
+      receipt.binding.sessionGeneration === binding.sessionGeneration &&
+      receipt.ownerIdentityDigest ===
+        createHash('sha256').update(JSON.stringify(binding.ownerIdentities)).digest('hex')
+    )
+  }
+
+  private expireMarkdownTabCloseRequest(request: MarkdownTabCloseRequest): void {
+    if (
+      (request.state === 'pending' || request.state === 'granted') &&
+      request.expiresAt <= Date.now()
+    ) {
+      request.state = 'expired'
+    }
   }
 
   /**
@@ -1611,16 +2557,41 @@ export class AppService {
    * the saved token could not be removed, because the in-memory session is gone.
    */
   private async endCommittedSession(): Promise<void> {
-    this.clearAuthenticatedSessionState()
+    const pending = this.reserveSessionPreclear('session-ended')
+    if (pending) await this.awaitSessionPreclear(pending)
+    const capturedGeneration = this.sessionGeneration
+    const capturedToken = this.sessionToken
+    const capturedMe = this.me
     try {
       await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
         legacyEnvKeys: getActiveLegacyEnvKeys(),
       })
     } catch (clearError) {
       console.warn('[AppService] Failed to clear the saved session token:', clearError)
-    } finally {
-      this.onSessionCleared?.()
+      if (capturedToken && capturedMe) {
+        try {
+          const currentMe = await this.authClient.getMe(capturedToken)
+          if (
+            this.sessionGeneration === capturedGeneration &&
+            this.sessionToken === capturedToken &&
+            this.me === capturedMe &&
+            currentMe.id === capturedMe.id &&
+            String(currentMe.teamId || '') === String(capturedMe.teamId || '')
+          ) {
+            // The persisted token is still valid, so restore the same GFS
+            // scope before releasing its preclear fence.
+            this.activateGfsAuthScope(desktopGfsUploadIdentity(capturedMe))
+            if (pending) this.releaseSessionPreclear(pending, 'session-ended')
+            return
+          }
+        } catch (verificationError) {
+          if (!AppService.isSessionEndedByMe(verificationError)) throw clearError
+        }
+      }
     }
+    if (capturedGeneration !== this.sessionGeneration || this.sessionToken !== capturedToken) return
+    this.clearAuthenticatedSessionState()
+    this.onSessionCleared?.()
   }
 
   /**
@@ -1640,6 +2611,8 @@ export class AppService {
     }
     const identity =
       this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
+    const pending = this.reserveSessionPreclear('session-ended')
+    if (pending) await this.awaitSessionPreclear(pending)
     try {
       await this.suspendDesktopGfsUploadsForAuthBoundary(identity)
     } catch (fenceError) {
@@ -1721,10 +2694,16 @@ export class AppService {
     driveValue: string | undefined,
     options: { allowTransientTeamHop?: boolean } = {}
   ): DesktopGfsUploadScope {
+    if (this.pendingSessionPreclear) throw new Error('session_clear_pending')
     if (this.gfsDispatchBlocked || !this.sessionToken || !this.me) {
       throw new Error('GFS upload dispatch is unavailable without an active authenticated scope')
     }
-    if (!options.allowTransientTeamHop) this.assertGfsDispatchAllowed()
+    if (!options.allowTransientTeamHop) {
+      this.assertGfsDispatchAllowed()
+      if (this.gfsTransientTeamHopDepth > 0) {
+        throw new Error('GFS upload dispatch is unavailable during a transient team hop')
+      }
+    }
     const identity = this.gfsScopeIdentity
     if (!identity) {
       throw new Error('GFS upload dispatch is unavailable before scope activation')
@@ -1877,7 +2856,9 @@ export class AppService {
     if (reservation.tokenReadFailed) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
-        if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+        if (this.sessionToken !== null || this.me !== null) {
+          await this.clearLiveSessionAfterPreclear('session-ended')
+        }
         return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
@@ -1886,7 +2867,9 @@ export class AppService {
     if (!token) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
-        if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+        if (this.sessionToken !== null || this.me !== null) {
+          await this.clearLiveSessionAfterPreclear('session-ended')
+        }
         return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
@@ -1948,7 +2931,9 @@ export class AppService {
     } catch (error) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
-        if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+        if (this.sessionToken !== null || this.me !== null) {
+          await this.clearLiveSessionAfterPreclear('session-ended')
+        }
         // A 401, 403 or 410 from `/me` ended the session and removes the saved token;
         // any other restore failure signs this process out and keeps the token for
         // the next start.
@@ -2133,15 +3118,16 @@ export class AppService {
     const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
     const oldSessionToken = this.sessionToken
     const oldMe = this.me
+    const hadAuthenticatedScope = Boolean(oldSessionToken && oldMe)
+    const preclear = hadAuthenticatedScope
+      ? this.reserveSessionPreclear('environment-change')
+      : null
+    if (preclear) await this.awaitSessionPreclear(preclear)
+    const transitionGeneration = this.sessionGeneration
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
-      const hadAuthenticatedScope = Boolean(this.sessionToken && this.me)
       this.entityChangeEnvironmentSwitching = true
       this.entityChangeConnectionStop?.({ silent: true })
-      // Invalidate a restore that may still be awaiting keychain/getMe before it
-      // can bind an old-environment token to the newly selected runtime.
-      this.sessionGeneration += 1
-      const transitionGeneration = this.sessionGeneration
       if (hadAuthenticatedScope) await this.suspendDesktopGfsUploadsForAuthBoundary()
       this.assertSessionGeneration(transitionGeneration)
       try {
@@ -2154,18 +3140,20 @@ export class AppService {
           normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
         if (!environmentUnchanged) {
           this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
+          await this.tokenStore.clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
+          this.assertSessionGeneration(transitionGeneration)
           this.clearAuthenticatedSessionState()
-          await this.tokenStore
-            .clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
-            .catch(() => undefined)
+          this.onSessionCleared?.()
         } else if (
           hadAuthenticatedScope &&
           this.sessionToken === oldSessionToken &&
           this.me === oldMe &&
+          this.sessionGeneration === transitionGeneration &&
           this.sessionToken &&
           this.me
         ) {
           this.activateGfsAuthScope()
+          if (preclear) this.releaseSessionPreclear(preclear, 'environment-change')
         }
         throw error
       }
@@ -2173,15 +3161,42 @@ export class AppService {
         getActiveEnvKey() !== oldEnvKey ||
         normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) !== oldBaseUrl
       if (boundaryChanged) {
-        this.clearAuthenticatedSessionState()
         await this.tokenStore.clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
+        this.assertSessionGeneration(transitionGeneration)
+        this.clearAuthenticatedSessionState()
+        this.onSessionCleared?.()
       } else if (hadAuthenticatedScope && this.sessionToken && this.me) {
         this.activateGfsAuthScope()
         this.sessionGeneration += 1
+        if (preclear) this.releaseSessionPreclear(preclear, 'environment-change')
       } else {
         this.sessionGeneration += 1
       }
       return this.sessionGeneration
+    } catch (error) {
+      const boundaryChanged =
+        getActiveEnvKey() !== oldEnvKey ||
+        normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) !== oldBaseUrl
+      if (
+        preclear &&
+        this.pendingSessionPreclear === preclear &&
+        this.sessionGeneration === transitionGeneration &&
+        this.sessionToken === oldSessionToken &&
+        this.me === oldMe
+      ) {
+        if (boundaryChanged) {
+          // Once the runtime boundary moved, the captured session cannot remain
+          // active even if clearing its persisted token failed.
+          this.clearAuthenticatedSessionState()
+          this.onSessionCleared?.()
+        } else {
+          // A failed operation on the original boundary must return the still
+          // current session to a visible, usable state.
+          this.activateGfsAuthScope()
+          this.releaseSessionPreclear(preclear, 'environment-change')
+        }
+      }
+      throw error
     } finally {
       this.entityChangeEnvironmentSwitching = false
       if (
@@ -2776,9 +3791,21 @@ export class AppService {
     return { opened: true }
   }
 
-  async logout(): Promise<number> {
-    return this.withNativeAuthEnvironmentCommit(async () => {
-      this.sessionGeneration += 1
+  logout(): Promise<number> {
+    if (this.pendingLogout) return this.pendingLogout
+    // Reserve before entering the native auth queue: a queued team/environment
+    // operation must not leave the outgoing renderer visible while logout waits.
+    let preclear = this.reserveSessionPreclear('logout')
+    const logoutPrincipalId = this.me?.id
+    const operation = this.withNativeAuthEnvironmentCommit(async () => {
+      if (preclear) {
+        preclear = logoutPrincipalId
+          ? await this.awaitSessionPreclear(preclear, {
+              reason: 'logout',
+              principalId: logoutPrincipalId,
+            })
+          : await this.awaitSessionPreclear(preclear)
+      }
       const logoutGeneration = this.sessionGeneration
       const logoutToken = this.sessionToken
       const logoutMe = this.me
@@ -2786,16 +3813,77 @@ export class AppService {
       try {
         const envKey = getActiveEnvKey()
         const legacyEnvKeys = getActiveLegacyEnvKeys()
-        await this.suspendDesktopGfsUploadsForAuthBoundary()
+        try {
+          await this.suspendDesktopGfsUploadsForAuthBoundary()
+        } catch (error) {
+          if (
+            this.sessionGeneration === logoutGeneration &&
+            this.sessionToken === logoutToken &&
+            this.me === logoutMe
+          ) {
+            // Suspension happens before token removal. If it fails, the old
+            // session still owns the renderer; restore its GFS dispatch scope
+            // and release even a preclear that was shared with a queued logout.
+            try {
+              this.activateGfsAuthScope()
+            } catch {
+              // Preserve the initiating failure, but never strand the renderer
+              // behind a preclear after the logout operation has settled.
+            }
+          }
+          if (preclear) this.releaseSessionPreclear(preclear, 'logout')
+          throw error
+        }
         this.assertSessionGeneration(logoutGeneration)
         try {
           await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
           this.assertSessionGeneration(logoutGeneration)
         } catch (error) {
-          if (logoutToken && logoutMe) this.activateGfsAuthScope()
+          if (logoutToken && logoutMe && preclear) {
+            try {
+              const currentMe = await this.authClient.getMe(logoutToken)
+              if (
+                this.sessionGeneration === logoutGeneration &&
+                this.sessionToken === logoutToken &&
+                this.me === logoutMe &&
+                currentMe.id === logoutMe.id &&
+                String(currentMe.teamId || '') === String(logoutMe.teamId || '')
+              ) {
+                this.activateGfsAuthScope()
+                this.releaseSessionPreclear(preclear, 'logout')
+              } else if (
+                this.sessionGeneration === logoutGeneration &&
+                this.sessionToken === logoutToken &&
+                this.me === logoutMe
+              ) {
+                // A valid token now identifies a different principal or team.
+                // Retire the old in-memory authority before revealing the app.
+                this.clearAuthenticatedSessionState()
+                this.onSessionCleared?.()
+              }
+            } catch (verificationError) {
+              if (AppService.isSessionEndedByMe(verificationError)) {
+                this.clearAuthenticatedSessionState()
+                this.onSessionCleared?.()
+              } else if (
+                this.sessionGeneration === logoutGeneration &&
+                this.sessionToken === logoutToken &&
+                this.me === logoutMe
+              ) {
+                // The token-store write failed and `/me` could not establish a
+                // different auth state. Keep the still-committed session usable
+                // and release the renderer preclear so the user can retry.
+                this.activateGfsAuthScope()
+                this.releaseSessionPreclear(preclear, 'logout')
+              }
+            }
+          } else if (logoutToken && logoutMe) {
+            this.activateGfsAuthScope()
+          }
           throw error
         }
         this.clearAuthenticatedSessionState()
+        this.onSessionCleared?.()
         await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
         // Grants survive logout (they are keyed by userId), but every cached SDK
         // result must not: the next user of this machine gets nothing of this one's.
@@ -2805,11 +3893,18 @@ export class AppService {
         releasePrewarm()
       }
     })
+    this.pendingLogout = operation
+    const clearPendingLogout = () => {
+      if (this.pendingLogout === operation) this.pendingLogout = null
+    }
+    void operation.then(clearPendingLogout, clearPendingLogout)
+    return operation
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
-  async resolveGfsUri(uri: string) {
-    return this.gfsClient.resolveUri(uri, this.requireSessionToken())
+  async resolveGfsUri(uri: string, expectedSessionGeneration?: number) {
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
+    return this.gfsClient.resolveUri(uri, token)
   }
 
   /**
@@ -2818,10 +3913,16 @@ export class AppService {
    * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
    * reads the full body.
    */
-  async downloadGfsUri(uri: string, maxBytes?: number, signal?: AbortSignal) {
+  async downloadGfsUri(
+    uri: string,
+    maxBytes?: number,
+    signal?: AbortSignal,
+    expectedSessionGeneration?: number
+  ) {
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
     return this.gfsClient.download(
       uri,
-      this.requireSessionToken(),
+      token,
       maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
     )
   }
@@ -2840,9 +3941,10 @@ export class AppService {
     signal: AbortSignal | undefined,
     onChunk: (chunk: Uint8Array) => Promise<void>
   ) {
+    const token = await this.captureGfsDispatchToken()
     return this.gfsClient.downloadInto(
       uri,
-      this.requireSessionToken(),
+      token,
       signal ? { maxBytes, signal } : { maxBytes },
       onChunk
     )
@@ -2850,7 +3952,8 @@ export class AppService {
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */
   async listGfsChildren(resourceId: string, drive?: string, cursor?: string, signal?: AbortSignal) {
-    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), {
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.listChildren(resourceId, token, {
       drive,
       cursor,
       signal,
@@ -2859,7 +3962,8 @@ export class AppService {
 
   /** List explicit gfs resources the current user can read through grants or shares. */
   async listAccessibleGfsResources(drive?: string, cursor?: string) {
-    return this.gfsClient.listAccessible(this.requireSessionToken(), { drive, cursor })
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.listAccessible(token, { drive, cursor })
   }
 
   /**
@@ -2868,12 +3972,13 @@ export class AppService {
    * (the existing pure lib) maps them to {canDelegate, grantableBits,
    * canCreateShare}. Enforcement is always server-side — this only hides controls.
    */
-  async gfsAffordances(resourceId: string, drive?: string): Promise<DelegationAffordances> {
-    const { held, isOperator } = await this.gfsClient.affordances(
-      resourceId,
-      this.requireSessionToken(),
-      drive
-    )
+  async gfsAffordances(
+    resourceId: string,
+    drive?: string,
+    expectedSessionGeneration?: number
+  ): Promise<DelegationAffordances> {
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
+    const { held, isOperator } = await this.gfsClient.affordances(resourceId, token, drive)
     return delegationAffordances(new Set(held), isOperator)
   }
 
@@ -2891,12 +3996,13 @@ export class AppService {
     drive?: string,
     inherit?: boolean
   ) {
+    const token = await this.captureGfsDispatchToken()
     // One atomic bulk PUT for every selected subject (server caps at 100). Each
     // key is parsed to its structured subject up front, so a single malformed
     // key fails the whole call before any round-trip — never a partial write.
     await this.gfsClient.grant(
       { resourceId, drive, subjects: subjectKeys.map(parseSubjectKey), permissions: bits, inherit },
-      this.requireSessionToken()
+      token
     )
   }
 
@@ -2906,22 +4012,26 @@ export class AppService {
    * enforced server-side; a caller without manage_acl gets the API's 403.
    */
   async listGfsGrants(resourceId: string, drive?: string) {
-    return this.gfsClient.listGrants({ resourceId, drive }, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.listGrants({ resourceId, drive }, token)
   }
 
   /** Revoke an ACL row by id (id learned from listGfsGrants). */
   async revokeGfsGrant(grantId: string) {
-    await this.gfsClient.revokeGrant(grantId, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    await this.gfsClient.revokeGrant(grantId, token)
   }
 
   /** List direct URI shares on a resource for the combined access-management view. */
   async listGfsShares(resourceId: string, drive?: string) {
-    return this.gfsClient.listShares({ resourceId, drive }, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.listShares({ resourceId, drive }, token)
   }
 
   /** Revoke a direct URI share by its server-issued row id. */
   async revokeGfsShare(shareId: string) {
-    await this.gfsClient.revokeShare(shareId, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    await this.gfsClient.revokeShare(shareId, token)
   }
 
   /**
@@ -2941,6 +4051,7 @@ export class AppService {
    * read + share. includeDescendants so a folder share covers its subtree.
    */
   async createGfsShare(resourceId: string, subjectKeys: string[], drive?: string) {
+    const token = await this.captureGfsDispatchToken()
     await this.gfsClient.createShare(
       {
         resourceId,
@@ -2949,21 +4060,23 @@ export class AppService {
         permissions: ['read'],
         includeDescendants: true,
       },
-      this.requireSessionToken()
+      token
     )
   }
 
   async createGfsFolder(parentResourceId: string, name: string, drive?: string) {
+    const token = await this.captureGfsDispatchToken()
     return this.gfsClient.createResource(
       { parentResourceId, drive, name, kind: 'directory' },
-      this.requireSessionToken()
+      token
     )
   }
 
   async createGfsFile(parentResourceId: string, name: string, encodedData: string, drive?: string) {
+    const token = await this.captureGfsDispatchToken()
     return this.gfsClient.createResource(
       { parentResourceId, drive, name, kind: 'file', encodedData },
-      this.requireSessionToken()
+      token
     )
   }
 
@@ -3494,11 +4607,15 @@ export class AppService {
     }
   }
 
-  async replaceGfsFile(resourceId: string, encodedData: string, drive?: string, ifMatch?: number) {
-    return this.gfsClient.replaceFile(
-      { resourceId, drive, encodedData, ifMatch },
-      this.requireSessionToken()
-    )
+  async replaceGfsFile(
+    resourceId: string,
+    encodedData: string,
+    drive?: string,
+    ifMatch?: number,
+    expectedSessionGeneration?: number
+  ) {
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
+    return this.gfsClient.replaceFile({ resourceId, drive, encodedData, ifMatch }, token)
   }
 
   async replaceGfsFileFromPath(
@@ -3541,10 +4658,8 @@ export class AppService {
   }
 
   async renameGfsResource(resourceId: string, newName: string, drive?: string, ifMatch?: number) {
-    return this.gfsClient.renameResource(
-      { resourceId, drive, newName, ifMatch },
-      this.requireSessionToken()
-    )
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.renameResource({ resourceId, drive, newName, ifMatch }, token)
   }
 
   /**
@@ -3564,7 +4679,7 @@ export class AppService {
     if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
       throw new Error('invalid_session_generation')
     }
-    this.assertSessionGeneration(expectedSessionGeneration)
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
     try {
       const receipt = await this.gfsClient.moveResource(
         {
@@ -3574,7 +4689,7 @@ export class AppService {
           ifMatch,
           ...(newName !== undefined ? { newName } : {}),
         },
-        this.requireSessionToken()
+        token
       )
       this.assertSessionGeneration(expectedSessionGeneration)
       return receipt
@@ -3585,10 +4700,12 @@ export class AppService {
   }
 
   async deleteGfsResource(resourceId: string, drive?: string, ifMatch?: number) {
-    return this.gfsClient.deleteResource({ resourceId, drive, ifMatch }, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.deleteResource({ resourceId, drive, ifMatch }, token)
   }
 
   private requireSessionToken(): string {
+    if (this.pendingSessionPreclear) throw new Error('session_clear_pending')
     if (!this.sessionToken) {
       throw new Error('Not authenticated')
     }
@@ -3596,10 +4713,20 @@ export class AppService {
   }
 
   async getSessionState(): Promise<SessionState> {
+    const projectCurrentSession = (): SessionState => {
+      const me = this.sessionToken && this.me ? this.me : null
+      return {
+        authenticated: me !== null,
+        me,
+        sessionGeneration: this.sessionGeneration,
+        authorityBinding: this.captureSessionAuthorityBinding(),
+      }
+    }
+
     if (!this.sessionToken || !this.me) {
       if (this.restoreSavedSessionInFlight) {
-        const restored = await this.restoreSavedSession()
-        return restored
+        await this.restoreSavedSession()
+        return projectCurrentSession()
       }
       // createWindow() already performs the saved-token restore before showing
       // the renderer. Do not immediately repeat a failed 60-second network
@@ -3609,12 +4736,22 @@ export class AppService {
         this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
         Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
       ) {
-        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
+        return {
+          authenticated: false,
+          me: null,
+          sessionGeneration: this.sessionGeneration,
+          authorityBinding: this.captureSessionAuthorityBinding(),
+        }
       }
-      const restored = await this.restoreSavedSession()
-      return restored
+      await this.restoreSavedSession()
+      return projectCurrentSession()
     }
-    return { authenticated: true, me: this.me, sessionGeneration: this.sessionGeneration }
+    return {
+      authenticated: true,
+      me: this.me,
+      sessionGeneration: this.sessionGeneration,
+      authorityBinding: this.captureSessionAuthorityBinding(),
+    }
   }
 
   /**

@@ -69,6 +69,7 @@ import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
 import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
+import { MarkdownDraftOwner } from '@lib/markdownDraftOwner'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   canProcessSandboxUiDeepLinks,
@@ -140,6 +141,14 @@ import {
   platformFromNavigator,
 } from '../../src/desktopCommands'
 import type { DeepLinkAcknowledgmentAuthority } from '../../src/types'
+
+type PendingMarkdownCloseRequest = {
+  binding: Parameters<typeof window.clerum.auth.authorizeMarkdownTabClose>[0]
+  gfsUri: string
+  reconciling: boolean
+  retryTimer: number | null
+  ownerActionComplete: boolean
+}
 
 type SandboxUiSessionInvalidation = {
   sessionGeneration: number
@@ -334,6 +343,12 @@ function DesktopUpdateRequiredDialog({
 
 export function App() {
   const vm = useAppController()
+  const [rendererDocumentReady, setRendererDocumentReady] = React.useState<{
+    documentEpoch: string
+    sessionTransitionRevealPending: boolean
+  } | null>(null)
+  const [testMarkdownDraftOwner] = React.useState(() => new MarkdownDraftOwner())
+  const markdownDraftOwner = vm.markdownDraftOwner ?? testMarkdownDraftOwner
   const queryClient = desktopQueryClient
   const entityChangeRegistry = React.useMemo(() => new EntityChangeRegistry(), [])
   // Electron never fires `visibilitychange` on OS-window switching; bridge
@@ -412,6 +427,126 @@ export function App() {
   // The universal tab store lives in the controller (single writer; `vm.navItem`
   // is its projection). App composes the strip/reveal/reconcile over it.
   const workspaceTabs = vm.workspaceTabs
+  const [markdownCloseTabId, setMarkdownCloseTabId] = React.useState<string | null>(null)
+  const pendingMarkdownClosesRef = React.useRef(new Map<string, PendingMarkdownCloseRequest>())
+  const activeMarkdownCloseRequestIdRef = React.useRef<string | null>(null)
+  const queuedMarkdownCloseTabsRef = React.useRef(new Map<string, true>())
+  const nextMarkdownCloseSequenceRef = React.useRef(1)
+  const authorizeMarkdownCloseRef = React.useRef<(id: string) => Promise<void>>(
+    async () => undefined
+  )
+  const reconcileMarkdownCloseRef = React.useRef<(requestId: string) => Promise<void>>(
+    async () => undefined
+  )
+  const [markdownAuthBarrier, setMarkdownAuthBarrier] = React.useState(() =>
+    markdownDraftOwner.getAuthBarrier()
+  )
+  const [markdownPreclearNotice, setMarkdownPreclearNotice] = React.useState<{
+    notice: {
+      transitionId: number
+      sessionGeneration: number
+      reason: 'logout' | 'session-ended' | 'environment-change'
+    }
+    token: { id: number }
+  } | null>(null)
+  React.useEffect(
+    () =>
+      markdownDraftOwner.subscribe(() =>
+        setMarkdownAuthBarrier(markdownDraftOwner.getAuthBarrier())
+      ),
+    [markdownDraftOwner]
+  )
+  React.useEffect(() => {
+    const unsubscribePreclear = window.clerum.auth?.onSessionPreclear?.(notice => {
+      let barrier = markdownDraftOwner.getAuthBarrier()
+      let token =
+        barrier && barrier.sessionGeneration === notice.sessionGeneration
+          ? { id: barrier.id }
+          : markdownDraftOwner.beginAuthBarrier(
+              vm.markdownPrincipalOwner ?? 'unknown-principal',
+              notice.sessionGeneration,
+              false
+            )
+      if (!token || !markdownDraftOwner.reserveAuthBarrierFromMain(token)) return
+      barrier = markdownDraftOwner.getAuthBarrier()
+      setMarkdownPreclearNotice({ notice, token })
+      setMarkdownAuthBarrier(barrier)
+      setMarkdownCloseTabId(null)
+    })
+    const unsubscribeCancelled = window.clerum.auth?.onSessionPreclearCancelled?.(notice => {
+      const barrier = markdownDraftOwner.getAuthBarrier()
+      if (!barrier || barrier.sessionGeneration !== notice.sessionGeneration) return
+      markdownDraftOwner.restoreAfterAuthBarrier({ id: barrier.id }, notice.sessionGeneration)
+      setMarkdownPreclearNotice(null)
+      setMarkdownAuthBarrier(markdownDraftOwner.getAuthBarrier())
+      for (const requestId of pendingMarkdownClosesRef.current.keys()) {
+        void reconcileMarkdownCloseRef.current(requestId)
+      }
+      if (activeMarkdownCloseRequestIdRef.current === null) {
+        const nextTabId = queuedMarkdownCloseTabsRef.current.keys().next().value as
+          | string
+          | undefined
+        if (nextTabId) {
+          queuedMarkdownCloseTabsRef.current.delete(nextTabId)
+          window.setTimeout(() => void authorizeMarkdownCloseRef.current(nextTabId), 0)
+        }
+      }
+    })
+    const unsubscribeCleared = window.clerum.auth?.onSessionCleared?.(() => {
+      const barrier = markdownDraftOwner.getAuthBarrier()
+      if (barrier) markdownDraftOwner.retirePrincipalAfterAuthBarrier({ id: barrier.id })
+      for (const request of pendingMarkdownClosesRef.current.values()) {
+        if (request.retryTimer !== null) window.clearTimeout(request.retryTimer)
+      }
+      pendingMarkdownClosesRef.current.clear()
+      activeMarkdownCloseRequestIdRef.current = null
+      queuedMarkdownCloseTabsRef.current.clear()
+      setMarkdownPreclearNotice(null)
+      setMarkdownAuthBarrier(markdownDraftOwner.getAuthBarrier())
+    })
+    const unsubscribeDraftLost = window.clerum.auth?.onMarkdownDraftLost?.(() => {
+      vm.pushToast(
+        'The editor restarted during session recovery. Any unsaved Markdown draft could not be restored.',
+        'info'
+      )
+    })
+    return () => {
+      unsubscribePreclear?.()
+      unsubscribeCancelled?.()
+      unsubscribeCleared?.()
+      unsubscribeDraftLost?.()
+    }
+  }, [markdownDraftOwner, vm.markdownPrincipalOwner, vm.pushToast])
+  React.useLayoutEffect(() => {
+    const barrier = markdownDraftOwner.getAuthBarrier()
+    if (!barrier) return
+    if (!barrier.neutralCommitted) {
+      markdownDraftOwner.commitAuthNeutralSurface({ id: barrier.id })
+    }
+    const current = markdownDraftOwner.getAuthBarrier()
+    const notice = markdownPreclearNotice
+    if (
+      current?.mainReserved &&
+      current.neutralCommitted &&
+      !current.acknowledged &&
+      notice?.token.id === current.id
+    ) {
+      void window.clerum.auth
+        .acknowledgeSessionPreclear(notice.notice)
+        .then(acknowledged => {
+          if (acknowledged) markdownDraftOwner.acknowledgeAuthNeutralSurface({ id: current.id })
+        })
+        .catch(() => undefined)
+    }
+    if (
+      current?.id !== markdownAuthBarrier?.id ||
+      current?.neutralCommitted !== markdownAuthBarrier?.neutralCommitted ||
+      current?.mainReserved !== markdownAuthBarrier?.mainReserved ||
+      current?.acknowledged !== markdownAuthBarrier?.acknowledged
+    ) {
+      setMarkdownAuthBarrier(current)
+    }
+  }, [markdownAuthBarrier, markdownDraftOwner, markdownPreclearNotice])
   const visibleWorkspaceTabs = React.useMemo(
     () =>
       workspaceTabs.tabs.map(tab =>
@@ -930,7 +1065,7 @@ export function App() {
     [cancelPendingGfsResourceAction, revealWorkspaceTab, vm.beginUserNavigationIntent]
   )
 
-  const handleCloseWorkspaceTab = React.useCallback(
+  const closeWorkspaceTabNow = React.useCallback(
     (id: string) => {
       const current = workspaceTabsRef.current
       const wasActive = current.activeTabId === id
@@ -957,6 +1092,206 @@ export function App() {
       revealWorkspaceTab,
       vm.beginUserNavigationIntent,
     ]
+  )
+
+  const reconcileMarkdownCloseRequest = React.useCallback(
+    async (requestId: string) => {
+      const request = pendingMarkdownClosesRef.current.get(requestId)
+      if (!request || request.reconciling) return
+      request.reconciling = true
+      try {
+        const acknowledgeTerminalAction = async () => {
+          const nextSequence = await window.clerum.auth.acknowledgeMarkdownTabClose(request.binding)
+          if (nextSequence !== request.binding.sequence + 1) return false
+          nextMarkdownCloseSequenceRef.current = nextSequence
+          pendingMarkdownClosesRef.current.delete(requestId)
+          if (activeMarkdownCloseRequestIdRef.current === requestId) {
+            activeMarkdownCloseRequestIdRef.current = null
+          }
+          setMarkdownCloseTabId(null)
+          const nextTabId = queuedMarkdownCloseTabsRef.current.keys().next().value as
+            | string
+            | undefined
+          if (nextTabId) {
+            queuedMarkdownCloseTabsRef.current.delete(nextTabId)
+            window.setTimeout(() => void authorizeMarkdownCloseRef.current(nextTabId), 0)
+          }
+          return true
+        }
+
+        if (request.ownerActionComplete) {
+          await acknowledgeTerminalAction()
+          return
+        }
+        if (markdownDraftOwner.getAuthBarrier() !== null) return
+        let state = await window.clerum.auth.getMarkdownTabClosePermitStatus(request.binding)
+        if (markdownDraftOwner.getAuthBarrier() !== null) return
+        if (state === 'pending' || state === 'unknown') {
+          state = await window.clerum.auth.cancelMarkdownTabClosePermit(request.binding)
+        }
+        if (markdownDraftOwner.getAuthBarrier() !== null) return
+        if (state === 'granted') {
+          state = await window.clerum.auth.consumeMarkdownTabClosePermit(request.binding)
+        }
+
+        if (markdownDraftOwner.getAuthBarrier() !== null && !request.ownerActionComplete) return
+
+        if (state === 'consumed') {
+          if (!markdownDraftOwner.promoteCloseRequest(requestId)) {
+            request.retryTimer = window.setTimeout(() => {
+              request.retryTimer = null
+              void reconcileMarkdownCloseRef.current(requestId)
+            }, 500)
+            return
+          }
+          if (!markdownDraftOwner.commitCloseRequest(requestId)) {
+            request.retryTimer = window.setTimeout(() => {
+              request.retryTimer = null
+              void reconcileMarkdownCloseRef.current(requestId)
+            }, 500)
+            return
+          }
+          request.ownerActionComplete = true
+          const currentTab = workspaceTabsRef.current.tabs.find(
+            candidate =>
+              candidate.id === request.binding.tabId &&
+              candidate.kind === 'preview' &&
+              candidate.preview?.fileKind === 'markdown' &&
+              candidate.preview.gfsUri === request.gfsUri
+          )
+          if (currentTab) closeWorkspaceTabNow(request.binding.tabId)
+          await acknowledgeTerminalAction()
+          return
+        }
+
+        if (state === 'denied' || state === 'cancelled' || state === 'expired') {
+          markdownDraftOwner.releaseCloseRequest(requestId)
+          request.ownerActionComplete = true
+          await acknowledgeTerminalAction()
+          return
+        }
+      } catch {
+        // An unavailable or lost main response is not a terminal result. Keep
+        // the exact owner reservation and retry with its immutable binding.
+      } finally {
+        request.reconciling = false
+      }
+
+      if (
+        pendingMarkdownClosesRef.current.has(requestId) &&
+        request.retryTimer === null &&
+        (request.ownerActionComplete || markdownDraftOwner.getAuthBarrier() === null)
+      ) {
+        request.retryTimer = window.setTimeout(() => {
+          request.retryTimer = null
+          void reconcileMarkdownCloseRef.current(requestId)
+        }, 500)
+      }
+    },
+    [closeWorkspaceTabNow, markdownDraftOwner]
+  )
+  reconcileMarkdownCloseRef.current = reconcileMarkdownCloseRequest
+
+  const authorizeAndCloseMarkdownTab = React.useCallback(
+    async (id: string) => {
+      if (
+        activeMarkdownCloseRequestIdRef.current !== null ||
+        markdownDraftOwner.getAuthBarrier() !== null
+      ) {
+        queuedMarkdownCloseTabsRef.current.set(id, true)
+        setMarkdownCloseTabId(null)
+        return
+      }
+      const tab = workspaceTabsRef.current.tabs.find(
+        candidate => candidate.id === id && candidate.kind === 'preview'
+      )
+      const sessionGeneration = vm.sessionGeneration
+      const documentEpoch = window.clerum.auth.getMarkdownTabCloseDocumentEpoch()
+      if (
+        !tab ||
+        tab.preview?.fileKind !== 'markdown' ||
+        !tab.preview.gfsUri ||
+        !documentEpoch ||
+        !Number.isSafeInteger(sessionGeneration) ||
+        sessionGeneration === null ||
+        sessionGeneration === undefined
+      ) {
+        markdownDraftOwner.releaseCloseReservation(id)
+        setMarkdownCloseTabId(null)
+        return
+      }
+      const requestId = `${id}:${window.crypto.randomUUID()}`
+      const sequence = nextMarkdownCloseSequenceRef.current
+      const ownerIdentities = markdownDraftOwner.reserveCloseRequest(id, requestId)
+      if (!ownerIdentities) {
+        markdownDraftOwner.releaseCloseReservation(id)
+        setMarkdownCloseTabId(null)
+        return
+      }
+      const binding = {
+        requestId,
+        documentEpoch,
+        sequence,
+        tabId: id,
+        sessionGeneration,
+        ownerIdentities,
+      }
+      pendingMarkdownClosesRef.current.set(requestId, {
+        binding,
+        gfsUri: tab.preview.gfsUri,
+        reconciling: false,
+        retryTimer: null,
+        ownerActionComplete: false,
+      })
+      activeMarkdownCloseRequestIdRef.current = requestId
+      try {
+        await window.clerum.auth.authorizeMarkdownTabClose(binding)
+      } catch {
+        // The main request may already have linearized. Reconcile its exact
+        // status instead of releasing the reservation on a lost response.
+      }
+      await reconcileMarkdownCloseRequest(requestId)
+    },
+    [markdownDraftOwner, reconcileMarkdownCloseRequest, vm.sessionGeneration]
+  )
+  authorizeMarkdownCloseRef.current = authorizeAndCloseMarkdownTab
+
+  React.useEffect(() => {
+    if (markdownAuthBarrier || activeMarkdownCloseRequestIdRef.current !== null) return
+    const nextTabId = queuedMarkdownCloseTabsRef.current.keys().next().value as string | undefined
+    if (!nextTabId) return
+    queuedMarkdownCloseTabsRef.current.delete(nextTabId)
+    window.setTimeout(() => void authorizeMarkdownCloseRef.current(nextTabId), 0)
+  }, [markdownAuthBarrier, workspaceTabs])
+
+  React.useEffect(() => {
+    const openMarkdownTabIds = new Set(
+      workspaceTabs.tabs
+        .filter(tab => tab.kind === 'preview' && tab.preview?.fileKind === 'markdown')
+        .map(tab => tab.id)
+    )
+    for (const tabId of queuedMarkdownCloseTabsRef.current.keys()) {
+      if (!openMarkdownTabIds.has(tabId)) queuedMarkdownCloseTabsRef.current.delete(tabId)
+    }
+  }, [workspaceTabs.tabs])
+
+  const handleCloseWorkspaceTab = React.useCallback(
+    (id: string) => {
+      const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
+      if (tab?.kind !== 'preview' || tab.preview?.fileKind !== 'markdown') {
+        closeWorkspaceTabNow(id)
+        return
+      }
+      const result = markdownDraftOwner.requestClose(id)
+      if (result === 'blocked') return
+      if (result === 'confirm') {
+        setMarkdownCloseTabId(id)
+        return
+      }
+      if (result === 'reserved') void authorizeAndCloseMarkdownTab(id)
+      else closeWorkspaceTabNow(id)
+    },
+    [authorizeAndCloseMarkdownTab, closeWorkspaceTabNow, markdownDraftOwner]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -2188,10 +2523,55 @@ export function App() {
   }, [compactNavigation, compactSidebarOpen])
 
   React.useEffect(() => {
-    void window.clerum.app.rendererReady().catch(error => {
-      console.warn('[Desktop] Could not signal renderer readiness:', error)
-    })
+    let cancelled = false
+    void window.clerum.app
+      .rendererReady()
+      .then(result => {
+        if (!cancelled) setRendererDocumentReady(result)
+      })
+      .catch(error => {
+        console.warn('[Desktop] Could not signal renderer readiness:', error)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
+
+  React.useEffect(() => {
+    if (!rendererDocumentReady?.sessionTransitionRevealPending || vm.booting) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const receipt = await window.clerum.auth.getRendererSessionView()
+        if (!receipt || cancelled || receipt.documentEpoch !== rendererDocumentReady.documentEpoch)
+          return
+        const authority = receipt.state
+        if (
+          authority.authenticated !== vm.isAuthenticated ||
+          authority.sessionGeneration !== vm.sessionGeneration ||
+          (authority.me?.id ?? null) !== (vm.me?.id ?? null) ||
+          (authority.me?.teamId ?? null) !== (vm.me?.teamId ?? null)
+        )
+          return
+        await window.clerum.auth.commitRendererSessionView({
+          documentEpoch: receipt.documentEpoch,
+          receiptId: receipt.receiptId,
+        })
+      } catch (error) {
+        console.warn('[Desktop] Could not confirm the current session view:', error)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [
+    rendererDocumentReady,
+    vm.booting,
+    vm.isAuthenticated,
+    vm.me?.id,
+    vm.me?.teamId,
+    vm.sessionGeneration,
+  ])
 
   React.useEffect(() => {
     if (!vm.isAuthenticated) {
@@ -4827,6 +5207,16 @@ export function App() {
       >
         <WindowTitleBar actionsRef={setTitlebarActionsRoot} leadingRef={setTitlebarLeadingRoot} />
         <div className="app-root" inert={bootSplashLoading || undefined}>
+          {markdownAuthBarrier ? (
+            <div
+              aria-live="polite"
+              className="app-auth-neutral-surface"
+              data-testid="markdown-auth-neutral-surface"
+              role="status"
+            >
+              Clearing the session…
+            </div>
+          ) : null}
           {vm.isAuthenticated ? (
             <NavigationContext.Provider value={navValue}>
               <NotificationsContext.Provider value={notifValue}>
@@ -5091,6 +5481,9 @@ export function App() {
                                           void refreshOpenPreview(renamedUri)
                                         }}
                                         titlebarLeadingTarget={titlebarLeadingRoot}
+                                        markdownDraftOwner={markdownDraftOwner}
+                                        markdownPrincipalOwner={vm.markdownPrincipalOwner}
+                                        tabId={activePreviewTabId ?? undefined}
                                       />
                                     )}
                                   {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
@@ -5214,6 +5607,24 @@ export function App() {
                             {environmentSwitchConfirmationDialog}
                             {environmentSetupSuccessDialog}
                             {sandboxUiDeepLinkDialog}
+                            {markdownCloseTabId ? (
+                              <ConfirmDialog
+                                title="Discard unsaved Markdown changes?"
+                                body={<p>This tab has unsaved Markdown changes.</p>}
+                                cancelLabel="Stay and Continue Editing"
+                                confirmLabel="Discard and Close"
+                                onCancel={() => {
+                                  markdownDraftOwner.resolveClose(markdownCloseTabId, 'stay')
+                                  setMarkdownCloseTabId(null)
+                                }}
+                                onConfirm={async () => {
+                                  const id = markdownCloseTabId
+                                  if (!markdownDraftOwner.resolveClose(id, 'discard')) return
+                                  await authorizeAndCloseMarkdownTab(id)
+                                }}
+                                tone="danger"
+                              />
+                            ) : null}
                             {gfsDeepLinkDialog}
                             {pluginConsentPrompt ? (
                               <PluginConsentModal

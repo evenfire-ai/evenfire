@@ -312,7 +312,7 @@ describe('AppService invitation configuration lookup', () => {
 
       expect(clearSessionToken).not.toHaveBeenCalled()
 
-      await expect(service.getSessionState()).resolves.toEqual({
+      await expect(service.getSessionState()).resolves.toMatchObject({
         authenticated: false,
         me: null,
         sessionGeneration: 0,
@@ -358,7 +358,7 @@ describe('AppService invitation configuration lookup', () => {
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
-      await expect(service.getSessionState()).resolves.toEqual({
+      await expect(service.getSessionState()).resolves.toMatchObject({
         authenticated: false,
         me: null,
         sessionGeneration: 0,
@@ -426,14 +426,14 @@ describe('AppService invitation configuration lookup', () => {
     expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
       legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()],
     })
-    await expect(service.getSessionState()).resolves.toEqual({
+    await expect(service.getSessionState()).resolves.toMatchObject({
       authenticated: true,
       me,
-      sessionGeneration: 3,
+      sessionGeneration: 2,
     })
     expect(service.getCachedUserId()).toBe('user-1')
     expect(getSessionToken).not.toHaveBeenCalled()
-    expect(getMe).not.toHaveBeenCalled()
+    expect(getMe).toHaveBeenCalledWith('test-token')
     expect(service.gfsDispatchBlocked).toBe(false)
   })
 
@@ -502,7 +502,7 @@ describe('AppService invitation configuration lookup', () => {
     const second = service.getSessionState()
     resolveMe(me)
 
-    await expect(Promise.all([first, second])).resolves.toEqual([
+    await expect(Promise.all([first, second])).resolves.toMatchObject([
       { authenticated: true, me, sessionGeneration: 1 },
       { authenticated: true, me, sessionGeneration: 1 },
     ])
@@ -549,7 +549,7 @@ describe('AppService invitation configuration lookup', () => {
     service.savedSessionRestoreAttemptedEnvKey = getActiveEnvKey()
     service.savedSessionRestoreAttemptedAtMs = 0
 
-    await expect(service.getSessionState()).resolves.toEqual({
+    await expect(service.getSessionState()).resolves.toMatchObject({
       authenticated: false,
       me: null,
       sessionGeneration: logoutGeneration,

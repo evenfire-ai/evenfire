@@ -31,6 +31,8 @@ import {
   HostRuntimeStatus,
   HostStatusStreamEvent,
   LoginBackendHint,
+  MarkdownTabCloseBinding,
+  MarkdownTabCloseState,
   MessageToolStep,
   PasswordLoginResult,
   PendingWorkflowApproval,
@@ -71,6 +73,16 @@ declare global {
       }
       auth: {
         getSessionState: () => Promise<SessionState>
+        getRendererSessionView: () => Promise<{
+          documentEpoch: string
+          receiptId: string
+          state: SessionState
+        } | null>
+        commitRendererSessionView: (receipt: {
+          documentEpoch: string
+          receiptId: string
+        }) => Promise<boolean>
+        getMarkdownTabCloseDocumentEpoch: () => string | null
         getSessionGeneration: () => Promise<number>
         getDependenciesHealth: () => Promise<{
           externalRestApi: { ok: boolean; detail?: string }
@@ -113,8 +125,46 @@ declare global {
         getDesktopReleaseStatus: () => Promise<DesktopReleaseStatus>
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
+        prepareSessionClear: () => Promise<{
+          transitionId: number
+          sessionGeneration: number
+          reason: 'logout' | 'session-ended' | 'environment-change'
+        } | null>
+        acknowledgeSessionPreclear: (notice: {
+          transitionId: number
+          sessionGeneration: number
+          reason: 'logout' | 'session-ended' | 'environment-change'
+        }) => Promise<boolean>
+        authorizeMarkdownTabClose: (
+          binding: MarkdownTabCloseBinding
+        ) => Promise<MarkdownTabCloseState>
+        getMarkdownTabClosePermitStatus: (
+          binding: MarkdownTabCloseBinding
+        ) => Promise<MarkdownTabCloseState>
+        cancelMarkdownTabClosePermit: (
+          binding: MarkdownTabCloseBinding
+        ) => Promise<MarkdownTabCloseState>
+        consumeMarkdownTabClosePermit: (
+          binding: MarkdownTabCloseBinding
+        ) => Promise<MarkdownTabCloseState>
+        acknowledgeMarkdownTabClose: (binding: MarkdownTabCloseBinding) => Promise<number | null>
+        onSessionPreclear: (
+          callback: (notice: {
+            transitionId: number
+            sessionGeneration: number
+            reason: 'logout' | 'session-ended' | 'environment-change'
+          }) => void
+        ) => () => void
+        onSessionPreclearCancelled: (
+          callback: (notice: {
+            transitionId: number
+            sessionGeneration: number
+            reason: 'logout' | 'session-ended' | 'environment-change'
+          }) => void
+        ) => () => void
         onExternalLogout: (callback: () => void) => () => void
         onSessionCleared: (callback: () => void) => () => void
+        onMarkdownDraftLost: (callback: () => void) => () => void
         logout: () => Promise<{ ok: true; sessionGeneration: number }>
       }
       team: {
@@ -147,7 +197,10 @@ declare global {
             userNavigationGenerationAtActivation: number
           }) => void
         ) => () => void
-        resolve: (uri: string) => Promise<{
+        resolve: (
+          uri: string,
+          expectedSessionGeneration?: number
+        ) => Promise<{
           drive: string
           resourceId: string
           parentResourceId: string | null
@@ -183,7 +236,8 @@ declare global {
         }>
         downloadPreview: (
           uri: string,
-          maxBytes: number
+          maxBytes: number,
+          expectedSessionGeneration?: number
         ) => Promise<{
           resource: {
             drive: string
@@ -248,7 +302,8 @@ declare global {
         }>
         affordances: (
           resourceId: string,
-          drive?: string
+          drive?: string,
+          expectedSessionGeneration?: number
         ) => Promise<{
           held: string[]
           canDelegate: boolean
@@ -395,7 +450,8 @@ declare global {
           resourceId: string,
           encodedData: string,
           drive?: string,
-          ifMatch?: number
+          ifMatch?: number,
+          expectedSessionGeneration?: number
         ) => Promise<{
           resourceId: string
           rid: string
@@ -711,7 +767,10 @@ declare global {
       }
       app: {
         openUrl: (url: string) => Promise<void>
-        rendererReady: () => Promise<void>
+        rendererReady: () => Promise<{
+          documentEpoch: string
+          sessionTransitionRevealPending: boolean
+        }>
       }
       window: {
         getVisibility: () => Promise<{ visible: boolean; focused: boolean }>

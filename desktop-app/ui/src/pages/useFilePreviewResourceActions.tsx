@@ -173,7 +173,7 @@ export function useFilePreviewResourceActions({
       gfsUri,
       { sessionGeneration },
     ],
-    queryFn: () => window.clerum.gfs.resolve(gfsUri),
+    queryFn: () => window.clerum.gfs.resolve(gfsUri, sessionGeneration ?? undefined),
     enabled: Boolean(
       canResolve &&
       sessionScope &&
@@ -193,7 +193,7 @@ export function useFilePreviewResourceActions({
       drive,
       sessionGeneration
     ),
-    queryFn: () => window.clerum.gfs.affordances(resourceId, drive),
+    queryFn: () => window.clerum.gfs.affordances(resourceId, drive, sessionGeneration ?? undefined),
     enabled: Boolean(
       canResolve &&
       resourceId &&
@@ -235,7 +235,8 @@ export function useFilePreviewResourceActions({
       drive,
       sessionGeneration
     ),
-    queryFn: () => window.clerum.gfs.affordances(sourceParentId!, drive),
+    queryFn: () =>
+      window.clerum.gfs.affordances(sourceParentId!, drive, sessionGeneration ?? undefined),
     enabled: Boolean(
       canResolve &&
       resource?.kind === 'file' &&
@@ -251,6 +252,16 @@ export function useFilePreviewResourceActions({
       : sourceParentAffordancesQuery.data
   const canShare = Boolean(canResolve && affordances?.canDelegate)
   const canRename = Boolean(canResolve && affordances?.held.includes('write'))
+  const canWrite = Boolean(
+    canResolve &&
+    resource?.kind === 'file' &&
+    resourceQuery.data?.resourceId === resource.resourceId &&
+    !resourceQuery.isFetching &&
+    !resourceQuery.isError &&
+    !affordancesQuery.isFetching &&
+    !affordancesQuery.isError &&
+    affordances?.held.includes('write')
+  )
   const canDelete = Boolean(canResolve && affordances?.held.includes('delete'))
   const canMove = Boolean(
     canResolve &&
@@ -259,6 +270,74 @@ export function useFilePreviewResourceActions({
     !sourceParentAffordancesQuery.isError &&
     hasGfsMoveSourcePermissions(sourceParentAffordances?.held)
   )
+  const revalidateWriteCapability = useCallback(async (): Promise<boolean> => {
+    const requestedContext = moveContextRef.current
+    if (
+      !canResolve ||
+      !requestedContext.gfsUri ||
+      !requestedContext.sessionScope ||
+      !isGfsSessionGeneration(requestedContext.sessionGeneration) ||
+      !isGfsSessionAuthorityCurrent(
+        requestedContext.sessionScope,
+        requestedContext.sessionGeneration,
+        sessionScope,
+        sessionGeneration
+      )
+    )
+      return false
+
+    try {
+      const latestResource = await window.clerum.gfs.resolve(
+        requestedContext.gfsUri,
+        requestedContext.sessionGeneration
+      )
+      const current = moveContextRef.current
+      if (
+        current.gfsUri !== requestedContext.gfsUri ||
+        current.sessionScope !== requestedContext.sessionScope ||
+        current.sessionGeneration !== requestedContext.sessionGeneration ||
+        current.principalScope !== requestedContext.principalScope ||
+        !isGfsSessionAuthorityCurrent(
+          requestedContext.sessionScope,
+          requestedContext.sessionGeneration,
+          current.sessionScope,
+          current.sessionGeneration
+        ) ||
+        latestResource.kind !== 'file'
+      )
+        return false
+
+      const latest = await window.clerum.gfs.affordances(
+        latestResource.resourceId,
+        latestResource.drive,
+        requestedContext.sessionGeneration
+      )
+      const settled = moveContextRef.current
+      if (
+        settled.gfsUri !== requestedContext.gfsUri ||
+        settled.sessionScope !== requestedContext.sessionScope ||
+        settled.sessionGeneration !== requestedContext.sessionGeneration ||
+        settled.principalScope !== requestedContext.principalScope ||
+        !isGfsSessionAuthorityCurrent(
+          requestedContext.sessionScope,
+          requestedContext.sessionGeneration,
+          settled.sessionScope,
+          settled.sessionGeneration
+        )
+      )
+        return false
+      return latest.held.includes('write')
+    } catch (error) {
+      if (httpErrorStatus(error) === 401) {
+        onAuthorityFailure(
+          describeGfsReadError(error).message,
+          requestedContext.sessionScope,
+          requestedContext.sessionGeneration
+        )
+      }
+      return false
+    }
+  }, [canResolve, onAuthorityFailure, sessionGeneration, sessionScope])
   const sharePermissionAffordances = affordances ?? {
     canDelegate: false,
     grantableBits: [],
@@ -1065,7 +1144,12 @@ export function useFilePreviewResourceActions({
           moveContext.drive,
           moveContext.sessionGeneration
         ),
-        queryFn: () => window.clerum.gfs.affordances(destinationId, moveContext.drive),
+        queryFn: () =>
+          window.clerum.gfs.affordances(
+            destinationId,
+            moveContext.drive,
+            moveContext.sessionGeneration ?? undefined
+          ),
         staleTime: 0,
         retry: false,
       })
@@ -1094,7 +1178,10 @@ export function useFilePreviewResourceActions({
       const outcome = await commitGfsMove(
         {
           resolveSource: async sourceUri => {
-            const resolved = await window.clerum.gfs.resolve(sourceUri)
+            const resolved = await window.clerum.gfs.resolve(
+              sourceUri,
+              capturedSessionGeneration as number
+            )
             return {
               resourceId: resolved.resourceId,
               gfsUri: sourceUri,
@@ -1739,10 +1826,13 @@ export function useFilePreviewResourceActions({
     dialogs,
     permissionNotices,
     canShare,
+    canWrite,
+    revalidateWriteCapability,
     canRename,
     canMove,
     canDownload: Boolean(resource?.kind === 'file' && canResolve),
     canDelete,
     mutating: mutationPending,
+    resourceVersion: resource?.version ?? null,
   }
 }

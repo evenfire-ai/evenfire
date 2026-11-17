@@ -1,4 +1,5 @@
 import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
+import type { MarkdownDraftOwner } from '@lib/markdownDraftOwner'
 import type { Tone } from '@/uiTypes'
 
 export interface FilePreviewPageProps {
@@ -23,4 +24,10 @@ export interface FilePreviewPageProps {
   onPendingResourceActionHandled?: (requestId: number) => void
   /** Native titlebar action slot supplied by the app shell. */
   titlebarLeadingTarget?: HTMLElement | null
+  /** Process-local owner shared by all preview tabs. */
+  markdownDraftOwner?: MarkdownDraftOwner
+  /** Stable process-local authenticated-principal owner token for draft retirement. */
+  markdownPrincipalOwner?: string | null
+  /** Stable workspace tab identity for its in-memory Markdown draft. */
+  tabId?: string
 }

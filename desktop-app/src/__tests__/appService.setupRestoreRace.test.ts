@@ -4,7 +4,9 @@ import {
   createNativeCommitTestHarness,
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
+import type { SessionPreclearNotice } from '../appService.js'
 import { bindChatStoreForUser } from '../chatStoreBinding.js'
+import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
 import type { SessionMe } from '../types.js'
 
 afterEach(cleanupNativeCommitTestHarness)
@@ -34,6 +36,7 @@ describe('AppService setup and saved-session ownership', () => {
       authenticated: false,
       me: null,
       sessionGeneration: 0,
+      authorityBinding: service.getSessionAuthorityBinding(),
     })
     expect(app.getSessionGeneration()).toBe(0)
   })
@@ -86,6 +89,7 @@ describe('AppService setup and saved-session ownership', () => {
         authenticated: false,
         me: null,
         sessionGeneration: 1,
+        authorityBinding: service.getSessionAuthorityBinding(),
       })
       expect(app.authClient.getMe).not.toHaveBeenCalled()
 
@@ -213,13 +217,79 @@ describe('AppService setup and saved-session ownership', () => {
       authenticated: false,
       me: null,
       sessionGeneration: 2,
+      authorityBinding: service.getSessionAuthorityBinding(),
     })
     expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restB)
     expect(app.sessionToken).toBeNull()
     expect(app.me).toBeNull()
   })
 
-  it('does not relabel a restored identity with a queued logout generation', async () => {
+  it('projects the current restore owner while an external logout is queued', async () => {
+    let preclearNotice: SessionPreclearNotice | null = null
+    const { service } = await createNativeCommitTestHarness({
+      onSessionPreclear: notice => {
+        preclearNotice = notice
+      },
+    })
+    const restoredUser = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const app = service as unknown as {
+      authClient: { getMe: ReturnType<typeof vi.fn> }
+      tokenStore: { getSessionToken: ReturnType<typeof vi.fn> }
+      getSessionGeneration: () => number
+      acknowledgeSessionPreclear: (notice: SessionPreclearNotice) => boolean
+    }
+    app.tokenStore.getSessionToken.mockResolvedValue('synthetic-saved-session-a')
+    app.authClient = { getMe: vi.fn().mockResolvedValue(restoredUser) }
+    await expect(service.getSessionState()).resolves.toMatchObject({
+      authenticated: true,
+      me: restoredUser,
+    })
+    let logout: Promise<number> | null = null
+    const router = createEvenfireDeepLinkRouter({
+      appProtocol: 'evenfire',
+      sandboxUiDeepLinkHost: 'app',
+      gfsResourceDeepLinkHost: 'files',
+      focusMainWindow: vi.fn(),
+      getWindow: () => null,
+      handleSandboxUiDeepLink: vi.fn(() => false),
+      handleGfsResourceDeepLink: vi.fn(() => false),
+      isRendererReady: () => false,
+      logout: () => {
+        logout = service.logout()
+        return logout
+      },
+      requestMainWindow: vi.fn(),
+      shouldAcceptSandboxUiProtocolLink: vi.fn(() => false),
+      shouldAcceptGfsResourceProtocolLink: vi.fn(() => false),
+    })
+    router.handle('evenfire://logout')
+    await vi.waitFor(() => expect(preclearNotice).not.toBeNull())
+    if (!preclearNotice) throw new Error('the production logout path did not reserve preclear')
+    const observed = await service.getSessionState()
+
+    expect(observed).toEqual({
+      authenticated: true,
+      me: restoredUser,
+      sessionGeneration: app.getSessionGeneration(),
+      authorityBinding: service.getSessionAuthorityBinding(),
+    })
+    expect(app.acknowledgeSessionPreclear(preclearNotice)).toBe(true)
+    if (!logout) throw new Error('the production deep-link logout caller did not run')
+    await logout
+    expect(app.getSessionGeneration()).toBeGreaterThan(observed.sessionGeneration)
+    expect(service.sessionToken).toBeNull()
+    expect(app.me).toBeNull()
+  })
+
+  it('projects signed-out state when queued external logout clears before restore finalization', async () => {
     const { service } = await createNativeCommitTestHarness()
     const restoredUser = {
       id: 'user-a',
@@ -231,32 +301,67 @@ describe('AppService setup and saved-session ownership', () => {
       role: 'member',
     }
     const response = deferred<typeof restoredUser>()
+    const restoreFinalization = deferred<void>()
     const app = service as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
-      tokenStore: { getSessionToken: ReturnType<typeof vi.fn> }
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
+      }
+      commitPendingRuntimeConfigDiscoveryIfSafe: () => Promise<void>
       getSessionGeneration: () => number
     }
     app.tokenStore.getSessionToken.mockResolvedValue('synthetic-saved-session-a')
     app.authClient = { getMe: vi.fn(() => response.promise) }
+    const initialGeneration = app.getSessionGeneration()
+
     let logout: Promise<number> | null = null
+    const router = createEvenfireDeepLinkRouter({
+      appProtocol: 'evenfire',
+      sandboxUiDeepLinkHost: 'app',
+      gfsResourceDeepLinkHost: 'files',
+      focusMainWindow: vi.fn(),
+      getWindow: () => null,
+      handleSandboxUiDeepLink: vi.fn(() => false),
+      handleGfsResourceDeepLink: vi.fn(() => false),
+      isRendererReady: () => false,
+      logout: () => {
+        logout = service.logout()
+        return logout
+      },
+      requestMainWindow: vi.fn(),
+      shouldAcceptSandboxUiProtocolLink: vi.fn(() => false),
+      shouldAcceptGfsResourceProtocolLink: vi.fn(() => false),
+    })
+    let finalizationCalls = 0
+    app.commitPendingRuntimeConfigDiscoveryIfSafe = vi.fn(async () => {
+      finalizationCalls += 1
+      if (finalizationCalls === 2) await restoreFinalization.promise
+    })
     vi.mocked(bindChatStoreForUser).mockImplementation(async () => {
-      logout = service.logout()
+      router.handle('evenfire://logout')
     })
 
     const observedPromise = service.getSessionState()
     await vi.waitFor(() => expect(app.authClient.getMe).toHaveBeenCalledOnce())
     response.resolve(restoredUser)
-    const observed = await observedPromise
-    if (!logout) throw new Error('the restore commit did not schedule logout')
+    await vi.waitFor(() => expect(app.tokenStore.clearSessionToken).toHaveBeenCalledOnce())
+    if (!logout) throw new Error('the production deep-link logout caller did not run')
     await logout
+    await vi.waitFor(() => expect(finalizationCalls).toBe(2))
 
-    expect(observed).toEqual({
-      authenticated: true,
-      me: restoredUser,
-      sessionGeneration: 1,
-    })
-    expect(app.getSessionGeneration()).toBe(3)
+    const currentGeneration = app.getSessionGeneration()
     expect(service.sessionToken).toBeNull()
-    expect(app.me).toBeNull()
+    expect(currentGeneration).toBeGreaterThan(initialGeneration)
+    restoreFinalization.resolve()
+
+    await expect(observedPromise).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: currentGeneration,
+      authorityBinding: service.getSessionAuthorityBinding(),
+    })
+    expect(service.sessionToken).toBeNull()
+    expect(app.getSessionGeneration()).toBe(currentGeneration)
   })
 })

@@ -576,7 +576,7 @@ describe('AppService profile UI link authority', () => {
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })
 
-  it('waits for logout before creating a link and refuses the retired session', async () => {
+  it('keeps the committed generation until logout clears and refuses the retired session', async () => {
     const service = makeService() as unknown as {
       me: { id: string; email: string }
       sessionGeneration: number
@@ -586,16 +586,23 @@ describe('AppService profile UI link authority', () => {
     }
     service.me = { id: 'user-1', email: 'user@tenant.example' }
     let finishSuspension!: () => void
+    let notifySuspensionStarted!: () => void
+    const suspensionStarted = new Promise<void>(resolve => {
+      notifySuspensionStarted = resolve
+    })
     service.suspendDesktopGfsUploadsForAuthBoundary = () =>
       new Promise<void>(resolve => {
         finishSuspension = resolve
+        notifySuspensionStarted()
       })
 
     const logout = service.logout()
-    await vi.waitFor(() => expect(service.sessionGeneration).toBe(1))
+    await suspensionStarted
+    expect(service.sessionGeneration).toBe(0)
     const link = service.createGfsResourceDeepLink('gfs://main/0123456789abcdef0123456789abcdef')
     finishSuspension()
     await logout
+    expect(service.sessionGeneration).toBe(1)
 
     await expect(link).rejects.toThrow('Not authenticated')
   })

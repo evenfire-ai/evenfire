@@ -126,13 +126,25 @@ function installTeamSession(catalogForTeam: (teamId: string) => AccessCatalog) {
     teamDirectory: { items: [], currentTeamId: 'team-a' },
   })
   let currentTeamId = 'team-a'
+  let currentGeneration = 1
+  handle.getSessionState.mockImplementation(async () => ({
+    authenticated: true,
+    me: {
+      ...HARNESS_ME,
+      teamId: currentTeamId,
+      teamName: currentTeamId === 'team-a' ? 'Team A' : 'Team B',
+    },
+    sessionGeneration: currentGeneration,
+  }))
   const refreshCatalog = vi.fn(async () => catalogForTeam(currentTeamId))
   Object.assign(window.clerum.team, {
     switch: vi.fn(async (teamId: string) => {
       currentTeamId = teamId
+      currentGeneration += 1
       return {
         authenticated: true,
         me: { ...HARNESS_ME, teamId, teamName: teamId === 'team-a' ? 'Team A' : 'Team B' },
+        sessionGeneration: currentGeneration,
       }
     }),
   })
@@ -148,9 +160,11 @@ function installTeamSession(catalogForTeam: (teamId: string) => AccessCatalog) {
       })
     } else {
       currentTeamId = 'team-b'
+      currentGeneration += 1
       handle.getSessionState.mockResolvedValue({
         authenticated: true,
         me: { ...HARNESS_ME, teamId: 'team-b', teamName: 'Team B' },
+        sessionGeneration: currentGeneration,
       })
       await act(async () => {
         await app.result.current.loadSession({ preserveNav: true })
@@ -216,9 +230,12 @@ describe('useAppController agent selection and sending do not depend on the team
         : productionCatalog('team-b', 'team-b-only-agent')
     )
     const app = await bootInTeamAWithAgent(TEAM_A_AGENT)
+    const markdownPrincipalOwner = app.result.current.markdownPrincipalOwner
+    expect(markdownPrincipalOwner).toBeTruthy()
 
     await moveToTeamB(app, 'team.switch')
 
+    expect(app.result.current.markdownPrincipalOwner).toBe(markdownPrincipalOwner)
     await waitFor(() => expect(catalogQueryData(app)?.teamId).toBe('team-b'))
     expect(catalogQueryData(app)?.teamAgentNames).toEqual(['team-b-only-agent'])
     expect(app.result.current.selectedAgent).toBe(TEAM_A_AGENT)

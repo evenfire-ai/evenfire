@@ -3,7 +3,7 @@ import { app, shell } from 'electron'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { AppService } from '../appService.js'
+import { AppService, type AppServiceOptions, type SessionPreclearNotice } from '../appService.js'
 import { __setChatStoreBaseDirForTests, unbindChatStore } from '../chatStoreBinding.js'
 import { wireMainWindowRendererReadiness } from '../mainWindowReadiness.js'
 import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../pluginSdkRuntime.js'
@@ -257,6 +257,32 @@ describe('AppService sandbox-ui effective RPC endpoint', () => {
   it('uses a late discovery from the active session for mint, cookie, and navigation', async () => {
     const { config } = await import('../config.js')
     const discoveredRpcUrl = 'https://late-rpc.example.test'
+    const me = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    let service!: AppService
+    let recoveryNotice: SessionPreclearNotice | null = null
+    let resolveReceipt!: (accepted: boolean) => void
+    const receiptAccepted = new Promise<boolean>(resolve => {
+      resolveReceipt = resolve
+    })
+    service = new AppService({
+      onSessionPreclear: () => false,
+      onSessionPreclearRecoveryRequired: notice => {
+        recoveryNotice = notice
+      },
+      onSessionPreclearAwaitingReceipt: () => {
+        resolveReceipt(
+          service.completeSessionPreclearRendererReceipt(service.getSessionAuthorityBinding())
+        )
+      },
+    })
     config.rpcProxyBaseUrl = ''
     authMocks.getDesktopEnvironment
       .mockRejectedValueOnce(new Error('initial discovery unavailable'))
@@ -265,22 +291,14 @@ describe('AppService sandbox-ui effective RPC endpoint', () => {
         rpcProxyBaseUrl: discoveredRpcUrl,
         appName: 'Discovered environment',
       })
-    authMocks.googleLogin.mockResolvedValue({
-      token: 'fake-session-token',
-      me: {
-        id: 'user-a',
-        email: 'user-a@example.test',
-        name: 'User A',
-        picture: null,
-        teamId: 'team-a',
-        teamName: 'Team A',
-        role: 'member',
-      },
-    })
-    const service = new AppService()
+    authMocks.googleLogin.mockResolvedValue({ token: 'fake-session-token', me })
+    authMocks.getMe.mockResolvedValue(me)
     await service.googleLogin('google-id-token')
     await service.getDependenciesHealth()
     expect(config.rpcProxyBaseUrl).toBe('')
+    expect(recoveryNotice).not.toBeNull()
+    expect(service.retrySessionPreclearRecovery(recoveryNotice!)).toBe(true)
+    await expect(receiptAccepted).resolves.toBe(true)
 
     const parentWindow = new FakeParentWindow()
 

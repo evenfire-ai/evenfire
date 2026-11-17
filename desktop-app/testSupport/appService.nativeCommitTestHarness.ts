@@ -2,6 +2,8 @@ import { vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import type { AppServiceOptions, SessionPreclearNotice } from '../src/appService.js'
+import type { SessionAuthorityBinding } from '../src/types.js'
 
 vi.mock('../src/chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
@@ -38,6 +40,9 @@ export type NativeCommitTestService = {
   getSessionState: () => Promise<unknown>
   getCachedUserId: () => string | null
   listGfsUploadSessions: () => Promise<unknown>
+  getSessionAuthorityBinding: () => SessionAuthorityBinding
+  retrySessionPreclearRecovery: (notice: SessionPreclearNotice) => boolean
+  completeSessionPreclearRendererReceipt: (binding: SessionAuthorityBinding) => boolean
 }
 
 export type NativeCommitTestHarnessOptions = {
@@ -56,7 +61,9 @@ const originalEnvironment = {
 }
 const tempDirs = new Set<string>()
 
-export async function createNativeCommitTestHarness(options: NativeCommitTestHarnessOptions = {}) {
+export async function createNativeCommitTestHarness(
+  options: AppServiceOptions & NativeCommitTestHarnessOptions = {}
+) {
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-native-commit-'))
   tempDirs.add(userDataDir)
   delete process.env.CLERUM_DESKTOP_CONFIG_PATH
@@ -107,7 +114,7 @@ export async function createNativeCommitTestHarness(options: NativeCommitTestHar
   if (!optionA || !optionB) throw new Error('test runtime profiles were not created')
   await runtimeConfig.selectDesktopRuntimeConfigOption(optionA.id)
 
-  const service = new AppService() as unknown as NativeCommitTestService
+  const service = new AppService(options) as unknown as NativeCommitTestService
   service.tokenStore = {
     clearSessionToken: vi.fn().mockResolvedValue(undefined),
     getSessionToken: vi.fn().mockResolvedValue(null),

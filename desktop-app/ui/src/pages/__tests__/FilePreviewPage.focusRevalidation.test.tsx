@@ -77,7 +77,7 @@ describe('FilePreviewPage focus revalidation', () => {
     })
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
-    await waitFor(() => expect(affordances).toHaveBeenCalledWith(resourceId, 'main'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(resourceId, 'main', 1))
     const resourceReads = () => affordances.mock.calls.filter(([id]) => id === resourceId).length
     const parentReads = () => affordances.mock.calls.filter(([id]) => id === 'source-parent').length
     expect(resourceReads()).toBe(1)
@@ -299,7 +299,7 @@ describe('FilePreviewPage focus revalidation', () => {
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
-    await waitFor(() => expect(affordances).toHaveBeenCalledWith('source-parent', 'main'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('source-parent', 'main', 1))
     expect(affordances.mock.calls.filter(([id]) => id === 'source-parent')).toHaveLength(1)
     act(() => window.dispatchEvent(new Event('blur')))
     act(() => window.dispatchEvent(new Event('focus')))

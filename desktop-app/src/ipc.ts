@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
-import { AppService } from './appService.js'
+import { AppService, type SessionPreclearNotice, type SessionPreclearReason } from './appService.js'
 import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
   getChatStoreBindingGeneration,
@@ -47,6 +47,7 @@ import {
   HostMessageAttachment,
   HostMessageRequest,
   HostStatusStreamEvent,
+  MarkdownTabCloseBinding,
   TaskProgressStreamEvent,
   WorkflowNotificationStreamEvent,
 } from './types.js'
@@ -203,6 +204,42 @@ function sanitizeOptionalInteger(input: unknown): number | undefined {
     throw new Error('Invalid integer')
   }
   return input
+}
+
+function sanitizeOptionalSessionGeneration(input: unknown): number | undefined {
+  const generation = sanitizeOptionalInteger(input)
+  if (generation !== undefined && generation < 0) {
+    throw new Error('Invalid session generation')
+  }
+  return generation
+}
+
+function parseMarkdownTabCloseBinding(input: unknown): MarkdownTabCloseBinding {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid Markdown tab close binding')
+  }
+  const payload = input as Record<string, unknown>
+  const sessionGeneration = sanitizeOptionalSessionGeneration(payload.sessionGeneration)
+  const sequence = sanitizeOptionalPositiveInteger(payload.sequence, 'sequence')
+  const ownerIdentities = payload.ownerIdentities
+  if (
+    sessionGeneration === undefined ||
+    sequence === undefined ||
+    typeof payload.documentEpoch !== 'string' ||
+    !/^[a-f0-9-]{36}$/i.test(payload.documentEpoch) ||
+    !Array.isArray(ownerIdentities) ||
+    ownerIdentities.some(identity => typeof identity !== 'string')
+  ) {
+    throw new Error('Invalid Markdown tab close binding')
+  }
+  return {
+    requestId: sanitizeString(payload.requestId),
+    documentEpoch: sanitizeString(payload.documentEpoch),
+    sequence,
+    tabId: sanitizeString(payload.tabId),
+    sessionGeneration,
+    ownerIdentities: ownerIdentities as string[],
+  }
 }
 
 function sanitizeOptionalPositiveInteger(input: unknown, label: string): number | undefined {
@@ -469,10 +506,38 @@ function sanitizeDesktopNotificationActions(
     .slice(0, 3)
 }
 
-export function registerIpcHandlers(service: AppService, logout: () => Promise<number>): void {
+export function registerIpcHandlers(
+  service: AppService,
+  logout: () => Promise<number>,
+  getMainWindow: () => BrowserWindow | null = () => null,
+  canRevealWindow: (window: BrowserWindow) => boolean = () => true
+): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
+  const markdownCloseOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
+
+  const trackMarkdownCloseOwner = (sender: IpcMainInvokeEvent['sender']) => {
+    if (markdownCloseOwnerCleanupRegistered.has(sender.id)) return
+    markdownCloseOwnerCleanupRegistered.add(sender.id)
+    const retire = () => service.retireMarkdownTabCloseDocument(sender.id)
+    const cleanup = () => {
+      markdownCloseOwnerCleanupRegistered.delete(sender.id)
+      retire()
+      sender.removeListener('did-navigate', retire)
+      sender.removeListener('render-process-gone', retire)
+      sender.removeListener('destroyed', cleanup)
+    }
+    sender.on('did-navigate', retire)
+    sender.on('render-process-gone', retire)
+    sender.once('destroyed', cleanup)
+  }
+
+  const assertCurrentMarkdownCloseFrame = (event: IpcMainInvokeEvent) => {
+    if (event.senderFrame !== event.sender.mainFrame) {
+      throw new Error('Markdown tab close requires the current main frame')
+    }
+  }
 
   // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
   // R1-M1): the renderer attaches a requestId to an invoke and fires
@@ -646,8 +711,113 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.openDesktopRelease(sanitizeString(payload?.releaseUrl))
   })
+  ipcMain.handle('auth:prepareSessionClear', async event => {
+    assertTrustedSender(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Session preclear requires the owning window')
+    }
+    return service.prepareSessionClear()
+  })
+  ipcMain.handle(
+    'auth:acknowledgeSessionPreclear',
+    async (
+      event,
+      payload: {
+        transitionId: number
+        sessionGeneration: number
+        reason: SessionPreclearReason
+      }
+    ) => {
+      assertTrustedSender(event)
+      const mainWindow = getMainWindow()
+      if (!mainWindow || event.sender !== mainWindow.webContents) {
+        throw new Error('Session preclear acknowledgment requires the owning window')
+      }
+      const transitionId = sanitizeOptionalPositiveInteger(payload?.transitionId, 'transitionId')
+      const sessionGeneration = sanitizeOptionalSessionGeneration(payload?.sessionGeneration)
+      const reason = payload?.reason
+      if (
+        transitionId === undefined ||
+        sessionGeneration === undefined ||
+        !['logout', 'session-ended', 'environment-change'].includes(reason)
+      ) {
+        throw new Error('Invalid session preclear acknowledgment')
+      }
+      const notice: SessionPreclearNotice = {
+        transitionId,
+        sessionGeneration,
+        reason,
+      }
+      return service.acknowledgeSessionPreclear(notice)
+    }
+  )
+  ipcMain.handle('auth:authorizeMarkdownTabClose', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    assertCurrentMarkdownCloseFrame(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Markdown tab close requires the owning window')
+    }
+    trackMarkdownCloseOwner(event.sender)
+    return service.authorizeMarkdownTabClose(event.sender.id, parseMarkdownTabCloseBinding(payload))
+  })
+  ipcMain.handle('auth:getMarkdownTabClosePermitStatus', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    assertCurrentMarkdownCloseFrame(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Markdown tab close requires the owning window')
+    }
+    trackMarkdownCloseOwner(event.sender)
+    return service.getMarkdownTabClosePermitStatus(
+      event.sender.id,
+      parseMarkdownTabCloseBinding(payload)
+    )
+  })
+  ipcMain.handle('auth:cancelMarkdownTabClosePermit', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    assertCurrentMarkdownCloseFrame(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Markdown tab close requires the owning window')
+    }
+    trackMarkdownCloseOwner(event.sender)
+    return service.cancelMarkdownTabClosePermit(
+      event.sender.id,
+      parseMarkdownTabCloseBinding(payload)
+    )
+  })
+  ipcMain.handle('auth:consumeMarkdownTabClosePermit', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    assertCurrentMarkdownCloseFrame(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Markdown tab close requires the owning window')
+    }
+    trackMarkdownCloseOwner(event.sender)
+    return service.consumeMarkdownTabClosePermit(
+      event.sender.id,
+      parseMarkdownTabCloseBinding(payload)
+    )
+  })
+  ipcMain.handle('auth:acknowledgeMarkdownTabClose', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    assertCurrentMarkdownCloseFrame(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Markdown tab close requires the owning window')
+    }
+    trackMarkdownCloseOwner(event.sender)
+    const binding = parseMarkdownTabCloseBinding(payload)
+    return service.acknowledgeMarkdownTabClose(event.sender.id, binding)
+  })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
+    const mainWindow = getMainWindow()
+    if (mainWindow && event.sender !== mainWindow.webContents) {
+      throw new Error('Logout requires the owning window')
+    }
     const sessionGeneration = await logout()
     return { ok: true, sessionGeneration }
   })
@@ -670,11 +840,12 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       if (event.sender.isDestroyed()) return
       event.sender.send(channel, detail)
     }
-    const focusOwner = () => {
-      if (!owner || owner.isDestroyed()) return
+    const focusOwner = (): boolean => {
+      if (!owner || owner.isDestroyed() || !canRevealWindow(owner)) return false
       if (owner.isMinimized()) owner.restore()
       owner.show()
       owner.focus()
+      return true
     }
 
     const notification = new Notification({
@@ -688,11 +859,11 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
 
     activeDesktopNotifications.set(id, notification)
     notification.on('click', () => {
-      focusOwner()
+      if (!focusOwner()) return
       sendToRenderer('notifications:click', { id })
     })
     notification.on('action', (details, actionIndex) => {
-      focusOwner()
+      if (!focusOwner()) return
       const index =
         typeof details.actionIndex === 'number'
           ? details.actionIndex
@@ -723,10 +894,16 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.listTeamMembers()
   })
-  ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
-    assertTrustedSender(event)
-    return service.resolveGfsUri(sanitizeString(payload?.uri))
-  })
+  ipcMain.handle(
+    'gfs:resolve',
+    async (event, payload: { uri: string; expectedSessionGeneration?: unknown }) => {
+      assertTrustedSender(event)
+      return service.resolveGfsUri(
+        sanitizeString(payload?.uri),
+        sanitizeOptionalSessionGeneration(payload?.expectedSessionGeneration)
+      )
+    }
+  )
   ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
@@ -753,7 +930,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   )
   ipcMain.handle(
     'gfs:downloadPreview',
-    async (event, payload: { uri: string; maxBytes: number }) => {
+    async (
+      event,
+      payload: { uri: string; maxBytes: number; expectedSessionGeneration?: unknown }
+    ) => {
       assertTrustedSender(event)
       // The preview path is bounded: a required ceiling caps the download so an
       // oversized payload is rejected before it materializes (the save-to-disk
@@ -769,7 +949,12 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       if (maxBytes > GFS_PREVIEW_MAX_BYTES) {
         throw new Error('preview download limit exceeds the allowed maximum')
       }
-      return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
+      return service.downloadGfsUri(
+        sanitizeString(payload?.uri),
+        maxBytes,
+        undefined,
+        sanitizeOptionalSessionGeneration(payload?.expectedSessionGeneration)
+      )
     }
   )
   ipcMain.handle(
@@ -798,10 +983,17 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   )
   ipcMain.handle(
     'gfs:affordances',
-    async (event, payload: { resourceId: string; drive?: string }) => {
+    async (
+      event,
+      payload: { resourceId: string; drive?: string; expectedSessionGeneration?: unknown }
+    ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
-      return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
+      return service.gfsAffordances(
+        sanitizeString(payload?.resourceId),
+        drive,
+        sanitizeOptionalSessionGeneration(payload?.expectedSessionGeneration)
+      )
     }
   )
   // Streamed, file-backed folder-zip assembly (R1-H2): entries append to a
@@ -1042,7 +1234,13 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     'gfs:replaceFile',
     async (
       event,
-      payload: { resourceId: string; encodedData: string; drive?: string; ifMatch?: number }
+      payload: {
+        resourceId: string
+        encodedData: string
+        drive?: string
+        ifMatch?: number
+        expectedSessionGeneration?: unknown
+      }
     ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
@@ -1050,7 +1248,8 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.encodedData),
         drive,
-        sanitizeOptionalInteger(payload?.ifMatch)
+        sanitizeOptionalInteger(payload?.ifMatch),
+        sanitizeOptionalSessionGeneration(payload?.expectedSessionGeneration)
       )
     }
   )

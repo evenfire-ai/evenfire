@@ -650,7 +650,7 @@ describe('flushSync call sites in the renderer', () => {
     })
   }
 
-  it('calls flushSync only from the activation seam in App', () => {
+  it('limits renderer flushSync calls to activation and authority-transition seams', () => {
     const root = join(__dirname, '..')
     const sites = sourceFiles(root).flatMap(path =>
       readFileSync(path, 'utf8')
@@ -658,6 +658,10 @@ describe('flushSync call sites in the renderer', () => {
         .filter(line => /\bflushSync\(/.test(line))
         .map(line => `${relative(root, path)}: ${line.trim()}`)
     )
-    expect(sites).toEqual(['App.tsx: flushSync(() => {'])
+    expect(sites).toEqual([
+      'App.tsx: flushSync(() => {',
+      'hooks/useAppController.ts: flushSync(() => {',
+      'hooks/useAppController.ts: flushSync(() => {',
+    ])
   })
 })

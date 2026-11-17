@@ -43,6 +43,8 @@ import {
   GfsClient,
   type GfsGrantListItem,
   type GfsHeldAffordances,
+  type GfsReplaceInput,
+  type GfsResourceView,
   type GfsShareListItem,
   type GfsTransport,
   type ResolvedGfsResource,
@@ -164,6 +166,51 @@ export async function moveResourceReceipt(
     SESSION_TOKEN
   )
   return structuredClone(receipt)
+}
+
+/** Run a replace response through the real GfsClient and IPC structured clone. */
+export async function replaceFileResult(
+  input: GfsReplaceInput,
+  resource: GfsResourceView
+): Promise<GfsResourceView> {
+  const client = new GfsClient(stubTransport({ ok: true, data: resource }))
+  return structuredClone(await client.replaceFile(input, SESSION_TOKEN))
+}
+
+/** The renderer-visible GfsClient error produced by an HTTP replace denial. */
+export async function replaceFileFailureMessage(
+  input: GfsReplaceInput,
+  status = 403,
+  errorBody: { code: string; message: string } = {
+    code: 'forbidden',
+    message: 'not authorized to replace this resource',
+  }
+): Promise<string> {
+  const server = createServer((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: errorBody }))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  let rejected = false
+  let failure: unknown
+  try {
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    const client = new GfsClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      requestJson,
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await client.replaceFile(input, SESSION_TOKEN)
+  } catch (error) {
+    rejected = true
+    failure = error
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+  if (!rejected) throw new Error(`expected replaceFile to reject with HTTP ${status}`)
+  if (!(failure instanceof Error)) return String(failure)
+  return failure.message
 }
 
 /** Run a resolve + byte fetch through the real `GfsClient.download` — the

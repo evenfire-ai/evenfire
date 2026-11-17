@@ -56,10 +56,10 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve }
 }
 
-function createSessionState(authenticated: boolean, me = HARNESS_ME) {
+function createSessionState(authenticated: boolean, me = HARNESS_ME, sessionGeneration = 1) {
   return authenticated
-    ? { authenticated: true, me, sessionGeneration: 1 }
-    : { authenticated: false, me: null, sessionGeneration: 1 }
+    ? { authenticated: true, me, sessionGeneration }
+    : { authenticated: false, me: null, sessionGeneration }
 }
 
 function createCatalog(agentNames: string[]) {
@@ -196,6 +196,7 @@ export function extendMockClerumForAppController(
     options: [],
   }
   let sessionMe = { ...HARNESS_ME, ...options.me }
+  let sessionGeneration = 1
   const handoffProducer = options.desktopEnvironmentHandoffProducer
   const teamDirectoryPayload = options.teamDirectory ?? {
     items: [],
@@ -214,7 +215,7 @@ export function extendMockClerumForAppController(
   const getSessionState = vi.fn(async () => {
     if (sessionStateError) throw sessionStateError
     if (handoffProducer) return handoffProducer.getSessionState()
-    return createSessionState(authenticated, sessionMe)
+    return createSessionState(authenticated, sessionMe, sessionGeneration)
   })
   const passwordLogin = vi.fn(async () => {
     if (options.passwordLoginError) throw options.passwordLoginError
@@ -272,7 +273,8 @@ export function extendMockClerumForAppController(
       teamId,
       teamName: teamId === HARNESS_ME.teamId ? HARNESS_ME.teamName : teamId,
     }
-    return createSessionState(true, sessionMe)
+    sessionGeneration += 1
+    return createSessionState(true, sessionMe, sessionGeneration)
   })
   const refreshCatalog = vi.fn(async () =>
     held() ? catalogDeferred.promise : createCatalog(agentNames)
@@ -328,6 +330,12 @@ export function extendMockClerumForAppController(
       getSessionGeneration,
       selectRuntimeConfigForHandoff,
       getDesktopReleaseStatus,
+      prepareSessionClear: vi.fn(async () => ({
+        transitionId: 1,
+        sessionGeneration,
+        reason: 'logout' as const,
+      })),
+      acknowledgeSessionPreclear: vi.fn(async () => true),
       openDesktopRelease: vi.fn(async () => undefined),
       passwordLogin,
       logout,
