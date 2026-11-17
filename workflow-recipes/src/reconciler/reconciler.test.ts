@@ -4803,6 +4803,66 @@ describe('WorkflowRecipeReconciler', () => {
         expect(annotations).not.toHaveProperty('example.com/injected')
       })
 
+      // R1-L1 — the API server stores a quantity in its canonical spelling, so a
+      // claim template size is compared by amount.
+      const withClaim = (size: string, replicas = 1): StsWorkload =>
+        ({
+          id: 'db',
+          type: 'statefulset',
+          image: 'postgres:16',
+          replicas,
+          volumeClaimTemplates: [{ name: 'data', size, accessMode: 'ReadWriteOnce' }],
+        }) as StsWorkload
+      const storeClaimSize = async (name: string, size: string) => {
+        const live = await stored(name)
+        live.spec!.volumeClaimTemplates![0].spec!.resources!.requests!.storage = size
+        await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+      }
+
+      it.each([
+        ['1024Mi', '1Gi'],
+        ['1.5Gi', '1536Mi'],
+        ['0.5Gi', '512Mi'],
+        ['2048Mi', '2Gi'],
+      ])(
+        'T-R3-L1-2: a claim template size %s stored as %s is not immutable drift (issue #1349)',
+        async (specSize, storedSize) => {
+          const name = stsNameOf(withClaim(specSize))
+          await ensure(withClaim(specSize))
+          await storeClaimSize(name, storedSize)
+          mockAppsApi.patchNamespacedStatefulSet.mockClear()
+
+          await ensure(withClaim(specSize, 2))
+
+          expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+          expect((await stored(name)).spec!.replicas).toBe(2)
+        }
+      )
+
+      it.each([
+        ['2Gi', '1Gi'],
+        ['1G', '1Gi'],
+        ['plenty', '1Gi'],
+        ['1e3', '1k'],
+      ])(
+        'T-R3-L1-3: a claim template size %s against a stored %s is still immutable drift (issue #1349)',
+        async (specSize, storedSize) => {
+          const name = stsNameOf(withClaim(specSize))
+          await ensure(withClaim(specSize))
+          await storeClaimSize(name, storedSize)
+          mockAppsApi.patchNamespacedStatefulSet.mockClear()
+
+          await expect(ensure(withClaim(specSize, 2))).rejects.toMatchObject({
+            name: 'ImmutableStatefulSetDriftError',
+            condition: {
+              message: expect.stringContaining('spec.volumeClaimTemplates'),
+            },
+          })
+          expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
+          expect((await stored(name)).spec!.replicas).toBe(1)
+        }
+      )
+
       it('T-P1-4: an existing StatefulSet without annotations gets the hash annotation', async () => {
         const oldWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:15' }
         const newWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:16' }
@@ -12938,6 +12998,31 @@ describe('WorkflowRecipeReconciler', () => {
       expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
       expect(statefulSetReads(name)).toBeGreaterThan(0)
       expect(delegationDeletes()).toBe(1)
+    })
+
+    it('T-R3-L1-4: a denied StatefulSet whose claim template size is stored in canonical form is revoked (issue #1349)', async () => {
+      denySecrets({ 'db-creds': '7' })
+      const recipe = deniedStatefulSetRecipe('non-workflow deploy', [
+        dbStatefulSet({
+          volumeClaimTemplates: [{ name: 'data', size: '1024Mi', accessMode: 'ReadWriteOnce' }],
+        }),
+      ])
+      const name = await storeCredentialedStatefulSet(recipe)
+      const namespace = recipe.metadata.namespace
+      const stored = async () =>
+        (await mockAppsApi.readNamespacedStatefulSet({ name, namespace })) as k8s.V1StatefulSet
+      // The API server stores 1024Mi as 1Gi.
+      const live = await stored()
+      live.spec!.volumeClaimTemplates![0].spec!.resources!.requests!.storage = '1Gi'
+      await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+      const store = installRecipeStore(recipe)
+
+      const result = await reconciler.reconcile(store.current())
+
+      expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+      expect(JSON.stringify((await stored()).spec!.template)).not.toContain('db-creds')
+      expect(store.current().status?.secretOwnershipRevocations?.['db']).toMatch(/^sha256:/)
+      expect(result.requeueAfterMs).toBeUndefined()
     })
 
     /** A Deployment that declares volumeClaimTemplates; only a StatefulSet turns them into PVCs. */
