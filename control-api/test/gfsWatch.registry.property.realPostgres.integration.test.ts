@@ -41,6 +41,14 @@ let flushMicrotasks!: Loaded['flushMicrotasks'],
 // kind under an `allow` decision, and no ancestry change of its chain landed
 // within the six seconds before that op started or while it ran. Everything
 // else is checked as an invariant at rest.
+//
+// Delivery safety is judged on what the client receives, not on registry
+// state: every key of a `changed` frame must be `accepted` in the newest
+// decision frame (`ready` or `subscriptions`) the client had received on that
+// stream. A key added by a command whose decision has not arrived is not in
+// that set, so the same check covers keys of the op in flight. Keys accepted
+// by that decision and later denied by gfsc still count: nothing revokes a
+// standing acceptance mid-stream, the reopen decides again.
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -59,6 +67,8 @@ type ConnModel = {
   lastSeqSeen: number
   /** Decision frames with their event number. */
   decisions: { frame: Record<string, unknown>; ev: number }[]
+  /** `accepted` of the newest decision frame received, or null before `ready`. */
+  lastAccepted: Set<GfsKey> | null
 }
 
 type Real = {
@@ -167,8 +177,21 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
   ]
 
   function track(real: Real, m: ConnModel): void {
+    const deniedKey = h.key('file', real.fixture.denied)
     m.socket.onFrame = (frame, ev) => {
-      if (frame.type === 'ready' || frame.type === 'subscriptions') m.decisions.push({ frame, ev })
+      if (frame.type === 'ready' || frame.type === 'subscriptions') {
+        m.decisions.push({ frame, ev })
+        m.lastAccepted = new Set(frame.accepted as GfsKey[])
+      }
+      if (frame.type !== 'changed') return
+      for (const k of frame.keys as GfsKey[]) {
+        if (k === deniedKey) real.failures.push(`S1: changed for denied ${k}`)
+        if (!m.lastAccepted?.has(k)) {
+          const d = m.decisions.at(-1)
+          const seq = d ? (d.frame.type === 'ready' ? 0 : d.frame.seq) : 'none'
+          real.failures.push(`S1: changed for ${k} not accepted by decision seq ${seq}`)
+        }
+      }
     }
   }
 
@@ -207,6 +230,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
         maxSeq: 0,
         lastSeqSeen: 0,
         decisions: [],
+        lastAccepted: null,
       }
       track(real, m)
       real.conns.push(m)
@@ -281,8 +305,17 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
     check = () => true
     async run(_m: object, real: Real) {
       const fx = real.fixture
-      await h.tree.rename([fx.f1, fx.f2, fx.g, fx.p][this.which % 4]!)
+      const target = [fx.f1, fx.f2, fx.g, fx.p, fx.denied][this.which % 5]!
+      await h.tree.rename(target)
       await h.barrier()
+      // A denied key is indexed between its ancestry query and its read, so a
+      // change landing in that window queues it for the next flush.
+      const deniedKey = h.key('file', fx.denied)
+      if (
+        target === fx.denied &&
+        real.conns.some(c => real.b.connOf(c.socket)?.pending.has(deniedKey))
+      )
+        coverage.deniedChangeQueued += 1
     }
     toString = () => `Rename(${this.which})`
   }
@@ -322,6 +355,15 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
     toString = () => `Step(${this.n})`
   }
 
+  /** Waits until a boundary call is parked, so a fixed example steps it deterministically. */
+  class ParkedCmd implements fc.AsyncCommand<object, Real> {
+    check = () => true
+    async run(_m: object, real: Real) {
+      for (let i = 0; i < 200 && real.s.count() === 0; i += 1) await sleep(5)
+    }
+    toString = () => 'Parked'
+  }
+
   class SettleCmd implements fc.AsyncCommand<object, Real> {
     check = () => true
     async run(_m: object, real: Real) {
@@ -338,6 +380,16 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
     constructor(readonly ms: number) {}
     check = () => true
     async run(_m: object, real: Real) {
+      // The flush about to fire holds a change for a key its op already
+      // accepted but has not yet announced in a decision frame.
+      const early = real.conns.some(c => {
+        const conn = real.b.connOf(c.socket)
+        if (!conn?.op) return false
+        return [...conn.pending].some(
+          k => conn.op!.added.has(k) && conn.keys.get(k)?.state === 'accepted'
+        )
+      })
+      if (early && this.ms >= 250) coverage.inFlightChangeQueued += 1
       await real.b.advance(this.ms)
     }
     toString = () => `Advance(${this.ms})`
@@ -385,7 +437,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       )
       .map(([c, k, v]) => new PutCmd(c, k, v as PutCmd['variant'])),
     fc.boolean().map(b => new MoveCmd(b)),
-    fc.nat(3).map(w => new RenameCmd(w)),
+    fc.nat(4).map(w => new RenameCmd(w)),
     fc
       .tuple(fc.nat(2), fc.constantFrom<GfscDecision>('allow', 'deny', 'unavailable'))
       .map(([w, d]) => new DecisionCmd(w, d)),
@@ -465,6 +517,9 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
     suspect: 0,
     subscriptions: 0,
     closedReady: 0,
+    changed: 0,
+    deniedChangeQueued: 0,
+    inFlightChangeQueued: 0,
   }
 
   function recordCoverage(real: Real): void {
@@ -477,8 +532,69 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
         if (d.frame.type === 'subscriptions') coverage.subscriptions += 1
       }
       if (m.socket.framesOf('stream.closing').length > 0) coverage.closedReady += 1
+      coverage.changed += m.socket.framesOf('changed').length
     }
   }
+
+  const seeded = () => fc.sample(fc.scheduler(), { seed: 1, numRuns: 1 })[0]!
+  const asCmds = (cmds: fc.AsyncCommand<object, Real>[]) =>
+    cmds as unknown as Iterable<fc.AsyncCommand<object, Real>>
+  // Fixed sequences that reach every decision and delivery path, so the
+  // coverage check below does not depend on what the random runs happen to draw.
+  const examples: [fc.Scheduler, Iterable<fc.AsyncCommand<object, Real>>][] = [
+    // An ancestor moves while the open is parked in front of its ancestry
+    // query, a delta follows, and the listener is lost with a stream open.
+    [
+      seeded(),
+      asCmds([
+        new OpenCmd(0, [1, 4]),
+        new MoveCmd(true),
+        new SettleCmd(),
+        new PutCmd(0, [1, 3], 'next'),
+        new SettleCmd(),
+        new ListenerLostCmd(),
+      ]),
+    ],
+    // The denied file is renamed after its ancestry query indexed it and
+    // before gfsc refuses it: the flush that follows holds a change for a key
+    // that ends rejected.
+    [
+      seeded(),
+      asCmds([
+        new OpenCmd(0, [1, 4]),
+        new ParkedCmd(),
+        new StepCmd(1),
+        new ParkedCmd(),
+        new RenameCmd(4),
+        new SettleCmd(),
+        new AdvanceCmd(250),
+        new SettleCmd(),
+      ]),
+    ],
+    // A delta adds two files; after the first read accepts one, both are
+    // renamed and the flush window elapses before the second read answers.
+    [
+      seeded(),
+      asCmds([
+        new OpenCmd(0, [1]),
+        new SettleCmd(),
+        new PutCmd(0, [2, 3], 'next'),
+        new ParkedCmd(),
+        new StepCmd(1),
+        new ParkedCmd(),
+        new StepCmd(1),
+        new ParkedCmd(),
+        new StepCmd(1),
+        new RenameCmd(1),
+        new RenameCmd(2),
+        new AdvanceCmd(250),
+        new SettleCmd(),
+        new RenameCmd(1),
+        new AdvanceCmd(250),
+        new SettleCmd(),
+      ]),
+    ],
+  ]
 
   it('keeps I4, I6, I11, I17, I19, I20, I23–I26, I30, I40 and I42 under scheduled interleavings', async () => {
     await fc.assert(
@@ -534,31 +650,15 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       {
         // fast-check counts the examples inside numRuns; add them back so the
         // number of random runs is the one requested.
-        numRuns: Number(process.env.GFS_WATCH_MODEL_RUNS ?? 25) + 1,
+        numRuns: Number(process.env.GFS_WATCH_MODEL_RUNS ?? 25) + examples.length,
         endOnFailure: true,
         verbose: 1,
-        // A fixed sequence that reaches every decision path, so the coverage
-        // check below does not depend on what the random runs happen to draw:
-        // an ancestor moves while the open is parked in front of its ancestry
-        // query, a delta follows, and the listener is lost with a stream open.
-        examples: [
-          [
-            fc.sample(fc.scheduler(), { seed: 1, numRuns: 1 })[0]!,
-            [
-              new OpenCmd(0, [1, 4]),
-              new MoveCmd(true),
-              new SettleCmd(),
-              new PutCmd(0, [1, 3], 'next'),
-              new SettleCmd(),
-              new ListenerLostCmd(),
-            ] as unknown as Iterable<fc.AsyncCommand<object, Real>>,
-          ],
-        ],
+        examples,
       }
     )
     // Every decision path must have been exercised, or a green run proves little.
-    // The fixed example alone reaches all of them, so this guards the harness
-    // and the example, not how widely the random runs happened to explore.
+    // The fixed examples alone reach all of them, so this guards the harness
+    // and the examples, not how widely the random runs happened to explore.
     expect(Object.entries(coverage).filter(([, n]) => n === 0)).toEqual([])
   }, 900_000)
 })
