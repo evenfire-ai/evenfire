@@ -4914,6 +4914,59 @@ describe('WorkflowRecipeReconciler', () => {
         }
       )
 
+      // Issue #1518 — the drift error says whether the stored spec hash is the
+      // desired one, and only its condition names the last writer.
+      const driftOnStaleHash = async (managedFields: k8s.V1ManagedFieldsEntry[] | undefined) => {
+        const oldWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:15' }
+        const newWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:16' }
+        const name = stsNameOf(oldWorkload)
+        await ensure(oldWorkload)
+        const live = await stored(name)
+        live.spec!.serviceName = 'renamed-by-hand'
+        live.metadata!.managedFields = managedFields
+        await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+        const error = await ensure(newWorkload).then(
+          () => undefined,
+          (rejection: unknown) => rejection as Error & { condition: { message: string } }
+        )
+        expect(error?.name).toBe('ImmutableStatefulSetDriftError')
+        const head =
+          `ImmutableStatefulSetDrift: StatefulSet "${name}" in ${namespace} has immutable drift ` +
+          'in spec.serviceName; WRC will not full-replace StatefulSets. '
+        const tail = 'Recreate through an explicit data-safe migration.'
+        for (const text of [error!.message, error!.condition.message]) {
+          expect(text.startsWith(head)).toBe(true)
+          expect(text.endsWith(tail)).toBe(true)
+          expect(text).toContain('The stored spec hash is not the desired one')
+        }
+        return error!
+      }
+
+      it('T-1518-4 (i): a drift on a stale hash says so, and a live object without managedFields names no writer (issue #1518)', async () => {
+        const error = await driftOnStaleHash(undefined)
+
+        expect(error.condition.message).toContain('The live object records no field manager.')
+        expect(error.message).not.toContain('field manager')
+      })
+
+      it('T-1518-4 (ii): the last writer is named in the condition message only, so a manager name is never classified as retryable (issue #1518)', async () => {
+        const error = await driftOnStaleHash([
+          {
+            manager: 'connect ETIMEDOUT',
+            operation: 'Update',
+            time: new Date('2026-11-17T10:00:00Z'),
+          },
+        ])
+
+        // Witness: the same error names the manager in its condition message.
+        expect(error.condition.message).toContain(
+          'Last writer of the live object (metadata.managedFields): "connect ETIMEDOUT". '
+        )
+        expect(error.message).not.toContain('connect ETIMEDOUT')
+        expect(isRetryableInfraError(error.message)).toBe(false)
+        expect(isRetryableInfraError('connect ETIMEDOUT')).toBe(true)
+      })
+
       it('T-P1-4: an existing StatefulSet without annotations gets the hash annotation', async () => {
         const oldWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:15' }
         const newWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:16' }
@@ -18911,6 +18964,107 @@ describe('WorkflowRecipeReconciler', () => {
         expect(mockCoreApi.deleteCollectionNamespacedPod).toHaveBeenCalledTimes(1)
         expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(firstDigest)
         expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      } finally {
+        mockCustomApi.patchNamespacedCustomObjectStatus
+          .mockReset()
+          .mockImplementation(echoPatchedStatus)
+      }
+    })
+
+    it('T-1518-3: a drift on the desired stored hash blames an outside writer and names the latest field manager of the object in the condition only (issue #1518)', async () => {
+      const denyAt = (resourceVersion: string) =>
+        mockCoreApi.readNamespacedSecret.mockResolvedValue({
+          metadata: { resourceVersion, labels: { 'clerum.io/owner-recipe': 'some-other-recipe' } },
+          data: { 'db-password': 'eA==' },
+        })
+      denyAt('1')
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'db',
+              type: 'statefulset',
+              image: 'postgres:16',
+              port: 5432,
+              envSecret: {
+                name: 'db-creds',
+                keys: [{ secretKey: 'db-password', envVar: 'POSTGRES_PASSWORD' }],
+              },
+            },
+          ],
+        },
+        status: {
+          workloadInstances: { db: 'test-recipe-db-live' },
+        } as unknown as WorkflowRecipeCRD['status'],
+      })
+      const credentialed = buildStatefulSet(
+        recipe.spec.workloads![0] as Parameters<typeof buildStatefulSet>[0],
+        recipe,
+        'minimal',
+        new Map([['db-creds', { state: 'accessible', keys: new Set(['db-password']) }]])
+      ).statefulSet
+      const stsName = credentialed.metadata!.name!
+      const namespace = recipe.metadata.namespace!
+      const storedStatefulSet = async () =>
+        (await mockAppsApi.readNamespacedStatefulSet({
+          name: stsName,
+          namespace,
+        })) as k8s.V1StatefulSet
+      await mockAppsApi.createNamespacedStatefulSet({ namespace, body: credentialed })
+      const store = installRecipeStore(recipe)
+
+      try {
+        // Pass 1 revokes and stamps the desired hash.
+        await reconciler.reconcile(store.current())
+        const revoked = await storedStatefulSet()
+        const hash = revoked.metadata?.annotations?.['clerum.io/spec-hash']
+        expect(hash).toEqual(expect.any(String))
+
+        // An immutable field drifts while the annotation keeps the desired hash.
+        // helm and kubectl-replace share the latest object time; helm is later in
+        // the list. The status subresource entry is newer and is not a writer of
+        // the object.
+        const t1 = new Date('2026-11-17T10:00:00Z')
+        const t2 = new Date('2026-11-17T10:05:00Z')
+        const t3 = new Date('2026-11-17T10:09:00Z')
+        const drifted = structuredClone(revoked)
+        drifted.spec!.serviceName = 'manually-mutated-headless-service'
+        drifted.metadata!.managedFields = [
+          { manager: 'wrc-test', operation: 'Update', time: t1 },
+          { manager: 'kubectl-replace', operation: 'Update', time: t2 },
+          { manager: 'helm', operation: 'Update', time: t2 },
+          {
+            manager: 'kube-controller-manager',
+            operation: 'Update',
+            subresource: 'status',
+            time: t3,
+          },
+        ]
+        await mockAppsApi.replaceNamespacedStatefulSet({ name: stsName, namespace, body: drifted })
+        expect((await storedStatefulSet()).metadata?.annotations?.['clerum.io/spec-hash']).toBe(
+          hash
+        )
+
+        // A new denial version, so the revocation runs again and meets the drift.
+        denyAt('2')
+        const errorLog = captureLogger('error')
+        await reconciler.reconcile(store.current())
+        errorLog.mockRestore()
+
+        const teardownFailure = errorLog.mock.calls.find(
+          ([message]) => message === 'Teardown of denied workload failed; will requeue'
+        )
+        expect(teardownFailure).toBeDefined()
+        const err = (teardownFailure![1] as { err: Error & { condition: { message: string } } }).err
+        expect(err.name).toBe('ImmutableStatefulSetDriftError')
+        const conditionMessage = err.condition.message
+        expect(conditionMessage).toContain('The stored spec hash is the desired one')
+        expect(conditionMessage).toContain('"helm"')
+        expect(conditionMessage).not.toContain('"kubectl-replace"')
+        expect(conditionMessage).not.toContain('kube-controller-manager')
+        // Witness for the negative below: the condition of the same error names helm.
+        expect(err.message).not.toContain('"helm"')
+        expect(err.message).toContain('The stored spec hash is the desired one')
       } finally {
         mockCustomApi.patchNamespacedCustomObjectStatus
           .mockReset()

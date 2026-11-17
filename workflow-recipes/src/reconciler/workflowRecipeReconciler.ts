@@ -5281,22 +5281,63 @@ export class WorkflowRecipeReconciler {
     return patch
   }
 
+  /**
+   * The error and the `StatefulSetImmutableDrift` condition for a StatefulSet whose
+   * immutable fields differ from the desired ones. Both say whether the stored
+   * spec hash is the desired one: when it is, the recipe did not change those
+   * fields, so the live object was changed outside WRC. Only the condition
+   * message names the last writer: a field manager name is free text, and the
+   * error message is embedded in result messages that `isRetryableInfraError`
+   * classifies, while condition messages are not classified.
+   */
   private immutableStatefulSetDriftError(
     name: string,
     namespace: string,
-    fields: string[]
+    fields: string[],
+    existing: k8s.V1StatefulSet,
+    desiredHash: string
   ): ImmutableStatefulSetDriftError {
-    const message =
+    const head =
       `ImmutableStatefulSetDrift: StatefulSet "${name}" in ${namespace} has immutable drift in ` +
-      `${fields.join(', ')}; WRC will not full-replace StatefulSets. ` +
-      'Recreate through an explicit data-safe migration.'
-    return new ImmutableStatefulSetDriftError(message, {
+      `${fields.join(', ')}; WRC will not full-replace StatefulSets. `
+    const cause =
+      existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash
+        ? 'The stored spec hash is the desired one, so the recipe did not change these fields ' +
+          'since WRC last applied the StatefulSet: the live object was replaced or recreated ' +
+          `outside WRC, by a user or tool that can write StatefulSets in ${namespace}. `
+        : 'The stored spec hash is not the desired one: either the desired spec changed one of ' +
+          'these fields (a recipe edit, or a controller version that renders them ' +
+          'differently), or the live object was changed outside WRC. '
+    const lastWriter = this.statefulSetLastWriter(existing)
+    const writer =
+      lastWriter === undefined
+        ? 'The live object records no field manager. '
+        : `Last writer of the live object (metadata.managedFields): "${lastWriter}". `
+    const tail = 'Recreate through an explicit data-safe migration.'
+    return new ImmutableStatefulSetDriftError(head + cause + tail, {
       type: 'StatefulSetImmutableDrift',
       status: 'True',
       reason: 'ImmutableStatefulSetDrift',
-      message,
+      message: head + cause + writer + tail,
       lastTransitionTime: new Date().toISOString(),
     })
+  }
+
+  /**
+   * The manager of the `metadata.managedFields` entry with the latest `time`,
+   * among the entries written to the object itself (no `subresource`): the
+   * status subresource is written continuously by kube-controller-manager.
+   * An entry without `time` ranks below any entry with one, and on equal times
+   * (one-second resolution) the entry later in the list wins.
+   */
+  private statefulSetLastWriter(existing: k8s.V1StatefulSet): string | undefined {
+    let best: { manager: string; time: number } | undefined
+    for (const entry of existing.metadata?.managedFields ?? []) {
+      if (entry.subresource || !entry.manager) continue
+      const time = entry.time ? new Date(entry.time).getTime() : Number.NEGATIVE_INFINITY
+      if (best === undefined || time >= best.time) best = { manager: entry.manager, time }
+    }
+    return best?.manager
   }
 
   // Read-first, like ensureTransportService in mcpDelegation.ts (#760): GET the
@@ -5385,7 +5426,13 @@ export class WorkflowRecipeReconciler {
 
     const immutableDriftFields = this.statefulSetImmutableDriftFields(statefulSet, existing)
     if (immutableDriftFields.length > 0) {
-      throw this.immutableStatefulSetDriftError(name, namespace, immutableDriftFields)
+      throw this.immutableStatefulSetDriftError(
+        name,
+        namespace,
+        immutableDriftFields,
+        existing,
+        desiredHash
+      )
     }
 
     // A JSON Patch (RFC 6902), not a strategic merge: `replace /spec/template`
