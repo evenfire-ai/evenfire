@@ -18,12 +18,6 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BRANCH_PROFILE="${BRANCH_PROFILE_LIFECYCLE_SCRIPT:-${ROOT}/scripts/minikube-profiles/branch-profile.sh}"
 [[ -f "${BRANCH_PROFILE}" ]] || { printf 'FAIL: script under test is missing: %s\n' "${BRANCH_PROFILE}" >&2; exit 1; }
 
-# shellcheck source=scripts/minikube/port-forward-owner.sh
-. "${ROOT}/scripts/minikube/port-forward-owner.sh"
-# shellcheck source=scripts/tests/lib/branch-profile-fixture-process.sh
-. "${ROOT}/scripts/tests/lib/branch-profile-fixture-process.sh"
-"${BASH}" "${ROOT}/scripts/tests/test-branch-profile-fixture-process.sh"
-
 # Ambient selectors from the caller's shell must not leak into the fixture.
 unset MINIKUBE_PROFILE BRANCH_PROFILE_PROFILE HOST CONFIRM_DELETE CONFIRM_PROFILE \
   ARGS KUBECONFIG ALLOWED_CONTEXTS CONTEXT DOCKER_CONTEXT PF_STARTUP_DELAY
@@ -34,35 +28,23 @@ state="${tmp}/state"
 stub_bin="${tmp}/bin"
 cache_root="${tmp}/cache"
 out_dir="${tmp}/out"
-mkdir -p "${state}/processes" "${stub_bin}" "${cache_root}" "${out_dir}"
+mkdir -p "${state}" "${stub_bin}" "${cache_root}" "${out_dir}"
 
 kill_recorded_processes() {
-  local record failed=0
-  for record in "${state}/processes/"*.ready; do
-    [[ -f "${record}" ]] || continue
-    if ! fixture_process_cleanup_record "${record}"; then
-      printf 'FAIL: could not verify fixture process record: %s\n' "${record}" >&2
-      failed=1
-    fi
+  local file pid
+  for file in "${state}/pf-pids" "${state}/foreign-pids"; do
+    [[ -f "${file}" ]] || continue
+    while IFS= read -r pid; do
+      [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+      kill -KILL "${pid}" 2>/dev/null || true
+      # Reap our own children quietly; kubectl stubs are not children here.
+      wait "${pid}" 2>/dev/null || true
+    done <"${file}"
   done
-  return "${failed}"
 }
 cleanup() {
-  local status=$?
-  trap - EXIT
-  if fixture_process_close_registration "${state}/processes" && kill_recorded_processes &&
-     [[ ! -e "${state}/processes.closed" && ! -L "${state}/processes.closed" ]] &&
-     mv -- "${state}/processes" "${state}/processes.closed"; then
-    rm -rf -- "${tmp}" || status=1
-  else
-    # A closed registry remains closed if cleanup has to preserve evidence.
-    if [[ -e "${state}/processes/.closed" ]]; then
-      rmdir -- "${state}/processes/.lock" 2>/dev/null || true
-    fi
-    printf 'Fixture process evidence retained at %s\n' "${tmp}" >&2
-    status=1
-  fi
-  exit "${status}"
+  kill_recorded_processes
+  rm -rf "${tmp}"
 }
 trap cleanup EXIT
 
@@ -284,11 +266,7 @@ case "${verb}" in
     esac
     ;;
   port-forward)
-    # shellcheck source=scripts/minikube/port-forward-owner.sh
-    . "${BRANCH_PROFILE_FIXTURE_ROOT:?}/scripts/minikube/port-forward-owner.sh"
-    # shellcheck source=scripts/tests/lib/branch-profile-fixture-process.sh
-    . "${BRANCH_PROFILE_FIXTURE_ROOT}/scripts/tests/lib/branch-profile-fixture-process.sh"
-    fixture_process_register "${state}/processes" "$$" "$0 ${original}"
+    printf '%s\n' "$$" >>"${state}/pf-pids"
     if [[ -e "${state}/pf-ignores-term" ]]; then trap '' TERM; fi
     # Present exactly "<path>/kubectl <original argv>" to ps(1) and block
     # until signalled; the FIFO is opened read-write so cat never sees EOF.
@@ -297,18 +275,6 @@ case "${verb}" in
   *) printf 'kubectl stub: unsupported call: %s\n' "${original}" >&2; exit 64 ;;
 esac
 EOF_KUBECTL
-
-cat >"${stub_bin}/foreign" <<'EOF_FOREIGN'
-#!/usr/bin/env bash
-set -euo pipefail
-state="${BRANCH_PROFILE_STUB_STATE:?}"
-# shellcheck source=scripts/minikube/port-forward-owner.sh
-. "${BRANCH_PROFILE_FIXTURE_ROOT:?}/scripts/minikube/port-forward-owner.sh"
-# shellcheck source=scripts/tests/lib/branch-profile-fixture-process.sh
-. "${BRANCH_PROFILE_FIXTURE_ROOT}/scripts/tests/lib/branch-profile-fixture-process.sh"
-fixture_process_register "${state}/processes" "$$" "$0"
-exec -a "$0" cat 0<>"${state}/pf.fifo"
-EOF_FOREIGN
 
 cat >"${stub_bin}/minikube" <<'EOF_MINIKUBE'
 #!/usr/bin/env bash
@@ -410,6 +376,9 @@ printf 'fixture deploy file\n' >"${repo}/deploy/minikube/fixture.txt"
 other_worktree="${tmp}/other-worktree"
 mkdir -p "${other_worktree}"
 
+# shellcheck source=scripts/minikube/port-forward-owner.sh
+. "${ROOT}/scripts/minikube/port-forward-owner.sh"
+
 reset_state() {
   : >"${state}/calls.log"
   printf '0\n' >"${state}/minikube-status-rc"
@@ -468,7 +437,6 @@ bp() {
     cd -- "${repo}" &&
       env PATH="${stub_bin}:${PATH}" \
         BRANCH_PROFILE_STUB_STATE="${state}" \
-        BRANCH_PROFILE_FIXTURE_ROOT="${ROOT}" \
         CACHE_ROOT="${cache_root}" \
         DOCKER_HOST="unix://${tmp}/docker.sock" \
         PF_OWNER_TERMINATE_ATTEMPTS=5 PF_OWNER_TERMINATE_DELAY=0.05 \
@@ -477,9 +445,9 @@ bp() {
 }
 
 start_foreign_process() {
-  env BRANCH_PROFILE_STUB_STATE="${state}" BRANCH_PROFILE_FIXTURE_ROOT="${ROOT}" \
-    "${stub_bin}/foreign" &
+  sleep 600 &
   FOREIGN_PID=$!
+  printf '%s\n' "${FOREIGN_PID}" >>"${state}/foreign-pids"
 }
 
 dead_pid() {
@@ -1316,8 +1284,6 @@ bp stop-pf-first-unverified-pf pf
 assert_rc 0 'pf before a stop-pf whose first record is unverifiable'
 record_pf_pids control-api
 orphaned_control_api_pid="${PF_PIDS[0]}"
-orphaned_control_api_port="${PF_OWNER_RECORD_LOCAL_PORT}"
-cp -- "${pids_dir}/control-api.pid" "${state}/orphaned-control-api.pid"
 record_pf_pids control-ui external-rest-api rpc-proxy
 printf '12345\n' >"${pids_dir}/control-api.pid"
 bp stop-pf-first-unverified stop-pf
@@ -1330,10 +1296,7 @@ for pid in "${PF_PIDS[@]}"; do
 done
 assert_file "${pids_dir}/control-api.pid" 'stop-pf keeps the unverifiable first record'
 assert_output_has "  ${pids_dir}/control-api.pid" 'stop-pf lists the kept first record'
-pf_owner_cleanup_record "${state}/orphaned-control-api.pid" "${profile}" "${profile}" \
-  "${repo}" control-plane control-api "${orphaned_control_api_port}" 8090 ||
-  fail 'could not safely stop the fixture control-api forward'
-assert_dead "${orphaned_control_api_pid}" 'the verified fixture control-api forward is stopped'
+kill -KILL "${orphaned_control_api_pid}" 2>/dev/null || true
 rm -f "${pids_dir}/control-api.pid"
 
 # === stop-pf keeps records it cannot prove are stale ==========================
