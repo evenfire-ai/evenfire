@@ -890,9 +890,11 @@ describe('hostModelSelectionStore — reset', () => {
 
 /**
  * Broker-backed Hosts (`codex-subscription`, `grok-subscription`) report their
- * `spec.model.name` as `hostDefault`, never `''`, and the runtime dispatches
- * that default for a session without a selection even when the catalog does
- * not list it. The fixtures below follow that producer shape.
+ * `spec.model.name` as `hostDefault`, and the runtime dispatches that default
+ * for a session without a selection even when the catalog does not list it.
+ * A `spec.model` without `name` reports the literal `'unknown'`; `''` only
+ * comes from a Host written outside control-api with `name: ""`, since
+ * control-api rejects an empty name. The fixtures below follow that shape.
  */
 describe('hostModelSelectionStore — broker-backed Host default', () => {
   const BROKER_PROVIDERS = ['codex-subscription', 'grok-subscription'] as const
