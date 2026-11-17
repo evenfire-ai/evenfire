@@ -131,8 +131,8 @@ winner_pid="$(awk '{print $2}' "${RESULT_FILE}")"
   echo 'FAIL: losing reclaimer left a claim inside the active replacement lock' >&2
   exit 1
 }
-[[ ! -e "${RECLAIM_DIR}" ]] || {
-  echo 'FAIL: winning reclaimer left the sibling claim behind after acquiring the lock' >&2
+[[ -d "${RECLAIM_DIR}" ]] || {
+  echo 'FAIL: winning reclaimer dropped the sibling claim before releasing the lock' >&2
   exit 1
 }
 
@@ -148,6 +148,10 @@ if ! { [[ "${rc_1}" -eq 0 && "${rc_2}" -ne 0 ]] || [[ "${rc_2}" -eq 0 && "${rc_1
 fi
 [[ ! -e "${LOCK_DIR}" ]] || {
   echo 'FAIL: winning reclaimer did not release its lock' >&2
+  exit 1
+}
+[[ ! -e "${RECLAIM_DIR}" ]] || {
+  echo 'FAIL: winning reclaimer left the sibling claim behind after releasing the lock' >&2
   exit 1
 }
 

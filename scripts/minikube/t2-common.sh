@@ -1308,9 +1308,11 @@ t2_lock_acquire() {
     # The claim must not live inside T2_LOCK_DIR: the winner removes that
     # directory before creating the replacement lock, and a losing reclaimer
     # could otherwise recreate `.reclaim` inside the winner's live lock.
-    # If a reclaimer is killed while holding this sibling claim, the marker
-    # deliberately remains and requires the documented orphan-lock recovery
-    # rather than permitting an unsafe retry.
+    # The winner keeps this sibling claim until it releases the replacement
+    # lock. Dropping it at the end of acquire lets a peer that already
+    # observed the stale owner take the lock too. If a reclaimer is killed
+    # while holding the claim, the marker deliberately remains and requires
+    # the documented orphan-lock recovery rather than an unsafe retry.
     reclaim_dir="$T2_LOCK_ROOT/$T2_PROFILE.reclaim"
     if ! mkdir "$reclaim_dir" 2>/dev/null; then
       T2_NEXT_COMMAND='wait for the stale-lock reclaimer to finish; if it died, follow the orphaned-lock recovery steps in docs/testing/minikube-t2-runbook.md'
@@ -1324,6 +1326,7 @@ t2_lock_acquire() {
     existing_token="$(t2_lock_owner_value TOKEN || true)"
     existing_start="$(t2_lock_owner_value PROCESS_START || true)"
     if [[ ! "$existing_pid" =~ ^[0-9]+$ ]] || [ -z "$existing_token" ] || [ -z "$existing_start" ]; then
+      rmdir "$reclaim_dir" 2>/dev/null || true
       T2_NEXT_COMMAND='verify no T2 process owns the lock, then follow the orphaned-lock recovery steps in docs/testing/minikube-t2-runbook.md'
       t2_fail PROFILE_BUSY "profile $T2_PROFILE owner changed while its stale lock was being reclaimed"
       return 1
@@ -1337,6 +1340,9 @@ t2_lock_acquire() {
     rm -rf -- "$T2_LOCK_DIR"
   fi
   mkdir "$T2_LOCK_DIR" 2>/dev/null || {
+    if [ -n "$reclaim_dir" ]; then
+      rmdir "$reclaim_dir" 2>/dev/null || true
+    fi
     T2_NEXT_COMMAND='retry after the profile lock is released'
     t2_fail PROFILE_BUSY "unable to acquire the profile lock: $T2_PROFILE"
     return 1
@@ -1359,9 +1365,9 @@ PID=$$
 PROCESS_START=$process_start
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-  if [ -n "$reclaim_dir" ]; then
-    rmdir "$reclaim_dir" 2>/dev/null || true
-  fi
+  # The sibling reclaim claim stays until t2_lock_release. A peer that
+  # arrives while this process holds the replacement lock must fail closed
+  # on the claim instead of classifying the new owner.
   # Children of this lease validate against the origin/dev read here, not
   # against the shared remote-tracking ref (see t2_resolve_origin_dev).
   export T2_PINNED_ORIGIN_DEV="$T2_ORIGIN_DEV"
@@ -1444,7 +1450,13 @@ t2_lock_release() {
     owner_pid="$(t2_lock_owner_value PID || true)"
     owner_token="$(t2_lock_owner_value TOKEN || true)"
     if [ "$owner_pid" = "$$" ] && [ -n "$T2_LOCK_TOKEN" ] && [ "$owner_token" = "$T2_LOCK_TOKEN" ]; then
-      rm -rf -- "$T2_LOCK_DIR" || cleanup_status=1
+      if rm -rf -- "$T2_LOCK_DIR"; then
+        # Drop the exclusion only after the lock directory is gone, so a peer
+        # cannot observe a stale owner and a free reclaim claim together.
+        rmdir "$T2_LOCK_ROOT/$T2_PROFILE.reclaim" 2>/dev/null || true
+      else
+        cleanup_status=1
+      fi
     fi
   fi
   T2_LOCK_HELD=false
