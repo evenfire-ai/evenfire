@@ -97,12 +97,14 @@ export function useRolloutWait({
       //    written synchronously right after the PUT. Treating it as failure
       //    would abort almost every successful rotation on the first poll.
       //  - `RolloutIncomplete` means the HCC exhausted ITS 120s readiness budget
-      //    (host-context-controller reconciler.ts, pollReadiness 24×5s) — but the
-      //    HCC keeps observing past that verdict (post-terminal re-poll) and
-      //    corrects the condition to True when a slow pod converges. Latching
-      //    failure here would discard the ~60s of budget this poll still holds
-      //    and report a deterministic false negative for any rollout converging
-      //    between 120s and 180s — the exact bug of issue #223.
+      //    (host-context-controller reconciler.ts, pollReadiness 24×5s) — but it
+      //    is not irreversible: a later HCC reconcile of the McpServer (a Secret
+      //    event, a desired-state change, a NetworkPolicy pass, a retry)
+      //    corrects the condition to True when a slow pod has converged.
+      //    Latching failure here would discard the ~60s of budget this poll
+      //    still holds, in which such a correction can land (issue #223). The
+      //    HCC does not re-poll on its own, so without such a reconcile a
+      //    rollout converging between 120s and 180s still ends as `failed`.
       //
       // So the ONLY outcomes are: a fresh True (success, above), or this poll's
       // own bounded timeout — which reports `failed` with the preserved HCC

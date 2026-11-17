@@ -114,6 +114,15 @@ function installClerumHarness() {
         ),
         appendMessages,
         upsertMessages,
+        removeMessages: vi.fn(async (agentRef: string, chatId: string, messageIds: string[]) => {
+          const key = messageKey(agentRef, chatId)
+          const existing = messagesByAgentChat.get(key) || []
+          const remaining = existing.filter(
+            message => !messageIds.includes((message as { id: string }).id)
+          )
+          messagesByAgentChat.set(key, remaining)
+          return existing.length - remaining.length
+        }),
         replaceMessages: vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
           messagesByAgentChat.set(messageKey(agentRef, chatId), [...messages])
         }),
@@ -556,7 +565,7 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
         ipcHttpError('rpc:invokeHostMessage', 401, 'Unauthorized', { error: 'expired' }),
       readError: null,
       revoked: false,
-      uncertain: true,
+      uncertain: false,
     },
     {
       label: 'exact Host-wide 403',

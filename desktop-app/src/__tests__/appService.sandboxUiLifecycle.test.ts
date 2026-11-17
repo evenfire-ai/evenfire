@@ -52,6 +52,7 @@ vi.mock('../config.js', async importOriginal => {
   }
   return {
     validateRpcProxyBaseUrl,
+    getActiveDeploymentProfileUiBaseUrl: () => 'https://profile.example.com',
     getActiveRuntimeConfigOptionId: () => null,
     getActiveEnvKey: () => 'test-env',
     getActiveLegacyEnvKeys: () => [],
@@ -1356,6 +1357,7 @@ describe('AppService sandbox-ui represented location', () => {
     const { config } = await import('../config.js')
     vi.spyOn(config, 'desktopProfileUiBaseUrlExplicit', 'get').mockReturnValue(true)
     const { service, launch } = await setupReleaseRecorder('/r/first')
+    service.me = { id: 'user-1', teamId: 'team-1' }
     await service.openSandboxUi(launch('first-app'))
 
     await expect(service.createSandboxUiDeepLink()).resolves.toEqual({
@@ -1628,6 +1630,7 @@ describe('AppService sandbox-ui route settling', () => {
     const { config } = await import('../config.js')
     vi.spyOn(config, 'desktopProfileUiBaseUrlExplicit', 'get').mockReturnValue(true)
     const { service, webContents } = await openLoading()
+    service.me = { id: 'user-1', teamId: 'team-1' }
     commitWithoutFinishing(webContents)
     webContents.navigateInPage(`${APP_VIEW_URL}/settings`)
     await expect(service.createSandboxUiDeepLink()).resolves.toEqual({

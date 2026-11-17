@@ -573,7 +573,7 @@ mcp-host/
 │   │   ├── registry.ts           # Provider factory dispatch
 │   │   ├── openai.ts             # OpenAI provider (gpt-5.4-mini default)
 │   │   ├── claude.ts             # Claude provider (claude-sonnet-4-6 default)
-│   │   └── openaiCompatible.ts   # OpenAI-compatible providers (zai, bailian) via baseURL
+│   │   └── openaiFamily/         # OpenAI wire family: endpoint profiles (compatibleProfile: zai, bailian, … via baseURL), wire protocols, model param policy
 │   └── mcp/
 │       ├── manager.ts            # MCP server manager (multi-client)
 │       ├── client.ts             # Single MCP server client
@@ -708,11 +708,12 @@ interface LLMProvider {
 
 #### OpenAI Provider
 
-- SDK: `openai` v4.70.0
+- SDK: `openai` ^4.87.0
 - Default model: `gpt-5.4-mini`
-- Tool format: OpenAI function calling schema
-- Tool responses: `role: "tool"` messages
-- System message: included in messages array
+- Wire protocol: Responses API (`responses.create`, `store: false`); Azure OpenAI and the OpenAI-compatible providers use Chat Completions instead
+- Tool format: function tools (`type: "function"`)
+- Tool responses: `function_call_output` input items
+- System message: kept in position as a `system` input message (not hoisted to `instructions`)
 
 #### Claude Provider
 
@@ -725,19 +726,20 @@ interface LLMProvider {
 
 #### ZAI Provider (z.ai / ZhipuAI)
 
-- SDK: `openai` v4.70.0 (z.ai is OpenAI-compatible, uses the same SDK with `baseURL: "https://api.z.ai/api/coding/paas/v4"`)
+- SDK: `openai` ^4.87.0 (z.ai is OpenAI-compatible, uses the same SDK with `baseURL: "https://api.z.ai/api/coding/paas/v4"`)
 - Default model: `glm-5.1`
-- Tool format: OpenAI function calling schema (identical to OpenAI provider)
-- Tool responses: `role: "tool"` messages (identical to OpenAI provider)
-- System message: included in messages array (identical to OpenAI provider)
-- Implementation: data-driven `openaiCompatible.ts` provider, configured from the `PROVIDERS` descriptor in `registryCore.ts` (only the client `baseURL` differs)
+- Wire protocol: Chat Completions (the same serializer Azure OpenAI uses; official OpenAI is on Responses)
+- Tool format: OpenAI function calling schema
+- Tool responses: `role: "tool"` messages
+- System message: included in messages array
+- Implementation: data-driven `compatibleProfile` (`openaiFamily/endpointProfiles.ts`) composed into `OpenAIProvider`, configured from the `PROVIDERS` descriptor in `registryCore.ts` (only the client `baseURL` differs)
 
 #### Bailian Provider (Alibaba DashScope)
 
-- SDK: `openai` v4.70.0 (OpenAI-compatible, `baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"`)
+- SDK: `openai` ^4.87.0 (OpenAI-compatible, `baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"`)
 - Default model: `qwen3-coder-plus`
 - API key: `BAILIAN_API_KEY` / Secret key `bailian-api-key`
-- Implementation: same data-driven `openaiCompatible.ts` provider as ZAI
+- Implementation: same data-driven `compatibleProfile` (`openaiFamily/endpointProfiles.ts`) as ZAI
 
 **Provider selection**: Auto-detected from available API key (priority order: openai, claude, zai, bailian), or set explicitly via `CLERUM_MODEL_PROVIDER`. `CLERUM_MODEL_NAME` applies only together with `CLERUM_MODEL_PROVIDER`; minikube setup refuses it alone, defaults to `openai/gpt-5.4-mini` when no key is set, and checks the pair against `llm_allowed_models` before applying the Host (see [LLM providers §4.7](../llm-providers/README.md#47-local-minikube-make-minikube-setup)).
 
@@ -781,10 +783,16 @@ HTTP 410; the remaining global v1 inventory is metadata-only transitional
 surface for the separately reviewed mcp-proxy PR2 and is not used by mcp-host.
 
 Polling interval: 30 seconds (configurable via `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`).
-In cluster mode it must remain strictly below `HCC_AUTHORITY_MAX_STALENESS_MS`
-(default 180 s, operator-tunable up to a 600 s hard ceiling); mcp-host rejects an
-invalid relation at startup rather than allowing the fleet to flap between
-successful polls and authority revocation. The staleness window governs only the
+In cluster mode `HCC_AUTHORITY_MAX_STALENESS_MS` (default 180 s, operator-tunable
+up to a 600 s hard ceiling) must absorb two missed HCC polls:
+`staleness >= interval + 2 × max(interval, request timeout) + request timeout + 1 s`,
+with the 10 s inventory request timeout. That is 101 s at the 30 s interval; the
+180 s default absorbs four missed polls and allows a poll interval of at most
+56333 ms (see the [upgrade note](../deploy/releases-and-upgrades.md#mcp-host-authority-staleness-floor)).
+mcp-host rejects a pair that breaks the
+rule, an interval that is not plain digits, or a staleness value that is not plain
+digits (in every mode; unset or `""` means the default), at startup rather than letting a short HCC
+restart revoke a healthy MCP fleet (issue #1350). The staleness window governs only the
 `unavailable` failure class (HCC unreachable / 5xx): it is sized to absorb a
 normal HCC `Recreate` rollout without tearing down the MCP fleet. Identity/401
 revocations are immediate and are not gated by this window (issue #425).
@@ -832,31 +840,31 @@ The HTTP response is held open until the agent finishes processing. The response
 
 ### Configuration
 
-| Variable                              | Default          | Description                                                                                                                                                            |
-| ------------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                                                                                                                                                        |
-| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required)                                                                                                                                   |
-| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                                                                                                                                                   |
-| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                                                                                                                                       |
-| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                                                                                                                                             |
-| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                                                                                                                                                     |
-| `HCC_AUTHORITY_MAX_STALENESS_MS`      | `180000`         | Max retained HCC authority while HCC is unreachable (ms); operator-tunable, hard-capped at 600000; must be greater than the poll interval in cluster mode (issue #425) |
-| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"`                                                                                                                        |
-| `CLERUM_MODEL_NAME`                   | provider default | Specific model name; used only with `CLERUM_MODEL_PROVIDER`                                                                                                            |
-| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                                                                                                                                                  |
-| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                                                                                                                                                  |
-| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)                                                                                                                                                |
-| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                                                                                                                                       |
-| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                                                                                                                                            |
-| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                                                                                                                                       |
-| `CLERUM_AGENT_TASK_DELAY`             | `3`              | Delay between tasks (ms)                                                                                                                                               |
-| `CLERUM_AGENT_MAX_TASK_DURATION`      | `86400000`       | Max active task duration, excluding approval waits (ms)                                                                                                                |
-| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `1000`           | Max LLM/tool iterations per task, configured per Host process                                                                                                          |
-| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                                                                                                                                                 |
+| Variable                              | Default          | Description                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                                                                                                                                                                                                                                                                                                                                                       |
+| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required)                                                                                                                                                                                                                                                                                                                                  |
+| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                                                                                                                                                                                                                                                                                                                                                  |
+| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                                                                                                                                                                                                                                                                                                                                      |
+| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                                                                                                                                                                                                                                                                                                                                            |
+| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                                                                                                                                                                                                                                                                                                                                                    |
+| `HCC_AUTHORITY_MAX_STALENESS_MS`      | `180000`         | Max retained HCC authority while HCC is unreachable (ms); operator-tunable, hard-capped at 600000; in cluster mode at least interval + 2 × max(interval, 10000) + 10000 + 1000 (101000 at the default interval; with the 180000 default the interval may be at most 56333), or startup fails (issues #425, #1350); plain digits only, unset or `""` means the default |
+| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"`                                                                                                                                                                                                                                                                                                                       |
+| `CLERUM_MODEL_NAME`                   | provider default | Specific model name; used only with `CLERUM_MODEL_PROVIDER`                                                                                                                                                                                                                                                                                                           |
+| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                                                                                                                                                                                                                                                                                                                                                 |
+| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                                                                                                                                                                                                                                                                                                                                                 |
+| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)                                                                                                                                                                                                                                                                                                                                               |
+| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                                                                                                                                                                                                                                                                                                                                      |
+| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                                                                                                                                                                                                                                                                                                                                           |
+| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                                                                                                                                                                                                                                                                                                                                      |
+| `CLERUM_AGENT_TASK_DELAY`             | `3`              | Delay between tasks (ms)                                                                                                                                                                                                                                                                                                                                              |
+| `CLERUM_AGENT_MAX_TASK_DURATION`      | `86400000`       | Max active task duration, excluding approval waits (ms)                                                                                                                                                                                                                                                                                                               |
+| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `1000`           | Max LLM/tool iterations per task, configured per Host process                                                                                                                                                                                                                                                                                                         |
+| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                                                                                                                                                                                                                                                                                                                                                |
 
 ### Dependencies
 
-- `openai` ^4.70.0 - OpenAI API client
+- `openai` ^4.87.0 - OpenAI API client (`/v1/responses` needs >= 4.87.0)
 - `@anthropic-ai/sdk` ^0.32.0 - Anthropic Claude API client
 - `@modelcontextprotocol/sdk` ^1.0.0 - MCP protocol SDK
 - `@kubernetes/client-node` ^1.0.0 - K8s API access
@@ -971,7 +979,7 @@ HCC reconciles NetworkPolicies in two modes:
 - `allow-hcc-api-egress-<ns>` (only the namespace's platform helper pods → HCC REST API; for example `mcp-proxy`, `rpc-proxy`, or workflow mcp-host pods)
 - `allow-k8s-api-egress-<ns>` (K8s API server on 443; created with an explicit opt-in pod selector `clerum.io/k8s-api-egress=true`, so ordinary runtime workloads do not receive API-server egress by default. The CIDR comes from `process.env.KUBERNETES_SERVICE_HOST` injected into HCC's own pod.)
 
-**In production, `CONTEXT_MAPPER_RUNTIME_NAMESPACES` is explicitly set to `mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui` (NOT the `config.ts` default, which is `mcp-server,mcp-host,sandbox-recipes,rpc-proxy` — it includes `mcp-host` and omits `sandbox-ui`). `sandbox-ui` is additionally listed in `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES`, so it receives only deny-all + DNS egress.** The `mcp-host` namespace is intentionally excluded: HCC's deny-all would block mcp-host pods from reaching LLM APIs. mcp-host's NetworkPolicies are statically declared in `deploy/base/mcp-host/networkpolicies.yaml` instead.
+**In production, `CONTEXT_MAPPER_RUNTIME_NAMESPACES` is explicitly set to `mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui` (the same value as the `config.ts` default). `sandbox-ui` is additionally listed in `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES`, so it receives only deny-all + DNS egress.** The `mcp-host` namespace is intentionally excluded: `mcp-host` keeps static policies (`deploy/base/mcp-host/networkpolicies.yaml`) under the names HCC would write; they carry no HCC ownership label, so listing `mcp-host` makes HCC's startup NetworkPolicy pass fail on conflicting ownership.
 
 HCC does NOT reconcile its own namespace (`control-plane`) either; control-plane policies are statically declared in `deploy/base/control-plane/networkpolicies.yaml` and patched per overlay for the cluster-specific K8s API IP.
 

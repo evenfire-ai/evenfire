@@ -360,9 +360,9 @@ teams app list                              # every app with its id
 ```
 
 **Messages arrive and are rejected.** `workflow-approval-request-reader` refuses
-any medium absent from `WORKFLOW_APPROVAL_READER_ENABLED_MEDIA`. The shipped
-manifests include `teams`, so this only bites a reader run by hand with the code
-default of `telegram,slack`.
+any medium absent from `WORKFLOW_APPROVAL_READER_ENABLED_MEDIA`. The code
+default and the shipped manifests both include `teams`, so this only happens
+when your Deployment replaces the default with a list that omits `teams`.
 
 ## See also
 

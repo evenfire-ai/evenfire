@@ -340,6 +340,9 @@ export async function runToolUseLoop(
             content: result.content ?? '',
             tool_calls: result.calls,
             reasoning_content: result.reasoning_content,
+            ...(result.provider_continuation
+              ? { provider_continuation: result.provider_continuation }
+              : {}),
           })
 
           for (const message of messages) {

@@ -367,6 +367,26 @@ export function useNavigationController() {
     [beginNavigationIntent, currentUserNavigationGeneration, nextWorkspaceTabId]
   )
 
+  const beginConfirmedGfsResourceNavigation = useCallback(
+    (id: number, uri: string, principalGeneration: number): GfsResourceNavigationRequest | null => {
+      const intentSequence = beginUserNavigationIntent()
+      const userNavigationGenerationAtActivation = currentUserNavigationGeneration()
+      if (userNavigationGenerationAtActivation === null) return null
+      const state = workspaceTabsRef.current
+      const owner = assignGfsResourceNavigationOwner(state, uri)
+      return {
+        id,
+        uri,
+        ownerTabId: owner.createDestination ? nextWorkspaceTabId() : owner.ownerTabId,
+        createDestination: owner.createDestination,
+        intentSequence,
+        principalGeneration,
+        userNavigationGenerationAtActivation,
+      }
+    },
+    [beginUserNavigationIntent, currentUserNavigationGeneration, nextWorkspaceTabId]
+  )
+
   const isGfsResourceNavigationCurrent = useCallback(
     (request: GfsResourceNavigationRequest, principalGeneration: number): boolean => {
       const userNavigationGeneration = currentUserNavigationGeneration()
@@ -509,6 +529,7 @@ export function useNavigationController() {
     beginUserNavigationIntent,
     isNavigationIntentCurrent,
     beginGfsResourceNavigation,
+    beginConfirmedGfsResourceNavigation,
     isGfsResourceNavigationCurrent,
     activateGfsResourceNavigation,
     completeGfsResourceNavigationPreview,

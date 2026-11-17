@@ -87,8 +87,13 @@ Two behaviours surprise people:
   you are mid-edit on. Stage or discard that file and commit again.
 
 Every refusal names the file and the fix. If you need to bypass the hook to
-get unstuck, say so in the PR rather than leaving it silent. The two release
-validators run in CI and will catch what the hook would have.
+get unstuck, say so in the PR rather than leaving it silent. A commit made
+without the hook leaves its services' versions where they were, and the
+required version check on pull requests into `dev` then fails with
+`code changed but <service>/package.json stayed at <version>`. To fix it, make
+a commit in that service with the hook on, or set the version above the base's
+with `npm version` (see
+[Releases and upgrades](docs/deploy/releases-and-upgrades.md)).
 
 ## Branches and pull requests
 
@@ -100,6 +105,12 @@ validators run in CI and will catch what the hook would have.
   release branch; changes reach it when `dev` is promoted.
 - CI (`.github/workflows/ci-public.yml`) builds, tests and typechecks every
   service in its matrix on each pull request.
+- CI also gates dependency advisories: `npm audit` for every lockfile against
+  a reviewed baseline, a check of the React copy bundled inside `next`, and a
+  Trivy scan of the Next.js app images. Lockfile scanners cannot see the
+  React inside `next`. See
+  [dependency scanning](docs/testing/dependency-scanning.md) for why, and for
+  what to do when one of these checks fails.
 
 ## Desktop App (Electron)
 

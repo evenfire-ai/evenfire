@@ -5,7 +5,7 @@ Admin dashboard for the control plane. A Next.js (App Router) React app that man
 ## How It Works
 
 - The browser only talks to same-origin paths: all API calls go to `/control-api/*` (base overridable via `NEXT_PUBLIC_CONTROL_API_BASE_URL`).
-- A Next.js route handler (`app/control-api/[...path]/route.ts`) proxies those requests server-side to `CONTROL_API_INTERNAL_URL` (default `http://127.0.0.1:8090`), stripping hop-by-hop headers, with a 30 s upstream timeout.
+- A Next.js route handler (`app/control-api/[...path]/route.ts`) proxies those requests server-side to `CONTROL_API_INTERNAL_URL` (default `http://127.0.0.1:8090`), stripping hop-by-hop headers. Requests other than GET and HEAD get an upstream timeout set by `CONTROL_API_PROXY_TIMEOUT_MS` (default 300 s); GFS upload-v2 part requests use `CONTROL_UI_GFS_UPLOAD_PROXY_TIMEOUT_MS` (default 600 s).
 - Dashboard pages redirect unauthenticated visitors to the login page — most via `<AuthGate>` (`components/AuthGate`), either directly or through a section shell (e.g. `/cost/*` via `CostShell`); the rest use an equivalent `useAuth` redirect.
 
 ## Authentication

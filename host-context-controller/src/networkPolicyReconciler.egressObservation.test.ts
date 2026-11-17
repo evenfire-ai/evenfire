@@ -8,6 +8,7 @@ import type { EgressBinding, McpServerCRD, McpServerCrdStatus } from './types'
 vi.mock('./config', () => ({
   config: {
     namespace: 'mcp-server',
+    k8sRequestTimeoutMs: 30_000,
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
