@@ -686,8 +686,7 @@ export async function updateAllowedModel(
   // from the catalog. The server cannot tell a value the operator chose from
   // one a client loaded before a prune and resent, so a client must send
   // `enabled` only when the operator changed it; one that resends the loaded
-  // value (the control-ui edit form still does) turns a model pruned while the
-  // page was open back on for good. A rename
+  // value turns a model pruned while its page was open back on for good. A rename
   // also hands the row to the operator and drops the prune token and the
   // acknowledgements: both belong to the old pair.
   const operatorDecidesEnabled =
