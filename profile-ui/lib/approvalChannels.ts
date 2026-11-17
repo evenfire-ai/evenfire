@@ -116,10 +116,9 @@ export type ChannelTableRow = {
   status: ChannelTableRowStatus
 }
 
-// One row per communication-channel target, plus any account record that no
-// longer maps to a known target so records never silently disappear. A target
-// is Verified while an active account references it, Disconnected when only a
-// disabled record remains, and Not connected before the first verification.
+// One row per target and one actionable representation per account. Additional
+// linked accounts get their own rows. Disabled records have no target references
+// in the producer response: Disconnected describes records, not target history.
 export function channelTableRows(
   targets: ApprovalChannelTarget[],
   accounts: WorkflowApprovalMediumAccount[]
@@ -131,7 +130,6 @@ export function channelTableRows(
     )
     const active =
       linked.find(account => !account.disabledAt && !representedAccounts.has(account.id)) ?? null
-    const disconnectedRecord = linked.find(account => account.disabledAt) ?? null
     const key = `target:${target.id}`
     if (active) {
       representedAccounts.add(active.id)
@@ -139,13 +137,6 @@ export function channelTableRows(
     }
     if (linked.some(account => !account.disabledAt)) {
       return { key, target, account: null, status: 'Verified' }
-    }
-    if (disconnectedRecord) {
-      if (representedAccounts.has(disconnectedRecord.id)) {
-        return { key, target, account: null, status: 'Disconnected' }
-      }
-      representedAccounts.add(disconnectedRecord.id)
-      return { key, target, account: disconnectedRecord, status: 'Disconnected' }
     }
     return { key, target, account: null, status: 'Not connected' }
   })

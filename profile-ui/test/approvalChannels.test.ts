@@ -23,6 +23,7 @@ import {
   targetDisplayName,
   telegramVerificationCommand,
 } from '../lib/approvalChannels'
+import producerOutput from './fixtures/telegram-channel-accounts.json'
 
 const target: ApprovalChannelTarget = {
   id: 'telegram:target',
@@ -93,7 +94,7 @@ test('approval account helpers expose disconnected state without targets', () =>
     providerWorkspaceId: null,
     providerChannelId: '987654321',
     disabledAt: '2026-06-05T18:00:00.000Z',
-    targets: [target],
+    targets: [],
   }
 
   assert.equal(approvalAccountStatusLabel(account), 'Disconnected')
@@ -171,23 +172,20 @@ test('channelTableRows reports Verified from the active account referencing the 
   assert.equal(rows[0]!.account, account)
 })
 
-test('channelTableRows reports Disconnected when only a disabled record remains', () => {
-  const disabled: WorkflowApprovalMediumAccount = {
-    id: 'account-1',
-    userId: 'user-1',
-    medium: 'telegram',
-    providerUserId: '123456789',
-    providerWorkspaceId: null,
-    providerChannelId: '987654321',
-    disabledAt: '2026-06-05T18:00:00.000Z',
-    targets: [target],
-  }
+test('channelTableRows shows producer-disabled records separately from unconnected targets', () => {
+  // Captured from the actual attachTelegramTargetsToAccounts producer, which
+  // deliberately clears target references when a record is disabled.
+  const targets = producerOutput.targets as ApprovalChannelTarget[]
+  const accounts = producerOutput.disabled as WorkflowApprovalMediumAccount[]
+  assert.deepEqual(accounts[0]!.targets, [])
+  assert.ok(accounts[0]!.disabledAt)
 
-  const rows = channelTableRows([target], [disabled])
+  const rows = channelTableRows(targets, accounts)
 
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0]!.status, 'Disconnected')
-  assert.equal(rows[0]!.account, disabled)
+  assert.equal(rows.length, targets.length + 1)
+  assert.ok(rows.filter(row => row.target).every(row => row.status === 'Not connected'))
+  assert.equal(rows.at(-1)!.status, 'Disconnected')
+  assert.equal(rows.at(-1)!.account, accounts[0])
 })
 
 test('channelTableRows prefers the active record over a stale disabled one', () => {
@@ -199,12 +197,13 @@ test('channelTableRows prefers the active record over a stale disabled one', () 
     providerWorkspaceId: null,
     providerChannelId: '987654321',
     disabledAt: '2026-06-05T18:00:00.000Z',
-    targets: [target],
+    targets: [],
   }
   const active: WorkflowApprovalMediumAccount = {
     ...disabled,
     id: 'account-new',
     disabledAt: undefined,
+    targets: [target],
   }
 
   const rows = channelTableRows([target], [disabled, active])
