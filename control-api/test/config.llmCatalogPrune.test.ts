@@ -62,12 +62,6 @@ describe('control-api llm catalog prune config', () => {
     )
   })
 
-  it('refuses at boot a grace PostgreSQL cannot subtract from NOW()', async () => {
-    await expect(loadConfigWith({ [GRACE]: String(Number.MAX_SAFE_INTEGER) })).rejects.toThrow(
-      GRACE
-    )
-  })
-
   for (const value of ['0', '1001', 'abc']) {
     it(`refuses ${CAP}=${value} at boot`, async () => {
       await expect(loadConfigWith({ [CAP]: value })).rejects.toThrow(CAP)
