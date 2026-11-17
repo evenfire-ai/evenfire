@@ -1,5 +1,12 @@
-import type { ReactNode } from 'react'
-import type { AdminAttentionItem, AdminCatalogModelAttentionItem, LlmAllowedModel } from '@lib/api'
+import type { ReactNode, RefObject } from 'react'
+import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
+import type {
+  AdminAckableAttentionItem,
+  AdminAttentionItem,
+  AdminModelAttentionItem,
+  LlmAllowedModel,
+} from '@lib/api'
+import type { GroupedAttentionItems } from '@lib/llmModelAttention'
 
 export type LlmModelsTab = 'catalog' | 'discovery'
 
@@ -20,16 +27,64 @@ export type CatalogAttentionBannerProps = {
    * page. An item whose row is not (yet) loaded renders without the link.
    */
   models?: LlmAllowedModel[]
+  /** Receives focus when the feed empties with the dialog open and takes its opener with it. */
+  returnFocusRef?: RefObject<HTMLElement | null>
 }
 
-export type CatalogModelAttentionGroupProps = {
-  items: AdminCatalogModelAttentionItem[]
-  /** The group's explanation, given the item count. */
-  lede: (count: number) => ReactNode
+export type CatalogAttentionDialogProps = {
+  open: boolean
+  onDismiss: () => void
+  /** Items still to review, grouped by kind. */
+  groups: GroupedAttentionItems
+  /** Items an acknowledgement covers; listed apart and never counted. */
+  reviewed: AdminModelAttentionItem[]
   modelIdsByPair: Map<string, string>
+  /** `attentionItemKey`s of the items with an action in flight. */
+  busyKeys: ReadonlySet<string>
+  /** The last action failure per `attentionItemKey`. */
+  itemErrors: ReadonlyMap<string, string>
+  onKeepEnabled: (item: AdminAckableAttentionItem) => void
+  onMarkReviewed: (item: AdminAckableAttentionItem) => void
+  onUndoReviewed: (item: AdminModelAttentionItem) => void
+}
+
+export type AttentionItemActionsProps = {
+  item: AdminAttentionItem
+  modelIdsByPair: Map<string, string>
+  busy: boolean
+  error: string | undefined
+  onKeepEnabled: (item: AdminAckableAttentionItem) => void
+  onMarkReviewed: (item: AdminAckableAttentionItem) => void
+}
+
+export type AttentionUsedByCellProps = {
+  item: AdminModelAttentionItem
+}
+
+export type ReviewedAttentionSectionProps = {
+  items: AdminModelAttentionItem[]
+  busyKeys: ReadonlySet<string>
+  itemErrors: ReadonlyMap<string, string>
+  onUndoReviewed: (item: AdminModelAttentionItem) => void
+  /** Rendered expanded; set when nothing is left to review. */
+  expanded: boolean
 }
 
 export type AttentionReviewLinkProps = {
   item: AdminAttentionItem
   modelIdsByPair: Map<string, string>
+}
+
+export type AttentionSectionProps = {
+  lede: ReactNode
+  columns: TableHeaderColumn[]
+  children: ReactNode
+}
+
+export type AttentionProviderCellProps = {
+  provider: string
+}
+
+export type AttentionModelCellProps = {
+  item: AdminAttentionItem
 }
