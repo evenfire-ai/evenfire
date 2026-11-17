@@ -808,6 +808,31 @@ export async function listGrantsReferencingModel(
 }
 
 /**
+ * Grants with a `prompt_targets[]` entry for exactly `(provider, model)`: the
+ * consumers `listGrantsReferencingModel` does not see. Unlike `allowed_models`,
+ * each target carries its provider and the runtime checks the target against
+ * the allowlist by pair, so matching the pair neither under- nor over-reports.
+ * Same lack of `policy_state` filter as the sibling query, for the same reason.
+ *
+ * `@>` with a one-element array of a partial object is true when some element
+ * of `prompt_targets` holds both keys with these values.
+ */
+export async function listGrantsReferencingPromptTarget(
+  provider: string,
+  model: string,
+  db: DbClient = pool
+): Promise<PluginWorkloadSdkGrant[]> {
+  const result = await db.query(
+    `SELECT * FROM plugin_workload_sdk_grants
+      WHERE prompt_targets @> jsonb_build_array(
+              jsonb_build_object('provider', $1::text, 'model', $2::text))
+      ORDER BY recipe_namespace, recipe_name, capability_family`,
+    [provider, model]
+  )
+  return (result.rows as Record<string, unknown>[]).map(mapGrantRow)
+}
+
+/**
  * Read-only migration gate for promptBridge rows written before the ordered
  * target policy existed. Legacy rows are intentionally never inferred or
  * rewritten here; operators get only non-secret identifiers, shape flags, and

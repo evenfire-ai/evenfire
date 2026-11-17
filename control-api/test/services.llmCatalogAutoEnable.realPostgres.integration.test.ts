@@ -279,8 +279,9 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
     cluster = new FakeConfigMapApi()
   })
 
-  function app() {
-    return mod.createApp(new mod.MockGateway())
+  // One gateway per app unless a case needs Hosts to outlive a request.
+  function app(gateway: unknown = new mod.MockGateway()) {
+    return mod.createApp(gateway)
   }
 
   function sync(
@@ -921,7 +922,7 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
   })
 
   describe('attention feed', () => {
-    it('T-H14 · an enabled model the catalog later deprecates is listed as deprecated_model_enabled', async () => {
+    it('T-H14 · an enabled model the catalog later deprecates is listed as deprecated_model_enabled once someone uses it', async () => {
       const base = wholeLiveProviders(['claude'])
       const target = first(discoveredOf(base, 'claude'), isAutoEnableEligible, 'eligible model')
       await sync(base)
@@ -946,7 +947,29 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
       expect(row.enabled).toBe(true)
       expect(row.catalog_status).toBe('deprecated')
 
-      res = await request(app()).get('/api/v1/admin/attention').set('Cookie', COOKIE).expect(200)
+      // Nobody uses it yet: a deprecated model without consumers needs no decision.
+      const gateway = new mod.MockGateway()
+      res = await request(app(gateway))
+        .get('/api/v1/admin/attention')
+        .set('Cookie', COOKIE)
+        .expect(200)
+      expect(res.body.items).toEqual([])
+
+      await request(app(gateway))
+        .post('/api/v1/admin/hosts')
+        .set('Cookie', COOKIE)
+        .send({
+          metadata: { name: 'uses-deprecated' },
+          spec: {
+            model: { provider: 'claude', name: target.model_id },
+            allowedModels: [{ provider: 'claude', model: target.model_id }],
+          },
+        })
+        .expect(201)
+      res = await request(app(gateway))
+        .get('/api/v1/admin/attention')
+        .set('Cookie', COOKIE)
+        .expect(200)
       expect(res.body.items).toContainEqual(
         expect.objectContaining({
           kind: 'deprecated_model_enabled',
@@ -957,7 +980,7 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
       expect(res.body.items).toHaveLength(1)
     })
 
-    it('T-L6 · an enabled discovery row gone stale is listed, an enabled manual stale row is not', async () => {
+    it('T-L6 · enabled stale rows nobody uses, discovery, manual or subscription, yield no item', async () => {
       const base = wholeLiveProviders(['claude'])
       const target = first(discoveredOf(base, 'claude'), isAutoEnableEligible, 'eligible model')
       await sync(base)
@@ -996,10 +1019,9 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
         .get('/api/v1/admin/attention')
         .set('Cookie', COOKIE)
         .expect(200)
-      const staleDiscovery = (res.body.items as Array<{ kind: string; model: string }>).filter(
-        i => i.kind === 'stale_discovery_enabled'
-      )
-      expect(staleDiscovery.map(i => i.model)).toEqual([target.model_id])
+      // The stale_discovery_enabled kind is retired, and none of these rows has
+      // a consumer, so none needs a decision.
+      expect(res.body.items).toEqual([])
     })
 
     it('a discovered model renamed by the operator is not flagged stale by the next live run', async () => {
@@ -1199,6 +1221,8 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
         ineligible: { no_text_output: 0, no_tool_call: 0, status: 0, not_runnable: 0 },
         dismissed: 0,
         pricesLoaded: 0,
+        reEnabled: 0,
+        reEnableDeferredByCap: 0,
       }
       expect(result.providerCounts?.claude).toEqual(expected)
       expect((await mod.getLastCatalogSyncRun())?.providerCounts?.claude).toEqual(expected)
@@ -1296,6 +1320,8 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
         ineligible: rejections,
         dismissed: dismissedHere,
         pricesLoaded: discovered.filter(m => m.cost !== null).length,
+        reEnabled: 0,
+        reEnableDeferredByCap: 0,
       })
     }
     // The status endpoint's source reports them too.
