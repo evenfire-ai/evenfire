@@ -27,6 +27,8 @@ set -euo pipefail
 # rotates tokens silently. Member-registration HMAC is stricter: env var →
 # existing Secret value → minikube local dev value, and outside minikube it
 # fails closed unless the env var or existing Secret value is present.
+# A Secret that cannot be read (any error other than NotFound, after retries)
+# stops the script before it writes anything.
 #
 # Env vars consumed:
 #   CONTEXT                              kubectl context (unset = current)
@@ -43,13 +45,17 @@ set -euo pipefail
 #                                        control-api Secret already has a value.
 #   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET override WRC HMAC (default: preserve-or-generate)
 #   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET override HCC HMAC (default: preserve-or-generate)
-#   FORCE_CONSUMER_RESTART               if true, restart every consumer including
-#                                        HCC even when the HCC HMAC is unchanged
+#   FORCE_CONSUMER_RESTART               if true, restart every consumer even when
+#                                        none of the tokens it reads changed
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=lib/clerum-minikube-context.sh
 source "${SCRIPT_DIR}/lib/clerum-minikube-context.sh"
+# shellcheck source=lib/token-consumer-stamp.sh
+source "${SCRIPT_DIR}/lib/token-consumer-stamp.sh"
 MEMBER_REGISTRATION_HMAC_KEY="CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET"
+# TOKEN_STAMP_ANNOTATION (the stamp on each consumer Deployment) comes from
+# lib/token-consumer-stamp.sh.
 
 kctl() {
   if [ -n "${CONTEXT:-}" ]; then
@@ -62,21 +68,6 @@ kctl() {
 log() { printf '[inter-service-tokens] %s\n' "$*" >&2; }
 die() { printf '[inter-service-tokens] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Read a plain string key from a Secret. Returns empty if Secret/key missing
-# or if the current value looks like a legacy `replace-with-*` placeholder
-# (so we treat those as "no real value present" and regenerate).
-read_secret_key() {
-  local ns="$1" secret="$2" key="$3"
-  local encoded decoded
-  encoded="$(kctl -n "$ns" get secret "$secret" -o jsonpath="{.data.$key}" 2>/dev/null || true)"
-  [ -z "$encoded" ] && { echo ""; return; }
-  decoded="$(printf '%s' "$encoded" | base64 --decode 2>/dev/null || echo "")"
-  case "$decoded" in
-    replace-with-*|"") echo ""; return ;;
-  esac
-  printf '%s' "$decoded"
-}
-
 resolve_token() {
   local env_var="$1" ns="$2" secret="$3" key="$4"
   local env_val="${!env_var:-}"
@@ -84,7 +75,7 @@ resolve_token() {
     printf '%s' "$env_val"; return
   fi
   local existing
-  existing="$(read_secret_key "$ns" "$secret" "$key")"
+  existing="$(read_secret_key "$ns" "$secret" "$key")" || exit 1
   if [ -n "$existing" ]; then
     printf '%s' "$existing"; return
   fi
@@ -122,7 +113,7 @@ resolve_member_registration_hmac() {
   fi
 
   local existing
-  existing="$(read_secret_key control-plane control-api-internal-tokens "$MEMBER_REGISTRATION_HMAC_KEY")"
+  existing="$(read_secret_key control-plane control-api-internal-tokens "$MEMBER_REGISTRATION_HMAC_KEY")" || exit 1
   if [ -n "$existing" ]; then
     printf '%s' "$existing"; return
   fi
@@ -217,6 +208,172 @@ fi
 SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER},codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY},grok-llm-proxy=${TOKEN_GROK_LLM_PROXY}"
 INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER},${TOKEN_CODEX_LLM_PROXY},${TOKEN_GROK_LLM_PROXY}"
 
+# --- Consumer restart decision ---
+# Each consumer's restart is decided by its token stamp
+# (lib/token-consumer-stamp.sh): the sha256 of the values its pods were last
+# restarted onto, kept as an annotation on the Deployment. A consumer restarts
+# when its stamp differs from the values this run writes.
+#
+# The "changed in this run" flags below compare each Secret value before this
+# run with the value it writes, before any Secret is patched. Every existing
+# consumer with a changed value is marked restart-pending before the first
+# write, so a failed restart, a run that dies half-way, or an out-of-band edit
+# that this run reverts (control-api's map and list are rebuilt from the
+# callers on every run) is restarted by this run or the next one without any
+# manual step. Values stay in shell locals and are never logged.
+#
+# Each control-api service token has two ends: the caller reads it from its own
+# Secret, and control-api verifies it from CONTROL_API_INTERNAL_SERVICE_TOKENS.
+# Each end is "true" when a value it reads changes. When only the other end
+# changes it is "peer": that marks a consumer without a stamp, for which a
+# changed other end is the only sign that its own Secret was edited without a
+# restart; a stamped consumer is decided by its stamp
+# (lib/token-consumer-stamp.sh), since it does not read the other end.
+#
+# Prints "true" or "false". Arguments are repeated
+# (namespace, secret, key, value-this-run-writes) groups.
+consumer_tokens_changed() {
+  [ "$#" -gt 0 ] && [ $(( $# % 4 )) -eq 0 ] || \
+    die "consumer_tokens_changed: expected (namespace secret key value) groups"
+  local current
+  while [ "$#" -gt 0 ]; do
+    current="$(read_secret_key "$1" "$2" "$3")" || exit 1
+    if [ -z "$current" ] || [ "$current" != "$4" ]; then
+      echo true; return
+    fi
+    shift 4
+  done
+  echo false
+}
+
+# Current control-api service-token map ("name=token,..."), read once.
+CURRENT_SERVICE_TOKENS_MAP="$(read_secret_key control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS)"
+
+# Prints "true" when the caller's own Secret key changes in this run, "peer"
+# when only its entry (name) in control-api's current service-token map differs
+# or is missing, else "false". Arguments:
+# name namespace secret key value-this-run-writes.
+service_token_changed() {
+  local name="$1" ns="$2" secret="$3" key="$4" value="$5"
+  local entry current_entry="" entries=() caller_key_changed
+  # Bash clears `set -e` inside command substitutions, so a `die` in the inner
+  # call is propagated explicitly; the caller's assignment then fails too.
+  caller_key_changed="$(consumer_tokens_changed "$ns" "$secret" "$key" "$value")" || exit 1
+  if [ "$caller_key_changed" = "true" ]; then
+    echo true; return
+  fi
+  if [ -n "$CURRENT_SERVICE_TOKENS_MAP" ]; then
+    IFS=',' read -r -a entries <<<"$CURRENT_SERVICE_TOKENS_MAP"
+  fi
+  for entry in "${entries[@]+"${entries[@]}"}"; do
+    if [ "${entry%%=*}" = "$name" ]; then
+      current_entry="${entry#*=}"
+      break
+    fi
+  done
+  if [ "$current_entry" != "$value" ]; then
+    echo peer; return
+  fi
+  echo false
+}
+
+# Consumer → keys it reads (deploy/base manifests; per-Host channel-reader
+# Deployments are built by host-context-controller buildChannelReaderDeployment).
+# Map entry names match SERVICE_TOKENS_MAP above.
+EXTERNAL_REST_API_CHANGED="$(service_token_changed external-rest-api \
+  profiles external-rest-api-secrets EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN "$TOKEN_EXT_REST")"
+RPC_PROXY_CHANGED="$(service_token_changed rpc-proxy \
+  rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN "$TOKEN_RPC")"
+WEBHOOK_PROXY_CHANGED="$(service_token_changed webhook-proxy \
+  webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN "$TOKEN_WEBHOOK_PROXY")"
+CODEX_LLM_PROXY_CHANGED="$(service_token_changed codex-llm-proxy \
+  control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN "$TOKEN_CODEX_LLM_PROXY")"
+GROK_LLM_PROXY_CHANGED="$(service_token_changed grok-llm-proxy \
+  control-plane grok-llm-proxy-secrets GROK_LLM_PROXY_CONTROL_API_TOKEN "$TOKEN_GROK_LLM_PROXY")"
+WA_READER_CONTROL_API_TOKEN_CHANGED="$(service_token_changed workflow-approval-reader \
+  channels workflow-approval-request-reader-credentials control-api-token "$TOKEN_WA_READER")"
+# The reader sends the handoff token and the channel-readers verify it; both
+# read the same key, so one comparison decides both restarts.
+CHANNEL_READER_CHANGED="$(consumer_tokens_changed \
+  channels workflow-approval-request-reader-credentials channel-reader-handoff-token "$READER_HANDOFF_TOKEN_VALUE")"
+if [ "$WA_READER_CONTROL_API_TOKEN_CHANGED" = "true" ] || [ "$CHANNEL_READER_CHANGED" = "true" ]; then
+  WA_READER_CHANGED=true
+else
+  # "peer" (only control-api's map entry for the reader differs) or "false".
+  WA_READER_CHANGED="$WA_READER_CONTROL_API_TOKEN_CHANGED"
+fi
+WORKFLOW_RECIPES_CHANGED="$(consumer_tokens_changed \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET "$INTERNAL_CONTROL_WRC_HMAC")"
+HCC_CHANGED="$(consumer_tokens_changed \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$INTERNAL_CONTROL_HCC_HMAC")"
+# control-api envFrom-loads control-api-internal-tokens and
+# internal-control-jwt-secrets whole; only the keys written here are compared.
+# When none of them changes but a caller's own key does (the other end of that
+# caller's token), control-api is "peer".
+CONTROL_API_CHANGED="$(consumer_tokens_changed \
+  control-plane control-api-internal-tokens CONTROL_API_INTERNAL_SERVICE_TOKENS "$SERVICE_TOKENS_MAP" \
+  control-plane control-api-internal-tokens CONTROL_API_INTERNAL_TOKENS "$INTERNAL_TOKENS_LIST" \
+  control-plane control-api-internal-tokens "$MEMBER_REGISTRATION_HMAC_KEY" "$MEMBER_REGISTRATION_HMAC" \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET "$INTERNAL_CONTROL_WRC_HMAC" \
+  control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET "$INTERNAL_CONTROL_HCC_HMAC")"
+for caller_changed in "$EXTERNAL_REST_API_CHANGED" "$RPC_PROXY_CHANGED" "$WEBHOOK_PROXY_CHANGED" \
+                      "$CODEX_LLM_PROXY_CHANGED" "$GROK_LLM_PROXY_CHANGED" \
+                      "$WA_READER_CONTROL_API_TOKEN_CHANGED"; do
+  if [ "$caller_changed" = "true" ] && [ "$CONTROL_API_CHANGED" = "false" ]; then
+    CONTROL_API_CHANGED=peer
+  fi
+done
+
+# Token stamp per consumer: the values each one reads, as written by this run.
+STAMP_CONTROL_API="$(token_stamp_of \
+  "CONTROL_API_INTERNAL_SERVICE_TOKENS=$SERVICE_TOKENS_MAP" \
+  "CONTROL_API_INTERNAL_TOKENS=$INTERNAL_TOKENS_LIST" \
+  "$MEMBER_REGISTRATION_HMAC_KEY=$MEMBER_REGISTRATION_HMAC" \
+  "INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET=$INTERNAL_CONTROL_WRC_HMAC" \
+  "INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET=$INTERNAL_CONTROL_HCC_HMAC")"
+STAMP_WORKFLOW_RECIPES="$(token_stamp_of "INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET=$INTERNAL_CONTROL_WRC_HMAC")"
+STAMP_HCC="$(token_stamp_of "INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET=$INTERNAL_CONTROL_HCC_HMAC")"
+STAMP_CODEX_LLM_PROXY="$(token_stamp_of "CODEX_LLM_PROXY_CONTROL_API_TOKEN=$TOKEN_CODEX_LLM_PROXY")"
+STAMP_GROK_LLM_PROXY="$(token_stamp_of "GROK_LLM_PROXY_CONTROL_API_TOKEN=$TOKEN_GROK_LLM_PROXY")"
+STAMP_EXTERNAL_REST_API="$(token_stamp_of "EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN=$TOKEN_EXT_REST")"
+STAMP_RPC_PROXY="$(token_stamp_of "RPC_PROXY_CONTROL_API_SERVICE_TOKEN=$TOKEN_RPC")"
+STAMP_WEBHOOK_PROXY="$(token_stamp_of "WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN=$TOKEN_WEBHOOK_PROXY")"
+STAMP_WA_READER="$(token_stamp_of \
+  "control-api-token=$TOKEN_WA_READER" \
+  "channel-reader-handoff-token=$READER_HANDOFF_TOKEN_VALUE")"
+STAMP_CHANNEL_READER="$(token_stamp_of "channel-reader-handoff-token=$READER_HANDOFF_TOKEN_VALUE")"
+
+# Fixed consumers: "namespace:deployment:changed-in-run:desired-stamp".
+TOKEN_CONSUMERS=(
+  "control-plane:control-api:${CONTROL_API_CHANGED}:${STAMP_CONTROL_API}"
+  "control-plane:codex-llm-proxy:${CODEX_LLM_PROXY_CHANGED}:${STAMP_CODEX_LLM_PROXY}"
+  "control-plane:grok-llm-proxy:${GROK_LLM_PROXY_CHANGED}:${STAMP_GROK_LLM_PROXY}"
+  "control-plane:workflow-recipes:${WORKFLOW_RECIPES_CHANGED}:${STAMP_WORKFLOW_RECIPES}"
+  "control-plane:host-context-controller:${HCC_CHANGED}:${STAMP_HCC}"
+  "profiles:external-rest-api:${EXTERNAL_REST_API_CHANGED}:${STAMP_EXTERNAL_REST_API}"
+  "rpc-proxy:rpc-proxy:${RPC_PROXY_CHANGED}:${STAMP_RPC_PROXY}"
+  "webhook-ingress:webhook-proxy:${WEBHOOK_PROXY_CHANGED}:${STAMP_WEBHOOK_PROXY}"
+  "channels:clerum-workflow-approval-request-reader:${WA_READER_CHANGED}:${STAMP_WA_READER}"
+)
+
+# --- 0. Record restart obligations before any Secret is written ---
+# Every existing consumer whose values change is marked restart-pending here
+# (see "Consumer restart decision"). If a mark cannot be written, the run stops
+# before changing any Secret.
+for entry in "${TOKEN_CONSUMERS[@]}"; do
+  IFS=':' read -r ns dep changed _stamp <<<"$entry"
+  token_stamp_mark_pending "$TOKEN_STAMP_ANNOTATION" "$ns" "$dep" "$changed" || exit 1
+done
+if [ "$CHANNEL_READER_CHANGED" = "true" ]; then
+  channel_readers_before="$(token_stamp_retry kctl -n channels get deploy -l app=channel-reader \
+      -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}')" \
+    || die "cannot list channel-reader deployments before writing Secrets; no Secret was written"
+  while IFS= read -r channel_reader; do
+    [ -n "$channel_reader" ] || continue
+    token_stamp_mark_pending "$TOKEN_STAMP_ANNOTATION" channels "$channel_reader" true || exit 1
+  done <<<"$channel_readers_before"
+fi
+
 # --- 1. control-api-internal-tokens (control-plane) ---
 log "Patching Secret control-api-internal-tokens (control-plane)"
 ensure_secret control-plane control-api-internal-tokens
@@ -240,17 +397,6 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials \
   -p='[{"op":"remove","path":"/data/service-token"}]' >/dev/null 2>&1 || true
 
 # --- 2. internal-control-jwt-secrets (control-plane) ---
-# Compare the HCC-consumed key only. The merge patch writes WRC + HCC together,
-# so a whole-Secret resourceVersion (or parsing `patched (no change)`) would
-# Recreate HCC on a WRC-only rotation. Values stay in shell locals — never logged.
-HCC_HMAC_BEFORE="$(read_secret_key control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET)"
-if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ] || \
-   [ -z "$HCC_HMAC_BEFORE" ] || \
-   [ "$HCC_HMAC_BEFORE" != "$INTERNAL_CONTROL_HCC_HMAC" ]; then
-  HCC_SECRET_CHANGED=true
-else
-  HCC_SECRET_CHANGED=false
-fi
 log "Patching Secret internal-control-jwt-secrets (control-plane)"
 ensure_secret control-plane internal-control-jwt-secrets
 INTERNAL_CONTROL_PATCH="$(jq -cn \
@@ -333,39 +479,31 @@ WA_READER_PATCH="$(jq -cn \
   }}')"
 kctl -n channels patch secret workflow-approval-request-reader-credentials --type=merge -p "$WA_READER_PATCH"
 
-# Roll the consumers so they pick up the fresh tokens on first deploy. Safe
-# no-ops if the Deployments do not yet exist. HCC is Recreate + replicas:1
-# and reloads HMAC only at process start, so skip that extra rollout when the
-# HCC key this run writes equals the key already in the Secret (image/spec
-# applies still roll HCC themselves). This is not "the running pod env matches
-# the Secret": an out-of-band kubectl patch of the HCC key, then a re-run that
-# preserve-or-generates from the Secret, will skip. Heal that with
-# FORCE_CONSUMER_RESTART=true.
-for pair in "control-plane:control-api" \
-            "control-plane:codex-llm-proxy" \
-            "control-plane:grok-llm-proxy" \
-            "control-plane:workflow-recipes" \
-            "control-plane:host-context-controller" \
-            "profiles:external-rest-api" \
-            "rpc-proxy:rpc-proxy" \
-            "webhook-ingress:webhook-proxy" \
-            "channels:clerum-workflow-approval-request-reader"; do
-  ns="${pair%%:*}"
-  dep="${pair#*:}"
-  if [ "$ns" = "control-plane" ] && [ "$dep" = "host-context-controller" ] && \
-     [ "$HCC_SECRET_CHANGED" != "true" ]; then
-    log "Skipping rollout of $ns/$dep: hcc-hmac unchanged"
-    continue
-  fi
-  if kctl -n "$ns" get deploy "$dep" >/dev/null 2>&1; then
-    log "Rolling deployment $ns/$dep to pick up fresh Secret values"
-    kctl -n "$ns" rollout restart deploy "$dep" >/dev/null
-  fi
+# Restart each consumer whose token stamp differs from the values written above
+# (see "Consumer restart decision"). Image/spec applies still roll Deployments
+# on their own; a Deployment that does not exist yet is skipped.
+TOKEN_RESTART_PENDING=()
+for entry in "${TOKEN_CONSUMERS[@]}"; do
+  IFS=':' read -r ns dep changed stamp <<<"$entry"
+  reconcile_token_consumer "$TOKEN_STAMP_ANNOTATION" "$ns" "$dep" "$changed" "$stamp"
 done
 
-if kctl -n channels get deploy -l app=channel-reader >/dev/null 2>&1; then
-  log "Rolling channel-reader deployments to pick up fresh Secret values"
-  kctl -n channels rollout restart deploy -l app=channel-reader >/dev/null || true
+# Per-Host channel-reader Deployments (built by host-context-controller in the
+# channels namespace, label app=channel-reader) read only the handoff token.
+if ! channel_readers="$(token_stamp_retry kctl -n channels get deploy -l app=channel-reader \
+     -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}')"; then
+  log "ERROR: cannot list channel-reader deployments; their restart is pending"
+  TOKEN_RESTART_PENDING+=("channels/app=channel-reader")
+elif [ -z "$channel_readers" ]; then
+  log "Skipping rollout of channels/app=channel-reader: none deployed"
+else
+  while IFS= read -r channel_reader; do
+    [ -n "$channel_reader" ] || continue
+    reconcile_token_consumer "$TOKEN_STAMP_ANNOTATION" channels "$channel_reader" \
+      "$CHANNEL_READER_CHANGED" "$STAMP_CHANNEL_READER"
+  done <<<"$channel_readers"
 fi
+
+token_stamp_fail_if_pending "${CONTEXT:-}" || exit 1
 
 log "Done."

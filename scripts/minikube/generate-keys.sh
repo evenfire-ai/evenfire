@@ -23,6 +23,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=../../deploy/scripts/lib/restart-jwt-key-consumers.sh
+source "${PROJECT_DIR}/deploy/scripts/lib/restart-jwt-key-consumers.sh"
 
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
@@ -256,6 +258,15 @@ if [[ "${1:-}" == "--apply" ]]; then
   log "Applying secrets to cluster..."
   $KC apply -f "$OUTPUT"
   ok "Secrets applied to cluster"
+  # New keys were just applied (this point is reached only when
+  # control-api-secrets was absent or FORCE_REGEN=true). Restart every deployed
+  # consumer so signers and verifiers load the same keys; on a fresh profile no
+  # consumer is deployed yet and each one is skipped. mcp-host and gfsc read the
+  # RPC public key from ConfigMaps that this script does not write: callers
+  # follow with `make minikube-sync-auth-key` (full-setup.sh runs
+  # sync-auth-key.sh later in the same setup).
+  log "Restarting consumers of the new keys..."
+  restart_jwt_key_consumers kubectl --context="${PROFILE}"
 fi
 
 log "Done. Key pairs generated and written to deploy/minikube/secrets/jwt-signing-keys.yaml"

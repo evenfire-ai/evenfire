@@ -75,7 +75,13 @@ t2_lock_process_matches() {
   return 1
 }
 
+# Per-worker trace, printed only when two owners are admitted (#1254).
+exec 9>"${TEST_RESULT_FILE}.trace.$$"
+BASH_XTRACEFD=9
+PS4='+${EPOCHREALTIME:-} ${LINENO} '
+set -x
 t2_lock_acquire
+set +x
 printf 'ACQUIRED %s\n' "$$" >>"${TEST_RESULT_FILE}"
 deadline=$((SECONDS + 10))
 while [[ ! -e "${TEST_RELEASE_FILE}" ]]; do
@@ -119,6 +125,10 @@ done
 
 [[ "$(wc -l <"${RESULT_FILE}" | tr -d ' ')" -eq 1 ]] || {
   cat "${RESULT_FILE}" >&2
+  for diagnostic in "${TMP_DIR}/worker-1.out" "${TMP_DIR}/worker-2.out" "${RESULT_FILE}".trace.* "${LOCK_DIR}/owner.env"; do
+    echo "--- ${diagnostic##*/}" >&2
+    cat "${diagnostic}" >&2 || true
+  done
   echo 'FAIL: two stale-lock reclaimers entered the critical section' >&2
   exit 1
 }
