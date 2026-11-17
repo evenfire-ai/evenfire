@@ -485,7 +485,8 @@ room. The user approves the delete on a card that lists each file with its
 kind, whole name, size and creation date. The delete's arguments are checked
 against its schema before the approval, so a call its schema refuses (more
 than 20 files, a name over 255 characters) shows no card. Desktop shows the
-card, with a note when redaction lengthened it past the 64 KiB bound. In
+card, with a note when redaction changed a kind or a name; a card that
+redaction lengthens past 64 KiB is also cut there. In
 Telegram, Slack and Teams the card is one message: Telegram 4096 characters,
 Slack 3000 characters once `&`, `<` and `>` are escaped, and Teams 12,000
 bytes of the JSON-encoded text, each measured on the whole card including its
