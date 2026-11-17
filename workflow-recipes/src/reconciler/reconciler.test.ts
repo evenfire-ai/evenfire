@@ -12817,7 +12817,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(revocationPatches()).toHaveLength(0)
     })
 
-    it('T2.4 the non-workflow loop revokes a denied workload once per denied Secret version', async () => {
+    it('T2.4 the non-workflow revocation round revokes a denied workload once per denied Secret version', async () => {
       denySecrets({ 'qa-creds': '7' })
       const store = installRecipeStore(
         makeRecipe({ spec: { workloads: [deniedDeployment('qa-api', 'qa-creds')] } })
@@ -13401,6 +13401,53 @@ describe('WorkflowRecipeReconciler', () => {
     })
     const statefulSetReads = (name: string) =>
       mockAppsApi.readNamespacedStatefulSet.mock.calls.filter(([arg]) => arg.name === name).length
+    const storedConditionOf = (store: { current: () => WorkflowRecipeCRD }, type: string) =>
+      store.current().status?.conditions?.find(c => c.type === type)
+
+    /**
+     * Issue #1518 — the first revocation of `db` meets immutable drift: its stored
+     * StatefulSet was given another `serviceName` outside WRC. Runs one pass as the
+     * watcher does (reconcile, then publish). Witnesses: the pass read the
+     * StatefulSet, and the teardown failure was logged with the drift error.
+     */
+    async function firstRevocationMeetsDrift(caller: DeniedCaller) {
+      const inner = caller === 'non-workflow deploy' ? undefined : stubInner()
+      denySecrets({ 'db-creds': '7' })
+      const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet()])
+      const name = await storeCredentialedStatefulSet(recipe)
+      const namespace = recipe.metadata.namespace
+      const readLive = async () =>
+        (await mockAppsApi.readNamespacedStatefulSet({ name, namespace })) as k8s.V1StatefulSet
+      const setServiceName = async (serviceName: string) => {
+        const live = await readLive()
+        live.spec!.serviceName = serviceName
+        await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+      }
+      const serviceName = (await readLive()).spec!.serviceName!
+      await setServiceName('renamed-by-hand')
+      const store = installRecipeStore(recipe)
+      const errorLog = captureLogger('error')
+      const readsBefore = statefulSetReads(name)
+
+      const before = store.current()
+      const result = await reconciler.reconcile(before)
+      const failureErrors = errorLog.mock.calls
+        .map(([, context]) => (context as { err?: Error } | undefined)?.err?.name)
+        .filter(errorName => errorName === 'ImmutableStatefulSetDriftError').length
+      errorLog.mockRestore()
+      const patched = await publishAsWatcher(before, result)
+
+      expect(statefulSetReads(name)).toBeGreaterThan(readsBefore)
+      expect(failureErrors).toBe(1)
+      return {
+        store,
+        name,
+        result,
+        patched,
+        innerCalls: () => inner?.reconcile.mock.calls.length ?? 0,
+        restoreServiceName: () => setServiceName(serviceName),
+      }
+    }
 
     for (const caller of DENIED_CALLERS) {
       it(`T-R3-M1-1 (${caller}): a StatefulSet revoked for a denial takes a later spec edit through the hash gate, with no Pod delete and no record write`, async () => {
@@ -13466,7 +13513,7 @@ describe('WorkflowRecipeReconciler', () => {
         expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
       })
 
-      it(`T-R3-M1-2 (${caller}): a failed update of a revoked StatefulSet is retried and neither deletes its Pods nor writes a record`, async () => {
+      it(`T-1518-2 / T-R3-M1-2 (${caller}): a failed update of a revoked StatefulSet is retried, neither deletes its Pods nor writes a record, and publishes the drift`, async () => {
         const inner = caller === 'non-workflow deploy' ? undefined : stubInner()
         denySecrets({ 'db-creds': '7' })
         // ok-api is ordered after db.
@@ -13483,7 +13530,11 @@ describe('WorkflowRecipeReconciler', () => {
         const stored = async () =>
           (await mockAppsApi.readNamespacedStatefulSet({ name, namespace })) as k8s.V1StatefulSet
 
-        await reconciler.reconcile(store.current())
+        // Pass 1 revokes. The workflow deploy pass is not published, so the stored
+        // phase stays `candidate` and pass 2 enters the deploy path again.
+        const pass1Recipe = store.current()
+        const pass1 = await reconciler.reconcile(pass1Recipe)
+        if (caller !== 'workflow deploy') await publishAsWatcher(pass1Recipe, pass1)
         expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
         const digest = store.current().status?.secretOwnershipRevocations?.['db']
         expect(digest).toMatch(/^sha256:/)
@@ -13527,19 +13578,155 @@ describe('WorkflowRecipeReconciler', () => {
             'ImmutableStatefulSetDriftError',
           ])
           expect(result.message).toBe(
-            'EnvSecretOwnershipDenied recheck deferred: update of revoked StatefulSet failed for db — requeuing'
+            'EnvSecretOwnershipDenied: update of revoked StatefulSet failed for db ' +
+              '(StatefulSet immutable drift: db) — requeuing'
           )
-          expect(result.skipStatusPatch).toBe(true)
+          expect(result.skipStatusPatch).toBeUndefined()
         }
         expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
         expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
         expect((await stored()).spec!.template.spec!.containers[0].image).toBe('postgres:16')
         expect(revocationPatches()).toHaveLength(0)
         expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(digest)
+
+        // Issue #1518 — the pass is published with the denial and the drift.
+        expect(await publishAsWatcher(edited, result)).toBe(true)
+        const drift = storedConditionOf(store, 'StatefulSetImmutableDrift')
+        expect(drift?.status).toBe('True')
+        expect(drift?.message).toContain('spec.serviceName')
+        expect(storedConditionOf(store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+      })
+
+      it(`T-1518-1 (${caller}): a first revocation that meets immutable drift publishes the drift and the denial once`, async () => {
+        vi.useFakeTimers()
+        onTestFinished(() => {
+          vi.useRealTimers()
+        })
+        vi.setSystemTime(new Date('2026-11-17T10:00:00.000Z'))
+        const run = await firstRevocationMeetsDrift(caller)
+
+        expect(run.patched).toBe(true)
+        const drift = storedConditionOf(run.store, 'StatefulSetImmutableDrift')
+        expect(drift?.status).toBe('True')
+        expect(drift?.message).toContain('spec.serviceName')
+        expect(drift?.message).toContain('The stored spec hash is not the desired one')
+        expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+        expect(run.result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(statefulSetWrites()).toEqual({ patches: 0, creates: 0, podDeletes: 0 })
+        expect(run.store.current().status?.secretOwnershipRevocations?.['db']).toBeUndefined()
+        expect(revocationPatches()).toHaveLength(0)
+        if (caller === 'workflow deploy') {
+          expect(run.result.message).toMatch(
+            /^Issue #637: teardown of denied workflow workload "db" failed; requeueing to retry revocation: ImmutableStatefulSetDrift: /
+          )
+          expect(run.innerCalls()).toBe(0)
+        } else if (caller === 'steady enforcer') {
+          expect(run.result.message).toBe(
+            'EnvSecretOwnershipDenied: teardown failed for db (StatefulSet immutable drift: db) — requeuing'
+          )
+          expect(run.result.skipStatusPatch).toBeUndefined()
+        } else {
+          expect(run.result.phase).toBe('degraded')
+        }
+
+        // A second pass over the same drift does not patch the status. Witness:
+        // the pass read the StatefulSet again and still carries the condition, with
+        // a later lastTransitionTime.
+        vi.setSystemTime(new Date('2026-11-17T10:01:00.000Z'))
+        const readsBeforePass2 = statefulSetReads(run.name)
+        const pass2Recipe = run.store.current()
+        const pass2 = await reconciler.reconcile(pass2Recipe)
+        expect(statefulSetReads(run.name)).toBeGreaterThan(readsBeforePass2)
+        const pass2Drift = pass2.workloadConditions?.find(
+          c => c.type === 'StatefulSetImmutableDrift'
+        )
+        expect(pass2Drift?.message).toBe(drift?.message)
+        expect(pass2Drift?.lastTransitionTime).not.toBe(drift?.lastTransitionTime)
+        expect(await publishAsWatcher(pass2Recipe, pass2)).toBe(false)
+        expect(statefulSetWrites()).toEqual({ patches: 0, creates: 0, podDeletes: 0 })
+      })
+
+      it(`T-1518-8 (${caller}): once the drift is resolved the revocation is applied and the drift condition is cleared`, async () => {
+        const run = await firstRevocationMeetsDrift(caller)
+        // Witness: the drift condition was stored by the blocked pass.
+        expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')?.status).toBe('True')
+        const innerCallsBefore = run.innerCalls()
+
+        await run.restoreServiceName()
+        const recipe = run.store.current()
+        const result = await reconciler.reconcile(recipe)
+
+        expect(await publishAsWatcher(recipe, result)).toBe(true)
+        expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')).toBeUndefined()
+        expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+        expect(run.store.current().status?.secretOwnershipRevocations?.['db']).toMatch(
+          /^sha256:[0-9a-f]{64}$/
+        )
+        if (caller === 'workflow deploy') {
+          // The pass left the degraded state and reached the inner reconcile.
+          expect(run.innerCalls()).toBeGreaterThan(innerCallsBefore)
+        }
       })
     }
 
-    it('T-R3-M1-4: the steady enforcer names a failed teardown and a failed update of a revoked StatefulSet separately', async () => {
+    it('T-1518-9: the status refresh drops both conditions and the forced reconcile writes them back (inherited, filed)', async () => {
+      const run = await firstRevocationMeetsDrift('non-workflow deploy')
+      // Witness: the blocked pass stored both conditions.
+      expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')?.status).toBe('True')
+      expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+
+      // The 30-second refresh as the watcher runs it (refreshWorkloadStatusOnly).
+      const refreshed = run.store.current()
+      const observed = await reconciler.observeCurrentWorkloadStatus(refreshed)
+      expect(await publishAsWatcher(refreshed, observed)).toBe(true)
+      expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')).toBeUndefined()
+      expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')).toBeUndefined()
+
+      // The forced reconcile that follows writes both back.
+      const forced = run.store.current()
+      const result = await reconciler.reconcile(forced)
+      expect(await publishAsWatcher(forced, result)).toBe(true)
+      expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')?.status).toBe('True')
+      expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+    })
+
+    it('T-1518-7: the steady enforcer defers a failed teardown without immutable drift and publishes nothing', async () => {
+      stubInner()
+      denySecrets({ 'qa-creds': '7' })
+      const store = installRecipeStore(
+        runChild([deniedDeployment('qa-api', 'qa-creds')], {
+          phase: 'active',
+          workflowExecution: { phase: 'running' },
+        })
+      )
+      mockAppsApi.deleteNamespacedDeployment.mockRejectedValue({
+        code: 500,
+        message: 'apiserver boom',
+      })
+      const errorLog = captureLogger('error')
+
+      const recipe = store.current()
+      const result = await reconciler.reconcile(recipe)
+      const failureLogs = errorLog.mock.calls.filter(
+        ([message]) => message === 'Denied workload teardown failed; requeueing'
+      ).length
+      errorLog.mockRestore()
+
+      // Witness: the teardown ran and failed.
+      expect(deploymentDeletes('qa-api')).toBeGreaterThan(0)
+      expect(failureLogs).toBe(1)
+      expect(result.message).toBe(
+        'EnvSecretOwnershipDenied recheck deferred: teardown failed for qa-api — requeuing'
+      )
+      expect(result.skipStatusPatch).toBe(true)
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.workloadConditions).toBeUndefined()
+      expect(result.secretOwnershipConditions).toBeUndefined()
+      expect(await publishAsWatcher(recipe, result)).toBe(false)
+    })
+
+    it('T-1518-6 / T-R3-M1-4: the steady enforcer names a failed teardown and a failed update of a revoked StatefulSet separately and publishes the drift', async () => {
       stubInner()
       denySecrets({ 'db-creds': '7', 'qa-creds': '7' })
       const workloads = (image: string) => [
@@ -13551,7 +13738,8 @@ describe('WorkflowRecipeReconciler', () => {
       const namespace = recipe.metadata.namespace
       const store = installRecipeStore(recipe)
 
-      await reconciler.reconcile(store.current())
+      const pass1Recipe = store.current()
+      await publishAsWatcher(pass1Recipe, await reconciler.reconcile(pass1Recipe))
       // Witness: both workloads were revoked and recorded.
       expect(Object.keys(store.current().status?.secretOwnershipRevocations ?? {}).sort()).toEqual([
         'db',
@@ -13577,10 +13765,15 @@ describe('WorkflowRecipeReconciler', () => {
       const result = await reconciler.reconcile(edited)
 
       expect(result.message).toBe(
-        'EnvSecretOwnershipDenied recheck deferred: teardown failed for qa-api; ' +
-          'update of revoked StatefulSet failed for db — requeuing'
+        'EnvSecretOwnershipDenied: teardown failed for qa-api; ' +
+          'update of revoked StatefulSet failed for db (StatefulSet immutable drift: db) — requeuing'
       )
       expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(await publishAsWatcher(edited, result)).toBe(true)
+      const drift = storedConditionOf(store, 'StatefulSetImmutableDrift')
+      expect(drift?.status).toBe('True')
+      expect(drift?.message).toContain('spec.serviceName')
+      expect(storedConditionOf(store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
     })
 
     it('T-R3-M1-3: a revoked transport StatefulSet is updated without deleting its McpServer delegation again', async () => {
@@ -13645,7 +13838,7 @@ describe('WorkflowRecipeReconciler', () => {
       } as unknown as WorkloadDef
     }
 
-    it('T-P2-1 the non-workflow loop deletes a denied Deployment that declares volumeClaimTemplates', async () => {
+    it('T-P2-1 the non-workflow revocation round deletes a denied Deployment that declares volumeClaimTemplates', async () => {
       mockCoreApi.readNamespacedSecret.mockImplementation(async () => ({
         metadata: { resourceVersion: '5', labels: { 'clerum.io/owner-recipe': 'test-recipe' } },
         data: { token: 'eA==' },
@@ -19556,7 +19749,7 @@ describe('WorkflowRecipeReconciler', () => {
         // A new denial version, so the revocation runs again and meets the drift.
         denyAt('2')
         const errorLog = captureLogger('error')
-        await reconciler.reconcile(store.current())
+        const result = await reconciler.reconcile(store.current())
         errorLog.mockRestore()
 
         const teardownFailure = errorLog.mock.calls.find(
@@ -19573,6 +19766,8 @@ describe('WorkflowRecipeReconciler', () => {
         // Witness for the negative below: the condition of the same error names helm.
         expect(err.message).not.toContain('"helm"')
         expect(err.message).toContain('The stored spec hash is the desired one')
+        // The pass publishes that condition (issue #1518).
+        expect(result.workloadConditions).toContainEqual(err.condition)
       } finally {
         mockCustomApi.patchNamespacedCustomObjectStatus
           .mockReset()

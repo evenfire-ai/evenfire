@@ -266,6 +266,14 @@ interface SteadyOwnershipOutcome {
   needsRequeue: boolean
   requeueReason?: string
   /**
+   * Issue #1518 — the `StatefulSetImmutableDrift` condition of every denied
+   * StatefulSet whose revocation or update met immutable drift in this pass, in
+   * spec order. Non-empty only with `needsRequeue`.
+   */
+  driftConditions: StatusCondition[]
+  /** The workload ids of `driftConditions`, in the same order. */
+  driftWorkloadIds: string[]
+  /**
    * Issue #1349 — the denied workloads were torn down, but this pass's revocation
    * record was not stored: the denial is published and the pass requeues.
    */
@@ -286,9 +294,25 @@ function steadyOwnershipResult(
   phase: RecipePhase
 ): ReconcileResult | null {
   if (outcome.needsRequeue) {
-    // Could not verify or could not tear down — requeue (transient) rather than
-    // report a clean or revoked status. `skipStatusPatch` + `requeueAfterMs`
-    // schedules a deterministic retry without writing a misleading condition.
+    if (outcome.driftConditions.length > 0) {
+      // Issue #1518 — immutable drift does not clear by itself: publish the
+      // denial and the drift condition, and requeue. The message is the same on
+      // every pass over the same failures, so the status is written once.
+      return {
+        phase,
+        message:
+          `EnvSecretOwnershipDenied: ${outcome.requeueReason} ` +
+          `(StatefulSet immutable drift: ${outcome.driftWorkloadIds.join(', ')}) — requeuing`,
+        workloadStatuses: [],
+        secretOwnershipConditions: outcome.conditions,
+        workloadConditions: outcome.driftConditions,
+        requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+      }
+    }
+    // Could not verify, or a teardown or update failed without immutable drift —
+    // requeue (transient) rather than report a clean or revoked status.
+    // `skipStatusPatch` + `requeueAfterMs` schedules a deterministic retry
+    // without writing a misleading condition.
     return {
       phase,
       message: `EnvSecretOwnershipDenied recheck deferred: ${outcome.requeueReason} — requeuing`,
@@ -763,6 +787,17 @@ class DeniedWorkloadRevocationError extends RetryableReconcileError {
   ) {
     super(message, options)
   }
+}
+
+/**
+ * Issue #1518 — the `StatefulSetImmutableDrift` condition of every failed
+ * revocation that met immutable drift, in spec order. Each caller of the
+ * revocation round publishes them next to its Secret ownership conditions.
+ */
+function revocationDriftConditions(failures: DeniedRevocationFailure[]): StatusCondition[] {
+  return failures.flatMap(failure =>
+    failure.error instanceof ImmutableStatefulSetDriftError ? [failure.error.condition] : []
+  )
 }
 
 /** Issue #637 / #1349 — the sentence a workflow deploy pass reports for one failed revocation. */
@@ -3281,14 +3316,19 @@ export class WorkflowRecipeReconciler {
       // reuse that verdict so render and delegation share one source of truth. The
       // denied workloads were already revoked right after the verdict.
       const workloadStatuses: ReconcileResult['workloadStatuses'] = []
-      const workloadConditions: StatusCondition[] = []
+      // Issue #1518 — a denied StatefulSet whose revocation met immutable drift is
+      // published with its drift condition; the render loop adds the drift of
+      // the workloads it renders.
+      const workloadConditions: StatusCondition[] = revocationDriftConditions(
+        revocationRound.failures
+      )
       for (const workloadId of sortOrder) {
         const workload = (recipe.spec.workloads ?? []).find(w => w.id === workloadId)!
 
         if (secretOwnership.deniedWorkloadIds.has(workload.id)) {
           // Ownership-refused Secret ref — do not render; the revocation round
-          // above already tore down any prior instance. Surface the denial so the
-          // operator labels the Secret.
+          // above tore down any prior instance, or failed to and the pass
+          // requeues. Surface the denial so the operator labels the Secret.
           workloadStatuses.push({
             id: workload.id,
             phase: 'failed',
@@ -4206,9 +4246,7 @@ export class WorkflowRecipeReconciler {
       throw new DeniedWorkloadRevocationError(
         revocationRound.failures.map(deniedWorkflowRevocationFailureMessage).join(' | '),
         secretOwnership.conditions,
-        revocationRound.failures.flatMap(failure =>
-          failure.error instanceof ImmutableStatefulSetDriftError ? [failure.error.condition] : []
-        ),
+        revocationDriftConditions(revocationRound.failures),
         { cause: revocationRound.failures[0].error }
       )
     }
@@ -7486,11 +7524,13 @@ export class WorkflowRecipeReconciler {
    * Fail-closed parity with the deploy path (which throws RetryableReconcileError
    * on `errored`): a Secret read failure, an `error`-state classification, OR a
    * failed teardown all set `needsRequeue` so the caller requeues and RETRIES,
-   * rather than silently skipping or — worse — reporting `hadDenied` (which would
-   * write `EnvSecretOwnershipDenied=True` while the foreign credential is still
-   * live because the delete actually failed). `hadDenied` is returned ONLY when
-   * every denied workload was torn down successfully. Issue #1349 — when only the
-   * revocation record was not stored, `hadDenied` is returned with
+   * rather than silently skipping or — worse — reporting `hadDenied` (which
+   * promises that every denied workload is torn down). `hadDenied` is returned
+   * ONLY when every denied workload was torn down successfully. Issue #1518 — a
+   * failure that met immutable drift also returns `driftConditions`, and the
+   * caller publishes them with `EnvSecretOwnershipDenied` while it requeues;
+   * any other failure publishes nothing. Issue #1349 — when only the revocation
+   * record was not stored, `hadDenied` is returned with
    * `revocationRecordPending`, so the denial is published and the pass requeues.
    */
   private async enforceActiveWorkflowSecretOwnership(
@@ -7500,6 +7540,8 @@ export class WorkflowRecipeReconciler {
       conditions: [],
       hadDenied: false,
       needsRequeue: false,
+      driftConditions: [],
+      driftWorkloadIds: [],
       revocationRecordPending: false,
       deniedWorkloadIds: new Set(),
     }
@@ -7560,10 +7602,12 @@ export class WorkflowRecipeReconciler {
           ),
       }
     )
-    // Teardown FAILED (e.g. RBAC 403 / apiserver 5xx). The foreign credential is
-    // still live, so we must NOT report the workload as revoked. Requeue so the
-    // next pass retries; the EnvSecretOwnershipDenied condition is written only
-    // once teardown actually succeeds. When the revocation was recorded in an
+    // Teardown FAILED (e.g. RBAC 403 / apiserver 5xx, or immutable drift of a
+    // kept StatefulSet). The foreign credential may still be live, so we must NOT
+    // report the workload as revoked. Requeue so the next pass retries. Without
+    // immutable drift no condition is written until the teardown succeeds; with
+    // it (issue #1518) the denial and the drift condition are published, because
+    // drift does not clear by itself. When the revocation was recorded in an
     // earlier pass, the failed step is the update of the kept StatefulSet: the
     // credential is already gone, and the pass is requeued so the update is
     // retried.
@@ -7573,6 +7617,11 @@ export class WorkflowRecipeReconciler {
     if (failedTeardowns.length > 0 || failedUpdates.length > 0) {
       return {
         ...clean,
+        conditions: secretOwnership.conditions,
+        driftConditions: revocationDriftConditions(failures),
+        driftWorkloadIds: failures
+          .filter(f => f.error instanceof ImmutableStatefulSetDriftError)
+          .map(f => f.workloadId),
         needsRequeue: true,
         requeueReason: [
           ...(failedTeardowns.length > 0
@@ -7588,6 +7637,8 @@ export class WorkflowRecipeReconciler {
       conditions: secretOwnership.conditions,
       hadDenied: true,
       needsRequeue: false,
+      driftConditions: [],
+      driftWorkloadIds: [],
       revocationRecordPending: !revocationRecordStored,
       deniedWorkloadIds: secretOwnership.deniedWorkloadIds,
     }
@@ -7782,7 +7833,8 @@ export class WorkflowRecipeReconciler {
    * StatefulSet is only brought up to date with the spec through the spec-hash
    * gate, with no Pod delete. A steady denial is therefore revoked once per denied
    * Secret version instead of on every pass. A failed update propagates like a
-   * failed teardown, and the caller requeues.
+   * failed teardown, and the caller requeues; an `ImmutableStatefulSetDriftError`
+   * carries the condition the caller publishes (issue #1518).
    */
   private async teardownDeniedWorkload(
     workload: WorkloadDef,

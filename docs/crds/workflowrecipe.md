@@ -865,6 +865,15 @@ label to add. The credential is never injected into the workload's runtime.
 On every deploy pass, every denied workload is revoked before any workload is
 delegated or rendered, and a failed revocation does not stop the others.
 
+A denied StatefulSet is kept (its PVCs hold data) and re-rendered without the
+denied refs. When its immutable fields differ from the desired ones, the
+revocation is not applied: the Pods keep their template, and the status carries
+a `StatefulSetImmutableDrift` condition next to `EnvSecretOwnershipDenied` until
+the drift is resolved. The condition message says whether the stored spec hash
+is the desired one (when it is, the recipe did not change those fields and the
+live object was changed outside WRC) and names the last field manager of the
+live object, or says that it records none.
+
 Enforcement points: the WRC reconciler is authoritative (it sees every reconcile
 and re-evaluates on Secret label/delete changes); Control API additionally
 rejects an _exists-but-foreign_ reference at recipe create/update and at registry
@@ -3235,7 +3244,7 @@ A matching `conditions[]` entry records the reason (for example
 | --- | --- |
 | `terminalRunTeardown.completedAt` | Date-time. Set when the terminal compute teardown of a run-scoped recipe (label `clerum.io/workflow-run-id`) completed. While it is set, WRC does not repeat that teardown. WRC removes the whole `terminalRunTeardown` object before it deploys the run again. |
 | `terminalRunTeardown.noSecretBearingWorkloads` | Boolean, written only as `true`. The terminal pass of a run whose compute teardown is recorded, and that has a workload naming a Secret (`envSecret` or `imagePullSecrets`), sets it when every such workload has been deleted, by the terminal teardown or by the Secret-denial teardown (a denied StatefulSet is kept, so it prevents the fact), and no Secret-ownership requeue or revocation record is pending. The periodic Secret-ownership recheck skips a recorded terminal run child that carries it and is not latched by a transient error; Secret key-set or ownership changes still reach the child through the Secret watcher. WRC adds it with a JSON Patch that the API server applies only while the stored `completedAt` is the one the pass holds. |
-| `secretOwnershipRevocations` | Map of workload id to a `sha256:<hex>` digest of the denied Secrets (name, namespace and `resourceVersion`) the workload was torn down for. WRC does not repeat the teardown while the denial has the stored digest. An entry is removed before WRC renders that workload, or delegates it to an McpServer, in a pass that did not deny it. A denied StatefulSet is kept: while its entry stands WRC still applies spec changes to it, without the denied refs, through its normal update, and does not delete its Pods again. |
+| `secretOwnershipRevocations` | Map of workload id to a `sha256:<hex>` digest of the denied Secrets (name, namespace and `resourceVersion`) the workload was torn down for. WRC does not repeat the teardown while the denial has the stored digest. An entry is removed before WRC renders that workload, or delegates it to an McpServer, in a pass that did not deny it. A denied StatefulSet is kept: while its entry stands WRC still applies spec changes to it, without the denied refs, through its normal update, and does not delete its Pods again. A revocation of a kept StatefulSet that fails on immutable drift writes no entry, and WRC publishes `StatefulSetImmutableDrift` for it, as for a failed update of a kept StatefulSet whose entry stands (§3.4.1). |
 
 The status schema is closed. On a cluster whose installed CRD predates these two
 fields the API server prunes them; WRC then logs an error naming the CRD and
