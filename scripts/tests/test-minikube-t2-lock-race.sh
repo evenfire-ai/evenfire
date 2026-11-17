@@ -162,3 +162,4 @@ cat "${TMP_DIR}/worker-1.out" "${TMP_DIR}/worker-2.out" | \
   }
 
 printf 'PASS: concurrent stale-lock reclaim admits exactly one owner and preserves its replacement lock\n'
+bash "${ROOT}/scripts/tests/test-minikube-t2-lock-arrival.sh"
