@@ -592,15 +592,24 @@ describe('catalog attention dialog Keep enabled offer', () => {
   it('offers only Reviewed on a deprecated item, even with its allowlist row loaded', async () => {
     const items = attentionWireBody().items
     const deprecated = items.find(item => item.kind === 'deprecated_model_enabled')!
+    const stale = items.find(item => item.model === 'claude-fable-5-1')!
     serve(items, rowsFor(items))
 
     renderSurface()
-    const row = pendingRow(await openReview(), deprecated)
+    const dialog = await openReview()
+    const row = pendingRow(dialog, deprecated)
 
     expect(
       within(row).getByRole('button', { name: `Mark reviewed: ${itemName(deprecated)}` })
     ).toBeInTheDocument()
     expect(within(row).queryByRole('button', { name: /^Keep enabled: / })).not.toBeInTheDocument()
+    // The allowlist rows reached the dialog: a stale item gets the offer, so the
+    // absence above comes from the kind and not from rows still loading.
+    expect(
+      within(pendingRow(dialog, stale)).getByRole('button', {
+        name: `Keep enabled: ${itemName(stale)}`,
+      })
+    ).toBeInTheDocument()
   })
 
   it('offers only Reviewed on a stale item whose model has no allowlist row to pin', async () => {
