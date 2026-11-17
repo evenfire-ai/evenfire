@@ -1,0 +1,148 @@
+import React from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import '@testing-library/jest-dom/vitest'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import type { ApprovalChannelTarget } from '@/app/types/approvalChannels'
+import { ChannelsContent } from '../../channels/ChannelsContent'
+
+const mocks = vi.hoisted(() => ({
+  confirm: vi.fn(),
+  isSilentApiError: vi.fn(),
+  listWorkflowApprovalMediums: vi.fn(),
+  refreshApprovalTargets: vi.fn(),
+  showToast: vi.fn(),
+}))
+
+vi.mock('next/link', () => ({
+  default: ({ children, href, ...props }: { children: React.ReactNode; href: string }) => (
+    <a href={href} {...props}>
+      {children}
+    </a>
+  ),
+}))
+
+vi.mock('@components/ConfirmDialog', () => ({
+  useConfirmDialog: () => ({ confirm: mocks.confirm, confirmDialog: null }),
+}))
+
+const profileAccess = vi.hoisted(() => ({
+  targets: [] as Array<{ id: string; medium: string }>,
+  loading: false,
+}))
+
+vi.mock('@components/ProfileAccessContext', () => ({
+  useProfileAccess: () => ({
+    approvalTargets: profileAccess.targets,
+    approvalTargetsError: false,
+    approvalTargetsLoading: profileAccess.loading,
+    canManageMembers: false,
+    manageableTeams: [],
+    manageableTeamsError: false,
+    manageableTeamsLoading: false,
+    refreshApprovalTargets: mocks.refreshApprovalTargets,
+    refreshManageableTeams: vi.fn(),
+  }),
+}))
+
+vi.mock('@components/ProfileBodySkeleton', () => ({
+  ProfileBodySkeleton: () => null,
+}))
+
+vi.mock('@components/ProfileShell', () => ({
+  ProfileShell: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}))
+
+vi.mock('@components/Toast', () => ({
+  useToast: () => ({ showToast: mocks.showToast }),
+}))
+
+vi.mock('@lib/api', () => ({
+  isSilentApiError: mocks.isSilentApiError,
+}))
+
+vi.mock('@lib/approvalChannels', () => ({
+  disconnectWorkflowApprovalMedium: vi.fn(),
+  listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums,
+}))
+
+vi.mock('../../channels/TelegramVerificationPanel', () => ({
+  TelegramVerificationPanel: (props: { connectRequestCount?: number }) => (
+    <div data-testid="channel-panel" data-connect-request-count={props.connectRequestCount ?? 0} />
+  ),
+}))
+
+function target(id: string, medium: string): ApprovalChannelTarget {
+  return { id, medium } as ApprovalChannelTarget
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  mocks.isSilentApiError.mockReturnValue(false)
+  mocks.listWorkflowApprovalMediums.mockResolvedValue([])
+  mocks.refreshApprovalTargets.mockResolvedValue([])
+  profileAccess.targets = [target('tg-1', 'telegram'), target('slack-1', 'slack')]
+  profileAccess.loading = false
+})
+
+afterEach(cleanup)
+
+describe('Social channels section header', () => {
+  it('renders the Connect action to the right of the reload control', async () => {
+    const view = render(<ChannelsContent activeChannel="telegram" />)
+
+    await waitFor(() => expect(screen.getByTestId('channel-panel')).toBeInTheDocument())
+
+    const toolbar = view.container.querySelector('.toolbar')
+    expect(toolbar).not.toBeNull()
+    const buttons = within(toolbar as HTMLElement).getAllByRole('button')
+    expect(buttons).toHaveLength(2)
+    expect(buttons[0]).toHaveAttribute('aria-label', 'Refresh social channels')
+    expect(buttons[1]).toHaveTextContent('Connect Telegram')
+    expect(buttons[1]).toBeEnabled()
+  })
+
+  it('labels the Connect action after the active channel', async () => {
+    render(<ChannelsContent activeChannel="slack" />)
+
+    expect(await screen.findByRole('button', { name: 'Connect Slack' })).toBeEnabled()
+  })
+
+  it('does not carry the release identity block or eyebrow in the header', async () => {
+    render(<ChannelsContent activeChannel="telegram" />)
+
+    await waitFor(() => expect(screen.getByTestId('channel-panel')).toBeInTheDocument())
+    expect(screen.queryByText('Evenfire Profile')).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Release /)).not.toBeInTheDocument()
+  })
+
+  it('opens the panel connection flow when the header Connect button is clicked', async () => {
+    render(<ChannelsContent activeChannel="telegram" />)
+
+    const panel = await screen.findByTestId('channel-panel')
+    expect(panel).toHaveAttribute('data-connect-request-count', '0')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Telegram' }))
+
+    expect(screen.getByTestId('channel-panel')).toHaveAttribute('data-connect-request-count', '1')
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Telegram' }))
+    expect(screen.getByTestId('channel-panel')).toHaveAttribute('data-connect-request-count', '2')
+  })
+
+  it('hides the Connect action when the account has no accessible channels', async () => {
+    profileAccess.targets = []
+
+    render(<ChannelsContent activeChannel="telegram" />)
+
+    expect(await screen.findByText(/No social channels are connected/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Connect / })).not.toBeInTheDocument()
+  })
+
+  it('disables the Connect action while a load is running', async () => {
+    mocks.listWorkflowApprovalMediums.mockReturnValue(new Promise(() => {}))
+
+    render(<ChannelsContent activeChannel="telegram" />)
+
+    const connect = screen.getByRole('button', { name: 'Connect Telegram' })
+    expect(connect).toBeDisabled()
+  })
+})

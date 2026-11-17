@@ -7,7 +7,6 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useProfileAccess } from '@components/ProfileAccessContext'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
-import { ReleaseLabel } from '@components/ReleaseLabel'
 import { useToast } from '@components/Toast'
 import { IconRefresh } from '@components/icons'
 import { PROFILE_ROUTES } from '@constants/routes'
@@ -16,7 +15,6 @@ import {
   disconnectWorkflowApprovalMedium,
   listWorkflowApprovalMediums,
 } from '@lib/approvalChannels'
-import { refreshReleaseIdentity } from '@lib/releaseIdentity'
 import type { WorkflowApprovalMediumAccount } from '@/app/types/approvalChannels'
 import { TelegramVerificationPanel } from './TelegramVerificationPanel'
 import { PROFILE_SOCIAL_CHANNEL_TABS } from './constants'
@@ -32,6 +30,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
   const [state, setState] = useState<LoadState>('loading')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [connectRequestCount, setConnectRequestCount] = useState(0)
 
   const telegramTargets = useMemo(
     () => targets.filter(target => target.medium === 'telegram'),
@@ -70,17 +69,18 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
   )
   const currentChannel =
     visibleSocialTabs.find(tab => tab.key === activeChannel) || visibleSocialTabs[0] || null
+  const currentTargets =
+    currentChannel?.key === 'slack'
+      ? slackTargets
+      : currentChannel?.key === 'teams'
+        ? teamsTargets
+        : telegramTargets
   const hasSocialAccess = visibleSocialTabs.length > 0
   const formDisabled = busy || state === 'loading'
 
   async function loadAll(forceAccess = false) {
     setState('loading')
     setError('')
-    // An explicit Refresh re-reads the release too, so a label left on
-    // "Release unavailable" by a transient failure heals here instead of
-    // waiting for a remount. Deliberately not on the mount path: that would
-    // defeat the per-session cache the label shares with the sidebar.
-    if (forceAccess) void refreshReleaseIdentity()
     try {
       await Promise.all([
         refreshApprovalTargets({ force: forceAccess }),
@@ -150,9 +150,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
       <div className="profile-page profile-page--settings">
         <header className="header-row">
           <div>
-            <p className="eyebrow">Evenfire Profile</p>
             <h1 className="page-title">Social channels</h1>
-            <ReleaseLabel className="small-plus muted" />
           </div>
           <div className="toolbar">
             <Button
@@ -166,6 +164,14 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
             >
               <IconRefresh className={state === 'loading' ? 'cu-spin' : undefined} />
             </Button>
+            {currentChannel ? (
+              <Button
+                onClick={() => setConnectRequestCount(count => count + 1)}
+                disabled={formDisabled || currentTargets.length === 0}
+              >
+                Connect {currentChannel.label}
+              </Button>
+            ) : null}
           </div>
         </header>
 
@@ -198,6 +204,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
                 disabled={formDisabled}
                 onAccountsRefresh={refreshApprovalAccounts}
                 onRemoveAccount={removeApprovalMediumAccount}
+                connectRequestCount={connectRequestCount}
               />
             ) : null}
             {currentChannel?.key === 'slack' ? (
@@ -208,6 +215,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
                 disabled={formDisabled}
                 onAccountsRefresh={refreshApprovalAccounts}
                 onRemoveAccount={removeApprovalMediumAccount}
+                connectRequestCount={connectRequestCount}
               />
             ) : null}
             {currentChannel?.key === 'teams' ? (
@@ -218,6 +226,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
                 disabled={formDisabled}
                 onAccountsRefresh={refreshApprovalAccounts}
                 onRemoveAccount={removeApprovalMediumAccount}
+                connectRequestCount={connectRequestCount}
               />
             ) : null}
           </section>

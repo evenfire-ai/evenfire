@@ -52,6 +52,7 @@ export function TelegramVerificationPanel({
   disabled,
   onAccountsRefresh,
   onRemoveAccount,
+  connectRequestCount = 0,
 }: TelegramVerificationPanelProps) {
   const { showToast } = useToast()
   const [modalOpen, setModalOpen] = useState(false)
@@ -100,6 +101,13 @@ export function TelegramVerificationPanel({
     if (selectedTargetId && targets.some(target => target.id === selectedTargetId)) return
     setSelectedTargetId(targets.length === 1 ? targets[0]!.id : '')
   }, [selectedTargetId, targets])
+
+  const [handledConnectRequestCount, setHandledConnectRequestCount] = useState(connectRequestCount)
+  useEffect(() => {
+    if (connectRequestCount === handledConnectRequestCount) return
+    setHandledConnectRequestCount(connectRequestCount)
+    openConnectionModal()
+  }, [connectRequestCount, handledConnectRequestCount])
 
   useEffect(() => {
     if (!pending) return
@@ -204,13 +212,7 @@ export function TelegramVerificationPanel({
         <div className="message message--warning message--plain">
           No accessible {providerLabel} communication channel is available.
         </div>
-      ) : (
-        <div className="settings-social-channel-toolbar">
-          <Button onClick={openConnectionModal} disabled={disabled}>
-            Connect {providerLabel}
-          </Button>
-        </div>
-      )}
+      ) : null}
 
       {accounts.length > 0 ? (
         <RecordList className="settings-target-list">
