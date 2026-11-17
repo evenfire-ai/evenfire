@@ -2217,10 +2217,12 @@ spec:
                     Written by the controller when a run-scoped recipe's terminal
                     compute teardown completed. Removed before the run is deployed
                     again.
+                  required: [completedAt]
                   properties:
                     completedAt:
                       type: string
                       format: date-time
+                      description: When the terminal compute teardown of the run completed.
                     noSecretBearingWorkloads:
                       type: boolean
                       description: >-
