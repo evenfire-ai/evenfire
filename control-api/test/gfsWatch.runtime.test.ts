@@ -150,6 +150,30 @@ describe('timer, timerAt, interval and cancel', () => {
     expect(f).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['NaN', Number.NaN, 1],
+    ['Infinity', Number.POSITIVE_INFINITY, 1],
+    ['-Infinity', Number.NEGATIVE_INFINITY, 1],
+    ['2^31', 2 ** 31, 0],
+  ])('a %s delay fires at the largest delay Node honours, not after 1 ms', (_, ms, errors) => {
+    const { rt, clock, log } = setup()
+    const f = vi.fn()
+    rt.timer(ms, f)
+    clock.advance(2 ** 31 - 2)
+    expect(f).not.toHaveBeenCalled()
+    clock.advance(1)
+    expect(f).toHaveBeenCalledTimes(1)
+    expect(log.error).toHaveBeenCalledTimes(errors)
+  })
+
+  it('timerAt with an instant beyond the largest delay fires late, not after 1 ms', () => {
+    const { rt, clock } = setup()
+    const f = vi.fn()
+    rt.timerAt(clock.now() + 30 * 24 * 3_600_000, f)
+    clock.advance(1_000)
+    expect(f).not.toHaveBeenCalled()
+  })
+
   it('interval fires repeatedly', () => {
     const { rt, clock } = setup()
     const f = vi.fn()
