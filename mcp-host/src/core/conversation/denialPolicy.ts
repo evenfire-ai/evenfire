@@ -10,7 +10,7 @@
  * (sqliteConversationStore writes, reconstruct reads):
  *   - recordDenial: the latest denier wins, and the deny also revokes an
  *     earlier "Always approve" and this task's session-scoped approval for
- *     that tool.
+ *     that tool. A `shell_exec` denial also resets `auto_shell_grants`.
  *   - liftDenial: only the recorded denier lifts it. An unknown denier (legacy
  *     row) lets any approver lift it; a missing approver id never lifts a
  *     known denier's denial.
@@ -36,7 +36,10 @@ export function hasActiveDenials(conversation: WithDenials): boolean {
 }
 
 export function recordDenial(
-  conversation: Pick<Conversation, 'denials' | 'auto_approved_tools' | 'task_approved_tools'>,
+  conversation: Pick<
+    Conversation,
+    'denials' | 'auto_approved_tools' | 'task_approved_tools' | 'auto_shell_grants'
+  >,
   toolName: string,
   userId?: string
 ): void {
@@ -44,6 +47,9 @@ export function recordDenial(
   conversation.denials.set(toolName, userId || null)
   conversation.auto_approved_tools.delete(toolName)
   conversation.task_approved_tools?.delete(toolName)
+  if (toolName === 'shell_exec') {
+    conversation.auto_shell_grants = { wholeTool: false, commands: new Set() }
+  }
 }
 
 export type LiftOutcome = 'not_denied' | 'lifted' | 'kept_for_denier'

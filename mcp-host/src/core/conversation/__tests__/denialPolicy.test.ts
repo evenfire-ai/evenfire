@@ -9,8 +9,14 @@ import {
   serializeDenials,
 } from '../denialPolicy'
 
-function conversation(): Pick<Conversation, 'denials' | 'auto_approved_tools'> {
-  return { auto_approved_tools: new Set() }
+function conversation(): Pick<
+  Conversation,
+  'denials' | 'auto_approved_tools' | 'auto_shell_grants'
+> {
+  return {
+    auto_approved_tools: new Set(),
+    auto_shell_grants: { wholeTool: false, commands: new Set() },
+  }
 }
 
 describe('denialPolicy', () => {

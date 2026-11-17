@@ -2,6 +2,8 @@ import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
 import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
+import { type ApprovalMode, effectiveApprovalMode } from '../approval/approvalMode'
+import { approvalLogId, syncEffectiveMode } from '../approval/grantMemory'
 import { ConversationError, ConversationErrorCode } from '../errors'
 import { SESSION_SCOPED_APPROVAL_TOOLS } from '../extensions/approvalController'
 import {
@@ -581,6 +583,59 @@ export class ConversationManager {
   }
 
   /**
+   * Store a mode from the route or the messaging command.
+   *
+   * The route persists the requested mode, including a choice above the ceiling.
+   * The command persists `auto` or `allow_all` only when the channel cap is
+   * `allow_all`; otherwise it persists `manual`. `persistApprovalMode` is the
+   * durability barrier and moves the in-memory mirror only after the write is
+   * acknowledged. The effective mode is then synced, and L1 is logged with
+   * hashed session and user ids. `userId` is the acting user; L1 hashes
+   * `conversation.user_id`, not this argument.
+   */
+  async setApprovalMode(
+    conversation: Conversation,
+    requested: ApprovalMode,
+    live: { ceiling: ApprovalMode; cap: ApprovalMode },
+    writer: 'route' | 'command',
+    userId?: string
+  ): Promise<{
+    approvalMode: ApprovalMode
+    modeCeiling: ApprovalMode
+    channelCap: ApprovalMode
+    effectiveApprovalMode: ApprovalMode
+  }> {
+    void userId
+    const stored: ApprovalMode =
+      writer === 'command' && (live.cap !== 'allow_all' || requested === 'manual')
+        ? 'manual'
+        : requested
+    await this.store.persistApprovalMode(conversation, stored)
+    conversation.approval_mode = stored
+    const effective = effectiveApprovalMode(stored, live.ceiling, live.cap)
+    syncEffectiveMode(conversation, effective)
+    logger.info(
+      {
+        event: 'L1',
+        session: approvalLogId(conversation.id),
+        user: approvalLogId(conversation.user_id ?? ''),
+        requested,
+        ceiling: live.ceiling,
+        channelCap: live.cap,
+        effectiveApprovalMode: effective,
+        writer,
+      },
+      'Stored approval mode'
+    )
+    return {
+      approvalMode: conversation.approval_mode,
+      modeCeiling: live.ceiling,
+      channelCap: live.cap,
+      effectiveApprovalMode: effective,
+    }
+  }
+
+  /**
    * Resume after approval.
    * Transitions: AwaitingApproval → Processing
    *
@@ -649,8 +704,9 @@ export class ConversationManager {
    * Transitions: AwaitingApproval → Idle
    *
    * Records a denial of pending_approval.tool_name (denialPolicy) before clearing
-   * pending_approval. A user denial is persisted with the session. An approval
-   * timeout passes record:false and does not.
+   * pending_approval. A user denial is persisted with the session. A shell_exec
+   * denial also resets auto shell grants. An approval timeout passes record:false
+   * and does neither.
    *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
