@@ -520,15 +520,16 @@ code {
   top: 0;
   display: flex;
   width: 16rem;
-  height: calc(100vh - 2rem);
+  height: 100vh;
   flex-shrink: 0;
   flex-direction: column;
-  margin: 1rem;
   padding: 1.5rem 1rem;
-  overflow-y: auto;
-  border: 1px solid var(--cu-border);
-  border-radius: var(--cu-radius);
-  background: var(--cu-surface);
+  overflow: hidden;
+  border-right: 1px solid var(--cu-border);
+  border-radius: 0 var(--cu-radius) var(--cu-radius) 0;
+  background:
+    linear-gradient(150deg, rgba(var(--cu-edge-rgb), 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(var(--cu-edge-rgb), 0.05), transparent 52%), var(--cu-surface);
 }
 
 .cu-sidebar__brand {
@@ -570,9 +571,12 @@ code {
 
 .cu-sidebar__nav {
   display: flex;
+  flex: 1;
+  min-height: 0;
   flex-direction: column;
   gap: 0.35rem;
   margin-bottom: 0.5rem;
+  overflow-y: auto;
 }
 
 .cu-sidebar__item {
@@ -638,6 +642,7 @@ code {
 .cu-sidebar__footer {
   margin-top: auto;
   display: grid;
+  flex: 0 0 auto;
   gap: var(--cu-space-1);
 }
 
