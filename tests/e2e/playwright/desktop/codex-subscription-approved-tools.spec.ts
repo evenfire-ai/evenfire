@@ -122,7 +122,10 @@ async function openAgentChat(desktop: Page, scenario: Scenario) {
   await expect(
     desktop.getByRole('button', { name: 'Switch chat agent', exact: true })
   ).toContainText(scenario.agentDisplayName)
-  await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
+  // A new chat already shows the Host default on the chip, so match any
+  // model label. Picking that same model only closes the menu without
+  // writing a selection; the chip assertion below still pins the model.
+  await desktop.getByRole('button', { name: /^Model — / }).click()
   // The menu labels an option with the allowlist entry's displayName and
   // falls back to the model id when there is none (ModelSelector.tsx:276).
   // Which of the two renders depends on catalog metadata this test does not
