@@ -8,6 +8,7 @@ import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { FormField } from '@components/FormField'
 import { ModalCloseButton } from '@components/ModalCloseButton'
+import { useProfileAccess } from '@components/ProfileAccessContext'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { TextInput } from '@components/TextInput'
@@ -57,6 +58,7 @@ export function SettingsContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { checkAuth, logout } = useAuth()
+  const { refreshApprovalTargets } = useProfileAccess()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [me, setMe] = useState<Me | null>(null)
@@ -100,7 +102,7 @@ export function SettingsContent() {
     // defeat the per-session cache the label shares with the sidebar.
     if (forceAccess) void refreshReleaseIdentity()
     try {
-      const current = await getMe()
+      const [current] = await Promise.all([getMe(), refreshApprovalTargets({ force: forceAccess })])
       const channels = normalizeProfileChannels(current.profile.channels)
       setMe({ ...current, profile: { ...current.profile, channels } })
       setDisplayName(current.profile.displayName || current.name || current.email)

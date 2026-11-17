@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   logout: vi.fn(),
   navigateToDesktopApp: vi.fn(),
   refreshReleaseIdentity: vi.fn(),
+  refreshApprovalTargets: vi.fn(),
   routerPush: vi.fn(),
   routerReplace: vi.fn(),
   showToast: vi.fn(),
@@ -71,15 +72,17 @@ vi.mock('@components/ProfileBodySkeleton', () => ({
   ProfileBodySkeleton: () => null,
 }))
 
+const access = vi.hoisted(() => ({ approvalTargets: [{ id: 'slack-target' }] }))
+
 vi.mock('@components/ProfileAccessContext', () => ({
   useProfileAccess: () => ({
-    approvalTargets: [{ id: 'slack-target' }],
+    approvalTargets: access.approvalTargets,
     approvalTargetsLoading: false,
     canManageMembers: false,
     manageableTeams: [],
     manageableTeamsError: false,
     manageableTeamsLoading: false,
-    refreshApprovalTargets: vi.fn(),
+    refreshApprovalTargets: mocks.refreshApprovalTargets,
     refreshManageableTeams: vi.fn(),
   }),
 }))
@@ -120,6 +123,8 @@ vi.mock('@lib/releaseIdentity', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
+  access.approvalTargets = [{ id: 'slack-target' }]
+  mocks.refreshApprovalTargets.mockResolvedValue(undefined)
   vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'true')
   mocks.buildDesktopEnvironmentLink.mockReturnValue(null)
   mocks.getConfiguredExternalRestApiBaseUrl.mockReturnValue('https://api.example.com')
@@ -134,6 +139,20 @@ afterEach(() => {
 })
 
 describe('Settings header structure', () => {
+  it('refreshes channel access so newly granted approval settings become visible', async () => {
+    access.approvalTargets = []
+    render(<SettingsContent />)
+    const refresh = await screen.findByRole('button', { name: 'Refresh settings' })
+    await waitFor(() => expect(refresh).toBeEnabled())
+    expect(screen.queryByRole('tab', { name: 'Approval channels' })).not.toBeInTheDocument()
+    mocks.refreshApprovalTargets.mockImplementationOnce(async () => {
+      access.approvalTargets = [{ id: 'new-target' }]
+    })
+    fireEvent.click(refresh)
+    expect(await screen.findByRole('tab', { name: 'Approval channels' })).toBeInTheDocument()
+    expect(mocks.refreshApprovalTargets).toHaveBeenLastCalledWith({ force: true })
+  })
+
   it('renders the lean shared header used by the other sections', async () => {
     render(<SettingsContent />)
 
