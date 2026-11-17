@@ -311,6 +311,24 @@ describe('createStepSpillover', () => {
       expect(res).toEqual({ success: true, content: content.slice(100, 200) })
     })
 
+    it('serves a range exactly the threshold wide', async () => {
+      const spillover = make()
+      // ASCII blob: bytes and characters coincide.
+      const content = blob(THRESHOLD * 3)
+      await spillover.persist({
+        callId: 'c1',
+        toolName: 't',
+        content,
+        inlineBytes: bytes(content),
+        isError: false,
+      })
+      const res = await spillover.readTool.execute(
+        { ref: 'spillover://review-step/c1.json', range: { start: 0, end: THRESHOLD } },
+        WORKSPACE
+      )
+      expect(res).toEqual({ success: true, content: content.slice(0, THRESHOLD) })
+    })
+
     it('rejects a range wider than the threshold', async () => {
       const spillover = make()
       await spillover.persist({
