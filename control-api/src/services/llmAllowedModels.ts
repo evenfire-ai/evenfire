@@ -477,10 +477,13 @@ export interface AttentionAckEntry {
 
 /**
  * Record that the operator reviewed an attention item. Stores the consumer keys
- * the CLIENT saw, not the current consumers: one that appeared between the feed
- * and the click must reopen the item, not be accepted unseen. Returns null when
- * the row is gone, disabled, in another episode, or no longer meets the kind's
- * condition (the caller answers 409 and the client reloads the feed).
+ * the client sent, not the current consumers: for a client that sends the keys
+ * the feed showed, one that appeared between the feed and the click reopens the
+ * item instead of being accepted unseen. Keys are not checked against live
+ * consumers, so a key sent ahead of its consumer existing never reopens it.
+ * Returns null when the row is gone, disabled, in another episode, or no longer
+ * meets the kind's condition (the caller answers 409 and the client reloads the
+ * feed).
  */
 export async function acknowledgeAttention(
   input: AttentionAckInput,
