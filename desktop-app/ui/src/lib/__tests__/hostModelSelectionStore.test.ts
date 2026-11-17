@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { type Mock, afterEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
-import { resolveImageInputDecision } from '../../../../src/imageInputDecision'
 import type { HostModelsResult, SetHostModelResult } from '../../../../src/types'
 import {
   getPendingModelIntent,
@@ -984,6 +983,8 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
 
   it('P1 — the effective model is `intent ?? sessionModel ?? hostDefault` for every provider', async () => {
     const NAME_POOL = ['m-a', 'm-b', 'm-c', 'm-d', 'm-e'] as const
+    // No `validUntil`/evidence: the decisions never expire, so the literal
+    // oracle below needs no clock.
     const imageInputArb = fc.constantFrom(
       undefined,
       SUPPORTED,
@@ -1013,12 +1014,16 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
                     : { name: row.name }
                 )
             const names = models.map(row => row.name)
+            // `resolveSessionModel` returns a saved selection equal to the
+            // default without an allowlist check, so the Host can report
+            // `sessionModel === hostDefault` even when the catalog omits it.
+            const sessionModels = [...new Set([hostDefault, ...names])]
             return fc.record({
               provider: fc.constant(base.provider),
               degraded: fc.constant(base.degraded),
               hostDefault: fc.constant(hostDefault),
               models: fc.constant(models),
-              sessionModel: fc.constantFrom(null, ...names),
+              sessionModel: fc.constantFrom(null, ...sessionModels),
               intent: fc.constantFrom(null, 'm-intent', ...names),
             })
           })
@@ -1044,10 +1049,12 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
           const ref = intent ?? sessionModel ?? hostDefault
           const view = getHostModelSelectionSnapshot(AGENT, CHAT)
           expect(view.effectiveModel).toBe(ref)
-          const row = models.find(model => model.name === ref)
-          expect(view.canAttachImages).toBe(
-            row !== undefined && resolveImageInputDecision(row.imageInput).state === 'supported'
-          )
+          // Independent reference: the generated row's own state, or unknown
+          // when the model has no row or the row carries no decision.
+          const expectedImageState =
+            models.find(model => model.name === ref)?.imageInput?.state ?? 'unknown'
+          expect(view.imageInput.state).toBe(expectedImageState)
+          expect(view.canAttachImages).toBe(expectedImageState === 'supported')
         }
       ),
       { numRuns: 500 }
