@@ -94,9 +94,9 @@ export function createExternalOidcProfileFlowRouter(
     config.approvalRlExternalClientIpPerMin,
     config.approvalRlExternalEdgePerMin
   )
-  router.use('/oidc/profile-flow', ...edgeRateLimits)
+  router.use('/external/oidc/profile-flow', ...edgeRateLimits)
 
-  router.get('/oidc/profile-flow/configuration', (_req, res) => {
+  router.get('/external/oidc/profile-flow/configuration', (_req, res) => {
     try {
       const provider = getProvider()
       if (!provider) return res.status(404).json({ error: 'oidc_not_configured' })
@@ -109,7 +109,7 @@ export function createExternalOidcProfileFlowRouter(
     }
   })
 
-  router.post('/oidc/profile-flow/attempts', async (req, res) => {
+  router.post('/external/oidc/profile-flow/attempts', async (req, res) => {
     let provider: Provider | undefined
     try {
       provider = getProvider()
@@ -133,7 +133,7 @@ export function createExternalOidcProfileFlowRouter(
     }
   })
 
-  router.post('/oidc/profile-flow/complete', async (req, res) => {
+  router.post('/external/oidc/profile-flow/complete', async (req, res) => {
     let provider: Provider | undefined
     try {
       provider = getProvider()
@@ -168,7 +168,7 @@ export function createExternalOidcProfileFlowRouter(
     }
   })
 
-  router.post('/oidc/profile-flow/cancel', async (req, res) => {
+  router.post('/external/oidc/profile-flow/cancel', async (req, res) => {
     let provider: Provider | undefined
     try {
       provider = getProvider()

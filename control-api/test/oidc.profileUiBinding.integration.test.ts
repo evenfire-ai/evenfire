@@ -47,7 +47,6 @@ function makeControlApi(fixture: ReturnType<typeof createOidcR5ProtocolFixture>)
   const app = express()
   app.use(express.json())
   app.use(
-    '/external',
     createExternalOidcProfileFlowRouter({
       getProvider: () => fixture.provider,
       createEngine: () => fixture.engine,

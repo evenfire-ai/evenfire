@@ -14,7 +14,7 @@ function appFor(engine: object) {
   })
   const app = express()
   app.use(express.json())
-  app.use('/external', router)
+  app.use(router)
   return app
 }
 
