@@ -126,4 +126,33 @@ describe('HostContextLogger', () => {
     expect(payload.err.stack).toMatch(/^ {4}at /)
     expect(payload.err.stack).not.toContain('INNER-MARKER')
   })
+
+  it('renders the cause of one Error each time the Error is logged', () => {
+    const shared = new Error('shared outer', { cause: new TypeError('shared inner') })
+    const { payload } = logError({ first: shared, second: shared, list: [shared, shared] })
+
+    for (const rendered of [payload.first, payload.second, payload.list[0], payload.list[1]]) {
+      expect(rendered).toMatchObject({
+        message: 'shared outer',
+        cause: { name: 'TypeError', message: 'shared inner' },
+      })
+    }
+  })
+
+  it('omits the stack of an Error that has no frame lines', () => {
+    const frameless = new Error('FRAMELESS-MARKER')
+    frameless.stack = 'Error: FRAMELESS-MARKER'
+    const stackless = Object.assign(new Error('STACKLESS-MARKER'), { stack: undefined })
+    const { line, payload } = logError({
+      frameless,
+      stackless,
+      witness: new Error('has frames'),
+    })
+
+    expect(payload.frameless).toEqual({ name: 'Error', message: 'FRAMELESS-MARKER' })
+    expect(payload.stackless).toEqual({ name: 'Error', message: 'STACKLESS-MARKER' })
+    expect(occurrences(line, 'FRAMELESS-MARKER')).toBe(1)
+    // Witness: the same line carries the frames of an Error that has them.
+    expect(payload.witness.stack).toMatch(/^ {4}at /)
+  })
 })
