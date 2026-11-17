@@ -106,9 +106,10 @@ function required(name: string, devMode: boolean, devDefault?: string): string {
   throw new Error(`[gfsc] required environment variable ${name} is not set`)
 }
 
-// HCC injects this same value and seeds it as the drive of every resource row, so it ends up
-// inside every canonical URI (gfs://<drive>/<rid>) and every watch key. Checking it here too
-// fails a hand-deployed gfsc at boot instead of serving URIs that clients reject.
+// HCC injects this value and seeds it as the drive of the root-directory rows, which puts it
+// in canonical URIs (gfs://<drive>/<rid>) and watch keys. gfsc itself only reports it (boot
+// log, /ready), so this is fail-fast config validation: a hand-deployed gfsc with a name the
+// watch-key parsers reject fails at boot instead of running against an unwatchable drive.
 const DRIVE_NAME_PATTERN = /^[a-z0-9-]{1,63}$/
 
 function driveName(): string {
