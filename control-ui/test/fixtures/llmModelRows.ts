@@ -12,9 +12,14 @@
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { type LlmAllowedModel, normalizeLlmAllowedModel } from '@lib/api'
+import { type LlmAllowedModel, formatApiError, normalizeLlmAllowedModel } from '@lib/api'
 
-type SetupEnsureWire = { list: { status: number; body: { rows: LlmAllowedModel[] } } }
+type WireCapture = { status: number; body: Record<string, unknown> }
+
+type SetupEnsureWire = {
+  list: { status: number; body: { rows: LlmAllowedModel[] } }
+  create_configmap_write_failed: WireCapture
+}
 
 const WIRE = JSON.parse(
   readFileSync(
@@ -28,4 +33,16 @@ export function llmModelWireRow(enabled: boolean): LlmAllowedModel {
   const row = WIRE.list.body.rows.find(candidate => candidate.enabled === enabled)
   if (!row) throw new Error(`llmModelsSetupEnsure.wire.json has no row with enabled=${enabled}`)
   return normalizeLlmAllowedModel(structuredClone(row))
+}
+
+/**
+ * The error the client throws when a mutation committed the row but control-api
+ * could not update the allowlist ConfigMap: the real `formatApiError` over the
+ * generated 503. The file captures it on create; update and delete answer through
+ * the same route helper (`materializeOrFail`), so the body is the same.
+ */
+export function llmModelConfigMapDeferredError(): Error {
+  const capture = WIRE.create_configmap_write_failed
+  const res = { status: capture.status, statusText: 'Error' } as Response
+  return formatApiError(res, JSON.stringify(capture.body))
 }

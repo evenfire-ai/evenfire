@@ -11,6 +11,7 @@ import {
   updateLlmModel,
 } from '@lib/api'
 import { attentionWireBodyOf } from '../../test/fixtures/llmAttention'
+import { llmModelConfigMapDeferredError } from '../../test/fixtures/llmModelRows'
 import { LlmModelsSurface } from '../LlmModelsSurface'
 import { ToastProvider } from '../Toast'
 
@@ -194,6 +195,37 @@ describe('Keep disabled on a row the catalog sync turned off', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
 
     expect(await screen.findByText(/Models need review/)).toHaveTextContent('1 deprecated')
+    expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(1)
+  })
+  it('reports a delayed propagation as saved and re-reads the list and the attention feed', async () => {
+    // A 503 `configmap_write_failed` means the row was committed; only the
+    // ConfigMap behind it lags. The page must treat it as saved, not as a failure.
+    let current = pruned
+    let feed = { items: [] as unknown[], generatedAt: 'x' }
+    vi.mocked(getLlmModels).mockImplementation(async () => ({ rows: [current] }))
+    vi.mocked(getAdminAttention).mockImplementation(async () => parseAdminAttentionReport(feed))
+    vi.mocked(updateLlmModel).mockImplementationOnce(async () => {
+      current = { ...pruned, auto_disabled_at: null }
+      feed = attentionWireBodyOf('deprecated_model_enabled')
+      throw llmModelConfigMapDeferredError()
+    })
+
+    renderSurface()
+    await screen.findByRole('button', { name: 'Expand Anthropic models' })
+    const attentionReadsBefore = vi.mocked(getAdminAttention).mock.calls.length
+    await keepDisabled()
+
+    expect(
+      await screen.findByText(
+        'Anthropic/claude-old stays disabled. Saved. Propagation to the cluster is delayed and will reconcile shortly.'
+      )
+    ).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.queryByText('Turned off by catalog sync')).not.toBeInTheDocument()
+    )
+    expect(await screen.findByText(/Models need review/)).toHaveTextContent('1 deprecated')
+    expect(vi.mocked(getAdminAttention).mock.calls.length).toBeGreaterThan(attentionReadsBefore)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(1)
   })
 })
