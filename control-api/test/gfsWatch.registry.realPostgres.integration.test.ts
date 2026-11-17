@@ -821,6 +821,85 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     }
   })
 
+  const watchReopen = { kind: 'reply', status: 503, code: 'watch_reopen', retryAfterSec: 2 }
+
+  it('answers watch_reopen and frees the connection when T_auth fires during the session check', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const before = await disconnectsBy()
+    b.gates.observe.mode = 'hold'
+    const o = b.open(user, [h.key('file', f)])
+    await until(() => b.gates.observe.held.length === 1)
+    const conn = b.connOf(o.socket)!
+    await b.advance(6_000)
+    expect(await o.outcome).toEqual(watchReopen)
+    expect(o.socket.frames).toEqual([])
+    expect(countDelta(before, await disconnectsBy())).toEqual({ deadline: 1 })
+    b.gates.observe.mode = 'pass'
+    b.gates.observe.releaseAll()
+    await b.settle()
+    expect(restInvariantViolations(b, [conn])).toEqual([])
+  })
+
+  it('answers watch_reopen and frees the connection when the request aborts while the authority resolves', async () => {
+    const authority = await import('../src/gfs/externalAuthority.js')
+    let resolving = 0
+    let release!: () => void
+    const parked = new Promise<void>(resolve => (release = resolve))
+    b = await h.build({
+      resolveAuthority: async a => {
+        resolving += 1
+        await parked
+        return authority.resolveExternalGfsAuthorityForSession(a)
+      },
+    })
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const before = await disconnectsBy()
+    const request = new AbortController()
+    const o = b.open(user, [h.key('file', f)], { watchSignal: request.signal })
+    await until(() => resolving === 1)
+    const conn = b.connOf(o.socket)!
+    request.abort()
+    expect(await o.outcome).toEqual(watchReopen)
+    expect(o.socket.frames).toEqual([])
+    expect(countDelta(before, await disconnectsBy())).toEqual({ deadline: 1 })
+    release()
+    await b.settle()
+    expect(restInvariantViolations(b, [conn])).toEqual([])
+  })
+
+  it('hands an authority failure to the shell to classify, labelled internal', async () => {
+    const authority = await import('../src/gfs/externalAuthority.js')
+    // The real resolver, with its lifecycle lookup failing as it does when
+    // the users table cannot be read.
+    b = await h.build({
+      resolveAuthority: a =>
+        authority.resolveExternalGfsAuthority(a.authorityContext.userId, {
+          linkingEnabled: false,
+          resolveActiveLink: async () => null,
+          isDesktopUserActive: async () => {
+            throw new Error('Connection terminated unexpectedly')
+          },
+        }),
+    })
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const before = await disconnectsBy()
+    const o = b.open(user, [h.key('file', f)])
+    const outcome = await o.outcome
+    expect(outcome).toMatchObject({ kind: 'classify', origin: 'authority' })
+    const error = (outcome as { error: unknown }).error
+    expect(error).toBeInstanceOf(authority.ExternalGfsAuthorityError)
+    expect(error).toMatchObject({ status: 503, code: 'gfs_authority_unavailable' })
+    expect(o.socket.frames).toEqual([])
+    expect(countDelta(before, await disconnectsBy())).toEqual({ internal: 1 })
+    const conn = b.connOf(o.socket)!
+    await b.settle()
+    expect(restInvariantViolations(b, [conn])).toEqual([])
+  })
+
   it('answers watch_reauthorize to a retained user without spending budget, query or reads (T-SB76)', async () => {
     let hits = 0
     const budget = new ProcessMemoryRateLimiter(240)
