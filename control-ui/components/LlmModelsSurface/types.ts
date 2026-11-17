@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import type { AdminAttentionItem, LlmAllowedModel } from '@lib/api'
 import type { GroupedAttentionItems } from '@lib/llmModelAttention'
@@ -22,6 +22,8 @@ export type CatalogAttentionBannerProps = {
    * page. An item whose row is not (yet) loaded renders without the link.
    */
   models?: LlmAllowedModel[]
+  /** Receives focus when the feed empties with the dialog open and takes its opener with it. */
+  returnFocusRef?: RefObject<HTMLElement | null>
 }
 
 export type CatalogAttentionDialogProps = {

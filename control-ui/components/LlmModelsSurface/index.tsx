@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
@@ -44,6 +44,7 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
   // Bumped after each successful mutation so the attention banner re-fetches
   // and drops any item the operator just resolved (on demand, no polling).
   const [attentionRefreshKey, setAttentionRefreshKey] = useState(0)
+  const layoutRef = useRef<HTMLDivElement>(null)
 
   const unpricedKeys = useMemo(() => buildUnpricedKeys(unpriced), [unpriced])
 
@@ -157,14 +158,18 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
   )
 
   return (
-    <div className="cu-llm-models-layout">
+    <div className="cu-llm-models-layout" ref={layoutRef} tabIndex={-1}>
       {error ? (
         <div className="cu-banner cu-banner--error" role="alert">
           {error}
         </div>
       ) : null}
       {activeTab === 'catalog' ? (
-        <CatalogAttentionBanner refreshSignal={attentionRefreshKey} models={models} />
+        <CatalogAttentionBanner
+          refreshSignal={attentionRefreshKey}
+          models={models}
+          returnFocusRef={layoutRef}
+        />
       ) : null}
       {activeTab === 'catalog' ? (
         <LlmModelTable
