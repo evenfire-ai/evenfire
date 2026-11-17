@@ -85,8 +85,18 @@ test('internal signatures still correspond to their producer messages', () => {
     }
   }
   const harness = readFileSync(new URL('scripts/minikube/t2-common.sh', root), 'utf8')
-  for (const [code] of profileCases) {
+  const failureFunction = harness.match(/^t2_fail\(\) \{\n[\s\S]*?^\}/m)
+  assert.ok(failureFunction, 'profile failure function could not be found')
+  for (const [code, expected] of profileCases) {
     assert.match(harness, new RegExp('\\bt2_fail ' + code + '\\b'))
+    const result = spawnSync('/bin/bash', ['-c', `${failureFunction[0]}\nT2_NEXT_COMMAND="$2"\nt2_fail "$1" "$2"`, 'issue-628-test', code, 'UNTRUSTED_PAYLOAD'], {
+      encoding: 'utf8',
+      env: { PATH: '/usr/bin:/bin' },
+    })
+    assert.equal(result.status, 1)
+    const label = commandFailureReason(result.stderr)
+    assert.equal(label, expected)
+    assert.ok(!label.includes('UNTRUSTED_PAYLOAD'))
   }
 })
 
