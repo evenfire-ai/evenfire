@@ -25,10 +25,12 @@ const NO_MODELS: NonNullable<CatalogAttentionBannerProps['models']> = []
 export function CatalogAttentionBanner({
   refreshSignal,
   models = NO_MODELS,
+  returnFocusRef,
 }: CatalogAttentionBannerProps = {}) {
   const { authState } = useAuth()
   const [items, setItems] = useState<AdminAttentionItem[]>([])
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [focusOrphaned, setFocusOrphaned] = useState(false)
 
   // Re-fetches on mount and whenever `refreshSignal` changes — the surface bumps
   // it after a successful mutation so a just-resolved item stops showing. On
@@ -53,6 +55,13 @@ export function CatalogAttentionBanner({
   }, [authState.isLoggedIn, authState.isLoading, refreshSignal])
 
   const modelIdsByPair = useMemo(() => buildModelIdsByPair(models), [models])
+  // The dialog restores focus to its opener, but an emptied feed removes the
+  // opener in the same commit, which would drop focus to <body>.
+  useEffect(() => {
+    if (!focusOrphaned) return
+    setFocusOrphaned(false)
+    returnFocusRef?.current?.focus()
+  }, [focusOrphaned, returnFocusRef])
   // Unknown kinds never reach here: the fetch layer drops them while parsing.
   const groups = groupAttentionItems(items)
   const { staleReferenced, deprecated, staleDiscovery } = groups
@@ -60,7 +69,10 @@ export function CatalogAttentionBanner({
   // `return null` does not unmount this component, so without this reset a
   // dialog left open when the feed empties (an empty or a failed refetch) would
   // reappear on its own the next time the feed has items.
-  if (empty && reviewOpen) setReviewOpen(false)
+  if (empty && reviewOpen) {
+    setReviewOpen(false)
+    setFocusOrphaned(true)
+  }
   if (empty) return null
 
   // No total: one model can sit in two groups (deprecated and then dropped, or

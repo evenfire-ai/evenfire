@@ -718,4 +718,31 @@ describe('catalog attention banner — one line plus review dialog', () => {
       vi.mocked(getAdminAttention).mockRejectedValueOnce(new Error('attention refetch failed'))
     )
   })
+
+  it('T-9: focus stays on the surface when an empty refetch removes the dialog and its opener', async () => {
+    const body = attentionWireBodyOf('stale_model_referenced')
+    vi.mocked(getLlmModels).mockResolvedValue({ rows: [model] })
+    vi.mocked(getAdminAttention)
+      .mockResolvedValueOnce(parseAdminAttentionReport(body))
+      .mockResolvedValueOnce({ items: [], generatedAt: 'x' })
+    const pendingDelete = deferred<undefined>()
+    vi.mocked(deleteLlmModel).mockReturnValueOnce(pendingDelete.promise)
+
+    const { container } = renderSurface()
+
+    await findBannerMessage()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(vi.mocked(deleteLlmModel)).toHaveBeenCalledTimes(1))
+    const dialog = await openReview()
+    expect(within(dialog).getByRole('button', { name: 'Done' })).toHaveFocus()
+
+    await act(async () => {
+      pendingDelete.resolve(undefined)
+    })
+    await waitFor(() => expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(document.activeElement).not.toBe(document.body)
+    expect(container.querySelector('.cu-llm-models-layout')).toHaveFocus()
+  })
 })
