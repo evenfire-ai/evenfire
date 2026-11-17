@@ -250,6 +250,62 @@ describe('catalog attention dialog actions', () => {
     expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  it('keeps the item pending and never acknowledges when the Keep enabled PUT fails', async () => {
+    // The body control-api's llm-models route sends for a LlmAllowedModelConflictError.
+    vi.mocked(updateLlmModel).mockRejectedValueOnce(
+      structuredApiError(409, { error: 'conflict', message: 'allowlist row conflict' })
+    )
+    renderSurface()
+    const dialog = await openReview()
+
+    fireEvent.click(
+      within(pendingRow(dialog, stale)).getByRole('button', {
+        name: `Keep enabled: ${itemName(stale)}`,
+      })
+    )
+
+    const alert = await within(pendingRow(dialog, stale)).findByRole('alert')
+    expect(alert).toHaveTextContent('allowlist row conflict')
+    expect(alert).not.toHaveTextContent(/Kept enabled/)
+    expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(ackAdminAttention)).not.toHaveBeenCalled()
+    expect(pendingRow(dialog, stale)).toBeInTheDocument()
+    expect(screen.getByText(BANNER_TEXT)).toHaveTextContent('2 still referenced')
+  })
+
+  it('treats a 503 configmap_write_failed PUT as saved: acknowledges and the item moves to Reviewed', async () => {
+    // The body control-api's llm-models route sends when the row was saved but the
+    // ConfigMap write failed.
+    vi.mocked(updateLlmModel).mockRejectedValueOnce(
+      structuredApiError(503, {
+        error: 'configmap_write_failed',
+        message:
+          'the allowlist was saved but the ConfigMap could not be updated; runtime propagation is delayed — retry or it will reconcile on the next change/boot',
+      })
+    )
+    renderSurface()
+    const dialog = await openReview()
+
+    fireEvent.click(
+      within(pendingRow(dialog, stale)).getByRole('button', {
+        name: `Keep enabled: ${itemName(stale)}`,
+      })
+    )
+
+    await waitFor(() =>
+      expect(
+        within(dialog).queryByRole('button', { name: `Mark reviewed: ${itemName(stale)}` })
+      ).not.toBeInTheDocument()
+    )
+    expect(vi.mocked(ackAdminAttention)).toHaveBeenCalledTimes(1)
+    expect(
+      within(reviewedSection(dialog)).getByRole('button', {
+        name: `Undo review: ${itemName(stale)}`,
+      })
+    ).toBeInTheDocument()
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('reloads the feed and tells the operator when the item changed (409 attention_episode_changed)', async () => {
     vi.mocked(ackAdminAttention).mockRejectedValueOnce(episodeChangedError())
     renderSurface()
