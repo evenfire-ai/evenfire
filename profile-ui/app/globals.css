@@ -725,6 +725,17 @@ code {
   width: min(58rem, calc(100vw - 2rem));
 }
 
+.cu-modal-panel--connect-flow {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  width: min(44rem, calc(100vw - 2rem));
+}
+
+.cu-modal-panel--connect-flow .cu-modal-panel__body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .cu-modal-panel__head {
   display: flex;
   align-items: flex-start;
@@ -1055,6 +1066,7 @@ code {
 .tab-button {
   display: inline-flex;
   align-items: center;
+  gap: 0.35rem;
   min-height: 32px;
   padding: 0 10px;
   border: 0;
@@ -1554,6 +1566,44 @@ code {
   line-height: 1.25;
 }
 
+.cu-selection-dropdown__option-icon {
+  margin-right: 0.2rem;
+  vertical-align: middle;
+}
+
+/* Circular agent badge matching Control UI's agent access picker avatar. */
+.cu-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.95rem;
+  height: 0.95rem;
+  margin-right: 0.3rem;
+  border-radius: 999px;
+  background: rgba(var(--cu-accent-rgb), 0.18);
+  color: var(--cu-accent);
+  vertical-align: middle;
+}
+
+.cu-agent-badge svg {
+  width: 0.62rem;
+  height: 0.62rem;
+}
+
+/* Card-sized variant for the verify-flow setup summary; bare icon, no tile. */
+.cu-agent-badge--card {
+  width: 1.75rem;
+  height: 1.75rem;
+  flex-basis: 1.75rem;
+  background: none;
+  color: var(--cu-text);
+}
+
+.cu-agent-badge--card svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
 .cu-selection-dropdown__badge {
   max-width: 8rem;
   overflow: hidden;
@@ -1667,6 +1717,245 @@ code {
   font-family: var(--font-mono);
   font-size: 0.875rem;
   font-weight: 600;
+}
+
+.cu-connect-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.cu-connect-flow__main {
+  display: grid;
+  min-width: 0;
+  gap: 0.9rem;
+}
+
+/* Copyable token row embedded under its instruction step. */
+.cu-connect-flow__token-row {
+  display: inline-flex;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
+/* Code-chip treatment so the copyable value reads as the thing to copy. */
+.cu-connect-flow__token-row .token-box {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: rgba(var(--cu-edge-rgb), 0.14);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+}
+
+/* Expiry sits opposite the dialog buttons in the footer. */
+.cu-connect-flow__foot-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-right: auto;
+  color: var(--cu-text-soft);
+}
+
+.cu-connect-flow__head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.cu-connect-flow__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+  color: var(--cu-accent);
+}
+
+.cu-connect-flow__title {
+  margin: 0;
+  color: var(--cu-text);
+  font-size: 1.35rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.cu-connect-flow__description {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.cu-connect-flow__steps {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  gap: 0.35rem;
+}
+
+.cu-connect-flow__step {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.75rem;
+  padding-bottom: 0.85rem;
+}
+
+.cu-connect-flow__step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 2.2rem;
+  bottom: 0.1rem;
+  left: 1rem;
+  width: 1px;
+  background: var(--cu-border-subtle);
+}
+
+.cu-connect-flow__step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: 999px;
+  background: var(--cu-bg-elevated);
+  color: var(--cu-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.cu-connect-flow__step-content {
+  display: grid;
+  gap: 0.25rem;
+  align-content: start;
+}
+
+.cu-connect-flow__step-title {
+  margin: 0;
+  color: var(--cu-text);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 2rem;
+}
+
+.cu-connect-flow__step-text {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.cu-connect-card {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: rgba(var(--cu-panel-rgb), 0.36);
+}
+
+.cu-connect-card--summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem;
+  border: 0;
+  background: rgba(var(--cu-edge-rgb), 0.08);
+  padding: 0.75rem 0.9rem;
+}
+
+.cu-connect-summary__item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: center;
+}
+
+/* Tighter label-to-value spacing and smaller icons in the verify summary. */
+.cu-connect-summary__item .stack {
+  gap: 0.15rem;
+}
+
+.cu-connect-summary__item .cu-connect-card__icon {
+  width: 1.75rem;
+  height: 1.75rem;
+  border: 0;
+  background: none;
+}
+
+.cu-connect-summary__item .cu-connect-card__icon svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.cu-connect-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+  color: var(--cu-text);
+}
+
+.cu-connect-card__countdown {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.cu-connect-card__countdown-label {
+  color: var(--cu-text-soft);
+  font-size: 0.875rem;
+}
+
+.cu-connect-flow__loading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--cu-text-soft);
+  font-size: 0.875rem;
+}
+
+.cu-connect-flow__loading-spinner {
+  width: 1.35rem;
+  height: 1.35rem;
+}
+
+.cu-status-tag {
+  display: inline-block;
+  padding: 0.12rem 0.45rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.cu-status-tag--verified {
+  border-color: rgba(var(--cu-success-rgb), 0.34);
+  background: rgba(var(--cu-success-rgb), 0.14);
+  color: var(--cu-success);
+}
+
+.cu-status-tag--disconnected {
+  border-color: rgba(var(--cu-danger-rgb), 0.36);
+  background: rgba(var(--cu-danger-rgb), 0.16);
+  color: var(--cu-danger);
+}
+
+.cu-status-tag--not-connected {
+  border-color: rgba(var(--cu-edge-rgb), 0.36);
+  background: rgba(var(--cu-edge-rgb), 0.2);
+  color: var(--cu-text-soft);
 }
 
 .settings-channel-row {
@@ -2051,7 +2340,9 @@ code {
   .settings-channel-row,
   .settings-channel-readonly-row,
   .settings-verification-target,
-  .settings-verification-token-row {
+  .settings-verification-token-row,
+  .cu-connect-flow,
+  .cu-connect-card--summary {
     grid-template-columns: 1fr;
   }
 

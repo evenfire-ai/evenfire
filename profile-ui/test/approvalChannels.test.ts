@@ -17,6 +17,7 @@ import {
   challengeCountdownLabel,
   challengeExpirationLabel,
   challengeRemainingSeconds,
+  channelTableRows,
   preferredAccountOptionLabel,
   slackVerificationCommand,
   targetDisplayName,
@@ -140,6 +141,105 @@ test('activeApprovalAccounts excludes disabled accounts', () => {
   }
 
   assert.deepEqual(activeApprovalAccounts([active, disabled]), [active])
+})
+
+test('channelTableRows marks targets without an account as Not connected', () => {
+  const rows = channelTableRows([target], [])
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!.key, `target:${target.id}`)
+  assert.equal(rows[0]!.target, target)
+  assert.equal(rows[0]!.account, null)
+  assert.equal(rows[0]!.status, 'Not connected')
+})
+
+test('channelTableRows reports Verified from the active account referencing the target', () => {
+  const account: WorkflowApprovalMediumAccount = {
+    id: 'account-1',
+    userId: 'user-1',
+    medium: 'telegram',
+    providerUserId: '123456789',
+    providerWorkspaceId: null,
+    providerChannelId: '987654321',
+    targets: [target],
+  }
+
+  const rows = channelTableRows([target], [account])
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!.status, 'Verified')
+  assert.equal(rows[0]!.account, account)
+})
+
+test('channelTableRows reports Disconnected when only a disabled record remains', () => {
+  const disabled: WorkflowApprovalMediumAccount = {
+    id: 'account-1',
+    userId: 'user-1',
+    medium: 'telegram',
+    providerUserId: '123456789',
+    providerWorkspaceId: null,
+    providerChannelId: '987654321',
+    disabledAt: '2026-06-05T18:00:00.000Z',
+    targets: [target],
+  }
+
+  const rows = channelTableRows([target], [disabled])
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!.status, 'Disconnected')
+  assert.equal(rows[0]!.account, disabled)
+})
+
+test('channelTableRows prefers the active record over a stale disabled one', () => {
+  const disabled: WorkflowApprovalMediumAccount = {
+    id: 'account-old',
+    userId: 'user-1',
+    medium: 'telegram',
+    providerUserId: '123456789',
+    providerWorkspaceId: null,
+    providerChannelId: '987654321',
+    disabledAt: '2026-06-05T18:00:00.000Z',
+    targets: [target],
+  }
+  const active: WorkflowApprovalMediumAccount = {
+    ...disabled,
+    id: 'account-new',
+    disabledAt: undefined,
+  }
+
+  const rows = channelTableRows([target], [disabled, active])
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!.status, 'Verified')
+  assert.equal(rows[0]!.account, active)
+})
+
+test('channelTableRows keeps accounts that no longer map to a known target', () => {
+  const orphan: WorkflowApprovalMediumAccount = {
+    id: 'orphan-1',
+    userId: 'user-1',
+    medium: 'slack',
+    providerUserId: 'U123',
+    providerWorkspaceId: 'T123',
+    providerChannelId: 'C456',
+    targets: [],
+  }
+  const orphanDisabled: WorkflowApprovalMediumAccount = {
+    ...orphan,
+    id: 'orphan-2',
+    disabledAt: '2026-06-05T18:00:00.000Z',
+  }
+
+  const rows = channelTableRows([target], [orphan, orphanDisabled])
+
+  assert.deepEqual(
+    rows.map(row => [row.key, row.status]),
+    [
+      [`target:${target.id}`, 'Not connected'],
+      ['account:orphan-1', 'Verified'],
+      ['account:orphan-2', 'Disconnected'],
+    ]
+  )
 })
 
 test('preferredAccountOptionLabel renders medium with a channel hint', () => {

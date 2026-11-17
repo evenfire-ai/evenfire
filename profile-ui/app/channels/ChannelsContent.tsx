@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import Link from 'next/link'
 import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
@@ -8,7 +9,7 @@ import { useProfileAccess } from '@components/ProfileAccessContext'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { useToast } from '@components/Toast'
-import { IconRefresh } from '@components/icons'
+import { IconRefresh, IconSlack, IconTelegram } from '@components/icons'
 import { PROFILE_ROUTES } from '@constants/routes'
 import { isSilentApiError } from '@lib/api'
 import {
@@ -21,6 +22,11 @@ import { PROFILE_SOCIAL_CHANNEL_TABS } from './constants'
 import type { SocialChannelTabKey } from './types'
 
 type LoadState = 'loading' | 'ready' | 'error'
+
+const SOCIAL_TAB_ICONS: Partial<Record<SocialChannelTabKey, ReactNode>> = {
+  slack: <IconSlack width={14} height={14} />,
+  telegram: <IconTelegram width={14} height={14} />,
+}
 
 export function ChannelsContent({ activeChannel }: { activeChannel: SocialChannelTabKey }) {
   const { approvalTargets: targets, refreshApprovalTargets } = useProfileAccess()
@@ -191,6 +197,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
                   role="tab"
                   aria-selected={tab.key === currentChannel?.key}
                 >
+                  {SOCIAL_TAB_ICONS[tab.key]}
                   {tab.label}
                 </Link>
               ))}

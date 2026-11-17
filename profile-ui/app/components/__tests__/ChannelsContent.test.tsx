@@ -143,11 +143,12 @@ describe('Social channels section header', () => {
     const view = render(<ChannelsContent activeChannel="telegram" />)
 
     const tabs = screen.getByRole('tablist', { name: 'Social networks' })
-    expect(within(tabs).getByRole('tab', { name: 'Telegram' })).toHaveAttribute(
-      'aria-selected',
-      'true'
-    )
-    expect(within(tabs).getByRole('tab', { name: 'Slack' })).toBeInTheDocument()
+    const telegramTab = within(tabs).getByRole('tab', { name: 'Telegram' })
+    expect(telegramTab).toHaveAttribute('aria-selected', 'true')
+    expect(telegramTab.querySelector('svg[viewBox="0 0 512 512"]')).not.toBeNull()
+    const slackTab = within(tabs).getByRole('tab', { name: 'Slack' })
+    expect(slackTab).toBeInTheDocument()
+    expect(slackTab.querySelector('svg[viewBox="0 0 512 512"]')).not.toBeNull()
     expect(view.container.querySelector('.profile-skeleton')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Connect / })).toBeDisabled()
   })

@@ -107,6 +107,50 @@ export function approvalAccountStatusLabel(account: WorkflowApprovalMediumAccoun
   return account.disabledAt ? 'Disconnected' : 'Verified'
 }
 
+export type ChannelTableRowStatus = 'Verified' | 'Disconnected' | 'Not connected'
+
+export type ChannelTableRow = {
+  key: string
+  target: ApprovalChannelTarget | null
+  account: WorkflowApprovalMediumAccount | null
+  status: ChannelTableRowStatus
+}
+
+// One row per communication-channel target, plus any account record that no
+// longer maps to a known target so records never silently disappear. A target
+// is Verified while an active account references it, Disconnected when only a
+// disabled record remains, and Not connected before the first verification.
+export function channelTableRows(
+  targets: ApprovalChannelTarget[],
+  accounts: WorkflowApprovalMediumAccount[]
+): ChannelTableRow[] {
+  const rows: ChannelTableRow[] = targets.map(target => {
+    const linked = accounts.filter(account =>
+      (account.targets || []).some(item => item.id === target.id)
+    )
+    const active = linked.find(account => !account.disabledAt) ?? null
+    const disconnectedRecord = linked.find(account => account.disabledAt) ?? null
+    const key = `target:${target.id}`
+    if (active) return { key, target, account: active, status: 'Verified' }
+    if (disconnectedRecord) {
+      return { key, target, account: disconnectedRecord, status: 'Disconnected' }
+    }
+    return { key, target, account: null, status: 'Not connected' }
+  })
+  for (const account of accounts) {
+    if ((account.targets || []).some(item => targets.some(target => target.id === item.id))) {
+      continue
+    }
+    rows.push({
+      key: `account:${account.id}`,
+      target: null,
+      account,
+      status: account.disabledAt ? 'Disconnected' : 'Verified',
+    })
+  }
+  return rows
+}
+
 export function approvalAccountAssociationLabel(account: WorkflowApprovalMediumAccount): string {
   if (account.disabledAt) return 'Disconnected verification record'
   return (account.targets || []).length > 0
