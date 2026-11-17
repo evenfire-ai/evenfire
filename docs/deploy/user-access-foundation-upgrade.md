@@ -105,13 +105,41 @@ pruned (disabled because the catalog dropped it and nobody used it) stays
 disabled under the old image, which has no re-enable: turn it on by hand if
 it returns to the catalog while the old image runs.
 
-A model turned on under the old image after the new one pruned it (by hand,
-or by old pods during the rollout) keeps `auto_disabled_at` and stays
-catalog-managed, a state the new image never produces. After rolling forward
-again the prune can turn it off once more, and if the catalog lists it, its
-`stale` marker does not clear. Re-pin each such model as the operator's choice
-(`PUT /admin/llm-models/:id` with `enabled: true` and `pinEnabled: true`); they
-are the rows with `enabled AND auto_disabled_at IS NOT NULL`.
+The old image never moves `enabled_managed_by`, so an operator change it makes
+to a catalog-managed row leaves the row catalog-managed:
+
+- A model turned on under the old image after the new one pruned it (by hand,
+  or by old pods during the rollout) keeps `auto_disabled_at`, a state the new
+  image never produces. After rolling forward again the prune can turn it off
+  once more, and if the catalog lists it, its `stale` marker does not clear.
+- A discovered model that was off and never pruned (its provider's auto-enable
+  was off, or it was not eligible), turned on by hand under the old image, or a
+  discovered model renamed under the old image, is still catalog-managed after
+  rolling forward. Once it is stale for the grace period and nobody uses it, the
+  prune turns it off.
+
+Before or right after rolling forward, re-pin each such model as the
+operator's choice (`PUT /admin/llm-models/:id` with `enabled: true` and
+`pinEnabled: true`). These are the rows this query returns: the pruned ones by
+their `auto_disabled_at`, the others by an admin audit entry written after
+`0140` was applied (sync entries have no `detail`). It can also list a row
+whose `enabled` an admin of the new image resent unchanged; re-pinning that one
+only makes it the operator's.
+
+```sql
+SELECT t.id, t.provider, t.model
+  FROM llm_allowed_models t
+ WHERE t.enabled
+   AND t.enabled_managed_by = 'catalog'
+   AND (t.auto_disabled_at IS NOT NULL
+        OR EXISTS (
+          SELECT 1 FROM llm_allowed_models_audit a
+           WHERE a.provider = t.provider AND a.model = t.model
+             AND a.detail ?| ARRAY['enabled', 'provider', 'model']
+             AND a.created_at >= (SELECT applied_at FROM schema_migrations
+                                   WHERE version = '0140_llm_catalog_prune_episodes')))
+ ORDER BY t.provider, t.model;
+```
 
 Logout revokes only the token it receives. A V1 token issued before a team
 switch stays valid until its own expiry (at most 7 days, 604800 s), as on `dev`. A new
