@@ -20,11 +20,21 @@ import {
   runAnnotation,
   sanitizeFixtureReport,
   selectFixtureAction,
+  assertCanonicalEvenfireCheckout,
 } from './image-capabilities-fixture.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const laneConfigFile = lane =>
   path.join(repoRoot, playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane }).config)
+test('accepts the canonical Evenfire checkout directory names', () => {
+  assert.doesNotThrow(() => assertCanonicalEvenfireCheckout('/work/evenfire'))
+  assert.doesNotThrow(() => assertCanonicalEvenfireCheckout('/work/evenfire-open-source'))
+  assert.throws(
+    () => assertCanonicalEvenfireCheckout('/work/some-other-clone'),
+    /Canonical Evenfire checkout required/
+  )
+})
+
 function playwrightReport({ lane = 'image', stats = {}, errors = [], titles } = {}) {
   const { grep } = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane })
   const specTitles = titles ?? [`${grep}a journey`]

@@ -58,7 +58,7 @@ What the host-context-controller (HCC) creates for **each agent (Host)**:
 
 | Resource                                     | Namespace  | Default                                                                                 |
 | -------------------------------------------- | ---------- | --------------------------------------------------------------------------------------- |
-| `mcp-host` Deployment                        | `mcp-host` | 100m CPU / 128Mi requested, 500m / 512Mi limit (`CONTEXT_MAPPER_HOST_RESOURCES_*`)      |
+| `mcp-host` Deployment                        | `mcp-host` | 100m CPU / 128Mi requested, 500m / 2Gi limit (`CONTEXT_MAPPER_HOST_RESOURCES_*`)        |
 | Service                                      | `mcp-host` |                                                                                         |
 | Workspace PVC                                | `mcp-host` | RWO, 10Gi (`CONTEXT_MAPPER_HOST_WORKSPACE_SIZE`)                                        |
 | `channel-reader-<host>` Deployment + Service | `channels` | Always created. `replicas: 0` until a CommunicationChannel references the Host, then 1. |
