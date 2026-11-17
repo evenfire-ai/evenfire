@@ -413,6 +413,39 @@ describe('main.ts recovery dialog and renderer receipt ordering', () => {
     const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady') as any
     if (!didNavigate) throw new Error('main.ts did not register document navigation')
 
+    const currentSession = await service.getSessionState()
+    if (!currentSession.authenticated) {
+      const runtimeConfig = await import('../config.js')
+      const restBaseUrl = 'https://rest-delayed-projection.recovery-dialog.test'
+      const rpcBaseUrl = 'https://rpc-delayed-projection.recovery-dialog.test'
+      await runtimeConfig.saveDesktopRuntimeConfig({
+        externalRestApiBaseUrl: restBaseUrl,
+        rpcProxyBaseUrl: rpcBaseUrl,
+        appName: 'Delayed projection test',
+      })
+
+      const login = testLoginResult('delayed-projection-session')
+      const authClient = service.authClient as any
+      vi.spyOn(authClient, 'googleLogin').mockResolvedValue(login)
+      vi.spyOn(authClient, 'getDesktopEnvironment').mockResolvedValue({
+        externalRestApiBaseUrl: restBaseUrl,
+        rpcProxyBaseUrl: rpcBaseUrl,
+        appName: 'Delayed projection test',
+      })
+      vi.spyOn(authClient, 'getMe').mockResolvedValue(login.me)
+      await service.googleLogin('synthetic-delayed-projection-login')
+    }
+    expect(await service.getSessionState()).toMatchObject({ authenticated: true })
+
+    didNavigate()
+    const initialHandshake = ownContents.mainFrame.send.mock.calls
+      .filter(([channel]: unknown[]) => channel === 'auth:markdownDocumentHandshake')
+      .at(-1)
+    if (!initialHandshake) throw new Error('the current document did not receive its challenge')
+    const initialReadyState = rendererReady(ipcEvent(ownContents), initialHandshake[1]) as any
+    expect(initialReadyState.documentEpoch).toEqual(initialHandshake[1].documentEpoch)
+    expect(initialReadyState.sessionTransitionRevealPending).toBe(false)
+
     const staleReceipt = await view(ipcEvent(ownContents))
     if (!staleReceipt?.state?.authenticated) {
       throw new Error('the test requires a current authenticated renderer projection')
