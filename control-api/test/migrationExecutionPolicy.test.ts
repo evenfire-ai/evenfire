@@ -12,6 +12,7 @@ import {
   onlineIndex,
   preparePr1Migration,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
+import { GFS_RESOURCE_CHANGED_CHANNEL } from '../src/services/gfsWatch/notifySchemas.js'
 
 const EARLIER_HEAD_GUARD_MARKER = '/* pr1-earlier-head-guard */'
 const EARLIER_HEAD_DOC_REFERENCE =
@@ -100,22 +101,32 @@ describe('D34 migration execution policy', () => {
   })
 
   it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
-    // PR1 occupies slots 0137-0138, after dev's 0136, and no shared
-    // environment holds a receipt for either. 0137 creates the user-session
-    // tables (sessions, security epochs, the v1 revocation ledger) and their
-    // runtime grants; the indexes it needs on pre-existing tables are built
-    // online by PR1_ONLINE_INDEX_PLAN. 0138 backfills the security epochs from
-    // historical password events. PR1 installs no trigger and no function.
+    // PR1 occupies slots 0137-0139, after dev's 0136, and no shared
+    // environment holds a receipt for any of them. 0137 creates the
+    // user-session tables (sessions, security epochs, the v1 revocation ledger)
+    // and their runtime grants; the indexes it needs on pre-existing tables are
+    // built online by PR1_ONLINE_INDEX_PLAN. 0138 backfills the security epochs
+    // from historical password events. 0139 installs the only function and
+    // trigger of PR1: gfs_resource_changed_notify(), an AFTER ROW trigger on
+    // gfs_resources that sends one pg_notify per written row.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
         'de83799480ec54079f27e18abc5592780594e8b2d1a82759238a5edf1c8ff400',
+      ],
+      [
+        'src/services/gfsWatch/resourceChangedSchema.ts',
+        'a044bc9001c5aaa82bdba851d45434acbb87db09f2132240cc918a4cba15261a',
       ],
     ] as const
     for (const [path, expected] of files) {
       const bytes = await readFile(new URL(`../${path}`, import.meta.url))
       expect(createHash('sha256').update(bytes).digest('hex'), path).toBe(expected)
     }
+    // 0139's SQL interpolates the channel name from notifySchemas.ts. That file
+    // is pinned by this one value, not by its hash, because it also carries
+    // runtime payload parsers that later changes extend.
+    expect(GFS_RESOURCE_CHANGED_CHANNEL).toBe('gfs_resource_changed')
   })
 
   it('classifies every PR1 index exactly once', async () => {
