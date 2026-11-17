@@ -23,10 +23,10 @@ import type {
   InfrastructureTelemetryReporter,
 } from './infrastructureTelemetryReporter'
 import {
-  HOST_K8S_REQUEST_TIMEOUT_CODE,
-  HostK8sRequestTimeoutError,
-  makeHostK8sApiClient,
-} from './k8s/hostK8sApiClient'
+  K8S_REQUEST_TIMEOUT_CODE,
+  K8sRequestTimeoutError,
+  makeK8sApiClientWithDeadline,
+} from './k8s/k8sRequestDeadline'
 import {
   SFS_LABEL,
   SFS_NAMESPACE_LABEL,
@@ -654,15 +654,17 @@ export class HostReconciler {
 
   constructor(kc: k8s.KubeConfig, deps?: HostReconcilerDeps) {
     this.appsApi =
-      deps?.appsApi ?? makeHostK8sApiClient(kc, k8s.AppsV1Api, config.hostK8sRequestTimeoutMs)
+      deps?.appsApi ??
+      makeK8sApiClientWithDeadline(kc, k8s.AppsV1Api, config.hostK8sRequestTimeoutMs)
     this.coreApi =
-      deps?.coreApi ?? makeHostK8sApiClient(kc, k8s.CoreV1Api, config.hostK8sRequestTimeoutMs)
+      deps?.coreApi ??
+      makeK8sApiClientWithDeadline(kc, k8s.CoreV1Api, config.hostK8sRequestTimeoutMs)
     this.networkingApi =
       deps?.networkingApi ??
-      makeHostK8sApiClient(kc, k8s.NetworkingV1Api, config.hostK8sRequestTimeoutMs)
+      makeK8sApiClientWithDeadline(kc, k8s.NetworkingV1Api, config.hostK8sRequestTimeoutMs)
     this.rbacApi =
       deps?.rbacApi ??
-      makeHostK8sApiClient(kc, k8s.RbacAuthorizationV1Api, config.hostK8sRequestTimeoutMs)
+      makeK8sApiClientWithDeadline(kc, k8s.RbacAuthorizationV1Api, config.hostK8sRequestTimeoutMs)
     this.kubeConfig = kc
     this.customApiInstance = deps?.customApi
     this.now = deps?.now ?? (() => new Date())
@@ -712,7 +714,7 @@ export class HostReconciler {
   /** CustomObjects API client for Host /status writes (lazily constructed). */
   private get customApi(): k8s.CustomObjectsApi {
     if (!this.customApiInstance) {
-      this.customApiInstance = makeHostK8sApiClient(
+      this.customApiInstance = makeK8sApiClientWithDeadline(
         this.kubeConfig,
         k8s.CustomObjectsApi,
         config.hostK8sRequestTimeoutMs
@@ -1991,8 +1993,8 @@ export class HostReconciler {
       this.codexSnapshot = parseAllowedModelsSnapshot(cm)
     } catch (err) {
       const timeout =
-        err instanceof HostK8sRequestTimeoutError ||
-        (err as { code?: string }).code === HOST_K8S_REQUEST_TIMEOUT_CODE
+        err instanceof K8sRequestTimeoutError ||
+        (err as { code?: string }).code === K8S_REQUEST_TIMEOUT_CODE
       if (timeout) {
         this.lastCodexConfigMap = undefined
         this.codexSnapshot = snapshotFromConfigMapError('timeout')

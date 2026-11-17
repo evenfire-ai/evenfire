@@ -2133,7 +2133,7 @@ spec:
                         description: Original serialized output length in characters before preview truncation.
                       outputPreviewMaxChars:
                         type: integer
-                        description: Preview limit used when WRC stored output.
+                        description: WRC's output preview limit in characters. When outputTruncated is true, the length of the stored preview, which is that limit or less when the coordinator had already shortened the output.
                       error:
                         type: string
                       executor:
