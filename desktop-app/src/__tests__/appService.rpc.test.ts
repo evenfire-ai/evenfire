@@ -105,6 +105,7 @@ describe('AppService.invokeHostMessage', () => {
       metadata: { teamId: '00000000-0000-4000-8000-0000000000aa' },
       threadId: undefined,
       attachments: undefined,
+      displayCapabilities: ['mermaid'],
     })
     expect(service.rpcClient.invokeHostMessage.mock.calls[0][3]).toEqual({ async: true })
   })
@@ -162,6 +163,7 @@ describe('AppService.invokeHostMessage', () => {
       metadata: { teamId: '00000000-0000-4000-8000-0000000000aa' },
       threadId: undefined,
       attachments: [attachment],
+      displayCapabilities: ['mermaid'],
     })
     expect(Buffer.from(forwarded.attachments[0].dataBase64, 'base64')).toHaveLength(5 * MIB)
   })
@@ -319,6 +321,7 @@ describe('AppService.invokeHostMessage', () => {
         threadId: undefined,
         attachments: undefined,
         fileReferences: [reference],
+        displayCapabilities: ['mermaid'],
       })
     })
 

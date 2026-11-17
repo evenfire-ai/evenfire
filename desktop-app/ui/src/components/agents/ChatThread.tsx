@@ -810,7 +810,9 @@ export function ChatThread({
                                 : undefined
                           }
                           className={`chat-bubble ${message.role}${message.isError ? ' chat-bubble--error' : ''}${
-                            htmlPreview || hasHtmlArtifactMention ? ' chat-bubble--wide' : ''
+                            htmlPreview || hasHtmlArtifactMention || semanticModel.hasMermaidDiagram
+                              ? ' chat-bubble--wide'
+                              : ''
                           }`}
                         >
                           {message.isError ? (

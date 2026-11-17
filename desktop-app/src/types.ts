@@ -589,6 +589,29 @@ export type RpcTokenResult = {
   expiresInSeconds: number
 }
 
+/** A Mermaid diagram from an agent reply, to draw off the UI renderer. */
+export type DiagramDrawRequest = {
+  code: string
+  theme: 'dark' | 'light'
+  fontFamily: string
+  /** Width the diagram is laid out for; charts such as Gantt fill it. */
+  width: number
+}
+
+export type DiagramImage = {
+  /** `data:image/svg+xml` URL of the drawn diagram. */
+  src: string
+  width: number
+  height: number
+  /** Text alternative: the diagram's own accessible title and description, or a generic one. */
+  label: string
+}
+
+export type DiagramDrawResult =
+  | { ok: true; image: DiagramImage }
+  /** `retryable`: the renderer failed, not the code; the same code may draw later. */
+  | { ok: false; reason: string; retryable?: boolean }
+
 export type HostMessageRequest = {
   content: string
   channelType?: string
@@ -610,6 +633,8 @@ export type HostMessageRequest = {
    * references. mcp-host re-authorizes each one before the task exists.
    */
   fileReferences?: FileReferenceV1[]
+  /** What this build draws in a reply (`DESKTOP_DISPLAY_CAPABILITIES`). */
+  displayCapabilities?: string[]
   [key: string]: unknown
 }
 

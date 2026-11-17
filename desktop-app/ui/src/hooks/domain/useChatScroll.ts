@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { CHAT_NEAR_BOTTOM_THRESHOLD_PX } from '@constants/agents'
+import { isChatEndNearBottom } from '@lib/chatScroll'
 import type { AgentChatMessage, TaskProgress } from '../../uiTypes'
 
 interface UseChatScrollParams {
@@ -115,23 +115,8 @@ export function useChatScroll({
     scheduleTimeout(() => runBurst(2), 80)
   }, [cancelScheduledScrolls])
 
-  // B4-a: is the user currently following the bottom of the conversation? Walk up
-  // to the first actually-scrollable ancestor of the anchor and measure. When
-  // there is no anchor or no scrollable container (content fits, or SSR/jsdom
-  // where these read 0), default to `true` so an auto-scroll is harmless.
-  const isNearBottom = useCallback(() => {
-    const anchor = chatEndRef.current
-    if (!anchor) return true
-    let node: HTMLElement | null = anchor.parentElement
-    while (node) {
-      const { scrollHeight, scrollTop, clientHeight } = node
-      if (scrollHeight > clientHeight) {
-        return scrollHeight - scrollTop - clientHeight <= CHAT_NEAR_BOTTOM_THRESHOLD_PX
-      }
-      node = node.parentElement
-    }
-    return true
-  }, [])
+  // B4-a: is the user currently following the bottom of the conversation?
+  const isNearBottom = useCallback(() => isChatEndNearBottom(chatEndRef.current), [])
 
   // Auto-scroll effect. B4-a: only when the user is near the bottom. B4-b: the
   // progress dependency is the active view's slice, not the cross-agent map.

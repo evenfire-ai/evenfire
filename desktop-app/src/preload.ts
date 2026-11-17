@@ -4,6 +4,7 @@ import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfigHandoffSelection,
+  DiagramDrawRequest,
   EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
   HostMessageRequest,
@@ -701,6 +702,9 @@ const clerum = Object.freeze({
   app: {
     openUrl: (url: string) => ipcRenderer.invoke('app:openUrl', { url }),
     rendererReady: () => ipcRenderer.invoke('app:rendererReady'),
+  },
+  diagrams: {
+    draw: (request: DiagramDrawRequest) => ipcRenderer.invoke('diagram:draw', request),
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),

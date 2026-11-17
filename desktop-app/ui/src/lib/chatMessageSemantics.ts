@@ -22,6 +22,8 @@ export type ChatMessageSemanticModel = Readonly<{
   messageId: string
   contentRevision: string
   representation: 'markdown' | 'plain'
+  /** The Markdown holds a fenced `mermaid` block the chat draws as a diagram. */
+  hasMermaidDiagram: boolean
   renderTree: Root
   searchText: string
   fragments: readonly ChatSemanticFragment[]
@@ -50,6 +52,41 @@ const FLOW_BOUNDARIES = new Set([
   'th',
 ])
 const URL_PROPERTIES = new Set(['href', 'src'])
+const MERMAID_LANGUAGE_CLASS = 'language-mermaid'
+
+function textOf(node: RootContent | Root): string {
+  if (node.type === 'text') return node.value
+  return 'children' in node ? node.children.map(textOf).join('') : ''
+}
+
+/**
+ * The code of a fenced `mermaid` block, which Markdown renders as
+ * `pre > code.language-mermaid`, or null for any other element and an empty
+ * block. Search highlights wrap the text in spans but leave it unchanged.
+ */
+export function mermaidSourceOf(node: Element): string | null {
+  if (node.tagName !== 'pre') return null
+  const elements = node.children.filter((child): child is Element => child.type === 'element')
+  const code = elements.length === 1 ? elements[0] : undefined
+  if (!code || code.tagName !== 'code') return null
+  const className = code.properties.className
+  const classes = Array.isArray(className) ? className.map(String) : []
+  if (!classes.some(name => name.toLowerCase() === MERMAID_LANGUAGE_CLASS)) return null
+  const source = textOf(code).replace(/\n$/, '')
+  return source.trim() ? source : null
+}
+
+/** Whether a search highlight (`<mark>`) sits anywhere inside the element. */
+export function containsSearchMark(node: Element): boolean {
+  return node.children.some(
+    child => child.type === 'element' && (child.tagName === 'mark' || containsSearchMark(child))
+  )
+}
+
+function containsMermaidDiagram(node: RootContent | Root): boolean {
+  if (node.type === 'element' && mermaidSourceOf(node) !== null) return true
+  return 'children' in node && node.children.some(containsMermaidDiagram)
+}
 
 function normalizeTree(node: RootContent | Root): void {
   if ('children' in node) {
@@ -141,6 +178,7 @@ export function buildChatMessageSemanticModel(message: AgentChatMessage): ChatMe
     messageId: message.id,
     contentRevision: displayed,
     representation,
+    hasMermaidDiagram: representation === 'markdown' && containsMermaidDiagram(tree),
     renderTree: tree,
     searchText: flows.map(flow => flow.text).join('\u0000'),
     fragments: Object.freeze(fragments.map(fragment => Object.freeze(fragment))),

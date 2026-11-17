@@ -23,6 +23,7 @@ import {
   canonicalizeDesktopRestEndpoint,
   sameDesktopRestEndpoint,
 } from './desktopEnvironmentUrl.js'
+import { DESKTOP_DISPLAY_CAPABILITIES } from './displayCapabilities.js'
 import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
@@ -4622,6 +4623,9 @@ export class AppService {
       // Structured references (#666): parsed at the IPC boundary; rpc-proxy
       // forwards them and mcp-host resolves each one.
       ...(request.fileReferences === undefined ? {} : { fileReferences: request.fileReferences }),
+      // Declared by the build, never by the renderer: rpc-proxy forwards only
+      // the values it knows, and the Host tells the agent it may use them.
+      displayCapabilities: [...DESKTOP_DISPLAY_CAPABILITIES],
     }
     try {
       return await this.rpcClient.invokeHostMessage(
