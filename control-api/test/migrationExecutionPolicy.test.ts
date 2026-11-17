@@ -12,6 +12,10 @@ import {
   onlineIndex,
   preparePr1Migration,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
+import {
+  GFS_AUTHZ_CHANGED_CHANNEL,
+  GFS_WATCH_SESSION_CHANNEL,
+} from '../src/services/gfsWatch/notifySchemas.js'
 
 const EARLIER_HEAD_GUARD_MARKER = '/* pr1-earlier-head-guard */'
 const EARLIER_HEAD_DOC_REFERENCE =
@@ -106,22 +110,40 @@ describe('D34 migration execution policy', () => {
   })
 
   it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
-    // PR1 occupies slots 0137-0138, after dev's 0136, and no shared
-    // environment holds a receipt for either. 0137 creates the user-session
-    // tables (sessions, security epochs, the v1 revocation ledger) and their
-    // runtime grants; the indexes it needs on pre-existing tables are built
-    // online by PR1_ONLINE_INDEX_PLAN. 0138 backfills the security epochs from
-    // historical password events. PR1 installs no trigger and no function.
+    // PR1 occupies the slots after dev's 0136, and no shared environment holds
+    // a receipt for any of them. 0137 creates the user-session tables
+    // (sessions, security epochs, the v1 revocation ledger) and their runtime
+    // grants; the indexes it needs on pre-existing tables are built online by
+    // PR1_ONLINE_INDEX_PLAN. 0138 backfills the security epochs from historical
+    // password events. 0140-0145 install the GFS watch revocation signals, one
+    // table per migration and transaction: 0140 creates the key function
+    // gfs_authz_subject_key() and the trigger functions
+    // gfs_authz_subject_notify(), gfs_authz_user_notify(),
+    // gfs_authz_admin_notify() and gfs_watch_session_notify(), plus the AFTER
+    // ROW trigger on gfs_grants; 0141-0145 add AFTER ROW triggers on
+    // gfs_shares, gfs_desktop_operator_links, control_admin_users,
+    // team_members and users. Every login writes team_members and users, so
+    // 0144 and 0145 retry a lost lock wait twice; their lockRetries live in
+    // db.ts and are pinned by the lock-retry registration test below.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
         'de83799480ec54079f27e18abc5592780594e8b2d1a82759238a5edf1c8ff400',
+      ],
+      [
+        'src/services/gfsWatch/authzChangedSchema.ts',
+        '94bb4a41f9db114a8f67622e2e1b03dc504b737bdcdb01d523fd98f021e7cd1f',
       ],
     ] as const
     for (const [path, expected] of files) {
       const bytes = await readFile(new URL(`../${path}`, import.meta.url))
       expect(createHash('sha256').update(bytes).digest('hex'), path).toBe(expected)
     }
+    // The SQL of 0140-0145 interpolates its channel names from notifySchemas.ts.
+    // That file is pinned by these values, not by its hash, because it also
+    // carries runtime payload parsers that later changes extend.
+    expect(GFS_AUTHZ_CHANGED_CHANNEL).toBe('gfs_authz_changed')
+    expect(GFS_WATCH_SESSION_CHANNEL).toBe('gfs_watch_session')
   })
 
   it('classifies every PR1 index exactly once', async () => {
