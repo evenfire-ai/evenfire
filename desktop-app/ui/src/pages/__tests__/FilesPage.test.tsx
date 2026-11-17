@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { GFS_ACCESS_REVOKED_BODY, GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
@@ -165,6 +167,35 @@ function trailButtonNames(trail: HTMLElement): string[] {
     .getAllByRole('button')
     .filter(button => button.classList.contains('da-gfs-drive__breadcrumb'))
     .map(button => button.textContent ?? '')
+}
+
+/**
+ * Selectors of the real `styles.css` rules that give an svg both a width and a
+ * height. jsdom does not lay out or resolve `var(--)`, so a chevron the sheet
+ * never sizes renders at its intrinsic size only in a real window; matching the
+ * rendered svg against these selectors catches that here.
+ */
+function svgSizingSelectors(): string[] {
+  const css = readFileSync(resolve(__dirname, '../../styles.css'), 'utf8').replace(
+    /\/\*[\s\S]*?\*\//g,
+    ''
+  )
+  const selectors: string[] = []
+  for (const rule of css.matchAll(/([^{}@]+)\{([^{}]*)\}/g)) {
+    const body = rule[2] ?? ''
+    if (!/(^|[\s;])width\s*:/.test(body) || !/(^|[\s;])height\s*:/.test(body)) continue
+    for (const selector of (rule[1] ?? '').split(',')) {
+      if (/\bsvg\b/.test(selector)) selectors.push(selector.trim())
+    }
+  }
+  return selectors
+}
+
+/** Parent class of every svg in the trail that no sizing rule of the sheet matches. */
+function unsizedTrailIcons(trail: HTMLElement, sizing: string[]): string[] {
+  return Array.from(trail.querySelectorAll('svg'))
+    .filter(svg => !sizing.some(selector => svg.matches(selector)))
+    .map(svg => svg.parentElement?.className ?? '(detached)')
 }
 
 function uploadInput(): HTMLInputElement {
@@ -8649,6 +8680,49 @@ describe('FilesPage', () => {
     expect(within(otherTrail).getByRole('button', { name: 'Shared with me' })).toBeTruthy()
     expect(within(otherTrail).getByRole('button', { name: 'Team folder' })).toBeTruthy()
     expect(within(otherTrail).queryByRole('button', { name: 'My home' })).toBeNull()
+  })
+
+  it('sizes every chevron of the trail through the stylesheet, in each view', () => {
+    const sizing = svgSizingSelectors()
+    const homeCrumb = {
+      resourceId: 'home-1',
+      gfsUri: 'gfs://main/home-1',
+      name: 'fixture',
+      kind: 'directory' as const,
+      version: 4,
+      bytes: 0,
+    }
+    const projects = { ...homeCrumb, resourceId: 'projects-1', name: 'Projects' }
+    const teamCrumb = { ...homeCrumb, resourceId: 'team-1', name: 'Team folder' }
+    const views = [
+      // Overview: the chevron between the two view roots sits directly in the trail.
+      { current: null, crumbs: [], names: ['EvenDrive', 'Shared with me'] },
+      {
+        current: projects,
+        crumbs: [homeCrumb, projects],
+        names: ['EvenDrive', 'My home', 'Projects'],
+      },
+      {
+        current: teamCrumb,
+        crumbs: [teamCrumb],
+        names: ['EvenDrive', 'Shared with me', 'Team folder'],
+      },
+    ]
+    for (const view of views) {
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+        current: view.current,
+        crumbs: view.crumbs,
+      })
+      renderFilesPage()
+      const trail = screen.getByRole('navigation', { name: 'File location' })
+      expect(trailButtonNames(trail)).toEqual(view.names)
+      // Witness: one chevron between each pair of crumbs was rendered and inspected.
+      expect(trail.querySelectorAll('svg')).toHaveLength(view.names.length - 1)
+      expect(unsizedTrailIcons(trail, sizing)).toEqual([])
+      cleanup()
+    }
   })
 
   it('keeps the caller home out of the Shared with me listing and opens it from its own entry', () => {

@@ -15362,6 +15362,9 @@ pre {
   gap: var(--space-0-5);
 }
 
+/* Chevrons sit inside a crumb group or, between the EvenDrive and Shared with
+   me view roots, directly in the trail; both need the icon size. */
+.da-gfs-drive__breadcrumbs > svg,
 .da-gfs-drive__crumb-group > svg {
   width: var(--space-3);
   height: var(--space-3);
