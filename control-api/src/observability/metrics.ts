@@ -218,6 +218,12 @@ export const gfsWatchCmdDroppedTotal = getOrCreateCounter({
   labelNames: ['reason'] as const as Array<'reason'>,
 })
 
+export const gfsWatchKeyDeferredTotal = getOrCreateCounter({
+  name: 'gfs_watch_key_deferred_total',
+  help: 'GFS watch keys an op left deferred, by bounded cause.',
+  labelNames: ['cause'] as const as Array<'cause'>,
+})
+
 export const gfsWatchTotalFailedTotal = getOrCreateCounter({
   name: 'gfs_watch_total_failed_total',
   help: 'GFS watch awaited steps that failed, classified as transient infrastructure or defect.',
