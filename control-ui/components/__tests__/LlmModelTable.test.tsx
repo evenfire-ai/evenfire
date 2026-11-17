@@ -753,6 +753,8 @@ describe('LlmModelTable rows the catalog sync turned off', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Actions for model claude/claude-sonnet-4-6' })
     )
+    // Exactly one menu is open, the second row's; otherwise the absence below proves nothing.
+    expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: 'Keep disabled' })).not.toBeInTheDocument()
   })
 })
