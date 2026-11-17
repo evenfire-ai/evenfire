@@ -140,11 +140,11 @@ describe('Settings approval channels tab structure', () => {
     )
   })
 
-  it('does not render the removed preferred-channel section head or Manage redirect', async () => {
+  it('explains the preferred-channel section without a redundant Manage button', async () => {
     renderTab()
 
     await screen.findByText(preferredAccountOptionLabel(slackAccount))
-    expect(screen.queryByRole('heading', { name: 'Preferred approval channel' })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Preferred approval channel' })).toBeInTheDocument()
     expect(screen.queryByText('Manage')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Manage' })).toBeNull()
     expect(mocks.routerPush).not.toHaveBeenCalled()

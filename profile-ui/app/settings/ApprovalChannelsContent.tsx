@@ -144,6 +144,10 @@ export function ApprovalChannelsContent() {
 
         {state === 'ready' && preferences ? (
           <section className="section settings-section">
+            <h2 className="section-title">Preferred approval channel</h2>
+            <p className="small muted">
+              Choose which connected conversation receives approval notifications by default.
+            </p>
             {activeAccounts.length === 0 ? (
               <div className="message message--plain">
                 No external channels are connected. Connect one under Social channels.
