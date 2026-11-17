@@ -1,4 +1,4 @@
-import type { FileClass, FileClassification, FileDetection } from './fileClassifier'
+import type { FileClass, FileClassification, FileDetection, FileReader } from './fileClassifier'
 
 export type FileReferenceSource =
   | { kind: 'attachment'; attachmentId: string; messageId: string }
@@ -29,7 +29,8 @@ export interface FileReferenceV1 {
   /** Required for attachments, optional for GFS resources. */
   digest?: FileReferenceDigest
   textReadable: boolean
-  reader: 'text' | 'none'
+  /** `pdf` / `xlsx` only on those classes; both also accept `none` from older producers. */
+  reader: FileReader
   modelImageInput: 'candidate' | 'unsupported'
 }
 
