@@ -92,12 +92,18 @@ export async function applyLlmCatalogPruneStateSchema(db: DbClient): Promise<voi
   // `enabled`. The audit cannot tell whether an update changed `enabled` (it
   // stores the request body, not the previous value) and the sync writes no
   // per-model audit, so any audit row that names `enabled`, or any disable,
-  // keeps the row the operator's. `discovered_at` is written only by the sync's
-  // INSERT: the seeded rows 0135 handed to the sync have it NULL, and their
-  // contract is that the sync never changes their `enabled`. Subscription
-  // providers also use source='discovery' and are excluded by the provider list.
-  // A dismissed pair is excluded too. This marks more rows 'operator' than the
-  // runtime rule would; that is intended.
+  // keeps the row the operator's. So does one that names `provider` or
+  // `model`: an image released before renamed discovered rows became manual
+  // (v0.12.x) kept a renamed discovered row as source='discovery' with its
+  // discovered_at, and a rename sent without
+  // `enabled` is otherwise indistinguishable from a row the sync inserted (the
+  // audit is written under the new pair, so it matches the renamed row).
+  // `discovered_at` is written only by the sync's INSERT: the seeded rows 0135
+  // handed to the sync have it NULL, and their contract is that the sync never
+  // changes their `enabled`. Subscription providers also use source='discovery'
+  // and are excluded by the provider list. A dismissed pair is excluded too.
+  // Each test errs toward 'operator' (a body naming an unchanged `model` also
+  // counts), the side on which the prune never acts.
   await db.query(
     `UPDATE llm_allowed_models AS t
         SET enabled_managed_by = 'catalog'
@@ -111,7 +117,7 @@ export async function applyLlmCatalogPruneStateSchema(db: DbClient): Promise<voi
         AND NOT EXISTS (
           SELECT 1 FROM llm_allowed_models_audit a
            WHERE a.provider = t.provider AND a.model = t.model
-             AND (a.action = 'disable' OR a.detail ? 'enabled')
+             AND (a.action = 'disable' OR a.detail ?| ARRAY['enabled', 'provider', 'model'])
         )`,
     [Object.keys(PROVIDER_KEY_MAP)]
   )

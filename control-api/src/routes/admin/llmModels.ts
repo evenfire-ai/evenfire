@@ -228,8 +228,10 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   // enabled, or it no longer meets the kind's condition (back in the catalog, no
   // longer deprecated) since the operator loaded the feed: nothing is
   // acknowledged and the client reloads. The keys are stored as sent, not checked against the live
-  // consumers: checking would need K8s LISTs on this route, and a consumer the
-  // operator did not see simply reopens the item on the next feed.
+  // consumers: checking would need K8s LISTs on this route. A client that sends
+  // the keys the feed showed gets the item back when a consumer outside them
+  // appears; a hand-made request can list keys of consumers that do not exist
+  // yet, and those will not reopen it. Only an admin can call this route.
   router.post(
     '/admin/attention/ack',
     asyncHandler(async (req: Request, res: Response) => {

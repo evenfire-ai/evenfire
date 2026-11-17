@@ -83,7 +83,7 @@ ones ahead. See
 
 After each live, plausible run the sync disables catalog-managed models that
 have been stale for longer than `LLM_CATALOG_PRUNE_STALE_GRACE_MS` (default
-7 days, in milliseconds, at least 1 hour) and that no Host, grant or
+7 days, in milliseconds, at least 1 hour and at most 10 years) and that no Host, grant or
 WorkflowRecipe uses, at most `LLM_CATALOG_PRUNE_MAX_PER_RUN` per run (default
 50, 1–1000).
 

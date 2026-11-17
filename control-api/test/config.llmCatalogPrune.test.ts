@@ -1,7 +1,8 @@
 /**
  * The catalog prune's grace and per-run cap. The grace is refused below one
  * hour (it could not absorb an id that flickers out of the catalog for a single
- * run) and the cap outside 1–1000, at boot rather than clamped.
+ * run) and above ten years (PostgreSQL cannot subtract it from NOW()), and the
+ * cap outside 1–1000, at boot rather than clamped.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -48,6 +49,16 @@ describe('control-api llm catalog prune config', () => {
   it('refuses a grace below one hour at boot', async () => {
     await expect(loadConfigWith({ [GRACE]: '3599999' })).rejects.toThrow(
       `${GRACE} must be an integer >= 3600000 (milliseconds)`
+    )
+  })
+
+  it('accepts a ten-year grace and refuses one millisecond more at boot', async () => {
+    const tenYears = 10 * 365 * 24 * 60 * 60 * 1000
+    expect((await loadConfigWith({ [GRACE]: String(tenYears) })).llmCatalogPruneStaleGraceMs).toBe(
+      tenYears
+    )
+    await expect(loadConfigWith({ [GRACE]: String(tenYears + 1) })).rejects.toThrow(
+      `${GRACE} must be an integer <= ${tenYears} (milliseconds)`
     )
   })
 

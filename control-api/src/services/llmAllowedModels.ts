@@ -43,10 +43,13 @@ export type LlmAllowedModel = {
   stale: boolean
   /**
    * When the catalog sync's prune turned this row off for having no consumers;
-   * null otherwise. Cleared when the row is re-enabled, renamed, or an operator
-   * PUT takes authority over `enabled` (changing it or sending `pinEnabled`), so
-   * a non-null value always means "off because of the catalog, still the
-   * catalog's to turn back on".
+   * null otherwise. Cleared by the sync when a live run lists the model again:
+   * it turns the row back on, or, when the provider's auto-enable is off or the
+   * model is not eligible, retires it (leaves it off for good); a run that hits
+   * the auto-enable cap keeps it for a later run. Also cleared by an admin PUT
+   * that renames the row or takes authority over `enabled` (changing it or
+   * sending `pinEnabled`). So a non-null value always means "off because of the
+   * catalog, still the catalog's to turn back on".
    */
   auto_disabled_at: string | null
   /**
@@ -477,10 +480,13 @@ export interface AttentionAckEntry {
 
 /**
  * Record that the operator reviewed an attention item. Stores the consumer keys
- * the CLIENT saw, not the current consumers: one that appeared between the feed
- * and the click must reopen the item, not be accepted unseen. Returns null when
- * the row is gone, disabled, in another episode, or no longer meets the kind's
- * condition (the caller answers 409 and the client reloads the feed).
+ * the client sent, not the current consumers: for a client that sends the keys
+ * the feed showed, one that appeared between the feed and the click reopens the
+ * item instead of being accepted unseen. Keys are not checked against live
+ * consumers, so a key sent ahead of its consumer existing never reopens it.
+ * Returns null when the row is gone, disabled, in another episode, or no longer
+ * meets the kind's condition (the caller answers 409 and the client reloads the
+ * feed).
  */
 export async function acknowledgeAttention(
   input: AttentionAckInput,

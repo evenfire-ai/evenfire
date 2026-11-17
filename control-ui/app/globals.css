@@ -11790,6 +11790,11 @@ td.cu-registry-description {
   padding: 0;
 }
 
+/* Programmatic focus target only (tabIndex=-1), not a control: a ring around the whole surface is noise. */
+.cu-llm-models-layout:focus-visible {
+  outline: none;
+}
+
 .cu-llm-models-layout > .cu-section-card {
   flex: 1;
   min-height: 0;

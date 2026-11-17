@@ -52,11 +52,13 @@ function errorMessage(err: unknown, fallback: string): string {
 export function CatalogAttentionBanner({
   refreshSignal,
   models = NO_MODELS,
+  returnFocusRef,
 }: CatalogAttentionBannerProps = {}) {
   const { authState } = useAuth()
   const { showToast } = useToast()
   const [items, setItems] = useState<AdminAttentionItem[]>([])
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [focusOrphaned, setFocusOrphaned] = useState(false)
   const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set())
   const [itemErrors, setItemErrors] = useState<ReadonlyMap<string, string>>(() => new Map())
   // The feed read that may still land: a newer read supersedes it, so an older
@@ -191,6 +193,13 @@ export function CatalogAttentionBanner({
 
   const modelIdsByPair = useMemo(() => buildModelIdsByPair(models), [models])
   const { pending, reviewed } = splitAcknowledged(items)
+  // The dialog restores focus to its opener, but an emptied feed removes the
+  // opener in the same commit, which would drop focus to <body>.
+  useEffect(() => {
+    if (!focusOrphaned) return
+    setFocusOrphaned(false)
+    returnFocusRef?.current?.focus()
+  }, [focusOrphaned, returnFocusRef])
   // Unknown kinds never reach here: the fetch layer drops them while parsing.
   const groups = groupAttentionItems(pending)
   const { staleReferenced, deprecated, staleDiscovery } = groups
@@ -200,7 +209,10 @@ export function CatalogAttentionBanner({
   // dialog left open when the feed empties (an empty or a failed refetch) would
   // reappear on its own the next time the feed has items. Reviewed items keep it
   // open: they are where the operator undoes a review.
-  if (empty && reviewOpen) setReviewOpen(false)
+  if (empty && reviewOpen) {
+    setReviewOpen(false)
+    setFocusOrphaned(true)
+  }
   if (empty) return null
 
   // No total: one model can sit in two groups (deprecated and then dropped, or

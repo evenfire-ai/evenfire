@@ -147,7 +147,7 @@ it is.
 **Pruning stale models nobody uses.** After each live, plausible run commits,
 the sync disables the models that have been stale for longer than
 `LLM_CATALOG_PRUNE_STALE_GRACE_MS` (default 7 days, counted from when the model
-first went stale; at least 1 hour) and that nobody uses: no Host names them
+first went stale; at least 1 hour, at most 10 years) and that nobody uses: no Host names them
 (`spec.model`, `allowedModels`, fallbacks), no grant names them
 (`allowed_models` or a prompt target), no WorkflowRecipe names them, and no Host
 without a model subset of the same provider offers them. It only touches rows
@@ -157,7 +157,14 @@ the sync never prunes or re-enables it again, when an operator changes its
 (`PUT /admin/llm-models/:id`). With the pin the PUT applies the `enabled` it
 sends, whether or not it differs from the current value, and fixes the row to
 the operator; `pinEnabled` without `enabled` is rejected. At most `LLM_CATALOG_PRUNE_MAX_PER_RUN` models (default 50, 1–1000) are
-disabled per run; the rest wait for the next run. Each one is audited as
+disabled per run; the rest wait for the next run. The cap is per run, not
+per interval. Scheduled and boot runs never overlap each other, but manual
+syncs (`POST /admin/llm-models/discovery/sync`) are not serialized: each one
+that overlaps another manual sync or a scheduled or boot run, on any replica,
+can disable up to the cap, never a model another run already disabled. This matters most one grace
+period after the upgrade that adds the prune, when every model already stale at
+the upgrade reaches the grace at once; avoid manual syncs around then if you
+want the per-run pace. Each disabled model is audited as
 `auto_disable` (actor `system:catalog-sync`). Each prune of a run that could
 decide (live and plausible) appends a row to `llm_catalog_prune_runs`; a run
 that could not decide only counts in
