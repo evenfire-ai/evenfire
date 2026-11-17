@@ -158,9 +158,27 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Enable OpenAI/gpt-5' }))
 
     await waitFor(() =>
-      expect(api.updateLlmModel).toHaveBeenCalledWith('review-openai', { enabled: true })
+      expect(api.updateLlmModel).toHaveBeenCalledWith('review-openai', {
+        enabled: true,
+        pinEnabled: true,
+      })
     )
     expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('pins every model a bulk enable turns on', async () => {
+    const onRefresh = vi.fn().mockResolvedValue(undefined)
+    render(<LlmDiscoveryPanel items={[reviewModel]} loading={false} onRefresh={onRefresh} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select OpenAI/gpt-5' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable 1 selected' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable 1 models' }))
+
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.updateLlmModel).mock.calls).toEqual([
+      ['review-openai', { enabled: true, pinEnabled: true }],
+    ])
   })
 
   it('cancels a single-model confirmation without mutation', () => {

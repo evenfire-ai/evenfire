@@ -65,18 +65,16 @@ export default function EditLlmModelPage() {
   // operator's decision and takes the row away from the catalog sync for good.
   // The form always carries `enabled` as it loaded, and the sync may have turned
   // the row on or off since, so resending it would undo that change and pin the
-  // row. Send `enabled` only when the operator flipped the toggle. Turning a
-  // model off also pins it: a disable landing on a row the sync already turned
-  // off would otherwise change nothing and leave the sync free to re-enable it.
+  // row. Send `enabled` only when the operator flipped the toggle, and always
+  // with the pin: the sync may already have written the same value since the
+  // page loaded, and a flip that equals the stored row changes nothing on its
+  // own, leaving the sync free to undo the operator's choice later.
   async function handleSubmit({ enabled, ...fields }: CreateLlmModelInput) {
     if (enabled === undefined || enabled === model?.enabled) {
       await saveWithImpactGate(fields, false)
       return
     }
-    await saveWithImpactGate(
-      enabled ? { ...fields, enabled } : { ...fields, enabled, pinEnabled: true },
-      false
-    )
+    await saveWithImpactGate({ ...fields, enabled, pinEnabled: true }, false)
   }
 
   // A write that pulls a still-referenced pair out of the runtime allowlist is

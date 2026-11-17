@@ -202,8 +202,8 @@ describe('edit page disable impact gate (409 model_in_use → force)', () => {
   })
 })
 
-// `pinEnabled` hands the authority over `enabled` to the operator. Only turning
-// the model off is that decision; a save that leaves `enabled` as it loaded
+// `pinEnabled` hands the authority over `enabled` to the operator. Flipping the
+// toggle either way is that decision; a save that leaves `enabled` as it loaded
 // must not take the row away from the catalog sync.
 describe('edit page authority over enabled (pinEnabled)', () => {
   beforeEach(() => {
@@ -242,12 +242,19 @@ describe('edit page authority over enabled (pinEnabled)', () => {
     })
   })
 
-  it('turns a disabled model on without pinning it', async () => {
+  // The sync may have turned the row back on after the page loaded it off; the
+  // pin is what makes the operator's "on" stick against a later prune.
+  it('pins a model the operator turns on', async () => {
     const sent = await submit(
       { ...model, enabled: false },
       { provider: 'claude', model: 'claude-haiku-4-5', enabled: true }
     )
-    expect(sent).toEqual({ provider: 'claude', model: 'claude-haiku-4-5', enabled: true })
+    expect(sent).toEqual({
+      provider: 'claude',
+      model: 'claude-haiku-4-5',
+      enabled: true,
+      pinEnabled: true,
+    })
   })
 })
 
@@ -328,10 +335,9 @@ describe('edit page sends enabled only when the operator changes it', () => {
     expect(body).toMatchObject({ enabled: false, pinEnabled: true })
   })
 
-  it('sends enabled:true without the pin when the operator turns a disabled model on', async () => {
+  it('sends enabled:true with the pin when the operator turns a disabled model on', async () => {
     const loaded = llmModelWireRow(false)
     const body = await save(loaded, { ...metadataEdit(loaded), enabled: true })
-    expect(body).toMatchObject({ enabled: true })
-    expect(body).not.toHaveProperty('pinEnabled')
+    expect(body).toMatchObject({ enabled: true, pinEnabled: true })
   })
 })
