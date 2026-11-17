@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
-import { boundToolsCalledForStatus } from '@clerum/workflow-runtime-core'
+import { boundStepStatusBody, boundToolsCalledForStatus } from '@clerum/workflow-runtime-core'
 import {
   type AuthenticatedRequest,
   createWorkflowEndpointHandlers,
@@ -2199,6 +2199,716 @@ describe('deleteArtifactFile — per-file artifact delete', () => {
       })
     )
     expect(result.status).toBe(403)
+  })
+})
+
+// ─── postStepStatus — output bounded by the coordinator ─────────────────────
+
+describe('postStepStatus — output bounded by the coordinator', () => {
+  function makeEmitApi(): k8s.CustomObjectsApi {
+    return makeCustomApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'my-recipe', resourceVersion: '1' },
+        spec: { steps: [{ id: 'emit' }] },
+        status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+      }),
+    })
+  }
+
+  function customArtifact(i: number, path = `/output/result-${i}.json`) {
+    return {
+      name: `result-${i}.json`,
+      format: 'json',
+      path,
+      sizeBytes: 42,
+      createdAt: '2026-05-06T00:00:00.000Z',
+    }
+  }
+
+  function storedStep(api: k8s.CustomObjectsApi): Record<string, unknown> {
+    return getStatusPatchOps(api).find(op => op.path === '/status/steps/-')?.value as Record<
+      string,
+      unknown
+    >
+  }
+
+  function storedArtifacts(api: k8s.CustomObjectsApi): unknown[] {
+    return getStatusPatchOps(api)
+      .filter(op => op.path === '/status/artifacts/-')
+      .map(op => op.value)
+  }
+
+  it('stores the same step and artifacts as before for a body without the new fields', async () => {
+    const api = makeEmitApi()
+    const h = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
+
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      output: { artifacts: [customArtifact(0)] },
+    })
+
+    expect(result.status).toBe(200)
+    const output = JSON.stringify({ artifacts: [customArtifact(0)] })
+    expect(storedStep(api)).toEqual({
+      id: 'emit',
+      phase: 'completed',
+      output,
+      outputTruncated: false,
+      outputLength: output.length,
+      outputPreviewMaxChars: 32_768,
+      executor: 'custom',
+    })
+    expect(storedArtifacts(api)).toEqual([customArtifact(0)])
+  })
+
+  it('adds the outputArtifacts of a cut output like the artifacts of an uncut one', async () => {
+    const api = makeEmitApi()
+    const h = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
+
+    // Hand-written body: hostile entries are the point of this test.
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      output: 'r'.repeat(1_000),
+      outputLength: 200_000,
+      outputTruncated: true,
+      outputArtifacts: [
+        null,
+        'not-an-object',
+        customArtifact(98, '/etc/passwd'),
+        customArtifact(0),
+        customArtifact(0),
+        { ...customArtifact(1), name: 'b.json' },
+        customArtifact(1),
+        ...Array.from({ length: 23 }, (_, i) => customArtifact(i + 2)),
+      ],
+    } as Parameters<typeof h.postStepStatus>[2])
+
+    expect(result.status).toBe(200)
+    const names = (storedArtifacts(api) as Array<{ name: string }>).map(a => a.name)
+    // Of the first 21 entries (artifact plus 20 from artifacts[] is the most one
+    // output declares), the three invalid ones and the repeated name are dropped.
+    // Two names on one path are both stored, as for an uncut output. The valid
+    // entries after the invalid ones are stored, so the loop ran past them.
+    expect(names).toEqual([
+      'result-0.json',
+      'b.json',
+      'result-1.json',
+      ...Array.from({ length: 14 }, (_, i) => `result-${i + 2}.json`),
+    ])
+    expect((storedArtifacts(api) as Array<{ path: string }>).map(a => a.path)).not.toContain(
+      '/etc/passwd'
+    )
+  })
+
+  it('ignores outputArtifacts when the report does not say the output was cut', async () => {
+    const api = makeEmitApi()
+    const h = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
+    const report = {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      output: { artifact: customArtifact(0) },
+      outputArtifacts: [customArtifact(5), customArtifact(6)],
+    }
+
+    const result = await h.postStepStatus(
+      'my-recipe',
+      makeClaims(),
+      report as Parameters<typeof h.postStepStatus>[2]
+    )
+
+    // Witness: the report was stored with the artifact of its uncut output.
+    expect(result.status).toBe(200)
+    expect(storedArtifacts(api)).toEqual([customArtifact(0)])
+
+    // Liveness witness: when the report says the output was cut, the same
+    // entries are stored in place of the artifact the received prefix declares.
+    const cutApi = makeEmitApi()
+    const cutHandlers = createWorkflowEndpointHandlers(cutApi, 'sandbox-recipes')
+    const cutResult = await cutHandlers.postStepStatus('my-recipe', makeClaims(), {
+      ...report,
+      outputTruncated: true,
+      outputLength: 1_000,
+    } as Parameters<typeof h.postStepStatus>[2])
+    expect(cutResult.status).toBe(200)
+    expect(storedArtifacts(cutApi)).toEqual([customArtifact(5), customArtifact(6)])
+  })
+
+  it('stores the original length of an output the coordinator cut', async () => {
+    const api = makeEmitApi()
+    const h = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
+    const original = JSON.stringify({ report: 'r'.repeat(200_000), artifact: customArtifact(0) })
+    const cut = original.slice(0, 65_536)
+
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      output: cut,
+      outputLength: original.length,
+      outputTruncated: true,
+      outputArtifacts: [customArtifact(0)],
+    } as Parameters<typeof h.postStepStatus>[2])
+
+    expect(result.status).toBe(200)
+    const step = storedStep(api)
+    expect(step.output).toBe(original.slice(0, 32_768))
+    expect(step.outputLength).toBe(original.length)
+    expect(step.outputTruncated).toBe(true)
+    expect(step).not.toHaveProperty('outputArtifacts')
+    // The coordinator cut the output, so the artifact comes from outputArtifacts.
+    expect(storedArtifacts(api)).toEqual([customArtifact(0)])
+  })
+
+  // ── What WRC stores for the coordinator's bounded report and for the raw one ──
+
+  async function stored(body: Record<string, unknown>) {
+    const api = makeEmitApi()
+    const h = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
+    const result = await h.postStepStatus(
+      'my-recipe',
+      makeClaims(),
+      JSON.parse(JSON.stringify(body)) as Parameters<typeof h.postStepStatus>[2]
+    )
+    return { status: result.status, step: storedStep(api), artifacts: storedArtifacts(api) }
+  }
+
+  const pad = 'p'.repeat(70_000)
+  const sharedArtifact = customArtifact(0)
+  const parityRows: Array<[string, Record<string, unknown>, number]> = [
+    ['an uncut string', { output: 'done' }, 0],
+    [
+      'an uncut JSON-string record with an artifact',
+      { output: JSON.stringify({ artifact: customArtifact(0) }) },
+      1,
+    ],
+    [
+      'an uncut object with a shared artifact reference',
+      { output: { summary: { file: sharedArtifact }, artifacts: [sharedArtifact] } },
+      1,
+    ],
+    ['an uncut top-level Date', { output: new Date('2026-11-12T00:00:00.000Z') }, 0],
+    ['an uncut number', { output: 5 }, 0],
+    ['a cut plain string', { output: 'x'.repeat(150_000) }, 0],
+    [
+      'a cut JSON string with artifact and 20 artifacts[]',
+      {
+        output: JSON.stringify({
+          artifact: customArtifact(0),
+          artifacts: Array.from({ length: 20 }, (_, i) => customArtifact(i + 1)),
+          pad,
+        }),
+      },
+      21,
+    ],
+    [
+      'a cut object with artifact and 20 artifacts[]',
+      {
+        output: {
+          artifact: customArtifact(0),
+          artifacts: Array.from({ length: 20 }, (_, i) => customArtifact(i + 1)),
+          pad,
+        },
+      },
+      21,
+    ],
+    [
+      'a cut object with artifact and 25 artifacts[]',
+      {
+        output: {
+          artifact: customArtifact(0),
+          artifacts: Array.from({ length: 25 }, (_, i) => customArtifact(i + 1)),
+          pad,
+        },
+      },
+      21,
+    ],
+    [
+      'a cut object whose artifact is also first in artifacts[]',
+      {
+        output: {
+          artifact: customArtifact(0),
+          artifacts: [
+            customArtifact(0),
+            ...Array.from({ length: 19 }, (_, i) => customArtifact(i + 1)),
+          ],
+          pad,
+        },
+      },
+      20,
+    ],
+    [
+      'a cut object with two names on one path',
+      {
+        output: {
+          artifacts: [
+            { ...customArtifact(1), name: 'a.json' },
+            { ...customArtifact(1), name: 'b.json' },
+          ],
+          pad,
+        },
+      },
+      2,
+    ],
+    [
+      'a cut object with one name on two paths',
+      {
+        output: {
+          artifacts: [customArtifact(1, '/output/x.json'), customArtifact(1, '/output/y.json')],
+          pad,
+        },
+      },
+      1,
+    ],
+    [
+      'a cut object with an invalid path and non-object entries',
+      {
+        output: {
+          artifacts: [customArtifact(1, '/etc/passwd'), 'nope', null, customArtifact(2)],
+          pad,
+        },
+      },
+      1,
+    ],
+    [
+      'a cut object with a Date createdAt and a NaN sizeBytes',
+      {
+        output: {
+          artifacts: [
+            { ...customArtifact(1), createdAt: new Date('2026-01-02T03:04:05.000Z') },
+            { ...customArtifact(2), sizeBytes: NaN },
+          ],
+          pad,
+        },
+      },
+      2,
+    ],
+    [
+      'a tool-call artifact and a declared artifact on one path, cut output',
+      {
+        output: {
+          artifacts: [{ ...customArtifact(1, '/output/r.json'), name: 'decl.json' }],
+          pad,
+        },
+        toolsCalled: [
+          {
+            serverName: 'clerum',
+            toolName: 'generate_json',
+            args: {},
+            result: {
+              success: true,
+              artifact: { ...customArtifact(1, '/output/r.json'), name: 'tool.json' },
+              content: 'File generated: tool.json (json).',
+            },
+          },
+        ],
+      },
+      2,
+    ],
+    [
+      'a valid JSON record followed by 70,000 spaces',
+      { output: `${JSON.stringify({ artifact: customArtifact(0) })}${' '.repeat(70_000)}` },
+      1,
+    ],
+  ]
+
+  describe.each([1_024, 32_768, 65_536])('at a preview limit of %i characters', limit => {
+    it.each(parityRows)(
+      'stores for the bounded report of %s what it stores for the raw report',
+      async (_label, fields, expectedArtifacts) => {
+        process.env.WRC_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = String(limit)
+        const raw = { stepId: 'emit', phase: 'completed', executor: 'custom', ...fields }
+
+        const fromRaw = await stored(raw)
+        const fromBounded = await stored(boundStepStatusBody(raw))
+
+        expect(fromRaw.status).toBe(200)
+        expect(fromRaw.artifacts).toHaveLength(expectedArtifacts)
+        // Witness that this limit is the one in use: WRC records it for a raw report.
+        expect(fromRaw.step.outputPreviewMaxChars).toBe(limit)
+        expect(fromBounded).toEqual(fromRaw)
+      }
+    )
+  })
+
+  it.each([
+    ['the number 1', 1],
+    ['the string "true"', 'true'],
+    ['an object', {}],
+  ])('ignores outputArtifacts when outputTruncated is %s', async (_label, flag) => {
+    const report = {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      output: 'r'.repeat(1_000),
+      outputLength: 200_000,
+      outputArtifacts: [customArtifact(5)],
+    }
+
+    const withFlag = await stored({ ...report, outputTruncated: flag })
+    const withTrue = await stored({ ...report, outputTruncated: true })
+
+    expect(withFlag.status).toBe(200)
+    expect(withFlag.artifacts).toEqual([])
+    expect(withFlag.step.outputTruncated).toBe(false)
+    // Liveness witness: the same report with the boolean true stores the artifact.
+    expect(withTrue.status).toBe(200)
+    expect(withTrue.artifacts).toEqual([customArtifact(5)])
+    expect(withTrue.step.outputTruncated).toBe(true)
+  })
+
+  it.each([
+    ['equal to the length received', (received: number) => received],
+    ['shorter than the length received', () => 1],
+    ['missing', () => undefined],
+    ['a string', (received: number) => String(received + 100)],
+    ['not an integer', (received: number) => received + 0.5],
+    ['not a safe integer', () => 2 ** 53],
+  ])(
+    'stores the artifacts of the output it received when outputLength is %s',
+    async (_label, lengthFor) => {
+      const output = JSON.stringify({ artifact: customArtifact(1) })
+      const report = {
+        stepId: 'emit',
+        phase: 'completed',
+        executor: 'custom',
+        output,
+        outputTruncated: true,
+        outputArtifacts: [customArtifact(5)],
+      }
+
+      const rejected = await stored({ ...report, outputLength: lengthFor(output.length) })
+      const accepted = await stored({ ...report, outputLength: 200_000 })
+
+      // WRC does not accept the cut, so the output is complete and declares its own artifact.
+      expect(rejected.status).toBe(200)
+      expect(rejected.step.outputTruncated).toBe(false)
+      expect(rejected.artifacts).toEqual([customArtifact(1)])
+      // Liveness witness: with a length WRC accepts, the declared entries are stored instead.
+      expect(accepted.status).toBe(200)
+      expect(accepted.step.outputTruncated).toBe(true)
+      expect(accepted.artifacts).toEqual([customArtifact(5)])
+    }
+  )
+
+  it.each([
+    ['absent', undefined],
+    ['null', null],
+  ])('ignores outputArtifacts when the output is %s', async (_label, output) => {
+    const report = {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      outputTruncated: true,
+      outputLength: 200_000,
+      outputArtifacts: [customArtifact(5)],
+    }
+
+    const withoutOutput = await stored({ ...report, output })
+    const withOutput = await stored({ ...report, output: 'abc' })
+
+    expect(withoutOutput.status).toBe(200)
+    expect(withoutOutput.artifacts).toEqual([])
+    // Liveness witness: the same report with an output stores the entry.
+    expect(withOutput.status).toBe(200)
+    expect(withOutput.artifacts).toEqual([customArtifact(5)])
+  })
+
+  it.each([
+    [
+      'cut to 65,536 characters',
+      { cut: true, halved: false },
+      (tail: string): Record<string, unknown> => ({
+        output: `${JSON.stringify({ artifact: customArtifact(0) })}${' '.repeat(70_000)}${tail}`,
+      }),
+    ],
+    [
+      'halved to fit the body ceiling',
+      { cut: false, halved: true },
+      (tail: string): Record<string, unknown> => ({
+        output: `${JSON.stringify({ artifact: customArtifact(0) })}${'\n'.repeat(60_000)}${tail}`,
+        // Never reduced, so the reporter halves the output.
+        modelUsed: 'm'.repeat(200_000),
+      }),
+    ],
+    [
+      'cut to 65,536 characters and then halved',
+      { cut: true, halved: true },
+      (tail: string): Record<string, unknown> => ({
+        output: `${JSON.stringify({ artifact: customArtifact(0) })}${'\n'.repeat(70_000)}${tail}`,
+        modelUsed: 'm'.repeat(200_000),
+      }),
+    ],
+  ])(
+    'registers no artifact from a prefix that parses on its own, for an output %s',
+    async (_label, path, fields) => {
+      process.env.WRC_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = '65536'
+      const raw: Record<string, unknown> = {
+        stepId: 'emit',
+        phase: 'completed',
+        executor: 'custom',
+        ...fields(' prose'),
+      }
+      const bounded = boundStepStatusBody(raw)
+
+      // Witnesses: the whole output does not parse, the reporter shortened it,
+      // and the prefix it sends parses to an artifact.
+      expect(() => JSON.parse(raw.output as string)).toThrow(SyntaxError)
+      expect(bounded.outputTruncated).toBe(true)
+      expect((bounded.output as string).length).toBeLessThan((raw.output as string).length)
+      expect(JSON.parse(bounded.output as string)).toEqual({ artifact: customArtifact(0) })
+      expect(bounded.outputLength).toBe((raw.output as string).length)
+      // Which path shortened it: the cut to 65,536 characters, the halving, or both.
+      expect((raw.output as string).length > 65_536).toBe(path.cut)
+      expect((bounded.output as string).length < 65_536).toBe(path.halved)
+
+      const fromRaw = await stored(raw)
+      const fromBounded = await stored(bounded)
+      expect(fromRaw.status).toBe(200)
+      expect(fromBounded.status).toBe(200)
+      expect(fromRaw.artifacts).toEqual([])
+      expect(fromBounded.artifacts).toEqual([])
+
+      // Positive control: without the trailing text the whole output declares
+      // the artifact, and WRC stores it from both reports.
+      const declaring = { stepId: 'emit', phase: 'completed', executor: 'custom', ...fields('') }
+      expect((await stored(declaring)).artifacts).toEqual([customArtifact(0)])
+      expect((await stored(boundStepStatusBody(declaring))).artifacts).toEqual([customArtifact(0)])
+    }
+  )
+
+  it('stores the artifacts of every generated body as for the raw report', async () => {
+    process.env.WRC_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = '32768'
+    const tableArtifact = (i: number, name = `r-${i}.md`, path = `/output/r-${i}.md`) => ({
+      name,
+      format: 'md',
+      path,
+      sizeBytes: 10,
+      createdAt: '2026-11-12',
+    })
+    const declared = (count: number): Record<string, unknown> => {
+      if (count === 0) return {}
+      if (count === 1) return { artifact: tableArtifact(0) }
+      if (count === 21) {
+        return {
+          artifact: tableArtifact(0),
+          artifacts: Array.from({ length: 20 }, (_, i) => tableArtifact(i + 1)),
+        }
+      }
+      // 25 entries, with a repeated name and a repeated path.
+      return {
+        artifact: tableArtifact(0),
+        artifacts: [
+          tableArtifact(0),
+          tableArtifact(1, 'other.md'),
+          ...Array.from({ length: 23 }, (_, i) => tableArtifact(i + 1)),
+        ],
+      }
+    }
+    const makeOutput = (length: number, unit: string, kind: 'text' | number): string => {
+      if (kind === 'text') return unit.repeat(length)
+      const head = JSON.stringify({ ...declared(kind), pad: '' })
+      return JSON.stringify({
+        ...declared(kind),
+        pad: unit.repeat(Math.max(0, length - head.length)),
+      })
+    }
+    const makeCalls = (count: number, unit: string): Array<Record<string, unknown>> => [
+      ...Array.from({ length: count - 2 }, (_, i) => ({
+        serverName: 'git',
+        toolName: `read-${i}`,
+        args: { blob: unit.repeat(1000) },
+        result: unit.repeat(1000),
+        durationMs: 1,
+      })),
+      // The two shapes mcp-host records for artifact tools: an object and a JSON string.
+      {
+        serverName: 'clerum',
+        toolName: 'generate_markdown',
+        args: { t: 1 },
+        result: {
+          success: true,
+          content: 'File generated: tool-a.md (md).',
+          artifact: tableArtifact(100, 'tool-a.md'),
+          writtenSha256: 'a'.repeat(64),
+        },
+        durationMs: 1,
+      },
+      {
+        serverName: 'clerum',
+        toolName: 'generate_markdown',
+        args: { t: 1 },
+        result: JSON.stringify({
+          success: true,
+          content: 'File generated: tool-b.md (md).',
+          artifact: tableArtifact(101, 'tool-b.md'),
+          writtenSha256: 'b'.repeat(64),
+        }),
+        durationMs: 1,
+      },
+    ]
+
+    let compared = 0
+    let withArtifacts = 0
+    for (const length of [0, 1_000, 65_536, 65_537, 150_000]) {
+      for (const unit of ['a', '中', '\u0001']) {
+        for (const kind of ['text', 0, 1, 21, 25] as const) {
+          for (const callCount of [0, 30, 60]) {
+            for (const withReason of [false, true]) {
+              const raw: Record<string, unknown> = {
+                stepId: 'emit',
+                phase: withReason ? 'failed' : 'completed',
+                executor: 'agentic',
+                output: makeOutput(length, unit, kind),
+              }
+              if (callCount > 0) raw.toolsCalled = makeCalls(callCount, unit)
+              if (withReason) raw.failureReason = unit.repeat(100_000)
+              // Only bodies WRC accepts whole (512 KiB) have a raw report to compare with.
+              if (Buffer.byteLength(JSON.stringify(raw)) > 512 * 1024) continue
+
+              const fromRaw = await stored(raw)
+              const fromBounded = await stored(boundStepStatusBody(raw))
+              expect(fromRaw.status).toBe(200)
+              expect(fromBounded.status).toBe(200)
+              expect(fromBounded.artifacts).toEqual(fromRaw.artifacts)
+              compared += 1
+              if (fromRaw.artifacts.length > 0) withArtifacts += 1
+            }
+          }
+        }
+      }
+    }
+    // Witnesses: the generator produced comparable bodies, most with artifacts.
+    expect(compared).toBeGreaterThan(100)
+    expect(withArtifacts).toBeGreaterThan(50)
+  }, 120_000)
+
+  it('keeps the artifacts of the last calls when the reduction removes their previews', async () => {
+    // The result mcp-host records for its artifact tools
+    // (mcp-host/src/workflow/artifactOutput.ts:265-276); written out because
+    // mcp-host is not a dependency of this package.
+    const mcpHostResult = (n: number) => ({
+      success: true,
+      content: `File generated: result-${n}.json (json).`,
+      artifact: customArtifact(n),
+      writtenSha256: String(n).repeat(64),
+    })
+    const raw = {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'agentic',
+      output: '中'.repeat(65_536),
+      toolsCalled: [
+        ...Array.from({ length: 48 }, (_, i) => ({
+          serverName: 'git',
+          toolName: `read-${i}`,
+          args: { blob: '中'.repeat(1000) },
+          result: '中'.repeat(1000),
+          durationMs: 1,
+        })),
+        // Last: previews are removed from the last call backwards.
+        {
+          serverName: 'clerum',
+          toolName: 'generate_json',
+          args: { title: 't' },
+          result: mcpHostResult(0),
+          durationMs: 1,
+        },
+        {
+          serverName: 'clerum',
+          toolName: 'generate_json',
+          args: { title: 't' },
+          result: JSON.stringify(mcpHostResult(1)),
+          durationMs: 1,
+        },
+      ],
+    }
+    const bounded = boundStepStatusBody(raw)
+    const boundedCalls = bounded.toolsCalled as Array<Record<string, unknown>>
+
+    // Witnesses: WRC accepts the raw body whole, the reporter had to reduce it,
+    // and the reduction reached both artifact calls.
+    const rawBytes = Buffer.byteLength(JSON.stringify(raw))
+    expect(rawBytes).toBeGreaterThan(256 * 1024)
+    expect(rawBytes).toBeLessThan(512 * 1024)
+    for (const n of [0, 1]) {
+      expect(boundedCalls[48 + n]).not.toHaveProperty('args')
+      expect(boundedCalls[48 + n].result).toEqual({ success: true, artifact: customArtifact(n) })
+    }
+
+    const fromRaw = await stored(raw)
+    const fromBounded = await stored(bounded)
+    expect(fromRaw.status).toBe(200)
+    expect(fromBounded.status).toBe(200)
+    expect(fromRaw.artifacts).toHaveLength(2)
+    expect(fromBounded.artifacts).toEqual(fromRaw.artifacts)
+    for (const field of ['output', 'outputLength', 'outputTruncated']) {
+      expect(fromBounded.step[field]).toEqual(fromRaw.step[field])
+    }
+    const rawStoredCalls = fromRaw.step.toolsCalled as Array<Record<string, unknown>>
+    const boundedStoredCalls = fromBounded.step.toolsCalled as Array<Record<string, unknown>>
+    expect(boundedStoredCalls).toHaveLength(rawStoredCalls.length)
+    boundedStoredCalls.forEach((call, i) => {
+      // WRC writes `args: undefined` for a call reported without args.
+      const { args, result, ...rest } = call
+      if (args !== undefined) {
+        expect(call).toEqual(rawStoredCalls[i])
+        return
+      }
+      const { args: _args, result: _result, ...rawWithoutPreviews } = rawStoredCalls[i]
+      expect(rest).toEqual(rawWithoutPreviews)
+      if (result !== undefined) {
+        expect(result).toEqual({ success: true, artifact: expect.any(Object) })
+      }
+    })
+  })
+
+  it('stores the artifacts and the shorter preview of a report the coordinator halved', async () => {
+    const output = JSON.stringify({
+      report: '中'.repeat(60_000),
+      artifact: customArtifact(0),
+      artifacts: [customArtifact(1)],
+    })
+    const raw = {
+      stepId: 'emit',
+      phase: 'failed',
+      executor: 'custom',
+      output,
+      error: '\u0001'.repeat(20_000),
+      failureReason: '\u0001'.repeat(20_000),
+    }
+    const bounded = boundStepStatusBody(raw)
+    const halved = bounded.output as string
+
+    // Witnesses: WRC accepts the raw body whole, the output was under the
+    // character cap, and the reporter halved it below WRC's limit and declared
+    // its artifacts.
+    const rawBytes = Buffer.byteLength(JSON.stringify(raw))
+    expect(rawBytes).toBeGreaterThan(256 * 1024)
+    expect(rawBytes).toBeLessThan(512 * 1024)
+    expect(output.length).toBeLessThan(65_536)
+    expect(halved.length).toBeLessThan(32_768)
+    expect(output.startsWith(halved)).toBe(true)
+    expect(bounded.outputTruncated).toBe(true)
+    expect(bounded.outputArtifacts).toEqual([customArtifact(0), customArtifact(1)])
+
+    const fromRaw = await stored(raw)
+    const fromBounded = await stored(bounded)
+    expect(fromRaw.status).toBe(200)
+    expect(fromBounded.status).toBe(200)
+    expect(fromRaw.artifacts).toEqual([customArtifact(0), customArtifact(1)])
+    expect(fromBounded.artifacts).toEqual(fromRaw.artifacts)
+    expect(fromBounded.step.outputLength).toBe(output.length)
+    expect(fromRaw.step.outputLength).toBe(output.length)
+    expect(fromBounded.step.outputTruncated).toBe(true)
+    // WRC stores the halved preview and records its length as the limit used.
+    expect(fromBounded.step.output).toBe(halved)
+    expect(fromBounded.step.outputPreviewMaxChars).toBe(halved.length)
+    expect(fromRaw.step.outputPreviewMaxChars).toBe(32_768)
   })
 })
 
