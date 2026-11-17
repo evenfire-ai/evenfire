@@ -124,6 +124,21 @@ describe('isInsideCallerHome', () => {
   >([
     ['the home root itself', home(), { resourceId: HOME_ID, drive: 'main' }, [], true],
     [
+      'the root of a pending home',
+      home({ state: 'pending' }),
+      { resourceId: HOME_ID, drive: 'main' },
+      [],
+      false,
+    ],
+    [
+      'the root of a home in conflict',
+      home({ state: 'conflict' }),
+      { resourceId: HOME_ID, drive: 'main' },
+      [],
+      false,
+    ],
+    ['the home id on another drive', home(), { resourceId: HOME_ID, drive: 'archive' }, [], false],
+    [
       'a resource with access inherited from the home root',
       home(),
       { resourceId: 'sub-folder', drive: 'main' },

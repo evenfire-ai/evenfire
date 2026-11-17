@@ -1284,10 +1284,13 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
         },
       },
     })
-    renderHarness({ pendingGfsUri: 'evendrive:shared-with-me' })
+    const onExplicitNavigationIntent = vi.fn()
+    renderHarness({ pendingGfsUri: 'evendrive:shared-with-me', onExplicitNavigationIntent })
     const tab = () => screen.getByTestId('tab-files-1').textContent
     // Witness: the seeded view reported itself before the crumb is used.
     await waitFor(() => expect(tab()).toBe('evendrive:shared-with-me|Shared with me'))
+    // Opening the seed is not a user navigation.
+    expect(onExplicitNavigationIntent).not.toHaveBeenCalled()
 
     await act(async () => {
       screen.getByRole('button', { name: 'EvenDrive' }).click()
@@ -1295,6 +1298,8 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
 
     // A root tab has no path, and setFilesTabPath titles a nameless location "Files".
     await waitFor(() => expect(tab()).toBe('null|Files'))
+    // The crumb supersedes any pending deep link or seed.
+    expect(onExplicitNavigationIntent).toHaveBeenCalledOnce()
     expect(screen.getByRole('button', { name: 'EvenDrive' }).getAttribute('aria-current')).toBe(
       'page'
     )

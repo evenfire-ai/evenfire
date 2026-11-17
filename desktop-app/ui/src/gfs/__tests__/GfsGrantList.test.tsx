@@ -1200,6 +1200,61 @@ describe('GfsGrantList', () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
       expect(onRevoke).toHaveBeenCalled()
     })
+
+    it('lists an outside-team inherited row once the caller home turns ready', () => {
+      // Every prop except `home` keeps its identity across the rerender, as the
+      // controller's memoized arrays do in production. A fresh `shares` array
+      // on each render would recompute the merged rows anyway and hide whether
+      // the memo follows the home.
+      const outsider: GfsInheritedAccessItem = {
+        subject: { type: 'user', id: 'outsider-private-id' },
+        permissions: ['read'],
+        inheritedFrom: ['Projects'],
+        sources: mergeInheritedAccessItem(
+          null,
+          {
+            subject: { type: 'user', id: 'outsider-private-id' },
+            permissions: ['read'],
+            grantId: 'grant-outsider',
+            shareIds: [],
+          },
+          { resourceId: 'home-root', name: 'owner' }
+        ).sources,
+      }
+      const inheritedItems = [outsider]
+      const items: GfsGrantListItem[] = []
+      const shares: GfsShareListItem[] = []
+      const resource = { resourceId: 'file-1', drive: 'main' }
+      const onRevoke = vi.fn()
+      const onRemoveInherited = vi.fn()
+      const list = (home: GfsCallerHome) => (
+        <GfsGrantList
+          agents={agents}
+          home={home}
+          resource={resource}
+          items={items}
+          shares={shares}
+          inheritedItems={inheritedItems}
+          mergeInherited
+          onRemoveInherited={onRemoveInherited}
+          onRevoke={onRevoke}
+          subjects={subjects}
+        />
+      )
+      const view = render(
+        list({ state: 'pending', drive: 'main', resourceId: 'home-root', path: '/Users/fixture' })
+      )
+      // Witness: while the home is pending the list rendered and filtered the outsider.
+      expect(screen.getByText(HIDDEN_ACCESS_NOTICE_TEXT)).toBeTruthy()
+      expect(screen.queryByText(OUTSIDE_TEAMS_LABEL)).toBeNull()
+
+      view.rerender(list(readyHome('home-root')))
+
+      expect(
+        screen.getByTestId('gfs-access-row-inherited-user:outsider-private-id').textContent
+      ).toBe(`${OUTSIDE_TEAMS_LABEL}Read`)
+      expect(screen.queryByText(HIDDEN_ACCESS_NOTICE_TEXT)).toBeNull()
+    })
   })
 
   // R4 spec §2 — grants and shares fail independently: a share-list error

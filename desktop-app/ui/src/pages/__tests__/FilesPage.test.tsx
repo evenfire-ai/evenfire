@@ -4466,6 +4466,72 @@ describe('FilesPage', () => {
     )
   })
 
+  it('lists the owner and a member outside their teams when Share opens on the home root', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1', path: '/Users/owner' },
+      current: {
+        resourceId: 'home-1',
+        gfsUri: 'gfs://main/Users/owner',
+        name: 'owner',
+        kind: 'directory',
+      },
+      crumbs: [{ resourceId: 'home-1', gfsUri: 'gfs://main/Users/owner', name: 'owner' }],
+      affordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read'],
+        canCreateShare: false,
+      },
+      // The ancestor walk starts at the parent, so on the home root no row is
+      // sourced at the home: only the dialog's resource identifies the home.
+      inheritedAccess: [],
+      grants: [
+        {
+          id: 'owner-grant',
+          drive: 'main',
+          resourceId: 'home-1',
+          subject: { type: 'user', id: 'owner-1' },
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+          inherit: true,
+          homeOwner: true,
+        },
+        {
+          id: 'grant-outside',
+          drive: 'main',
+          resourceId: 'home-1',
+          subject: { type: 'user', id: 'user-outside' },
+          permissions: ['read'],
+          inherit: true,
+        },
+      ],
+    })
+
+    renderFilesPage()
+    await openManageDialog('My home')
+
+    // Witness: the Share dialog is open and listing access.
+    expect(screen.getByRole('heading', { name: 'People with access' })).toBeTruthy()
+    const ownerRow = await screen.findByTestId('gfs-access-row-grant-owner-grant')
+    expect(ownerRow.textContent).toBe('Owner')
+    expect(within(ownerRow).queryByRole('button')).toBeNull()
+    const outsideRow = screen.getByTestId('gfs-access-row-grant-grant-outside')
+    expect(outsideRow.textContent).toContain('Member outside your teams')
+    expect(outsideRow.textContent).toContain('Read')
+    expect(outsideRow.textContent).not.toContain('user-outside')
+    expect(
+      within(outsideRow).getByRole('button', { name: 'Actions for Member outside your teams' })
+    ).toBeTruthy()
+    expect(screen.queryByText('Only members outside your teams have access here.')).toBeNull()
+  })
+
   it('lists direct shares in the who-has-access list and revokes them', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
