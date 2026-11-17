@@ -451,6 +451,12 @@ marker_bindings=(
   "$LOG_HELPER" '"ccLifecycleGeneration":'
   "$HCC_K8S_CLIENT" 'ccLifecycleGeneration: lifecycleGeneration'
 
+  # The helper selects every fleet pass by the `Reconciling N Host(s) ` prefix.
+  # HCC prints that prefix from two statements: this pair binds the lifecycle
+  # one, the next pair binds the full-mode one.
+  "$LOG_HELPER" '/Reconciling [0-9]+ Host\(s\) /'
+  "$HCC_K8S_CLIENT" 'Reconciling ${hosts.length} Host(s) for lifecycle after ${reason}'
+
   "$LOG_HELPER" 'Host(s) after Host watch recovery convergence'
   "$HCC_K8S_CLIENT" 'Reconciling ${hosts.length} Host(s) after ${reason}'
 
@@ -540,7 +546,7 @@ done
 # unset. Assert the arity explicitly rather than relying on the pair count to
 # happen to notice.
 if [ $((${#marker_bindings[@]} % 4)) -eq 0 ] &&
-  [ "$marker_binding_count" -eq 34 ] &&
+  [ "$marker_binding_count" -eq 35 ] &&
   [ -z "$marker_drift" ]; then
   pass "all ${marker_binding_count} consumed HCC log markers stay bound to their runtime producers"
 else
@@ -1699,6 +1705,70 @@ assert_fleet_pass_count 1 "a Host-watch recovery completion carrying the generat
   fx_completed 'Context cache recovery' full 1
 } >"$MOCK_LOG_FILE"
 assert_fleet_pass_count 1 "two completions at the recovered generation in one cycle count 1"
+
+# Generations are compared as numbers. The counter belongs to the HCC process
+# and the gate does not restart HCC, so a run can cross from 9 to 10.
+context_recovery_cycle 9 10 >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 6; then
+  pass "a completion at generation 10 satisfies a cycle recovered at generation 9"
+else
+  fail "a completion at generation 10 was rejected for a cycle recovered at generation 9"
+fi
+assert_fleet_pass_count 1 "a completion at generation 10 covers a cycle recovered at generation 9"
+
+context_recovery_cycle 10 9 >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 6; then
+  fail "a completion at generation 9 satisfied a cycle recovered at generation 10"
+else
+  context_recovery_cycle 10 >"$MOCK_LOG_FILE"
+  if recovery_cycle_used_fresh_host_inventory 1 6; then
+    pass "a completion at generation 9 cannot satisfy a cycle recovered at generation 10"
+  else
+    fail "the witness completion at generation 10 was rejected"
+  fi
+fi
+context_recovery_cycle 10 9 >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 0 "a completion at generation 9 does not cover a cycle recovered at generation 10"
+context_recovery_cycle 10 >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 1 "the witness completion at generation 10 covers its cycle"
+
+# A pass that carries the next interruption generation can complete between a
+# cycle's watch end and its Recovered line (Context cache recovery re-lists
+# first). It predates the recovery, so it is not credited to that cycle.
+early_pass_second_cycle() {
+  context_recovery_cycle 2
+  fx_ended
+  fx_reconciling '6 Host(s) after Context cache recovery'
+  fx_completed 'Context cache recovery' full 3
+  fx_listed
+  fx_recovered 2 4
+  [ "$1" = uncovered ] || {
+    fx_reconciling '6 Host(s) for lifecycle after CommunicationChannel recovery'
+    fx_completed 'CommunicationChannel recovery' lifecycle 4
+  }
+}
+early_pass_second_cycle uncovered >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 1 "a pass completed before a cycle's Recovered line is not credited to that cycle"
+early_pass_second_cycle covered >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 2 "the same cycle counts once it is covered after its Recovered line"
+
+{
+  fx_reconciling '6 Host(s) after Host watch recovery convergence'
+  fx_completed 'Host watch recovery convergence' full
+  context_recovery_cycle 1
+} >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 2 "a Host-watch recovery completion before the first cycle is counted"
+
+# The gate's final check takes its count from recovery_fleet_pass_count and
+# bounds it to 2..4. Literal source-code assertions.
+# shellcheck disable=SC2016
+if grep -Fq 'fleet_passes="$(recovery_fleet_pass_count "$final_logs")"' "$WATCH_GATE" &&
+   grep -Fq '[ "$fleet_passes" -ge 2 ] && [ "$fleet_passes" -le 4 ] ||' "$WATCH_GATE" &&
+   [ "$(grep -c 'fleet_passes=' "$WATCH_GATE")" = 1 ]; then
+  pass "the watch-recovery gate bounds the recovery_fleet_pass_count result to 2..4"
+else
+  fail "the watch-recovery gate no longer takes its fleet pass count from recovery_fleet_pass_count, or no longer bounds it to 2..4"
+fi
 
 large_log_tail="$(awk 'BEGIN {
   for (i = 1; i <= 20000; i++) {
