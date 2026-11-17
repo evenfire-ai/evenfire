@@ -96,3 +96,22 @@ describe('TelegramVerificationPanel display name editing', () => {
     )
   })
 })
+
+describe('TelegramVerificationPanel empty state', () => {
+  it('says the selected channel has nothing set up yet', () => {
+    render(
+      <ToastProvider>
+        <TelegramVerificationPanel
+          accounts={[]}
+          disabled={false}
+          medium="slack"
+          onAccountsRefresh={vi.fn()}
+          onRemoveAccount={() => undefined}
+          targets={[]}
+        />
+      </ToastProvider>
+    )
+
+    expect(screen.getByText('No Slack channels set up yet.')).toBeInTheDocument()
+  })
+})

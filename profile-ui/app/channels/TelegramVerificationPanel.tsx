@@ -210,7 +210,7 @@ export function TelegramVerificationPanel({
       {error && !modalOpen ? <div className="message message--error">{error}</div> : null}
       {targets.length === 0 ? (
         <div className="message message--warning message--plain">
-          No accessible {providerLabel} communication channel is available.
+          No {providerLabel} channels set up yet.
         </div>
       ) : null}
 

@@ -147,7 +147,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
 
   return (
     <ProfileShell currentRoute="socialChannels">
-      <div className="profile-page profile-page--settings">
+      <div className="profile-page">
         <header className="header-row">
           <div>
             <h1 className="page-title">Social channels</h1>
@@ -177,13 +177,8 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
 
         {error && <div className="message message--error">{error}</div>}
 
-        {state === 'loading' ? (
-          <ProfileBodySkeleton
-            label="Loading social channels"
-            sections={[{ title: 'Social channels', actions: ['Connect'], rows: 4 }]}
-          />
-        ) : hasSocialAccess ? (
-          <section className="section settings-section">
+        <section className="section">
+          {hasSocialAccess ? (
             <div className="tabs" role="tablist" aria-label="Social networks">
               {visibleSocialTabs.map(tab => (
                 <Link
@@ -197,50 +192,52 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
                 </Link>
               ))}
             </div>
-            {currentChannel?.key === 'telegram' ? (
-              <TelegramVerificationPanel
-                targets={telegramTargets}
-                accounts={telegramAccounts}
-                disabled={formDisabled}
-                onAccountsRefresh={refreshApprovalAccounts}
-                onRemoveAccount={removeApprovalMediumAccount}
-                connectRequestCount={connectRequestCount}
-              />
-            ) : null}
-            {currentChannel?.key === 'slack' ? (
-              <TelegramVerificationPanel
-                medium="slack"
-                targets={slackTargets}
-                accounts={slackAccounts}
-                disabled={formDisabled}
-                onAccountsRefresh={refreshApprovalAccounts}
-                onRemoveAccount={removeApprovalMediumAccount}
-                connectRequestCount={connectRequestCount}
-              />
-            ) : null}
-            {currentChannel?.key === 'teams' ? (
-              <TelegramVerificationPanel
-                medium="teams"
-                targets={teamsTargets}
-                accounts={teamsAccounts}
-                disabled={formDisabled}
-                onAccountsRefresh={refreshApprovalAccounts}
-                onRemoveAccount={removeApprovalMediumAccount}
-                connectRequestCount={connectRequestCount}
-              />
-            ) : null}
-          </section>
-        ) : (
-          <section className="section settings-section">
-            <div>
-              <h2 className="section-title">Social channels</h2>
-              <p className="body-copy">
-                No social channels are connected to your account yet. Connect one from an approval
-                channel invitation to verify workflow access here.
-              </p>
-            </div>
-          </section>
-        )}
+          ) : null}
+          {state === 'loading' ? (
+            <ProfileBodySkeleton
+              label="Loading social channels"
+              sections={[{ title: 'Social channels', rows: 4 }]}
+              showHead={false}
+            />
+          ) : hasSocialAccess && currentChannel ? (
+            <>
+              {currentChannel.key === 'telegram' ? (
+                <TelegramVerificationPanel
+                  targets={telegramTargets}
+                  accounts={telegramAccounts}
+                  disabled={formDisabled}
+                  onAccountsRefresh={refreshApprovalAccounts}
+                  onRemoveAccount={removeApprovalMediumAccount}
+                  connectRequestCount={connectRequestCount}
+                />
+              ) : null}
+              {currentChannel.key === 'slack' ? (
+                <TelegramVerificationPanel
+                  medium="slack"
+                  targets={slackTargets}
+                  accounts={slackAccounts}
+                  disabled={formDisabled}
+                  onAccountsRefresh={refreshApprovalAccounts}
+                  onRemoveAccount={removeApprovalMediumAccount}
+                  connectRequestCount={connectRequestCount}
+                />
+              ) : null}
+              {currentChannel.key === 'teams' ? (
+                <TelegramVerificationPanel
+                  medium="teams"
+                  targets={teamsTargets}
+                  accounts={teamsAccounts}
+                  disabled={formDisabled}
+                  onAccountsRefresh={refreshApprovalAccounts}
+                  onRemoveAccount={removeApprovalMediumAccount}
+                  connectRequestCount={connectRequestCount}
+                />
+              ) : null}
+            </>
+          ) : (
+            <p className="body-copy">No social channels are set up yet.</p>
+          )}
+        </section>
 
         {confirmDialog}
       </div>

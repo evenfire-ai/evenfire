@@ -45,7 +45,7 @@ vi.mock('@components/ProfileAccessContext', () => ({
 }))
 
 vi.mock('@components/ProfileBodySkeleton', () => ({
-  ProfileBodySkeleton: () => null,
+  ProfileBodySkeleton: () => <div className="profile-skeleton" role="status" />,
 }))
 
 vi.mock('@components/ProfileShell', () => ({
@@ -133,8 +133,23 @@ describe('Social channels section header', () => {
 
     render(<ChannelsContent activeChannel="telegram" />)
 
-    expect(await screen.findByText(/No social channels are connected/)).toBeInTheDocument()
+    expect(await screen.findByText('No social channels are set up yet.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Connect / })).not.toBeInTheDocument()
+  })
+
+  it('keeps the network tabs visible while only the body loads', async () => {
+    mocks.listWorkflowApprovalMediums.mockReturnValue(new Promise(() => {}))
+
+    const view = render(<ChannelsContent activeChannel="telegram" />)
+
+    const tabs = screen.getByRole('tablist', { name: 'Social networks' })
+    expect(within(tabs).getByRole('tab', { name: 'Telegram' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    expect(within(tabs).getByRole('tab', { name: 'Slack' })).toBeInTheDocument()
+    expect(view.container.querySelector('.profile-skeleton')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Connect / })).toBeDisabled()
   })
 
   it('disables the Connect action while a load is running', async () => {

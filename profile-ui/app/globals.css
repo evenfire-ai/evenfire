@@ -1610,11 +1610,6 @@ code {
   gap: 0.75rem;
 }
 
-.settings-social-channel-toolbar {
-  display: flex;
-  justify-content: flex-end;
-}
-
 .settings-verification-token-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
