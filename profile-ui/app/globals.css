@@ -2378,3 +2378,22 @@ code {
     padding: 1rem;
   }
 }
+
+/* The shared shell owns focus and dismissal; these preserve connect-flow sizing. */
+.cu-channel-connect-dialog {
+  max-width: min(32rem, 100%);
+  overflow: visible;
+}
+
+.cu-channel-connect-dialog .eft-dialog__content {
+  overflow: visible;
+}
+
+.cu-channel-connect-dialog--wide {
+  max-width: min(44rem, 100%);
+  overflow: hidden;
+}
+
+.cu-channel-connect-dialog--wide .eft-dialog__content {
+  overflow: auto;
+}
