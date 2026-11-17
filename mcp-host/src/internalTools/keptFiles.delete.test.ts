@@ -1194,6 +1194,23 @@ describe('the delete refuses a call whose approval card does not fit one channel
     expect(refusal(longLast, 'slack')).toBe(MANY(20, last))
   })
 
+  it('H2c counts a Telegram card in UTF-16 units, not in characters', () => {
+    // An emoji is shown as written and takes two UTF-16 units.
+    const files: CardFile[] = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `${'\u{1F4C4}'.repeat(80)}${String(n).padStart(2, '0')}`,
+    }))
+    const card = asciiCard(files, REPLY)
+    // Witness: the card is over the limit in UTF-16 units and under it in characters.
+    expect(RULES.telegram.size(card)).toBeGreaterThan(RULES.telegram.max)
+    expect([...card].length).toBeLessThanOrEqual(RULES.telegram.max)
+    const leading = leadingFit(files, 'telegram', REPLY)
+    expect(leading).toBeGreaterThan(0)
+    expect(leading).toBeLessThan(20)
+    expect(refusal(files, 'telegram')).toBe(MANY(20, leading))
+    expect(refusal(files.slice(0, leading), 'telegram')).toBeUndefined()
+  })
+
   it('H3 refuses a first file that redaction lengthened past the limit, and only then', () => {
     const grown: CardFile = { kind: 'upload', name: `${GROWING_ENTRY.value.repeat(63)}abc` }
     for (const channel of ['telegram', 'slack'] as const) {
