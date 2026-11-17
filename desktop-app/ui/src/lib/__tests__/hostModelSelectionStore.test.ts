@@ -981,6 +981,52 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
     expect(view.effectiveModel).toBe('gpt-5.5')
   })
 
+  // Accepted transient: the send ack confirms the default as the chat's model, and
+  // a read withheld by a newer pick must not overwrite a confirmed model, so the
+  // old default shows until the next settled read. Shared by every provider.
+  describe.each(['codex-subscription', 'claude'])(
+    'a superseded reread keeps a send-confirmed default until the next settled read (%s)',
+    provider => {
+      it('shows the old default, then follows the new one on a settled read', async () => {
+        const models: HostModelsResult['models'] = [
+          { name: 'm-old', displayName: 'M Old', imageInput: SUPPORTED },
+          { name: 'm-new', displayName: 'M New', imageInput: SUPPORTED },
+        ]
+        let current = brokerResult({ provider, hostDefault: 'm-old', models })
+        const { transport, getHostModels } = makeTransport({
+          getHostModels: vi.fn(async () => current),
+          setHostModel: vi.fn(async () => {
+            throw new Error('Set host model rejected (model_not_allowed)')
+          }),
+        })
+        await loadHostModels(transport, AGENT, CHAT)
+        const sent = getHostModelSelectionSnapshot(AGENT, CHAT)
+        expect(sent.effectiveModel).toBe('m-old')
+        expect(sent.canAttachImages).toBe(true)
+        // The image send carried the default and its ack confirms it.
+        confirmHostModelSelectionFromSend(AGENT, CHAT, 'm-old', 0)
+
+        // The operator moves the Host default.
+        current = brokerResult({ provider, hostDefault: 'm-new', models })
+        const reread = deferred<HostModelsResult>()
+        getHostModels.mockImplementationOnce(() => reread.promise)
+        const load = loadHostModels(transport, AGENT, CHAT, { force: true })
+        // A pick that the Host rejects bumps the generation, so the reread
+        // lands superseded.
+        expect(await selectHostModel(transport, AGENT, CHAT, 'm-new')).toBe(false)
+        reread.resolve(current)
+        await load
+
+        const withheld = getHostModelSelectionSnapshot(AGENT, CHAT)
+        expect(withheld.data?.hostDefault).toBe('m-new')
+        expect(withheld.effectiveModel).toBe('m-old')
+
+        await loadHostModels(transport, AGENT, CHAT, { force: true })
+        expect(getHostModelSelectionSnapshot(AGENT, CHAT).effectiveModel).toBe('m-new')
+      })
+    }
+  )
+
   it('P1 — after one fresh read, the effective model is `intent ?? sessionModel ?? hostDefault` for every provider', async () => {
     // One settled read per run leaves `lastConfirmedModel === sessionModel`, so
     // the last-confirmed step (stale reads, conflicts, send acks) is not covered.
