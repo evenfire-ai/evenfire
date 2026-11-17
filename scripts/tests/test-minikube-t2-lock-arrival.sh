@@ -12,7 +12,7 @@ PIDS=()
 cleanup() {
   # Let only this fixture's workers exit before removing their temporary files.
   : >"$TMP_DIR/continue-stale"
-  for role in stale new normal orphan symlink; do : >"$TMP_DIR/release-$role"; done
+  for role in stale new normal orphan symlink broken-claim fresh-a fresh-b; do : >"$TMP_DIR/release-$role"; done
   if [[ "${PIDS+x}" == x ]]; then
     for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
   fi
@@ -49,6 +49,27 @@ if [[ "$TEST_ROLE" == stale ]]; then
         sleep 0.02
       done
     fi
+  }
+fi
+
+# Simulate a non-recursive mkdir that reports success when a concurrent
+# creator wins. Only the fixture's lock and claim paths receive this behavior.
+if [[ "$TEST_ROLE" == broken-claim || "$TEST_ROLE" == fresh-a || "$TEST_ROLE" == fresh-b ]]; then
+  mkdir() {
+    if [[ "$TEST_ROLE" == broken-claim && $# -eq 1 && "$1" == "$T2_LOCK_ROOT/race-profile.reclaim" ]]; then
+      return 0
+    fi
+    if [[ "$TEST_ROLE" == fresh-* && $# -eq 1 && "$1" == "$T2_LOCK_ROOT/race-profile.lock" ]]; then
+      : >"$TEST_DIR/ready-$TEST_ROLE"
+      local deadline=$((SECONDS + 10))
+      while [[ ! -e "$TEST_DIR/ready-fresh-a" || ! -e "$TEST_DIR/ready-fresh-b" ]]; do
+        (( SECONDS < deadline )) || return 70
+        sleep 0.02
+      done
+      command mkdir "$@" 2>/dev/null || [[ -d "$1" ]]
+      return
+    fi
+    command mkdir "$@"
   }
 fi
 
@@ -169,4 +190,44 @@ wait_for_file "$TMP_DIR/result-symlink" "$symlink_pid"
   }
 rm -- "$CLAIM_DIR"
 
+mkdir "$LOCK_DIR" "$CLAIM_DIR"
+printf 'PID=999999\nTOKEN=stale-token\nPROCESS_START=stale-start\n' >"$LOCK_DIR/owner.env"
+start_worker broken-claim
+broken_claim_pid="$WORKER_PID"
+wait_for_file "$TMP_DIR/result-broken-claim" "$broken_claim_pid"
+[[ "$(cat "$TMP_DIR/result-broken-claim")" == rejected ]] && ! wait "$broken_claim_pid" &&
+  [[ -d "$CLAIM_DIR" && "$(sed -n 's/^PID=//p' "$LOCK_DIR/owner.env")" == 999999 ]] || {
+    printf 'FAIL: a falsely successful mkdir bypassed the existing reclaim claim\n' >&2
+    exit 1
+  }
+rm -rf -- "$LOCK_DIR"
+rmdir "$CLAIM_DIR"
+
+start_worker fresh-a
+fresh_a_pid="$WORKER_PID"
+start_worker fresh-b
+fresh_b_pid="$WORKER_PID"
+wait_for_file "$TMP_DIR/result-fresh-a" "$fresh_a_pid"
+wait_for_file "$TMP_DIR/result-fresh-b" "$fresh_b_pid"
+fresh_results="$(cat "$TMP_DIR/result-fresh-a")/$(cat "$TMP_DIR/result-fresh-b")"
+[[ "$fresh_results" == acquired/rejected || "$fresh_results" == rejected/acquired ]] || {
+  printf 'FAIL: falsely successful mkdir admitted multiple fresh owners (%s)\n' "$fresh_results" >&2
+  exit 1
+}
+: >"$TMP_DIR/release-fresh-a"
+: >"$TMP_DIR/release-fresh-b"
+set +e
+wait "$fresh_a_pid"; fresh_a_rc=$?
+wait "$fresh_b_pid"; fresh_b_rc=$?
+set -e
+if ! { [[ "$fresh_a_rc" -eq 0 && "$fresh_b_rc" -ne 0 ]] || [[ "$fresh_b_rc" -eq 0 && "$fresh_a_rc" -ne 0 ]]; }; then
+  printf 'FAIL: fresh owners did not exit with one success and one rejection\n' >&2
+  exit 1
+fi
+[[ ! -e "$LOCK_DIR" && ! -e "$CLAIM_DIR" ]] || {
+  printf 'FAIL: fresh owner did not release its lock\n' >&2
+  exit 1
+}
+
 printf 'PASS: new arrivals respect reclaim ownership and orphaned claims\n'
+printf 'PASS: exclusive lock and reclaim creation reject a falsely successful mkdir\n'

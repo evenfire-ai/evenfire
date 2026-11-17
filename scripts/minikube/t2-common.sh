@@ -1257,6 +1257,12 @@ t2_lock_profile_id_check() {
   fi
 }
 
+t2_lock_mkdir_exclusive() {
+  # Some mkdir implementations report success when a concurrent creator wins.
+  # Use the OS operation directly so only one process can acquire the directory.
+  python3 -c 'import os, sys; os.mkdir(sys.argv[1])' "$1"
+}
+
 t2_lock_process_matches() {
   local pid="$1" expected_start actual_start state
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
@@ -1315,7 +1321,7 @@ t2_lock_acquire() {
     # while holding the claim, the marker deliberately remains and requires
     # the documented orphan-lock recovery rather than an unsafe retry.
     reclaim_dir="$T2_LOCK_ROOT/$T2_PROFILE.reclaim"
-    if ! mkdir "$reclaim_dir" 2>/dev/null; then
+    if ! t2_lock_mkdir_exclusive "$reclaim_dir" 2>/dev/null; then
       T2_NEXT_COMMAND='wait for the stale-lock reclaimer to finish; if it died, follow the orphaned-lock recovery steps in docs/testing/minikube-t2-runbook.md'
       t2_fail PROFILE_BUSY "profile $T2_PROFILE stale lock is already being reclaimed"
       return 1
@@ -1340,7 +1346,7 @@ t2_lock_acquire() {
     fi
     rm -rf -- "$T2_LOCK_DIR"
   fi
-  mkdir "$T2_LOCK_DIR" 2>/dev/null || {
+  t2_lock_mkdir_exclusive "$T2_LOCK_DIR" 2>/dev/null || {
     if [ -n "$reclaim_dir" ]; then
       rmdir "$reclaim_dir" 2>/dev/null || true
     fi

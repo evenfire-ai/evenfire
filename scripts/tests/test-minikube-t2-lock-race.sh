@@ -21,12 +21,17 @@ trap cleanup EXIT
 
 show_diagnostics() {
   local file
-  for file in "${RESULT_FILE}" "${TMP_DIR}"/worker-*.out "${TMP_DIR}/trace"; do
+  for file in "${RESULT_FILE}" "${TMP_DIR}"/worker-*.out; do
     [[ -f "${file}" ]] || continue
     printf '%s\n' "--- ${file##*/} ---" >&2
     cat "${file}" >&2
   done
 }
+
+if [[ "${CI:-}" == true ]]; then
+  printf 'LOCK_TEST_MKDIR_PATH=%s\n' "$(command -v mkdir)"
+  mkdir --version 2>/dev/null | sed -n '1p' || true
+fi
 
 mkdir -p "${LOCK_DIR}"
 : >"${READY_FILE}"
@@ -72,29 +77,6 @@ T2_PROFILE=race-profile
 T2_CONTEXT=race-profile
 T2_WORKTREE_ID=lock-race-worktree
 
-# Do not let the trace wrappers hide a different inherited command. The shared
-# trace records both sides of each operation so CI shows their order on failure.
-for operation in mkdir rm rmdir; do
-  command_type="$(type -t "${operation}" || true)"
-  command_path="$(type -P "${operation}" || true)"
-  printf 'pid=%s command=%s type=%s path=%s\n' "$$" "${operation}" "${command_type}" "${command_path}" >>"${TEST_TRACE_DIR}/trace"
-  if [[ "${command_type}" != file ]]; then
-    printf 'FAIL: fixture command %s resolves as %s instead of a file\n' "${operation}" "${command_type:-missing}" >&2
-    exit 1
-  fi
-done
-trace_fs() {
-  local operation="$1" status=0
-  shift
-  printf 'pid=%s operation=%s phase=begin args=%s\n' "$$" "${operation}" "$*" >>"${TEST_TRACE_DIR}/trace"
-  command "${operation}" "$@" || status=$?
-  printf 'pid=%s operation=%s phase=end status=%s args=%s\n' "$$" "${operation}" "${status}" "$*" >>"${TEST_TRACE_DIR}/trace"
-  return "${status}"
-}
-mkdir() { trace_fs mkdir "$@"; }
-rm() { trace_fs rm "$@"; }
-rmdir() { trace_fs rmdir "$@"; }
-
 # Force both contenders to classify the same original owner as stale before
 # either can claim it. A replacement owner is judged by liveness so the loser
 # cannot remove the winner's newly acquired lock.
@@ -132,7 +114,6 @@ worker_env=(
   TEST_READY_FILE="${READY_FILE}"
   TEST_RESULT_FILE="${RESULT_FILE}"
   TEST_RELEASE_FILE="${RELEASE_FILE}"
-  TEST_TRACE_DIR="${TMP_DIR}"
   T2_LOCK_ROOT="${LOCK_ROOT}"
   T2_PROFILE=race-profile
   T2_CONTEXT=race-profile
