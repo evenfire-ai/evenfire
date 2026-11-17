@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import request from 'supertest'
@@ -221,14 +220,13 @@ const PRUNE_STATE_COLUMNS = [
 ]
 
 /*
- * The statements the image before this change runs on llm_allowed_models,
- * copied verbatim from the merge base (control-api/src/services/llmCatalogSync.ts
- * and the SET list llmAllowedModels.ts builds for an `enabled` PUT). They are
- * checked against that commit below when it is in the clone.
+ * A frozen copy of the statements the image before this change runs on
+ * llm_allowed_models: the catalog sync's INSERT and mark-stale UPDATE, and the
+ * row lock plus SET list the admin PUT builds for an `enabled`-only body. That
+ * image keeps running beside the migrated schema during a rollout, so these
+ * strings are the contract the migrations must stay compatible with; they are
+ * not re-read from git because CI checks out a shallow clone without that commit.
  */
-// The commit this change branched from. When a sync with dev brings changes to
-// these statements, move it to the new merge base and copy them again.
-const PREVIOUS_IMAGE_BASE = 'e611ebfcb'
 const PREVIOUS_SYNC_INSERT = `INSERT INTO llm_allowed_models
        (provider, model, enabled, source, discovered_at, last_seen_at, stale,
         context_window_tokens, display_name, image_input, catalog_status)
@@ -259,17 +257,6 @@ const PREVIOUS_PUT_LOCK_ROW = `SELECT ${PREVIOUS_MODEL_COLUMNS} FROM llm_allowed
 const PREVIOUS_PUT_ENABLED = `UPDATE llm_allowed_models
           SET enabled = $1, updated_at = NOW()
         WHERE id = $2`
-
-function previousImageSource(path: string): string | null {
-  try {
-    return execFileSync('git', ['show', `${PREVIOUS_IMAGE_BASE}:control-api/${path}`], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-  } catch {
-    return null
-  }
-}
 
 describeRealPostgres('0139/0140 enabled authority and episodes (real PostgreSQL)', () => {
   const database = `control_api_prune_state_${randomBytes(6).toString('hex')}`
@@ -1103,31 +1090,6 @@ describeRealPostgres('0139/0140 enabled authority and episodes (real PostgreSQL)
   })
 
   describe('the image before this change, after the migrations', () => {
-    it('runs its statements verbatim from the merge base', ctx => {
-      const sync = previousImageSource('src/services/llmCatalogSync.ts')
-      const allowed = previousImageSource('src/services/llmAllowedModels.ts')
-      // A clone without that commit (a shallow CI checkout) cannot check the copy.
-      if (sync === null || allowed === null) {
-        ctx.skip()
-        return
-      }
-      expect(sync).toContain(PREVIOUS_SYNC_INSERT)
-      expect(sync).toContain(PREVIOUS_SYNC_MARK_STALE)
-      expect(sync).not.toContain('enabled_managed_by')
-      // The PUT builds `SET ${sets.join(', ')}` from `<column> = $<n>` and then
-      // appends `updated_at = NOW()`; for an `enabled`-only body that is the
-      // statement above.
-      expect(allowed).toContain(
-        "`UPDATE llm_allowed_models\n          SET ${sets.join(', ')}\n        WHERE id = $${idx}"
-      )
-      expect(allowed).toContain('sets.push(`updated_at = NOW()`)')
-      expect(allowed).toContain('const MODEL_COLUMNS = `' + PREVIOUS_MODEL_COLUMNS + '`')
-      expect(allowed).toContain(
-        '`SELECT ${MODEL_COLUMNS} FROM llm_allowed_models WHERE id = $1 FOR UPDATE`'
-      )
-      expect(allowed).not.toContain('enabled_managed_by')
-    })
-
     it('gets the defaults: operator rows, no token, episodes opened by the trigger', async () => {
       const [ga, deprecated] = [pick(0), pick(1)]
       // The parameters the previous sync passes, from the same producers.

@@ -394,9 +394,10 @@ family, or an "OpenAI-compatible" request shape.
 - A capability change re-materializes the ConfigMap `imageInput` field, so
   running Hosts pick it up without a redeploy. The sync re-materializes
   `clerum-llm-allowed-models` whenever its content differs from Postgres (an
-  `image_input` change on an enabled row, a model it enabled on insert); it
-  never enables or disables an existing row, nor edits any other served column
-  of one.
+  `image_input` change on an enabled row, a model it enabled on insert, a
+  model it pruned or re-enabled). It changes `enabled` on an existing row only
+  through the prune and the re-enable described above, and never edits any
+  other served column of one.
 
 #### Rollout and refresh cadence
 

@@ -1507,7 +1507,9 @@ describeRealPostgres(
       const pair = pairOf(item.provider, item.model)
       const row = M.rows[pair]
       const current = row ? (item.kind === STALE_KIND ? row.staleEpisode : row.depEpisode) : -1
-      const accepted = row !== undefined && row.enabled && current === item.episode
+      // The row must still meet the kind's condition, the one modelFeed lists it by.
+      const holds = row ? (item.kind === STALE_KIND ? row.stale : row.deprecated) : false
+      const accepted = row !== undefined && row.enabled && current === item.episode && holds
       const res = await request(api()).post(`${API}/attention/ack`).set('Cookie', COOKIE).send({
         provider: item.provider,
         model: item.model,

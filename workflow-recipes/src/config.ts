@@ -2,7 +2,7 @@
  * Workload Recipes Controller (WRC) configuration.
  * Follows the same env-config pattern as host-context-controller/src/config.ts
  */
-import { registryHostFromUrl } from '@clerum/workflow-runtime-core'
+import { STATUS_OUTPUT_MAX_CHARS, registryHostFromUrl } from '@clerum/workflow-runtime-core'
 
 export interface DbConfig {
   connectionString?: string
@@ -118,7 +118,8 @@ export const DEFAULT_WORKFLOW_DEFAULT_RUN_DURATION_SECONDS = 60 * 60
 export const DEFAULT_WORKFLOW_MAX_RUN_DURATION_SECONDS = 24 * 60 * 60
 export const DEFAULT_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = 32 * 1024
 export const MIN_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = 1024
-export const MAX_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = 64 * 1024
+/** The coordinator cuts step output to this length before reporting it. */
+export const MAX_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = STATUS_OUTPUT_MAX_CHARS
 export const DEFAULT_RUNTIME_TOKEN_TTL_SECONDS = 15 * 60
 export const DEFAULT_RUNTIME_TOKEN_REFRESH_BEFORE_SECONDS = 5 * 60
 export const DEFAULT_RUNTIME_EGRESS_DNS_OVERLAP_SECONDS = 5 * 60

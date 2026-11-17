@@ -224,9 +224,10 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   )
 
   // Acknowledge an attention item with the `episode` and `consumerKeys` the feed
-  // returned for it. A 409 means the episode moved on (or the model is no longer
-  // enabled) since the operator loaded the feed: nothing is acknowledged and the
-  // client reloads. The keys are stored as sent, not checked against the live
+  // returned for it. A 409 means the episode moved on, the model is no longer
+  // enabled, or it no longer meets the kind's condition (back in the catalog, no
+  // longer deprecated) since the operator loaded the feed: nothing is
+  // acknowledged and the client reloads. The keys are stored as sent, not checked against the live
   // consumers: checking would need K8s LISTs on this route, and a consumer the
   // operator did not see simply reopens the item on the next feed.
   router.post(

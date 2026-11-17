@@ -354,16 +354,23 @@ function episodeCounter(raw: unknown, column: string): number {
   throw new Error(`llm_allowed_models.${column} is not an integer counter`)
 }
 
+// The row condition of each attention kind, shared by the feed and the
+// acknowledgement so the two cannot disagree on what is an item. The deprecated
+// predicate takes the catalog providers as the bound parameter `param`.
+const STALE_CONDITION = 'stale'
+const deprecatedCondition = (param: string) =>
+  `catalog_status = 'deprecated' AND provider = ANY(${param}::text[])`
+
 export async function listAttentionCandidates(
   db: DbClient = pool
 ): Promise<AttentionCandidateRow[]> {
   const result = await db.query(
     `SELECT provider, model, display_name, stale,
-            (catalog_status = 'deprecated' AND provider = ANY($1::text[])) IS TRUE AS deprecated,
+            (${deprecatedCondition('$1')}) IS TRUE AS deprecated,
             stale_episode, deprecated_episode, attention_ack
        FROM llm_allowed_models
       WHERE enabled
-        AND (stale OR (catalog_status = 'deprecated' AND provider = ANY($1::text[])))
+        AND (${STALE_CONDITION} OR (${deprecatedCondition('$1')}))
       ORDER BY provider ASC, model ASC`,
     [CATALOG_PROVIDERS]
   )
@@ -391,6 +398,21 @@ export const ATTENTION_ACK_EPISODE_COLUMN = {
 
 export type AckableAttentionKind = keyof typeof ATTENTION_ACK_EPISODE_COLUMN
 
+/**
+ * The row condition an acknowledgement requires, per kind: the same one the
+ * feed uses to list the row, so a kind whose condition is gone (the model came
+ * back to the catalog, or is no longer deprecated) is not acknowledged. Closed
+ * like the episode map, and interpolated the same way; any value it needs is a
+ * bound parameter starting at `$6`.
+ */
+const ATTENTION_ACK_CONDITION: Record<
+  AckableAttentionKind,
+  { sql: string; params: readonly unknown[] }
+> = {
+  stale_model_referenced: { sql: STALE_CONDITION, params: [] },
+  deprecated_model_enabled: { sql: deprecatedCondition('$6'), params: [CATALOG_PROVIDERS] },
+}
+
 const ACKABLE_KINDS = Object.keys(ATTENTION_ACK_EPISODE_COLUMN) as [
   AckableAttentionKind,
   ...AckableAttentionKind[],
@@ -404,6 +426,21 @@ const MAX_ATTENTION_CONSUMER_KEY_LENGTH = 400
 // int4 upper bound: the episode columns are `integer`.
 const MAX_EPISODE = 2_147_483_647
 
+// The three shapes `explicitConsumerKeys` (llmModelConsumers.ts) emits: a
+// Host or WorkflowRecipe as `<namespace>/<name>` from its K8s metadata
+// (namespace is a DNS label, name a DNS subdomain) and a grant by its
+// `plugin_workload_sdk_grants.id`, a UUID Postgres renders lowercase. A
+// subdomain caps only its total length (253), not each dot-separated part:
+// the apiserver accepts a 64+ character name with no dot, and refusing its key
+// would leave that item impossible to acknowledge. The keys are stored and
+// audited as sent, so anything else is refused.
+const DNS_LABEL = '[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?'
+const DNS_SUBDOMAIN = '[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?'
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const ATTENTION_CONSUMER_KEY_RE = new RegExp(
+  `^(?:(?:host|recipe):${DNS_LABEL}/${DNS_SUBDOMAIN}|grant:${UUID})$`
+)
+
 const attentionPairShape = {
   provider: z.string().trim().min(1).max(200),
   model: z.string().trim().min(1).max(400),
@@ -415,7 +452,12 @@ export const attentionAckSchema = z
     ...attentionPairShape,
     episode: z.number().int().min(0).max(MAX_EPISODE),
     consumerKeys: z
-      .array(z.string().min(1).max(MAX_ATTENTION_CONSUMER_KEY_LENGTH))
+      .array(
+        z
+          .string()
+          .max(MAX_ATTENTION_CONSUMER_KEY_LENGTH)
+          .regex(ATTENTION_CONSUMER_KEY_RE, 'not a host:, grant: or recipe: consumer key')
+      )
       .max(MAX_ATTENTION_CONSUMER_KEYS),
   })
   .strict()
@@ -437,7 +479,8 @@ export interface AttentionAckEntry {
  * Record that the operator reviewed an attention item. Stores the consumer keys
  * the CLIENT saw, not the current consumers: one that appeared between the feed
  * and the click must reopen the item, not be accepted unseen. Returns null when
- * the row is gone, disabled, or in another episode (the caller answers 409).
+ * the row is gone, disabled, in another episode, or no longer meets the kind's
+ * condition (the caller answers 409 and the client reloads the feed).
  */
 export async function acknowledgeAttention(
   input: AttentionAckInput,
@@ -445,6 +488,7 @@ export async function acknowledgeAttention(
   db: DbTransactionClient
 ): Promise<AttentionAckEntry | null> {
   const column = ATTENTION_ACK_EPISODE_COLUMN[input.kind]
+  const condition = ATTENTION_ACK_CONDITION[input.kind]
   const entry: AttentionAckEntry = {
     episode: input.episode,
     consumerKeys: [...new Set(input.consumerKeys)].sort(),
@@ -455,8 +499,16 @@ export async function acknowledgeAttention(
     `UPDATE llm_allowed_models
         SET attention_ack = jsonb_set(coalesce(attention_ack, '{}'::jsonb), ARRAY[$3::text], $4::jsonb)
       WHERE provider = $1 AND model = $2 AND enabled
-        AND ${column} = $5::int`,
-    [input.provider, input.model, input.kind, JSON.stringify(entry), input.episode]
+        AND ${column} = $5::int
+        AND ${condition.sql}`,
+    [
+      input.provider,
+      input.model,
+      input.kind,
+      JSON.stringify(entry),
+      input.episode,
+      ...condition.params,
+    ]
   )
   if (result.rowCount !== 1) return null
   await writeAudit(db, {
@@ -630,8 +682,12 @@ export async function updateAllowedModel(
   // Authority over `enabled`, decided on the locked row: the route's earlier
   // read is unlocked, and the catalog prune or re-enable can commit in
   // between. Only a real change of the value, or an explicit pin, is an
-  // operator decision. The edit form resends `enabled` unchanged with every
-  // save, and that must not take the row away from the catalog. A rename
+  // operator decision: resending the current value must not take the row away
+  // from the catalog. The server cannot tell a value the operator chose from
+  // one a client loaded before a prune and resent, so a client must send
+  // `enabled` only when the operator changed it; one that resends the loaded
+  // value (the control-ui edit form still does) turns a model pruned while the
+  // page was open back on for good. A rename
   // also hands the row to the operator and drops the prune token and the
   // acknowledgements: both belong to the old pair.
   const operatorDecidesEnabled =

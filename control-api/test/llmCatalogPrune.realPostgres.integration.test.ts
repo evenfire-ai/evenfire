@@ -43,6 +43,40 @@ vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(async () => [{ address: '93.184.216.34' }]),
 }))
 
+// Records what the catalog sync's module logger emits; every other logger is
+// the real (silent) one.
+const syncLogged = vi.hoisted(() => [] as Array<{ level: string; payload: unknown }>)
+vi.mock('../src/observability/logger.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/observability/logger.js')>()
+  const root = actual.rootLogger
+  const rootLogger = new Proxy(root, {
+    get(target, prop, receiver) {
+      if (prop !== 'child') return Reflect.get(target, prop, receiver)
+      return (bindings: Record<string, unknown>, options?: object) => {
+        const child = target.child(bindings, options)
+        if (bindings?.service !== 'llm_catalog_sync') return child
+        return new Proxy(child, {
+          get(c, level, r) {
+            const value = Reflect.get(c, level, r)
+            if (typeof level !== 'string' || !['info', 'warn', 'error'].includes(level))
+              return value
+            return (payload: unknown, ...rest: unknown[]) => {
+              syncLogged.push({ level, payload })
+              return (value as (...a: unknown[]) => void).call(c, payload, ...rest)
+            }
+          },
+        })
+      }
+    },
+  })
+  return { ...actual, rootLogger }
+})
+
+const retiredLogs = () =>
+  syncLogged
+    .filter(e => (e.payload as { event?: string })?.event === 'llm_catalog_pruned_model_retired')
+    .map(e => ({ level: e.level, ...(e.payload as object) }))
+
 const mockVerifyAdminToken = vi.fn()
 const mockIsAdminTokenRevoked = vi.fn()
 const mockFindAdminById = vi.fn()
@@ -284,6 +318,7 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
   })
 
   beforeEach(async () => {
+    syncLogged.length = 0
     mockVerifyAdminToken.mockReset().mockReturnValue(ADMIN_CLAIMS)
     mockIsAdminTokenRevoked.mockReset().mockResolvedValue(false)
     mockFindAdminById.mockReset().mockResolvedValue(ACTIVE_ADMIN)
@@ -1063,6 +1098,44 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       ])
     })
 
+    // Read by the scraped name, as an alert would.
+    const recordFailures = async () => {
+      const { registry } = await import('../src/observability/metrics.js')
+      const metric = registry.getSingleMetric('clerum_llm_catalog_prune_run_record_failures_total')
+      return ((await metric?.get())?.values[0]?.value as number | undefined) ?? 0
+    }
+
+    it('a prune run whose INSERT is rejected is counted as a record failure and does not throw', async () => {
+      const { recordCatalogPruneRun } = await import('../src/services/llmCatalogPrune.js')
+      const rejecting = new Proxy(corePool, {
+        get(target, prop) {
+          if (prop === 'query') {
+            return () => Promise.reject(new Error('permission denied for table'))
+          }
+          const value = Reflect.get(target, prop, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+      const before = await recordFailures()
+      await expect(
+        recordCatalogPruneRun(
+          rejecting,
+          { decidable: true, syncRanAt: new Date().toISOString() },
+          {
+            skipped: false,
+            candidates: 0,
+            prefiltered: 0,
+            examinedLocked: 0,
+            pruned: 0,
+            aborted: false,
+            abortReason: null,
+          }
+        )
+      ).resolves.toBeUndefined()
+      expect((await recordFailures()) - before).toBe(1)
+      expect(await pruneRuns()).toEqual([])
+    })
+
     it.each([
       ['its INSERT is rejected', 'insert'],
       ['no connection is available', 'connect'],
@@ -1106,6 +1179,7 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
             })
           },
         }
+        const before = await recordFailures()
         const res = await sync(gone(m), {
           connector: connector as unknown as Pool,
           wrapPrune: () => async () => {
@@ -1115,6 +1189,7 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
         })
         expect(res).toMatchObject({ pruneAborted: true, pruned: 0 })
         expect(attempts).toBe(1)
+        expect((await recordFailures()) - before).toBe(1)
         expect((await row(m)).enabled).toBe(true)
         expect(await pruneRuns()).toEqual([])
       }
@@ -1227,6 +1302,7 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       })
       expect(isPublished(m)).toBe(true)
       expect(await audits('auto_enable', m)).toEqual([SYNC_ACTOR])
+      expect(retiredLogs()).toEqual([])
     })
 
     it('S-8b: a pruned model that comes back deprecated stays off, loses its token and is not an item', async () => {
@@ -1237,6 +1313,15 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       expect(isPublished(m)).toBe(false)
       expect(await feedItems(m)).toEqual([])
       expect(await audits('auto_enable')).toEqual([])
+      expect(retiredLogs()).toEqual([
+        {
+          level: 'info',
+          event: 'llm_catalog_pruned_model_retired',
+          provider: PROVIDER,
+          model: m,
+          reason: 'status',
+        },
+      ])
     })
 
     it('S-8c: a vendored run between the prune and the relisting neither clears stale nor re-enables', async () => {
@@ -1294,6 +1379,8 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       await sync(FULL, { maxPerProvider: 1 })
       await sync(FULL, { maxPerProvider: 1 })
       for (const m of [a, b, c]) expect((await row(m)).enabled).toBe(true)
+      // A cap deferral is never reported as a retirement.
+      expect(retiredLogs()).toEqual([])
     })
 
     for (const cap of ['per run', 'per provider'] as const) {
@@ -1343,8 +1430,19 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       await mod.setProviderAutoEnable(PROVIDER, false, 'test-admin', corePool)
       await sync(FULL)
       expect(await row(m)).toMatchObject({ enabled: false, stale: false, auto_disabled_at: null })
+      expect(retiredLogs()).toEqual([
+        {
+          level: 'info',
+          event: 'llm_catalog_pruned_model_retired',
+          provider: PROVIDER,
+          model: m,
+          reason: 'auto_enable_off',
+        },
+      ])
       await mod.setProviderAutoEnable(PROVIDER, true, 'test-admin', corePool)
       await sync(FULL)
+      // The token is gone: the second run neither re-enables nor retires again.
+      expect(retiredLogs()).toHaveLength(1)
       expect((await row(m)).enabled).toBe(false)
       expect(isPublished(m)).toBe(false)
     })
@@ -1491,7 +1589,9 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       const res = await sync(gone(m), {
         hooks: {
           beforeCommit: onceFor(m, async () => {
-            // The edit form loaded `enabled: true` and saves it again.
+            // An explicit `enabled: true`, sent before the prune commits. The
+            // server cannot tell it from a value a stale page resends, which is
+            // why clients must send `enabled` only when the operator changed it.
             edit = Promise.resolve(put(id, { enabled: true, display_name: 'Edited' }))
             await untilBlocked(1, 'row')
           }),

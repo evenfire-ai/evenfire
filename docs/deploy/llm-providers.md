@@ -139,8 +139,10 @@ unusable and is flagged in the wizard.
 **Discovery review.** `/llm-models` (Catalog) and `/llm-models/discovery`
 (Discovery Review) are two tabs of the same screen. Models that disappear from
 the latest live catalog stay in Catalog with a **Stale** marker and a
-per-provider stale count. Only a live, plausible run marks a model stale or
-clears the marker; a `vendored` run leaves it as it is.
+per-provider stale count. Only a live, plausible run marks a model stale, and
+any live run that lists the model again clears the marker (on a model the
+prune turned off, only the re-enable clears it); a `vendored` run leaves it as
+it is.
 
 **Pruning stale models nobody uses.** After each live, plausible run commits,
 the sync disables the models that have been stale for longer than
@@ -161,7 +163,9 @@ decide (live and plausible) appends a row to `llm_catalog_prune_runs`; a run
 that could not decide only counts in
 `clerum_llm_catalog_prune_runs_total{outcome="skipped"}`. A failed Kubernetes LIST stops the prune for that
 run, keeping what it already disabled
-(`clerum_llm_catalog_prune_runs_total{outcome="aborted"}`). When a later live
+(`clerum_llm_catalog_prune_runs_total{outcome="aborted"}`). A run whose row
+cannot be written to `llm_catalog_prune_runs` is still counted there, and also
+in `clerum_llm_catalog_prune_run_record_failures_total`. When a later live
 run lists a pruned model again, it is enabled again (audited `auto_enable`)
 under the same rules as a new model: provider policy ON, eligible, not
 removed, within the per-run caps, which it shares with the new models it

@@ -708,6 +708,15 @@ export const llmCatalogPruneRunsTotal = getOrCreateCounter({
   labelNames: ['outcome'] as const as Array<'outcome'>, // completed | aborted | skipped
 })
 
+// Runs whose row in llm_catalog_prune_runs could not be written. The run itself
+// is still counted in clerum_llm_catalog_prune_runs_total; a non-zero rate means
+// the prune log under-reports what the prune did.
+export const llmCatalogPruneRunRecordFailuresTotal = getOrCreateCounter({
+  name: 'clerum_llm_catalog_prune_run_record_failures_total',
+  help: 'Count of catalog prune runs that could not be recorded in llm_catalog_prune_runs.',
+  labelNames: [] as string[],
+})
+
 // Models the prune disabled (each one also has an `auto_disable` audit row).
 export const llmCatalogPrunedModelsTotal = getOrCreateCounter({
   name: 'clerum_llm_catalog_pruned_models_total',

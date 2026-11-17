@@ -105,6 +105,14 @@ pruned (disabled because the catalog dropped it and nobody used it) stays
 disabled under the old image, which has no re-enable: turn it on by hand if
 it returns to the catalog while the old image runs.
 
+A model turned on under the old image after the new one pruned it (by hand,
+or by old pods during the rollout) keeps `auto_disabled_at` and stays
+catalog-managed, a state the new image never produces. After rolling forward
+again the prune can turn it off once more, and if the catalog lists it, its
+`stale` marker does not clear. Re-pin each such model as the operator's choice
+(`PUT /admin/llm-models/:id` with `enabled: true` and `pinEnabled: true`); they
+are the rows with `enabled AND auto_disabled_at IS NOT NULL`.
+
 Logout revokes only the token it receives. A V1 token issued before a team
 switch stays valid until its own expiry (at most 7 days, 604800 s), as on `dev`. A new
 Desktop build against the old External REST removes a rejected stored token as
@@ -185,6 +193,11 @@ before this release.
   model routes, the Host spec validation, the plugin-workload grant gate and
   the allowlist ConfigMap publisher, and the old image's catalog sync.
   mcp-host does not: it reads the published ConfigMap, not the table.
+  If a transaction keeps the table through every attempt (a reader for 0139,
+  or a catalog sync or admin write that outlasts the Job's 10 s for 0140),
+  the Job exhausts its `backoffLimit` with `55P03` and the deploy stops. The
+  migration that timed out is not applied; the ones before it stay committed.
+  Rerun the Job once that transaction ends.
 - `0140_llm_catalog_prune_episodes` never blocks a plain `SELECT` on
   `llm_allowed_models`. It starts by taking `EXCLUSIVE` on the table and holds
   it until it commits. Under that lock it validates the `CHECK`, backfills the
