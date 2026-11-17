@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { LlmAllowedModel } from '../../lib/api'
+import { llmModelWireRow } from '../../test/fixtures/llmModelRows'
 import { LlmModelTable } from '../LlmModelTable'
 
 const baseModel: LlmAllowedModel = {
@@ -754,6 +755,24 @@ describe('LlmModelTable rows the catalog sync turned off', () => {
       screen.getByRole('button', { name: 'Actions for model claude/claude-sonnet-4-6' })
     )
     // Exactly one menu is open, the second row's; otherwise the absence below proves nothing.
+    expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Keep disabled' })).not.toBeInTheDocument()
+  })
+
+  // An older control-api turns rows back on without clearing the prune stamp.
+  // That row is on: it must read as Enabled only, with nothing to keep disabled.
+  it('treats an enabled row that still carries the prune stamp as plainly enabled', () => {
+    const reEnabled = { ...llmModelWireRow(true), auto_disabled_at: '2026-11-01T00:00:00.000Z' }
+    renderTable([reEnabled])
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI models' }))
+
+    const row = screen.getByText(reEnabled.model).closest('tr')
+    expect(row).toHaveTextContent('Enabled')
+    expect(screen.queryByText('Turned off by catalog sync')).not.toBeInTheDocument()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: `Actions for model openai/${reEnabled.model}` })
+    )
     expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: 'Keep disabled' })).not.toBeInTheDocument()
   })

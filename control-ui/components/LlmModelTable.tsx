@@ -88,6 +88,13 @@ function collapseFamilyRows(family: string, models: LlmAllowedModel[]): DisplayM
   })
 }
 
+// `auto_disabled_at` alone is not enough: a control-api rolled back to before
+// the prune turns rows on without clearing it, and such a row is on, not
+// pruned. Its remedy is pinning it on, never "Keep disabled".
+function catalogPrunedAt(row: LlmAllowedModel): string | null {
+  return row.enabled ? null : row.auto_disabled_at
+}
+
 /** Row action that pins a catalog-pruned row off; none for any other row. */
 function keepDisabledActions(
   row: LlmAllowedModel | undefined,
@@ -95,7 +102,7 @@ function keepDisabledActions(
   keepingDisabledId: string | null,
   onKeepDisabled: (model: LlmAllowedModel) => Promise<void>
 ) {
-  if (!row?.auto_disabled_at) return []
+  if (!row || !catalogPrunedAt(row)) return []
   return [
     {
       key: `keep-disabled-${row.id}`,
@@ -511,10 +518,10 @@ export function LlmModelTable({
                         >
                           {model.enabled ? 'Enabled' : 'Disabled'}
                         </span>
-                        {model.auto_disabled_at ? (
+                        {catalogPrunedAt(model) ? (
                           <span
                             className="cu-llm-model-row__auto-off"
-                            title={`Turned off by catalog sync on ${formatLocalTimestamp(model.auto_disabled_at)}: no Host, grant or recipe used it after the catalog stopped listing it.`}
+                            title={`Turned off by catalog sync on ${formatLocalTimestamp(catalogPrunedAt(model))}: no Host, grant or recipe used it after the catalog stopped listing it.`}
                           >
                             Turned off by catalog sync
                           </span>
