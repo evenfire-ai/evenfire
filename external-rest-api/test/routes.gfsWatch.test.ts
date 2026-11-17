@@ -77,6 +77,8 @@ type Scenario = {
   openDelayMs?: number
   /** Puts control-api's own service-credential gate in front of the watch router. */
   serviceGate?: boolean
+  /** Hands this error to control-api's global error handler before the watch router runs. */
+  thrown?: unknown
 }
 
 /** The upstream side of the last stream the fake registry opened. */
@@ -197,6 +199,11 @@ describe('GFS watch through external-rest-api', () => {
     const authority = await import('../../control-api/src/gfs/externalAuthority.js')
     const { requireInternalToken, requireInternalService } =
       await import('../../control-api/src/middleware/internalServiceAuth.js')
+    const { clerumErrorHandler } = await import('../../control-api/src/http/errorHandler.js')
+    const { RegistryUnavailableError } =
+      await import('../../control-api/src/services/registryClient.js')
+    ;(globalThis as { __registryUnavailable?: unknown }).__registryUnavailable =
+      RegistryUnavailableError
     resetIngress = gfsRoutes.__resetExternalGfsIngressRateLimitForTests
     ;(globalThis as { __watchAuthority?: unknown }).__watchAuthority = authority
 
@@ -216,6 +223,11 @@ describe('GFS watch through external-rest-api', () => {
       res.statusCode = raw.status
       for (const [name, value] of Object.entries(raw.headers ?? {})) res.setHeader(name, value)
       res.end(raw.body ?? '')
+    })
+    app.use((req, _res, next) => {
+      if (scenario.thrown === undefined) return next()
+      req.resume()
+      next(scenario.thrown)
     })
     // The gates control-api's app mounts ahead of every /external route.
     app.use((req, res, next) =>
@@ -265,6 +277,10 @@ describe('GFS watch through external-rest-api', () => {
         }) as never,
         notify: async () => undefined,
       })
+    )
+    app.use(
+      (err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) =>
+        scenario.thrown === undefined ? next(err) : clerumErrorHandler(err, req, res, next)
     )
     upstream = await listen(app)
     config.controlApiBaseUrl = urlOf(upstream)
@@ -564,6 +580,43 @@ describe('GFS watch through external-rest-api', () => {
         config.controlApiServiceToken = originalServiceToken
       }
     })
+
+    // A JSON failure control-api writes outside the watch route, e.g. from its
+    // global error handler: same status family as the contract, no x-watch-error.
+    for (const method of ['GET', 'PUT'] as const) {
+      it(`${method}: turns a 403, 500 or 503 JSON without x-watch-error into 503 watch_reopen`, async () => {
+        const RegistryUnavailable = (globalThis as { __registryUnavailable: new () => Error })
+          .__registryUnavailable
+        const thrown: Array<[string, unknown, number]> = [
+          [
+            '403 forwarded client error',
+            Object.assign(new Error('Forbidden'), { status: 403 }),
+            403,
+          ],
+          ['500 unhandled error', new Error('database unreachable'), 500],
+          ['503 registry unavailable', new RegistryUnavailable(), 503],
+        ]
+        for (const [name, error, status] of thrown) {
+          scenario = defaultScenario()
+          scenario.thrown = error
+          const opts = { headers: bearer(), ...(method === 'PUT' ? { body: putBody } : {}) }
+          const direct = await call(`${urlOf(upstream)}/external/gfs/watch`, method, {
+            ...opts,
+            headers: { 'x-user-session-token': 'test-token-u1' },
+            record: false,
+          })
+          expect(direct.status, name).toBe(status)
+          expect(String(direct.headers['content-type']), name).toMatch(/^application\/json/)
+          expect(typeof (direct.body as { error?: unknown }).error, name).toBe('string')
+          expect(direct.headers['x-watch-error'], name).toBeUndefined()
+
+          resetIngress()
+          const r = await call(watchUrl(), method, opts)
+          expect(watchError(r), name).toEqual(reopen)
+          expect(r.headers['retry-after'], name).toBe('2')
+        }
+      })
+    }
 
     it('PUT: any answer with a non-JSON body is 503 watch_reopen, never a 502, 500 or 200', async () => {
       const html = { 'content-type': 'text/html' }
