@@ -421,7 +421,7 @@ export class GfsServingHandler {
     const sessionPermission: GfsPermission = "write";
     const sessionCeiling = checkTokenCeiling({ scopes: claims.scopes, pathBindings: claims.pathBindings, op: sessionPermission, resourcePath: null });
     if (!sessionCeiling.allowed && (claims.pathBindings.length === 0 || sessionCeiling.reason === "scope_not_in_token")) {
-      throw new GfsError("forbidden", `token does not authorize ${sessionPermission}`, sessionCeiling.reason);
+      throw GfsError.forbidden(`token does not authorize ${sessionPermission}`, sessionCeiling.reason);
     }
     if (collectionMatch) {
       if (method !== "POST") throw new GfsError("not_found", `no ${method} route for upload collection`);
@@ -636,7 +636,7 @@ export class GfsServingHandler {
       );
     } catch (err) {
       if (err instanceof GfsSubjectResolutionDeniedError) {
-        throw new GfsError("forbidden", "principal is not authorized for GFS", "principal_denied");
+        throw GfsError.forbidden("principal is not authorized for GFS", "principal_denied");
       }
       throw new GfsError(
         "not_mounted",
@@ -670,7 +670,7 @@ export class GfsServingHandler {
       resourcePath,
     });
     if (!ceiling.allowed) {
-      throw new GfsError("forbidden", `token does not authorize ${op}`, ceiling.reason);
+      throw GfsError.forbidden(`token does not authorize ${op}`, ceiling.reason);
     }
 
     const decision = await this.deps.authorize(ctx, rid, op);
@@ -692,11 +692,7 @@ export class GfsServingHandler {
       resourcePath: null,
     });
     if (!ceiling.allowed) {
-      throw new GfsError(
-        "forbidden",
-        "read scope is required for accessible-resource discovery",
-        ceiling.reason
-      );
+      throw GfsError.forbidden("read scope is required for accessible-resource discovery", ceiling.reason);
     }
     if (!this.deps.listAccessible) {
       throw new GfsError("not_mounted", "accessible-resource store is unavailable");
