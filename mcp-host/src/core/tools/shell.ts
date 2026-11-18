@@ -26,29 +26,54 @@ const STATE_DB_COMMAND_PATTERN = /(^|[^A-Za-z0-9_.-])state\.db|\.clerum-state(\/
 
 // UX guard for obvious destructive commands. It matches the command text and
 // does not parse the shell. Not a sandbox or a security boundary.
-const SHELL_UX_BLOCK_DEVICE = 'nvme|xvd|sd|hd|vd'
-const SHELL_UX_RECURSIVE_ROOT_DELETE = new RegExp(
-  '(?:^|[^A-Za-z0-9_.-])rm(?=\\s)' +
-    '(?=[^;&|\\n]*?(?:^|\\s)-[A-Za-z]*[rR][A-Za-z]*(?=\\s|$))' +
-    '(?=[^;&|\\n]*?(?:^|\\s)-[A-Za-z]*f[A-Za-z]*(?=\\s|$))' +
-    '(?=[^;&|\\n]*?(?:^|\\s)/(?:\\*(?=\\s|$)|(?=\\s|$)))'
-)
+//
+// It runs on the Host event loop, so every check is linear in the command
+// length: split into segments once, find the first `rm`/`dd` per segment, and
+// test its whitespace-split arguments with plain string checks. A lookahead
+// that rescans to the segment end from every `rm` start is quadratic.
+const SHELL_UX_LINE_CONTINUATION = /\\\r?\n/g
+const SHELL_UX_SEGMENT_SEPARATOR = /[;&|\n]/
+const SHELL_UX_RM = /(?:^|[^A-Za-z0-9_.-])rm(?=\s)/
+const SHELL_UX_DD = /(?:^|[^A-Za-z0-9_.-])dd(?=\s)/
+const SHELL_UX_SHORT_FLAGS = /^-[A-Za-z]+$/
+const SHELL_UX_DD_DEVICE_TARGET = /^of=["']?\/dev\/(?:nvme|xvd|sd|hd|vd)/
+const SHELL_UX_DEVICE_REDIRECT = /(?:^|[^>])>>?\|?\s*["']?\/dev\/(?:nvme|xvd|sd|hd|vd)/
 const SHELL_UX_FORK_BOMB = /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/
-const SHELL_UX_RAW_DISK_WRITE = new RegExp(
-  '(?:^|[^A-Za-z0-9_.-])dd(?=\\s)' +
-    `(?=[^;&|\\n]*?(?:^|\\s)of=(?:["'])?/dev/(?:${SHELL_UX_BLOCK_DEVICE})[A-Za-z0-9]*)` +
-    `|(?:^|[^>])>>?\\|?\\s*(?:["'])?/dev/(?:${SHELL_UX_BLOCK_DEVICE})[A-Za-z0-9]*`
-)
 
 const SHELL_UX_BLOCKED_MESSAGE =
   'Command blocked: it matches an obvious destructive shell pattern and was not run.'
 
-function shellUxBlocked(command: string): boolean {
+/** The arguments after the first `word` in a segment, or null when it has none. */
+function shellUxArguments(segment: string, word: RegExp): string[] | null {
+  const match = word.exec(segment)
+  if (!match) return null
+  return segment
+    .slice(match.index + match[0].length)
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+function shellUxRecursiveRootDelete(args: string[]): boolean {
+  const flags = args.filter(arg => SHELL_UX_SHORT_FLAGS.test(arg))
   return (
-    SHELL_UX_RECURSIVE_ROOT_DELETE.test(command) ||
-    SHELL_UX_FORK_BOMB.test(command) ||
-    SHELL_UX_RAW_DISK_WRITE.test(command)
+    flags.some(flag => /[rR]/.test(flag)) &&
+    flags.some(flag => flag.includes('f')) &&
+    args.some(arg => arg === '/' || arg === '/*')
   )
+}
+
+function shellUxBlocked(rawCommand: string): boolean {
+  // A backslash-newline continues the same command line in the shell, so it
+  // must not split a segment. A bare newline does end the command.
+  const command = rawCommand.replace(SHELL_UX_LINE_CONTINUATION, ' ')
+  if (SHELL_UX_FORK_BOMB.test(command) || SHELL_UX_DEVICE_REDIRECT.test(command)) return true
+  for (const segment of command.split(SHELL_UX_SEGMENT_SEPARATOR)) {
+    const rmArgs = shellUxArguments(segment, SHELL_UX_RM)
+    if (rmArgs && shellUxRecursiveRootDelete(rmArgs)) return true
+    const ddArgs = shellUxArguments(segment, SHELL_UX_DD)
+    if (ddArgs?.some(arg => SHELL_UX_DD_DEVICE_TARGET.test(arg))) return true
+  }
+  return false
 }
 
 // Node/libuv error codes (E2BIG, ENOMEM, ERR_INVALID_ARG_VALUE) are fixed
