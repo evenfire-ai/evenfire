@@ -22,6 +22,8 @@ import { MockGateway } from './mockGateway.js'
  *   - `context` → covered by routes.internal.mcpOauth.contextGate.test.ts.
  */
 
+const USER = '77777777-7777-4777-8777-777777777777'
+
 const mockPoolQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
   pool: { query: (...args: unknown[]) => mockPoolQuery(...args) },
@@ -117,13 +119,13 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
     // user-7 is a member of ctx-9, whose allowlist enables gdrive.
     await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
-    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-9'] } })
+    membership(mockPoolQuery, { contexts: { [USER]: ['ctx-9'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
       // A bogus oauthClientId in the body MUST be ignored — it is derived from
       // the server. userId is the value forwarded from the session.
-      .send({ mcpServerName: 'gdrive', userId: 'user-7', oauthClientId: 'attacker-client' })
+      .send({ mcpServerName: 'gdrive', userId: USER, oauthClientId: 'attacker-client' })
 
     if (res.status !== 200) {
       throw new Error(`got ${res.status}: ${JSON.stringify(res.body)}\n${res.text}`)
@@ -140,7 +142,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
         expect(verified.claims.mcpServerName).toBe('gdrive')
       }
       // userId comes from the seam-forwarded body value…
-      expect(verified.claims.userId).toBe('user-7')
+      expect(verified.claims.userId).toBe(USER)
       // …but oauthClientId is the server's, NOT the attacker body value.
       expect(verified.claims.oauthClientId).toBe('google-drive')
     }
@@ -194,11 +196,11 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
     await seedAllowlistedContext(gateway, 'ctx-owner', ['gdrive'])
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
-    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-business', 'ctx-unrelated'] } })
+    membership(mockPoolQuery, { contexts: { [USER]: ['ctx-business', 'ctx-unrelated'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+      .send({ mcpServerName: 'gdrive', userId: USER })
     expect(res.status).toBe(200)
     expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
   })
@@ -210,7 +212,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+      .send({ mcpServerName: 'gdrive', userId: USER })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('context_membership_denied')
     expect(res.body.authorizeUrl).toBeUndefined()
@@ -225,13 +227,13 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
     await seedAgentHost(gateway, 'host-c', 'ctx-c')
     membership(mockPoolQuery, {
-      contexts: { 'user-7': ['ctx-owner'] },
-      agents: { 'user-7': ['host-c'] },
+      contexts: { [USER]: ['ctx-owner'] },
+      agents: { [USER]: ['host-c'] },
     })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+      .send({ mcpServerName: 'gdrive', userId: USER })
     expect(res.status).toBe(200)
     expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
   })
@@ -239,11 +241,11 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('user flavor: the body contextId is ignored (neither required nor cross-checked)', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
-    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-business'] } })
+    membership(mockPoolQuery, { contexts: { [USER]: ['ctx-business'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-7', contextId: 'ctx-anything' })
+      .send({ mcpServerName: 'gdrive', userId: USER, contextId: 'ctx-anything' })
     expect(res.status).toBe(200)
   })
 
@@ -295,7 +297,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('user flavor: 500 without authorizeUrl when listing Contexts fails', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
-    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-business'] } })
+    membership(mockPoolQuery, { contexts: { [USER]: ['ctx-business'] } })
     const realList = gateway.listResource.bind(gateway)
     vi.spyOn(gateway, 'listResource').mockImplementation((plural, ns) =>
       plural === 'contexts'
@@ -305,7 +307,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+      .send({ mcpServerName: 'gdrive', userId: USER })
     expect(res.status).toBe(500)
     expect(res.body.authorizeUrl).toBeUndefined()
   })
@@ -314,7 +316,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
     await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
     await seedAgentHost(gateway, 'host-c', 'ctx-c')
-    membership(mockPoolQuery, { agents: { 'user-7': ['host-c'] } })
+    membership(mockPoolQuery, { agents: { [USER]: ['host-c'] } })
     const realGet = gateway.getResource.bind(gateway)
     vi.spyOn(gateway, 'getResource').mockImplementation((plural, name, ns) =>
       plural === 'hosts'
@@ -324,7 +326,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+      .send({ mcpServerName: 'gdrive', userId: USER })
     expect(res.status).toBe(500)
     expect(res.body.authorizeUrl).toBeUndefined()
   })

@@ -22,6 +22,9 @@ import { MockGateway } from './mockGateway.js'
  * exported producer).
  */
 
+const USER = '77777777-7777-4777-8777-777777777777'
+const OTHER = '88888888-8888-4888-8888-888888888888'
+
 const mockPoolQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
   pool: { query: (...args: unknown[]) => mockPoolQuery(...args) },
@@ -51,43 +54,43 @@ describe('userHasContextEnablingMcpServer', () => {
   it('true when one of the user Contexts allowlists the server', async () => {
     await seedAllowlistedContext(gateway, 'ctx-owner', ['notion'])
     await seedAllowlistedContext(gateway, 'ctx-business', ['notion', 'gdrive'])
-    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-business', 'ctx-unrelated'] } })
-    expect(await check(gateway, 'user-1', 'notion')).toBe(true)
+    membership(mockPoolQuery, { contexts: { [USER]: ['ctx-business', 'ctx-unrelated'] } })
+    expect(await check(gateway, USER, 'notion')).toBe(true)
   })
 
   it('false when another user, not the asked one, belongs to the allowlisting Context', async () => {
     await seedAllowlistedContext(gateway, 'ctx-business', ['notion'])
-    membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-business'] } })
-    expect(await check(gateway, 'user-1', 'notion')).toBe(false)
+    membership(mockPoolQuery, { contexts: { [OTHER]: ['ctx-business'] } })
+    expect(await check(gateway, USER, 'notion')).toBe(false)
   })
 
   it('false when none of the user Contexts allowlists the server', async () => {
     await seedAllowlistedContext(gateway, 'ctx-a', ['gdrive'])
     await seedAllowlistedContext(gateway, 'ctx-b', [])
-    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-a', 'ctx-b'] } })
-    expect(await check(gateway, 'user-1', 'notion')).toBe(false)
+    membership(mockPoolQuery, { contexts: { [USER]: ['ctx-a', 'ctx-b'] } })
+    expect(await check(gateway, USER, 'notion')).toBe(false)
   })
 
   it('false when the allowlisting Context is one the user is NOT a member of', async () => {
     await seedAllowlistedContext(gateway, 'ctx-owner', ['notion'])
     await seedAllowlistedContext(gateway, 'ctx-mine', [])
-    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-mine'] } })
-    expect(await check(gateway, 'user-1', 'notion')).toBe(false)
+    membership(mockPoolQuery, { contexts: { [USER]: ['ctx-mine'] } })
+    expect(await check(gateway, USER, 'notion')).toBe(false)
   })
 
   it('false without listing Contexts when the user belongs to none', async () => {
     await seedAllowlistedContext(gateway, 'ctx-owner', ['notion'])
-    membership(mockPoolQuery, { contexts: { 'user-1': [] } })
+    membership(mockPoolQuery, { contexts: { [USER]: [] } })
     const listSpy = vi.spyOn(gateway, 'listResource')
-    expect(await check(gateway, 'user-1', 'notion')).toBe(false)
+    expect(await check(gateway, USER, 'notion')).toBe(false)
     expect(listSpy).not.toHaveBeenCalled()
   })
 
   it('team membership does not count: neither team_contexts nor team_agents is read', async () => {
     await seedAllowlistedContext(gateway, 'ctx-team', ['notion'])
     await seedAgentHost(gateway, 'host-team', 'ctx-team')
-    membership(mockPoolQuery, { contexts: { 'user-1': [] }, agents: { 'user-1': [] } })
-    expect(await check(gateway, 'user-1', 'notion')).toBe(false)
+    membership(mockPoolQuery, { contexts: { [USER]: [] }, agents: { [USER]: [] } })
+    expect(await check(gateway, USER, 'notion')).toBe(false)
     const sqls = mockPoolQuery.mock.calls.map(([sql]) => String(sql))
     expect(sqls.some(sql => sql.includes('FROM user_contexts'))).toBe(true)
     expect(sqls.some(sql => sql.includes('FROM user_agents'))).toBe(true)
@@ -95,9 +98,9 @@ describe('userHasContextEnablingMcpServer', () => {
   })
 
   it('propagates a Context list failure instead of answering false', async () => {
-    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-a'] } })
+    membership(mockPoolQuery, { contexts: { [USER]: ['ctx-a'] } })
     vi.spyOn(gateway, 'listResource').mockRejectedValueOnce(new Error('apiserver down'))
-    await expect(check(gateway, 'user-1', 'notion')).rejects.toThrow('apiserver down')
+    await expect(check(gateway, USER, 'notion')).rejects.toThrow('apiserver down')
   })
 })
 
@@ -112,8 +115,8 @@ describe('userHasContextEnablingMcpServer — Contexts reached through assigned 
   it('S1: no direct Contexts, an assigned agent whose Context allowlists the server → true', async () => {
     await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
     await seedAgentHost(gateway, 'host-c', 'ctx-c')
-    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(true)
+    membership(mockPoolQuery, { agents: { [USER]: ['host-c'] } })
+    expect(await check(gateway, USER, 'gdrive')).toBe(true)
   })
 
   it('S2: the direct Context dropped the server, an assigned agent Context still allowlists it → true', async () => {
@@ -121,32 +124,32 @@ describe('userHasContextEnablingMcpServer — Contexts reached through assigned 
     await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
     await seedAgentHost(gateway, 'host-c', 'ctx-c')
     membership(mockPoolQuery, {
-      contexts: { 'user-1': ['ctx-owner'] },
-      agents: { 'user-1': ['host-c'] },
+      contexts: { [USER]: ['ctx-owner'] },
+      agents: { [USER]: ['host-c'] },
     })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(true)
+    expect(await check(gateway, USER, 'gdrive')).toBe(true)
   })
 
   it('an agent assigned to another user does not count', async () => {
     await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
     await seedAgentHost(gateway, 'host-c', 'ctx-c')
-    membership(mockPoolQuery, { agents: { 'user-2': ['host-c'] } })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+    membership(mockPoolQuery, { agents: { [OTHER]: ['host-c'] } })
+    expect(await check(gateway, USER, 'gdrive')).toBe(false)
   })
 
   it('a disabled Host does not count', async () => {
     await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
     await seedAgentHost(gateway, 'host-c', 'ctx-c', { enabled: false })
-    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+    membership(mockPoolQuery, { agents: { [USER]: ['host-c'] } })
+    expect(await check(gateway, USER, 'gdrive')).toBe(false)
   })
 
   it('the legacy fleet-wide sentinel Host does not count', async () => {
     expect(HOSTS_NS).toBe('mcp-host')
     await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
     await seedAgentHost(gateway, 'standalone', 'ctx-c')
-    membership(mockPoolQuery, { agents: { 'user-1': ['standalone'] } })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+    membership(mockPoolQuery, { agents: { [USER]: ['standalone'] } })
+    expect(await check(gateway, USER, 'gdrive')).toBe(false)
   })
 
   it('a deleting Host does not count', async () => {
@@ -159,8 +162,8 @@ describe('userHasContextEnablingMcpServer — Contexts reached through assigned 
         ? { ...row, metadata: { ...row.metadata, deletionTimestamp: '2026-10-12T00:00:00Z' } }
         : row
     })
-    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+    membership(mockPoolQuery, { agents: { [USER]: ['host-c'] } })
+    expect(await check(gateway, USER, 'gdrive')).toBe(false)
   })
 
   it('a Host whose directory name differs from the assigned agent name does not count', async () => {
@@ -170,8 +173,8 @@ describe('userHasContextEnablingMcpServer — Contexts reached through assigned 
     vi.spyOn(gateway, 'getResource').mockImplementation(async (plural, name, ns) =>
       plural === 'hosts' ? real(plural, 'host-other', ns) : real(plural, name, ns)
     )
-    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+    membership(mockPoolQuery, { agents: { [USER]: ['host-c'] } })
+    expect(await check(gateway, USER, 'gdrive')).toBe(false)
   })
 
   it('a Host that reports another namespace does not count', async () => {
@@ -187,15 +190,15 @@ describe('userHasContextEnablingMcpServer — Contexts reached through assigned 
         ? { ...row, metadata: { ...row.metadata, namespace: 'some-other-namespace' } }
         : row
     })
-    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+    membership(mockPoolQuery, { agents: { [USER]: ['host-c'] } })
+    expect(await check(gateway, USER, 'gdrive')).toBe(false)
   })
 
   it('a missing (404) Host is ignored, the other agents still count', async () => {
     await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
     await seedAgentHost(gateway, 'host-c', 'ctx-c')
-    membership(mockPoolQuery, { agents: { 'user-1': ['host-gone', 'host-c'] } })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(true)
+    membership(mockPoolQuery, { agents: { [USER]: ['host-gone', 'host-c'] } })
+    expect(await check(gateway, USER, 'gdrive')).toBe(true)
   })
 
   it('a non-404 Host read failure propagates when the direct Contexts do not enable the server', async () => {
@@ -204,8 +207,8 @@ describe('userHasContextEnablingMcpServer — Contexts reached through assigned 
     vi.spyOn(gateway, 'getResource').mockRejectedValue(
       Object.assign(new Error('apiserver unavailable'), { statusCode: 503 })
     )
-    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
-    await expect(check(gateway, 'user-1', 'gdrive')).rejects.toThrow('apiserver unavailable')
+    membership(mockPoolQuery, { agents: { [USER]: ['host-c'] } })
+    await expect(check(gateway, USER, 'gdrive')).rejects.toThrow('apiserver unavailable')
   })
 
   it('a Host read failure does not matter when a direct Context already enables the server', async () => {
@@ -215,10 +218,10 @@ describe('userHasContextEnablingMcpServer — Contexts reached through assigned 
       .spyOn(gateway, 'getResource')
       .mockRejectedValue(Object.assign(new Error('apiserver unavailable'), { statusCode: 503 }))
     membership(mockPoolQuery, {
-      contexts: { 'user-1': ['ctx-business'] },
-      agents: { 'user-1': ['host-c'] },
+      contexts: { [USER]: ['ctx-business'] },
+      agents: { [USER]: ['host-c'] },
     })
-    expect(await check(gateway, 'user-1', 'gdrive')).toBe(true)
+    expect(await check(gateway, USER, 'gdrive')).toBe(true)
     expect(hostRead).not.toHaveBeenCalled()
   })
 })
@@ -291,8 +294,8 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
             await seedAgentHost(gateway, name, h.contextRef, { enabled: h.enabled })
           }
           membership(mockPoolQuery, {
-            contexts: { 'user-1': userContexts },
-            agents: { 'user-1': userAgents },
+            contexts: { [USER]: userContexts },
+            agents: { [USER]: userAgents },
           })
 
           const panel = await resolveConnectorsForAgents(
@@ -302,7 +305,7 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
               contextsNamespace: MCP_NS,
               hostsNamespace: HOSTS_NS,
               agentNames: userAgents,
-              userId: 'user-1',
+              userId: USER,
             },
             allGrantsPresent as never
           )
@@ -310,7 +313,7 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
             gateway as never,
             MCP_NS,
             userContexts,
-            'user-1',
+            USER,
             allGrantsPresent as never,
             MCP_NS
           )
@@ -324,7 +327,7 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
           }
 
           for (const name of servers) {
-            expect({ name, gate: await check(gateway, 'user-1', name) }).toEqual({
+            expect({ name, gate: await check(gateway, USER, name) }).toEqual({
               name,
               gate: offered.has(name),
             })

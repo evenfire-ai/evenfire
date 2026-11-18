@@ -33,7 +33,7 @@ const MCP_NS = config.mcpServersNamespace
 const SERVER = 'gdrive'
 const OAUTH_CLIENT_ID = 'google-drive'
 const OWNER_CONTEXT = 'ctx-owner'
-const USER_ID = 'user-7'
+const USER_ID = '77777777-7777-4777-8777-777777777777'
 
 async function seedUserScopedOauthServer(gateway: MockGateway): Promise<void> {
   await gateway.createResource(

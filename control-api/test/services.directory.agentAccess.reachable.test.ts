@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getUserReachableAgents } from '../src/services/directory/index.js'
+import { membershipResult } from './fixtures/contextAllowlist.js'
 
 const dbMocks = vi.hoisted(() => ({
   poolQuery: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
 }))
 
 const USER = '77777777-7777-4777-8777-777777777777'
+const OTHER = '88888888-8888-4888-8888-888888888888'
 
 describe('getUserReachableAgents', () => {
   const query = vi.fn()
@@ -71,5 +73,33 @@ describe('getUserReachableAgents', () => {
     dbMocks.poolQuery.mockResolvedValue({ rows: [{ agent_name: 'x' }], rowCount: 1 })
     await expect(getUserReachableAgents(USER)).resolves.toEqual({ agentNames: ['x'] })
     expect(dbMocks.poolQuery).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('membershipResult fixture', () => {
+  it('answers the reachable-agents statement with direct ∪ team agents, sorted distinct', () => {
+    // Carries lifecycle_state + team_agents like the real statement, so a branch
+    // placed after the host branch would misroute it.
+    const sql =
+      "SELECT agent_name FROM (SELECT ... FROM user_agents ... u.lifecycle_state = 'active' UNION SELECT ... JOIN team_agents ... u.lifecycle_state = 'active') reachable"
+    expect(
+      membershipResult(sql, [USER], {
+        agents: { [USER]: ['b'] },
+        teamAgents: { [USER]: ['a', 'b'] },
+      })
+    ).toEqual({ rows: [{ agent_name: 'a' }, { agent_name: 'b' }], rowCount: 2 })
+    expect(membershipResult(sql, [OTHER], { teamAgents: { [USER]: ['a'] } })).toEqual({
+      rows: [],
+      rowCount: 0,
+    })
+  })
+
+  it('still answers the broker Host read from direct agents only', () => {
+    const host =
+      "SELECT 1 FROM users u WHERE u.id = $1::uuid AND u.lifecycle_state = 'active' AND (EXISTS (... user_agents ...) OR EXISTS (... team_agents ...))"
+    expect(membershipResult(host, [USER, 'h1'], { agents: { [USER]: ['h1'] } })).toEqual({
+      rows: [{ allowed: 1 }],
+      rowCount: 1,
+    })
   })
 })
