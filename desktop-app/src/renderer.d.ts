@@ -21,8 +21,10 @@ import {
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
-  EntityChangeStreamEvent,
   ExternalChannelsSummary,
+  GfsWatchEvent,
+  GfsWatchSubscriptionRequest,
+  GfsWatchSubscriptionResult,
   HostActivitySnapshot,
   HostActivityStreamEvent,
   HostMessageRequest,
@@ -515,10 +517,18 @@ declare global {
         onFailed: (callback: (payload: { id: string; error: string }) => void) => () => void
         ack: (notificationId: string) => Promise<{ ok: boolean; status: string }>
       }
-      entityChanges: {
-        subscribe: (
-          onEvent: (event: EntityChangeStreamEvent) => void
-        ) => Promise<() => Promise<void>>
+      gfsWatch: {
+        open: (
+          onEvent: (event: GfsWatchEvent) => void,
+          initial: GfsWatchSubscriptionRequest
+        ) => Promise<{
+          sessionExpired: boolean
+          setSubscriptions: (
+            request: GfsWatchSubscriptionRequest
+          ) => Promise<GfsWatchSubscriptionResult>
+          /** Empties this window's list and stops listening; the window stays registered. */
+          close: () => Promise<void>
+        }>
       }
       notificationPreferences: {
         get: () => Promise<import('./types').UserNotificationPreferences>
@@ -606,7 +616,7 @@ declare global {
           taskId: string,
           toolCallId: string,
           hostRefs?: string[],
-          options?: { teamId?: string | null }
+          options?: { teamId?: string | null; alwaysApprove?: boolean }
         ) => Promise<ApprovalDecisionResult>
         denyToolCall: (
           hostRef: string,

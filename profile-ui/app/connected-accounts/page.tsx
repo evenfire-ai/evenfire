@@ -77,11 +77,6 @@ function ConnectedAccountsContent() {
 
         {state === 'ready' && (
           <section className="section">
-            <h2 className="section-title">Connected accounts</h2>
-            <p className="small muted">
-              Apps you have connected a third-party account to. Background access lets the app act
-              on your behalf even when you are not using it; revoke any time.
-            </p>
             {accounts.length === 0 ? (
               <div className="muted">No connected accounts.</div>
             ) : (

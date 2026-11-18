@@ -17,11 +17,13 @@ import {
   challengeCountdownLabel,
   challengeExpirationLabel,
   challengeRemainingSeconds,
+  channelTableRows,
   preferredAccountOptionLabel,
   slackVerificationCommand,
   targetDisplayName,
   telegramVerificationCommand,
 } from '../lib/approvalChannels'
+import producerOutput from './fixtures/telegram-channel-accounts.json'
 
 const target: ApprovalChannelTarget = {
   id: 'telegram:target',
@@ -92,7 +94,7 @@ test('approval account helpers expose disconnected state without targets', () =>
     providerWorkspaceId: null,
     providerChannelId: '987654321',
     disabledAt: '2026-06-05T18:00:00.000Z',
-    targets: [target],
+    targets: [],
   }
 
   assert.equal(approvalAccountStatusLabel(account), 'Disconnected')
@@ -140,6 +142,104 @@ test('activeApprovalAccounts excludes disabled accounts', () => {
   }
 
   assert.deepEqual(activeApprovalAccounts([active, disabled]), [active])
+})
+
+test('channelTableRows marks targets without an account as Not connected', () => {
+  const rows = channelTableRows([target], [])
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!.key, `target:${target.id}`)
+  assert.equal(rows[0]!.target, target)
+  assert.equal(rows[0]!.account, null)
+  assert.equal(rows[0]!.status, 'Not connected')
+})
+
+test('channelTableRows reports Verified from the active account referencing the target', () => {
+  const account: WorkflowApprovalMediumAccount = {
+    id: 'account-1',
+    userId: 'user-1',
+    medium: 'telegram',
+    providerUserId: '123456789',
+    providerWorkspaceId: null,
+    providerChannelId: '987654321',
+    targets: [target],
+  }
+
+  const rows = channelTableRows([target], [account])
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!.status, 'Verified')
+  assert.equal(rows[0]!.account, account)
+})
+
+test('channelTableRows shows producer-disabled records separately from unconnected targets', () => {
+  // Captured from the actual attachTelegramTargetsToAccounts producer, which
+  // deliberately clears target references when a record is disabled.
+  const targets = producerOutput.targets as ApprovalChannelTarget[]
+  const accounts = producerOutput.disabled as WorkflowApprovalMediumAccount[]
+  assert.deepEqual(accounts[0]!.targets, [])
+  assert.ok(accounts[0]!.disabledAt)
+
+  const rows = channelTableRows(targets, accounts)
+
+  assert.equal(rows.length, targets.length + 1)
+  assert.ok(rows.filter(row => row.target).every(row => row.status === 'Not connected'))
+  assert.equal(rows.at(-1)!.status, 'Disconnected')
+  assert.equal(rows.at(-1)!.account, accounts[0])
+})
+
+test('channelTableRows prefers the active record over a stale disabled one', () => {
+  const disabled: WorkflowApprovalMediumAccount = {
+    id: 'account-old',
+    userId: 'user-1',
+    medium: 'telegram',
+    providerUserId: '123456789',
+    providerWorkspaceId: null,
+    providerChannelId: '987654321',
+    disabledAt: '2026-06-05T18:00:00.000Z',
+    targets: [],
+  }
+  const active: WorkflowApprovalMediumAccount = {
+    ...disabled,
+    id: 'account-new',
+    disabledAt: undefined,
+    targets: [target],
+  }
+
+  const rows = channelTableRows([target], [disabled, active])
+
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0]!.status, 'Verified')
+  assert.equal(rows[0]!.account, active)
+  assert.equal(rows[1]!.account, disabled)
+})
+
+test('channelTableRows keeps accounts that no longer map to a known target', () => {
+  const orphan: WorkflowApprovalMediumAccount = {
+    id: 'orphan-1',
+    userId: 'user-1',
+    medium: 'slack',
+    providerUserId: 'U123',
+    providerWorkspaceId: 'T123',
+    providerChannelId: 'C456',
+    targets: [],
+  }
+  const orphanDisabled: WorkflowApprovalMediumAccount = {
+    ...orphan,
+    id: 'orphan-2',
+    disabledAt: '2026-06-05T18:00:00.000Z',
+  }
+
+  const rows = channelTableRows([target], [orphan, orphanDisabled])
+
+  assert.deepEqual(
+    rows.map(row => [row.key, row.status]),
+    [
+      [`target:${target.id}`, 'Not connected'],
+      ['account:orphan-1', 'Verified'],
+      ['account:orphan-2', 'Disconnected'],
+    ]
+  )
 })
 
 test('preferredAccountOptionLabel renders medium with a channel hint', () => {

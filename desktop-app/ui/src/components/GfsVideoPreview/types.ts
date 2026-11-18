@@ -7,12 +7,18 @@ import type { ReactNode } from 'react'
  */
 export type GfsVideoPreviewBodyProps = {
   byteLength: number
+  /**
+   * Bumped when the server publishes a newer version of the same file. The body
+   * re-downloads in place, keeping the current content until the new one lands.
+   */
+  contentVersion?: number
   fileName: string
   gfsUri: string
   mimeType: string
   onDownloadError?: (error: unknown) => void
   titleId?: string
   titleActions?: ReactNode
+  permissionProgress?: ReactNode
   headerActions?: ReactNode
   headingLevel?: 2 | 3
 }

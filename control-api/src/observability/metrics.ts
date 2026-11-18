@@ -175,6 +175,67 @@ export const entityChangeStreamResyncRequiredTotal = getOrCreateCounter({
   labelNames: ['principal_kind'] as const as Array<'principal_kind'>,
 })
 
+// ─── GFS watch stream metrics ───────────────────────────────────────────
+export const gfsWatchConnectionsActive = getOrCreateGauge({
+  name: 'gfs_watch_connections_active',
+  help: 'Admitted GFS watch stream connections.',
+  labelNames: ['principal_kind'] as const as Array<'principal_kind'>,
+})
+
+export const gfsWatchDisconnectsTotal = getOrCreateCounter({
+  name: 'gfs_watch_disconnects_total',
+  help: 'GFS watch stream closures by bounded reason.',
+  labelNames: ['reason'] as const as Array<'reason'>,
+})
+
+export const gfsWatchFramesSentTotal = getOrCreateCounter({
+  name: 'gfs_watch_frames_sent_total',
+  help: 'GFS watch frames handed to HTTP responses.',
+  labelNames: ['frame_type'] as const as Array<'frame_type'>,
+})
+
+export const gfsWatchNotifyInvalidTotal = getOrCreateCounter({
+  name: 'gfs_watch_notify_invalid_total',
+  help: 'GFS watch NOTIFY payloads rejected by their channel schema.',
+  labelNames: ['channel'] as const as Array<'channel'>,
+})
+
+export const gfsWatchDispatchFailedTotal = getOrCreateCounter({
+  name: 'gfs_watch_dispatch_failed_total',
+  help: 'GFS watch NOTIFY handlers that threw after the payload validated.',
+  labelNames: ['channel'] as const as Array<'channel'>,
+})
+
+export const gfsWatchTickFailedTotal = getOrCreateCounter({
+  name: 'gfs_watch_tick_failed_total',
+  help: 'GFS watch process-level entry points (timers, library events) that threw or rejected.',
+  labelNames: ['name'] as const as Array<'name'>,
+})
+
+export const gfsWatchCmdDroppedTotal = getOrCreateCounter({
+  name: 'gfs_watch_cmd_dropped_total',
+  help: 'Valid GFS watch commands the owning replica refused (binding mismatch, seq jump).',
+  labelNames: ['reason'] as const as Array<'reason'>,
+})
+
+export const gfsWatchExpansionFailclosedTotal = getOrCreateCounter({
+  name: 'gfs_watch_expansion_failclosed_total',
+  help: 'GFS watch fail-closed holds of every connected user: an authorization expansion failed twice, or a revocation hint was unreadable.',
+  labelNames: [],
+})
+
+export const gfsWatchKeyDeferredTotal = getOrCreateCounter({
+  name: 'gfs_watch_key_deferred_total',
+  help: 'GFS watch keys an op left deferred, by bounded cause.',
+  labelNames: ['cause'] as const as Array<'cause'>,
+})
+
+export const gfsWatchTotalFailedTotal = getOrCreateCounter({
+  name: 'gfs_watch_total_failed_total',
+  help: 'GFS watch awaited steps that failed, classified as transient infrastructure or defect.',
+  labelNames: ['label', 'kind'] as const as Array<'label' | 'kind'>,
+})
+
 // ─── Auth token counters ──────────────────────────────────────────────────
 export const mcpHostJwtIssueTotal = getOrCreateCounter({
   name: 'workflow_auth_issue_total',
