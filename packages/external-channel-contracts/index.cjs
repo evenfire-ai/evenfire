@@ -1,8 +1,11 @@
 'use strict'
 
-// Shared External Channels contracts. Every validator checks the exact key set
-// (unknown and missing keys are both rejected), returns a deep-frozen copy of
-// the value, and throws an Error whose `code` is fixed per contract. Error
+// Shared External Channels contracts. Every validator reads its input once: it
+// takes a deep-frozen snapshot of the value's own enumerable data properties
+// and of the nested records the contract names, checks the exact key set of
+// that snapshot (unknown and missing keys are both rejected) and returns it. A
+// record with an accessor, a symbol key or a non-enumerable own key is refused.
+// Every validator throws an Error whose `code` is fixed per contract. Error
 // messages name the field only, never its value: the values are provider and
 // member identifiers.
 
@@ -134,10 +137,35 @@ function isPositiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0
 }
 
-function deepFreezeCopy(value) {
+// The nested positions each contract names: only these records are snapshotted
+// in turn, so the depth stays bounded whatever the input holds.
+const NO_NESTED_RECORDS = Object.freeze({})
+const RECEIPT_NESTED_RECORDS = Object.freeze({ action: NO_NESTED_RECORDS })
+const ADMISSION_NESTED_RECORDS = Object.freeze({ event: RECEIPT_NESTED_RECORDS })
+
+// Reads every own key once through its descriptor, never through [[Get]], so no
+// getter and no Proxy get trap runs. A record with a symbol key, a key without a
+// descriptor, a non-enumerable key or an accessor has no data snapshot and
+// yields undefined, which every validator refuses at that position.
+function frozenSnapshot(value, nested) {
   if (!isRecord(value)) return value
   const copy = {}
-  for (const key of Object.keys(value)) copy[key] = deepFreezeCopy(value[key])
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, key)
+    if (
+      typeof key !== 'string' ||
+      descriptor === undefined ||
+      !descriptor.enumerable ||
+      !Object.hasOwn(descriptor, 'value')
+    ) {
+      return undefined
+    }
+    // defineProperty, not assignment: an own __proto__ key stays a key.
+    Object.defineProperty(copy, key, {
+      value: Object.hasOwn(nested, key) ? frozenSnapshot(descriptor.value, nested[key]) : descriptor.value,
+      enumerable: true,
+    })
+  }
   return Object.freeze(copy)
 }
 
@@ -182,7 +210,8 @@ function checkEventFields(value, check) {
 
 const checkReceipt = checker('invalid_provider_event_receipt')
 
-function validateProviderEventReceiptClaims(value) {
+function validateProviderEventReceiptClaims(input) {
+  const value = frozenSnapshot(input, RECEIPT_NESTED_RECORDS)
   checkReceipt(hasExactKeys(value, RECEIPT_KEYS), 'keys')
   checkReceipt(value.ver === 1, 'ver')
   checkReceipt(MEDIUMS.includes(value.medium), 'medium')
@@ -203,7 +232,7 @@ function validateProviderEventReceiptClaims(value) {
   checkReceipt(isText(value.jti), 'jti')
   checkReceipt(isPositiveInteger(value.iat), 'iat')
   checkReceipt(isPositiveInteger(value.exp) && value.exp - value.iat === PROVIDER_EVENT_RECEIPT_TTL_SECONDS, 'exp')
-  return deepFreezeCopy(value)
+  return value
 }
 
 const checkAdmission = checker('invalid_channel_admission')
@@ -213,7 +242,8 @@ function checkAdmissionEvent(event) {
   checkEventFields(event, (condition, field) => checkAdmission(condition, `event.${field}`))
 }
 
-function validateChannelAdmission(value) {
+function validateChannelAdmission(input) {
+  const value = frozenSnapshot(input, ADMISSION_NESTED_RECORDS)
   checkAdmission(isRecord(value), 'value')
   if (value.outcome === 'admitted') {
     checkAdmission(hasExactKeys(value, ADMITTED_KEYS), 'keys')
@@ -235,12 +265,13 @@ function validateChannelAdmission(value) {
   } else {
     throw contractError('invalid_channel_admission', 'outcome')
   }
-  return deepFreezeCopy(value)
+  return value
 }
 
 const checkOrigin = checker('invalid_origin_route')
 
-function validateOriginRoute(value) {
+function validateOriginRoute(input) {
+  const value = frozenSnapshot(input, NO_NESTED_RECORDS)
   const keys = isRecord(value) && Object.hasOwn(value, 'quotedMessageId')
     ? [...ORIGIN_ROUTE_KEYS, 'quotedMessageId']
     : ORIGIN_ROUTE_KEYS
@@ -252,15 +283,16 @@ function validateOriginRoute(value) {
   checkOrigin(isTextOrNull(value.threadRootId), 'threadRootId')
   checkOrigin(REPLY_STYLES.includes(value.replyStyle), 'replyStyle')
   if (Object.hasOwn(value, 'quotedMessageId')) checkOrigin(isText(value.quotedMessageId), 'quotedMessageId')
-  return deepFreezeCopy(value)
+  return value
 }
 
 const checkPrincipal = checker('invalid_execution_principal')
 
-function validateStage1ExecutionPrincipal(value) {
+function validateStage1ExecutionPrincipal(input) {
+  const value = frozenSnapshot(input, NO_NESTED_RECORDS)
   checkPrincipal(isRecord(value), 'value')
-  // The kind is discriminated before the shape, so a bot or an unknown kind
-  // is refused with its own code whatever else it carries.
+  // The snapshot is taken first: a record with an accessor, a symbol key or a non-enumerable own key is refused with value.
+  // On a snapshot the kind is discriminated before the shape, so a bot or an unknown kind is refused with its own code whatever other enumerable data properties it carries.
   if (value.kind === 'bot') throw contractError('stage1_bot_principal', 'kind')
   if (value.kind !== 'member') throw contractError('unknown_principal_kind', 'kind')
   checkPrincipal(hasExactKeys(value, MEMBER_PRINCIPAL_KEYS), 'keys')
@@ -268,7 +300,7 @@ function validateStage1ExecutionPrincipal(value) {
   checkPrincipal(isText(value.identityId), 'identityId')
   checkPrincipal(CONVERSATION_KINDS.includes(value.conversationKind), 'conversationKind')
   checkPrincipal(Number.isSafeInteger(value.policyVersion) && value.policyVersion >= 0, 'policyVersion')
-  return deepFreezeCopy(value)
+  return value
 }
 
 module.exports = {

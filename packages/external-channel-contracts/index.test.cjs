@@ -576,3 +576,224 @@ describe('per-field rejections', () => {
     }
   })
 })
+
+// Each validator reads its input once, through property descriptors, and
+// validates and returns that snapshot: an accessor, a Proxy trap, a symbol or
+// non-enumerable key, an inherited property or a cycle can change neither what
+// is checked nor what is returned.
+describe('input snapshot', () => {
+  const PRINCIPAL_ERROR = 'invalid_execution_principal'
+  // Turns record[key] into an enumerable accessor; fn receives the read count.
+  const getter = (record, key, fn) => {
+    const counter = { reads: 0 }
+    Object.defineProperty(record, key, {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        counter.reads++
+        return fn(counter.reads)
+      },
+    })
+    return counter
+  }
+  // A Proxy over a plain record whose get trap answers lie(n) on the n-th read
+  // of key; every trap call is counted.
+  const lyingProxy = (target, key, lie) => {
+    const counts = { get: 0, ownKeys: 0, descriptors: 0, keyReads: 0 }
+    const proxy = new Proxy(target, {
+      get(record, property, receiver) {
+        counts.get++
+        if (property !== key) return Reflect.get(record, property, receiver)
+        counts.keyReads++
+        return lie(counts.keyReads)
+      },
+      ownKeys(record) {
+        counts.ownKeys++
+        return Reflect.ownKeys(record)
+      },
+      getOwnPropertyDescriptor(record, property) {
+        counts.descriptors++
+        return Reflect.getOwnPropertyDescriptor(record, property)
+      },
+    })
+    return { proxy, counts }
+  }
+  const hidden = (record, key) =>
+    Object.defineProperty(record, key, { value: 'fixture-hidden', enumerable: false, configurable: true })
+
+  it('refuses a field backed by an accessor on every validator', () => {
+    for (const [label, validator, name, key, code, field] of [
+      ['receipt hostRef', validateProviderEventReceiptClaims, 'receipt.slack.message.json', 'hostRef', RECEIPT_ERROR, 'keys'],
+      ['admission memberId', validateChannelAdmission, 'admission.admitted.json', 'memberId', ADMISSION_ERROR, 'value'],
+      ['origin medium', validateOriginRoute, 'origin.thread.json', 'medium', ORIGIN_ERROR, 'keys'],
+      ['principal memberId', validateStage1ExecutionPrincipal, 'principal.member.json', 'memberId', PRINCIPAL_ERROR, 'value'],
+    ]) {
+      assertAccepts(validator, load(name))
+      const value = load(name)
+      const valid = value[key]
+      const counter = getter(value, key, () => valid)
+      assertRejects(validator, value, code, field, label)
+      assert.equal(counter.reads, 0, label)
+      assert.equal(value[key], valid, label)
+      assert.equal(counter.reads, 1, label)
+    }
+  })
+
+  it('refuses a kind that changes between reads', () => {
+    assertAccepts(validateStage1ExecutionPrincipal, load('principal.member.json'))
+    const value = load('principal.member.json')
+    const counter = getter(value, 'kind', reads => (reads <= 2 ? 'member' : 'bot'))
+    assertRejects(validateStage1ExecutionPrincipal, value, PRINCIPAL_ERROR, 'value')
+    assert.equal(counter.reads, 0)
+    assert.equal(value.kind, 'member')
+    assert.equal(counter.reads, 1)
+  })
+
+  it('refuses accessor-backed fields inside nested records', () => {
+    for (const [label, validator, name, recordOf, key, code, field] of [
+      ['receipt action.token', validateProviderEventReceiptClaims, 'receipt.slack.action.approve.json', value => value.action, 'token', RECEIPT_ERROR, 'action'],
+      ['admission event.messageId', validateChannelAdmission, 'admission.admitted.json', value => value.event, 'messageId', ADMISSION_ERROR, 'event'],
+      ['admission event.action.token', validateChannelAdmission, 'admission.refused.missing_channel_grant.json', value => value.event.action, 'token', ADMISSION_ERROR, 'event.action'],
+    ]) {
+      assertAccepts(validator, load(name))
+      const value = load(name)
+      const record = recordOf(value)
+      const valid = record[key]
+      const counter = getter(record, key, () => valid)
+      assertRejects(validator, value, code, field, label)
+      assert.equal(counter.reads, 0, label)
+    }
+  })
+
+  it('reads every record through descriptors only, on every validator and nested position', () => {
+    const rows = [
+      ['1 receipt top level', validateProviderEventReceiptClaims, 'receipt.slack.action.approve.json', [], 'hostRef', () => ''],
+      ['2 receipt action', validateProviderEventReceiptClaims, 'receipt.slack.action.approve.json', ['action'], 'token', () => 'x'],
+      ['3 admission top level', validateChannelAdmission, 'admission.admitted.json', [], 'memberId', () => ''],
+      ['4 admission event', validateChannelAdmission, 'admission.admitted.json', ['event'], 'messageId', () => ''],
+      ['5 admission event.action', validateChannelAdmission, 'admission.refused.missing_channel_grant.json', ['event', 'action'], 'decision', () => 'nope'],
+      ['6 origin top level', validateOriginRoute, 'origin.thread.json', [], 'conversationId', () => ''],
+      ['7 principal top level', validateStage1ExecutionPrincipal, 'principal.member.json', [], 'kind', reads => (reads <= 2 ? 'member' : 'bot')],
+    ]
+    for (const [label, validator, name, position, key, lie] of rows) {
+      const value = load(name)
+      const parent = position.slice(0, -1).reduce((record, step) => record[step], value)
+      const target = position.reduce((record, step) => record[step], value)
+      const { proxy, counts } = lyingProxy(target, key, lie)
+      const input = position.length === 0 ? proxy : value
+      if (position.length > 0) parent[position[position.length - 1]] = proxy
+      const result = validator(input)
+      assert.deepEqual(result, load(name), label)
+      assertDeepFrozen(result)
+      assert.equal(counts.get, 0, label)
+      assert.equal(counts.ownKeys, 1, label)
+      assert.equal(counts.descriptors, Reflect.ownKeys(target).length, label)
+    }
+    const member = load('principal.member.json')
+    const extra = new Proxy(member, { ownKeys: record => [...Reflect.ownKeys(record), 'extra'] })
+    assertRejects(validateStage1ExecutionPrincipal, extra, PRINCIPAL_ERROR, 'value', '8 ownKeys lists a key with no descriptor')
+  })
+
+  it('refuses a throwing accessor with the contract code', () => {
+    assertAccepts(validateStage1ExecutionPrincipal, load('principal.member.json'))
+    assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.action.approve.json'))
+    const fail = () => {
+      throw new Error('fixture accessor failure')
+    }
+    const principal = load('principal.member.json')
+    getter(principal, 'memberId', fail)
+    assertRejects(validateStage1ExecutionPrincipal, principal, PRINCIPAL_ERROR, 'value', 'principal memberId')
+    const receipt = load('receipt.slack.action.approve.json')
+    getter(receipt.action, 'token', fail)
+    assertRejects(validateProviderEventReceiptClaims, receipt, RECEIPT_ERROR, 'action', 'receipt action.token')
+  })
+
+  it('keeps an own __proto__ key from JSON.parse as an unknown key', () => {
+    const member = load('principal.member.json')
+    const message = load('receipt.slack.message.json')
+    const action = load('receipt.slack.action.approve.json')
+    assertAccepts(validateStage1ExecutionPrincipal, member)
+    assertAccepts(validateProviderEventReceiptClaims, message)
+    assertAccepts(validateProviderEventReceiptClaims, action)
+    const principal = JSON.parse(`{"__proto__":${JSON.stringify(member)}}`)
+    assert.ok(Object.hasOwn(principal, '__proto__'))
+    assertRejects(validateStage1ExecutionPrincipal, principal, 'unknown_principal_kind', 'kind', 'principal')
+    const receipt = JSON.parse(`${JSON.stringify(message).slice(0, -1)},"__proto__":{}}`)
+    assert.ok(Object.hasOwn(receipt, '__proto__'))
+    assertRejects(validateProviderEventReceiptClaims, receipt, RECEIPT_ERROR, 'keys', 'receipt')
+    const actionText = JSON.stringify(action)
+    assert.equal(actionText.split('"action":{').length, 2)
+    const actionReceipt = JSON.parse(actionText.replace('"action":{', '"action":{"__proto__":{},'))
+    assert.ok(Object.hasOwn(actionReceipt.action, '__proto__'))
+    assertRejects(validateProviderEventReceiptClaims, actionReceipt, RECEIPT_ERROR, 'action', 'action receipt')
+  })
+
+  it('refuses symbol and non-enumerable own keys', () => {
+    assertAccepts(validateStage1ExecutionPrincipal, load('principal.member.json'))
+    assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.message.json'))
+    assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.action.approve.json'))
+    assertAccepts(validateChannelAdmission, load('admission.admitted.json'))
+    assertAccepts(validateOriginRoute, load('origin.thread.json'))
+    const principal = { ...load('principal.member.json'), [Symbol('fixture')]: 'fixture-symbol' }
+    assertRejects(validateStage1ExecutionPrincipal, principal, PRINCIPAL_ERROR, 'value', 'principal symbol key')
+    const receipt = hidden(load('receipt.slack.message.json'), 'extra')
+    assertRejects(validateProviderEventReceiptClaims, receipt, RECEIPT_ERROR, 'keys', 'receipt non-enumerable key')
+    const action = load('receipt.slack.action.approve.json')
+    hidden(action.action, 'extra')
+    assertRejects(validateProviderEventReceiptClaims, action, RECEIPT_ERROR, 'action', 'action non-enumerable key')
+    const admission = load('admission.admitted.json')
+    admission.event = { ...admission.event, [Symbol('fixture')]: 'fixture-symbol' }
+    assertRejects(validateChannelAdmission, admission, ADMISSION_ERROR, 'event', 'event symbol key')
+    const origin = hidden(load('origin.thread.json'), 'quotedMessageId')
+    assertRejects(validateOriginRoute, origin, ORIGIN_ERROR, 'keys', 'origin non-enumerable quotedMessageId')
+  })
+
+  it('reads own properties only', () => {
+    assertAccepts(validateChannelAdmission, load('admission.admitted.json'))
+    assertAccepts(validateOriginRoute, load('origin.thread.json'))
+    assertRejects(validateStage1ExecutionPrincipal, Object.create({ kind: 'bot' }), 'unknown_principal_kind', 'kind', 'inherited kind')
+    const { outcome, ...admitted } = load('admission.admitted.json')
+    const admission = Object.assign(Object.create({ outcome }), admitted)
+    assertRejects(validateChannelAdmission, admission, ADMISSION_ERROR, 'outcome', 'inherited outcome')
+    const origin = Object.assign(Object.create({ quotedMessageId: 'fixture-quoted-message' }), load('origin.thread.json'))
+    const result = validateOriginRoute(origin)
+    assert.deepEqual(result, load('origin.thread.json'))
+    assertDeepFrozen(result)
+    assert.equal(Object.hasOwn(result, 'quotedMessageId'), false)
+    assert.equal(result.quotedMessageId, undefined)
+  })
+
+  it('refuses a value that carries an extra enumerable accessor', () => {
+    for (const [label, validator, name, recordOf, code, field] of [
+      ['receipt', validateProviderEventReceiptClaims, 'receipt.slack.message.json', value => value, RECEIPT_ERROR, 'keys'],
+      ['origin', validateOriginRoute, 'origin.thread.json', value => value, ORIGIN_ERROR, 'keys'],
+      ['admission', validateChannelAdmission, 'admission.admitted.json', value => value, ADMISSION_ERROR, 'value'],
+      ['principal', validateStage1ExecutionPrincipal, 'principal.member.json', value => value, PRINCIPAL_ERROR, 'value'],
+      ['receipt action', validateProviderEventReceiptClaims, 'receipt.slack.action.approve.json', value => value.action, RECEIPT_ERROR, 'action'],
+    ]) {
+      assertAccepts(validator, load(name))
+      const value = load(name)
+      const counter = getter(recordOf(value), 'extra', () => 'fixture-extra')
+      assertRejects(validator, value, code, field, label)
+      assert.equal(counter.reads, 0, label)
+    }
+  })
+
+  it('refuses a cyclic value with the contract code', () => {
+    assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.action.approve.json'))
+    assertAccepts(validateChannelAdmission, load('admission.admitted.json'))
+    assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.message.json'))
+    const action = load('receipt.slack.action.approve.json')
+    action.action.self = action.action
+    assertRejects(validateProviderEventReceiptClaims, action, RECEIPT_ERROR, 'action', 'action.self')
+    const admission = load('admission.admitted.json')
+    admission.event.self = admission.event
+    assertRejects(validateChannelAdmission, admission, ADMISSION_ERROR, 'event', 'event.self')
+    const hostRef = {}
+    hostRef.self = hostRef
+    assertRejects(validateProviderEventReceiptClaims, { ...load('receipt.slack.message.json'), hostRef }, RECEIPT_ERROR, 'hostRef', 'cyclic hostRef')
+    const receipt = load('receipt.slack.message.json')
+    receipt.self = receipt
+    assertRejects(validateProviderEventReceiptClaims, receipt, RECEIPT_ERROR, 'keys', 'top-level self')
+  })
+})
