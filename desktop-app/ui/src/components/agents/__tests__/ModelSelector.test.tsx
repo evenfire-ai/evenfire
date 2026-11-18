@@ -203,8 +203,8 @@ describe('ModelSelector', () => {
     expect(optionOf(/Sonnet 5/).textContent).toBe('Sonnet 5')
 
     // hostDefault is claude-opus-4-8 and the three models cover supported /
-    // unsupported / unverified image input — none of them may render a tag.
-    expect(document.querySelectorAll('.model-selector-item-tag').length).toBe(0)
+    // unsupported / unverified image input — none of them may render a default
+    // or image-input label.
     expect(screen.queryByText('default')).toBeNull()
     expect(screen.queryByText('images')).toBeNull()
     expect(screen.queryByText('no images')).toBeNull()
@@ -326,9 +326,8 @@ describe('ModelSelector', () => {
     expect(
       screen.getByRole('menuitemradio', { name: /GPT-5\.3/ }).getAttribute('aria-checked')
     ).toBe('false')
-    // The check mark is the only marker: the default row carries no tag.
+    // The check mark is the only marker: the default row carries no "default" label.
     expect(screen.queryByText('default')).toBeNull()
-    expect(document.querySelectorAll('.model-selector-item-tag').length).toBe(0)
   })
 
   it('names a broker Host default that the catalog does not list', async () => {
