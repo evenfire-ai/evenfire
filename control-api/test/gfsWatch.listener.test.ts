@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Notification } from 'pg'
+import pino from 'pino'
+import { rootLogger } from '../src/observability/logger.js'
 import {
   gfsWatchDispatchFailedTotal,
   gfsWatchNotifyInvalidTotal,
@@ -804,5 +806,53 @@ describe('a client that cannot be built still leaves a way back', () => {
     await t.clock.advanceAsync(2_000)
     expect(t.attempts).toEqual([0, 1_000, 3_000])
     expect(s.listenerReady).toBe(true)
+  })
+})
+
+describe('the build-failure log line of the real pg client', () => {
+  it('carries no part of the connection string password, through the redacting root logger', async () => {
+    const secret = 'Sup3rS3cretPw'
+    // Port 99999 makes pg's connection-string parser throw from the Client
+    // constructor, the error this log line reports on every reconnect.
+    const connectionString = `postgres://watch:${secret}@127.0.0.1:99999/clerum`
+    const stream = (rootLogger as unknown as Record<symbol, { write(line: string): unknown }>)[
+      pino.symbols.streamSym
+    ]!
+    const lines: string[] = []
+    const write = vi.spyOn(stream, 'write').mockImplementation(line => {
+      lines.push(String(line))
+      return true
+    })
+    const level = rootLogger.level
+    rootLogger.level = 'error'
+    try {
+      const clock = createVirtualWatchClock({ random: () => 0 })
+      const rt = createWatchRuntime<Conn>({ clock, closeConnInternal: () => {} })
+      const listener = createGfsWatchListener<Conn>({
+        connectionString,
+        runtime: rt,
+        recentDirty: createRecentDirty(clock.now),
+        connections: () => [],
+        opsInFlight: () => [],
+        closeConn: () => {},
+        onCmd: () => {},
+        onResourceChanged: () => {},
+        resetWindows: () => {},
+        onExpansionFailed: () => {},
+      })
+      listener.startGfsWatchRegistry()
+      await clock.advanceAsync(3_000)
+      listener.stopGfsWatchRegistry()
+    } finally {
+      rootLogger.level = level
+      write.mockRestore()
+    }
+    const built = lines.filter(l => l.includes('gfs watch listener client construction failed'))
+    // At 0 s, 1 s and 3 s: the start and two backed-off reconnects.
+    expect(built).toHaveLength(3)
+    for (const l of built) {
+      expect(l).not.toContain(secret)
+      expect(JSON.parse(l)).toMatchObject({ err: { code: 'ERR_INVALID_URL' } })
+    }
   })
 })
