@@ -253,6 +253,7 @@ describe('SlackAdapter — fetchMessages()', () => {
       providerWorkspaceId: 'T123',
       providerChannelId: 'C12345',
       providerEventId: 'slack:T123:C12345:1700000001.000001',
+      providerChannelType: 'channel',
     })
   })
 
@@ -333,6 +334,7 @@ describe('SlackAdapter — fetchMessages()', () => {
       providerWorkspaceId: 'T123',
       providerChannelId: 'C12345',
       providerEventId: 'slack:T123:C12345:1700000001.000006',
+      providerChannelType: 'channel',
     })
   })
 
@@ -457,6 +459,7 @@ describe('SlackAdapter — fetchMessages()', () => {
       providerWorkspaceId: 'T123',
       providerChannelId: 'C12345',
       providerEventId: 'slack:T123:C12345:1700000001.000004',
+      providerChannelType: 'channel',
     })
   })
 
@@ -979,5 +982,98 @@ describe('SlackAdapter — channelType', () => {
   it('reports channelType as slack', () => {
     const adapter = new SlackAdapter()
     expect(adapter.channelType).toBe('slack')
+  })
+})
+
+// ── conversation type on ordinary messages ────────────────────────────────────
+
+describe('SlackAdapter — conversation type on ordinary messages (T3b)', () => {
+  const users = new Set(['U123'])
+
+  async function connected() {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    return { adapter, client: slackState.instances[0]! }
+  }
+
+  function seedHistory(
+    client: { conversations: { history: ReturnType<typeof vi.fn> } },
+    ts: string
+  ) {
+    client.conversations.history.mockResolvedValueOnce({
+      messages: [{ user: 'U123', text: 'Hello', ts }],
+      ok: true,
+    })
+  }
+
+  it('a direct message carries providerChannelType im', async () => {
+    const { adapter, client } = await connected()
+    seedHistory(client, '1700000001.000001')
+    client.conversations.info.mockResolvedValueOnce({
+      channel: { id: 'D12345', is_im: true, user: 'U123' },
+      ok: true,
+    })
+    const [msg] = await adapter.fetchMessages('D12345', users)
+    expect(msg!.providerIdentity?.providerChannelType).toBe('im')
+  })
+
+  it('a channel message carries providerChannelType channel', async () => {
+    const { adapter, client } = await connected()
+    seedHistory(client, '1700000001.000001')
+    const [msg] = await adapter.fetchMessages('C12345', users)
+    expect(msg!.providerIdentity?.providerChannelType).toBe('channel')
+  })
+
+  it('im is accepted only for D ids: a C conversation reported as im carries no type', async () => {
+    const { adapter, client } = await connected()
+    seedHistory(client, '1700000001.000001')
+    client.conversations.info.mockResolvedValueOnce({
+      channel: { id: 'C12345', is_im: true },
+      ok: true,
+    })
+    const [msg] = await adapter.fetchMessages('C12345', users)
+    expect(msg).toBeDefined()
+    expect(msg!.providerIdentity).not.toHaveProperty('providerChannelType')
+  })
+
+  it('a caller-supplied conversationType of im is never consulted for a C channel', async () => {
+    const { adapter, client } = await connected()
+    seedHistory(client, '1700000001.000001')
+    const [msg] = await adapter.fetchMessages('C12345', users, {
+      conversationType: 'im',
+    } as never)
+    expect(msg!.providerIdentity?.providerChannelType).toBe('channel')
+  })
+
+  it('looks the type up once per channel', async () => {
+    const { adapter, client } = await connected()
+    seedHistory(client, '1700000001.000001')
+    seedHistory(client, '1700000002.000001')
+    client.conversations.info.mockResolvedValue({
+      channel: { id: 'D12345', is_im: true },
+      ok: true,
+    })
+    const first = await adapter.fetchMessages('D12345', users)
+    const second = await adapter.fetchMessages('D12345', users)
+    expect(first).toHaveLength(1)
+    expect(second).toHaveLength(1)
+    expect(second[0]!.providerIdentity?.providerChannelType).toBe('im')
+    expect(client.conversations.info).toHaveBeenCalledTimes(1)
+  })
+
+  it('a conversations.info error leaves the field absent and is not cached', async () => {
+    const { adapter, client } = await connected()
+    seedHistory(client, '1700000001.000001')
+    seedHistory(client, '1700000002.000001')
+    client.conversations.info.mockRejectedValueOnce(new Error('ratelimited'))
+    const [first] = await adapter.fetchMessages('D12345', users)
+    expect(first!.providerIdentity).not.toHaveProperty('providerChannelType')
+    client.conversations.info.mockResolvedValueOnce({
+      channel: { id: 'D12345', is_im: true },
+      ok: true,
+    })
+    const [second] = await adapter.fetchMessages('D12345', users)
+    expect(second!.providerIdentity?.providerChannelType).toBe('im')
+    expect(client.conversations.info).toHaveBeenCalledTimes(2)
   })
 })
