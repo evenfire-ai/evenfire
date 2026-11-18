@@ -17,7 +17,15 @@ import {
   normalizeGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
 import { isEditorGfsPermissions, planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
-import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  IconButton,
+  PermissionStatusIndicator,
+  StatusBanner,
+  TextInput,
+} from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
@@ -543,27 +551,11 @@ export function FilesPage({
     ),
   }
   const rowPermissionNoticeFor = (resourceId: string, resourceName: string) => {
-    // Shared-root rows inherit status from one accessible-list query. A
-    // background refresh of that shared query is not a separate permission
-    // check for every row, and its page-level feedback must not be repeated
-    // in twenty row live regions.
     if (!currentIsFolder && accessibleRootResourceIds.has(resourceId)) return null
-    const statuses = ctrl.rowPermissionStatusByResourceId
-    if (!statuses) return null
-    const status = statuses[resourceId]
-    if (status?.status === 'ready' || status?.status === 'stale') return null
-    if (status?.status === 'error') {
-      return {
-        role: 'alert' as const,
-        tone: 'error' as const,
-        message: `Could not verify permissions for ${resourceName}: ${status.message}`,
-      }
-    }
-    return {
-      role: 'status' as const,
-      tone: 'info' as const,
-      message: `Checking permissions for ${resourceName}…`,
-    }
+    const status = ctrl.rowPermissionStatusByResourceId?.[resourceId]
+    return status?.status === 'error'
+      ? `Could not verify permissions for ${resourceName}: ${status.message}`
+      : null
   }
   const moveWorkspaceRef = useRef({
     sessionScope,
@@ -3314,6 +3306,12 @@ export function FilesPage({
                   resourceName={current.name}
                 />
               ) : null}
+              {current && !currentIsFile ? (
+                <PermissionStatusIndicator
+                  active={loadingAffordances}
+                  label={`Checking permissions for ${current.name}`}
+                />
+              ) : null}
             </div>
             <div className="da-gfs-drive__upload-input">
               <input
@@ -3375,11 +3373,6 @@ export function FilesPage({
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
-          {current && loadingAffordances ? (
-            <div role="status">
-              <StatusBanner tone="info" text={`Checking permissions for ${current.name}…`} />
-            </div>
-          ) : null}
           {current &&
           affordancesError &&
           (ctrl.affordancesHttpStatus === 429 ||
@@ -3523,6 +3516,10 @@ export function FilesPage({
                       />
                     </>
                   )}
+                  <PermissionStatusIndicator
+                    active={loadingAffordances}
+                    label={`Checking permissions for ${current.name}`}
+                  />
                 </div>
                 <p className="muted">
                   {currentPreviewAvailable
@@ -3690,8 +3687,8 @@ export function FilesPage({
                           ) : null}
                         </span>
                         {permissionNotice ? (
-                          <span className="muted" role={permissionNotice.role}>
-                            {permissionNotice.message}
+                          <span className="muted" role="alert">
+                            {permissionNotice}
                           </span>
                         ) : null}
                       </span>

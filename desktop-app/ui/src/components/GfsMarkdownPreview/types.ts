@@ -18,6 +18,7 @@ export type GfsMarkdownPreviewBodyProps = {
   onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
   titleId?: string
   titleActions?: ReactNode
+  permissionProgress?: ReactNode
   headerActions?: ReactNode
   headingLevel?: 2 | 3
 }
