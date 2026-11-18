@@ -152,8 +152,10 @@ vi.mock('@pages/ChatPage', async () => {
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
   const { useNavigationContext } = await import('@contexts/NavigationContext')
   const { useComposerDraft } = await import('@hooks/useComposerDraft')
+  const { useChatLinkActivation } = await import('@contexts/ChatLinkActivationContext')
   return {
     ChatPage: () => {
+      const activateChatLink = useChatLinkActivation()
       const { activeChatId, composerFocusRequestId, workspaceChatTabId } =
         useChatComposerStateContext()
       const { selectedAgent } = useNavigationContext()
@@ -181,6 +183,12 @@ vi.mock('@pages/ChatPage', async () => {
           ) : null}
           <button type="button" onClick={() => setDraft('failed-send recovery')}>
             Write tabless recovery draft
+          </button>
+          <button
+            type="button"
+            onClick={() => void activateChatLink('gfs://main/0123456789abcdef0123456789abcdef')}
+          >
+            Activate chat link
           </button>
         </div>
       )
@@ -370,6 +378,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
     beginUserNavigationIntent: vi.fn(),
+    isNavigationIntentCurrent: vi.fn(() => true),
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
@@ -552,6 +561,40 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  it('routes a chat link activated in the drawer through the fenced resolve to a Files tab', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    const resolveForNavigation = vi.fn().mockResolvedValue({ status: 'resolved', resource: folder })
+    Object.assign(window.clerum, { gfs: { resolveForNavigation } })
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    renderApp(<App />)
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Activate chat link' }))
+    })
+
+    expect(resolveForNavigation.mock.calls).toEqual([
+      ['gfs://main/0123456789abcdef0123456789abcdef'],
+    ])
+    const active = activeWorkspaceTab(currentController.workspaceTabs)
+    expect(active?.kind).toBe('files')
+    expect(active?.files?.path).toBe(folder.gfsUri)
   })
 
   it('binds a Files New Chat prefill to the exact chat tab created by the App', async () => {

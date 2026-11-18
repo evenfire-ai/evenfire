@@ -91,7 +91,8 @@ function normalizeChildren<T extends RootContent>(children: T[]): T[] {
     const href = canonicalChatLinkHref(child.properties.href)
     if (href === null) return child.children as T[]
     child.properties.href = href
-    if (/^https?:/.test(href)) child.properties.title = href
+    // The author-supplied title would otherwise be a tooltip that lies about the target.
+    child.properties.title = href
     return [child]
   })
 }

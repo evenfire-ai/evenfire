@@ -88,6 +88,18 @@ describe('chat link policy (S-9)', () => {
   })
 
   it.each([
+    ['[x](mailto:a@b.c "https://bank.example")', 'mailto:a@b.c'],
+    [
+      '[x](gfs://main/859df99de46b407bb0ec4b0f7cb424a5 "https://bank.example")',
+      'gfs://main/859df99de46b407bb0ec4b0f7cb424a5',
+    ],
+  ])('replaces an author-supplied title with the canonical href: %s', (content, href) => {
+    const anchor = renderMessage(content).querySelector('a')
+    expect(anchor?.getAttribute('href')).toBe(href)
+    expect(anchor?.getAttribute('title')).toBe(href)
+  })
+
+  it.each([
     ['HTTPS://Host', 'https://host/'],
     ['https:host', 'https://host/'],
     ['HTTP://Host/Path?q=1', 'http://host/Path?q=1'],
