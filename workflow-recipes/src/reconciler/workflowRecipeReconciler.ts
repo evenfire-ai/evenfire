@@ -819,6 +819,38 @@ function deniedWorkflowRevocationFailureMessage(failure: DeniedRevocationFailure
   )
 }
 
+/** Issue #1528 / #1529 — ids the stored status still names and the deploy pass does not render. */
+interface WorkloadIdsNoLongerRendered {
+  /** Keys of the stored `status.workloadInstances`. */
+  instances: string[]
+  /** Keys of the stored `status.secretOwnershipRevocations`. */
+  revocations: string[]
+}
+
+/**
+ * Issue #1528 / #1529 — workload ids the stored status still names and this
+ * deploy pass does not render. `rendered` is `recipe.spec.workloads` as the pass
+ * holds it: after `includeWhen` on the non-workflow path, the whole list on the
+ * workflow path. Null when `live` is null (the recipe is gone, replaced or being
+ * deleted) or the pass runs on another generation than the stored recipe: a
+ * pass on an older spec must not treat a workload the stored spec has just
+ * added as removed. The CRD has the status subresource, so the generation
+ * changes on every spec change and on nothing else.
+ */
+function workloadIdsNoLongerRendered(
+  recipe: WorkflowRecipeCRD,
+  live: WorkflowRecipeCRD | null
+): WorkloadIdsNoLongerRendered | null {
+  if (!live || live.metadata.generation !== recipe.metadata.generation) return null
+  const rendered = new Set((recipe.spec.workloads ?? []).map(workload => workload.id))
+  return {
+    instances: Object.keys(live.status?.workloadInstances ?? {}).filter(id => !rendered.has(id)),
+    revocations: Object.keys(live.status?.secretOwnershipRevocations ?? {}).filter(
+      id => !rendered.has(id)
+    ),
+  }
+}
+
 function throwNetworkPolicyMutationError(error: unknown, name: string, namespace: string): never {
   if (getErrorCode(error) === 409 || getErrorCode(error) === 404) {
     throw new NetworkPolicyReplanRequiredError(
@@ -3257,10 +3289,14 @@ export class WorkflowRecipeReconciler {
       // every workload is denied. A failed read requeues before anything is
       // delegated or rendered.
       const deployRead = await this.readLiveRecipeForDeployPass(recipe)
+      // Issue #1528 — computed once from the pass's read, on the spec after
+      // includeWhen (a workload it excludes counts as no longer rendered).
+      const noLongerRendered = workloadIdsNoLongerRendered(recipe, deployRead.live)
       await this.clearSecretRevocationsBeforeRender(
         recipe,
         secretOwnership.deniedWorkloadIds,
-        deployRead.live
+        deployRead.live,
+        noLongerRendered
       )
 
       // Issue #637 — revoke every denied workload before any workload is delegated
@@ -4248,10 +4284,13 @@ export class WorkflowRecipeReconciler {
           `(transient read error) — requeuing before delegating or rendering workloads`
       )
     }
+    // Issue #1528 — computed once from the pass's read, on the whole spec.
+    const noLongerRendered = workloadIdsNoLongerRendered(recipe, deployRead.live)
     await this.clearSecretRevocationsBeforeRender(
       recipe,
       secretOwnership.deniedWorkloadIds,
-      deployRead.live
+      deployRead.live,
+      noLongerRendered
     )
 
     // Issue #637 — revoke every denied workload before any workload is delegated
@@ -4835,29 +4874,38 @@ export class WorkflowRecipeReconciler {
    * the gate. A kept StatefulSet is still updated, without those refs, while its
    * entry stands.
    *
+   * Issue #1528 (R1-L5) — the same patch removes the stored entries of the
+   * workloads the pass no longer renders (`noLongerRendered.revocations`, see
+   * {@link workloadIdsNoLongerRendered}); nothing else would ever remove them.
+   * Null `noLongerRendered` (another generation, or the recipe gone) removes
+   * none of them. The entries of denied workloads still in the spec are never
+   * touched, so an entry the pass's revocation round writes cannot be removed.
+   *
    * Works on `live`, the stored object from the pass's single live read (issue
    * #1528): the pass can run on an object whose in-memory status lacks an entry
    * that is stored. A failed patch ends the pass with a requeue before anything
    * is rendered. Whenever `live` is the recipe and no patch failed, the in-memory
-   * entries of every rendered id are removed too, also when no stored entry
-   * needed a patch, so a stale in-memory entry cannot outlive the pass. When
-   * `live` is null (the recipe is gone, replaced or being deleted), nothing is
-   * cleared, in memory or stored.
+   * entries of every rendered id and of every removed id are removed too, also
+   * when no stored entry needed a patch, so a stale in-memory entry cannot
+   * outlive the pass. When `live` is null (the recipe is gone, replaced or being
+   * deleted), nothing is cleared, in memory or stored.
    */
   private async clearSecretRevocationsBeforeRender(
     recipe: WorkflowRecipeCRD,
     deniedWorkloadIds: ReadonlySet<string>,
-    live: WorkflowRecipeCRD | null
+    live: WorkflowRecipeCRD | null,
+    noLongerRendered: WorkloadIdsNoLongerRendered | null
   ): Promise<void> {
     const rendered = (recipe.spec.workloads ?? [])
       .map(workload => workload.id)
       .filter(id => !deniedWorkloadIds.has(id))
-    if (rendered.length === 0) return
     if (!live) return
+    const removed = noLongerRendered?.revocations ?? []
     try {
       const stored = live.status?.secretOwnershipRevocations ?? {}
       const stale = rendered.filter(id => stored[id] !== undefined)
-      if (stale.length > 0) {
+      const cleared = [...stale, ...removed]
+      if (cleared.length > 0) {
         await this.customApi.patchNamespacedCustomObjectStatus(
           {
             group: CRD_GROUP,
@@ -4867,7 +4915,7 @@ export class WorkflowRecipeReconciler {
             name: recipe.metadata.name,
             body: {
               status: {
-                secretOwnershipRevocations: Object.fromEntries(stale.map(id => [id, null])),
+                secretOwnershipRevocations: Object.fromEntries(cleared.map(id => [id, null])),
               },
             },
           },
@@ -4875,7 +4923,7 @@ export class WorkflowRecipeReconciler {
         )
         createLogger('wrc', recipe.metadata.name).info(
           'Removed Secret revocation records before re-render',
-          { name: recipe.metadata.name, value2: stale.join(', ') }
+          { name: recipe.metadata.name, value2: stale.join(', '), value3: removed.join(', ') }
         )
       }
     } catch (error) {
@@ -4886,7 +4934,7 @@ export class WorkflowRecipeReconciler {
       )
     }
     const inMemory = recipe.status?.secretOwnershipRevocations
-    if (inMemory) for (const id of rendered) delete inMemory[id]
+    if (inMemory) for (const id of [...rendered, ...removed]) delete inMemory[id]
   }
 
   /**

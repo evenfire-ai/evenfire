@@ -15030,6 +15030,92 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mcpServerWrites()).toBe(mcpServerWritesAtFailedRead)
       expect(inner.reconcile).not.toHaveBeenCalled()
     })
+
+    // ─── Issue #1528 (R1-L5) — entries of workloads the pass no longer renders ───
+
+    /** Digest of a `db-creds` denial at resourceVersion 7, as the revocation round stores it. */
+    const dbDenialDigest = () =>
+      deniedSecretRevocationDigest(
+        ['db-creds'],
+        new Map([['db-creds', { state: 'denied', versions: ['sandbox-recipes/7'] }]])
+      )
+    const GONE_DIGEST = `sha256:${'c'.repeat(64)}`
+
+    for (const path of ['non-workflow', 'workflow'] as const) {
+      const recipeFor = (workloads: WorkloadDef[]) =>
+        path === 'workflow'
+          ? runChild(workloads, { phase: 'candidate' })
+          : makeRecipe({ spec: { workloads } })
+
+      it(`T-1528-C1 the ${path} deploy pass removes the entry of a workload no longer in the spec with the stale entries of rendered workloads`, async () => {
+        if (path === 'workflow') stubInner()
+        classifySecrets({ 'db-creds': '7' }, { 'own-creds': '9' })
+        const store = installRecipeStore(
+          withRevocations(
+            recipeFor([deniedDeployment('api', 'own-creds'), deniedDeployment('db', 'db-creds')]),
+            { api: STORED_DIGEST, db: dbDenialDigest(), gone: GONE_DIGEST }
+          )
+        )
+        const passObject = store.current()
+
+        await reconciler.reconcile(passObject)
+
+        // Witness: the removal patch was sent, and names the removed keys only.
+        expect(revocationRemovals()).toEqual([{ api: null, gone: null }])
+        expect(store.current().status?.secretOwnershipRevocations).toEqual({
+          db: dbDenialDigest(),
+        })
+        expect(passObject.status?.secretOwnershipRevocations).toEqual({ db: dbDenialDigest() })
+        // The denied `db` keeps its entry, so the round does not tear it down again.
+        expect(deploymentDeletes('db')).toBe(0)
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-1528-C3 the ${path} deploy pass on an older generation keeps the entry of a workload only the stored spec has`, async () => {
+        if (path === 'workflow') stubInner()
+        classifySecrets({}, { 'own-creds': '9' })
+        const stored = withRevocations(
+          recipeFor([deniedDeployment('api', 'own-creds'), deniedDeployment('late', 'own-creds')]),
+          { late: STORED_DIGEST }
+        )
+        stored.metadata.generation = 2
+        const store = installRecipeStore(stored)
+        // The pass runs on the object of generation 1, before `late` was added.
+        const passObject = store.current()
+        passObject.metadata.generation = 1
+        passObject.spec.workloads = [deniedDeployment('api', 'own-creds')]
+        const getsBefore = recipeGets()
+
+        await reconciler.reconcile(passObject)
+
+        expect(store.current().status?.secretOwnershipRevocations).toEqual({
+          late: STORED_DIGEST,
+        })
+        expect(revocationRemovals()).toEqual([])
+        // Witnesses: the pass made its single live read and rendered `api`.
+        expect(recipeGets() - getsBefore).toBe(3)
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+    }
+
+    it('T-1528-C2 a non-workflow pass whose workloads are all denied removes the entry of a workload no longer in the spec', async () => {
+      classifySecrets({ 'db-creds': '7' })
+      const store = installRecipeStore(
+        withRevocations(makeRecipe({ spec: { workloads: [deniedDeployment('db', 'db-creds')] } }), {
+          db: dbDenialDigest(),
+          gone: GONE_DIGEST,
+        })
+      )
+
+      await reconciler.reconcile(store.current())
+
+      // Witness: the removal patch was sent, and names `gone` only.
+      expect(revocationRemovals()).toEqual([{ gone: null }])
+      expect(store.current().status?.secretOwnershipRevocations).toEqual({
+        db: dbDenialDigest(),
+      })
+      expect(deploymentDeletes('db')).toBe(0)
+    })
   })
 
   describe('terminal-run compute teardown (CPU-starvation fix)', () => {
