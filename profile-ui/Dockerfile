@@ -1,4 +1,4 @@
-FROM node:24.22.1-alpine AS builder
+FROM node:24.22.3-alpine AS builder
 WORKDIR /app
 
 COPY packages/desktop-app-links ./packages/desktop-app-links
@@ -20,11 +20,8 @@ ENV NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED=${PROFILE_DESKTOP_HANDOFF_ENABLE
 RUN npm run build \
   && npm prune --omit=dev --ignore-scripts
 
-FROM node:24.22.1-alpine
-# npm is a build tool; starting Next directly keeps its bundled dependencies
-# out of the runtime image as well as the application's dev dependencies.
-RUN addgroup -S app && adduser -S app -G app \
-  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+FROM node:24.22.3-alpine
+RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app/profile-ui
 
 ENV NODE_ENV=production

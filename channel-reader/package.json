@@ -4,7 +4,7 @@
   "description": "Watches CommunicationChannel CRDs and fetches messages from Telegram, Email, and Slack",
   "main": "dist/main.js",
   "engines": {
-    "node": ">=24.22.1"
+    "node": ">=24.22.3"
   },
   "scripts": {
     "build": "tsc",

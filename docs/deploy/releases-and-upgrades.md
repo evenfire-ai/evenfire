@@ -352,7 +352,7 @@ allowlisted set of environment variables, and this variable is not in that set.
 
 No action is needed when you use the runner image built from this repository:
 the repository images use Node 24. If `CLERUM_SNIPPET_RUNNER_IMAGE` points at
-your own image, run Node 24.x: `workflow-recipes` declares Node `>=24.22.1` and
+your own image, run Node 24.x: `workflow-recipes` declares Node `>=24.22.3` and
 is tested only on Node 24. On Node 25 and later the runner starts, but snippet
 workers cannot open network connections, because those releases also restrict
 network access under `--permission`, and the runner does not pass `--allow-net`
