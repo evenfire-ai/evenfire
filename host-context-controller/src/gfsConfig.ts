@@ -59,8 +59,8 @@ function envPullPolicy(key: string): 'Always' | 'IfNotPresent' | 'Never' {
 
 // Injected into every gfsc pod as GFS_DRIVE_NAME, which gfsc validates with this same
 // pattern at boot; rejecting it here fails the operator once instead of crash-looping
-// every gfsc pod it creates.
-const DRIVE_NAME_PATTERN = /^[a-z0-9-]{1,63}$/
+// every gfsc pod it creates. The packages share no module, so a test pins it to gfsc's.
+export const DRIVE_NAME_PATTERN = /^[a-z0-9-]{1,63}$/
 
 function envDriveName(key: string): string {
   const value = env(key, 'main')
