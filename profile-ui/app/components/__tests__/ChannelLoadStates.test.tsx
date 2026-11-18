@@ -1,7 +1,7 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ApprovalChannelTarget } from '@/app/types/approvalChannels'
 import producerOutput from '@/test/fixtures/telegram-channel-accounts.json'
 import { ChannelsContent } from '../../channels/ChannelsContent'

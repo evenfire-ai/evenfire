@@ -85,7 +85,7 @@ describe('Profile Sidebar access-controlled entries', () => {
   it('keeps the landing destination available while access is unresolved', () => {
     profileAccessState.approvalTargetsLoading = true
 
-    const view = render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
+    render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
 
     expect(screen.getByRole('link', { name: /Social channels/i })).toHaveAttribute(
       'href',
@@ -125,7 +125,7 @@ describe('Profile Sidebar navigation order', () => {
   it('keeps Social channels active while access is unresolved', () => {
     profileAccessState.approvalTargetsLoading = true
 
-    const view = render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
+    render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
 
     expect(screen.getByRole('link', { name: /Social channels/i })).toHaveAttribute(
       'href',
