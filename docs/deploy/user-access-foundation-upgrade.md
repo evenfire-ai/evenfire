@@ -234,7 +234,8 @@ before this release.
   sign-in, so `0144` and `0145` retry a lost lock wait (`lockRetries: 2`): after
   a 10 s `lock_timeout` the transaction rolls back, holds no lock, waits 1 s
   (then 2 s) and starts again, for at most three attempts. Each of the two can
-  thus block sign-ins in 10 s windows for up to about 33 s in total before it
+  thus block sign-ins for up to about 30 s in total, in three 10 s windows
+  spread over about 33 s (the 1 s and 2 s pauses hold no lock), before it
   fails the Job attempt; a transaction that has written to `team_members` or
   `users` and stays open longer than that fails it. Run the migration outside
   sign-in peaks.
