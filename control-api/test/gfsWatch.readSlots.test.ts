@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
 import {
   READ_SLOTS_PERMITS,
   type ReadSlots,
@@ -267,6 +269,21 @@ describe('T-SB85 an aborted acquire ends its path', () => {
     expect(slots.waiters).toBe(0)
   })
 
+  it('serves queued waiters in arrival order', async () => {
+    const slots = createReadSlots(createVirtualWatchClock().now)
+    const live = new AbortController().signal
+    for (let i = 0; i < READ_SLOTS_PERMITS; i += 1) await slots.acquire(live)
+    const served: string[] = []
+    const queued = ['A', 'B', 'C'].map(name => slots.acquire(live).then(() => served.push(name)))
+    expect(slots.waiters).toBe(3)
+    for (let i = 0; i < 3; i += 1) {
+      slots.release(true)
+      await flushMicrotasks()
+    }
+    await Promise.all(queued)
+    expect(served).toEqual(['A', 'B', 'C'])
+  })
+
   it('an op of 64 keys aborted before its thunks start reads nothing', async () => {
     const clock = createVirtualWatchClock()
     const slots = createReadSlots(clock.now)
@@ -347,11 +364,25 @@ describe('T-SB86 runLimited', () => {
   })
 })
 
+/**
+ * A full collection, then the live heap. The semaphore keeps its state in a
+ * closure (or anywhere else it likes), so the only honest check that it holds
+ * nothing per read is the retained heap itself.
+ */
+function retainedHeapBytes(): number {
+  setFlagsFromString('--expose-gc')
+  const gc = runInNewContext('gc') as () => void
+  gc()
+  gc()
+  return process.memoryUsage().heapUsed
+}
+
 describe('T-SB87 the rate is kept in fixed memory on the monotonic clock', () => {
   it('10 min at 2,400 reads/s keeps 5 buckets; a wall jump does not move backlogMs; aborted reads do not count', async () => {
     const clock = createVirtualWatchClock()
     const slots = createReadSlots(clock.now)
     const signal = new AbortController().signal
+    const heapBefore = retainedHeapBytes()
     slots.demand = 24_000
     for (let second = 0; second < 600; second += 1) {
       for (let i = 0; i < 2_400; i += 1) {
@@ -373,8 +404,9 @@ describe('T-SB87 the rate is kept in fixed memory on the monotonic clock', () =>
     }
     expect(slots.backlogMs()).toBe(before)
     expect(slots.free).toBe(64)
-    // The semaphore holds no per-read record: only the five buckets.
-    const heapProbe = JSON.stringify(Object.getOwnPropertyNames(slots))
-    expect(heapProbe).not.toMatch(/done|ring/)
+    expect(slots.waiters).toBe(0)
+    // ~1.5 M reads: any per-read record, even one number each, retains
+    // several MB; the five buckets retain nothing measurable.
+    expect(retainedHeapBytes() - heapBefore).toBeLessThan(1024 * 1024)
   })
 })

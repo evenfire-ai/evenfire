@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createPublicKey } from 'node:crypto'
 import { once } from 'node:events'
 import { type Server, createServer } from 'node:http'
@@ -9,7 +9,11 @@ import { loadVerificationKey } from '../../gfs-controller/src/auth/keys.js'
 import { verifyGfsToken } from '../../gfs-controller/src/auth/verify.js'
 import { config } from '../src/config.js'
 import { resolveExternalGfsAuthority } from '../src/gfs/externalAuthority.js'
-import { mintExternalGfsReadToken, readGfsc } from '../src/gfs/externalGfsRead.js'
+import {
+  GFSC_READ_MAX_BODY_BYTES,
+  mintExternalGfsReadToken,
+  readGfsc,
+} from '../src/gfs/externalGfsRead.js'
 
 // Error envelopes are serialized by gfsc's own `toResponse`, the function its
 // server uses for every failure. The 403 with `reason: 'principal_denied'`
@@ -118,6 +122,43 @@ describe('readGfsc', () => {
     } finally {
       rawOk = null
     }
+  })
+
+  it('stops pulling an oversized 2xx body just past the cap and cancels the stream', async () => {
+    // gfsc's own envelope as the first bytes, then padding pulled on demand,
+    // so the count is exactly what the reader asked for.
+    const head = new TextEncoder().encode(JSON.stringify(ok({ kind: 'file' })).slice(0, -2))
+    const CHUNK = 8 * 1024
+    const TOTAL = 4 * 1024 * 1024
+    let pulled = 0
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (pulled >= TOTAL) return controller.close()
+          const chunk = pulled === 0 ? head : new Uint8Array(CHUNK).fill(0x20)
+          pulled += chunk.byteLength
+          controller.enqueue(chunk)
+        },
+        cancel() {
+          cancelled = true
+        },
+      },
+      { highWaterMark: 0 }
+    )
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+      )
+    try {
+      expect(await readWith(null)).toMatchObject({ status: 'transient', httpStatus: 200 })
+    } finally {
+      fetchSpy.mockRestore()
+    }
+    expect(pulled).toBeGreaterThan(GFSC_READ_MAX_BODY_BYTES)
+    expect(pulled).toBeLessThanOrEqual(GFSC_READ_MAX_BODY_BYTES + 2 * CHUNK)
+    expect(cancelled).toBe(true)
   })
 
   it('flags principalDenied only for a 403 that carries that reason', async () => {

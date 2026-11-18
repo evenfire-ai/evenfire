@@ -25,7 +25,8 @@ let flushMicrotasks!: Loaded['flushMicrotasks'],
   nextEv!: Loaded['nextEv'],
   quoteIdent!: Loaded['quoteIdent'],
   restInvariantViolations!: Loaded['restInvariantViolations'],
-  sleep!: Loaded['sleep']
+  sleep!: Loaded['sleep'],
+  waitForListenerReady!: Loaded['waitForListenerReady']
 
 // Model-based test of the GFS watch registry (§2–§3) on the real stack: real
 // Postgres with the dedicated LISTEN and the real resource trigger, real
@@ -60,9 +61,8 @@ type ConnModel = {
   outcome: WatchOpenOutcome | null
   conn: WatchConnection | undefined
   openKeys: GfsKey[]
-  /** seq → keys and the issue instant of every legitimate command sent. */
-  puts: Map<number, { keys: GfsKey[]; vt: number; r: string }>
-  openVt: number
+  /** seq → keys and request id of every legitimate command sent. */
+  puts: Map<number, { keys: GfsKey[]; r: string }>
   openRequestId: string
   maxSeq: number
   lastSeqSeen: number
@@ -113,6 +113,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       quoteIdent,
       restInvariantViolations,
       sleep,
+      waitForListenerReady,
     } = await loadHelpers())
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(registryTestDatabase)}`)
@@ -238,7 +239,6 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
         conn: undefined,
         openKeys: pick(real.fixture, this.keys),
         puts: new Map(),
-        openVt: real.b.clock.now(),
         openRequestId: requestId,
         maxSeq: 0,
         lastSeqSeen: 0,
@@ -285,7 +285,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       if (this.variant === 'gen') g += 1
       if (this.variant !== 'next') legit = this.variant === 'dup' || this.variant === 'older'
       if (legit) c.maxSeq = Math.max(c.maxSeq, s)
-      if (legit && !c.puts.has(s)) c.puts.set(s, { keys, vt: real.b.clock.now(), r })
+      if (legit && !c.puts.has(s)) c.puts.set(s, { keys, r })
       await h.notifyCmd({ c: c.conn.connId, s, u, g, r: r as Uuid, keys: new Set(keys) })
       if (c.conn.lastSeq < c.lastSeqSeen)
         real.failures.push(`I40: lastSeq decreased on ${c.conn.connId}`)
@@ -432,7 +432,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       }
       coverage.listenerLost += 1
       real.b.clock.advance(1_200)
-      for (let i = 0; i < 1_000 && !real.b.registry.listenerReady(); i += 1) await sleep(5)
+      await waitForListenerReady(() => real.b.registry.listenerReady())
     }
     toString = () => 'ListenerLost'
   }
@@ -541,12 +541,15 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       )
       if (!reads.some(r => r.status === 200 && r.decision === 'allow'))
         v.push(`I6: ${k} accepted at frame ev ${d.ev} after reads ${JSON.stringify(reads)}`)
-      if (!underP.has(r32)) continue
       // Anchored where the op takes its snapshot of recent ancestry changes:
-      // when it starts, not when the test sent its command.
-      const vt = d.opStartVt ?? (seq === 0 ? m.openVt : m.puts.get(seq)?.vt)
+      // when it starts, not when the test sent its command. Without that
+      // instant the window cannot be judged, and falling back to the
+      // command's instant would judge it against the wrong one in silence.
+      const vt = d.opStartVt
+      if (vt === null) v.push(`oracle: ${String(d.frame.type)} ${seq} has no op start instant`)
+      if (!underP.has(r32)) continue
       for (const mv of real.moves) {
-        if (mv.ev < d.ev && vt !== undefined && mv.vt > vt - 6_000) {
+        if (mv.ev < d.ev && vt !== null && mv.vt > vt - 6_000) {
           v.push(`I6/S4: ${k} accepted despite move ev ${mv.ev} before frame ev ${d.ev}`)
         }
       }

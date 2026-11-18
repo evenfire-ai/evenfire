@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Notification } from 'pg'
+import pino from 'pino'
+import { rootLogger } from '../src/observability/logger.js'
 import {
   gfsWatchDispatchFailedTotal,
   gfsWatchNotifyInvalidTotal,
@@ -331,12 +333,11 @@ describe('onListenerLost: own state first, then the closes', () => {
     const t = setup({ autoConnect: false })
     t.listener.startGfsWatchRegistry()
     const gaps: number[] = []
-    let lastStart = t.clock.now()
     for (let i = 0; i < 5; i += 1) {
       const c = t.clients.at(-1)!
       c.connectResult!.reject(new Error('ECONNREFUSED'))
       await flushMicrotasks()
-      lastStart = t.clock.now()
+      const lastStart = t.clock.now()
       const n = t.clients.length
       while (t.clients.length === n) await t.clock.advanceAsync(100)
       gaps.push(Math.round(t.clock.now() - lastStart))
@@ -410,6 +411,35 @@ describe('T-SB33 events of a superseded client', () => {
       await t.clock.advanceAsync(1_000)
     }
     expect(t.resetWindows).not.toHaveBeenCalled()
+  })
+
+  it('a reconnect in progress is neither pinged nor torn down by echo checks that see the last echo long gone', async () => {
+    const t = setup({ autoConnect: false })
+    t.listener.startGfsWatchRegistry()
+    t.clients[0]!.connectResult!.resolve()
+    await flushMicrotasks()
+    expect(t.listener.state.listenerReady).toBe(true)
+    t.clients[0]!.echo = false
+    // No echo since 0 s: the check at 25 s declares the loss, and the
+    // reconnection starts c2 at 26 s, still connecting.
+    await t.clock.advanceAsync(26_000)
+    expect(t.resetWindows).toHaveBeenCalledTimes(1)
+    const c2 = t.clients[1]!
+    expect(t.listener.state.listenerClient).toBe(c2)
+    expect(t.listener.state.listenerReady).toBe(false)
+    // The checks at 30 s and 35 s see more than 20 s without an echo, but
+    // the attempt in progress is not theirs to judge: tConnect bounds it.
+    await t.clock.advanceAsync(9_000)
+    expect(t.resetWindows).toHaveBeenCalledTimes(1)
+    expect(t.listener.state.listenerClient).toBe(c2)
+    expect(c2.ended).toBe(0)
+    // Nor pinged at 30 s: an echo of a ping sent before the LISTEN would
+    // prove nothing about it.
+    expect(c2.queries).toEqual([])
+    c2.connectResult!.resolve()
+    await flushMicrotasks()
+    expect(t.listener.state.listenerReady).toBe(true)
+    expect(t.clients).toHaveLength(2)
   })
 })
 
@@ -855,5 +885,53 @@ describe('a client that cannot be built still leaves a way back', () => {
     await t.clock.advanceAsync(2_000)
     expect(t.attempts).toEqual([0, 1_000, 3_000])
     expect(s.listenerReady).toBe(true)
+  })
+})
+
+describe('the build-failure log line of the real pg client', () => {
+  it('carries no part of the connection string password, through the redacting root logger', async () => {
+    const secret = 'Sup3rS3cretPw'
+    // Port 99999 makes pg's connection-string parser throw from the Client
+    // constructor, the error this log line reports on every reconnect.
+    const connectionString = `postgres://watch:${secret}@127.0.0.1:99999/clerum`
+    const stream = (rootLogger as unknown as Record<symbol, { write(line: string): unknown }>)[
+      pino.symbols.streamSym
+    ]!
+    const lines: string[] = []
+    const write = vi.spyOn(stream, 'write').mockImplementation(line => {
+      lines.push(String(line))
+      return true
+    })
+    const level = rootLogger.level
+    rootLogger.level = 'error'
+    try {
+      const clock = createVirtualWatchClock({ random: () => 0 })
+      const rt = createWatchRuntime<Conn>({ clock, closeConnInternal: () => {} })
+      const listener = createGfsWatchListener<Conn>({
+        connectionString,
+        runtime: rt,
+        recentDirty: createRecentDirty(clock.now),
+        connections: () => [],
+        opsInFlight: () => [],
+        closeConn: () => {},
+        onCmd: () => {},
+        onResourceChanged: () => {},
+        resetWindows: () => {},
+        onExpansionFailed: () => {},
+      })
+      listener.startGfsWatchRegistry()
+      await clock.advanceAsync(3_000)
+      listener.stopGfsWatchRegistry()
+    } finally {
+      rootLogger.level = level
+      write.mockRestore()
+    }
+    const built = lines.filter(l => l.includes('gfs watch listener client construction failed'))
+    // At 0 s, 1 s and 3 s: the start and two backed-off reconnects.
+    expect(built).toHaveLength(3)
+    for (const l of built) {
+      expect(l).not.toContain(secret)
+      expect(JSON.parse(l)).toMatchObject({ err: { code: 'ERR_INVALID_URL' } })
+    }
   })
 })
