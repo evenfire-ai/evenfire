@@ -255,3 +255,74 @@ describe('assertRequestTimeoutsBelowPassHardLimit', () => {
     }
   })
 })
+
+// #1493: the same plain-digit rule for three older numeric settings. Unset or
+// "" means the default; everything else Number() used to read now refuses.
+describe.each([
+  {
+    name: 'HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS',
+    read: (c: Record<string, unknown>) => c.externalEgressDnsResolveTimeoutMs,
+    defaultValue: 5_000,
+    valid: ['5000', 5_000] as const,
+  },
+  {
+    name: 'CONTEXT_MAPPER_HEARTBEAT_POLL_MS',
+    read: (c: Record<string, unknown>) => c.heartbeatPollMs,
+    defaultValue: 10_000,
+    valid: ['5000', 5_000] as const,
+  },
+  {
+    name: 'HCC_HOST_FULL_RECONCILE_CONCURRENCY',
+    read: (c: Record<string, unknown>) => c.hostFullReconcileConcurrency,
+    defaultValue: 2,
+    valid: ['4', 4] as const,
+  },
+])('#1493: plain digits only for $name', ({ name, read, defaultValue, valid }) => {
+  it.each([undefined, ''])('means the default for %s', async raw => {
+    const { config } = await loadConfigWith({ [name]: raw })
+    expect(read(config as unknown as Record<string, unknown>)).toBe(defaultValue)
+  })
+
+  it('accepts plain digits in range', async () => {
+    const { config } = await loadConfigWith({ [name]: valid[0] })
+    expect(read(config as unknown as Record<string, unknown>)).toBe(valid[1])
+  })
+
+  const value = valid[0]
+  it.each([
+    '   ',
+    ` ${value} `,
+    `+${value}`,
+    `0${value}`,
+    `${value}.0`,
+    `${value}e0`,
+    `0x${Number(value).toString(16)}`,
+    `${value}abc`,
+    '0',
+    '-1',
+    'abc',
+  ])("refuses '%s' and names the variable", async raw => {
+    await expect(loadConfigWith({ [name]: raw })).rejects.toThrow(name)
+  })
+})
+
+describe('CONTEXT_MAPPER_HEARTBEAT_POLL_MS timer bound', () => {
+  const NAME = 'CONTEXT_MAPPER_HEARTBEAT_POLL_MS'
+
+  // HB-T1
+  it('accepts the largest delay a timer can hold', async () => {
+    const { config } = await loadConfig(NAME, '2147483647')
+    expect(config.heartbeatPollMs).toBe(2_147_483_647)
+  })
+
+  // HB-T2: HB-T1 shows the parser ran on the neighbouring value, so the
+  // refusal below is the bound and not a load that never reached the parser.
+  it.each(['2147483648', '9007199254740991'])(
+    "refuses '%s' and names the bound, because a timer would fire after about 1 ms",
+    async raw => {
+      await expect(loadConfig(NAME, raw)).rejects.toThrow(
+        new RegExp(`${NAME} must be a positive integer of at most 2147483647 milliseconds`)
+      )
+    }
+  )
+})
