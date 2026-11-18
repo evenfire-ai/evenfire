@@ -329,6 +329,7 @@ Read the notes for every release you skip over, not only the target release.
 | [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac)                            | Every cluster. Apply the updated Role before you roll the new host-context-controller image.                                                                                                                                                                                                                                  |
 | [HCC McpServer verdict changes](#hcc-mcpserver-verdict-changes)                    | You alert, filter or report on HCC's McpServer conditions, NetworkPolicy pass results, Secret informer metrics or log lines.                                                                                                                                                                                                  |
 | [Numeric settings in plain digits](#numeric-settings-in-plain-digits)              | You set one of twelve HCC or mcp-host numeric variables to anything but plain digits, or `CLERUM_DYNAMIC_TOOLS_THRESHOLD` to an invalid value. The pod no longer starts.                                                                                                                                                      |
+| [Desktop floor for the GFS watch](#desktop-floor-for-the-gfs-watch)                | You cut the first release that serves the GFS watch. Pass `--minimum-desktop-version` equal to that release, or older Desktop Apps lose live updates.                                                                                                                                                                         |
 
 #### Snippet runner Node permissions
 
@@ -685,3 +686,31 @@ release. If your `mcp-host-config` started as a copy of it, raise
 mcp-host image; otherwise every Host refuses to start. mcp-host reads both
 values at startup through `envFrom`, so a ConfigMap change applies when each
 Host pod starts again.
+
+### Desktop floor for the GFS watch
+
+The External REST API no longer serves `GET /api/v1/entity-changes/stream`. It
+answers 404, like any unrouted path. Desktop Apps that include the GFS watch
+client use the GFS watch routes instead. Older Desktop Apps keep requesting the
+retired stream and treat the 404 as a transient error: they retry in the
+background every 15 to 18 s until the app is updated. Those apps get no live
+refresh and show no error, so users are not told that the view has stopped
+updating. Each one sends three to four requests per minute that fail with 404.
+
+`minimumDesktopVersion` is what makes those apps show **Desktop update
+required**. `prepare-release.mjs` changes it only when you pass the flag, so cut
+the first release that contains the GFS watch with the flag set to that
+release's own version:
+
+```bash
+node scripts/release/prepare-release.mjs --version X.Y.Z --release-id vX.Y.Z \
+  --minimum-desktop-version X.Y.Z
+```
+
+You cannot raise the floor ahead of the release in a feature branch. The script
+refuses a floor above `--version`, and it refuses a `--version` that is not
+greater than the Desktop App version already committed.
+
+Before that release is cut, only a cluster deployed from `dev` serves the new
+routes. Older Desktop Apps pointed at such a cluster lose live updates in the
+same way.

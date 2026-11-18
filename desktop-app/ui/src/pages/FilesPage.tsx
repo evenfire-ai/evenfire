@@ -353,7 +353,8 @@ export function FilesPage({
   isPendingGfsDeepLinkCurrent,
   onExplicitNavigationIntent,
   onPendingGfsDeepLinkOutcome,
-  remoteGfsChangeEpoch,
+  registerLocationRefresh,
+  onResolvedLocationChange,
   onLocationChange,
   onOpenPreview,
   onOpenPendingGfsPreview,
@@ -643,13 +644,10 @@ export function FilesPage({
       }
     )
 
-  const lastRemoteGfsChangeEpochRef = useRef(remoteGfsChangeEpoch)
-  useEffect(() => {
-    if (remoteGfsChangeEpoch === undefined) return
-    if (lastRemoteGfsChangeEpochRef.current === remoteGfsChangeEpoch) return
-    lastRemoteGfsChangeEpochRef.current = remoteGfsChangeEpoch
-    void ctrl.refreshCurrentLocation({ background: true })
-  }, [ctrl.refreshCurrentLocation, remoteGfsChangeEpoch])
+  useEffect(
+    () => registerLocationRefresh?.(() => ctrl.refreshCurrentLocation({ background: true })),
+    [ctrl.refreshCurrentLocation, registerLocationRefresh]
+  )
 
   // Warm the cache for directory rows in the current view so clicking into a
   // folder is instant. TanStack Query's staleTime:Infinity (set in
@@ -1810,6 +1808,14 @@ export function FilesPage({
     }
     onLocationChange?.(currentGfsUri, currentName)
   }, [currentGfsUri, currentName, onLocationChange])
+
+  const currentKind = current?.kind ?? null
+  useEffect(() => {
+    onResolvedLocationChange?.(
+      currentGfsUri && currentKind ? { gfsUri: currentGfsUri, kind: currentKind } : null
+    )
+  }, [currentGfsUri, currentKind, onResolvedLocationChange])
+  useEffect(() => () => onResolvedLocationChange?.(null), [onResolvedLocationChange])
 
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()
