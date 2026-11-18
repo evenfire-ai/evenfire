@@ -2365,7 +2365,10 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
       effectiveModel: 'gpt-5.3',
       pending: false,
     })
-    // Showing or sending the default must not persist it as the chat's selection.
+    // Sending with the default must not persist it as the chat's selection:
+    // no write reached the RPC bridge (the controller's write path), and none
+    // went through the transport handed to the reads above (the load path).
+    expect(clerum.rpc.setHostModel).not.toHaveBeenCalled()
     expect(brokerTransport.setHostModel).not.toHaveBeenCalled()
   })
 
