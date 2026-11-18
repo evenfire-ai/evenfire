@@ -126,9 +126,16 @@ The same field in `CLERUM_APPROVAL_CONFIG` is not a live control, except in
 dev mode.
 
 A control-api admin, or a Kubernetes principal who can write
-`hosts.clerum.io`, sets it. The mcp-host service account cannot. Setting
-`allow_all` accepts unattended execution for this Host. Treat that as suitable
-only for a single-user Host. v1 does not enforce that.
+`hosts.clerum.io`, sets it. The mcp-host service account cannot write the Host.
+Setting `auto` or `allow_all` accepts unattended shell on this Host. Treat
+either as suitable only for a single-user Host. v1 does not enforce that.
+
+An `allow_all` ceiling accepts, among other things: shell that can read the
+process environment, the runtime-token Secret, and the Host GFS token; HTTP to
+any public host on ports 80 and 443 when the allowlist is empty; MCP servers
+running under the user's own OAuth identity; and edits to shared identity files.
+`cron_manage` still asks. In `auto`, `http_request` runs with no card unless
+`tools.http_request` is `true`, which keeps the card.
 
 ### Channel cap
 

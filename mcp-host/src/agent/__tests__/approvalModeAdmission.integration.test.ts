@@ -564,6 +564,26 @@ describe('approval mode admission', () => {
       desktopCommandOffered: true,
     })
     expect(codex.approval?.authorization_scope).toBe('exact_invocation')
+
+    const secret = await drive({
+      mode: 'auto',
+      verdict: 'ESCALATE',
+      calls: [shell('sh-secret', 'printf sk-live-abc123def456ghi789jkl012')],
+    })
+    expect(secret.approval?.shellCard).toEqual({
+      channelCommandOffered: true,
+      desktopCommandOffered: false,
+    })
+
+    const huge = await drive({
+      mode: 'auto',
+      verdict: 'ESCALATE',
+      calls: [shell('sh-huge', 'x'.repeat(64 * 1024 + 1))],
+    })
+    expect(huge.approval?.shellCard).toEqual({
+      channelCommandOffered: false,
+      desktopCommandOffered: false,
+    })
   })
 
   it('A3 re-reads the mode and the tools override after classify', async () => {

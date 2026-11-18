@@ -51,6 +51,8 @@ interface Entry {
   heldForFirstSend: ApprovalMode | null
   persisted: boolean
   writing: boolean
+  /** Bumps when a write starts. A session read captured earlier must not paint over it. */
+  writeEpoch: number
   listeners: Set<() => void>
   view: HostApprovalModeView | null
 }
@@ -73,13 +75,23 @@ function labelFor(mode: ApprovalMode): string | null {
 }
 
 /** IPC keeps the HTTP status in the message. A status property is accepted too. */
-function isDefiniteRejection(error: unknown): boolean {
+function rejectionStatus(error: unknown): number | null {
   if (error && typeof error === 'object' && 'status' in error) {
     const status = (error as { status?: unknown }).status
-    if (status === 400 || status === 401 || status === 404) return true
+    if (status === 400 || status === 401 || status === 404) return status
   }
   const message = error instanceof Error ? error.message : String(error)
-  return /\((400|401|404)\)/.test(message)
+  const match = message.match(/\((400|401|404)\)/)
+  return match ? Number(match[1]) : null
+}
+
+function isNotFound(error: unknown): boolean {
+  return rejectionStatus(error) === 404
+}
+
+function isDefiniteRejection(error: unknown): boolean {
+  const status = rejectionStatus(error)
+  return status === 400 || status === 401
 }
 
 function buildView(entry: Entry): HostApprovalModeView {
@@ -113,6 +125,7 @@ function getEntry(agentRef: string, chatId: string | null): Entry {
       heldForFirstSend: null,
       persisted: false,
       writing: false,
+      writeEpoch: entry?.scopeGeneration === scopeGeneration ? entry.writeEpoch : 0,
       listeners: entry?.scopeGeneration === scopeGeneration ? entry.listeners : new Set(),
       view: null,
     }
@@ -169,14 +182,21 @@ export function snapshotFromSessionRead(
   }
 }
 
+/** Epoch to capture before a session read. Pass it back when the read lands. */
+export function hostApprovalModeEpoch(agentRef: string, chatId: string | null): number {
+  return getEntry(agentRef, chatId).writeEpoch
+}
+
 export function noteHostApprovalModeFromSession(
   agentRef: string,
   chatId: string,
-  snapshot: SessionApprovalSnapshot
+  snapshot: SessionApprovalSnapshot,
+  readEpoch?: number
 ): void {
   if (!agentRef || !chatId) return
   const entry = getEntry(agentRef, chatId)
   if (entry.writing) return
+  if (readEpoch !== undefined && readEpoch !== entry.writeEpoch) return
   applySnapshot(entry, snapshot)
   notify(entry)
 }
@@ -268,6 +288,7 @@ export async function selectHostApprovalMode(
   }
 
   entry.writing = true
+  entry.writeEpoch += 1
   notify(entry)
   try {
     const result = await transport.setApprovalMode(agentRef, chatId, mode)
@@ -276,6 +297,14 @@ export async function selectHostApprovalMode(
     return true
   } catch (error) {
     if (!current(entry)) return false
+    if (isNotFound(error)) {
+      entry.storedMode = mode
+      entry.effectiveMode = mode
+      entry.heldForFirstSend = mode === 'manual' ? null : mode
+      entry.persisted = false
+      notify(entry)
+      return true
+    }
     if (isDefiniteRejection(error)) return false
     try {
       const read = await transport.readSessionApproval(agentRef, chatId)

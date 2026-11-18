@@ -419,7 +419,7 @@ const HostLifecycleSchema = z
 /**
  * Validate a Host spec before it reaches the K8s API.
  *
- * - `spec.approval`: defensive zod shape check (unchanged behavior).
+ * - `spec.approval`: modeCeiling and per-channel allowModeChange, plus the existing policy fields.
  * - `spec.lifecycle` (stateless agents): optional object carrying a boolean
  *   `stateless`; absent means disabled (the admin facade full-replaces the CR,
  *   so Control UI must echo the full spec it read).

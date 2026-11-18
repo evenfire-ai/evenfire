@@ -784,6 +784,19 @@ describe('approval mode writers at admission', () => {
     }
   })
 
+  it('leaves no session when a first message with a mode carries an unreadable image', async () => {
+    const manager = new ConversationManager()
+    const { admit, spies } = admitWith(manager, OPEN_CEILING, {
+      resolveImageInput: vi.fn(() => ({
+        capability: { state: 'unsupported', evidence: CURATED_SUPPORTED.evidence },
+      })),
+    })
+    const response = await admit(imageMessage({ approvalMode: 'auto' }))
+    expect(response).toMatchObject({ success: false })
+    expect(spies.dispatch).not.toHaveBeenCalled()
+    expect(manager.getStore().listByPrefix('')).toHaveLength(0)
+  })
+
   it('stores auto from a first message that carries only approvalMode', async () => {
     const manager = new ConversationManager()
     const key = serializeSessionKey({
@@ -932,11 +945,13 @@ describe('approval mode writers at admission', () => {
     expect(spies.dispatch).not.toHaveBeenCalled()
     expect(slack).toMatchObject({
       success: true,
-      response: 'Approval mode is manual. Effective mode is manual.',
+      response:
+        'Approval mode is manual. Effective mode is manual. This channel is limited to manual.',
     })
     expect(teams).toMatchObject({
       success: true,
-      response: 'Approval mode is manual. Effective mode is manual.',
+      response:
+        'Approval mode is manual. Effective mode is manual. This channel is limited to manual.',
     })
     expect(
       manager.getSessionByKey(
@@ -980,7 +995,8 @@ describe('approval mode writers at admission', () => {
     )
     expect(spies.dispatch).not.toHaveBeenCalled()
     expect(response).toMatchObject({
-      response: 'Approval mode is manual. Effective mode is manual.',
+      response:
+        'Approval mode is manual. Effective mode is manual. This channel is limited to manual.',
     })
     expect(manager.getSessionByKey(key)?.approval_mode).toBe('manual')
     expect(manager.getSessionByKey(key)?.channel_type).toBeUndefined()

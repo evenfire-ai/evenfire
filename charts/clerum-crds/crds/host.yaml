@@ -259,12 +259,14 @@ spec:
                   # ADDITIVE: a Host with neither field keeps today's manual gate.
                   #
                   # ROLLOUT ORDER — CRD FIRST. apiextensions/v1 silently PRUNES
-                  # unknown fields: if control-api or mcp-host writes
-                  # spec.approval.modeCeiling, or allowModeChange on telegram,
-                  # email or slack, while the OLD CRD is applied, the apiserver
-                  # drops those fields on admission with no error. The reader
-                  # then fails safe to manual. Apply this CRD before any
-                  # component reads or writes them.
+                  # unknown fields: if a client writes spec.approval.modeCeiling,
+                  # or allowModeChange on telegram, email or slack, while the OLD
+                  # CRD is applied, the apiserver drops those fields on admission
+                  # with no error. The reader then fails safe to manual.
+                  # mcp-host's Role is get, watch and list; it does not write
+                  # this object. Apply this CRD before any component reads or
+                  # writes these fields. In auto, tools.http_request: true still
+                  # shows the http_request card.
                   type: object
                   description: >-
                     Tool approval configuration. Controls who can approve tool

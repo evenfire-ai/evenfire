@@ -692,12 +692,8 @@ function resolveTaskModel(
  * triggered a Deployment rollout in HCC, but we re-create here anyway
  * so a soft secretRef change without HCC also picks up correctly).
  */
-async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
+async function openConfigStore(host: HostCRD): Promise<ConfigStore> {
   const provider = host.spec.model?.provider ?? null
-  if (configStore) {
-    configStore.stop()
-    configStore = null
-  }
   const store = new ConfigStore({
     namespace: config.namespace,
     hostRef: host.name,
@@ -710,7 +706,14 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
     fallbackCredentialSlots: fallbackCredentialSlotsFor(currentPolicy),
   })
   await store.start()
+  return store
+}
+
+function installConfigStore(store: ConfigStore, host: HostCRD): void {
+  if (configStore && configStore !== store) configStore.stop()
   configStore = store
+  currentKeys = apiKeysFromConfigStore(store)
+  const provider = host.spec.model?.provider ?? null
 
   // R3.7 — non-disruptive signal: warn (+ metric) if this Host's configured
   // model is not in the operator allowlist. No enforcement here; the hard gate
@@ -767,7 +770,11 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
       logger.info({}, '[Main] LLM provider rebuilt (agent not ready yet, will use on init)')
     }
   })
+}
 
+async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
+  const store = await openConfigStore(host)
+  installConfigStore(store, host)
   return store
 }
 
@@ -1485,6 +1492,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
   // fallback credential slots are loaded. Captured before the await so a newer
   // event can publish its approval policy while this one is still reconciling.
   const prevFallbackSlots = fallbackCredentialSlotsFor(currentPolicy)
+  const stagedStores = new Map<HostCRD, ConfigStore>()
   await applyHostChange(host, {
     gate: hostEventGate,
     publishApproval,
@@ -1504,11 +1512,14 @@ async function onHostChange(host: HostCRD): Promise<void> {
           {},
           '[Main] Rebuilding ConfigStore (provider/secretRef/connectionRef/failover slots changed)'
         )
-        await ensureConfigStore(eventHost)
+        stagedStores.set(eventHost, await openConfigStore(eventHost))
       }
-      currentKeys = apiKeysFromConfigStore(configStore!)
     },
     commitHost: eventHost => {
+      const staged = stagedStores.get(eventHost)
+      stagedStores.delete(eventHost)
+      if (staged) installConfigStore(staged, eventHost)
+      else if (configStore) currentKeys = apiKeysFromConfigStore(configStore)
       currentHost = eventHost
       // R5.10 — only a primary credential-surface change may clear a sticky
       // runtime cooldown. A stale completion does not reach this assignment.
@@ -1542,6 +1553,8 @@ async function onHostChange(host: HostCRD): Promise<void> {
       })
     },
   })
+  for (const abandoned of stagedStores.values()) abandoned.stop()
+  stagedStores.clear()
 }
 
 /**

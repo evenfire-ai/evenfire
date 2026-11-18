@@ -93,5 +93,7 @@ export function effectiveApprovalMode(
  * `approval-mode auto`, or `approval-mode allow-all`. Anything else is not a command.
  */
 export function parseApprovalModeCommand(text: string): ApprovalMode | null {
-  return APPROVAL_MODE_COMMANDS[text.trim().toLowerCase()] ?? null
+  const key = text.trim().toLowerCase()
+  if (!Object.hasOwn(APPROVAL_MODE_COMMANDS, key)) return null
+  return APPROVAL_MODE_COMMANDS[key]
 }

@@ -4,6 +4,7 @@ import {
   type HostApprovalModeTransport,
   type SessionApprovalSnapshot,
   approvalModeForFirstSend,
+  hostApprovalModeEpoch,
   noteHostApprovalModeFromSession,
   readHostApprovalMode,
   resetHostApprovalModeStore,
@@ -77,7 +78,30 @@ describe('hostApprovalModeStore', () => {
     expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
   })
 
-  it.each([400, 401, 404])('a %s keeps the old label without a re-read', async status => {
+  it('a 404 holds the mode for the first send', async () => {
+    const { client, setApprovalMode, readSessionApproval } = transport()
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+    setApprovalMode.mockRejectedValue(new Error('Set approval mode failed (404)'))
+
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')).resolves.toBe(true)
+
+    expect(readSessionApproval).not.toHaveBeenCalled()
+    expect(approvalModeForFirstSend(AGENT, CHAT)).toBe('allow_all')
+    expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Allow all')
+  })
+
+  it('a session read from before a write does not paint the old mode', async () => {
+    const { client, setApprovalMode } = transport()
+    const epoch = hostApprovalModeEpoch(AGENT, CHAT)
+    setApprovalMode.mockResolvedValue(snapshot('allow_all'))
+
+    await selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'), epoch)
+
+    expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
+  })
+
+  it.each([400, 401])('a %s keeps the old label without a re-read', async status => {
     const { client, setApprovalMode, readSessionApproval } = transport()
     noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('auto'))
     expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Auto-approve')

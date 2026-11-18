@@ -199,6 +199,7 @@ function parsePendingApproval(value: unknown, label: string): PendingApprovalLit
     `${label}.alwaysApproveAllowed`
   )
   const shellCard = parseShellCard(record.shellCard)
+  const inputPreview = parseInputPreview(record.inputPreview)
   return {
     requestId: wireString(record.requestId, `${label}.requestId`),
     displayName: wireString(record.displayName, `${label}.displayName`),
@@ -206,7 +207,15 @@ function parsePendingApproval(value: unknown, label: string): PendingApprovalLit
     ...(mcpServerName !== undefined ? { mcpServerName } : {}),
     ...(alwaysApproveAllowed === false ? { alwaysApproveAllowed: false as const } : {}),
     ...(shellCard ? { shellCard } : {}),
+    ...(inputPreview ? { inputPreview } : {}),
   }
+}
+
+function parseInputPreview(value: unknown): { text: string; truncated: boolean } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.text !== 'string' || typeof record.truncated !== 'boolean') return undefined
+  return { text: record.text, truncated: record.truncated }
 }
 
 function parseTokens(value: unknown, label: string): SessionTokensLite | undefined {

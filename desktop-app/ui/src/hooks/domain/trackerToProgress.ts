@@ -41,7 +41,7 @@ export function desktopShellCommandOffered(
   preview: { truncated?: boolean } | undefined
 ): boolean {
   if (!card || card.desktopCommandOffered !== true) return false
-  if (preview?.truncated === true) return false
+  if (!preview || preview.truncated === true) return false
   return true
 }
 

@@ -106,7 +106,8 @@ export function decideApproval(input: {
 
   const tool = toolClass(input.toolName)
   if (tool === 'cron') return manualColumn(input, true)
-  if (input.mode === 'manual') return manualColumn(input, false)
+  // An unknown mode is manual. Falling through would use the auto column.
+  if (input.mode !== 'auto' && input.mode !== 'allow_all') return manualColumn(input, false)
   if (input.mode === 'allow_all') return { kind: 'run', cell: 'X1' }
 
   if (AUTO_EXACT_CAUSES.has(input.cause) || input.cause !== 'ordinary') {

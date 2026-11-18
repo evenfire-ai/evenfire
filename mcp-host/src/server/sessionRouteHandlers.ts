@@ -133,7 +133,10 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
             // rebuild a "Connect <server>" suspension after a cold restart, and
             // alwaysApproveAllowed:false hides "Always approve" exactly when the
             // Host would refuse it. One projection for every view.
-            ...pendingApprovalWireFields(approval),
+            ...pendingApprovalWireFields({
+              ...approval,
+              shellCard: previewApproval?.shellCard,
+            }),
             ...(approval.reason !== 'connect_required' && previewApproval
               ? {
                   inputPreview: projectApprovalInputPreview(

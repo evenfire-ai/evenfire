@@ -24,12 +24,15 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
   )
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [writeError, setWriteError] = useState<string | null>(null)
   const showClassifierNote = effectiveMode === 'auto' && shellClassifierAvailable === false
 
   const choose = (mode: ApprovalMode) => {
     setOpen(false)
     setConfirming(false)
-    void selectMode(mode)
+    void selectMode(mode).then(ok => {
+      setWriteError(ok ? null : 'The approval mode could not be saved.')
+    })
   }
 
   return (
@@ -42,6 +45,11 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
       {showClassifierNote ? (
         <p data-testid="approval-mode-classifier-note" role="note">
           shell always asks on this model
+        </p>
+      ) : null}
+      {writeError ? (
+        <p data-testid="approval-mode-write-error" role="alert">
+          {writeError}
         </p>
       ) : null}
       <button

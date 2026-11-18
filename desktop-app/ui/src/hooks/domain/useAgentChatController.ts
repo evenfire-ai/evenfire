@@ -42,6 +42,7 @@ import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   approvalModeForFirstSend,
   confirmHeldApprovalModeFromSend,
+  hostApprovalModeEpoch,
   migrateHeldApprovalMode,
   noteHostApprovalModeFromSession,
   snapshotFromSessionRead,
@@ -2355,6 +2356,10 @@ export function useAgentChatController({
 
   const reconcileAttachLiveTask = useCallback<ReconcileChatDeps['attachLiveTask']>(
     async (chatKey, resp, snapshotEpoch, stillRelevant) => {
+      const approvalReadEpoch = hostApprovalModeEpoch(
+        parseTaskKey(chatKey).agentRef,
+        parseTaskKey(chatKey).chatId
+      )
       // Staleness guard for the TRACKER (the FSM has R2, the coordinator does not):
       // if a newer local `SEND_STARTED` bumped the epoch since this reconcile's
       // fetch began, the server's `activeTaskId` is stale — calling `attach` would
@@ -2396,7 +2401,12 @@ export function useAgentChatController({
       const approvalSnapshot = snapshotFromSessionRead(resp)
       if (approvalSnapshot) {
         const { agentRef: approvalAgent, chatId: approvalChatId } = parseTaskKey(chatKey)
-        noteHostApprovalModeFromSession(approvalAgent, approvalChatId, approvalSnapshot)
+        noteHostApprovalModeFromSession(
+          approvalAgent,
+          approvalChatId,
+          approvalSnapshot,
+          approvalReadEpoch
+        )
       }
       // reason:'rejoin' → the coordinator consumes the bounded re-rejoin budget
       // (P1-stall guard). Idempotent when the same task is already attached.

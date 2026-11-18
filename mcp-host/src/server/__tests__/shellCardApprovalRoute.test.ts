@@ -290,9 +290,8 @@ describe('shell card approval route', () => {
         expect.objectContaining({ approved: true, alwaysApprove: false, shellAction: action })
       )
       expect(executeSingleTool).toHaveBeenCalledTimes(1)
-      expect(executeSingleTool).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'shell_exec', arguments: { command: COMMAND } }),
-        expect.anything()
+      expect(vi.mocked(executeSingleTool).mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({ name: 'shell_exec', arguments: { command: COMMAND } })
       )
       const grants = conversationFor(task).auto_shell_grants
       expect(grants.wholeTool).toBe(action === 'shell')
@@ -553,6 +552,26 @@ describe('shell card approval route', () => {
     expect(executeSingleTool).not.toHaveBeenCalled()
   })
 
+  it('Always on a waiting manual HTTP card stores nothing while the effective mode is auto', async () => {
+    const task = taskFor('rpc', 'host-1')
+    expect(
+      await suspend(
+        task,
+        card('req-http-auto', 'http_request', { url: 'https://example.test/auto' })
+      )
+    ).toBe(true)
+    const conv = conversationFor(task)
+    conv.approval_mode = 'auto'
+    const live = policy('allow_all', true)
+    agent.setApprovalConfig(live, live)
+
+    await answerAndRun(task, { requestId: 'req-http-auto', alwaysApprove: true }, 'desktop')
+
+    expect(executeSingleTool).toHaveBeenCalledTimes(1)
+    expect(conv.auto_approved_tools).toEqual(new Set())
+    expect(conv.task_approved_tools ?? new Set()).toEqual(new Set())
+  })
+
   it('Always on a waiting manual HTTP card stores nothing after the mode is allow_all', async () => {
     const task = taskFor('rpc', 'host-1')
     expect(
@@ -566,9 +585,8 @@ describe('shell card approval route', () => {
     await answerAndRun(task, { requestId: 'req-http', alwaysApprove: true }, 'desktop')
 
     expect(executeSingleTool).toHaveBeenCalledTimes(1)
-    expect(executeSingleTool).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'http_request' }),
-      expect.anything()
+    expect(vi.mocked(executeSingleTool).mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ name: 'http_request' })
     )
     expect(conv.auto_approved_tools).toEqual(new Set())
     expect(conv.task_approved_tools ?? new Set()).toEqual(new Set())

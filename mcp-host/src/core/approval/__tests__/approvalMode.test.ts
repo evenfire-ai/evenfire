@@ -53,5 +53,7 @@ describe('approval mode readers', () => {
     expect(readChannelCap(snap({}), 'rpc')).toBe('allow_all')
     expect(parseApprovalModeCommand('  Approval-Mode allow-all ')).toBe('allow_all')
     expect(parseApprovalModeCommand('please approval-mode auto')).toBeNull()
+    expect(parseApprovalModeCommand('constructor')).toBeNull()
+    expect(parseApprovalModeCommand('__proto__')).toBeNull()
   })
 })

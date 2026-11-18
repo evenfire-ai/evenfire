@@ -3,6 +3,7 @@ import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import { byUpdatedDesc, mergeByUpdatedDesc, mergeCatalogPage } from '@lib/catalogMerge'
 import { agentChatPlaceholder, remotePlaceholder } from '@lib/chatTitle'
 import {
+  hostApprovalModeEpoch,
   noteHostApprovalModeFromSession,
   snapshotFromSessionRead,
 } from '@lib/hostApprovalModeStore'
@@ -38,11 +39,12 @@ function noteCatalogApprovalModes(
     channelCap?: unknown
     effectiveApprovalMode?: unknown
     shellClassifierAvailable?: unknown
-  }[]
+  }[],
+  readEpoch: number
 ): void {
   for (const session of sessions) {
     const approval = snapshotFromSessionRead(session)
-    if (approval) noteHostApprovalModeFromSession(agentRef, session.chatId, approval)
+    if (approval) noteHostApprovalModeFromSession(agentRef, session.chatId, approval, readEpoch)
   }
 }
 
@@ -635,6 +637,7 @@ export function useChatListController({
       const suppressionMarkerAtRequest = suppressAutoSelectionByAgentRef.current.get(agentRef)
       scheduleAfterFirstPaint(async () => {
         let serverResult: IssuedCatalogPage
+        const approvalReadEpoch = hostApprovalModeEpoch(agentRef, null)
         try {
           serverResult = await readSessionCatalog(chatStore, agentRef, {
             agent: agentRef,
@@ -691,7 +694,7 @@ export function useChatListController({
         // for badges via SERVER_SNAPSHOT (D4 / §4.1 R2 owns "never degrade a live
         // task").
         seedSessionSnapshots(fsm, agentRef, serverSessions)
-        noteCatalogApprovalModes(agentRef, serverSessions)
+        noteCatalogApprovalModes(agentRef, serverSessions, approvalReadEpoch)
 
         // Chats the server knows but the local cache doesn't (e.g. created on
         // another device). Post-§7.1 wipe these are normal entries — no
@@ -793,6 +796,7 @@ export function useChatListController({
     const authorityScopeAtRequest = currentAuthorityScopeRef.current
     const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
     setChatListMoreLoading(true)
+    const approvalReadEpoch = hostApprovalModeEpoch(agentRef, null)
     try {
       let serverResult: IssuedCatalogPage
       try {
@@ -870,7 +874,7 @@ export function useChatListController({
       chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
       setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
       seedSessionSnapshots(fsm, agentRef, serverSessions)
-      noteCatalogApprovalModes(agentRef, serverSessions)
+      noteCatalogApprovalModes(agentRef, serverSessions, approvalReadEpoch)
       setChatList(previous => {
         // The hold is a read-time mask; keep the prior catalog for recovery.
         if (isHostAccessBlocked(agentRef)) return previous
@@ -1740,6 +1744,7 @@ export function useChatListController({
             let serverSessions: SessionsListResult['items'] = []
             // Undefined when the read failed: no page, so no request time.
             let issueSeq: number | undefined
+            const approvalReadEpoch = hostApprovalModeEpoch(agentRef, null)
             try {
               const serverResult = await readSessionCatalog(chatStore, agentRef, {
                 agent: agentRef,
@@ -1771,7 +1776,7 @@ export function useChatListController({
               )
               .map(session => ({ ...session, agentRef }))
             seedSessionSnapshots(fsm, agentRef, sessions)
-            noteCatalogApprovalModes(agentRef, sessions)
+            noteCatalogApprovalModes(agentRef, sessions, approvalReadEpoch)
             // Hardening: tombstones are read again inside the updater. The filter
             // above already dropped them from `sessions`, and no test deletes a
             // chat between that filter and this updater.

@@ -125,8 +125,13 @@ function carriedApprovalMode(message: IncomingMessage): ApprovalMode | undefined
   return undefined
 }
 
-function approvalModeReply(stored: ApprovalMode, effective: ApprovalMode): string {
-  return `Approval mode is ${stored}. Effective mode is ${effective}.`
+function approvalModeReply(
+  stored: ApprovalMode,
+  effective: ApprovalMode,
+  limitedToManual: boolean
+): string {
+  const base = `Approval mode is ${stored}. Effective mode is ${effective}.`
+  return limitedToManual ? `${base} This channel is limited to manual.` : base
 }
 
 function approvalModeStoreFailure(provider: string | undefined): MessageResponse {
@@ -310,12 +315,13 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             source: normalizedMessage.channelType,
           })
           const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
+          const cap = readChannelCap(live, conversation.channel_type)
           const stored = await manager.setApprovalMode(
             conversation,
             command,
             {
               ceiling: readModeCeiling(live),
-              cap: readChannelCap(live, conversation.channel_type),
+              cap,
             },
             'command',
             normalizedMessage.sender
@@ -323,7 +329,11 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           return {
             success: true,
             status: 'completed' as const,
-            response: approvalModeReply(stored.approvalMode, stored.effectiveApprovalMode),
+            response: approvalModeReply(
+              stored.approvalMode,
+              stored.effectiveApprovalMode,
+              command !== 'manual' && cap !== 'allow_all'
+            ),
           }
         } catch (err) {
           logger.warn({ err }, 'Approval mode command could not be stored')
@@ -636,6 +646,12 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       }
 
       if (carried) {
+        // Refuse an unreadable image before the mode write, so a refused
+        // first message does not leave a session.
+        if (hasImageAttachments) {
+          const admission = admitImageModel(deps.resolveTaskModel(undefined))
+          if (!admission.ok) return admission.response
+        }
         return (async () => {
           const modeResult = await applyFirstMessageMode()
           if (modeResult) return modeResult

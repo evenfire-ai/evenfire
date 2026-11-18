@@ -1105,6 +1105,8 @@ export interface PendingApprovalLite {
   alwaysApproveAllowed?: false
   /** Auto shell card. Absent on a restarted card and on every non-shell card. */
   shellCard?: ShellCardDescriptor
+  /** Desktop command preview. Absent means the command was not shown. */
+  inputPreview?: { text: string; truncated: boolean }
 }
 
 /**

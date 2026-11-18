@@ -76,6 +76,15 @@ function parametersOfJsonLength(length: number): Record<string, unknown> {
 }
 
 describe('decideApproval', () => {
+  it('treats an unknown mode as manual', () => {
+    const decision = decide({
+      mode: 'yolo' as ApprovalMode,
+      toolName: HTTP,
+      cause: 'ordinary',
+    })
+    expect(decision).toMatchObject({ kind: 'card', cell: 'M1' })
+  })
+
   it.each(MODES.flatMap(mode => [SHELL, HTTP, CRON, OTHER].map(toolName => ({ mode, toolName }))))(
     'N1 $mode $toolName runs when the cause is none',
     ({ mode, toolName }) => {
