@@ -33,16 +33,16 @@ const PERMISSION_TO_SCOPE: Record<GfsPermission, GfsScope> = {
   share: "gfs.share",
 };
 
-export type CeilingReason =
-  | "ok"
+export type CeilingDenyReason =
   | "scope_not_in_token"
   | "no_path_binding_covers"
   | "resource_path_unknown";
 
-export interface CeilingResult {
-  allowed: boolean;
-  reason: CeilingReason;
-}
+export type CeilingReason = "ok" | CeilingDenyReason;
+
+export type CeilingResult =
+  | { allowed: true; reason: "ok" }
+  | { allowed: false; reason: CeilingDenyReason };
 
 export interface CeilingInput {
   scopes: GfsScope[];
