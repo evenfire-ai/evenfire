@@ -139,8 +139,9 @@ export function GfsImagePreview({
           </>
         ) : (
           <GfsImagePreviewBody
-            key={`${gfsUri}:${reloadVersion ?? 0}`}
+            key={gfsUri}
             byteLength={byteLength}
+            contentVersion={reloadVersion}
             fileName={fileName}
             gfsUri={gfsUri}
             dataBase64={dataBase64}

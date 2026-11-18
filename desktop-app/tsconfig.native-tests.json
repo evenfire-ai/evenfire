@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    // testSupport/gfsWatch/fakeWatchServer imports control-api's gfsWatch/keys.ts, which pulls in control-api/src; control-api does not compile under this rule.
+    "noUncheckedIndexedAccess": false
+  },
+  "include": ["test/native/*.ts"],
+  "exclude": []
+}

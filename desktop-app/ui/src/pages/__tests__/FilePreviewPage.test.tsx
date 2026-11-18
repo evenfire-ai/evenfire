@@ -13,8 +13,9 @@ import {
 } from '@testing-library/react'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
-import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
+import { useGfsWatchSubscription } from '@hooks/domain/useGfsWatchSubscription'
 import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { GfsWatchEventSource } from '@/gfs/__fixtures__/gfsWatchEvents'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
 
@@ -1291,14 +1292,23 @@ describe('FilePreviewPage', () => {
     expect(downloadPreview).toHaveBeenCalledTimes(1)
   })
 
-  it('purges image bytes and its object URL on session expiry through the entity registry', async () => {
+  it('purges image bytes and its object URL on a watch session expiry', async () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller())
     stubDownload(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
-    const registry = new EntityChangeRegistry()
+    const source = await new GfsWatchEventSource().start()
+    const watch = source.connectRenderer()
+    Object.assign(window.clerum, { gfsWatch: watch.bridge })
 
     function SessionAwarePreview() {
       const [unavailable, setUnavailable] = useState(false)
-      useEffect(() => registry.subscribe(['gfs', 'authorization'], () => setUnavailable(true)), [])
+      useGfsWatchSubscription({
+        keys: [],
+        userId: null,
+        sessionKey: 'session',
+        onEvent: event => {
+          if (event.type === 'sessionExpired') setUnavailable(true)
+        },
+      })
       return (
         <FilePreviewPage
           gfsUri="gfs://main/session-expired"
@@ -1314,18 +1324,15 @@ describe('FilePreviewPage', () => {
     render(<SessionAwarePreview />)
     expect(await screen.findByAltText('Preview of session-secret.png')).toBeTruthy()
 
-    act(() =>
-      registry.dispatch({
-        type: 'stream.closing',
-        schemaVersion: 1,
-        cursor: '00000000-0000-0000-0000-000000000001',
-        reason: 'session_expired',
-      })
-    )
+    await waitFor(() => expect(watch.opens).toBe(1))
+    await act(async () => {
+      await source.sessionExpired()
+    })
 
     expect(await screen.findByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
     expect(screen.queryByAltText('Preview of session-secret.png')).toBeNull()
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:gfs-preview')
+    await source.stop()
   })
 
   // R1-H6: a persistent preview tab outlives the grant that opened it. A
