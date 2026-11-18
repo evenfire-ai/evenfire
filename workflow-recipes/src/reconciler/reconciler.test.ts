@@ -184,7 +184,10 @@ function mergeStatusPatch(
  * Issue #1349 — a one-recipe CR store: the status patch merges into it and
  * GET answers from it, so pass 2 of a test reads what pass 1 stored. A JSON
  * Patch status body (an array) is applied atomically with `applyJsonPatch`; an
- * operation that does not apply throws `{ code: 422 }` and stores nothing. `prune`
+ * operation that does not apply throws a 422 whose body is the API server's
+ * generic `Status` ("the server rejected our request due to an error in our
+ * request", reason `Invalid`, the patch error in `details.causes[0].message`)
+ * and stores nothing. `prune`
  * drops status keys as an API server with an older CRD does; a dotted key
  * (`terminalRunTeardown.noSecretBearingWorkloads`) drops one field of a record.
  * `onGet` is called with a copy of the stored recipe on every GET of it: it
@@ -212,12 +215,24 @@ function installRecipeStore(
     if (Array.isArray(body)) {
       // A JSON Patch on the status subresource: applied atomically to the stored
       // object; an operation that does not apply (a failed `test`, a missing
-      // parent) is a 422, as from the API server, and stores nothing.
+      // parent) is a 422 with the API server's generic body, and stores nothing.
       let patched: { status?: Record<string, unknown> }
       try {
         patched = applyJsonPatch({ status: structuredClone(live.status ?? {}) }, body)
       } catch (error) {
-        throw { code: 422, message: (error as Error).message }
+        throw {
+          code: 422,
+          body: {
+            kind: 'Status',
+            status: 'Failure',
+            reason: 'Invalid',
+            code: 422,
+            message: 'the server rejected our request due to an error in our request',
+            details: {
+              causes: [{ reason: 'UnexpectedServerResponse', message: (error as Error).message }],
+            },
+          },
+        }
       }
       const status = patched.status ?? {}
       for (const key of options.prune ?? []) {
@@ -628,6 +643,11 @@ function jsonPatchOpAt(body: unknown, path: string): JsonPatchOperation | undefi
 }
 
 const NO_SECRET_BEARING_FACT_PATH = '/status/terminalRunTeardown/noSecretBearingWorkloads'
+/** The `error` line of a status record (or the terminal fact) that was not stored. */
+const RECORD_NOT_STORED_ERROR = 'Run status record was not stored; requeueing'
+/** R2-L4 — the `warn` line of a fact patch the API server did not apply. */
+const FACT_NOT_APPLIED_WARNING =
+  'Terminal teardown record changed since it was read; the fact was not added; requeueing'
 
 /**
  * The bodies of the status patches that write the terminal
@@ -16813,13 +16833,13 @@ describe('WorkflowRecipeReconciler', () => {
         } as WorkflowRecipeCRD['status']
         const store = installRecipeStore(live)
         mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
-        const errorLog = captureLogger('error')
+        const logs = captureLoggerLevels(['warn', 'error'] as const)
 
         const result = await reconciler.reconcile(stale)
-        const notStored = errorLog.mock.calls.find(
-          ([message]) => message === 'Run status record was not stored; requeueing'
+        logs.restore()
+        const notApplied = logs.calls.warn.mock.calls.find(
+          ([message]) => message === FACT_NOT_APPLIED_WARNING
         )
-        errorLog.mockRestore()
 
         // Witness: the pass sent the fact, guarded by the completedAt it holds.
         expect(noSecretBearingFactWrites()).toEqual([
@@ -16834,14 +16854,78 @@ describe('WorkflowRecipeReconciler', () => {
         ])
         // The API server refused it: nothing was stored, the pass is retried.
         expect(store.current().status?.terminalRunTeardown).toEqual(row.storedRecord)
-        expect(notStored).toBeDefined()
-        expect((notStored![1] as { err: { code?: number } }).err.code).toBe(422)
+        // R2-L4 — the patch the API server did not apply is a stale read,
+        // logged at warn; the warn entry is the witness for the negative.
+        expect(notApplied).toBeDefined()
+        expect((notApplied![1] as { err: { code?: number } }).err.code).toBe(422)
+        expect(
+          logs.calls.error.mock.calls.filter(([message]) => message === RECORD_NOT_STORED_ERROR)
+        ).toEqual([])
         expect(stale.status?.terminalRunTeardown).not.toHaveProperty('noSecretBearingWorkloads')
         expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
       })
     }
 
-    it('a fact the API server pruned (older CRD) is not reported as stored (issue #1349, T1.8 L-1)', async () => {
+    // R2-L4 — a failure other than the unapplied patch stays an error.
+    for (const row of [
+      {
+        id: 'T-L4-2',
+        label: 'a 422 with a validation message',
+        error: {
+          code: 422,
+          body: {
+            reason: 'Invalid',
+            message:
+              'WorkflowRecipe.clerum.io "wf-run" is invalid: status.terminalRunTeardown.completedAt: Required value',
+          },
+        },
+      },
+      { id: 'T-L4-3', label: 'a 503', error: { code: 503 } },
+    ]) {
+      it(`${row.id}: a fact patch rejected with ${row.label} is logged as an error, not as a stale read (issue #1349)`, async () => {
+        stubWorkflowReconciler()
+        const store = installRecipeStore(
+          secretBearingTerminalRun('wf-run-fact-rejected', 'parent-recipe')
+        )
+        const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async args => {
+          if (
+            Array.isArray(args.body) &&
+            args.body.some((op: { path?: string }) => op.path === NO_SECRET_BEARING_FACT_PATH)
+          ) {
+            throw row.error
+          }
+          return storePatch(args)
+        })
+        const logs = captureLoggerLevels(['warn', 'error'] as const)
+        const recipe = store.current()
+
+        const result = await reconciler.reconcile(recipe)
+        logs.restore()
+
+        // Witness: the fact was sent, and the error entry carries its rejection.
+        expect(noSecretBearingFactWrites()).toHaveLength(1)
+        const notStored = logs.calls.error.mock.calls.find(
+          ([message]) => message === RECORD_NOT_STORED_ERROR
+        )
+        expect(notStored).toBeDefined()
+        expect((notStored![1] as { err: unknown }).err).toBe(row.error)
+        expect(
+          logs.calls.warn.mock.calls.filter(([message]) => message === FACT_NOT_APPLIED_WARNING)
+        ).toEqual([])
+        expect(recipe.status?.terminalRunTeardown).not.toHaveProperty('noSecretBearingWorkloads')
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      })
+    }
+
+    // Hypothetical shape: a CRD that declares terminalRunTeardown.completedAt but
+    // not noSecretBearingWorkloads. No CRD revision has it: both fields were added
+    // together, and a real older CRD drops the whole object, so publishStatusRecord
+    // fails first (see 'a record the API server pruned (older CRD) is not reported
+    // as stored'). This test pins the read-back check of
+    // publishNoSecretBearingWorkloads: a 200 answer without the fact is not
+    // reported as stored, and it is logged at error, not as the unapplied patch.
+    it('a fact missing from the patch answer (hypothetical CRD without the field) is not reported as stored (issue #1349, T1.8 L-1)', async () => {
       stubWorkflowReconciler()
       const store = installRecipeStore(
         secretBearingTerminalRun('wf-run-fact-pruned', 'parent-recipe'),
@@ -16849,21 +16933,25 @@ describe('WorkflowRecipeReconciler', () => {
           prune: ['terminalRunTeardown.noSecretBearingWorkloads'],
         }
       )
-      const errorLog = captureLogger('error')
+      const logs = captureLoggerLevels(['warn', 'error'] as const)
       const recipe = store.current()
 
       const result = await reconciler.reconcile(recipe)
-      errorLog.mockRestore()
+      logs.restore()
 
       // Witness: the fact was sent.
       expect(noSecretBearingFactWrites()).toHaveLength(1)
-      const notStored = errorLog.mock.calls.find(
-        ([message]) => message === 'Run status record was not stored; requeueing'
+      const notStored = logs.calls.error.mock.calls.find(
+        ([message]) => message === RECORD_NOT_STORED_ERROR
       )
       expect(notStored).toBeDefined()
       expect(String((notStored![1] as { err: Error }).err.message)).toContain(
         'terminalRunTeardown.noSecretBearingWorkloads'
       )
+      // The error entry above is the witness for this negative.
+      expect(
+        logs.calls.warn.mock.calls.filter(([message]) => message === FACT_NOT_APPLIED_WARNING)
+      ).toEqual([])
       expect(recipe.status?.terminalRunTeardown?.completedAt).toEqual(expect.any(String))
       expect(recipe.status?.terminalRunTeardown).not.toHaveProperty('noSecretBearingWorkloads')
       expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)

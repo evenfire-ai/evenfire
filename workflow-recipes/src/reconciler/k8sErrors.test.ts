@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { getErrorCode, isRetryableInfraError } from './k8sErrors'
+import { ApiException } from '@kubernetes/client-node'
+import { getErrorCode, isJsonPatchNotApplied, isRetryableInfraError } from './k8sErrors'
 
 describe('getErrorCode', () => {
   it('reads top-level numeric code', () => {
@@ -147,5 +148,59 @@ describe('isRetryableInfraError', () => {
     // Error-class prefix form (e.g. `console.error(err)` → `Error: …`).
     expect(isRetryableInfraError('Error: socket hang up')).toBe(true)
     expect(isRetryableInfraError('FetchError: request failed, reason: network timeout')).toBe(true)
+  })
+})
+
+describe('isJsonPatchNotApplied (T-L4-4)', () => {
+  const rejection = 'the server rejected our request due to an error in our request'
+  const generic422Body = {
+    kind: 'Status',
+    status: 'Failure',
+    reason: 'Invalid',
+    code: 422,
+    message: rejection,
+    details: { causes: [{ reason: 'UnexpectedServerResponse', message: 'test failed' }] },
+  }
+
+  it('matches the generic 422 the API server answers for a JSON Patch that does not apply', () => {
+    // The body parsed as an object: the sentence is in body.message.
+    expect(isJsonPatchNotApplied({ code: 422, body: generic422Body })).toBe(true)
+    expect(
+      isJsonPatchNotApplied(new ApiException(422, 'Unknown API Status Code!', generic422Body, {}))
+    ).toBe(true)
+    // The body left as a string: the sentence is only in the client's message
+    // (`HTTP-Code: 422\nMessage: …\nBody: …`).
+    const stringBody = new ApiException(
+      422,
+      'Unknown API Status Code!',
+      JSON.stringify(generic422Body),
+      {}
+    )
+    expect(typeof stringBody.body).toBe('string')
+    expect(stringBody.message).toContain(rejection)
+    expect(isJsonPatchNotApplied(stringBody)).toBe(true)
+  })
+
+  it('does not match a 422 with a validation message, an empty 422, other codes or a plain Error', () => {
+    expect(
+      isJsonPatchNotApplied({
+        code: 422,
+        body: {
+          reason: 'Invalid',
+          message:
+            'WorkflowRecipe.clerum.io "wf-run" is invalid: status.terminalRunTeardown.completedAt: Required value',
+        },
+      })
+    ).toBe(false)
+    expect(isJsonPatchNotApplied({ code: 422 })).toBe(false)
+    expect(isJsonPatchNotApplied({ code: 422, body: { message: '' } })).toBe(false)
+    expect(isJsonPatchNotApplied({ code: 409, body: { message: rejection } })).toBe(false)
+    expect(isJsonPatchNotApplied({ code: 404, body: { message: rejection } })).toBe(false)
+    expect(isJsonPatchNotApplied({ code: 500, body: { message: rejection } })).toBe(false)
+    expect(isJsonPatchNotApplied(new Error(rejection))).toBe(false)
+    // A recipe name holding "test" is not the signal.
+    expect(
+      isJsonPatchNotApplied({ code: 422, body: { message: 'WorkflowRecipe "test" is invalid' } })
+    ).toBe(false)
   })
 })

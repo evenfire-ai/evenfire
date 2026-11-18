@@ -107,6 +107,7 @@ import {
   ResourceVanishedAfterConflictError,
   RetryableReconcileError,
   getErrorCode,
+  isJsonPatchNotApplied,
   isRetryableInfraError,
 } from './k8sErrors'
 import { canonicalKubernetesQuantity } from './kubernetesQuantity'
@@ -8105,7 +8106,9 @@ export class WorkflowRecipeReconciler {
    *
    * Returns `true` only when the fact is stored; the in-memory status is updated
    * only then. A failure is logged here and never thrown, as in
-   * {@link publishStatusRecord}: the caller asks for a requeue.
+   * {@link publishStatusRecord}: the caller asks for a requeue. A patch the API
+   * server did not apply is logged at warn ({@link isJsonPatchNotApplied}); any
+   * other failure at error.
    */
   private async publishNoSecretBearingWorkloads(
     recipe: WorkflowRecipeCRD,
@@ -8138,10 +8141,21 @@ export class WorkflowRecipeReconciler {
         throw new StatusRecordPrunedError('terminalRunTeardown.noSecretBearingWorkloads')
       }
     } catch (error) {
-      createLogger('wrc', recipe.metadata.name).error(
-        'Run status record was not stored; requeueing',
-        { name: recipe.metadata.name, value2: 'terminalRunTeardown', err: error }
-      )
+      // R2-L4 — the patch the API server did not apply means the record was
+      // removed or rewritten since this pass read it: a stale read, not a fault.
+      // Every other failure (a schema 422, a server or transport error, the
+      // read-back check above) stays an error. Both requeue.
+      if (isJsonPatchNotApplied(error)) {
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Terminal teardown record changed since it was read; the fact was not added; requeueing',
+          { name: recipe.metadata.name, value2: 'terminalRunTeardown', err: error }
+        )
+      } else {
+        createLogger('wrc', recipe.metadata.name).error(
+          'Run status record was not stored; requeueing',
+          { name: recipe.metadata.name, value2: 'terminalRunTeardown', err: error }
+        )
+      }
       return false
     }
     const status = recipe.status as WorkflowRecipeStatus
