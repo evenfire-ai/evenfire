@@ -87,6 +87,7 @@ export {
   AgentGrantPreconditionError,
   getTeamAgents,
   getUserAgents,
+  getUserReachableAgents,
   listTeamAgentsByTeam,
   listTeamsByAgent,
   listUsersByAgent,

@@ -1,6 +1,7 @@
 import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { type McpHostControlClaims, isHccControlLineage } from '../../utils/auth/mcpHostJwtToken.js'
+import { isCanonicalUuid } from '../../utils/canonicalUuid.js'
 import { isK8sResourceNotFound } from './mcpInvocable.js'
 
 /**
@@ -20,14 +21,9 @@ export function isValidK8sName(name: string): boolean {
   return name.length > 0 && name.length <= 253 && K8S_NAME_RE.test(name)
 }
 
-// Stricter than Postgres' `::uuid` cast (which also accepts braces and no
-// hyphens): anything that passes here is guaranteed to cast, so a channel
-// provider id or a test sender is a definitive denial, never a DB error.
-const CANONICAL_UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
-export function isCanonicalUuid(value: string): boolean {
-  return CANONICAL_UUID_RE.test(value)
-}
+// Stricter than Postgres' `::uuid` cast; see utils/canonicalUuid.ts. Re-exported
+// so existing importers keep resolving it from here.
+export { isCanonicalUuid }
 
 export type CallerLineage =
   | { kind: 'ok'; hostName: string; hostUid: string }
