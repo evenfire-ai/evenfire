@@ -326,8 +326,11 @@ describe('ModelSelector', () => {
     expect(
       screen.getByRole('menuitemradio', { name: /GPT-5\.3/ }).getAttribute('aria-checked')
     ).toBe('false')
-    // The check mark is the only marker: the default row carries no "default" label.
+    // The check mark is the only marker: the default row carries no label of
+    // any kind. The exact text catches a tag reintroduced under any class or
+    // wording, which a `queryByText('default')` alone would miss.
     expect(screen.queryByText('default')).toBeNull()
+    expect(screen.getByRole('menuitemradio', { name: /GPT-5\.5/ }).textContent).toBe('GPT-5.5')
   })
 
   it('names a broker Host default that the catalog does not list', async () => {
