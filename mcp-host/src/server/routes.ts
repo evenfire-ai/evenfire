@@ -56,8 +56,6 @@ import { decodeSessionsCursor, sessionsCursorScope } from './wireProjections'
 const MAX_PENDING_ACTIVITY_STREAM_EVENTS = 64
 
 export type RouteHandlers = {
-  directServiceAdmission?: () => { allowed: true } | { allowed: false; retryAfterSeconds: number }
-  afterDirectMessageAdmission?: (req: Request, res: Response) => boolean
   messageHandler: MessageHandler | null
   statusHandler: StatusHandler | null
   approvalHandler: ApprovalHandler | null
@@ -84,39 +82,6 @@ export type RouteHandlers = {
   modelsListHandler?: ModelsListHandler | null
   setModelHandler?: SetModelHandler | null
   setTitleHandler?: SetTitleHandler | null
-}
-
-/**
- * Charges every direct trusted service-plane route except the timer-driven
- * reads and their acknowledgements (cron results and cron result ack,
- * notification claim and its ack/fail, task result) and the progress stream of
- * an accepted task. The charged callers are `channel-reader` and
- * `workflow-approval-request-reader`. RPC Proxy ingress is not charged here;
- * Control API's Host-message and Host-RPC admission are charged only in its V2
- * action checkpoint route, so with V2 off they do not apply to RPC Proxy
- * ingress either. The outer runtimeEdgeGuard has already authenticated/accepted
- * this caller.
- */
-function admitDirectServiceRequest(req: Request, res: Response, handlers: RouteHandlers): boolean {
-  const caller = getRuntimeCallerContext(req)?.caller
-  if (caller === 'rpc-proxy') return true
-  if (caller !== 'channel-reader' && caller !== 'workflow-approval-request-reader') return true
-
-  const result = handlers.directServiceAdmission?.()
-  if (!result || result.allowed) return true
-
-  const retryAfterSeconds = Math.max(1, Math.min(60, Math.floor(result.retryAfterSeconds)))
-  res.setHeader('Retry-After', String(retryAfterSeconds))
-  res.setHeader('Cache-Control', 'no-store')
-  logger.warn(
-    { event: 'runtime_direct_service_admission_denied' },
-    'direct trusted service runtime admission limit reached'
-  )
-  json(res, 429, {
-    error: 'runtime_service_admission_limited',
-    retryAfterSeconds,
-  })
-  return false
 }
 
 function isSessionOwnershipError(error: unknown): boolean {
@@ -481,15 +446,6 @@ export async function handleMessageRoute(
     message.fileReferences = fileReferences.references.length
       ? fileReferences.references
       : undefined
-
-    if (!admitDirectServiceRequest(req, res, handlers)) return
-    if (
-      getRuntimeCallerContext(req)?.caller !== 'rpc-proxy' &&
-      handlers.afterDirectMessageAdmission &&
-      !handlers.afterDirectMessageAdmission(req, res)
-    ) {
-      return
-    }
 
     logger.info(
       { channelType: message.channelType, sender: message.sender },
@@ -880,8 +836,6 @@ export async function handleApprovalRoute(
       }
     }
 
-    if (!admitDirectServiceRequest(req, res, handlers)) return
-
     const decision: ApprovalDecision = {
       userId,
       requestId: validatedRequestId,
@@ -986,7 +940,6 @@ export async function handleProviderMessageAuthorizationRoute(
       json(res, 403, { authorized: false, error: 'Runtime edge source mismatch' })
       return
     }
-    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.providerMessageAuthorizationHandler({
       providerIdentity: parsed.providerIdentity,
     })
@@ -1039,8 +992,6 @@ export async function handleProviderWorkflowApprovalDecisionRoute(
       return
     }
 
-    if (!admitDirectServiceRequest(req, res, handlers)) return
-
     const result = await handlers.providerWorkflowApprovalDecisionHandler({
       approvalRequestId,
       decision: parsed.decision,
@@ -1088,8 +1039,6 @@ export async function handleProviderWorkflowApprovalResolveRoute(
       json(res, 403, { error: 'Runtime edge source mismatch' })
       return
     }
-
-    if (!admitDirectServiceRequest(req, res, handlers)) return
 
     const result = await handlers.providerWorkflowApprovalResolveHandler({
       recipeName,
@@ -1197,8 +1146,6 @@ export async function handleProviderWorkflowResultRequestRoute(
       return
     }
 
-    if (!admitDirectServiceRequest(req, res, handlers)) return
-
     const result = await handlers.providerWorkflowResultRequestHandler(
       {
         ...(workflowName ? { workflowName } : {}),
@@ -1290,13 +1237,12 @@ export async function handleWorkflowApprovalNotificationClaimRoute(
       return
     }
     const limit = Number(body.limit ?? 10)
-    const claimLimit = Number.isFinite(limit) ? Math.max(1, Math.min(50, Math.floor(limit))) : 10
     const result = await handlers.workflowApprovalNotificationClaimHandler({
       medium,
       providerChannelIds,
       providerWorkspaceId: nullableString(body.providerWorkspaceId),
       hostRef,
-      limit: claimLimit,
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(50, Math.floor(limit))) : 10,
     })
     if ('error' in result) {
       json(res, 502, { deliveries: [], error: result.error })
@@ -1399,7 +1345,6 @@ export async function handleWorkflowApprovalMediumEnrollmentRoute(
       json(res, 403, { error: 'Runtime edge source mismatch' })
       return
     }
-    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.workflowApprovalMediumEnrollmentHandler({
       nonce,
       medium,
@@ -1457,7 +1402,6 @@ export async function handleTelegramWorkflowApprovalVerificationRoute(
       json(res, 403, { error: 'Runtime edge source mismatch' })
       return
     }
-    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.telegramWorkflowApprovalVerificationHandler({
       code,
       providerUserId,
