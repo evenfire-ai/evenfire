@@ -367,15 +367,16 @@ describe('ModelSelector', () => {
     expect(chip.textContent).toBe('gpt-5.5')
   })
 
-  it('defensive guard: shows "Select model" if a broker-backed Host reports an empty model', async () => {
-    // Only reachable for a Host written outside control-api with an empty
-    // `spec.model.name`: the Host forwards it as `hostDefault: ''`.
-    await setHookFromStore(
-      baseData({ provider: 'codex-subscription', hostDefault: '', sessionModel: null })
-    )
-    renderSelector()
-    expect(screen.getByRole('button', { name: /Model — Select model/ })).toBeTruthy()
-  })
+  it.each(['codex-subscription', 'grok-subscription'])(
+    'defensive guard: shows "Select model" if a %s Host reports an empty model',
+    async provider => {
+      // Only reachable for a Host written outside control-api with an empty
+      // `spec.model.name`: the Host forwards it as `hostDefault: ''`.
+      await setHookFromStore(baseData({ provider, hostDefault: '', sessionModel: null }))
+      renderSelector()
+      expect(screen.getByRole('button', { name: /Model — Select model/ })).toBeTruthy()
+    }
+  )
 
   it('hides stale and disabled Codex models from new picks, keeping a saved selection', () => {
     setHook({
