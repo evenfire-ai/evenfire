@@ -460,6 +460,57 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(restInvariantViolations(b, [conn])).toEqual([])
   })
 
+  async function metricBy(
+    metric: { get(): Promise<{ values: { labels: Record<string, unknown>; value: number }[] }> },
+    label: string
+  ): Promise<Record<string, number>> {
+    const out: Record<string, number> = {}
+    for (const v of (await metric.get()).values)
+      out[String(v.labels[label])] = (out[String(v.labels[label])] ?? 0) + v.value
+    return out
+  }
+
+  it('counts dropped commands by reason, frames by type, admitted streams and disconnects', async () => {
+    b = await h.build()
+    const m = h.modules.metrics
+    const user = await h.createUser()
+    const other = await h.createUser()
+    const f = await h.tree.add('file')
+    const snapshot = async () => ({
+      dropped: await metricBy(m.gfsWatchCmdDroppedTotal, 'reason'),
+      frames: await metricBy(m.gfsWatchFramesSentTotal, 'frame_type'),
+      active: await metricBy(m.gfsWatchConnectionsActive, 'principal_kind'),
+      disconnects: await metricBy(m.gfsWatchDisconnectsTotal, 'reason'),
+    })
+    const s0 = await snapshot()
+    const { socket, conn } = await ready(user, [h.key('file', f)])
+    const s1 = await snapshot()
+    expect(countDelta(s0.frames, s1.frames)).toEqual({ ready: 1 })
+    expect(countDelta(s0.active, s1.active)).toEqual({ user: 1 })
+    await put(conn, [], 1, { u: other.userId, g: conn.binding.authGeneration })
+    await put(conn, [], 1, { u: conn.binding.userId, g: conn.binding.authGeneration + 1 })
+    await put(conn, [], 2 ** 53 - 1)
+    await b.settle()
+    const s2 = await snapshot()
+    expect(countDelta(s1.dropped, s2.dropped)).toEqual({ binding_mismatch: 2, seq_jump: 1 })
+    expect(countDelta(s1.frames, s2.frames)).toEqual({})
+    await put(conn, [h.key('file', f)], 1)
+    await b.settle()
+    await h.tree.rename(f)
+    await h.barrier()
+    b.clock.advance(250)
+    await b.settle()
+    expect(socket.framesOf('changed')).toHaveLength(1)
+    const s3 = await snapshot()
+    expect(countDelta(s2.frames, s3.frames)).toEqual({ subscriptions: 1, changed: 1 })
+    expect(countDelta(s2.dropped, s3.dropped)).toEqual({})
+    socket.emitGone()
+    await b.settle()
+    const s4 = await snapshot()
+    expect(countDelta(s3.active, s4.active)).toEqual({ user: -1 })
+    expect(countDelta(s3.disconnects, s4.disconnects)).toEqual({ client_gone: 1 })
+  })
+
   it('applies a command built from another token of the same binding (T-SB112)', async () => {
     b = await h.build()
     const user = await h.createUser()
