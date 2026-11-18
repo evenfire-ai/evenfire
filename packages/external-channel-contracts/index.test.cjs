@@ -76,6 +76,29 @@ const assertRejects = (validator, value, code, field, label) =>
     return true
   }, label)
 
+// The pause token grammar, used by the receipt validator and by the parser so
+// that the two patterns cannot drift apart: [label, token, accepted].
+const PAUSE_TOKEN_ROWS = [
+  ['15 characters', 'fixture-pause-0', false],
+  ['16 characters', 'fixture-pause-01', true],
+  ['64 characters', `fixture-pause-${'0'.repeat(50)}`, true],
+  ['65 characters', `fixture-pause-${'0'.repeat(51)}`, false],
+  ['an underscore', 'fixture_pause_01', true],
+  ['upper case', 'FIXTURE-PAUSE-01', true],
+  ['a slash', 'fixture-pause/01', false],
+  ['a dot', 'fixture.pause.01', false],
+  ['a space', 'fixture pause 01', false],
+  ['a trailing newline', 'fixture-pause-01\n', false],
+  ['a valid 16-character run, then a slash', 'fixture-pause-01/x', false],
+]
+const assertPauseTokenBoundaries = () => {
+  const length = label => PAUSE_TOKEN_ROWS.find(([rowLabel]) => rowLabel === label)[1].length
+  assert.deepEqual(
+    ['15 characters', '16 characters', '64 characters', '65 characters'].map(length),
+    [15, 16, 64, 65]
+  )
+}
+
 const assertAccepts = (validator, value) => {
   const result = validator(value)
   assert.deepEqual(result, value)
@@ -209,6 +232,21 @@ describe('provider event receipt claims', () => {
     assert.equal(assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.action.other.json')).action, null)
   })
 
+  it('pins the pause token grammar on action receipts', () => {
+    assertPauseTokenBoundaries()
+    for (const [label, token, accepted] of PAUSE_TOKEN_ROWS) {
+      const value = { ...action, action: { decision: 'approve', token } }
+      if (accepted) {
+        assert.doesNotThrow(() => validateProviderEventReceiptClaims(value), label)
+        assert.equal(assertAccepts(validateProviderEventReceiptClaims, value).action.token, token, label)
+      } else {
+        assertRejects(validateProviderEventReceiptClaims, value, RECEIPT_ERROR, 'action', label)
+      }
+    }
+    const numberToken = { ...action, action: { decision: 'approve', token: 1234567890123456 } }
+    assertRejects(validateProviderEventReceiptClaims, numberToken, RECEIPT_ERROR, 'action', 'a number as token')
+  })
+
   // Each row: the refused value and the field the error message names.
   const rejected = {
     'an unknown key': [{ ...message, teamId: 'T0FIXTURE01' }, 'keys'],
@@ -276,6 +314,13 @@ describe('parsePauseActionValue', () => {
       42,
     ]) {
       assert.equal(parsePauseActionValue(value), null, String(value))
+    }
+  })
+
+  it('pins the same token grammar as the receipt validator', () => {
+    assertPauseTokenBoundaries()
+    for (const [label, token, accepted] of PAUSE_TOKEN_ROWS) {
+      assert.deepEqual(parsePauseActionValue(`tool:a:${token}`), accepted ? { decision: 'approve', token } : null, label)
     }
   })
 })
