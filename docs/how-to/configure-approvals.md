@@ -144,20 +144,29 @@ The cap comes from the session's channel type, not from the session key.
 | Session | Cap |
 | --- | --- |
 | Desktop (`rpc`) | `allow_all` |
-| Telegram, Slack, email, or Microsoft Teams | `allow_all` unless `approval.channels.<type>.allowModeChange` is `false`. The switch defaults to on |
-| Teams, or any other channel | `manual` |
+| Telegram, Slack, or Microsoft Teams | `allow_all` unless `approval.channels.<type>.allowModeChange` is `false`. The switch defaults to on |
+| Email | `allow_all` only when `approval.channels.email.allowModeChange` is `true`. The switch defaults to off, because the From address can be forged |
+| Any other channel | `manual` |
 
-| Ceiling | Desktop can use | A channel with `allowModeChange: true` can use | A channel without it can use |
+A malformed value caps that channel at `manual`: a `channels` value or channel
+block that is not an object, or an `allowModeChange` that is not a boolean.
+mcp-host logs `approval_config_invalid` with the field name when the config
+arrives.
+
+| Ceiling | Desktop can use | A channel whose switch is on can use | A channel whose switch is off can use |
 | --- | --- | --- | --- |
 | `manual` | manual | manual | manual |
 | `auto` | manual, auto | manual, auto | manual |
 | `allow_all` | all three | all three | manual |
 
 A messaging command may always store `manual`. It may store `auto` or
-`allow_all` unless that channel's `allowModeChange` is false. The switch
-defaults to on. An explicit false stores `manual` and says the channel is
-limited to manual. Turning the flag
-off again lowers every session on that channel at the next tool call.
+`allow_all` only while that channel's switch is on. When the switch is off,
+the command stores `manual` and says the channel is limited to manual. On
+Slack, a sender who passed the channel allowlist only by display username
+(a legacy entry) cannot raise the mode either: the command stores `manual`
+and asks for the Slack user ID to be allowlisted.
+Turning the switch off again lowers every session on that channel at the
+next tool call.
 
 ### Kill switch
 

@@ -61,6 +61,12 @@ export interface IncomingMessage {
    * cannot store a mode with this field.
    */
   approvalMode?: ApprovalMode
+  /**
+   * Set by channel-reader when a polled Slack sender passed the allowlist only
+   * by display username, which is not a stable identity. Such a sender cannot
+   * raise the approval mode. Absent for every other match.
+   */
+  senderMatch?: 'username'
   /** Optional CAS base for a visual message's explicit model selection. */
   modelSelectionRevision?: number
   /** Server-owned immutable visual selection; incoming callers cannot set it. */

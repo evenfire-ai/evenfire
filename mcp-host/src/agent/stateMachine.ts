@@ -17,6 +17,7 @@ import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAd
 // Phase 6 imports
 import {
   type ApprovalConfigSnapshot,
+  approvalModeConfigWarnings,
   effectiveApprovalMode,
   normalizeApprovalMode,
   readChannelCap,
@@ -671,6 +672,9 @@ export class AgentStateMachine extends EventEmitter {
     this.approvalConfig = config
     this.approvalHostSpec = hostSpec
     logger.info({ defaultPolicy: config?.defaultPolicy || 'none' }, 'Approval policy configured')
+    for (const warning of approvalModeConfigWarnings(hostSpec)) {
+      logger.warn({ event: 'approval_config_invalid', field: warning.field }, warning.message)
+    }
     this.sweepEffectiveApprovalModes()
   }
 

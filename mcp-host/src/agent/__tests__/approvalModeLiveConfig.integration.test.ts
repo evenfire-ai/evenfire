@@ -443,3 +443,49 @@ describe('approval mode live config', () => {
     expect(vi.mocked(requestPinned)).not.toHaveBeenCalled()
   })
 })
+
+describe('approval config warnings', () => {
+  function newAgent(): AgentStateMachine {
+    const lifecycle = new TaskLifecycle()
+    const queue = new MessageQueue()
+    queue.setLifecycle(lifecycle)
+    return new AgentStateMachine(queue, lifecycle, {
+      autoStart: false,
+      approvalTimeout: 0,
+      maxTaskDuration: 30_000,
+      maxToolCallsPerTask: 6,
+      taskDelay: 0,
+    })
+  }
+
+  function invalidFields(warn: { mock: { calls: unknown[][] } }): unknown[] {
+    return warn.mock.calls
+      .map(call => call[0] as Record<string, unknown> | undefined)
+      .filter(fields => fields?.event === 'approval_config_invalid')
+      .map(fields => fields?.field)
+  }
+
+  it('logs one warning per malformed mode field in the host spec it installs', () => {
+    const agent = newAgent()
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    try {
+      const malformed = {
+        defaultPolicy: 'channel_users',
+        modeCeiling: 'yolo',
+        channels: { telegram: false, slack: { allowModeChange: 'false' } },
+      } as unknown as ApprovalConfig
+      agent.setApprovalConfig(policy('allow_all'), malformed)
+      expect(invalidFields(warn)).toEqual([
+        'modeCeiling',
+        'channels.telegram',
+        'channels.slack.allowModeChange',
+      ])
+
+      warn.mockClear()
+      agent.setApprovalConfig(policy('allow_all'), policy('allow_all'))
+      expect(invalidFields(warn)).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})

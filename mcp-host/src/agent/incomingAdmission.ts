@@ -125,13 +125,25 @@ function carriedApprovalMode(message: IncomingMessage): ApprovalMode | undefined
   return undefined
 }
 
+type ApprovalModeRefusal = 'channel' | 'slack_username'
+
+const APPROVAL_MODE_REFUSAL_TEXT: Record<ApprovalModeRefusal, string> = {
+  channel: 'This channel is limited to manual.',
+  slack_username: 'Only an allowlisted Slack user ID can raise the mode.',
+}
+
 function approvalModeReply(
   stored: ApprovalMode,
   effective: ApprovalMode,
-  limitedToManual: boolean
+  refusal: ApprovalModeRefusal | null
 ): string {
   const base = `Approval mode is ${stored}. Effective mode is ${effective}.`
-  return limitedToManual ? `${base} This channel is limited to manual.` : base
+  return refusal ? `${base} ${APPROVAL_MODE_REFUSAL_TEXT[refusal]}` : base
+}
+
+/** A Slack display-username match is not a stable identity, so it cannot raise. */
+function slackUsernameOnly(message: IncomingMessage): boolean {
+  return message.channelType === 'slack' && message.senderMatch === 'username'
 }
 
 function approvalModeStoreFailure(provider: string | undefined): MessageResponse {
@@ -315,7 +327,9 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             source: normalizedMessage.channelType,
           })
           const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
-          const cap = readChannelCap(live, conversation.channel_type)
+          const channelCap = readChannelCap(live, conversation.channel_type)
+          const usernameOnly = slackUsernameOnly(normalizedMessage)
+          const cap: ApprovalMode = usernameOnly ? 'manual' : channelCap
           const stored = await manager.setApprovalMode(
             conversation,
             command,
@@ -326,14 +340,13 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             'command',
             normalizedMessage.sender
           )
+          let refusal: ApprovalModeRefusal | null = null
+          if (command !== 'manual' && channelCap !== 'allow_all') refusal = 'channel'
+          else if (command !== 'manual' && usernameOnly) refusal = 'slack_username'
           return {
             success: true,
             status: 'completed' as const,
-            response: approvalModeReply(
-              stored.approvalMode,
-              stored.effectiveApprovalMode,
-              command !== 'manual' && cap !== 'allow_all'
-            ),
+            response: approvalModeReply(stored.approvalMode, stored.effectiveApprovalMode, refusal),
           }
         } catch (err) {
           logger.warn({ err }, 'Approval mode command could not be stored')

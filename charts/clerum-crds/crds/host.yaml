@@ -262,7 +262,11 @@ spec:
                   # unknown fields: if a client writes spec.approval.modeCeiling,
                   # or allowModeChange on telegram, email, slack or teams, while the OLD
                   # CRD is applied, the apiserver drops those fields on admission
-                  # with no error. The reader then fails safe to manual.
+                  # with no error. modeCeiling is pruned with them, and an absent
+                  # ceiling reads manual, so every session stays manual. A pruned
+                  # allowModeChange alone does NOT fail safe: on telegram, slack
+                  # and teams an absent field means on. An allowModeChange: false
+                  # written before this CRD is lost, so re-apply it after.
                   # mcp-host's Role is get, watch and list; it does not write
                   # this object. Apply this CRD before any component reads or
                   # writes these fields. In auto, tools.http_request: true still
@@ -334,12 +338,13 @@ spec:
                                 type: string
                             allowModeChange:
                               type: boolean
-                              default: true
+                              default: false
                               description: >-
-                                When true or absent, an email session may store
-                                auto or allow_all, up to modeCeiling. Only false
-                                caps that channel at manual. Email identity is
-                                the From address.
+                                Only when true may an email session store auto
+                                or allow_all, up to modeCeiling. False or absent
+                                caps email at manual. Email identity is the From
+                                address, which a sender can forge, so the switch
+                                defaults to off.
                         slack:
                           type: object
                           properties:
@@ -357,9 +362,9 @@ spec:
                               description: >-
                                 When true or absent, a Slack session may store
                                 auto or allow_all, up to modeCeiling. Only false
-                                caps that channel at manual. A Slack
-                                username-allowlist match is accepted as that
-                                session's identity.
+                                caps that channel at manual. A sender who matched
+                                only a legacy username allowlist entry cannot
+                                raise the mode; allowlist the Slack user ID.
                         teams:
                           type: object
                           properties:

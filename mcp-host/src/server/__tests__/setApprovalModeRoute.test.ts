@@ -409,7 +409,9 @@ describe('session reads project the live approval config', () => {
       effective: snapshot(undefined).effective,
       hostSpec: {
         defaultPolicy: 'cli_only',
-        channels: { email: { enabled: true } },
+        // Explicit false: the email cap must read manual whatever the default,
+        // so a reader that parses the rpc-shaped key (allow_all) still fails.
+        channels: { email: { enabled: true, allowModeChange: false } },
         modeCeiling: 'allow_all',
       },
     }
@@ -420,7 +422,7 @@ describe('session reads project the live approval config', () => {
     const list = await handleSessionsList(USER, {})
     const emailColumn = list.items.find(item => item.chatId === CHAT)
     const unset = list.items.find(item => item.chatId === 'unset')
-    expect(emailColumn?.channelCap).toBe('allow_all')
+    expect(emailColumn?.channelCap).toBe('manual')
     expect(emailColumn?.approvalMode).toBe('allow_all')
     expect(unset?.channelCap).toBe('manual')
     expect(unset?.approvalMode).toBe('manual')

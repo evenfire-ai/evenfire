@@ -44,6 +44,10 @@ const BLOCKED = [
   'rm -fr /',
   'rm -r -f /',
   'rm --no-preserve-root -rf /',
+  'rm -rf /; ls',
+  'ls && rm -rf /*&& ls',
+  'rm -rf \\\n/',
+  'dd if=/dev/zero \\\nof=/dev/sda',
   ':(){ :|:& };:',
   'dd if=/dev/zero of=/dev/sda',
   'echo x > /dev/nvme0n1',
@@ -301,6 +305,22 @@ describe('ShellTool.execute', () => {
     expect(spawnMock).toHaveBeenCalledTimes(1)
     expect(spawnMock.mock.calls[0]?.[1]).toEqual(['-c', command])
     expect(result.is_error).toBe(false)
+  })
+
+  // The guard runs on the Host event loop. A check that rescans to the end of
+  // the segment for every `rm`/`dd` start is quadratic: about 150 KB took
+  // seconds and stalled every session on the Host.
+  it.each([
+    ['rm', 'rm '.repeat(50_000)],
+    ['dd', 'dd '.repeat(50_000)],
+  ])('checks a 150 KB repeated %s command in linear time', async (_word, command) => {
+    const started = performance.now()
+    const result = await new ShellTool(workspacePath, 5_000, ['PATH']).execute({ command })
+    const elapsedMs = performance.now() - started
+
+    expect(result.content).not.toBe(BLOCKED_MESSAGE)
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    expect(elapsedMs).toBeLessThan(500)
   })
 })
 
