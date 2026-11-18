@@ -24,7 +24,6 @@ import {
 
 const SLACK_CONVERSATION_LIST_MAX_PAGES = 50
 const SLACK_CHANNEL_NAME_CACHE_MAX = 1000
-const SLACK_CONVERSATION_TYPE_CACHE_MAX = 1000
 const SLACK_USER_CACHE_MAX = 5000
 const WORKFLOW_DOCUMENT_MIME_BY_EXT = new Map([
   ['json', 'application/json'],
@@ -151,7 +150,6 @@ export class SlackAdapter implements ChannelAdapter {
   private lastTimestamps: Map<string, string> = new Map()
   private userCache: Map<string, string> = new Map()
   private channelIdByNameCache: Map<string, string> = new Map()
-  private conversationTypeByChannel: Map<string, string> = new Map()
   private verifiedSendersByChannel: Map<string, Set<string>> = new Map()
   private botUserId: string | null = null
   private teamId: string | null = null
@@ -177,7 +175,6 @@ export class SlackAdapter implements ChannelAdapter {
     this.lastTimestamps.clear()
     this.userCache.clear()
     this.channelIdByNameCache.clear()
-    this.conversationTypeByChannel.clear()
     this.verifiedSendersByChannel.clear()
   }
 
@@ -191,44 +188,6 @@ export class SlackAdapter implements ChannelAdapter {
       if (firstKey) this.channelIdByNameCache.delete(firstKey)
     }
     this.channelIdByNameCache.set(normalized, id)
-  }
-
-  private cacheConversationType(channelId: string, type: string): void {
-    if (this.conversationTypeByChannel.has(channelId)) {
-      this.conversationTypeByChannel.delete(channelId)
-    } else if (this.conversationTypeByChannel.size >= SLACK_CONVERSATION_TYPE_CACHE_MAX) {
-      const firstKey = this.conversationTypeByChannel.keys().next().value
-      if (firstKey) this.conversationTypeByChannel.delete(firstKey)
-    }
-    this.conversationTypeByChannel.set(channelId, type)
-  }
-
-  /**
-   * Live conversation type from conversations.info, cached for the connection's
-   * life. `im` is only trusted for direct-message ids (D...). A failed or
-   * unclassifiable lookup returns undefined and is not cached.
-   */
-  private async resolveConversationType(resolvedChannelId: string): Promise<string | undefined> {
-    const cached = this.conversationTypeByChannel.get(resolvedChannelId)
-    if (cached) return cached
-    if (!this.client) return undefined
-    try {
-      const response = await this.client.conversations.info({ channel: resolvedChannelId })
-      const channel =
-        response.channel && typeof response.channel === 'object'
-          ? (response.channel as Record<string, unknown>)
-          : {}
-      const type = slackConversationType(channel)
-      if (!type) return undefined
-      if (type === 'im' && !resolvedChannelId.startsWith('D')) return undefined
-      this.cacheConversationType(resolvedChannelId, type)
-      return type
-    } catch (error) {
-      console.warn(
-        `[Slack] Could not resolve conversation type for ${resolvedChannelId}: ${error instanceof Error ? error.message : 'unknown error'}`
-      )
-      return undefined
-    }
   }
 
   private cacheUsername(userId: string, username: string): void {
@@ -430,9 +389,6 @@ export class SlackAdapter implements ChannelAdapter {
             }
           }
 
-          const providerChannelType = providerWorkspaceId
-            ? await this.resolveConversationType(resolvedChannelId)
-            : undefined
           const providerIdentity = providerWorkspaceId
             ? {
                 medium: 'slack' as const,
@@ -440,7 +396,6 @@ export class SlackAdapter implements ChannelAdapter {
                 providerWorkspaceId,
                 providerChannelId: resolvedChannelId,
                 providerEventId: `slack:${providerWorkspaceId}:${resolvedChannelId}:${ts}`,
-                ...(providerChannelType ? { providerChannelType } : {}),
                 ...(options?.providerTarget ? { providerTarget: options.providerTarget } : {}),
               }
             : undefined
