@@ -239,7 +239,7 @@ function teamsIsWorkflowResultAction(payload: unknown): boolean {
 }
 
 export function teamsIsToolApprovalAction(payload: unknown): boolean {
-  return /^tool:[ald]:[A-Za-z0-9_-]{16}$/.test(teamsActionValue(payload))
+  return /^tool:[aldcs]:[A-Za-z0-9_-]{16}$/.test(teamsActionValue(payload))
 }
 
 function teamsIsWorkflowApprovalAction(payload: unknown): boolean {

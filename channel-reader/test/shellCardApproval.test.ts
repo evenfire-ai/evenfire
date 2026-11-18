@@ -185,10 +185,11 @@ describe('shell card approval handler', () => {
     ])
     const values = callbackValues(sent.at(-1)?.options)
     expect(values.some(value => value.startsWith('tool:a:'))).toBe(true)
+    expect(values.some(value => value.startsWith('tool:c:'))).toBe(true)
+    expect(values.some(value => value.startsWith('tool:s:'))).toBe(true)
     expect(values.some(value => value.startsWith('tool:d:'))).toBe(true)
-    expect(values.some(value => /^tool:[cs]:/.test(value))).toBe(false)
     const titles = sent.at(-1)?.options?.teamsActions?.map(action => action.title)
-    expect(titles).toEqual(['Approve', 'Deny'])
+    expect(titles).toEqual(['Allow once', 'Allow this command', 'Always allow shell', 'Deny'])
   })
 
   it('rejects an unknown code without sendDenial', async () => {

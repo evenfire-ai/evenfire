@@ -46,8 +46,9 @@ describe('approval mode readers', () => {
     )
     expect(readChannelCap(snap({ email: { enabled: true } }), 'email')).toBe('manual')
     expect(readChannelCap(snap({ teams: { enabled: true, allowModeChange: true } }), 'teams')).toBe(
-      'manual'
+      'allow_all'
     )
+    expect(readChannelCap(snap({ teams: { enabled: true } }), 'teams')).toBe('manual')
     expect(readChannelCap(snap(null), 'telegram')).toBe('manual')
     expect(readChannelCap(snap({}), undefined)).toBe('manual')
     expect(readChannelCap(snap({}), 'rpc')).toBe('allow_all')

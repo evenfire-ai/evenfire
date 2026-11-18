@@ -694,7 +694,7 @@ const UNSET_CHANNELS: ApprovalConfigSnapshot = {
       telegram: { enabled: true },
       email: { enabled: true },
       slack: { enabled: true },
-      teams: { enabled: true, allowModeChange: true },
+      teams: { enabled: true },
     },
     modeCeiling: 'allow_all',
   },
@@ -922,7 +922,36 @@ describe('approval mode writers at admission', () => {
     expect(conv?.channel_type).toBe('slack')
   })
 
-  it('stores manual when allowModeChange is unset and when the channel is Teams', async () => {
+  it('stores allow-all on Teams when allowModeChange is true', async () => {
+    const manager = new ConversationManager()
+    const { admit, spies } = admitWith(manager, OPEN_CEILING)
+    const response = await admit(
+      message({
+        channelType: 'teams',
+        channelId: 'team-1',
+        sender: 'teams-user',
+        messageId: 'msg-teams-open',
+        content: 'approval-mode allow-all',
+      })
+    )
+    expect(spies.dispatch).not.toHaveBeenCalled()
+    expect(response).toMatchObject({
+      success: true,
+      response: 'Approval mode is allow_all. Effective mode is allow_all.',
+    })
+    expect(
+      manager.getSessionByKey(
+        serializeSessionKey({
+          userId: 'teams-user',
+          channelType: 'teams',
+          channelId: 'team-1',
+          threadId: 'chat-1',
+        })
+      )?.approval_mode
+    ).toBe('allow_all')
+  })
+
+  it('stores manual when allowModeChange is unset', async () => {
     const manager = new ConversationManager()
     const { admit, spies } = admitWith(manager, UNSET_CHANNELS)
     const slack = await admit(

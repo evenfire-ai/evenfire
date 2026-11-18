@@ -260,7 +260,7 @@ spec:
                   #
                   # ROLLOUT ORDER — CRD FIRST. apiextensions/v1 silently PRUNES
                   # unknown fields: if a client writes spec.approval.modeCeiling,
-                  # or allowModeChange on telegram, email or slack, while the OLD
+                  # or allowModeChange on telegram, email, slack or teams, while the OLD
                   # CRD is applied, the apiserver drops those fields on admission
                   # with no error. The reader then fails safe to manual.
                   # mcp-host's Role is get, watch and list; it does not write
@@ -271,7 +271,7 @@ spec:
                   description: >-
                     Tool approval configuration. Controls who can approve tool
                     executions, the highest approval mode this Host may run, and
-                    whether Telegram, email and Slack sessions may change it.
+                    whether Telegram, email, Slack and Teams sessions may change it.
                   properties:
                     defaultPolicy:
                       type: string
@@ -320,8 +320,7 @@ spec:
                               description: >-
                                 When true, a Telegram session may store auto or
                                 allow_all, up to modeCeiling. Absent or false
-                                caps that channel at manual. Teams has no switch
-                                and stays manual.
+                                caps that channel at manual.
                         email:
                           type: object
                           properties:
@@ -361,6 +360,24 @@ spec:
                                 caps that channel at manual. A Slack
                                 username-allowlist match is accepted as that
                                 session's identity.
+                        teams:
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                              description: Whether Microsoft Teams users can approve.
+                            approvers:
+                              type: array
+                              description: List of Teams user IDs allowed to approve.
+                              items:
+                                type: string
+                            allowModeChange:
+                              type: boolean
+                              default: false
+                              description: >-
+                                When true, a Microsoft Teams session may store
+                                auto or allow_all, up to modeCeiling. Absent or
+                                false caps that channel at manual.
                     tools:
                       type: object
                       description: >-

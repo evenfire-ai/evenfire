@@ -51,16 +51,20 @@ export function readModeCeiling(snapshot: ApprovalConfigSnapshot): ApprovalMode 
 /**
  * Channel cap from `hostSpec` only.
  * `rpc` is allow_all. telegram, email, and slack are allow_all only when
- * `allowModeChange === true`. Every other type, including teams and an
- * absent channel, is manual. A missing, null, or non-object `channels`
- * value does not throw.
+ * `allowModeChange === true`. Every other type, and an absent channel, is
+ * manual. A missing, null, or non-object `channels` value does not throw.
  */
 export function readChannelCap(
   snapshot: ApprovalConfigSnapshot,
   channelType: string | undefined
 ): ApprovalMode {
   if (channelType === 'rpc') return 'allow_all'
-  if (channelType !== 'telegram' && channelType !== 'email' && channelType !== 'slack') {
+  if (
+    channelType !== 'telegram' &&
+    channelType !== 'email' &&
+    channelType !== 'slack' &&
+    channelType !== 'teams'
+  ) {
     return 'manual'
   }
 

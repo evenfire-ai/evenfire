@@ -144,7 +144,7 @@ The cap comes from the session's channel type, not from the session key.
 | Session | Cap |
 | --- | --- |
 | Desktop (`rpc`) | `allow_all` |
-| Telegram, Slack, or email | `allow_all` while `approval.channels.<type>.allowModeChange` is `true`; otherwise `manual` |
+| Telegram, Slack, email, or Microsoft Teams | `allow_all` while `approval.channels.<type>.allowModeChange` is `true`; otherwise `manual` |
 | Teams, or any other channel | `manual` |
 
 | Ceiling | Desktop can use | A channel with `allowModeChange: true` can use | A channel without it can use |

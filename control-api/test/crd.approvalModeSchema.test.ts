@@ -12,7 +12,7 @@ const crdsDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../charts/c
 const hostYamlPath = resolve(crdsDir, 'host.yaml')
 
 const APPROVAL_MODES = ['manual', 'auto', 'allow_all'] as const
-const MODE_CHANNELS = ['telegram', 'email', 'slack'] as const
+const MODE_CHANNELS = ['telegram', 'email', 'slack', 'teams'] as const
 
 type AllowModeChangeHit = { path: string; type: unknown }
 
@@ -63,14 +63,14 @@ describe('host.yaml approval mode schema', () => {
     expect(asRecord(approval.modeCeiling)?.enum).toEqual([...APPROVAL_MODES])
   })
 
-  it('allowModeChange is a boolean under telegram, email and slack only', () => {
+  it('allowModeChange is a boolean under telegram, email, slack and teams', () => {
     const channels = asRecord(asRecord(approval.channels)?.properties)
     expect(channels && Object.keys(channels).sort()).toEqual([...MODE_CHANNELS].sort())
 
     const hits = collectAllowModeChange(document, '')
     const channelOf = (path: string) => {
       const match =
-        /approval\.properties\.channels\.properties\.(telegram|email|slack)\.properties\.allowModeChange$/.exec(
+        /approval\.properties\.channels\.properties\.(telegram|email|slack|teams)\.properties\.allowModeChange$/.exec(
           path
         )
       return match?.[1]

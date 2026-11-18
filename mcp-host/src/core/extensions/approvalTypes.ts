@@ -32,8 +32,8 @@ export interface ChannelApprovalConfig {
   enabled: boolean
   approvers?: string[]
   /**
-   * When true, a telegram, email, or slack session may use a channel cap of
-   * allow_all. Teams and every other channel stay manual. Absent is false.
+   * When true, a telegram, email, slack, or teams session may use a channel
+   * cap of allow_all. Every other channel stays manual. Absent is false.
    */
   allowModeChange?: boolean
 }

@@ -520,7 +520,7 @@ describe('decisionHandler', () => {
   })
 
   it.each(['c', 's'])(
-    'does not treat a Teams tool:%s payload as a tool action or hand it off',
+    'normalizes a Teams tool:%s payload and hands it off',
     async code => {
       const { teamsIsToolApprovalAction } = await import('../src/server.js')
       const action = `tool:${code}:abcdefghijklmnop`
@@ -544,11 +544,10 @@ describe('decisionHandler', () => {
       }
       const labeled = { ...payload, text: 'Allow this command' }
 
-      expect(teamsIsToolApprovalAction(payload)).toBe(false)
-      expect(teamsIsToolApprovalAction(labeled)).toBe(false)
-      expect(normalizeTeamsMessage(payload)).toBeNull()
-      expect(normalizeTeamsMessage(labeled)?.content).not.toBe(action)
-      expect(normalizeTeamsMessage(labeled)?.content ?? '').not.toMatch(/^tool:[cs]:/)
+      expect(teamsIsToolApprovalAction(payload)).toBe(true)
+      expect(teamsIsToolApprovalAction(labeled)).toBe(true)
+      expect(normalizeTeamsMessage(payload)?.content).toBe(action)
+      expect(normalizeTeamsMessage(labeled)?.content).toBe(action)
     }
   )
 
