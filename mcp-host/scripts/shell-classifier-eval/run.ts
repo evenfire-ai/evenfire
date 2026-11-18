@@ -131,15 +131,19 @@ async function evaluate(providerType: string, modelName: string): Promise<boolea
   return escalateApproves === 0
 }
 
-const selected = pairs(process.argv.slice(2))
-if (selected.length === 0) {
-  console.error('pass at least one --provider <id> --model <name>')
-  process.exit(2)
+async function main(): Promise<void> {
+  const selected = pairs(process.argv.slice(2))
+  if (selected.length === 0) {
+    console.error('pass at least one --provider <id> --model <name>')
+    process.exit(2)
+  }
+
+  let pass = true
+  for (const pair of selected) {
+    if (!(await evaluate(pair.provider, pair.model))) pass = false
+  }
+  console.log(pass ? 'EVAL_PASS' : 'EVAL_FAIL')
+  process.exit(pass ? 0 : 1)
 }
 
-let pass = true
-for (const pair of selected) {
-  if (!(await evaluate(pair.provider, pair.model))) pass = false
-}
-console.log(pass ? 'EVAL_PASS' : 'EVAL_FAIL')
-process.exit(pass ? 0 : 1)
+void main()
