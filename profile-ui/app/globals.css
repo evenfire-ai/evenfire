@@ -529,9 +529,11 @@ code {
 }
 
 .cu-sidebar__brand {
+  --cu-sidebar-brand-mark-height: 28px;
   display: flex;
-  align-items: flex-end;
-  gap: 0.55rem;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
   margin-bottom: 2rem;
 }
 
@@ -540,6 +542,24 @@ code {
   height: 2.75rem;
   flex-shrink: 0;
   object-fit: contain;
+}
+
+.cu-sidebar__brand .cu-sidebar__brand-mark {
+  width: auto;
+  height: var(--cu-sidebar-brand-mark-height);
+  max-width: 100%;
+}
+
+.cu-sidebar__brand-mark--dark {
+  display: none;
+}
+
+:root[data-theme='dark'] .cu-sidebar__brand-mark--light {
+  display: none;
+}
+
+:root[data-theme='dark'] .cu-sidebar__brand-mark--dark {
+  display: block;
 }
 
 .cu-sidebar__brand-copy {

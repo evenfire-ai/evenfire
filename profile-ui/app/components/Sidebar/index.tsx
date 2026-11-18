@@ -31,17 +31,19 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
     >
       <div className="cu-sidebar__brand" title={formatReleaseTitle(releaseId)}>
         <Image
-          className="cu-sidebar__brand-mark"
-          src="/brand/logo.svg"
-          alt=""
-          width={44}
+          className="cu-sidebar__brand-mark cu-sidebar__brand-mark--light"
+          src="/brand/logotype-light.svg"
+          alt="Evenfire"
+          width={184}
           height={44}
-          aria-hidden="true"
         />
-        <div className="cu-sidebar__brand-copy">
-          <h1 className="cu-sidebar__title">Evenfire</h1>
-          <p className="cu-sidebar__subtitle">Profile Portal</p>
-        </div>
+        <Image
+          className="cu-sidebar__brand-mark cu-sidebar__brand-mark--dark"
+          src="/brand/logotype-dark.svg"
+          alt="Evenfire"
+          width={184}
+          height={44}
+        />
       </div>
       <nav className="cu-sidebar__nav" aria-label="Main sections">
         {navigationItems.map(([routeKey, item]) => {
