@@ -48,6 +48,8 @@ import {
   TRANSPORT_NETWORK_CONDITION_TYPE,
   WorkflowRecipeReconciler,
   hasPendingTransportNetworkReadiness,
+  hasTerminalRunTeardownRecord,
+  isWorkflowLatchedByTransientError,
 } from './reconciler/workflowRecipeReconciler'
 import {
   type StatusCondition,
@@ -478,10 +480,30 @@ export function workflowNeedsInfrastructureReconcile(recipe: WorkflowRecipeCRD):
 }
 
 export function workflowNeedsTerminalRunTeardown(recipe: WorkflowRecipeCRD): boolean {
-  const isWorkflow = (recipe.spec.steps ?? []).length > 0
-  if (!isWorkflow || recipe.metadata.deletionTimestamp) return false
-  if (!recipe.metadata.labels?.['clerum.io/workflow-run-id']?.trim()) return false
+  if (!isTerminalRunChild(recipe)) return false
+  // Issue #1349 — once the terminal teardown is recorded, a status-only event
+  // (including the record's own patch) only needs the DB sync. A latched child
+  // falls through to the deploy path, as at the base, and is still forced.
+  return !hasTerminalRunTeardownRecord(recipe) || isWorkflowLatchedByTransientError(recipe)
+}
 
+/**
+ * Issue #1349 — a terminal run child whose teardown is recorded and that is not
+ * latched. Its passes return from the terminal block before the deploy path, so a
+ * forced pass on a timer only repeats what the recorded pass already did.
+ */
+function isRecordedTerminalRunChild(recipe: WorkflowRecipeCRD): boolean {
+  return (
+    isTerminalRunChild(recipe) &&
+    hasTerminalRunTeardownRecord(recipe) &&
+    !isWorkflowLatchedByTransientError(recipe)
+  )
+}
+
+/** A run-scoped workflow child whose execution phase is terminal and that is not being deleted. */
+function isTerminalRunChild(recipe: WorkflowRecipeCRD): boolean {
+  if ((recipe.spec.steps ?? []).length === 0 || recipe.metadata.deletionTimestamp) return false
+  if (!recipe.metadata.labels?.['clerum.io/workflow-run-id']?.trim()) return false
   const workflowPhase = recipe.status?.workflowExecution?.phase
   return (
     workflowPhase === 'completed' || workflowPhase === 'failed' || workflowPhase === 'cancelled'
@@ -524,12 +546,21 @@ export function recipeReferencesNamedSecrets(recipe: WorkflowRecipeCRD): boolean
  * workflow was revoked solely by the event-driven SecretWatcher, with no
  * deterministic timer fallback if a watch event was delayed or coalesced. This gate
  * lets such workflow recipes through to an OWNERSHIP-ONLY re-reconcile (no workload
- * status patch), reusing the already-hardened steady-state revocation path
- * (`revokeOrRequeueSteadyWorkflow`).
+ * status patch). Every steady short-circuit of that reconcile runs the steady
+ * ownership enforcer (`enforceActiveWorkflowSecretOwnership`).
  */
 export function workflowNeedsOwnershipBackstop(recipe: WorkflowRecipeCRD): boolean {
   if (recipe.metadata.deletionTimestamp) return false
   if ((recipe.spec.steps ?? []).length === 0) return false
+  // Issue #1349 — a recorded terminal run child whose terminal pass found no
+  // workload left deployed with a Secret has nothing for the backstop to revoke.
+  // Secret changes still reach it through the SecretWatcher.
+  if (
+    isRecordedTerminalRunChild(recipe) &&
+    recipe.status?.terminalRunTeardown?.noSecretBearingWorkloads === true
+  ) {
+    return false
+  }
   return recipeReferencesNamedSecrets(recipe)
 }
 
@@ -964,7 +995,8 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     if (!recipe) return
     // Issue #637 — a Secret re-label does NOT bump the recipe's metadata.generation,
     // so a plain 'MODIFIED' event is classified status-only and short-circuits BEFORE
-    // reconcile() (and thus before the ownership gate `revokeOrRequeueSteadyWorkflow`).
+    // reconcile() (and thus before the steady ownership enforcer
+    // `enforceActiveWorkflowSecretOwnership`, which every steady short-circuit runs).
     // forceReconcile makes the event-driven revocation actually re-evaluate ownership;
     // without it a foreign re-label is only caught by the slower 30s periodic backstop,
     // not the ~10s watcher debounce this path exists to provide.
@@ -1270,7 +1302,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
    *   waiting on a Pod we created): FIXED `delay = baseMs` with `attempts` RESET
    *   to 0. Progress is not an error and must not inherit the error backoff
    *   curve — exponential growth would stretch the poll cadence toward the cap
-   *   and re-expose the 240s mcp-host readiness deadline this requeue beats.
+   *   and delay each deploying sub-phase of a run by up to that long.
    *   Resetting attempts means a later GENUINE transient error starts backoff
    *   fresh from base rather than from a counter inflated by normal progress.
    *
@@ -1329,9 +1361,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // transient-error requeues preserve a growing attempt count so they back off.
     // NOTE: a fixed 5s interval × N concurrent deploying runs is N/5 reconciles
     // per second. We accept that load tradeoff for prompt progress; the inner
-    // reconcile advances past the waiting state once the awaited Pod succeeds,
-    // and the 240s readiness deadline / dbRunProcessor max-duration paths
-    // terminate any run permanently stuck in deploying, so this is bounded.
+    // reconcile advances past the waiting state once the awaited Pod succeeds.
+    // The mcp-host readiness wait for a pod ends at that pod's 240s deadline,
+    // measured from the later of the run start and that pod's creation (or, for
+    // a pod being deleted, its deletionTimestamp). While no pod has the name
+    // there is no deadline, and the next pass creates the pod. dbRunProcessor
+    // fails a run that exceeds its max_duration_seconds when one is set.
     this.transientRetries.set(name, {
       timer,
       attempts: fixedInterval ? 0 : attempts + 1,
@@ -1495,7 +1530,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     const started = Date.now()
     const selected = [...this.recipes.keys()].filter(name => {
       const recipe = this.recipes.get(name)
-      return recipe ? recipeHasExternalExactHostEgress(recipe) : false
+      // A recorded, non-latched terminal run child returns before the egress
+      // accumulator runs, so a forced pass cannot fold a new DNS snapshot.
+      return recipe
+        ? recipeHasExternalExactHostEgress(recipe) && !isRecordedTerminalRunChild(recipe)
+        : false
     })
     if (selected.length === 0) return
 

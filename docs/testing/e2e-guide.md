@@ -73,6 +73,8 @@ decides which image refs the pods run — see
 For the E2E fixture set (test user, `e2e-*` recipes, demo MCP servers), use
 `make minikube-setup-e2e`. In ghcr mode that pulls the published images and then
 builds the two unpublished E2E coordinator fixtures locally.
+Demo servers are associated with `context1` only when it is first created;
+rerunning setup preserves its existing connector selection.
 
 > `scripts/bootstrap-cluster.sh` is an older, partial bootstrap (no full JWT
 > chain, UIs, or user seed). E2E suites need the full setup above — do not use
