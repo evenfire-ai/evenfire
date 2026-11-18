@@ -51,8 +51,10 @@ export function readModeCeiling(snapshot: ApprovalConfigSnapshot): ApprovalMode 
 /**
  * Channel cap from `hostSpec` only.
  * `rpc` is allow_all. telegram, email, and slack are allow_all only when
- * `allowModeChange === true`. Every other type, and an absent channel, is
- * manual. A missing, null, or non-object `channels` value does not throw.
+ * `allowModeChange` is not `false`. The switch defaults to on: a missing
+ * channel block, or a block that omits the field, still allows the raise.
+ * Only an explicit `false` caps that channel at manual. Every other channel
+ * type is manual. A missing or non-object `channels` value does not throw.
  */
 export function readChannelCap(
   snapshot: ApprovalConfigSnapshot,
@@ -71,11 +73,11 @@ export function readChannelCap(
   // The declared channels type is an object, but a live spec can be null or
   // a non-object. Read it as unknown so that case returns manual instead of throwing.
   const channels: unknown = snapshot.hostSpec?.channels
-  if (!isPlainObject(channels)) return 'manual'
+  if (!isPlainObject(channels)) return 'allow_all'
 
   const entry = channels[channelType]
-  if (!isPlainObject(entry)) return 'manual'
-  return entry.allowModeChange === true ? 'allow_all' : 'manual'
+  if (!isPlainObject(entry)) return 'allow_all'
+  return entry.allowModeChange === false ? 'manual' : 'allow_all'
 }
 
 /** Effective mode is min(stored, ceiling, channel cap). */

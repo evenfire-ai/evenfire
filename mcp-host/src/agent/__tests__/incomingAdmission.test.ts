@@ -691,10 +691,10 @@ const UNSET_CHANNELS: ApprovalConfigSnapshot = {
   hostSpec: {
     defaultPolicy: 'cli_only',
     channels: {
-      telegram: { enabled: true },
-      email: { enabled: true },
-      slack: { enabled: true },
-      teams: { enabled: true },
+      telegram: { enabled: true, allowModeChange: false },
+      email: { enabled: true, allowModeChange: false },
+      slack: { enabled: true, allowModeChange: false },
+      teams: { enabled: true, allowModeChange: false },
     },
     modeCeiling: 'allow_all',
   },
@@ -951,7 +951,7 @@ describe('approval mode writers at admission', () => {
     ).toBe('allow_all')
   })
 
-  it('stores manual when allowModeChange is unset', async () => {
+  it('stores manual when allowModeChange is false', async () => {
     const manager = new ConversationManager()
     const { admit, spies } = admitWith(manager, UNSET_CHANNELS)
     const slack = await admit(

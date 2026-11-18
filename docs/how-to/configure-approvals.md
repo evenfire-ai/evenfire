@@ -144,7 +144,7 @@ The cap comes from the session's channel type, not from the session key.
 | Session | Cap |
 | --- | --- |
 | Desktop (`rpc`) | `allow_all` |
-| Telegram, Slack, email, or Microsoft Teams | `allow_all` while `approval.channels.<type>.allowModeChange` is `true`; otherwise `manual` |
+| Telegram, Slack, email, or Microsoft Teams | `allow_all` unless `approval.channels.<type>.allowModeChange` is `false`. The switch defaults to on |
 | Teams, or any other channel | `manual` |
 
 | Ceiling | Desktop can use | A channel with `allowModeChange: true` can use | A channel without it can use |
@@ -154,8 +154,9 @@ The cap comes from the session's channel type, not from the session key.
 | `allow_all` | all three | all three | manual |
 
 A messaging command may always store `manual`. It may store `auto` or
-`allow_all` only while that channel's `allowModeChange` is true. Otherwise it
-stores `manual` and says the channel is limited to manual. Turning the flag
+`allow_all` unless that channel's `allowModeChange` is false. The switch
+defaults to on. An explicit false stores `manual` and says the channel is
+limited to manual. Turning the flag
 off again lowers every session on that channel at the next tool call.
 
 ### Kill switch

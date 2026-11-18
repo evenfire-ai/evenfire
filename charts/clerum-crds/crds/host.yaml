@@ -316,10 +316,10 @@ spec:
                                 type: string
                             allowModeChange:
                               type: boolean
-                              default: false
+                              default: true
                               description: >-
-                                When true, a Telegram session may store auto or
-                                allow_all, up to modeCeiling. Absent or false
+                                When true or absent, a Telegram session may store
+                                auto or allow_all, up to modeCeiling. Only false
                                 caps that channel at manual.
                         email:
                           type: object
@@ -334,10 +334,10 @@ spec:
                                 type: string
                             allowModeChange:
                               type: boolean
-                              default: false
+                              default: true
                               description: >-
-                                When true, an email session may store auto or
-                                allow_all, up to modeCeiling. Absent or false
+                                When true or absent, an email session may store
+                                auto or allow_all, up to modeCeiling. Only false
                                 caps that channel at manual. Email identity is
                                 the From address.
                         slack:
@@ -353,10 +353,10 @@ spec:
                                 type: string
                             allowModeChange:
                               type: boolean
-                              default: false
+                              default: true
                               description: >-
-                                When true, a Slack session may store auto or
-                                allow_all, up to modeCeiling. Absent or false
+                                When true or absent, a Slack session may store
+                                auto or allow_all, up to modeCeiling. Only false
                                 caps that channel at manual. A Slack
                                 username-allowlist match is accepted as that
                                 session's identity.
@@ -373,11 +373,11 @@ spec:
                                 type: string
                             allowModeChange:
                               type: boolean
-                              default: false
+                              default: true
                               description: >-
-                                When true, a Microsoft Teams session may store
-                                auto or allow_all, up to modeCeiling. Absent or
-                                false caps that channel at manual.
+                                When true or absent, a Microsoft Teams session
+                                may store auto or allow_all, up to modeCeiling.
+                                Only false caps that channel at manual.
                     tools:
                       type: object
                       description: >-
