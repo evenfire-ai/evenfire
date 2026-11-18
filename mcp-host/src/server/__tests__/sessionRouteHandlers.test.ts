@@ -93,6 +93,27 @@ describe('createSessionRouteHandlers — U5 connect_required projection on the r
     expect(item?.pendingApproval).not.toHaveProperty('provider')
   })
 
+  it('a waiting shell card returns shellCard on the session read', async () => {
+    const { convManager, handleSessionMessages } = makeHandlersUnderTest()
+    const shellCard = { channelCommandOffered: false, desktopCommandOffered: true }
+    const conv = await convManager.getOrCreate('user-A:rpc:agent-x:chat-shell')
+    await convManager.startTurn(conv, 'pwd', 'task-shell')
+    await convManager.suspendForApproval(conv, {
+      request_id: 'req-shell',
+      tool_name: 'shell_exec',
+      parameters: { command: 'pwd' },
+      description: 'Shell command',
+      tool_call_id: 'tc_shell',
+      context_snapshot: [],
+      shellCard,
+    })
+
+    const page = await handleSessionMessages('user-A', 'agent-x', 'chat-shell', {})
+
+    expect(page?.state).toBe('awaiting_approval')
+    expect(page?.pendingApproval?.shellCard).toEqual(shellCard)
+  })
+
   it('a generic approval projects WITHOUT the connect fields (back-compat)', async () => {
     const { convManager, handleSessionMessages } = makeHandlersUnderTest()
     await suspendGenericApproval(convManager, 'user-A:rpc:agent-x:chat-2')
