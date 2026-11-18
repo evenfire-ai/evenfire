@@ -325,12 +325,11 @@ describe('onListenerLost: own state first, then the closes', () => {
     const t = setup({ autoConnect: false })
     t.listener.startGfsWatchRegistry()
     const gaps: number[] = []
-    let lastStart = t.clock.now()
     for (let i = 0; i < 5; i += 1) {
       const c = t.clients.at(-1)!
       c.connectResult!.reject(new Error('ECONNREFUSED'))
       await flushMicrotasks()
-      lastStart = t.clock.now()
+      const lastStart = t.clock.now()
       const n = t.clients.length
       while (t.clients.length === n) await t.clock.advanceAsync(100)
       gaps.push(Math.round(t.clock.now() - lastStart))
