@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=lib/bootstrap-instances.sh
+source "$ROOT/deploy/scripts/lib/bootstrap-instances.sh"
 
 usage() {
   cat <<'EOF'
@@ -9,8 +11,10 @@ Usage:
   deploy/scripts/provision-gfs-runtime.sh --context <kube-context> --overlay <overlay-dir> [--allow-prod] [--skip-auth-sync] [--skip-instances]
 
 Runs the post-overlay GFS runtime provisioning steps and applies overlay CRD
-instances. Production contexts require --allow-prod; the Makefile prod target
-must perform the human confirmation before passing that flag.
+instances. Connector selections on mcp-server/context1 remain user-managed;
+its other declared fields and all other instances are applied normally.
+Production contexts require --allow-prod; the Makefile prod target must perform
+the human confirmation before passing that flag.
 
 Environment:
   ALLOWED_CONTEXTS   Comma-separated exact kube-contexts to treat as allowed dev
@@ -60,8 +64,8 @@ while [ $# -gt 0 ]; do
       ;;
     --skip-instances)
       # GFS DB provisioning only — do NOT apply the overlay's CRD instances
-      # (Host/Context/CommunicationChannel/GlobalFileSystem). Used by the prod
-      # promotion pipeline, where instance management stays a gated runbook op.
+      # (Host/Context/CommunicationChannel/GlobalFileSystem). Use when the caller
+      # manages those instances in a separate gated step.
       SKIP_INSTANCES="1"
       shift
       ;;
@@ -115,6 +119,11 @@ case "$CONTEXT" in
     fi
     ;;
 esac
+
+INSTANCES_DIR="$OVERLAY/instances"
+if [ "$SKIP_INSTANCES" != "1" ] && [ -d "$INSTANCES_DIR" ] && ! command -v jq >/dev/null 2>&1; then
+  die 'jq is required to apply CRD instances'
+fi
 
 kctl() {
   kubectl --context "$CONTEXT" "$@"
@@ -202,8 +211,6 @@ finalize_credentials_after_overlay() {
   wait_for_globalfilesystem_ready
 }
 
-INSTANCES_DIR="$OVERLAY/instances"
-
 log "Checking required GFS platform resources"
 kctl get crd globalfilesystems.clerum.io >/dev/null
 kctl -n gfs get role host-context-controller-gfs-runtime >/dev/null
@@ -222,12 +229,12 @@ else
 fi
 
 if [ "$SKIP_INSTANCES" = "1" ]; then
-  # Prod promotion does not manage CR instances here. Credential staging was
+  # This invocation does not manage CR instances. Credential staging was
   # already completed before overlay apply and never triggers a rollout.
   log "Skipping CRD instances apply and GlobalFileSystem readiness wait (--skip-instances)"
 elif [ -d "$INSTANCES_DIR" ]; then
   log "Applying CRD instances from $INSTANCES_DIR"
-  kctl apply -f "$INSTANCES_DIR"
+  apply_bootstrap_instances "$CONTEXT" "$INSTANCES_DIR"
 else
   log "No instances directory found at $INSTANCES_DIR"
 fi
