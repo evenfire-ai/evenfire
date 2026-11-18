@@ -12,6 +12,7 @@ import { config } from '../src/config.js'
 // a counter read here observes exactly what the edge backstops emit.
 import { rootLogger } from '../src/observability/logger.js'
 import { externalGfsRateLimitRequestsTotal } from '../src/observability/metrics.js'
+import type { ExternalSessionAuthentication } from '../src/services/auth/externalSessionAuthentication.js'
 
 /**
  * Unit tests for the end-user gfs surface on the /external (Session-JWT) plane.
@@ -228,7 +229,12 @@ async function buildAdminGrantsApp(sub: string) {
   return app
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  // The ingress backstop is one process-wide instance; each case starts with
+  // an empty window, as it did when every router built its own.
+  const { __resetExternalGfsIngressRateLimitForTests } =
+    await import('../src/routes/external/gfs.js')
+  __resetExternalGfsIngressRateLimitForTests()
   mockVerifyExternalSessionToken.mockReset()
   mockSignGfsToken.mockReset()
   mockSignCurrentExternalGfsUserToken.mockReset()
@@ -272,19 +278,36 @@ beforeEach(() => {
 })
 afterEach(() => vi.unstubAllGlobals())
 
-const auth = () =>
-  mockVerifyExternalSessionToken.mockResolvedValue({
-    status: 'authenticated',
+// Every field the real V1 authentication carries: the authority middleware
+// reads authorityContext, not the claims. `satisfies` pins the shape to the
+// producer's type whenever this file is typechecked.
+const AUTHENTICATED_V1_SESSION = {
+  status: 'authenticated',
+  contract: 'v1',
+  claims: SESSION,
+  tokenClaims: SESSION,
+  authorityContext: {
     contract: 'v1',
-    claims: SESSION,
-    authorityContext: {
-      contract: 'v1',
-      userId: SESSION.userId,
-      tokenHash: 'token-hash',
-      issuedAt: SESSION.exp - 3600,
-      authGeneration: SESSION.authGeneration,
-    },
-  })
+    userId: SESSION.userId,
+    tokenHash: 'route-test-token-hash',
+    issuedAt: SESSION.exp - 7200,
+    authGeneration: SESSION.authGeneration,
+  },
+  policy: {
+    policyVersion: '1',
+    policyRevision: 'route-test',
+    acceptV1: true,
+    issueV1: true,
+    acceptV2: true,
+    issueV2: false,
+    renewV2: false,
+    switchCompatibility: false,
+    minimumClientVersion: null,
+    enforceMinimumClient: false,
+  },
+} satisfies ExternalSessionAuthentication
+
+const auth = () => mockVerifyExternalSessionToken.mockResolvedValue(AUTHENTICATED_V1_SESSION)
 
 const v2Auth = () =>
   mockVerifyExternalSessionToken.mockResolvedValue({
@@ -475,6 +498,31 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     } finally {
       ;(config as { externalGfsIngressRlPerMin: number }).externalGfsIngressRlPerMin =
         previousIngressLimit
+    }
+  })
+
+  it('shares one ingress budget per source IP across every router that mounts it', async () => {
+    const previousIngressLimit = config.externalGfsIngressRlPerMin
+    config.externalGfsIngressRlPerMin = 2
+    try {
+      auth()
+      const first = await buildApp()
+      const second = await buildApp()
+      for (const app of [first, second]) {
+        await request(app)
+          .get('/external/gfs/not-classified')
+          .set('x-user-session-token', 'sess')
+          .set('x-forwarded-for', '203.0.113.21')
+          .expect(404)
+      }
+      const exhausted = await request(second)
+        .get('/external/gfs/not-classified')
+        .set('x-user-session-token', 'sess')
+        .set('x-forwarded-for', '203.0.113.21')
+      expect(exhausted.status).toBe(429)
+      expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(2)
+    } finally {
+      config.externalGfsIngressRlPerMin = previousIngressLimit
     }
   })
 

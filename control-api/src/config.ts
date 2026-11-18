@@ -7,11 +7,34 @@ import {
 import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
 import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
 import { rootLogger } from './observability/logger.js'
+import {
+  GFS_WATCH_MAX_CONNECTIONS,
+  GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL,
+} from './services/gfsWatch/admissionLimits.js'
 import { assertSafeCatalogUrl, resolveModelsDevApiUrl } from './services/modelsDevCatalogUrl.js'
+
+function isBoundedInteger(value: number, min: number, max: number): boolean {
+  return Number.isSafeInteger(value) && value >= min && value <= max
+}
 
 function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
   const parsed = Number(process.env[name])
-  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
+  return isBoundedInteger(parsed, min, max) ? parsed : fallback
+}
+
+// Same tolerance as boundedIntegerEnv (an unusable value boots with the
+// default instead of refusing), but says so: a silently ignored cap leaves the
+// operator believing the replica runs with the value they wrote.
+function warnedBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return fallback
+  const parsed = Number(raw)
+  if (isBoundedInteger(parsed, min, max)) return parsed
+  rootLogger.warn(
+    { event: 'env_value_out_of_range', env: name, value: raw, min, max, default: fallback },
+    `${name} is outside [${min}, ${max}] or not an integer; using the default`
+  )
+  return fallback
 }
 
 type Config = {
@@ -317,11 +340,13 @@ type Config = {
   entityChangeDispatchBatchSize: number
   entityChangeMaxRecoveryEvents: number
   entityChangeStreamPollMs: number
-  entityChangeUserVisibilityRefreshMs: number
   entityChangeStreamHeartbeatMs: number
   entityChangeStreamMaxLifetimeMs: number
   entityChangeStreamMaxConnections: number
   entityChangeStreamMaxConnectionsPerPrincipal: number
+  gfsWatchHeartbeatMs: number
+  gfsWatchMaxConnections: number
+  gfsWatchMaxConnectionsPerPrincipal: number
   notificationsDesktopFirstEnabled: boolean
   notificationDesktopGraceSeconds: number
   // Stricter than the normal refresh limiter: a client reaching reissue has
@@ -1378,17 +1403,34 @@ export const config: Config = {
     100000
   ),
   entityChangeStreamPollMs: boundedIntegerEnv('ENTITY_CHANGE_STREAM_POLL_MS', 1000, 250, 5000),
-  entityChangeUserVisibilityRefreshMs: boundedIntegerEnv(
-    'ENTITY_CHANGE_USER_VISIBILITY_REFRESH_MS',
-    4000,
-    1000,
-    5000
-  ),
   entityChangeStreamHeartbeatMs: boundedIntegerEnv(
     'ENTITY_CHANGE_STREAM_HEARTBEAT_MS',
     20 * 1000,
     1000,
     60 * 1000
+  ),
+  // Kept apart from ENTITY_CHANGE_STREAM_HEARTBEAT_MS (ceiling 60 s): the value
+  // travels in the watch `ready` frame, and the desktop treats a `ready` whose
+  // heartbeat is outside [5 s, 25 s] as invalid and reopens.
+  gfsWatchHeartbeatMs: warnedBoundedIntegerEnv(
+    'GFS_WATCH_HEARTBEAT_MS',
+    20 * 1000,
+    5 * 1000,
+    25 * 1000
+  ),
+  gfsWatchMaxConnections: warnedBoundedIntegerEnv(
+    'GFS_WATCH_MAX_CONNECTIONS',
+    GFS_WATCH_MAX_CONNECTIONS,
+    1,
+    10000
+  ),
+  // Ceiling well under the process default: one desktop holds one stream, so a
+  // larger per-principal cap only lets a single account crowd out the replica.
+  gfsWatchMaxConnectionsPerPrincipal: warnedBoundedIntegerEnv(
+    'GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL',
+    GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL,
+    1,
+    64
   ),
   entityChangeStreamMaxLifetimeMs: boundedIntegerEnv(
     'ENTITY_CHANGE_STREAM_MAX_LIFETIME_MS',

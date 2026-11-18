@@ -585,7 +585,7 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
   })
 
   it('builds no index on a pre-existing table inside a PR2 schema transaction', async () => {
-    // Liveness: PR2's transactions were recorded, including 0141's own table
+    // Liveness: PR2's transactions were recorded, including 0148's own table
     // and the in-transaction index on it, which the pattern below must see.
     const transactionSql = fresh.pr2TransactionSql.join('\n')
     expect(transactionSql).toContain('CREATE TABLE IF NOT EXISTS workflow_authority_bindings')

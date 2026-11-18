@@ -780,6 +780,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       ),
     })
   }, [current?.resourceId, queryClient])
+  // Access can be revoked by another mount or by the session-expiry purge,
+  // which cannot reach this mount's local state: the open location's names
+  // must not outlive the session that was allowed to read them.
+  const previousAccessStateRef = useRef(accessState)
+  useEffect(() => {
+    const previous = previousAccessStateRef.current
+    previousAccessStateRef.current = accessState
+    if (previous === 'revoked' || accessState !== 'revoked') return
+    setCrumbs([])
+    setOpenError(null)
+  }, [accessState, setCrumbs])
   const revokeAccess = useCallback(() => {
     setAccessState('revoked')
     clearGfsState()

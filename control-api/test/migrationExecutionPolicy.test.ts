@@ -16,6 +16,11 @@ import {
   onlineIndex,
   preparePr1Migration,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
+import {
+  GFS_AUTHZ_CHANGED_CHANNEL,
+  GFS_RESOURCE_CHANGED_CHANNEL,
+  GFS_WATCH_SESSION_CHANNEL,
+} from '../src/services/gfsWatch/notifySchemas.js'
 
 const EARLIER_HEAD_GUARD_MARKER = '/* pr1-earlier-head-guard */'
 const EARLIER_HEAD_DOC_REFERENCE =
@@ -58,16 +63,23 @@ describe('D34 migration execution policy', () => {
       '0138_legacy_password_security_epoch_backfill',
       '0139_llm_catalog_prune_columns',
       '0140_llm_catalog_prune_episodes',
+      '0141_gfs_resource_changed_notify',
+      '0142_gfs_authz_grants_notify',
+      '0143_gfs_authz_shares_notify',
+      '0144_gfs_authz_operator_links_notify',
+      '0145_gfs_authz_control_admins_notify',
+      '0146_gfs_authz_team_members_notify',
+      '0147_gfs_watch_session_users_notify',
     ])
-    // PR2 follows dev's last migration (0140) in consecutive slots. No read
+    // PR2 follows dev's last migration (0147) in consecutive slots. No read
     // binding entity migration remains (WF-14, A6 E1).
     expect(PR2_MIGRATION_VERSIONS).toEqual([
-      '0141_workflow_authority_bindings',
-      '0142_gfs_upload_authority_bindings',
-      '0143_pr2_readiness_evidence',
-      '0144_pr2_runtime_privileges',
-      '0145_workflow_run_failure_reason',
-      '0146_workflow_authorization_pause',
+      '0148_workflow_authority_bindings',
+      '0149_gfs_upload_authority_bindings',
+      '0150_pr2_readiness_evidence',
+      '0151_pr2_runtime_privileges',
+      '0152_workflow_run_failure_reason',
+      '0153_workflow_authorization_pause',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -130,13 +142,13 @@ describe('D34 migration execution policy', () => {
       ])
     ).toEqual([
       [
-        '0141_workflow_authority_bindings',
+        '0148_workflow_authority_bindings',
         'workflow_runs_initiating_authority_binding',
         'after-schema',
         undefined,
       ],
-      ['0146_workflow_authorization_pause', 'idx_wr_phase_v2', 'after-schema', 'idx_wr_phase'],
-      ['0146_workflow_authorization_pause', 'idx_wr_owner_v2', 'after-schema', 'idx_wr_owner'],
+      ['0153_workflow_authorization_pause', 'idx_wr_phase_v2', 'after-schema', 'idx_wr_phase'],
+      ['0153_workflow_authorization_pause', 'idx_wr_owner_v2', 'after-schema', 'idx_wr_owner'],
     ])
     expect(
       PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => [
@@ -146,62 +158,87 @@ describe('D34 migration execution policy', () => {
       ])
     ).toEqual([
       [
-        '0141_workflow_authority_bindings',
+        '0148_workflow_authority_bindings',
         'workflow_runs',
         'workflow_runs_initiating_authority_binding_id_fkey',
       ],
       [
-        '0141_workflow_authority_bindings',
+        '0148_workflow_authority_bindings',
         'workflow_approval_requests',
         'workflow_approval_requests_trigger_authority_binding_id_fkey',
       ],
       [
-        '0141_workflow_authority_bindings',
+        '0148_workflow_authority_bindings',
         'workflow_approval_requests',
         'workflow_approval_requests_decision_authority_binding_id_fkey',
       ],
       [
-        '0141_workflow_authority_bindings',
+        '0148_workflow_authority_bindings',
         'workflow_approval_requests',
         'workflow_approval_requests_consume_authority_binding_id_fkey',
       ],
       [
-        '0142_gfs_upload_authority_bindings',
+        '0149_gfs_upload_authority_bindings',
         'gfs_upload_sessions',
         'gfs_upload_sessions_action_authority_object',
       ],
-      ['0145_workflow_run_failure_reason', 'workflow_runs', 'workflow_runs_failure_reason_check'],
-      ['0146_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_phase_check'],
-      ['0146_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+      ['0152_workflow_run_failure_reason', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+      ['0153_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_phase_check'],
+      ['0153_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_failure_reason_check'],
     ])
-    // A version with only constraint validations (0142, 0145) still has
+    // A version with only constraint validations (0149, 0152) still has
     // post-schema work; the versions without either have none.
     expect(PR2_MIGRATION_VERSIONS.filter(version => hasPostSchemaWork(version))).toEqual([
-      '0141_workflow_authority_bindings',
-      '0142_gfs_upload_authority_bindings',
-      '0145_workflow_run_failure_reason',
-      '0146_workflow_authorization_pause',
+      '0148_workflow_authority_bindings',
+      '0149_gfs_upload_authority_bindings',
+      '0152_workflow_run_failure_reason',
+      '0153_workflow_authorization_pause',
     ])
     expect(PR1_MIGRATION_VERSIONS.filter(version => hasPostSchemaWork(version))).toEqual([])
   })
 
   it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
-    // PR1 occupies slots 0137-0138, after dev's 0136, and no shared
-    // environment holds a receipt for either. 0137 creates the user-session
-    // tables (sessions, security epochs, the v1 revocation ledger) and their
-    // runtime grants; the indexes it needs on pre-existing tables are built
-    // online by PR1_ONLINE_INDEX_PLAN. 0138 backfills the security epochs from
-    // historical password events. PR1 installs no trigger and no function.
+    // PR1 occupies the slots after dev's 0136 other than 0139 and 0140 (dev's
+    // catalog prune), and no shared environment holds a receipt for any of
+    // them. 0137 creates the user-session tables (sessions, security epochs,
+    // the v1 revocation ledger) and their runtime grants; the indexes it needs
+    // on pre-existing tables are built online by PR1_ONLINE_INDEX_PLAN. 0138
+    // backfills the security epochs from historical password events. 0141 installs gfs_resource_changed_notify(), an AFTER
+    // ROW trigger on gfs_resources that sends one pg_notify per written row.
+    // 0142-0147 install the GFS watch revocation signals, one table per
+    // migration and transaction: 0142 creates the key function
+    // gfs_authz_subject_key() and the trigger functions
+    // gfs_authz_subject_notify(), gfs_authz_user_notify(),
+    // gfs_authz_admin_notify() and gfs_watch_session_notify(), plus the AFTER
+    // ROW trigger on gfs_grants; 0143-0147 add AFTER ROW triggers on
+    // gfs_shares, gfs_desktop_operator_links, control_admin_users,
+    // team_members and users. Every login writes team_members and users, so
+    // 0146 and 0147 retry a lost lock wait twice; their lockRetries live in
+    // db.ts and are pinned by the lock-retry registration test below.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
         'de83799480ec54079f27e18abc5592780594e8b2d1a82759238a5edf1c8ff400',
+      ],
+      [
+        'src/services/gfsWatch/resourceChangedSchema.ts',
+        'a044bc9001c5aaa82bdba851d45434acbb87db09f2132240cc918a4cba15261a',
+      ],
+      [
+        'src/services/gfsWatch/authzChangedSchema.ts',
+        '94bb4a41f9db114a8f67622e2e1b03dc504b737bdcdb01d523fd98f021e7cd1f',
       ],
     ] as const
     for (const [path, expected] of files) {
       const bytes = await readFile(new URL(`../${path}`, import.meta.url))
       expect(createHash('sha256').update(bytes).digest('hex'), path).toBe(expected)
     }
+    // The SQL of 0141-0147 interpolates its channel names from notifySchemas.ts.
+    // That file is pinned by these values, not by its hash, because it also
+    // carries runtime payload parsers that later changes extend.
+    expect(GFS_RESOURCE_CHANGED_CHANNEL).toBe('gfs_resource_changed')
+    expect(GFS_AUTHZ_CHANGED_CHANNEL).toBe('gfs_authz_changed')
+    expect(GFS_WATCH_SESSION_CHANNEL).toBe('gfs_watch_session')
   })
 
   it('classifies every PR1 index exactly once', async () => {
@@ -397,11 +434,11 @@ describe('D34 PR1 migration runner', () => {
     })
 
     expect(applied).toEqual([...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS])
-    // One transaction per version without post-schema work (0137-0140,
-    // 0143-0144); a version with it commits its schema, each validation and
-    // its receipt separately: 0141 1 + 4 + 1, 0142 1 + 1 + 1, 0145 1 + 1 + 1,
-    // 0146 1 + 2 + 1.
-    const transactions = 6 + 6 + 3 + 3 + 4
+    // One transaction per version without post-schema work (0137-0147,
+    // 0150-0151); a version with it commits its schema, each validation and
+    // its receipt separately: 0148 1 + 4 + 1, 0149 1 + 1 + 1, 0152 1 + 1 + 1,
+    // 0153 1 + 2 + 1.
+    const transactions = 13 + 6 + 3 + 3 + 4
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
@@ -437,7 +474,7 @@ describe('D34 PR1 migration runner', () => {
         return { rows: [], rowCount: 0 }
       }),
     }
-    const pendingVersion = '0141_workflow_authority_bindings'
+    const pendingVersion = '0148_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
@@ -471,8 +508,8 @@ describe('D34 PR1 migration runner', () => {
   })
 
   it.each([
-    ['0142_gfs_upload_authority_bindings', ['gfs_upload_sessions_action_authority_object']],
-    ['0145_workflow_run_failure_reason', ['workflow_runs_failure_reason_check']],
+    ['0149_gfs_upload_authority_bindings', ['gfs_upload_sessions_action_authority_object']],
+    ['0152_workflow_run_failure_reason', ['workflow_runs_failure_reason_check']],
   ])(
     'validates the constraints of %s, which has no online index, after its schema commits',
     async (pendingVersion, constraints) => {
@@ -556,7 +593,7 @@ describe('D34 PR1 migration runner', () => {
       }
       return { rows: [], rowCount: 0 }
     })
-    const pendingVersion = '0145_workflow_run_failure_reason'
+    const pendingVersion = '0152_workflow_run_failure_reason'
     const appliedVersions = new Set<string>([
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
@@ -602,7 +639,7 @@ describe('D34 PR1 migration runner', () => {
       if (sql.startsWith('CREATE INDEX CONCURRENTLY')) throw new Error('online index failed')
       return { rows: [], rowCount: 0 }
     })
-    const pendingVersion = '0141_workflow_authority_bindings'
+    const pendingVersion = '0148_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
@@ -651,6 +688,123 @@ describe('D34 PR1 migration runner', () => {
     ).rejects.toThrow('boom')
     expect(applyOrder).not.toContain(PR1_MIGRATION_VERSIONS[0])
     expect(query).toHaveBeenCalledWith('ROLLBACK')
+  })
+
+  it('rejects a lockRetries outside 0..3 before applying anything', async () => {
+    for (const lockRetries of [-1, 4, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const apply = vi.fn(async () => undefined)
+      const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+      await expect(
+        applyPendingPr1Migrations({
+          db: { query },
+          migrations: PR1_MIGRATION_VERSIONS.map((version, index) => ({
+            version,
+            ...(index === PR1_MIGRATION_VERSIONS.length - 1 ? { lockRetries } : {}),
+            apply,
+          })),
+          appliedVersions: new Set(),
+          recordMigration: async () => undefined,
+        }),
+        String(lockRetries)
+      ).rejects.toThrow(/lockRetries must be an integer from 0 to 3/)
+      expect(apply).not.toHaveBeenCalled()
+      expect(query).not.toHaveBeenCalled()
+    }
+    // The bounds themselves are accepted.
+    for (const lockRetries of [0, 3]) {
+      await applyPendingPr1Migrations({
+        db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },
+        migrations: [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS].map(version => ({
+          version,
+          lockRetries,
+          apply: async () => undefined,
+        })),
+        appliedVersions: new Set([...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]),
+        recordMigration: async () => undefined,
+      })
+    }
+  })
+
+  it('registers lock retries only on the users and team_members trigger migrations', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const withRetries = CONTROL_API_MIGRATIONS.filter(
+      migration => (migration as { lockRetries?: number }).lockRetries !== undefined
+    ).map(migration => [migration.version, (migration as { lockRetries?: number }).lockRetries])
+    expect(withRetries).toEqual([
+      ['0146_gfs_authz_team_members_notify', 2],
+      ['0147_gfs_watch_session_users_notify', 2],
+    ])
+  })
+
+  // The SQLSTATE of a lost lock wait comes from real PostgreSQL in
+  // gfsWatch.authzSessionTriggers.realPostgres.integration.test.ts; these cases
+  // pin the runner's bounds around it.
+  describe('lock retries', () => {
+    const retried = PR1_MIGRATION_VERSIONS[PR1_MIGRATION_VERSIONS.length - 1]
+
+    function lockFailingRun(failures: Array<{ code?: string }>, lockRetries?: number) {
+      const transactions: string[] = []
+      const sleeps: number[] = []
+      const recorded: string[] = []
+      let calls = 0
+      const runnerVersions = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]
+      const migrations = runnerVersions.map(version => ({
+        version,
+        ...(version === retried && lockRetries !== undefined ? { lockRetries } : {}),
+        apply: vi.fn(async () => {
+          if (version !== retried) return
+          const failure = failures[calls]
+          calls += 1
+          if (failure) throw Object.assign(new Error('lock'), failure)
+        }),
+      }))
+      const run = applyPendingPr1Migrations({
+        db: {
+          query: vi.fn(async (sql: string) => {
+            if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') transactions.push(sql)
+            return { rows: [], rowCount: 0 }
+          }),
+        },
+        migrations,
+        appliedVersions: new Set(runnerVersions.filter(version => version !== retried)),
+        recordMigration: async (_db, version) => {
+          recorded.push(version)
+        },
+        sleep: async ms => {
+          sleeps.push(ms)
+        },
+      })
+      return { run, transactions, sleeps, recorded, attempts: () => calls }
+    }
+
+    it('retries the whole transaction after a lock timeout and then records once', async () => {
+      const r = lockFailingRun([{ code: '55P03' }, { code: '55P03' }], 2)
+      await r.run
+      expect(r.attempts()).toBe(3)
+      expect(r.recorded).toEqual([retried])
+      expect(r.transactions).toEqual(['BEGIN', 'ROLLBACK', 'BEGIN', 'ROLLBACK', 'BEGIN', 'COMMIT'])
+      expect(r.sleeps).toEqual([1_000, 2_000])
+    })
+
+    it('gives up after its retries and surfaces the lock error', async () => {
+      const r = lockFailingRun([{ code: '55P03' }, { code: '55P03' }, { code: '55P03' }], 2)
+      await expect(r.run).rejects.toMatchObject({ code: '55P03' })
+      expect(r.attempts()).toBe(3)
+      expect(r.recorded).toEqual([])
+    })
+
+    it('does not retry other errors, nor a version without lockRetries', async () => {
+      for (const code of ['57014', '40P01']) {
+        const other = lockFailingRun([{ code }], 2)
+        await expect(other.run).rejects.toMatchObject({ code })
+        expect(other.attempts(), code).toBe(1)
+      }
+
+      const noRetries = lockFailingRun([{ code: '55P03' }])
+      await expect(noRetries.run).rejects.toMatchObject({ code: '55P03' })
+      expect(noRetries.attempts()).toBe(1)
+      expect(noRetries.sleeps).toEqual([])
+    })
   })
 
   it('fails closed for an unclassified migration after the dev batch', async () => {
@@ -856,10 +1010,18 @@ describe('PR1 earlier-head guard', () => {
     })
 
     expect(queries.filter(({ sql }) => sql.includes(EARLIER_HEAD_GUARD_MARKER))).toHaveLength(1)
+    // 0138 is recorded through its alias; the versions after it apply normally.
     expect(recorded).toEqual([
       '0138_legacy_password_security_epoch_backfill',
       '0139_llm_catalog_prune_columns',
       '0140_llm_catalog_prune_episodes',
+      '0141_gfs_resource_changed_notify',
+      '0142_gfs_authz_grants_notify',
+      '0143_gfs_authz_shares_notify',
+      '0144_gfs_authz_operator_links_notify',
+      '0145_gfs_authz_control_admins_notify',
+      '0146_gfs_authz_team_members_notify',
+      '0147_gfs_watch_session_users_notify',
     ])
   })
 })

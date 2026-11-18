@@ -48,6 +48,15 @@ import {
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
 import {
+  applyGfsAuthzControlAdminsSchema,
+  applyGfsAuthzGrantsSchema,
+  applyGfsAuthzOperatorLinksSchema,
+  applyGfsAuthzSharesSchema,
+  applyGfsAuthzTeamMembersSchema,
+  applyGfsWatchSessionUsersSchema,
+} from './services/gfsWatch/authzChangedSchema.js'
+import { applyGfsResourceChangedSchema } from './services/gfsWatch/resourceChangedSchema.js'
+import {
   applyGrokCatalogModelsSchema,
   applyGrokSubscriptionConnectionSchema,
   applyGrokSubscriptionOAuthStateSchema,
@@ -146,6 +155,8 @@ type DbMigration = {
   // Equivalent names used before a branch merge renumbered the same migration body.
   legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
+  // Extra attempts when the transaction loses a lock wait (runner versions only).
+  lockRetries?: number
 }
 
 export type { BoundedPoolBudget, PoolConstructor } from './boundedPgPool.js'
@@ -6662,30 +6673,62 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyLlmCatalogPruneStateSchema,
   },
   {
-    // PR2 follows dev's last migration, 0140_llm_catalog_prune_episodes, in
-    // consecutive slots. No shared database recorded an earlier PR2 name, so
-    // none is carried as an alias.
-    version: '0141_workflow_authority_bindings',
+    version: '0141_gfs_resource_changed_notify',
+    apply: applyGfsResourceChangedSchema,
+  },
+  {
+    version: '0142_gfs_authz_grants_notify',
+    apply: applyGfsAuthzGrantsSchema,
+  },
+  {
+    version: '0143_gfs_authz_shares_notify',
+    apply: applyGfsAuthzSharesSchema,
+  },
+  {
+    version: '0144_gfs_authz_operator_links_notify',
+    apply: applyGfsAuthzOperatorLinksSchema,
+  },
+  {
+    version: '0145_gfs_authz_control_admins_notify',
+    apply: applyGfsAuthzControlAdminsSchema,
+  },
+  {
+    version: '0146_gfs_authz_team_members_notify',
+    apply: applyGfsAuthzTeamMembersSchema,
+    // Every login writes users and team_members: CREATE TRIGGER on them can
+    // lose its lock wait at a busy moment, which should not fail the Job.
+    lockRetries: 2,
+  },
+  {
+    version: '0147_gfs_watch_session_users_notify',
+    apply: applyGfsWatchSessionUsersSchema,
+    lockRetries: 2,
+  },
+  {
+    // PR2 follows dev's last migration, 0147_gfs_watch_session_users_notify,
+    // in consecutive slots. No shared database recorded an earlier PR2 name,
+    // so none is carried as an alias.
+    version: '0148_workflow_authority_bindings',
     apply: applyWorkflowAuthorityBindingsSchema,
   },
   {
-    version: '0142_gfs_upload_authority_bindings',
+    version: '0149_gfs_upload_authority_bindings',
     apply: applyGfsUploadAuthorityBindingSchema,
   },
   {
-    version: '0143_pr2_readiness_evidence',
+    version: '0150_pr2_readiness_evidence',
     apply: applyPr2ReadinessEvidenceSchema,
   },
   {
-    version: '0144_pr2_runtime_privileges',
+    version: '0151_pr2_runtime_privileges',
     apply: applyPr2RuntimePrivilegesSchema,
   },
   {
-    version: '0145_workflow_run_failure_reason',
+    version: '0152_workflow_run_failure_reason',
     apply: applyWorkflowRunFailureReasonSchema,
   },
   {
-    version: '0146_workflow_authorization_pause',
+    version: '0153_workflow_authorization_pause',
     apply: applyWorkflowRunAuthorizationPauseSchema,
   },
 ]

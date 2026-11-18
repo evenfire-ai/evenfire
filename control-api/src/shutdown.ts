@@ -29,6 +29,7 @@ export const CONTROL_API_SHUTDOWN_STEP_NAMES = [
   'workflow-approval-trace-projector',
   'entity-change-dispatcher',
   'pr2-runtime-evidence',
+  'watch-database-pool',
   'core-database-pool',
   'rate-limit-database-pool',
   'trace-database-pools',

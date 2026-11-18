@@ -311,10 +311,10 @@ Read the notes for every release you skip over, not only the target release.
    Job, then External REST and Profile UI, and only then control-api.
    gfs-controller images that include the upload authority change write
    `gfs_upload_sessions.action_authority`, so control-api migration
-   `0142_gfs_upload_authority_bindings` must be applied first; do not bump
+   `0149_gfs_upload_authority_bindings` must be applied first; do not bump
    `CONTEXT_MAPPER_GFSC_IMAGE` on its own ahead of control-api. v0.12.1 does
    not include that change. workflow-recipes images of the same release need
-   `0141_workflow_authority_bindings` and `0145_workflow_run_failure_reason` to
+   `0148_workflow_authority_bindings` and `0152_workflow_run_failure_reason` to
    start a run: roll workflow-recipes after the control-api migration Job. If
    it rolls first, runs already in progress continue, and new runs stay
    `Pending` and are retried on each run poll until the migrations are
@@ -336,6 +336,7 @@ Read the notes for every release you skip over, not only the target release.
 | [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.                                                                                                                                                                                      |
 | [HCC NetworkPolicy pass bounds](#hcc-networkpolicy-pass-bounds)                    | You upgrade host-context-controller. It can now exit and restart when a NetworkPolicy pass reaches its hard limit, and it refuses to start when `HCC_K8S_REQUEST_TIMEOUT_MS`, `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` or the hard limit is not plain digits, or when a request timeout is not below the hard limit. No RBAC change. |
 | [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor)          | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`.                                                                                                                                                               |
+| [Desktop floor for the GFS watch](#desktop-floor-for-the-gfs-watch)                | You cut the first release that serves the GFS watch. Pass `--minimum-desktop-version` equal to that release, or older Desktop Apps lose live updates.                                                                                                                                                                         |
 
 #### Snippet runner Node permissions
 
@@ -563,3 +564,31 @@ release. If your `mcp-host-config` started as a copy of it, raise
 mcp-host image; otherwise every Host refuses to start. mcp-host reads both
 values at startup through `envFrom`, so a ConfigMap change applies when each
 Host pod starts again.
+
+### Desktop floor for the GFS watch
+
+The External REST API no longer serves `GET /api/v1/entity-changes/stream`. It
+answers 404, like any unrouted path. Desktop Apps that include the GFS watch
+client use the GFS watch routes instead. Older Desktop Apps keep requesting the
+retired stream and treat the 404 as a transient error: they retry in the
+background every 15 to 18 s until the app is updated. Those apps get no live
+refresh and show no error, so users are not told that the view has stopped
+updating. Each one sends three to four requests per minute that fail with 404.
+
+`minimumDesktopVersion` is what makes those apps show **Desktop update
+required**. `prepare-release.mjs` changes it only when you pass the flag, so cut
+the first release that contains the GFS watch with the flag set to that
+release's own version:
+
+```bash
+node scripts/release/prepare-release.mjs --version X.Y.Z --release-id vX.Y.Z \
+  --minimum-desktop-version X.Y.Z
+```
+
+You cannot raise the floor ahead of the release in a feature branch. The script
+refuses a floor above `--version`, and it refuses a `--version` that is not
+greater than the Desktop App version already committed.
+
+Before that release is cut, only a cluster deployed from `dev` serves the new
+routes. Older Desktop Apps pointed at such a cluster lose live updates in the
+same way.

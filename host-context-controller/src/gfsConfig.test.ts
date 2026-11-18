@@ -159,3 +159,35 @@ describe('gfsDefaultFactoryConfig', () => {
     expect(() => gfsDefaultFactoryConfig()).toThrow(/expected \/32 CIDR/)
   })
 })
+
+describe('gfsDefaultFactoryConfig drive name', () => {
+  afterEach(() => {
+    delete process.env.CONTEXT_MAPPER_GFS_DRIVE_NAME
+  })
+
+  it.each([undefined, ''])('defaults to main when absent or empty (%s)', value => {
+    if (value === undefined) delete process.env.CONTEXT_MAPPER_GFS_DRIVE_NAME
+    else process.env.CONTEXT_MAPPER_GFS_DRIVE_NAME = value
+    expect(gfsDefaultFactoryConfig().driveName).toBe('main')
+  })
+
+  it.each(['main', 'team-drive-2', '0', 'a'.repeat(63)])('accepts %s', value => {
+    process.env.CONTEXT_MAPPER_GFS_DRIVE_NAME = value
+    expect(gfsDefaultFactoryConfig().driveName).toBe(value)
+  })
+
+  it.each([
+    'Main',
+    'my_drive',
+    'drive.one',
+    'drive/x',
+    ' main',
+    'main ',
+    'main\n',
+    'dríve',
+    'a'.repeat(64),
+  ])('fails to load with %s', value => {
+    process.env.CONTEXT_MAPPER_GFS_DRIVE_NAME = value
+    expect(() => gfsDefaultFactoryConfig()).toThrow(/CONTEXT_MAPPER_GFS_DRIVE_NAME must match/)
+  })
+})

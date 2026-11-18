@@ -112,7 +112,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
 
 export const PR2_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
   onlineIndex({
-    migrationVersion: '0141_workflow_authority_bindings',
+    migrationVersion: '0148_workflow_authority_bindings',
     phase: 'after-schema',
     name: 'workflow_runs_initiating_authority_binding',
     table: 'workflow_runs',
@@ -120,7 +120,7 @@ export const PR2_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
     where: '(initiating_authority_binding_id IS NOT NULL)',
   }),
   onlineIndex({
-    migrationVersion: '0146_workflow_authorization_pause',
+    migrationVersion: '0153_workflow_authorization_pause',
     phase: 'after-schema',
     name: 'idx_wr_phase_v2',
     table: 'workflow_runs',
@@ -129,7 +129,7 @@ export const PR2_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
     replaces: 'idx_wr_phase',
   }),
   onlineIndex({
-    migrationVersion: '0146_workflow_authorization_pause',
+    migrationVersion: '0153_workflow_authorization_pause',
     phase: 'after-schema',
     name: 'idx_wr_owner_v2',
     table: 'workflow_runs',
@@ -174,42 +174,42 @@ function constraintValidation(
 export const PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS: readonly PostSchemaConstraintValidation[] =
   Object.freeze([
     constraintValidation({
-      migrationVersion: '0141_workflow_authority_bindings',
+      migrationVersion: '0148_workflow_authority_bindings',
       table: 'workflow_runs',
       constraint: 'workflow_runs_initiating_authority_binding_id_fkey',
     }),
     constraintValidation({
-      migrationVersion: '0141_workflow_authority_bindings',
+      migrationVersion: '0148_workflow_authority_bindings',
       table: 'workflow_approval_requests',
       constraint: 'workflow_approval_requests_trigger_authority_binding_id_fkey',
     }),
     constraintValidation({
-      migrationVersion: '0141_workflow_authority_bindings',
+      migrationVersion: '0148_workflow_authority_bindings',
       table: 'workflow_approval_requests',
       constraint: 'workflow_approval_requests_decision_authority_binding_id_fkey',
     }),
     constraintValidation({
-      migrationVersion: '0141_workflow_authority_bindings',
+      migrationVersion: '0148_workflow_authority_bindings',
       table: 'workflow_approval_requests',
       constraint: 'workflow_approval_requests_consume_authority_binding_id_fkey',
     }),
     constraintValidation({
-      migrationVersion: '0142_gfs_upload_authority_bindings',
+      migrationVersion: '0149_gfs_upload_authority_bindings',
       table: 'gfs_upload_sessions',
       constraint: 'gfs_upload_sessions_action_authority_object',
     }),
     constraintValidation({
-      migrationVersion: '0145_workflow_run_failure_reason',
+      migrationVersion: '0152_workflow_run_failure_reason',
       table: 'workflow_runs',
       constraint: 'workflow_runs_failure_reason_check',
     }),
     constraintValidation({
-      migrationVersion: '0146_workflow_authorization_pause',
+      migrationVersion: '0153_workflow_authorization_pause',
       table: 'workflow_runs',
       constraint: 'workflow_runs_phase_check',
     }),
     constraintValidation({
-      migrationVersion: '0146_workflow_authorization_pause',
+      migrationVersion: '0153_workflow_authorization_pause',
       table: 'workflow_runs',
       constraint: 'workflow_runs_failure_reason_check',
     }),

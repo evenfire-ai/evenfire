@@ -1734,15 +1734,15 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       REVOKE ALL ON TABLE pr2_readiness_activations FROM control_api_runtime;
       REVOKE ALL ON TABLE pr2_readiness_evidence FROM control_api_runtime;
       DELETE FROM schema_migrations
-       WHERE version = '0144_pr2_runtime_privileges';
+       WHERE version = '0151_pr2_runtime_privileges';
     `)
     await initDb(connector)
     const upgradedPr2Corrections = await dbPool.query<{ version: string }>(
       `SELECT version FROM schema_migrations
-        WHERE version = '0144_pr2_runtime_privileges'`
+        WHERE version = '0151_pr2_runtime_privileges'`
     )
     expect(upgradedPr2Corrections.rows.map(row => row.version)).toEqual([
-      '0144_pr2_runtime_privileges',
+      '0151_pr2_runtime_privileges',
     ])
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0063_workflow_approval_trace_binding'
@@ -3857,10 +3857,13 @@ describeRealPostgres('control-api real Postgres migrations', () => {
              'entity_change_capture_resource',
              'entity_change_capture_scope',
              'entity_change_dispatch_batch',
-             'entity_change_read_checkpoint'
+             'entity_change_read_checkpoint',
+             'gfs_resource_changed_notify'
            )
       `)
-      expect(functionPaths.rows).toHaveLength(4)
+      // The watch trigger runs with the writer's rights, but the probe INSERT
+      // above also fires it: its casts must not resolve to the temp domain.
+      expect(functionPaths.rows).toHaveLength(5)
       for (const { config } of functionPaths.rows) {
         expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
       }

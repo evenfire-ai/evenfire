@@ -283,6 +283,13 @@ jobs:
         working-directory: mcp-host
         run: npm ci
 
+      # The native GFS watch fixture imports control-api source through
+      # testSupport/gfsWatch, so its typecheck resolves control-api's packages.
+      - name: Install Control API dependencies for Desktop native fixture typecheck
+        if: matrix.service == 'desktop-app'
+        working-directory: control-api
+        run: npm ci
+
       # Host's native HTTP admission test imports each proxy server. Install the
       # existing locked proxy dependencies on this otherwise isolated matrix job.
       - name: Install Codex proxy dependencies for Host integration
@@ -313,6 +320,14 @@ jobs:
         if: matrix.service == 'control-api' || matrix.service == 'rpc-proxy' || matrix.service == 'external-rest-api'
         working-directory: ${{ matrix.service }}
         run: npm run typecheck:jwt-contract
+
+      # The native Electron fixtures do not run in CI. The TypeScript one
+      # (test/native/*.ts) is typechecked so it cannot drift from the src/
+      # contracts it drives; the .cjs fixtures are not covered.
+      - name: Typecheck Desktop native test fixtures
+        if: matrix.service == 'desktop-app'
+        working-directory: desktop-app
+        run: npm run typecheck:native
 
       - name: Build Profile UI image builder stage
         if: matrix.service == 'profile-ui'
