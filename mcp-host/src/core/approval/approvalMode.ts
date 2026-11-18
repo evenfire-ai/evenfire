@@ -48,36 +48,112 @@ export function readModeCeiling(snapshot: ApprovalConfigSnapshot): ApprovalMode 
   return normalizeApprovalMode(snapshot.hostSpec?.modeCeiling)
 }
 
+const MESSAGING_CHANNEL_TYPES = ['telegram', 'email', 'slack', 'teams'] as const
+type MessagingChannelType = (typeof MESSAGING_CHANNEL_TYPES)[number]
+
+/**
+ * The channel switch when `allowModeChange` is absent. Email identity is the
+ * From address, which a sender can forge, so email raises only on an explicit
+ * `true`. The other messaging channels default to on.
+ */
+const CHANNEL_SWITCH_DEFAULT: Record<MessagingChannelType, boolean> = {
+  telegram: true,
+  email: false,
+  slack: true,
+  teams: true,
+}
+
+function isMessagingChannelType(value: string | undefined): value is MessagingChannelType {
+  return (MESSAGING_CHANNEL_TYPES as readonly (string | undefined)[]).includes(value)
+}
+
 /**
  * Channel cap from `hostSpec` only.
- * `rpc` is allow_all. telegram, email, and slack are allow_all only when
- * `allowModeChange` is not `false`. The switch defaults to on: a missing
- * channel block, or a block that omits the field, still allows the raise.
- * Only an explicit `false` caps that channel at manual. Every other channel
- * type is manual. A missing or non-object `channels` value does not throw.
+ * `rpc` is allow_all. telegram, slack, and teams are allow_all unless
+ * `allowModeChange` is `false`; email is allow_all only when it is `true`.
+ * An absent `channels`, channel block, or field takes that default. A value
+ * that is present but malformed (a non-object `channels` or entry, or a
+ * non-boolean field) caps the channel at manual; `approvalModeConfigWarnings`
+ * names it. Every other channel type is manual.
  */
 export function readChannelCap(
   snapshot: ApprovalConfigSnapshot,
   channelType: string | undefined
 ): ApprovalMode {
   if (channelType === 'rpc') return 'allow_all'
-  if (
-    channelType !== 'telegram' &&
-    channelType !== 'email' &&
-    channelType !== 'slack' &&
-    channelType !== 'teams'
-  ) {
-    return 'manual'
-  }
+  if (!isMessagingChannelType(channelType)) return 'manual'
 
-  // The declared channels type is an object, but a live spec can be null or
-  // a non-object. Read it as unknown so that case returns manual instead of throwing.
+  // The declared types are objects and booleans, but a spec that skipped the
+  // apiserver schema (dev-mode env config) can carry anything. Read as unknown.
   const channels: unknown = snapshot.hostSpec?.channels
-  if (!isPlainObject(channels)) return 'allow_all'
+  let allowModeChange: unknown
+  if (channels !== undefined) {
+    if (!isPlainObject(channels)) return 'manual'
+    const entry = channels[channelType]
+    if (entry !== undefined) {
+      if (!isPlainObject(entry)) return 'manual'
+      allowModeChange = entry.allowModeChange
+    }
+  }
+  if (allowModeChange === undefined) allowModeChange = CHANNEL_SWITCH_DEFAULT[channelType]
+  return allowModeChange === true ? 'allow_all' : 'manual'
+}
 
-  const entry = channels[channelType]
-  if (!isPlainObject(entry)) return 'allow_all'
-  return entry.allowModeChange === false ? 'manual' : 'allow_all'
+/** One malformed approval-mode field. `field` is a path under `spec.approval`. */
+export interface ApprovalModeConfigWarning {
+  field: string
+  message: string
+}
+
+/**
+ * Malformed mode fields in a Host's `spec.approval`. Each one reads manual.
+ * Called once per config install so an operator can see why a channel or the
+ * ceiling stayed manual. Messages name the field, never its value.
+ */
+export function approvalModeConfigWarnings(
+  approval: ApprovalConfig | undefined
+): ApprovalModeConfigWarning[] {
+  if (!isPlainObject(approval)) return []
+  const warnings: ApprovalModeConfigWarning[] = []
+  const ceiling = approval.modeCeiling
+  if (
+    Object.hasOwn(approval, 'modeCeiling') &&
+    ceiling !== undefined &&
+    normalizeApprovalMode(ceiling) !== ceiling
+  ) {
+    warnings.push({
+      field: 'modeCeiling',
+      message: 'modeCeiling is not manual, auto or allow_all; the ceiling reads manual',
+    })
+  }
+  const channels: unknown = approval.channels
+  if (channels === undefined) return warnings
+  if (!isPlainObject(channels)) {
+    warnings.push({
+      field: 'channels',
+      message: 'channels is not an object; every messaging channel is capped at manual',
+    })
+    return warnings
+  }
+  for (const channelType of MESSAGING_CHANNEL_TYPES) {
+    const entry = channels[channelType]
+    if (entry === undefined) continue
+    if (!isPlainObject(entry)) {
+      warnings.push({
+        field: `channels.${channelType}`,
+        message: `channels.${channelType} is not an object; that channel is capped at manual`,
+      })
+      continue
+    }
+    const value = entry.allowModeChange
+    if (value !== undefined && typeof value !== 'boolean') {
+      warnings.push({
+        field: `channels.${channelType}.allowModeChange`,
+        message: `channels.${channelType}.allowModeChange is not a boolean; that channel is capped at manual`,
+      })
+    }
+  }
+  return warnings
 }
 
 /** Effective mode is min(stored, ceiling, channel cap). */

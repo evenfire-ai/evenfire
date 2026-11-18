@@ -1004,6 +1004,56 @@ describe('approval mode writers at admission', () => {
     ).toBe('manual')
   })
 
+  it('raises Telegram but keeps email manual when allowModeChange is absent', async () => {
+    const manager = new ConversationManager()
+    const absent: ApprovalConfigSnapshot = {
+      effective: OPEN_CEILING.effective,
+      hostSpec: {
+        defaultPolicy: 'cli_only',
+        channels: { telegram: { enabled: true }, email: { enabled: true } },
+        modeCeiling: 'allow_all',
+      },
+    }
+    const { admit, spies } = admitWith(manager, absent)
+    const telegram = await admit(
+      message({
+        channelType: 'telegram',
+        channelId: 'tg-1',
+        sender: 'tg-user',
+        content: 'approval-mode allow-all',
+      })
+    )
+    const email = await admit(
+      message({
+        channelType: 'email',
+        channelId: 'inbox-1',
+        sender: 'mail-user@example.test',
+        messageId: 'msg-email',
+        content: 'approval-mode allow-all',
+      })
+    )
+    expect(spies.dispatch).not.toHaveBeenCalled()
+    expect(telegram).toMatchObject({
+      success: true,
+      response: 'Approval mode is allow_all. Effective mode is allow_all.',
+    })
+    expect(email).toMatchObject({
+      success: true,
+      response:
+        'Approval mode is manual. Effective mode is manual. This channel is limited to manual.',
+    })
+    expect(
+      manager.getSessionByKey(
+        serializeSessionKey({
+          userId: 'mail-user@example.test',
+          channelType: 'email',
+          channelId: 'inbox-1',
+          threadId: 'chat-1',
+        })
+      )?.approval_mode
+    ).toBe('manual')
+  })
+
   it('reads the cap from the stored channel type, never from the key', async () => {
     const manager = new ConversationManager()
     const key = serializeSessionKey({

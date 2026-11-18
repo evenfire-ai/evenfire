@@ -37,7 +37,7 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 | `spec.approval.channels.email` | object | no | Email approval config. |
 | `spec.approval.channels.email.enabled` | boolean | no | Whether email users can approve. |
 | `spec.approval.channels.email.approvers` | string[] | no | List of email addresses allowed to approve. |
-| `spec.approval.channels.email.allowModeChange` | boolean | no | Default `true`. When `true` or absent, an email session may store `auto` or `allow_all`, up to `modeCeiling`. Only `false` caps that channel at `manual`. Email identity is the From address. |
+| `spec.approval.channels.email.allowModeChange` | boolean | no | Default `false`. Only when `true` may an email session store `auto` or `allow_all`, up to `modeCeiling`. Absent or `false` caps email at `manual`. Email identity is the From address, which a sender can forge. |
 | `spec.approval.channels.slack` | object | no | Slack approval config. |
 | `spec.approval.channels.slack.enabled` | boolean | no | Whether Slack users can approve. |
 | `spec.approval.channels.slack.approvers` | string[] | no | List of Slack user IDs allowed to approve. |
@@ -137,13 +137,13 @@ kubectl create secret generic chatllm-api-keys \
 
 `spec.approval.modeCeiling` and each channel's `allowModeChange` are read from this Host CR only. The same fields in mcp-host's `CLERUM_APPROVAL_CONFIG` are ignored: that variable is parsed once at startup, so it cannot act as a live kill switch. The exception is dev mode (`CLERUM_DEV_MODE`), which has no Host watch and reads both fields from `CLERUM_APPROVAL_CONFIG`.
 
-An absent ceiling, a Host with no `spec.approval`, or any other value means `manual`. A Telegram, email, Slack, or Microsoft Teams session may rise above manual unless that channel's `allowModeChange` is `false`. The switch defaults to on. Desktop is not capped by a channel switch. See [Configure approvals](../how-to/configure-approvals.md).
+An absent ceiling, a Host with no `spec.approval`, or any other value means `manual`. A Telegram, Slack, or Microsoft Teams session may rise above manual unless that channel's `allowModeChange` is `false`; the switch defaults to on. An email session may rise above manual only when `email.allowModeChange` is `true`; the switch defaults to off, because the From address can be forged. A malformed value (a non-object `channels` or channel block, or a non-boolean `allowModeChange`) caps that channel at manual, and mcp-host logs `approval_config_invalid` naming the field. Desktop is not capped by a channel switch. See [Configure approvals](../how-to/configure-approvals.md).
 
 A Host whose approval policy comes only from the ConfigMap has ceiling `manual` and channel cap `manual`. mcp-host uses `spec.approval` or the ConfigMap policy as one whole object, so adding `spec.approval` replaces that policy. Copy `defaultPolicy`, `channels`, and `tools` into the CR in the same edit that sets the ceiling.
 
 An explicit `shell_exec: true`, including the example above, keeps a card on every `shell_exec` in auto, with no classifier and no shell memory. Remove that line if auto should judge shell.
 
-Apply this CRD before any component writes `modeCeiling` or `allowModeChange`. Until it is applied, the API server prunes the new fields and the ceiling stays manual.
+Apply this CRD before any component writes `modeCeiling` or `allowModeChange`. Until it is applied, the API server prunes the new fields and the ceiling stays manual. An `allowModeChange: false` written before the CRD is lost; write it again after the CRD is applied, before raising the ceiling.
 
 ## Related
 

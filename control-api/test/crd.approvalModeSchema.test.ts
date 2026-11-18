@@ -82,6 +82,20 @@ describe('host.yaml approval mode schema', () => {
     }
   })
 
+  // The apiserver fills these defaults into any channel block that omits the
+  // field, so they must match mcp-host's readChannelCap defaults. A `true` on
+  // email would open the forgeable From-address channel whenever a block exists.
+  it('allowModeChange defaults to off on email and on for the other channels', () => {
+    const channels = asRecord(asRecord(approval.channels)?.properties)
+    const defaults = Object.fromEntries(
+      MODE_CHANNELS.map(channel => [
+        channel,
+        asRecord(asRecord(asRecord(channels?.[channel])?.properties)?.allowModeChange)?.default,
+      ])
+    )
+    expect(defaults).toEqual({ telegram: true, email: false, slack: true, teams: true })
+  })
+
   it('marks the new approval fields with the CRD-first rollout note', () => {
     const start = raw.indexOf('\n                approval:')
     const end = raw.indexOf('\n                desktop:')
