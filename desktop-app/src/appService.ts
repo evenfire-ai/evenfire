@@ -2396,7 +2396,7 @@ export class AppService {
       .toLowerCase()
     const socialPath =
       options.section === 'social' && /^[a-z0-9-]+$/.test(network)
-        ? `/settings/social/${network}`
+        ? `/channels/${network}`
         : '/settings/profile'
     const profileUiUrl = new URL(socialPath, `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
     if (options.action === 'password') profileUiUrl.searchParams.set('action', 'password')

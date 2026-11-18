@@ -1359,10 +1359,10 @@ describe('ChannelReader pollCycle provider guards', () => {
 describe('profileSocialChannelUrl', () => {
   it('appends the provider tab path', () => {
     expect(profileSocialChannelUrl('https://profile.example.com', 'teams')).toBe(
-      'https://profile.example.com/settings/social/teams'
+      'https://profile.example.com/channels/teams'
     )
     expect(profileSocialChannelUrl('https://profile.example.com', 'slack')).toBe(
-      'https://profile.example.com/settings/social/slack'
+      'https://profile.example.com/channels/slack'
     )
   })
 
@@ -1379,16 +1379,16 @@ describe('profileSocialChannelUrl', () => {
   // only slowly. The linearity lives in the implementation, not in this test.
   it('strips a run of trailing slashes, however long', () => {
     expect(profileSocialChannelUrl('https://profile.example.com' + '/'.repeat(500), 'teams')).toBe(
-      'https://profile.example.com/settings/social/teams'
+      'https://profile.example.com/channels/teams'
     )
     expect(profileSocialChannelUrl('  https://profile.example.com//  ', 'teams')).toBe(
-      'https://profile.example.com/settings/social/teams'
+      'https://profile.example.com/channels/teams'
     )
   })
 
   it('leaves a URL with no trailing slash untouched', () => {
     expect(profileSocialChannelUrl('https://p.example.com/base', 'teams')).toBe(
-      'https://p.example.com/base/settings/social/teams'
+      'https://p.example.com/base/channels/teams'
     )
   })
 })

@@ -17,7 +17,8 @@ RUN npm ci \
 COPY profile-ui ./
 ARG PROFILE_DESKTOP_HANDOFF_ENABLED=false
 ENV NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED=${PROFILE_DESKTOP_HANDOFF_ENABLED}
-RUN npm run build
+RUN npm run build \
+  && npm prune --omit=dev --ignore-scripts
 
 FROM node:24.22.3-alpine
 RUN addgroup -S app && adduser -S app -G app
@@ -35,4 +36,4 @@ COPY --from=builder --chown=app:app /app/profile-ui/public ./public
 
 USER app
 EXPOSE 3001
-CMD ["npm", "run", "start"]
+CMD ["node", "node_modules/next/dist/bin/next", "start", "-p", "3001"]
