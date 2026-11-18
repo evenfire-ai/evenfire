@@ -142,7 +142,7 @@ describe('chat link policy (S-9)', () => {
     const container = renderMessage(
       [
         '<https://evenfire.ai/a>',
-        'www.evenfire.ai',
+        'www.example.com',
         'team@evenfire.ai',
         '<mailto:team@evenfire.ai?subject=hi>',
         '[ref][web] [bad][rel] [drive][gfs]',
@@ -154,7 +154,7 @@ describe('chat link policy (S-9)', () => {
 
     expect(anchors(container).map(anchor => anchor.href)).toEqual([
       'https://evenfire.ai/a',
-      'http://www.evenfire.ai/',
+      'http://www.example.com/',
       'mailto:team@evenfire.ai',
       'mailto:team@evenfire.ai',
       'https://evenfire.ai/ref',
