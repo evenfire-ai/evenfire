@@ -424,9 +424,10 @@ describe("GfsReadServer.tryHandle — auth chain (fail-closed)", () => {
     });
     await run(d, req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
     expect(res.statusCode).toBe(403);
-    expect((res.json as { error: { code: string; message: string } }).error).toEqual({
+    expect((res.json as { error: { code: string; message: string; reason?: string } }).error).toEqual({
       code: "forbidden",
       message: "principal is not authorized for GFS",
+      reason: "principal_denied",
     });
   });
 
@@ -436,6 +437,9 @@ describe("GfsReadServer.tryHandle — auth chain (fail-closed)", () => {
     await run(d, req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
     expect(res.statusCode).toBe(403);
     expect(res.body).not.toContain("report.pdf"); // no existence/name leak
+    const error = (res.json as { error: { code: string; reason?: string } }).error;
+    expect(error.code).toBe("forbidden");
+    expect(error.reason).toBeUndefined();
   });
 
   it("403 when the token ceiling denies (scope absent) — store never consulted", async () => {
