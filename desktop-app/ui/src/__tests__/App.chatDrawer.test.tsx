@@ -12,7 +12,10 @@ import {
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { useNavigationController } from '@hooks/domain/useNavigationController'
+import { useToastController } from '@hooks/domain/useToastController'
 import { useAppController } from '@hooks/useAppController'
+import { CHAT_GFS_LINK_UNAVAILABLE_MESSAGE } from '@lib/chatLinkActivation'
 import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
@@ -98,6 +101,7 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     onEmbedSlotRightChange?: (rightPx: number) => void
   },
 }))
+const chatLinkHarness = vi.hoisted(() => ({ href: '' }))
 const appHeaderHarness = vi.hoisted(() => ({
   props: null as null | {
     notificationTrayMode?: 'drawer' | 'overlay'
@@ -184,10 +188,7 @@ vi.mock('@pages/ChatPage', async () => {
           <button type="button" onClick={() => setDraft('failed-send recovery')}>
             Write tabless recovery draft
           </button>
-          <button
-            type="button"
-            onClick={() => void activateChatLink('gfs://main/0123456789abcdef0123456789abcdef')}
-          >
+          <button type="button" onClick={() => void activateChatLink(chatLinkHarness.href)}>
             Activate chat link
           </button>
         </div>
@@ -378,7 +379,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
     beginUserNavigationIntent: vi.fn(),
-    isNavigationIntentCurrent: vi.fn(() => true),
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
@@ -563,38 +563,130 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
   })
 
-  it('routes a chat link activated in the drawer through the fenced resolve to a Files tab', async () => {
-    const folder = await resolveResource(
-      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
-    )
-    const resolveForNavigation = vi.fn().mockResolvedValue({ status: 'resolved', resource: folder })
-    Object.assign(window.clerum, { gfs: { resolveForNavigation } })
-    currentController = makeController({
-      selectedAgent: 'alpha',
-      activeChatId: 'chat-1',
-      navItem: DESKTOP_ROUTES.chat,
-      chatList: CHAT_LIST,
-    } as Partial<AppController>)
-    renderApp(<App />)
-    act(() => {
-      sidebarHarness.props?.onOpenSandboxUiApp?.({
-        appRef: 'ns/app',
-        label: 'App',
-        defaultPath: '/',
+  describe('chat link activation wiring', () => {
+    const FOLDER_A = '0123456789abcdef0123456789abcdef'
+    const FOLDER_B = 'fedcba9876543210fedcba9876543210'
+    let userNavigationGeneration = 0
+
+    // The fence and the toast come from their real producers: a fence stub that
+    // is always current cannot show a stale resolve being dropped, and a toast
+    // spy cannot show the message reaching the screen.
+    function useControllerWithRealLinkProducers(controller: AppController): AppController {
+      const navigation = useNavigationController()
+      const toasts = useToastController()
+      Object.assign(controller, {
+        beginUserNavigationIntent: navigation.beginUserNavigationIntent,
+        isNavigationIntentCurrent: navigation.isNavigationIntentCurrent,
+        pushToast: toasts.pushToast,
+        dismissToast: toasts.dismissToast,
+        toasts: toasts.toasts,
       })
-    })
-    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+      return useReactiveController(controller)
+    }
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Activate chat link' }))
+    function renderChatDrawer(
+      resolveForNavigation: Window['clerum']['gfs']['resolveForNavigation']
+    ) {
+      userNavigationGeneration = 0
+      const openUrl = vi.fn().mockResolvedValue(undefined)
+      Object.assign(window.clerum, {
+        gfs: {
+          advanceUserNavigationGeneration: () => ++userNavigationGeneration,
+          getUserNavigationGeneration: () => userNavigationGeneration,
+          resolveForNavigation,
+        },
+      })
+      Object.assign(window.clerum.app, { openUrl })
+      currentController = makeController({
+        selectedAgent: 'alpha',
+        activeChatId: 'chat-1',
+        navItem: DESKTOP_ROUTES.chat,
+        chatList: CHAT_LIST,
+      } as Partial<AppController>)
+      vi.mocked(useAppController).mockImplementation(() =>
+        useControllerWithRealLinkProducers(currentController)
+      )
+      renderApp(<App />)
+      act(() => {
+        sidebarHarness.props?.onOpenSandboxUiApp?.({
+          appRef: 'ns/app',
+          label: 'App',
+          defaultPath: '/',
+        })
+      })
+      expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+      return { openUrl }
+    }
+
+    async function clickChatLink(href: string) {
+      chatLinkHarness.href = href
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Activate chat link' }))
+      })
+    }
+
+    it('routes a chat link activated in the drawer through the fenced resolve to a Files tab', async () => {
+      const folder = await resolveResource(resolvedDirectory(FOLDER_A, 'Shared folder'))
+      const resolveForNavigation = vi
+        .fn()
+        .mockResolvedValue({ status: 'resolved', resource: folder })
+      renderChatDrawer(resolveForNavigation)
+
+      await clickChatLink(`gfs://main/${FOLDER_A}`)
+
+      expect(resolveForNavigation.mock.calls).toEqual([[`gfs://main/${FOLDER_A}`]])
+      const active = activeWorkspaceTab(currentController.workspaceTabs)
+      expect(active?.kind).toBe('files')
+      expect(active?.files?.path).toBe(folder.gfsUri)
     })
 
-    expect(resolveForNavigation.mock.calls).toEqual([
-      ['gfs://main/0123456789abcdef0123456789abcdef'],
-    ])
-    const active = activeWorkspaceTab(currentController.workspaceTabs)
-    expect(active?.kind).toBe('files')
-    expect(active?.files?.path).toBe(folder.gfsUri)
+    it('drops a resolve that a newer chat link click superseded', async () => {
+      const folders: Record<string, Awaited<ReturnType<typeof resolveResource>>> = {
+        [`gfs://main/${FOLDER_A}`]: await resolveResource(resolvedDirectory(FOLDER_A, 'Older')),
+        [`gfs://main/${FOLDER_B}`]: await resolveResource(resolvedDirectory(FOLDER_B, 'Newer')),
+      }
+      const pending = new Map<string, () => void>()
+      const resolveForNavigation = vi.fn(
+        (uri: string) =>
+          new Promise(resolve => {
+            pending.set(uri, () => resolve({ status: 'resolved', resource: folders[uri] }))
+          })
+      )
+      renderChatDrawer(resolveForNavigation as Window['clerum']['gfs']['resolveForNavigation'])
+
+      await clickChatLink(`gfs://main/${FOLDER_A}`)
+      await clickChatLink(`gfs://main/${FOLDER_B}`)
+      await act(async () => pending.get(`gfs://main/${FOLDER_B}`)?.())
+      await act(async () => pending.get(`gfs://main/${FOLDER_A}`)?.())
+
+      const fileTabs = currentController.workspaceTabs.tabs
+        .filter(tab => tab.kind === 'files')
+        .map(tab => tab.files?.path)
+      expect(fileTabs).toEqual([folders[`gfs://main/${FOLDER_B}`]!.gfsUri])
+      expect(activeWorkspaceTab(currentController.workspaceTabs)?.files?.path).toBe(
+        folders[`gfs://main/${FOLDER_B}`]!.gfsUri
+      )
+    })
+
+    it('shows the unavailable toast and leaves the tabs alone when the resolve fails', async () => {
+      renderChatDrawer(vi.fn().mockResolvedValue({ status: 'unavailable' }))
+      const tabsBefore = currentController.workspaceTabs
+
+      await clickChatLink(`gfs://main/${FOLDER_A}`)
+
+      expect(screen.getByRole('alert').textContent).toContain(CHAT_GFS_LINK_UNAVAILABLE_MESSAGE)
+      expect(currentController.workspaceTabs).toBe(tabsBefore)
+    })
+
+    it('hands a web link to the system browser without resolving it', async () => {
+      const resolveForNavigation = vi.fn()
+      const { openUrl } = renderChatDrawer(resolveForNavigation)
+
+      await clickChatLink('https://example.com/docs')
+
+      expect(openUrl.mock.calls).toEqual([['https://example.com/docs']])
+      expect(resolveForNavigation).not.toHaveBeenCalled()
+    })
   })
 
   it('binds a Files New Chat prefill to the exact chat tab created by the App', async () => {
