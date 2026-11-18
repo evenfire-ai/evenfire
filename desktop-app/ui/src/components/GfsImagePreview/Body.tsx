@@ -24,6 +24,7 @@ export function GfsImagePreviewBody({
   onCopyContentReady,
   titleId,
   titleActions,
+  permissionProgress,
   headerActions,
   headingLevel = 3,
 }: GfsImagePreviewBodyProps) {
@@ -135,6 +136,7 @@ export function GfsImagePreviewBody({
             {fileName}
           </HeadingTag>
           {titleActions}
+          {permissionProgress}
         </div>
         <div className="da-gfs-image-preview-dialog__header-actions">{headerActions}</div>
       </header>
