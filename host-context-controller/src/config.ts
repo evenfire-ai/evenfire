@@ -5,6 +5,7 @@ import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
 import { NETPOL_PASS_OVERRUN_WARN_MS } from './constants'
 import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
 import { kubernetesQuantitiesEqual } from './kubernetesQuantity'
+import { hccLogger } from './logger'
 import { ContextCRD, McpServerCRD } from './types'
 
 export const DEFAULT_EGRESS_PROXY_IMAGE = 'clerum/nginx-egress-proxy:0.1.0'
@@ -352,11 +353,10 @@ function requireCanonicalNonNegativeEnvInt(key: string, defaultValue: number): n
 }
 
 export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return 5_000
-  const parsed = Number(raw)
+  const parsed = plainPositiveIntegerOrDefault(raw, 5_000)
   if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 2_147_483_647) {
     throw new Error(
-      `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS must be a positive integer no greater than 2147483647, got '${raw}'`
+      `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS must be a positive integer no greater than 2147483647, in plain digits, got '${raw}'`
     )
   }
   return parsed
@@ -384,15 +384,17 @@ function getExternalEgressEnvInt(key: string, defaultValue: number): number {
 
 /**
  * CONTEXT_MAPPER_HEARTBEAT_POLL_MS — cadence of HCC's control-api heartbeat
- * poll. Fails config load loudly on a non-positive-integer value: a silent
- * default over garbage would hide a typo'd cadence in production.
+ * poll. Unset or "" means the default; anything else must be plain digits and
+ * at most MAX_TIMER_DELAY_MS, the largest delay setTimeout holds.
+ * Fails config load loudly on any other value: a silent default over garbage
+ * would hide a typo'd cadence in production, and a clamped value would make
+ * the poll fire continuously.
  */
 export function parseHeartbeatPollMs(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return 10_000
-  const parsed = Number(raw)
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  const parsed = plainPositiveIntegerOrDefault(raw, 10_000)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
     throw new Error(
-      `CONTEXT_MAPPER_HEARTBEAT_POLL_MS must be a positive integer (milliseconds), got '${raw}'`
+      `CONTEXT_MAPPER_HEARTBEAT_POLL_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds in plain digits, got '${raw}'`
     )
   }
   return parsed
@@ -468,16 +470,16 @@ export function assertRequestTimeoutsBelowPassHardLimit(
  * HCC_HOST_FULL_RECONCILE_CONCURRENCY — bounded cross-Host concurrency for a
  * full/lifecycle Host fleet pass. Urgent per-Host events are admitted OUTSIDE
  * this budget, so a low default optimizes for Kubernetes API stability rather
- * than convergence speed. Integer 1..8 (1 = diagnostic serial mode), default 2.
+ * than convergence speed. Integer 1..8 (1 = diagnostic serial mode), default 2;
+ * unset or "" means the default, anything else must be plain digits.
  * Fails config load loudly on garbage: a silent default over a typo'd value
  * would mask an operator's intended concurrency in production.
  */
 export function parseHostFullReconcileConcurrency(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return 2
-  const parsed = Number(raw)
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 8) {
+  const parsed = plainPositiveIntegerOrDefault(raw, 2)
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 8) {
     throw new Error(
-      `HCC_HOST_FULL_RECONCILE_CONCURRENCY must be an integer from 1 through 8, got '${raw}'`
+      `HCC_HOST_FULL_RECONCILE_CONCURRENCY must be an integer from 1 through 8 in plain digits, got '${raw}'`
     )
   }
   return parsed
@@ -526,13 +528,19 @@ function parseDevMcpServers(): McpServerCRD[] {
 
   try {
     const parsed = JSON.parse(serversJson) as McpServerCRD[]
-    console.log(`[Config] Parsed ${parsed.length} dev MCP server(s) from CLERUM_MCP_SERVERS`)
+    hccLogger.info(`[Config] Parsed ${parsed.length} dev MCP server(s) from CLERUM_MCP_SERVERS`)
     for (const server of parsed) {
-      console.log(`[Config]   - ${server.name}: ${server.spec.transport?.url || 'no url'}`)
+      // The URL itself is not logged (repository logging standard).
+      hccLogger.info(`[Config]   - ${server.name}`, {
+        hasUrl: Boolean(server.spec.transport?.url),
+      })
     }
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_MCP_SERVERS:', error)
+    // A JSON.parse message can quote the input, so only the error's name is logged.
+    hccLogger.error('[Config] Failed to parse CLERUM_MCP_SERVERS:', {
+      errorName: error instanceof Error ? error.name : typeof error,
+    })
     return []
   }
 }
@@ -549,13 +557,16 @@ function parseDevContexts(): ContextCRD[] {
 
   try {
     const parsed = JSON.parse(contextsJson) as ContextCRD[]
-    console.log(`[Config] Parsed ${parsed.length} dev Context(s) from CLERUM_CONTEXTS`)
+    hccLogger.info(`[Config] Parsed ${parsed.length} dev Context(s) from CLERUM_CONTEXTS`)
     for (const ctx of parsed) {
-      console.log(`[Config]   - ${ctx.name}: mcpServers=[${ctx.spec.mcpServers.join(', ')}]`)
+      hccLogger.info(`[Config]   - ${ctx.name}: mcpServers=[${ctx.spec.mcpServers.join(', ')}]`)
     }
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_CONTEXTS:', error)
+    // A JSON.parse message can quote the input, so only the error's name is logged.
+    hccLogger.error('[Config] Failed to parse CLERUM_CONTEXTS:', {
+      errorName: error instanceof Error ? error.name : typeof error,
+    })
     return []
   }
 }
@@ -575,11 +586,15 @@ function parseDevAuthTokens(): Map<string, string> {
     const tokens = new Map<string, string>()
     for (const [name, token] of Object.entries(parsed)) {
       tokens.set(name, token)
-      console.log(`[Config]   - Auth token configured for: ${name}`)
+      hccLogger.info(`[Config]   - Auth token configured for: ${name}`)
     }
     return tokens
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_MCP_AUTH:', error)
+    // A JSON.parse message can quote the input, which holds tokens: only the
+    // error's name is logged.
+    hccLogger.error('[Config] Failed to parse CLERUM_MCP_AUTH:', {
+      errorName: error instanceof Error ? error.name : typeof error,
+    })
     return new Map()
   }
 }

@@ -4033,7 +4033,7 @@ describe('NetworkPolicyReconciler', () => {
         expect.objectContaining({
           level: 'error',
           contextId: 'aaa-poisoned',
-          err: { name: 'Error', message: additiveFailure.message },
+          err: expect.objectContaining({ name: 'Error', message: additiveFailure.message }),
         })
       )
     })

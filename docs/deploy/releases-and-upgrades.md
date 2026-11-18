@@ -326,6 +326,9 @@ Read the notes for every release you skip over, not only the target release.
 | [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.                                                                                                                                                                                      |
 | [HCC NetworkPolicy pass bounds](#hcc-networkpolicy-pass-bounds)                    | You upgrade host-context-controller. It can now exit and restart when a NetworkPolicy pass reaches its hard limit, and it refuses to start when `HCC_K8S_REQUEST_TIMEOUT_MS`, `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` or the hard limit is not plain digits, or when a request timeout is not below the hard limit. No RBAC change. |
 | [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor)          | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`.                                                                                                                                                               |
+| [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac)                            | Every cluster. Apply the updated Role before you roll the new host-context-controller image.                                                                                                                                                                                                                                  |
+| [HCC McpServer verdict changes](#hcc-mcpserver-verdict-changes)                    | You alert, filter or report on HCC's McpServer conditions, NetworkPolicy pass results, Secret informer metrics or log lines.                                                                                                                                                                                                  |
+| [Numeric settings in plain digits](#numeric-settings-in-plain-digits)              | You set one of twelve HCC or mcp-host numeric variables to anything but plain digits, or `CLERUM_DYNAMIC_TOOLS_THRESHOLD` to an invalid value. The pod no longer starts.                                                                                                                                                      |
 | [Desktop floor for the GFS watch](#desktop-floor-for-the-gfs-watch)                | You cut the first release that serves the GFS watch. Pass `--minimum-desktop-version` equal to that release, or older Desktop Apps lose live updates.                                                                                                                                                                         |
 
 #### Snippet runner Node permissions
@@ -460,11 +463,11 @@ code defaults. The table also lists the existing
 `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` (`deploy/base` sets `30000`), because the hard
 limit now bounds it too:
 
-| Variable                          | Default            | Meaning                                                                                                                                                                                                                                                                                                                                       |
-| --------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HCC_K8S_REQUEST_TIMEOUT_MS`      | `30000`            | Deadline in milliseconds for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding reconcilers and of the watcher's McpServer/Context and Secret clients. A timed-out request fails with error code `HCC_K8S_REQUEST_TIMEOUT`, and the pass fails and retries. It must be below `HCC_NETPOL_PASS_HARD_LIMIT_MS`. |
-| `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` | `30000`            | Deadline in milliseconds for each finite Kubernetes request on the Host convergence path, including Host work queued behind a Context. It must be below `HCC_NETPOL_PASS_HARD_LIMIT_MS`.                                                                                                                                                      |
-| `HCC_NETPOL_PASS_HARD_LIMIT_MS`   | `1800000` (30 min) | Longest a NetworkPolicy pass may run. It must be above `300000`, the 5-minute overrun mark.                                                                                                                                                                                                                                                   |
+| Variable                          | Default            | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HCC_K8S_REQUEST_TIMEOUT_MS`      | `30000`            | Deadline in milliseconds for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding reconcilers, of the watcher's McpServer/Context and Secret clients, and of the list requests of the mcp-server SecretInformer and the Deployment informer. A timed-out request fails with error code `HCC_K8S_REQUEST_TIMEOUT`, and the pass fails and retries. It must be below `HCC_NETPOL_PASS_HARD_LIMIT_MS`. |
+| `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` | `30000`            | Deadline in milliseconds for each finite Kubernetes request on the Host convergence path, including Host work queued behind a Context. It must be below `HCC_NETPOL_PASS_HARD_LIMIT_MS`.                                                                                                                                                                                                                                          |
+| `HCC_NETPOL_PASS_HARD_LIMIT_MS`   | `1800000` (30 min) | Longest a NetworkPolicy pass may run. It must be above `300000`, the 5-minute overrun mark.                                                                                                                                                                                                                                                                                                                                       |
 
 All three accept plain decimal digits only. Unset or `""` means the default;
 any other spelling (`3e4`, `+30000`, `030000`, `30000.0`, surrounding white
@@ -502,9 +505,138 @@ earlier releases used `HCC_HOST_K8S_REQUEST_TIMEOUT` and
 `HostK8sRequestTimeoutError`. Update any log filter or alert that matches the
 old names.
 
-**No RBAC change.** This release does not change the HCC Role, ClusterRole or
-their bindings in `deploy/base`. Roll out the new HCC image as usual; no RBAC
-manifest needs to be applied first.
+**RBAC.** The pass bounds need no change to the HCC Role, ClusterRole or their
+bindings in `deploy/base`. The Deployment watch in the same release does: see
+[HCC Deployment watch RBAC](#hcc-deployment-watch-rbac).
+
+### HCC Deployment watch RBAC
+
+host-context-controller (HCC) now watches its managed Deployments in `mcp-server`,
+so its Role there needs `watch` on `deployments`. Apply the Role before you roll
+the new HCC image. If your CD identity may not patch Roles, re-run
+`deploy/scripts/bootstrap-rbac.sh` before upgrading.
+
+If the image rolls first, the list succeeds, the watch answers 403, and the
+informer retries at up to 30 s and logs an error line per attempt
+(`event: deployment-informer-watch-forbidden`), with
+`clerum_hcc_deployment_informer_running` at 0. HCC readiness does not depend on
+the informer. While the informer is down, a rollout that converges after its
+readiness budget is published at HCC's next re-read of the Deployment (every
+60 s) instead of within seconds. Control UI can still report a false failure
+for a credential rotation that converges between 120 s and 180 s when that
+correction arrives after 180 s.
+
+### HCC McpServer verdict changes
+
+These host-context-controller (HCC) changes need no action unless you alert,
+filter or report on the signals they name.
+
+- **Fail-closed verdicts are persisted before the retract.** When an McpServer's
+  Secret check fails closed (`SecretNotFound`, `SecretMissingKey`,
+  `SecretAccessDenied`), HCC writes `SecretResolved=False` and `Ready=False`
+  before it deletes the runtime. NetworkPolicy intent follows `SecretResolved`,
+  so the server's allows are revoked from that write on, also when the
+  Deployment delete then fails. The delete starts after both writes return.
+  Each write is a status GET and PATCH, repeated up to three times only on a
+  write conflict, and each call is bounded by `HCC_K8S_REQUEST_TIMEOUT_MS`
+  (default 30 s), so a status endpoint that does not answer delays the delete
+  by up to about 2 minutes at the default.
+- **Restart comparison.** After a restart HCC compares the Secret it reads with
+  the `clerum.io/credentials-revision` annotation of the managed Deployment, so a
+  Secret changed while HCC was down no longer keeps a ready verdict over a
+  transient failure of a later call. It costs one extra Deployment read per
+  reconcile of a Secret-backed, ready McpServer until HCC's first completed sync
+  of it. No CRD or RBAC change. If that Deployment read itself fails
+  transiently, HCC has nothing to compare and keeps the verdict until a read
+  succeeds: usually about 35 s for a single failure, up to about 330 s in
+  uncommon conditions, and for the API outage plus up to about 330 s while the
+  API keeps failing. A failed carried read is reported as
+  `site=resource_sync` in `clerum_hcc_mcpserver_reconcile_call_failures_total`.
+- **NetworkPolicy pass outcomes.** A NetworkPolicy pass that returns without
+  certifying because the desired Context or McpServer inventory changed is now
+  reported as
+  `clerum_hcc_initial_convergence_pass_results_total{result="aborted-bump"}` and
+  `clerum_hcc_initial_convergence_swallowed_total{sink="inventory-changed"}`.
+  Before, it was counted as `aborted-authority` / `authority-lost`, which now
+  mean only that a watch cache lost authority. A pass that ends with an
+  inventory-changed error was already classified the same way (`aborted-bump`
+  when the inventory moved, `aborted-authority` otherwise) and, as before,
+  increments no `swallowed` series.
+- **Secret informer metrics carry a `namespace` label.**
+  `clerum_hcc_secret_informer_events_total` (labels `type` → `namespace`,
+  `type`), `clerum_hcc_secret_informer_reconnects_total` and
+  `clerum_hcc_secret_informer_running` (no label → `namespace`) now report
+  their series per informer namespace (McpServer, channels and llm-hooks
+  namespaces). Before, the three informers shared the same series: one each for
+  the reconnects and running metrics, one per event `type` for the events
+  metric. A query or alert on the bare name now returns one series per
+  namespace for each of those: select a namespace or aggregate with
+  `sum by (namespace)` (or `sum by (type)` for the events metric).
+  `clerum_hcc_secret_informer_events_total` now counts events delivered to the
+  consumer, where it used to count events received from the watch. Each
+  informer namespace exposes `clerum_hcc_secret_informer_reconnects_total` at 0,
+  `clerum_hcc_secret_informer_events_total` at 0 for `ADDED`, `MODIFIED` and
+  `DELETED`, and `clerum_hcc_secret_informer_running` at 0 from the informer's
+  construction. `clerum_hcc_deployment_informer_running` is also exposed at 0
+  from construction, so a watch that never connects reads 0 instead of having
+  no series.
+- **Structured HCC watcher and dev-mode configuration logs.** HCC's watcher and
+  dev-mode configuration lines are now structured JSON lines like the rest of
+  HCC's log. The fixed part of the old text is the `msg` field. An error that
+  used to follow that text is now the `err` field (`err.name`, `err.message`,
+  the stack frame lines as `err.stack`, a string or numeric `err.code`, and an
+  Error cause as `err.cause`; the response `body` and `headers` of a Kubernetes
+  API error are not copied as fields); a Kubernetes API status code and
+  response body are in `err.message`, not in `msg`. Dev-mode configuration lines log `hasUrl`
+  instead of the URL and `errorName` instead of a parse error's message. Update
+  log filters anchored on the start or end of those lines, and filters that
+  matched the text and the error as one string.
+
+### Numeric settings in plain digits
+
+Twelve numeric settings now follow the plain-digit rule of the HCC pass bounds:
+unset or `""` means the default, and any other value must be plain decimal
+digits, or the component refuses to start.
+
+| Component               | Variables                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| host-context-controller | `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS`, `CONTEXT_MAPPER_HEARTBEAT_POLL_MS`, `HCC_HOST_FULL_RECONCILE_CONCURRENCY`                                                                                                                                                                                                                                                       |
+| mcp-host                | `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`, `CLERUM_DYNAMIC_TOOLS_THRESHOLD`, `MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS`, `MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS`, `MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS`, `MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS`, `MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS`, `MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN`, `MCP_CATALOG_BOOTSTRAP_BACKOFF_MS` |
+
+Values that used to be accepted and now stop the pod: surrounding white space,
+`+5000`, `05000`, `5e3`, `0x1388`, `5000.0` (for
+`HCC_HOST_FULL_RECONCILE_CONCURRENCY`, whose range is 1 to 8, the same forms of
+an in-range value, such as `+5` or `05`), and for the catalog-bootstrap
+variables and `CLERUM_DYNAMIC_TOOLS_THRESHOLD` also a fraction such as `2000.5`
+(the threshold used to truncate it). `CONTEXT_MAPPER_HEARTBEAT_POLL_MS`,
+`CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`, `CLERUM_DYNAMIC_TOOLS_THRESHOLD` and
+the catalog-bootstrap variables also used to accept a value above
+9007199254740991 (for example `99999999999999999999`); it now stops the pod.
+`CONTEXT_MAPPER_HEARTBEAT_POLL_MS` and `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`
+also stop the pod above 2147483647, the largest delay a timer holds; a larger
+value used to make the poll or the heartbeat fire after about 1 ms. The same
+bound applies to `MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS`,
+`MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS` and
+`MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS`: a larger wait budget or probe
+timeout used to end after about 1 ms, and a larger connect timeout used to fail
+every catalog-bootstrap connection.
+A value of only white space used to
+mean the default for the HCC variables and `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`;
+it now stops the pod. `deploy/base` sets the three HCC variables in plain
+digits, the minikube overlay sets `CONTEXT_MAPPER_HEARTBEAT_POLL_MS` in plain
+digits, and neither sets any of the mcp-host ones.
+
+A value that used to be replaced by the default with a warning
+(`CLERUM_DYNAMIC_TOOLS_THRESHOLD`: `0`, a negative number, text or `0x3c`) now
+stops the Host at startup; `60abc` used to become `60` and now stops it too.
+
+`""` now means the default for the catalog-bootstrap variables; it used to stop
+the Host.
+
+The rule covers only the variables in the table. The other external-egress
+settings of HCC (`HCC_EXTERNAL_EGRESS_RESYNC_SEC`, `HCC_EXTERNAL_EGRESS_OVERLAP_SEC`,
+`HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC`, `HCC_EXTERNAL_EGRESS_MAX_ENTRIES`) keep
+their unsigned-digits rule, which still accepts leading zeros such as `05000`.
 
 ### mcp-host authority staleness floor
 
