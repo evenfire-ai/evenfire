@@ -811,8 +811,7 @@ export async function handleApprovalRoute(
         hostRef: caller?.actionContextV2?.target?.hostRef,
         taskId: typeof parsed.taskId === 'string' ? parsed.taskId.trim() : undefined,
         action: approved ? 'approve' : 'deny',
-        approvalRequestId:
-          typeof parsed.toolCallId === 'string' ? parsed.toolCallId.trim() : validatedRequestId,
+        approvalRequestId: validatedRequestId,
       })
     ) {
       return

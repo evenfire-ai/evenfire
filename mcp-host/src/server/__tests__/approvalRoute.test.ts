@@ -319,4 +319,43 @@ describe('handleApprovalRoute — V2 task.manage target', () => {
       }
     )
   })
+
+  // The guard binds the request id the decision applies (requestId). A
+  // toolCallId in the body is not part of the mcp-host approval API and is
+  // ignored by the guard.
+  it.each<[ApprovalAction]>([['approve'], ['deny']])(
+    'ignores a toolCallId equal to the bound id when the %s decides another requestId',
+    async route => {
+      await expectAcceptThenReject(
+        { route, targetAction: route },
+        {
+          route,
+          targetAction: route,
+          body: {
+            ...upstreamBody(route),
+            toolCallId: V2_APPROVAL_REQUEST_ID,
+            requestId: 'other-id',
+          },
+        }
+      )
+    }
+  )
+
+  it.each<[ApprovalAction, string]>([
+    ['approve', 'other-id'],
+    ['approve', ''],
+    ['deny', 'other-id'],
+    ['deny', ''],
+  ])(
+    'applies the %s decision for the bound requestId despite a stray toolCallId %j',
+    async (route, toolCallId) => {
+      const approvalHandler = approvalHandlerMock()
+
+      const out = await send(route, route, { ...upstreamBody(route), toolCallId }, approvalHandler)
+
+      expect(out.statusCode).toBe(200)
+      expect(approvalHandler).toHaveBeenCalledTimes(1)
+      expect(approvalHandler).toHaveBeenCalledWith(expectedDecision(route))
+    }
+  )
 })
