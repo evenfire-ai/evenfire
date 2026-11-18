@@ -690,6 +690,44 @@ describeRealPostgres('GFS watch routes on real Postgres', () => {
     expect(Date.now() - started).toBeLessThan(3_000)
   })
 
+  // A step that never settles must still lose to the server deadline. The
+  // call races its own bound so a hang fails on the assertion, not on the
+  // test timeout.
+  async function callWithin(ms: number, ...args: Parameters<typeof call>) {
+    let timer!: NodeJS.Timeout
+    const bound = new Promise<'hung'>(resolve => (timer = setTimeout(() => resolve('hung'), ms)))
+    try {
+      return await Promise.race([call(...args), bound])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  const never = () => new Promise<never>(() => {})
+  const putBody = { connId: 'a'.repeat(32), seq: 1, keys: [] }
+
+  for (const [method, stepName, deps] of [
+    ['GET', 'session', { authenticate: never, openServerDeadlineMs: 200 }],
+    ['GET', 'open limiter', { openLimiter: never, openServerDeadlineMs: 200 }],
+    ['PUT', 'session', { authenticate: never, putServerDeadlineMs: 200 }],
+    ['PUT', 'PUT limiter', { putLimiter: never, putServerDeadlineMs: 200 }],
+    ['PUT', 'authority', { resolveAuthority: never, putServerDeadlineMs: 200 }],
+  ] as const) {
+    it(`answers ${method} with 503 watch_reopen at the deadline when the ${stepName} never settles`, async () => {
+      const url = await mount(deps)
+      const user = await h.createUser()
+      const started = Date.now()
+      const r = await callWithin(3_000, url, method, {
+        headers: session(user),
+        ...(method === 'PUT' ? { body: putBody } : {}),
+      })
+      expect(r).not.toBe('hung')
+      expectWatchError(r as Reply, 503, 'watch_reopen')
+      expect((r as Reply).headers['retry-after']).toBe('2')
+      expect(Date.now() - started).toBeGreaterThanOrEqual(150)
+      expect(b!.registry.state.byConnId.size).toBe(0)
+    })
+  }
+
   it('a NOTIFY error is a 503 watch_reopen', async () => {
     const url = await mount({ notify: () => Promise.reject(new TypeError('defect')) })
     const user = await h.createUser()
