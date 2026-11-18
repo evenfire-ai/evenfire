@@ -646,6 +646,27 @@ describe('GFS watch through external-rest-api', () => {
       expect(redirectTargetHits).toBe(0)
     })
 
+    it('GET: a non-JSON error page at a status the contract relays is 503 watch_reopen, never relayed', async () => {
+      // The stream client wraps a non-JSON body as {error: <raw text>} instead of
+      // raising the synthetic 502 PUT gets, so on GET only the missing
+      // x-watch-error keeps a funnel page from reaching the client as a verdict.
+      const html = { 'content-type': 'text/html' }
+      const pages: Array<[string, RawUpstream]> = [
+        ['400 HTML page', { status: 400, headers: html, body: '<html>Bad Request</html>' }],
+        ['401 HTML page', { status: 401, headers: html, body: '<html>Unauthorized</html>' }],
+        ['403 HTML page', { status: 403, headers: html, body: '<html>Forbidden</html>' }],
+        ['502 HTML page', { status: 502, headers: html, body: '<html>Bad Gateway</html>' }],
+        ['503 HTML page', { status: 503, headers: html, body: '<html>Unavailable</html>' }],
+      ]
+      for (const [name, raw] of pages) {
+        scenario.raw = raw
+        const r = await call(watchUrl(), 'GET', { headers: bearer() })
+        expect(watchError(r), name).toEqual(reopen)
+        expect(r.headers['retry-after'], name).toBe('2')
+      }
+      expect(watchCalls()).toHaveLength(pages.length)
+    })
+
     it('answers 503 watch_reopen when control-api cannot be reached', async () => {
       const unreachable = await listen(() => {})
       const address = urlOf(unreachable)
@@ -688,6 +709,22 @@ describe('GFS watch through external-rest-api', () => {
         expect(r.headers.allow).toBe('GET, PUT')
       }
       expect(upstreamRequests).toEqual([])
+    })
+  })
+
+  describe('credentials', () => {
+    // No origin or cookie either, so the browser mutation guard lets the PUT
+    // through and the edge's own session check is the one that answers.
+    it('answers GET and PUT without credentials 401 at the edge, sending nothing to control-api', async () => {
+      const open = await call(watchUrl(), 'GET')
+      const put = await call(watchUrl(), 'PUT', { body: putBody })
+      for (const r of [open, put]) {
+        expect({ status: r.status, body: r.body }).toEqual({
+          status: 401,
+          body: { error: 'Unauthorized' },
+        })
+      }
+      expect(watchCalls()).toEqual([])
     })
   })
 
@@ -761,6 +798,33 @@ describe('GFS watch through external-rest-api', () => {
       expect(sent!.headers['x-request-id']).toBe(r.headers['x-request-id'])
     })
 
+    it('relays the 400 bad_request control-api answers for a command over 64 keys', async () => {
+      // Relayed, the client resets the poisoned command; turned into a reopen, it
+      // would resend it on a slow loop.
+      const keys = Array.from(
+        { length: 65 },
+        (_, i) => `file:gfs://drive-a/${i.toString(16).padStart(32, '0')}`
+      )
+      const body = { ...putBody, keys }
+      const direct = await call(`${urlOf(upstream)}/external/gfs/watch`, 'PUT', {
+        headers: { 'x-user-session-token': 'test-token-u1' },
+        body,
+        record: false,
+      })
+      expect(watchError(direct)).toEqual({
+        status: 400,
+        header: 'bad_request',
+        body: { error: 'bad_request' },
+      })
+
+      resetIngress()
+      upstreamRequests.length = 0
+      const viaEdge = await call(watchUrl(), 'PUT', { headers: bearer(), body })
+      expect(watchError(viaEdge)).toEqual(watchError(direct))
+      expect(viaEdge.headers['retry-after']).toBeUndefined()
+      expect(watchCalls()).toHaveLength(1)
+    })
+
     it('passes the browser mutation guard with a Bearer token even from a foreign origin', async () => {
       const foreign = { origin: 'https://foreign.example', cookie: 'x=1' }
       const withBearer = await call(watchUrl(), 'PUT', {
@@ -794,10 +858,48 @@ describe('GFS watch through external-rest-api', () => {
       expect(new Set(buckets.slice(10))).toEqual(new Set(['watch-ip']))
       expect(watchCalls()).toHaveLength(240)
 
+      // One user's spent budget must not stall the live updates of the others
+      // behind the same edge.
+      const otherUserPut = await call(watchUrl(), 'PUT', {
+        headers: { ...bearer('test-token-u2'), 'x-forwarded-for': '198.51.100.21' },
+        body: putBody,
+      })
+      expect({ status: otherUserPut.status, body: otherUserPut.body }).toEqual({
+        status: 202,
+        body: { seq: 1 },
+      })
+      expect(watchCalls()).toHaveLength(241)
+
       const otherUserRead = await call(`${urlOf(era)}/api/v1/me/gfs/roots`, 'GET', {
         headers: { ...bearer('test-token-u2'), 'x-forwarded-for': '198.51.100.20' },
       })
       expect(otherUserRead.status).not.toBe(429)
+    })
+
+    it('charges a user’s opens to the same buckets, the user one first and then the per-IP one', async () => {
+      const statuses: number[] = []
+      const buckets: unknown[] = []
+      for (let i = 0; i < 260; i += 1) {
+        const r = await call(watchUrl(), 'GET', {
+          headers: { ...bearer(), 'x-forwarded-for': '203.0.113.11' },
+        })
+        r.close()
+        statuses.push(r.status)
+        if (r.status === 429) buckets.push((r.body as { rateLimitBucket: string }).rateLimitBucket)
+      }
+      expect(statuses.filter(s => s === 200)).toHaveLength(240)
+      expect(statuses[240]).toBe(429)
+      expect(buckets.slice(0, 10)).toEqual(Array(10).fill('watch-user'))
+      expect(new Set(buckets.slice(10))).toEqual(new Set(['watch-ip']))
+      expect(watchCalls()).toHaveLength(240)
+
+      const otherUserOpen = await call(watchUrl(), 'GET', {
+        headers: { ...bearer('test-token-u2'), 'x-forwarded-for': '198.51.100.22' },
+      })
+      otherUserOpen.close()
+      expect(otherUserOpen.status).toBe(200)
+      expect(JSON.parse(otherUserOpen.firstLine!)).toEqual({ type: 'ready', schemaVersion: 1 })
+      expect(watchCalls()).toHaveLength(241)
     })
   })
 })
