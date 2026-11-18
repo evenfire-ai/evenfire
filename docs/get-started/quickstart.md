@@ -14,6 +14,7 @@ named `chatllm` you can message immediately.
   (the cluster is started with `--memory=10240 --cpus=6` and Calico CNI)
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl**
+- **jq**
 - **python3** (used by the JWT key sync)
 - **Node.js 24.22.1 or later** (use the Node 24 version pinned in `.nvmrc` for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration
@@ -130,7 +131,9 @@ Useful re-runs (setup rebuilds the database by default, so keep it with
 cold-start crash; see the troubleshooting table) ·
 `ARGS="--force-keys"` (regenerate the JWT chain) ·
 `ARGS="--seed-profile=e2e"` or `make minikube-setup-e2e` (adds the E2E fixture
-set: test user, `e2e-*` recipes, demo MCP servers).
+set: test user, `e2e-*` recipes, demo MCP servers). Demo connectors are
+selected when `context1` is first created; a rerun preserves its existing
+selection. Use Control UI to add demo connectors to an existing context.
 
 ## 3. Say hello — desktop app
 
