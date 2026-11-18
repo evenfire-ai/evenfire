@@ -747,6 +747,11 @@ describeRealPostgres('GFS watch routes on real Postgres', () => {
     const intruder = await h.createUser()
     const f = await h.tree.add('file')
     const { r, connId } = await openReady(url, owner)
+    const dropped = async () =>
+      (await h.modules.metrics.gfsWatchCmdDroppedTotal.get()).values.find(
+        v => v.labels.reason === 'binding_mismatch'
+      )?.value ?? 0
+    const before = await dropped()
     const put = await call(url, 'PUT', {
       headers: session(intruder),
       body: { connId, seq: 1, keys: [h.key('file', f)] },
@@ -754,6 +759,9 @@ describeRealPostgres('GFS watch routes on real Postgres', () => {
     expect(put.status).toBe(202)
     await h.barrier()
     await b!.settle()
+    // The command reached the owner and was refused there, so the empty
+    // stream below is the binding check's doing and not a lost NOTIFY.
+    expect((await dropped()) - before).toBe(1)
     expect(r.frames.filter(x => x.type === 'subscriptions')).toEqual([])
     r.close()
   })
