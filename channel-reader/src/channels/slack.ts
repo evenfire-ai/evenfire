@@ -409,6 +409,9 @@ export class SlackAdapter implements ChannelAdapter {
             messageId: ts,
             threadId: (msg as Record<string, unknown>).thread_ts as string | undefined,
             ...(providerIdentity ? { providerIdentity } : {}),
+            ...(!allowedByUserId && !allowedByVerifiedSender && allowedByUsername
+              ? { senderMatch: 'username' as const }
+              : {}),
             rawData: msg as unknown as Record<string, unknown>,
           })
 

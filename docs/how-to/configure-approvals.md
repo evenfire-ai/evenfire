@@ -161,7 +161,10 @@ arrives.
 
 A messaging command may always store `manual`. It may store `auto` or
 `allow_all` only while that channel's switch is on. When the switch is off,
-the command stores `manual` and says the channel is limited to manual.
+the command stores `manual` and says the channel is limited to manual. On
+Slack, a sender who passed the channel allowlist only by display username
+(a legacy entry) cannot raise the mode either: the command stores `manual`
+and asks for the Slack user ID to be allowlisted.
 Turning the switch off again lowers every session on that channel at the
 next tool call.
 

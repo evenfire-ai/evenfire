@@ -362,9 +362,9 @@ spec:
                               description: >-
                                 When true or absent, a Slack session may store
                                 auto or allow_all, up to modeCeiling. Only false
-                                caps that channel at manual. A Slack
-                                username-allowlist match is accepted as that
-                                session's identity.
+                                caps that channel at manual. A sender who matched
+                                only a legacy username allowlist entry cannot
+                                raise the mode; allowlist the Slack user ID.
                         teams:
                           type: object
                           properties:

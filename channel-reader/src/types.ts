@@ -160,6 +160,12 @@ export interface Message {
   messageId: string
   threadId?: string
   providerIdentity?: ProviderIdentity
+  /**
+   * 'username' when a polled Slack sender passed the allowlist only by display
+   * username, which is not a stable identity. mcp-host then refuses an
+   * approval-mode raise. Absent for every other match.
+   */
+  senderMatch?: 'username'
   rawData?: Record<string, unknown>
 }
 
