@@ -1,0 +1,108 @@
+name: Publish Playwright MCP security candidate
+
+on:
+  push:
+    branches: [build/playwright-mcp-security-candidate]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/evenfire-ai/playwright-server
+
+jobs:
+  build:
+    name: Build and test candidate (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        id: image
+        with:
+          context: mcp-servers/playwright
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+      - name: Test the image pulled from GHCR
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          ref="$IMAGE@$DIGEST"
+          timeout 180 docker pull --platform "linux/$ARCH" "$ref"
+          timeout 90 docker run --rm -i --platform "linux/$ARCH" --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --memory=1g --cpus=1 --entrypoint node --workdir /app "$ref" --input-type=commonjs < mcp-servers/playwright/test/runtime-smoke.cjs
+          mkdir -p digests
+          printf '%s\n' "$DIGEST" > "digests/$ARCH-manifest"
+          docker buildx imagetools inspect --raw "$ref" | jq -er '.config.digest | select(test("^sha256:[a-f0-9]{64}$"))' > "digests/$ARCH-config"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: playwright-mcp-${{ matrix.arch }}
+          path: digests/
+          if-no-files-found: error
+
+  publish:
+    name: Publish verified multi-architecture index
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: playwright-mcp-amd64
+          path: digests
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: playwright-mcp-arm64
+          path: digests
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish candidate and verify the index
+        run: |
+          set -euo pipefail
+          amd64="$(cat digests/amd64-manifest)"
+          arm64="$(cat digests/arm64-manifest)"
+          amd64_config="$(cat digests/amd64-config)"
+          arm64_config="$(cat digests/arm64-config)"
+          for digest in "$amd64" "$arm64" "$amd64_config" "$arm64_config"; do
+            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          done
+          tag="$IMAGE:candidate-$GITHUB_SHA"
+          docker buildx imagetools create --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" -t "$tag" "$IMAGE@$amd64" "$IMAGE@$arm64"
+          index="$(docker buildx imagetools inspect "$tag" | awk '$1 == "Digest:" && !seen++ {print $2}')"
+          [[ "$index" =~ ^sha256:[a-f0-9]{64}$ ]]
+          docker buildx imagetools inspect --raw "$IMAGE@$index" | jq -e --arg amd64 "$amd64" --arg arm64 "$arm64" \
+            '.manifests | length == 2 and any(.[]; .platform.os == "linux" and .platform.architecture == "amd64" and .digest == $amd64) and any(.[]; .platform.os == "linux" and .platform.architecture == "arm64" and .digest == $arm64)' > /dev/null
+          jq -n --arg image "$IMAGE" --arg tag "$tag" --arg source "$GITHUB_SHA" --arg index "$index" \
+            --arg amd64 "$amd64" --arg arm64 "$arm64" --arg amd64_config "$amd64_config" --arg arm64_config "$arm64_config" \
+            '{image:$image, tag:$tag, source:$source, digest:$index, amd64:{manifest:$amd64,config:$amd64_config}, arm64:{manifest:$arm64,config:$arm64_config}}' > candidate-image.json
+          cat candidate-image.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: playwright-mcp-candidate-image
+          path: candidate-image.json
+          if-no-files-found: error
