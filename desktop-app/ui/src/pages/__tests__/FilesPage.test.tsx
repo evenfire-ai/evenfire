@@ -92,6 +92,9 @@ function baseController() {
     revokeShare: vi.fn(),
     revokingShare: false,
     accessState: 'active',
+    readAccessState(this: { accessState: string }) {
+      return this.accessState
+    },
     retryAccess: vi.fn(),
     handleAuthorityFailure: vi.fn(() => false),
     createShare: vi.fn(),
@@ -271,6 +274,7 @@ describe('FilesPage', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
         gfs: {
           getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`),
           affordances,

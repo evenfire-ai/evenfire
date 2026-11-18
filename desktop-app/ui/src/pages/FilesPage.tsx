@@ -2,20 +2,13 @@ import {
   type DragEvent as ReactDragEvent,
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
 } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
-import {
-  GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
-  GFS_UPLOAD_NAME_RETRY_LIMIT,
-  createGfsUploadNameReservationBook,
-  gfsUploadNameRetryDecision,
-  normalizeGfsResourceName,
-} from '@clerum/gfs-interaction-policy'
+import { createGfsUploadNameReservationBook } from '@clerum/gfs-interaction-policy'
 import { isEditorGfsPermissions, planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
 import {
   Badge,
@@ -56,10 +49,7 @@ import {
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
-import {
-  GFS_AUTHORITY_STALE_TIME_MS,
-  assertGfsAuthorityRetryAllowed,
-} from '@lib/gfsAuthorityQueryPolicy'
+import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import {
@@ -70,6 +60,8 @@ import {
   describeZipSkips,
   isFolderZipAbortError,
 } from '@lib/gfsFolderZip'
+import { fetchGfsAuthority, requireFreshGfsPermissions } from '@lib/gfsFreshPermissions'
+import type { GfsFreshPermissionsContext } from '@lib/gfsFreshPermissions.types'
 import {
   describeGfsGrantError,
   describeGfsReadError,
@@ -119,6 +111,14 @@ import type {
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
+import { GfsNameDialog } from '@/gfs/nameDialog'
+import {
+  runGfsCreateFolder,
+  runGfsDelete,
+  runGfsRename,
+  runGfsUpload,
+} from '@/gfs/resourceActionRunners'
+import type { GfsActionRunnerDeps } from '@/gfs/resourceActionRunners.types'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
 
@@ -364,7 +364,6 @@ export function FilesPage({
   routeDialogRequestId = 0,
   onRouteDialogRequestHandled,
 }: FilesPageProps) {
-  const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [createFolderParentId, setCreateFolderParentId] = useState<string | null>(null)
   const [createFolderParentName, setCreateFolderParentName] = useState<string | null>(null)
@@ -494,9 +493,6 @@ export function FilesPage({
   } | null>(null)
   const uploadNameReservationsRef = useRef(createGfsUploadNameReservationBook())
   const handledRouteDialogRequestIdRef = useRef(0)
-  const createFolderTitleId = useId()
-  const createFolderDescriptionId = useId()
-  const createFolderInputId = useId()
   const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
   const seedPendingRef = useRef(false)
@@ -767,7 +763,6 @@ export function FilesPage({
   }, [ctrl.restoreCrumbs])
   const closeCreateFolder = useCallback(() => {
     setCreateFolderOpen(false)
-    setCreateFolderName('')
     setCreateFolderError(null)
     setCreateFolderParentId(null)
     setCreateFolderParentName(null)
@@ -776,7 +771,6 @@ export function FilesPage({
     if (returnCrumbs) ctrl.restoreCrumbs(returnCrumbs)
   }, [ctrl.restoreCrumbs])
   const openCreateFolder = useCallback((parentResourceId: string, parentName: string) => {
-    setCreateFolderName('')
     setCreateFolderError(null)
     setCreateFolderParentId(parentResourceId)
     setCreateFolderParentName(parentName)
@@ -786,15 +780,6 @@ export function FilesPage({
     setManageOpen(false)
     setCreateFolderOpen(true)
   }, [])
-
-  useEffect(() => {
-    if (!createFolderOpen) return
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !ctrl.mutating) closeCreateFolder()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeCreateFolder, createFolderOpen, ctrl.mutating])
 
   useEffect(() => {
     if (!routeDialogRequestId || handledRouteDialogRequestIdRef.current === routeDialogRequestId) {
@@ -842,124 +827,94 @@ export function FilesPage({
       ),
     [ctrl.handleAuthorityFailure, ctrl.sessionGeneration, sessionScope]
   )
-  const fetchRowAuthority = async (resourceId: string, resourceName: string, drive: string) => {
-    const requestedScope = sessionScope
-    const requestedGeneration = ctrl.sessionGeneration
-    if (!requestedScope || accessRevoked || !isGfsSessionGeneration(requestedGeneration)) {
-      pushToast?.(`Could not verify permissions for ${resourceName}. Try again.`, 'error')
-      return null
-    }
-    const queryKey = desktopQueryKeys.gfsAffordances(
-      requestedScope,
-      resourceId,
-      drive,
-      requestedGeneration
+  const freshPermissionsContext = (
+    requestedScope: string,
+    requestedGeneration: number | null
+  ): GfsFreshPermissionsContext => ({
+    queryClient,
+    handleAuthorityFailure: (error, scope, generation) =>
+      failClosedOnAuthorizationError(error, scope ?? requestedScope, generation),
+    pushToast,
+    isCurrent: () =>
+      pageActiveRef.current &&
+      isGfsSessionAuthorityCurrent(
+        requestedScope,
+        requestedGeneration,
+        moveWorkspaceRef.current.sessionScope,
+        moveWorkspaceRef.current.sessionGeneration
+      ) &&
+      ctrl.readAccessState() === 'active',
+  })
+  const fetchRowAuthority = (resourceId: string, resourceName: string, drive: string) =>
+    fetchGfsAuthority(
+      {
+        scope: sessionScope,
+        gen: ctrl.sessionGeneration,
+        resourceId,
+        resourceName,
+        drive,
+      },
+      freshPermissionsContext(sessionScope, ctrl.sessionGeneration)
     )
-    try {
-      assertGfsAuthorityRetryAllowed(queryClient, queryKey)
-      const authority = await queryClient.fetchQuery({
-        queryKey,
-        queryFn: () => window.clerum.gfs.affordances(resourceId, drive),
-        staleTime: GFS_AUTHORITY_STALE_TIME_MS,
-        retry: false,
-      })
-      if (
-        !pageActiveRef.current ||
-        !isGfsSessionAuthorityCurrent(
-          requestedScope,
-          requestedGeneration,
-          moveWorkspaceRef.current.sessionScope,
-          moveWorkspaceRef.current.sessionGeneration
-        )
-      ) {
-        return null
-      }
-      return authority
-    } catch (error) {
-      if (
-        !isGfsSessionAuthorityCurrent(
-          requestedScope,
-          requestedGeneration,
-          moveWorkspaceRef.current.sessionScope,
-          moveWorkspaceRef.current.sessionGeneration
-        )
-      )
-        return null
-      if (!failClosedOnAuthorizationError(error, requestedScope, requestedGeneration)) {
-        pushToast?.(describeGfsReadError(error).message, 'error')
-      }
-      return null
-    }
-  }
-  const requireFreshRowPermissions = async (
+  const requireFreshRowPermissions = (
     resourceId: string,
     resourceName: string,
-    requiredBits: string[],
+    requiredBits: readonly string[],
     drive = GFS_DRIVE_MAIN,
-    requiredGrantableBits: string[] = []
+    requiredGrantableBits: readonly string[] = []
   ) => {
-    const requestedScope = sessionScope
-    const requestedGeneration = ctrl.sessionGeneration
-    if (!requestedScope || !isGfsSessionGeneration(requestedGeneration)) return false
-    const queryKey = desktopQueryKeys.gfsAffordances(
-      requestedScope,
-      resourceId,
-      drive,
-      requestedGeneration
-    )
-    const queryState = queryKey ? queryClient.getQueryState(queryKey) : undefined
-    const stateAuthority = queryState?.data as
-      | { held?: string[]; grantableBits?: string[] }
-      | undefined
-    const queryDataIsFresh = Boolean(
-      queryState?.status === 'success' &&
-      stateAuthority &&
-      !queryState.isInvalidated &&
-      Date.now() - queryState.dataUpdatedAt < GFS_AUTHORITY_STALE_TIME_MS
-    )
     const rowStatus = ctrl.rowPermissionStatusByResourceId?.[resourceId]?.status
     const controllerAuthority =
       ctrl.current?.resourceId === resourceId
         ? ctrl.affordances
         : (ctrl.rowAffordancesByResourceId?.[resourceId] ??
           (ctrl.rowAffordancesResourceId === resourceId ? ctrl.rowAffordances : null))
-    // The controller already observes this exact session/resource/drive query.
-    // Reuse only an explicitly fresh success. Legacy controller-only test
-    // harnesses have no query observer/status map, so their injected fresh
-    // authority remains a valid fixture; production always exposes the query.
-    const controllerDataIsFresh = Boolean(
-      queryState === undefined &&
-      rowStatus === undefined &&
-      controllerAuthority &&
-      (hasBit(controllerAuthority, 'read') ||
-        hasBit(controllerAuthority, 'write') ||
-        hasBit(controllerAuthority, 'delete') ||
-        hasBit(controllerAuthority, 'manage_acl'))
+    return requireFreshGfsPermissions(
+      {
+        scope: sessionScope,
+        gen: ctrl.sessionGeneration,
+        resourceId,
+        resourceName,
+        drive,
+        bits: requiredBits,
+        grantableBits: requiredGrantableBits,
+      },
+      {
+        ...freshPermissionsContext(sessionScope, ctrl.sessionGeneration),
+        // The controller already observes this exact session/resource/drive query.
+        // Reuse only an explicitly fresh success. Legacy controller-only test
+        // harnesses have no query observer/status map, so their injected fresh
+        // authority remains a valid fixture; production always exposes the query.
+        fallbackAuthority: queryState =>
+          queryState === undefined &&
+          rowStatus === undefined &&
+          controllerAuthority &&
+          (hasBit(controllerAuthority, 'read') ||
+            hasBit(controllerAuthority, 'write') ||
+            hasBit(controllerAuthority, 'delete') ||
+            hasBit(controllerAuthority, 'manage_acl'))
+            ? controllerAuthority
+            : null,
+      }
     )
-    const authority = queryDataIsFresh
-      ? stateAuthority
-      : controllerDataIsFresh
-        ? controllerAuthority
-        : await fetchRowAuthority(resourceId, resourceName, drive)
-    if (!authority) return false
-    const missing = requiredBits.filter(bit => !hasBit(authority, bit))
-    if (missing.length > 0) {
-      const labels = missing.map(bit => (bit === 'manage_acl' ? 'manage' : bit))
-      const label = labels.length === 1 ? labels[0] : labels.join(' and ')
-      pushToast?.(`You do not have ${label} access to ${resourceName}.`, 'error')
-      return false
+  }
+  /** Session guards for the shared action runners; the location guard stays at dialog open. */
+  const actionRunnerDeps = (): GfsActionRunnerDeps => {
+    const requestedScope = sessionScope
+    const requestedGeneration = ctrl.sessionGeneration
+    return {
+      ops: ctrl,
+      freshPermissions: requireFreshRowPermissions,
+      readAccessState: () => ctrl.readAccessState(),
+      publishedGeneration: () => moveWorkspaceRef.current.sessionGeneration,
+      isCurrent: () =>
+        isGfsSessionAuthorityCurrent(
+          requestedScope,
+          requestedGeneration,
+          moveWorkspaceRef.current.sessionScope,
+          moveWorkspaceRef.current.sessionGeneration
+        ),
     }
-    const noLongerGrantable = requiredGrantableBits.filter(
-      bit => !authority.grantableBits?.includes(bit)
-    )
-    if (noLongerGrantable.length > 0) {
-      pushToast?.(
-        `You can no longer grant ${noLongerGrantable.join(' and ')} on ${resourceName}.`,
-        'error'
-      )
-      return false
-    }
-    return true
   }
   const runWithFreshResourcePermissions = async (
     target: GfsActionTarget,
@@ -1797,22 +1752,23 @@ export function FilesPage({
   }, [currentGfsUri, currentKind, onResolvedLocationChange])
   useEffect(() => () => onResolvedLocationChange?.(null), [onResolvedLocationChange])
 
-  const handleCreateFolder = async () => {
-    const requestedName = createFolderName.trim()
+  const handleCreateFolder = async (requestedName: string) => {
     const parentResourceId = createFolderParentId
-    if (!requestedName || !parentResourceId) return
-    const parentName = createFolderParentName ?? 'folder'
-    if (!(await requireFreshRowPermissions(parentResourceId, parentName, ['write']))) return
-    setCreateFolderError(null)
-    try {
-      const name = await normalizeGfsResourceName(requestedName)
-      if (!(await requireFreshRowPermissions(parentResourceId, parentName, ['write']))) return
-      await ctrl.createFolder(parentResourceId, name)
+    if (!parentResourceId) return
+    const result = await runGfsCreateFolder(
+      actionRunnerDeps(),
+      { resourceId: parentResourceId, name: createFolderParentName ?? 'folder' },
+      requestedName,
+      { onPermitted: () => setCreateFolderError(null) }
+    )
+    if (result.status === 'done') {
       closeCreateFolder()
-      pushToast?.(`Folder ${name} created`, 'success')
-    } catch (createError) {
-      if (failClosedOnAuthorizationError(createError)) return
-      setCreateFolderError(createError instanceof Error ? createError.message : String(createError))
+      pushToast?.(`Folder ${result.value.name} created`, 'success')
+    } else if (result.status === 'failed') {
+      if (failClosedOnAuthorizationError(result.error)) return
+      setCreateFolderError(
+        result.error instanceof Error ? result.error.message : String(result.error)
+      )
     }
   }
 
@@ -1823,43 +1779,21 @@ export function FilesPage({
     parentName = current?.name ?? 'folder'
   ) => {
     if (!file || !parentResourceId) return
-    if (!(await requireFreshRowPermissions(parentResourceId, parentName, ['write']))) return
-    try {
-      assertGfsFileUploadSize(file.size)
-      const normalizedName = await normalizeGfsResourceName(file.name)
-      const filePath = window.clerum.gfs.getPathForFile(file)
-      if (!filePath) throw new Error('Could not resolve the selected local file')
-      const nameReservation = uploadNameReservationsRef.current.begin(
-        parentResourceId,
-        normalizedName,
-        occupiedNames
+    const result = await runGfsUpload(
+      actionRunnerDeps(),
+      { resourceId: parentResourceId, name: parentName },
+      file,
+      occupiedNames,
+      uploadNameReservationsRef.current
+    )
+    if (result.status === 'done') {
+      pushToast?.(`Uploaded ${result.value.name}`, 'success')
+    } else if (result.status === 'failed') {
+      if (failClosedOnAuthorizationError(result.error)) return
+      pushToast?.(
+        result.error instanceof Error ? result.error.message : String(result.error),
+        'error'
       )
-      try {
-        for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
-          const name = nameReservation.reserveNext()
-
-          try {
-            if (!(await requireFreshRowPermissions(parentResourceId, parentName, ['write']))) return
-            await ctrl.createFileFromPath(parentResourceId, name, filePath)
-            nameReservation.markSuccess(name)
-            pushToast?.(`Uploaded ${name}`, 'success')
-            return
-          } catch (uploadError) {
-            const decision = gfsUploadNameRetryDecision(uploadError, { attempt })
-            if (decision === 'terminal') throw uploadError
-
-            nameReservation.markConflict(name)
-            if (decision === 'exhausted') throw new Error(GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE)
-          }
-        }
-
-        throw new Error(GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE)
-      } finally {
-        nameReservation.release()
-      }
-    } catch (uploadError) {
-      if (failClosedOnAuthorizationError(uploadError)) return
-      pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
     }
   }
 
@@ -2426,55 +2360,47 @@ export function FilesPage({
 
   const handleRenameCurrent = async () => {
     if (!current) return
-    if (!(await requireFreshRowPermissions(current.resourceId, current.name, ['write']))) return
-    const requestedName = renameName.trim()
-    if (!requestedName) return
-    try {
-      const name = await normalizeGfsResourceName(requestedName)
-      if (name === current.name) {
-        setRenameOpen(false)
-        return
-      }
-      await ctrl.renameResource(current.resourceId, name, current.version)
+    const result = await runGfsRename(actionRunnerDeps(), current, renameName)
+    if (result.status === 'unchanged') {
       setRenameOpen(false)
-      pushToast?.(`Renamed to ${name}`, 'success')
-    } catch (renameError) {
-      if (failClosedOnAuthorizationError(renameError)) return
-      pushToast?.(renameError instanceof Error ? renameError.message : String(renameError), 'error')
+    } else if (result.status === 'done') {
+      setRenameOpen(false)
+      pushToast?.(`Renamed to ${result.value.name}`, 'success')
+    } else if (result.status === 'failed') {
+      if (failClosedOnAuthorizationError(result.error)) return
+      pushToast?.(
+        result.error instanceof Error ? result.error.message : String(result.error),
+        'error'
+      )
     }
   }
 
   const handleDeleteCurrent = async () => {
     if (!current) return
-    if (!(await requireFreshRowPermissions(current.resourceId, current.name, ['delete']))) return
-    try {
-      await ctrl.deleteResource(current.resourceId, current.version)
+    const result = await runGfsDelete(actionRunnerDeps(), current)
+    if (result.status === 'done') {
       setDeleteOpen(false)
       closeManage()
       pushToast?.(`Deleted ${current.name}`, 'success')
-    } catch (deleteError) {
-      if (failClosedOnAuthorizationError(deleteError)) return
-      pushToast?.(deleteError instanceof Error ? deleteError.message : String(deleteError), 'error')
+    } else if (result.status === 'failed') {
+      if (failClosedOnAuthorizationError(result.error)) return
+      pushToast?.(
+        result.error instanceof Error ? result.error.message : String(result.error),
+        'error'
+      )
     }
   }
 
   const handleDeleteResource = async (resource: GfsActionTarget) => {
-    if (!(await requireFreshRowPermissions(resource.resourceId, resource.name, ['delete']))) {
-      setDeleteTarget(null)
-      return
-    }
-    try {
-      await ctrl.deleteResource(resource.resourceId, resource.version)
+    const result = await runGfsDelete(actionRunnerDeps(), resource)
+    setDeleteTarget(null)
+    if (result.status === 'done') {
       pushToast?.(`Deleted ${resource.name}`, 'success')
-    } catch (deleteError) {
-      if (!failClosedOnAuthorizationError(deleteError)) {
-        pushToast?.(
-          deleteError instanceof Error ? deleteError.message : String(deleteError),
-          'error'
-        )
-      }
-    } finally {
-      setDeleteTarget(null)
+    } else if (result.status === 'failed' && !failClosedOnAuthorizationError(result.error)) {
+      pushToast?.(
+        result.error instanceof Error ? result.error.message : String(result.error),
+        'error'
+      )
     }
   }
 
@@ -2839,22 +2765,18 @@ export function FilesPage({
   const handleRenameTarget = async () => {
     if (!renameTarget) return
     const target = renameTarget
-    const requestedName = renameDraft.trim()
-    if (!requestedName) return
-    if (!(await requireFreshRowPermissions(target.resourceId, target.name, ['write']))) return
-    try {
-      const name = await normalizeGfsResourceName(requestedName)
-      if (name === target.name) {
-        setRenameTarget(null)
-        return
-      }
-      if (!(await requireFreshRowPermissions(target.resourceId, target.name, ['write']))) return
-      await ctrl.renameResource(target.resourceId, name, target.version)
+    const result = await runGfsRename(actionRunnerDeps(), target, renameDraft)
+    if (result.status === 'unchanged') {
       setRenameTarget(null)
-      pushToast?.(`Renamed to ${name}`, 'success')
-    } catch (renameError) {
-      if (failClosedOnAuthorizationError(renameError)) return
-      pushToast?.(renameError instanceof Error ? renameError.message : String(renameError), 'error')
+    } else if (result.status === 'done') {
+      setRenameTarget(null)
+      pushToast?.(`Renamed to ${result.value.name}`, 'success')
+    } else if (result.status === 'failed') {
+      if (failClosedOnAuthorizationError(result.error)) return
+      pushToast?.(
+        result.error instanceof Error ? result.error.message : String(result.error),
+        'error'
+      )
     }
   }
 
@@ -3979,66 +3901,18 @@ export function FilesPage({
       />
 
       {createFolderOpen && createFolderParentId && createFolderParentName ? (
-        <div
-          className="da-gfs-manage-modal da-gfs-new-folder-modal"
-          role="presentation"
-          onMouseDown={event => {
-            if (event.target === event.currentTarget && !ctrl.mutating) closeCreateFolder()
-          }}
-        >
-          <section
-            aria-describedby={createFolderDescriptionId}
-            aria-labelledby={createFolderTitleId}
-            aria-modal="true"
-            className="da-gfs-new-folder-dialog"
-            onMouseDown={event => event.stopPropagation()}
-            role="dialog"
-          >
-            <header className="da-gfs-new-folder-dialog__header">
-              <h3 id={createFolderTitleId}>New folder</h3>
-            </header>
-            <p className="da-gfs-new-folder-dialog__copy" id={createFolderDescriptionId}>
-              Create a new folder in {createFolderParentName}.
-            </p>
-            <form
-              aria-label="Create folder"
-              className="da-gfs-new-folder-dialog__form"
-              onSubmit={event => {
-                event.preventDefault()
-                void handleCreateFolder()
-              }}
-            >
-              <label className="da-gfs-new-folder-dialog__field" htmlFor={createFolderInputId}>
-                <span>Folder name</span>
-                <TextInput
-                  aria-label="Folder name"
-                  autoComplete="off"
-                  autoFocus
-                  disabled={ctrl.mutating}
-                  id={createFolderInputId}
-                  placeholder="e.g. research-notes"
-                  spellCheck={false}
-                  value={createFolderName}
-                  onChange={event => setCreateFolderName(event.currentTarget.value)}
-                />
-              </label>
-              {createFolderError ? <StatusBanner tone="error" text={createFolderError} /> : null}
-              <footer className="da-gfs-new-folder-dialog__actions">
-                <Button
-                  disabled={ctrl.mutating}
-                  onClick={closeCreateFolder}
-                  type="button"
-                  variant="ghost"
-                >
-                  Cancel
-                </Button>
-                <Button disabled={!createFolderName.trim()} loading={ctrl.mutating} type="submit">
-                  Create folder
-                </Button>
-              </footer>
-            </form>
-          </section>
-        </div>
+        <GfsNameDialog
+          busy={ctrl.mutating}
+          description={<>Create a new folder in {createFolderParentName}.</>}
+          error={createFolderError}
+          fieldLabel="Folder name"
+          formLabel="Create folder"
+          placeholder="e.g. research-notes"
+          submitLabel="Create folder"
+          title="New folder"
+          onCancel={closeCreateFolder}
+          onSubmit={value => void handleCreateFolder(value)}
+        />
       ) : null}
 
       {deleteTarget ? (
