@@ -16,12 +16,32 @@ export interface FileExplorerTreeProps {
   onOpenPreview: (preview: GfsPreviewResource) => void
   /** Transient success/error feedback for the download fallback. */
   pushToast: (message: string, tone: Tone) => void
+  /**
+   * The folders currently expanded AND rendered, in the order they appear,
+   * as their gfs:// URIs. Reported again on every change and as `[]` when
+   * the tree unmounts, so the owner can watch exactly what is on screen.
+   */
+  onVisibleExpandedFoldersChange?: (gfsUris: string[]) => void
+}
+
+/** An expanded, rendered folder and its position in the tree (pre-order sibling indices). */
+export interface VisibleExpandedFolder {
+  gfsUri: string
+  order: readonly number[]
 }
 
 export interface FileExplorerNodeProps {
   node: GfsBrowserChild
   /** 1-based ARIA depth (`aria-level`). */
   level: number
+  /** Sibling index of this node and of each ancestor, root first: its on-screen order. */
+  visibleOrder: readonly number[]
+  /**
+   * An expanded folder reports itself while rendered, and `null` when collapsed
+   * or unmounted. `instanceKey` names the rendered copy, not the resource: one
+   * folder can appear more than once in the forest.
+   */
+  onExpandedFolderVisibility: (instanceKey: string, folder: VisibleExpandedFolder | null) => void
   /** Cache-scope key shared with the Files page's TanStack queries. */
   scope: string
   /** Published main-process generation that owns this authority query. */
