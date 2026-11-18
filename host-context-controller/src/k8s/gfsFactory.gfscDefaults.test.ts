@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
 import ts from 'typescript'
 import { exportedNumericConst, readSourceFile } from '../__tests__/sourceConstants'
+import { DRIVE_NAME_PATTERN } from '../gfsConfig'
 import {
   DEFAULT_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA,
   DEFAULT_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA,
@@ -47,6 +48,49 @@ function envNameReadFor(sourceFile: ts.SourceFile, property: string): string {
     )
   }
   return names[0]
+}
+
+function topLevelRegExpConst(sourceFile: ts.SourceFile, symbol: string): RegExp {
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement)) continue
+    if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== symbol) continue
+      const initializer = declaration.initializer
+      if (initializer === undefined || !ts.isRegularExpressionLiteral(initializer)) {
+        throw new Error(`${symbol} in ${GFSC_CONFIG} must be initialized with a regex literal`)
+      }
+      const literal = initializer.text
+      const lastSlash = literal.lastIndexOf('/')
+      return new RegExp(literal.slice(1, lastSlash), literal.slice(lastSlash + 1))
+    }
+  }
+  throw new Error(`${symbol} is not a top-level const in ${GFSC_CONFIG}`)
+}
+
+/** The `process.env.<NAME>` reads inside gfsc's top-level function `fn`. */
+function envNamesReadIn(sourceFile: ts.SourceFile, fn: string): string[] {
+  const declaration = sourceFile.statements.find(
+    (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === fn
+  )
+  if (declaration?.body === undefined) {
+    throw new Error(`${fn} is not a top-level function in ${GFSC_CONFIG}`)
+  }
+  const names: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === 'process' &&
+      node.expression.name.text === 'env'
+    ) {
+      names.push(node.name.text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(declaration.body)
+  return names
 }
 
 function readGfscConfig(): ts.SourceFile {
@@ -112,5 +156,28 @@ describe('gfsc agent budget defaults', () => {
       write: DEFAULT_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA,
       max: MAX_GFSC_AGENT_RL_PER_MIN_PER_REPLICA,
     })
+  })
+})
+
+describe('gfsc drive name', () => {
+  it('R2-M2: HCC validates the drive name with the same pattern gfsc enforces at boot', () => {
+    const gfsc = topLevelRegExpConst(readGfscConfig(), 'DRIVE_NAME_PATTERN')
+    expect({ source: gfsc.source, flags: gfsc.flags }).toEqual({
+      source: DRIVE_NAME_PATTERN.source,
+      flags: DRIVE_NAME_PATTERN.flags,
+    })
+  })
+
+  it('R2-M2: HCC writes the drive name under the env name gfsc reads it from, on every role', () => {
+    const expected = envNamesReadIn(readGfscConfig(), 'driveName')
+    const config = { ...factoryConfig, driveName: 'drive-pin' }
+    for (const role of ['writer', 'reader'] as const) {
+      const env =
+        buildDeployment({ name: 'gfs', namespace: 'gfs', spec: {} }, config, role).spec?.template
+          .spec?.containers[0].env ?? []
+      expect(env.filter(item => item.value === 'drive-pin').map(item => item.name)).toEqual(
+        expected
+      )
+    }
   })
 })
