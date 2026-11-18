@@ -16,6 +16,7 @@ import {
   recordDecision,
   resolveToolIdentityFromRegistry,
 } from '../guardrails'
+import type { RequestImageUsage } from '../interfaces'
 import type { PendingApproval, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
 import { executeSingleTool } from './toolUseLoopSingleTool'
@@ -388,7 +389,8 @@ async function applyApprovalMode(
 export async function executeAdmittedTool(
   admission: Extract<ToolCallAdmission, { kind: 'execute' }>,
   config: LoopConfig,
-  iteration: number
+  iteration: number,
+  requestImages?: RequestImageUsage
 ): Promise<ToolResult> {
   const { guardrails } = config
   const { toolIdentity } = admission
@@ -404,5 +406,5 @@ export async function executeAdmittedTool(
           return view.content === result.content ? result : { ...result, content: view.content }
         }
       : undefined
-  return executeSingleTool(admission.call, config, iteration, transformResult)
+  return executeSingleTool(admission.call, config, iteration, transformResult, requestImages)
 }

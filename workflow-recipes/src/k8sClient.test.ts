@@ -1503,6 +1503,113 @@ describe('workload status refresh loop helpers', () => {
     })
   })
 
+  // Issue #1349 — a recorded terminal run child whose terminal pass left no
+  // workload deployed with a Secret (`noSecretBearingWorkloads`) has nothing for
+  // the ownership backstop to revoke.
+  function terminalRunChildWithSecret(
+    name: string,
+    status: Partial<NonNullable<WorkflowRecipeCRD['status']>>,
+    labels: Record<string, string> = { 'clerum.io/workflow-run-id': `run-${name}` }
+  ): WorkflowRecipeCRD {
+    return makeWorkloadRecipe({
+      metadata: { name, namespace: 'sandbox-recipes', labels },
+      spec: {
+        steps: [{ id: 'run', instruction: 'go' }],
+        workloads: [
+          {
+            id: 'api',
+            type: 'deployment',
+            image: 'clerum/api:test',
+            envSecret: { name: 'creds', keys: [{ secretKey: 'k', envVar: 'K' }] },
+          },
+        ],
+      },
+      status: {
+        phase: 'active',
+        workflowExecution: { phase: 'completed' },
+        ...status,
+      } as WorkflowRecipeCRD['status'],
+    })
+  }
+  const completedAt = '2026-11-12T10:00:00.000Z'
+
+  it('T4.3 workflowNeedsOwnershipBackstop skips a recorded terminal run child only when its teardown found no Secret-bearing workload (issue #1349)', () => {
+    const recordWithFact = { terminalRunTeardown: { completedAt, noSecretBearingWorkloads: true } }
+    expect(workflowNeedsOwnershipBackstop(terminalRunChildWithSecret('fact', recordWithFact))).toBe(
+      false
+    )
+    expect(
+      workflowNeedsOwnershipBackstop(
+        terminalRunChildWithSecret('record-only', { terminalRunTeardown: { completedAt } })
+      )
+    ).toBe(true)
+    expect(
+      workflowNeedsOwnershipBackstop(
+        terminalRunChildWithSecret('fact-without-record', {
+          terminalRunTeardown: { noSecretBearingWorkloads: true },
+        } as unknown as Partial<NonNullable<WorkflowRecipeCRD['status']>>)
+      )
+    ).toBe(true)
+    expect(
+      workflowNeedsOwnershipBackstop(
+        terminalRunChildWithSecret('running', {
+          ...recordWithFact,
+          workflowExecution: { phase: 'running' },
+        })
+      )
+    ).toBe(true)
+    expect(
+      workflowNeedsOwnershipBackstop(
+        terminalRunChildWithSecret('latched', {
+          ...recordWithFact,
+          phase: 'failed',
+          message: 'Workflow failed',
+          workflowExecution: {
+            phase: 'failed',
+            message: 'FetchError: request failed, reason: connect ETIMEDOUT 10.96.0.1:443',
+          },
+        })
+      )
+    ).toBe(true)
+    expect(
+      workflowNeedsOwnershipBackstop(terminalRunChildWithSecret('not-a-run', recordWithFact, {}))
+    ).toBe(true)
+  })
+
+  it('T4.4 the steady refresh skips a run child with the no-Secret-bearing fact and still enqueues its sibling (issue #1349)', async () => {
+    const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+    const refreshWorkloadStatusOnly = vi.fn().mockResolvedValue(undefined)
+    const factChild = terminalRunChildWithSecret('fact-child', {
+      terminalRunTeardown: { completedAt, noSecretBearingWorkloads: true },
+    })
+    const sibling = terminalRunChildWithSecret('sibling-child', {
+      terminalRunTeardown: { completedAt },
+    })
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      eventQueue: { enqueue: typeof enqueue }
+      refreshWorkloadStatusOnly: typeof refreshWorkloadStatusOnly
+      refreshWorkloadStatusesForSteadyRecipes: () => Promise<void>
+      stopped: boolean
+    }
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([
+      [factChild.metadata.name, factChild],
+      [sibling.metadata.name, sibling],
+    ])
+    internal.eventQueue = { enqueue }
+    internal.refreshWorkloadStatusOnly = refreshWorkloadStatusOnly
+    internal.stopped = false
+
+    await internal.refreshWorkloadStatusesForSteadyRecipes()
+
+    // Witness: the sibling is enqueued for the ownership-only backstop.
+    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(sibling, { ownershipOnly: true })
+    expect(enqueue).not.toHaveBeenCalledWith(factChild.metadata.name, expect.any(Function))
+    expect(enqueue).toHaveBeenCalledTimes(1)
+  })
+
   it('triggerSecretDrivenReconcile forces a full reconcile so a Secret re-label reaches the ownership gate (Issue #637)', async () => {
     // A Secret re-label does NOT bump the recipe's generation, so a plain 'MODIFIED'
     // event is status-only and short-circuits before reconcile() (and the ownership
@@ -1988,6 +2095,43 @@ describe('workflowNeedsTerminalRunTeardown', () => {
       )
     ).toBe(false)
   })
+
+  // Issue #1349 — a recorded teardown is not repeated; a latched child still is.
+  it('does not select a run whose terminal teardown is recorded, unless it is latched', () => {
+    const recorded = (status: Partial<NonNullable<WorkflowRecipeCRD['status']>>) =>
+      makeWorkflowRecipe({
+        metadata: {
+          name: 'recorded',
+          namespace: 'sandbox-recipes',
+          labels: { 'clerum.io/workflow-run-id': 'run-recorded' },
+        },
+        status: {
+          phase: 'active',
+          workflowExecution: { phase: 'completed' },
+          ...status,
+        } as WorkflowRecipeCRD['status'],
+      })
+
+    expect(workflowNeedsTerminalRunTeardown(recorded({}))).toBe(true)
+    expect(
+      workflowNeedsTerminalRunTeardown(
+        recorded({ terminalRunTeardown: { completedAt: '2026-11-12T10:00:00.000Z' } })
+      )
+    ).toBe(false)
+    expect(
+      workflowNeedsTerminalRunTeardown(
+        recorded({
+          phase: 'failed',
+          message: 'Workflow failed',
+          workflowExecution: {
+            phase: 'failed',
+            message: 'FetchError: request failed, reason: connect ETIMEDOUT 10.96.0.1:443',
+          },
+          terminalRunTeardown: { completedAt: '2026-11-12T10:00:00.000Z' },
+        })
+      )
+    ).toBe(true)
+  })
 })
 
 describe('status-only events drive DB sync (terminal + heartbeat)', () => {
@@ -2114,6 +2258,31 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
       expect(reconcile).toHaveBeenCalledWith(completed)
       // Cache is updated.
       expect(internal.recipes.get(completed.metadata.name)).toBe(completed)
+    }
+  )
+
+  it.each(['completed', 'failed', 'cancelled'] as const)(
+    'only syncs a %s run-scoped status-only event whose terminal teardown is recorded',
+    async phase => {
+      const cached = makeRunChild({
+        status: { phase: 'active', workflowExecution: { phase } },
+      })
+      const recorded = makeRunChild({
+        metadata: { resourceVersion: 'next' },
+        status: {
+          phase: 'active',
+          workflowExecution: { phase },
+          terminalRunTeardown: { completedAt: '2026-11-12T10:00:00.000Z' },
+        },
+      })
+      const { internal, reconcile, sync } = makeInternal(cached)
+
+      await internal.handleRecipeEvent('MODIFIED', recorded)
+
+      expect(sync).toHaveBeenCalledTimes(1)
+      expect(sync).toHaveBeenCalledWith(recorded)
+      expect(reconcile).not.toHaveBeenCalled()
+      expect(internal.recipes.get(recorded.metadata.name)).toBe(recorded)
     }
   )
 
@@ -3030,6 +3199,61 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
         forceReconcile: true,
       })
     }
+  })
+
+  // Issue #1349 — a recorded terminal run child returns before the accumulator, so
+  // the refresh skips it; an unrecorded or latched one still takes a forced pass.
+  it('refreshExternalEgressForActiveRecipes skips a terminal run child whose teardown is recorded, unless it is latched', async () => {
+    const completedAt = '2026-11-12T10:00:00.000Z'
+    const terminalRunChild = (
+      name: string,
+      status: Partial<NonNullable<WorkflowRecipeCRD['status']>>
+    ): WorkflowRecipeCRD => {
+      const parent = makeWorkloadEgressRecipe(name)
+      return makeWorkflowRecipe({
+        metadata: {
+          name,
+          namespace: 'sandbox-recipes',
+          labels: { 'clerum.io/workflow-run-id': `run-${name}` },
+        },
+        spec: {
+          ...parent.spec,
+          steps: [
+            { id: 'step-1', run: { type: 'snippet', language: 'typescript', code: 'return {}' } },
+          ],
+        },
+        status: {
+          phase: 'active',
+          workflowExecution: { phase: 'completed' },
+          ...status,
+        } as WorkflowRecipeCRD['status'],
+      })
+    }
+    const { internal, enqueue, handleRecipeEvent } = makeInternal([
+      makeWorkloadEgressRecipe('parent'),
+      terminalRunChild('child-recorded', { terminalRunTeardown: { completedAt } }),
+      terminalRunChild('child-unrecorded', {}),
+      terminalRunChild('child-recorded-latched', {
+        phase: 'failed',
+        message: 'Workflow failed',
+        workflowExecution: {
+          phase: 'failed',
+          message: 'FetchError: request failed, reason: connect ETIMEDOUT 10.96.0.1:443',
+        },
+        terminalRunTeardown: { completedAt },
+      }),
+    ])
+
+    await internal.refreshExternalEgressForActiveRecipes()
+
+    // Witness: the external-egress parent still takes a forced pass.
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', internal.recipes.get('parent'), {
+      forceReconcile: true,
+    })
+    expect(enqueue).toHaveBeenCalledWith('child-unrecorded', expect.any(Function))
+    expect(enqueue).toHaveBeenCalledWith('child-recorded-latched', expect.any(Function))
+    expect(enqueue).not.toHaveBeenCalledWith('child-recorded', expect.any(Function))
+    expect(enqueue).toHaveBeenCalledTimes(3)
   })
 
   it('refreshExternalEgressForActiveRecipes is a no-op while stopped', async () => {

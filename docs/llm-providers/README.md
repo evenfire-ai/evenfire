@@ -351,7 +351,11 @@ runtime can execute) and the run fetched models.dev live; at most
 within a provider; the total is handed out in the fixed order of
 `PROVIDER_IDS`, so later providers wait for earlier ones), and a large catalog
 completes over several runs. It also loads the catalog price of each model it
-inserts. It never changes `enabled` on an existing row. Without egress
+inserts. Of the existing rows it only changes `enabled` on the ones it manages
+itself: it disables stale models nobody uses after a grace period
+(`LLM_CATALOG_PRUNE_STALE_GRACE_MS`, default 7 days) and enables them again if
+the catalog lists them later; an operator's decision is never overridden.
+Without egress
 (`vendored` runs) providers whose policy is ON get no discovered rows, and
 since nothing is seeded, a fresh installation without egress has no enabled
 model at all until an admin adds one (local minikube setup adds the Host's
@@ -390,9 +394,10 @@ family, or an "OpenAI-compatible" request shape.
 - A capability change re-materializes the ConfigMap `imageInput` field, so
   running Hosts pick it up without a redeploy. The sync re-materializes
   `clerum-llm-allowed-models` whenever its content differs from Postgres (an
-  `image_input` change on an enabled row, a model it enabled on insert); it
-  never enables or disables an existing row, nor edits any other served column
-  of one.
+  `image_input` change on an enabled row, a model it enabled on insert, a
+  model it pruned or re-enabled). It changes `enabled` on an existing row only
+  through the prune and the re-enable described above, and never edits any
+  other served column of one.
 
 #### Rollout and refresh cadence
 
