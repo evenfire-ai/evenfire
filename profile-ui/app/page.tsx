@@ -1,104 +1,27 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import Link from 'next/link'
-import { useAuth } from '@components/AuthContext'
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
-import { IconExternalLink } from '@components/icons'
 import { PROFILE_ROUTES } from '@constants/routes'
-import { getDesktopEnvironment } from '@lib/api'
-import {
-  buildDesktopEnvironmentLink,
-  isDesktopEnvironmentHandoffEnabled,
-} from '@lib/desktopAppLinks'
 
-function HomeContent() {
-  const { authState } = useAuth()
-  const me = authState.me
-  const displayName = me?.profile?.displayName || me?.name || me?.email || 'there'
-  const desktopHandoffEnabled = isDesktopEnvironmentHandoffEnabled()
-  const [desktopAppLink, setDesktopAppLink] = useState<
-    | { state: 'loading' }
-    | { state: 'ready'; href: string }
-    | { state: 'unavailable' }
-    | { state: 'disabled' }
-  >(() => (desktopHandoffEnabled ? { state: 'loading' } : { state: 'disabled' }))
+// The root URL is the signed-out login landing and the /?inviteToken= entry
+// (handled by ProfileAppFrame before this page mounts). Signed-in users land
+// on the Social channels section.
+function RootLandingRedirect() {
+  const router = useRouter()
 
   useEffect(() => {
-    if (!desktopHandoffEnabled) return
-    let isCurrent = true
-    void getDesktopEnvironment()
-      .then(environment => {
-        if (!isCurrent) return
-        const href = buildDesktopEnvironmentLink(environment)
-        setDesktopAppLink(href ? { state: 'ready', href } : { state: 'unavailable' })
-      })
-      .catch(() => {
-        if (isCurrent) setDesktopAppLink({ state: 'unavailable' })
-      })
+    router.replace(PROFILE_ROUTES.channels.root)
+  }, [router])
 
-    return () => {
-      isCurrent = false
-    }
-  }, [desktopHandoffEnabled])
-
-  return (
-    <section className="profile-page">
-      <div className="cu-card cu-home-welcome-card">
-        <div className="cu-card__body">
-          <p className="eyebrow">Evenfire Profile</p>
-          <h2 className="page-title page-title--large">Welcome, {displayName}</h2>
-        </div>
-      </div>
-
-      <div className="cu-card">
-        <div className="cu-card__body">
-          <p className="body-copy">
-            You are signed in to the Evenfire <strong>Profile Portal</strong>.
-          </p>
-          <p className="body-copy" role="status" aria-live="polite" aria-atomic="true">
-            {desktopAppLink.state === 'loading' ? (
-              'Checking desktop app setup…'
-            ) : desktopAppLink.state === 'disabled' ? (
-              'Automatic Desktop setup is not enabled yet. You can copy the REST API URL in Settings.'
-            ) : desktopAppLink.state === 'unavailable' ? (
-              <>
-                Desktop app setup is unavailable right now. Visit{' '}
-                <Link href={PROFILE_ROUTES.settings.profile}>Settings</Link> to review setup
-                options.
-              </>
-            ) : (
-              <>
-                <a className="cu-home-desktop-link" href={desktopAppLink.href}>
-                  Open Desktop App <IconExternalLink />
-                </a>{' '}
-                instead.
-              </>
-            )}
-          </p>
-        </div>
-      </div>
-
-      <div className="cu-card">
-        <div className="cu-card__body cu-profile-summary">
-          <div>
-            <span className="form-field__label">User</span>
-            <div>{displayName}</div>
-          </div>
-          <div>
-            <span className="form-field__label">Email</span>
-            <div>{me?.email}</div>
-          </div>
-        </div>
-      </div>
-    </section>
-  )
+  return null
 }
 
 export default function Page() {
   return (
     <AuthGate>
-      <HomeContent />
+      <RootLandingRedirect />
     </AuthGate>
   )
 }

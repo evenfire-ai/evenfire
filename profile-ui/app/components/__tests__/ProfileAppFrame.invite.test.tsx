@@ -141,15 +141,16 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('ProfileAppFrame root invite redirects', () => {
-  it('redirects signed-in root invite links before rendering the home shell', async () => {
+  it('redirects signed-in root invite links before rendering the app shell', async () => {
     navigationState.search = 'inviteToken=abc'
 
-    renderRootPage()
+    const view = renderRootPage()
 
     await waitFor(() => {
       expect(navigationState.replace).toHaveBeenCalledWith('/invitations/abc')
     })
-    expect(screen.queryByText(/Welcome, Ada Admin/i)).not.toBeInTheDocument()
+    expect(navigationState.replace).not.toHaveBeenCalledWith('/channels')
+    expect(view.container.querySelectorAll('.cu-sidebar')).toHaveLength(0)
   })
 
   it('redirects logged-out root invite links before showing login', async () => {
@@ -165,29 +166,41 @@ describe('ProfileAppFrame root invite redirects', () => {
     expect(screen.queryByTestId('profile-login-panel')).not.toBeInTheDocument()
   })
 
-  it('keeps ordinary signed-in root rendering inside a single profile shell', () => {
+  it('sends signed-in users from the root to the Social channels section inside a single shell', async () => {
     const view = renderRootPage()
 
-    expect(screen.getByRole('heading', { name: /Welcome, Ada Admin/i })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(navigationState.replace).toHaveBeenCalledWith('/channels')
+    })
     expect(view.container.querySelectorAll('.cu-sidebar')).toHaveLength(1)
-    expect(navigationState.replace).not.toHaveBeenCalled()
+    expect(navigationState.replace).not.toHaveBeenCalledWith(
+      expect.stringContaining('/invitations')
+    )
   })
 
-  it('keeps unrelated root query strings protected', () => {
+  it('keeps unrelated root query strings protected and lands on Social channels', async () => {
     navigationState.search = 'next=%2Fmembers'
 
     renderRootPage()
 
-    expect(screen.getByRole('heading', { name: /Welcome, Ada Admin/i })).toBeInTheDocument()
-    expect(navigationState.replace).not.toHaveBeenCalled()
+    await waitFor(() => {
+      expect(navigationState.replace).toHaveBeenCalledWith('/channels')
+    })
+    expect(navigationState.replace).not.toHaveBeenCalledWith(
+      expect.stringContaining('/invitations')
+    )
   })
 
-  it('keeps empty invite tokens protected', () => {
+  it('keeps empty invite tokens protected and lands on Social channels', async () => {
     navigationState.search = 'inviteToken='
 
     renderRootPage()
 
-    expect(screen.getByRole('heading', { name: /Welcome, Ada Admin/i })).toBeInTheDocument()
-    expect(navigationState.replace).not.toHaveBeenCalled()
+    await waitFor(() => {
+      expect(navigationState.replace).toHaveBeenCalledWith('/channels')
+    })
+    expect(navigationState.replace).not.toHaveBeenCalledWith(
+      expect.stringContaining('/invitations')
+    )
   })
 })
