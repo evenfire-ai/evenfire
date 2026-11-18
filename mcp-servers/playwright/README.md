@@ -6,7 +6,8 @@ The [`Dockerfile`](./Dockerfile) extends the pinned upstream image and installs 
 
 ## Environment Variables / Secrets
 
-None. The CRD sets `auth.type: none` and there is no secret template — the server is configured entirely through container args in `mcpserver.yaml`:
+The image sets `PLAYWRIGHT_MCP_EXECUTABLE_PATH` to select the pinned browser.
+The CRD uses `auth.type: none` and reads its container arguments from `mcpserver.yaml`.
 
 - `--headless --browser chromium --no-sandbox`
 - `--host 0.0.0.0 --port 8931`
@@ -36,7 +37,7 @@ make deploy-playwright
 
 See [`mcpserver.yaml`](./mcpserver.yaml) for the full CRD spec. Key fields:
 
-- **Image**: `ghcr.io/evenfire-ai/playwright-server@sha256:fc603bbc05d216ca9394940463e5e216d0a48732c24555fb9b67d20775fccf73` (digest-pinned build of this Dockerfile)
+- **Image**: `ghcr.io/evenfire-ai/playwright-server@sha256:2e5ef0183d6dda21e0797ef32f1cbba2e07e38ec93b67bd3675079c5729ffa74` (verified Node and Chromium image)
 - **Namespace**: `mcp-server`
 - **Transport**: StreamableHTTP at `http://playwright-server.mcp-server.svc.cluster.local:8931/mcp`
 - **Resources**: 512Mi/250m request, 1Gi/1000m limit
@@ -57,11 +58,9 @@ The pinned official image declares Node 22.22.0. The latest official release
 `v0.0.83` and the previous two stable tags declare Node 24.21.0 on amd64 and
 arm64, below the current security floor.
 
-For the published image, the Dockerfile keeps the pinned upstream application and
-system dependencies and replaces Node with the official digest-pinned 24.22.1 glibc
-binary.
-This is temporary until a patched official Playwright image is available. The
-deployment manifest pins the published build by digest.
+The Dockerfile keeps the pinned upstream application and system dependencies
+and replaces Node with the official digest-pinned 24.22.3 glibc binary.
+This is temporary until a patched official Playwright image is available.
 
 ## Chromium in new builds
 
@@ -71,8 +70,9 @@ arm64. The smoke test verifies the selected executable and starts a real session
 [Chrome for Testing downloads](https://googlechromelabs.github.io/chrome-for-testing/157.0.8103.78.json) ·
 [CVE-2026-125350 fix](https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop_018223192.html?hl=fr)
 
-After the rebuilt image is published, update the deployment manifest and the
-cluster probe to its verified multi-architecture digest together.
+The deployment manifest and cluster probe pin the verified multi-architecture
+image from the [combined security candidate](https://github.com/evenfire-ai/evenfire/commit/9a461918d4ac0538a9891d872d6f27630c0e25e3).
+The probe checks the image identity, Node version, and Chromium major version.
 
 `test/runtime-smoke.cjs` runs inside the isolated Linux container. It starts the
 real MCP HTTP server and Chromium, navigates to a loopback fixture, clicks the
