@@ -1,5 +1,6 @@
 import type { DbClient } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { GOVERNED_TRACE_RETENTION_MIGRATION } from './governedTraceRetention.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
@@ -18,6 +19,7 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0148_oidc_protocol_attempts',
   '0149_oidc_protocol_attempt_expiry_index',
   '0150_oidc_protocol_attempt_browser_binding',
+  GOVERNED_TRACE_RETENTION_MIGRATION,
 ] as const)
 
 // The one bound between initDb's single dev batch and this runner: every migration

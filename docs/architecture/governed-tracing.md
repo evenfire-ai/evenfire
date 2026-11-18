@@ -140,11 +140,17 @@ HCC, WRC, and mcp-host perform only bounded synchronous enqueue on their critica
 database, normalization, cost rollup, reconciliation, and retention work execute off-path with
 separate concurrency and connection budgets.
 
-Retention deletes at most 1,000 rows per wake across the three event families and infrastructure
-costs. The maintenance worker is deliberately non-HTTP, so it does not register process-local
-Prometheus series that cannot be scraped. Each completed wake emits structured operational fields
-for duration, saturated retention grains, family-to-stream registration gaps, inventory volume,
-and GCP import outcomes; overlap, lock, failure, and shutdown outcomes are emitted separately.
+Retention deletes at most 1,000 items per wake across agent runs, administrative events,
+infrastructure telemetry, infrastructure costs, and approval prompts. Each deleted event counts
+once and removes both the event and its stream pointer. The three event families prune oldest
+first. Equal timestamps use stream sequence for agent runs and administrative events, and event ID
+for telemetry.
+
+The maintenance worker is non-HTTP and reports retention through structured logs. A completed wake
+reports overall duration, `retentionDurationMsByGrain` (the sum of completed attempts for each grain),
+saturated grains, registration gaps, inventory volume, and GCP import outcomes. When a retention
+attempt fails, the wake logs `retentionGrain` and `retentionGrainDurationMs` with the PostgreSQL
+error. Overlap, lock, failure, and shutdown outcomes have separate log entries.
 Producer-specific flush, drop, retry, and gap counters remain on the existing scrapeable HTTP
 surfaces. Sustained non-empty `saturatedGrains` in the worker logs indicates that retention
 throughput is not keeping pace.

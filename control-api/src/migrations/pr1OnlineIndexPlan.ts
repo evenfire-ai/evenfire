@@ -1,21 +1,26 @@
 import type { DbClient } from '../db.js'
+import {
+  GOVERNED_TRACE_RETENTION_MIGRATION,
+  TELEMETRY_RETENTION_PREDICATES,
+} from './governedTraceRetention.js'
 import { MIGRATION_EXECUTION_POLICY } from './migrationExecutionPolicy.js'
 
 export type OnlineIndexDefinition = Readonly<{
-  migrationVersion: '0137_user_access_foundation'
+  migrationVersion: '0137_user_access_foundation' | typeof GOVERNED_TRACE_RETENTION_MIGRATION
   name: string
   table: string
   unique?: boolean
   keys: readonly string[]
   include?: readonly string[]
+  predicate?: keyof typeof TELEMETRY_RETENTION_PREDICATES
   createSql: string
 }>
 
 type OnlineIndexStructure = Omit<OnlineIndexDefinition, 'createSql'>
 
-// Every planned index is a plain btree over bare columns. Quoted identifiers,
-// expressions and predicates are unrepresentable, so PostgreSQL's deparsed
-// definition can be compared byte for byte without a normalizer.
+// Every planned index is a btree over bare columns. The two fixed telemetry
+// predicates use PostgreSQL's deparsed form so the complete definitions can
+// be compared byte for byte.
 const PLAIN_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
 
 function assertPlainIdentifier(value: string, role: string, indexName: string): void {
@@ -24,9 +29,10 @@ function assertPlainIdentifier(value: string, role: string, indexName: string): 
   }
 }
 
-function indexColumnsSql(entry: OnlineIndexStructure): string {
+function indexSuffixSql(entry: OnlineIndexStructure): string {
   const include = entry.include ? ` INCLUDE (${entry.include.join(', ')})` : ''
-  return `(${entry.keys.join(', ')})${include}`
+  const where = entry.predicate ? ` WHERE ${TELEMETRY_RETENTION_PREDICATES[entry.predicate]}` : ''
+  return `(${entry.keys.join(', ')})${include}${where}`
 }
 
 export function onlineIndex(structure: OnlineIndexStructure): OnlineIndexDefinition {
@@ -45,7 +51,7 @@ export function onlineIndex(structure: OnlineIndexStructure): OnlineIndexDefinit
     ...structure,
     keys: Object.freeze([...structure.keys]),
     ...(structure.include ? { include: Object.freeze([...structure.include]) } : {}),
-    createSql: `CREATE ${unique}INDEX CONCURRENTLY ${structure.name} ON ${structure.table} ${indexColumnsSql(structure)}`,
+    createSql: `CREATE ${unique}INDEX CONCURRENTLY ${structure.name} ON ${structure.table} ${indexSuffixSql(structure)}`,
   })
 }
 
@@ -53,7 +59,7 @@ export function onlineIndex(structure: OnlineIndexStructure): OnlineIndexDefinit
 export function expectedIndexDefinition(entry: OnlineIndexDefinition, schema: string): string {
   assertPlainIdentifier(schema, 'schema', entry.name)
   const unique = entry.unique ? 'UNIQUE ' : ''
-  return `CREATE ${unique}INDEX ${entry.name} ON ${schema}.${entry.table} USING btree ${indexColumnsSql(entry)}`
+  return `CREATE ${unique}INDEX ${entry.name} ON ${schema}.${entry.table} USING btree ${indexSuffixSql(entry)}`
 }
 
 export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
@@ -87,6 +93,24 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
     name: 'team_agents_agent_team_idx',
     table: 'team_agents',
     keys: ['agent_name', 'team_id'],
+  }),
+])
+
+export const ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
+  ...PR1_ONLINE_INDEX_PLAN,
+  onlineIndex({
+    migrationVersion: GOVERNED_TRACE_RETENTION_MIGRATION,
+    name: 'idx_infra_telemetry_retention_samples',
+    table: 'infrastructure_telemetry_events',
+    keys: ['occurred_at', 'event_id'],
+    predicate: 'samples',
+  }),
+  onlineIndex({
+    migrationVersion: GOVERNED_TRACE_RETENTION_MIGRATION,
+    name: 'idx_infra_telemetry_retention_other',
+    table: 'infrastructure_telemetry_events',
+    keys: ['occurred_at', 'event_id'],
+    predicate: 'other',
   }),
 ])
 
@@ -159,7 +183,7 @@ export async function ensureOnlineIndex(db: DbClient, entry: OnlineIndexDefiniti
 }
 
 export async function preparePr1Migration(db: DbClient, version: string): Promise<void> {
-  const indexes = PR1_ONLINE_INDEX_PLAN.filter(entry => entry.migrationVersion === version)
+  const indexes = ONLINE_INDEX_PLAN.filter(entry => entry.migrationVersion === version)
   if (indexes.length === 0) return
   for (const index of indexes) await ensureOnlineIndex(db, index)
 }

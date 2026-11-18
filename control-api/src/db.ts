@@ -6,6 +6,10 @@ import {
 } from './boundedPgPool.js'
 import { config } from './config.js'
 import { SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG } from './data/llmCatalogLegacySeeds.js'
+import {
+  GOVERNED_TRACE_RETENTION_MIGRATION,
+  applyGovernedTraceRetention,
+} from './migrations/governedTraceRetention.js'
 import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
 import {
   LAST_DEV_MIGRATION_VERSION,
@@ -6518,6 +6522,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       '0147_oidc_protocol_attempt_browser_binding',
     ],
     apply: applyOidcProtocolAttemptBrowserBindingSchema,
+  },
+  {
+    version: GOVERNED_TRACE_RETENTION_MIGRATION,
+    apply: applyGovernedTraceRetention,
   },
 ]
 

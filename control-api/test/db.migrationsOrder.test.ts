@@ -100,11 +100,11 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0147_gfs_watch_session_users_notify',
     ]
     const afterResourceNotify = versions.indexOf('0141_gfs_resource_changed_notify') + 1
-    expect(versions.slice(afterResourceNotify, afterResourceNotify + watchTriggers.length)).toEqual(
-      watchTriggers
-    )
-    expect(versions.slice(-3)).toEqual(oidc)
-    expect(versions.at(-1)).toBe(oidc.at(-1))
+    expect(versions.slice(afterResourceNotify)).toEqual([
+      ...watchTriggers,
+      ...oidc,
+      '0151_governed_trace_retention_indexed',
+    ])
   })
 
   it('keeps legacy aliases unique and distinct from current versions', async () => {

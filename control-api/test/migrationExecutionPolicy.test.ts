@@ -7,6 +7,7 @@ import {
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
 import {
+  ONLINE_INDEX_PLAN,
   PR1_ONLINE_INDEX_PLAN,
   expectedIndexDefinition,
   onlineIndex,
@@ -66,6 +67,7 @@ describe('D34 migration execution policy', () => {
       '0148_oidc_protocol_attempts',
       '0149_oidc_protocol_attempt_expiry_index',
       '0150_oidc_protocol_attempt_browser_binding',
+      '0151_governed_trace_retention_indexed',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -320,7 +322,7 @@ describe('D34 PR1 migration runner', () => {
           return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
         }
         if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
-          const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
+          const entry = ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
           if (entry) indexStates.set(entry.name, plannedIndexState(entry))
         }
         return { rows: [], rowCount: 0 }
@@ -539,7 +541,7 @@ describe('D34 PR1 migration runner', () => {
           return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
         }
         if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
-          const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
+          const entry = ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
           if (entry) indexStates.set(entry.name, plannedIndexState(entry))
         }
         return { rows: [], rowCount: 0 }
@@ -667,6 +669,15 @@ describe('PR1 earlier-head guard', () => {
 
   it('accepts a registered alias of an earlier name and proceeds when the probe is empty', async () => {
     const { db, queries } = guardedDb([])
+    const indexes = new Map(ONLINE_INDEX_PLAN.map(index => [index.name, plannedIndexState(index)]))
+    const guardedQuery = db.query
+    db.query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('FROM pg_class index_rel')) {
+        const index = indexes.get(String(values?.[0]))
+        return { rows: index ? [index] : [], rowCount: index ? 1 : 0 }
+      }
+      return guardedQuery(sql, values)
+    })
     const recorded: string[] = []
     const migrations = pr1Migrations({
       '0138_legacy_password_security_epoch_backfill': [
@@ -702,6 +713,7 @@ describe('PR1 earlier-head guard', () => {
       '0148_oidc_protocol_attempts',
       '0149_oidc_protocol_attempt_expiry_index',
       '0150_oidc_protocol_attempt_browser_binding',
+      '0151_governed_trace_retention_indexed',
     ])
   })
 })
