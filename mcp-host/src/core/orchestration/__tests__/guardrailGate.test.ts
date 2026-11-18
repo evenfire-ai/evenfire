@@ -106,6 +106,61 @@ function makeConfig(
 
 const call: ToolCall = { id: 'c1', name: 'do_thing', arguments: { a: 1 } }
 
+describe('executeToolCalls abort during admission', () => {
+  it('marks the rest of the batch not executed when the signal aborts during admission', async () => {
+    const controller = new AbortController()
+    let release: () => void = () => undefined
+    const held = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const first = new StubTool('first')
+    ;(
+      first as StubTool & {
+        validateParams: (
+          params: Record<string, unknown>
+        ) => Promise<{ is_valid: boolean; errors: string[] }>
+      }
+    ).validateParams = async () => {
+      controller.abort()
+      await held
+      return { is_valid: true, errors: [] }
+    }
+    const second = new StubTool('second')
+    const config = makeConfig(first, undefined)
+    config.toolRegistry = registry({ first, second })
+    config.abortSignal = controller.signal
+
+    const pending = executeToolCalls(
+      [
+        { id: 'c1', name: 'first', arguments: {} },
+        { id: 'c2', name: 'second', arguments: {} },
+      ],
+      config,
+      0
+    )
+    release()
+    const result = await pending
+
+    expect(result.cancelled).toBe(true)
+    expect(first.calls).toEqual([])
+    expect(second.calls).toEqual([])
+    expect(result.toolResults).toEqual([
+      {
+        tool_call_id: 'c1',
+        name: 'first',
+        content: 'Not executed: the task was cancelled.',
+        is_error: true,
+      },
+      {
+        tool_call_id: 'c2',
+        name: 'second',
+        content: 'Not executed: the task was cancelled.',
+        is_error: true,
+      },
+    ])
+  })
+})
+
 describe('guardrail gate in executeToolCalls', () => {
   it('deny → bounded error result, tool never executes', async () => {
     const tool = new StubTool('do_thing')
