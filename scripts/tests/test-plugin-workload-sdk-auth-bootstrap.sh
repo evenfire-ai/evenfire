@@ -18,6 +18,8 @@ source "$DOTENV_LIB"
 # shellcheck source=../e2e/admin-credentials.sh
 source "$ADMIN_CREDENTIAL_LIB"
 
+unset E2E_DISABLE_CANONICAL_DOTENV
+
 FAIL=0
 
 pass() { printf 'PASS: %s\n' "$1"; }
@@ -182,6 +184,7 @@ assert_admin_resolution_contract() {
     'ADMIN_PASSWORD=canonical-fixture-value' \
     'TEST_ADMIN_PASSWORD=canonical-secondary-value' \
     'E2E_ADMIN_PASSWORD=canonical-e2e-alias-value' \
+    'E2E_DOTENV_SENTINEL=canonical-fixture-value' \
     >"$main_repo/.env"
   printf '%s\n' 'ADMIN_PASSWORD=worktree-decoy-value' >"$worktree/.env"
 
@@ -203,6 +206,28 @@ assert_admin_resolution_contract() {
   else
     fail 'canonical .env did not win over the process environment'
   fi
+
+  E2E_DISABLE_CANONICAL_DOTENV=true
+  unset E2E_DOTENV_SENTINEL
+  if [[ -z "$(dotenv_canonical_root "$worktree")" ]] &&
+     dotenv_load_canonical_root "$worktree" && [[ -z "${E2E_DOTENV_SENTINEL+x}" ]]; then
+    pass 'isolated test mode does not load the canonical .env'
+  else
+    fail 'isolated test mode exposed the canonical .env'
+  fi
+  resolved="$(e2e_resolve_admin_password "$worktree" 'fallback-value')"
+  if [[ "$resolved" == 'process-e2e-value' ]]; then
+    pass 'isolated test mode resolves an explicit process credential'
+  else
+    fail 'isolated test mode did not use the process credential'
+  fi
+  E2E_DISABLE_CANONICAL_DOTENV=false
+  if [[ "$(dotenv_canonical_root "$worktree")" == "$canonical_main_repo/.env" ]]; then
+    pass 'the explicit false setting retains canonical .env resolution'
+  else
+    fail 'the explicit false setting disabled canonical .env resolution'
+  fi
+  unset E2E_DISABLE_CANONICAL_DOTENV
 
   printf '%s\n' 'TEST_ADMIN_PASSWORD=canonical-test-only' >"$main_repo/.env"
   resolved="$(e2e_resolve_admin_password "$worktree" 'fallback-value')"

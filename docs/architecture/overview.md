@@ -1464,7 +1464,7 @@ Default: `your-registry.example.com/evenfire/`
 | Service                     | Requests            | Limits              |
 | --------------------------- | ------------------- | ------------------- |
 | **channel-reader**          | 50m CPU, 128Mi RAM  | 200m CPU, 256Mi RAM |
-| **mcp-host**                | 100m CPU, 128Mi RAM | 500m CPU, 512Mi RAM |
+| **mcp-host**                | 100m CPU, 128Mi RAM | 500m CPU, 2Gi RAM   |
 | **host-context-controller** | 50m CPU, 64Mi RAM   | 200m CPU, 128Mi RAM |
 | **MCP servers**             | 100m CPU, 128Mi RAM | 500m CPU, 256Mi RAM |
 
