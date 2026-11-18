@@ -10,6 +10,7 @@ import { loadVerificationKey } from '../../../gfs-controller/src/auth/keys.js'
 import { verifyGfsToken } from '../../../gfs-controller/src/auth/verify.js'
 import { PgResourceStore } from '../../../gfs-controller/src/db/resourceStore.js'
 import type { GfsKey, Rid32, Uuid } from '../../src/services/gfsWatch/keys.js'
+import { LISTENER_CLIENT_OPTIONS } from '../../src/services/gfsWatch/listener.js'
 import type {
   GfsWatchRegistry,
   GfsWatchRegistryDeps,
@@ -54,6 +55,22 @@ let evCounter = 0
 export const nextEv = () => ++evCounter
 
 export const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+/**
+ * Real milliseconds a LISTEN attempt may take before the listener itself
+ * gives up on it. The registry clock is virtual and stands still while a test
+ * waits, so the listener's own connect deadline never fires here: only pg's
+ * connect and query timeouts, which run on wall time, bound the attempt.
+ */
+export const LISTEN_ATTEMPT_REAL_MS =
+  LISTENER_CLIENT_OPTIONS.connectionTimeoutMillis + LISTENER_CLIENT_OPTIONS.query_timeout + 1_000
+
+/** Waits, on wall time, as long as one LISTEN attempt may legitimately take. */
+export async function waitForListenerReady(ready: () => boolean): Promise<boolean> {
+  const start = Date.now()
+  while (!ready() && Date.now() - start < LISTEN_ATTEMPT_REAL_MS) await sleep(5)
+  return ready()
+}
 
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
@@ -225,6 +242,14 @@ export type BuiltRegistry = {
     keys: Iterable<GfsKey>,
     opts?: { requestId?: string; srvDeadlineMs?: number; watchSignal?: AbortSignal }
   ): { socket: FakeSocket; outcome: Promise<WatchOpenOutcome>; settled: () => boolean }
+  /**
+   * `count` opens of one authenticated session issued in the same tick, with
+   * no await between them, so admission sees them back to back.
+   */
+  openBurst(
+    user: TestUser,
+    count: number
+  ): Promise<{ socket: FakeSocket; outcome: Promise<WatchOpenOutcome> }[]>
   /** Connection that owns `socket`, once admitted. */
   connOf(socket: FakeSocket): WatchConnection | undefined
   settle(predicate?: () => boolean, timeoutMs?: number): Promise<void>
@@ -525,6 +550,29 @@ export async function createRegistryHarness(adminUrl: string) {
         void outcome.finally(() => opening.delete(outcome))
         return { socket, outcome, settled: () => done }
       },
+      async openBurst(user, count) {
+        const authentication = await user.authenticate()
+        const out: { socket: FakeSocket; outcome: Promise<WatchOpenOutcome> }[] = []
+        for (let i = 0; i < count; i += 1) {
+          const socket = new FakeSocket(() => registry.listenerReady())
+          sockets.push(socket)
+          const before = new Set(registry.state.byConnId.values())
+          const outcome = registry.open({
+            authentication,
+            keys: new Set(),
+            socket,
+            srvDeadline: registry.now() + 12_000,
+            watchSignal: new AbortController().signal,
+            requestId: randomUUID(),
+          })
+          for (const c of registry.state.byConnId.values()) if (!before.has(c)) socket.conn = c
+          if (socket.conn) socket.admittedVt = registry.now()
+          opening.add(outcome)
+          void outcome.finally(() => opening.delete(outcome))
+          out.push({ socket, outcome })
+        }
+        return out
+      },
       connOf(socket) {
         return socket.conn ?? undefined
       },
@@ -574,8 +622,9 @@ export async function createRegistryHarness(adminUrl: string) {
       },
     }
     built.push(b)
-    for (let i = 0; i < 500 && !registry.listenerReady(); i += 1) await sleep(5)
-    if (!registry.listenerReady()) throw new Error('listener did not become ready')
+    if (!(await waitForListenerReady(() => registry.listenerReady()))) {
+      throw new Error('listener did not become ready')
+    }
     return b
   }
 

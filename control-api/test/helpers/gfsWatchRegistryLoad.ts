@@ -11,6 +11,7 @@ export async function loadHelpers() {
     quoteIdent: harness.quoteIdent,
     restInvariantViolations: harness.restInvariantViolations,
     sleep: harness.sleep,
+    waitForListenerReady: harness.waitForListenerReady,
     flushMicrotasks: clock.flushMicrotasks,
   }
 }
