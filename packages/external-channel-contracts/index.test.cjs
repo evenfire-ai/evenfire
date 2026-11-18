@@ -164,6 +164,7 @@ describe('constants', () => {
     assert.equal(PROVIDER_EVENT_RECEIPT_HEADER_TYPE, 'provider-event-receipt+jwt')
     assert.equal(PROVIDER_EVENT_RECEIPT_TTL_SECONDS, 600)
     assert.equal(PAUSE_ACTION_VALUE_PATTERN.source, '^tool:([aldc]):([A-Za-z0-9_-]{16,64})$')
+    assert.equal(PAUSE_ACTION_VALUE_PATTERN.flags, '')
   })
 })
 
@@ -337,6 +338,19 @@ describe('parsePauseActionValue', () => {
       '',
       undefined,
       42,
+    ]) {
+      assert.equal(parsePauseActionValue(value), null, String(value))
+    }
+  })
+
+  it('returns null for another letter case and for non-strings that coerce to a valid value', () => {
+    assert.deepEqual(parsePauseActionValue(`tool:a:${token16}`), { decision: 'approve', token: token16 })
+    for (const value of [
+      `TOOL:A:${token16}`,
+      `tool:A:${token16}`,
+      [`tool:a:${token16}`],
+      { toString: () => `tool:a:${token16}` },
+      new String(`tool:a:${token16}`),
     ]) {
       assert.equal(parsePauseActionValue(value), null, String(value))
     }
