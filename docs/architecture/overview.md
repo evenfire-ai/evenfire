@@ -1681,7 +1681,7 @@ All three calls carry the `x-clerum-edge-*` caller headers (`x-clerum-edge-calle
 
 Approving a tool runs that call only. It does not allowlist the rest of the turn or every tool on the same MCP server. A later call, including the same tool with different arguments, asks again.
 
-`/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. It never waives a forced gate: the stateless `cron_manage` create/enable card and a denial re-ask run the call once and allowlist nothing, and Desktop hides the button on those cards.
+`/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. It never waives a forced gate: the stateless `cron_manage` create/enable card, a denial re-ask, and an OAuth connect card run the call once and allowlist nothing. Desktop hides the button on those cards. Slack, Telegram, and Teams do the same when the Host sets `alwaysApproveAllowed` to false.
 
 `/deny` records that exact tool name and revokes an earlier **Always approve** for it. The denial stays in effect until the user who denied it approves that tool, including after the host restarts. An approval timeout records no denial.
 
@@ -1698,15 +1698,15 @@ Denials apply to calls made in that conversation only. A workflow triggered from
 
 `shell_exec`, `http_request` and `cron_manage` (`SESSION_SCOPED_APPROVAL_TOOLS` in `approvalController.ts`) are approved per tool. A plain approval of one of them covers that tool for the rest of the current task, including every later iteration and the resume after another tool's approval card; the next user message starts a new task and asks again. **Always approve** covers it in later tasks while the conversation stays in memory. A Host restart or cold resume asks again.
 
-Every pending approval carries a durable `authorization_scope`. An ordinary card is `turn_tools` and may store the grants above; it grants nothing turn-wide. Forced cards (stateless `cron_manage` `create`/`enable`), denial re-asks, guardrail `ask` cards and live-tool cards are `exact_invocation`: approving runs only that call and stores nothing, also after a Host restart. Rows written before the column existed are treated as `exact_invocation`.
+Every pending approval carries a durable `authorization_scope`. An ordinary card is `turn_tools` and may store the grants above; it grants nothing turn-wide. Forced cards (stateless `cron_manage` `create`/`enable`), denial re-asks, guardrail `ask` cards, live-tool cards, and OAuth connect cards are `exact_invocation`: approving runs only that call and stores nothing, also after a Host restart. Rows written before the column existed are treated as `exact_invocation`. Desktop, Slack, Telegram, and Teams hide **Always approve** on those cards.
 
 **Channel commands:**
 
-| Command           | Behavior                                                                            |
-| ----------------- | ----------------------------------------------------------------------------------- |
-| `/approve`        | Run the approved call only                                                          |
-| `/approve always` | Run the call and allowlist that exact tool name                                     |
-| `/deny`           | Cancel the call, block that tool name until approved, and revoke its Always approve |
+| Command           | Behavior                                                                                                                               |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/approve`        | Run the approved call only                                                                                                             |
+| `/approve always` | On an ordinary card, run the call and allowlist that exact tool name. On an exact-invocation card, run the call once and store nothing |
+| `/deny`           | Cancel the call, block that tool name until approved, and revoke its Always approve                                                    |
 
 ### Architecture Components
 

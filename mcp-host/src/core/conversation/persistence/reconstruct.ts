@@ -9,7 +9,7 @@ import { parseTaskExecutionBudget } from '../../../agent/taskExecutionBudget'
  * Anything ephemeral (`auto_approved_tools`, `auto_shell_grants`,
  * `last_effective_approval_mode`, `compactionState`) is set to empty defaults —
  * by design (see T2.1 §11.3 and `aclaraciones/sqlite-persistence.md`).
- * `denied_tools` is durable (migration 016) and is rehydrated from the session row.
+ * `denied_tools` is durable (migration 018) and is rehydrated from the session row.
  * `approval_mode` is durable (migration 019). An unknown stored value reads as
  * `manual`. `channel_type` is loaded from the column.
  */

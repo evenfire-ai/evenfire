@@ -330,8 +330,9 @@ at all: the click dies in Slack, nothing reaches the cluster, and every service
 log stays silent. Slack marks the buttons with a warning tooltip reading "This
 app is not configured to handle interactive responses."
 
-A tool approval posts **three** buttons, not two
-(`channel-reader/src/main.ts:154-186`):
+A tool approval posts **Approve** and **Deny**. **Always approve** is added
+only when the Host card can store a lasting grant
+(`channel-reader/src/main.ts`, `toolApprovalMessageOptions`):
 
 | Button             | Value      | Effect on the conversation                                                                                                                                           |
 | ------------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -342,7 +343,8 @@ A tool approval posts **three** buttons, not two
 The value is `tool:<a|l|d>:<16-char token>`
 (`main.ts:110-121`, matched by `decisionHandler.ts:93`). Typing `/approve`,
 `/approve always`, or `/deny` works too. A denial re-ask, a forced cron card, a
-guardrail ask, and a live-tool card cannot store a grant. Their Host payload
+guardrail ask, a live-tool card, and an OAuth connect card cannot store a
+grant. Their Host payload
 sets `alwaysApproveAllowed` to false, the **Always approve** button is left
 off, and a typed `/approve always` runs only that call. The reply does not say
 the tool was allowlisted.
@@ -350,7 +352,8 @@ the tool was allowlisted.
 Three properties of that token that produce confusing failures:
 
 - It lives in `channel-reader`'s memory with a 10-minute TTL
-  (`main.ts:95`). Clicking later returns "No pending approval found".
+  (`PENDING_APPROVAL_TTL_MS` in `channel-reader/src/main.ts`). Clicking later
+  returns "No pending approval found".
 - Any `channel-reader` restart wipes it, and **saving an edit to the channel in
   the Control UI restarts that pod**. Approve after such a save and the click is
   already dead.
