@@ -386,6 +386,47 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
     })
   })
 
+  it('stores and claims an attempt on the 0141 table before the browser-binding upgrade', async () => {
+    await pool!.query('DROP TABLE IF EXISTS oidc_protocol_attempts')
+    await pool!.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
+      [
+        '0141_oidc_protocol_attempts',
+        '0142_oidc_protocol_attempt_expiry_index',
+        '0143_oidc_protocol_attempt_browser_binding',
+      ],
+    ])
+    await applyOidcProtocolAttemptSchema(pool!)
+
+    const state = `state-${randomBytes(32).toString('base64url')}`
+    const created = await insertOidcProtocolAttempt(pool!, ENCRYPTION_KEY, {
+      ...BINDING,
+      state,
+      browserBinding: BROWSER_BINDING,
+      pkceVerifier: 'fresh-table-verifier',
+      nonce: 'fresh-table-nonce',
+      expiresAt: new Date(Date.now() + 60_000),
+    })
+    const claimed = await claimOidcProtocolAttempt(
+      pool!,
+      ENCRYPTION_KEY,
+      state,
+      BROWSER_BINDING,
+      BINDING
+    )
+
+    expect(claimed).toMatchObject({
+      id: created.id,
+      pkceVerifier: 'fresh-table-verifier',
+      nonce: 'fresh-table-nonce',
+    })
+    const upgrade = await pool!.query<{ version: string }>(
+      `SELECT version FROM schema_migrations WHERE version = '0143_oidc_protocol_attempt_browser_binding'`
+    )
+    expect(upgrade.rows).toEqual([])
+
+    await initDb({ connect: () => pool!.connect() })
+  })
+
   it('upgrades legacy attempt rows and requires browser binding for new pending attempts', async () => {
     await pool!.query('DROP TABLE IF EXISTS oidc_protocol_attempts')
     await pool!.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [

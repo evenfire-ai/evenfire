@@ -43,6 +43,8 @@ describe(`${VERSION} migration`, () => {
     expect(sql).toContain("status IN ('pending', 'redeeming', 'completed', 'failed', 'cancelled')")
     expect(sql).toContain('pkce_verifier_encrypted TEXT')
     expect(sql).toContain('nonce_encrypted TEXT')
+    expect(sql).toContain('browser_binding_hash TEXT')
+    expect(sql).toContain('oidc_protocol_attempts_browser_binding_hash_format')
     expect(sql).toContain("response_mode TEXT NOT NULL CHECK (response_mode = 'query')")
     expect(sql).toContain(
       'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE oidc_protocol_attempts TO control_api_runtime'

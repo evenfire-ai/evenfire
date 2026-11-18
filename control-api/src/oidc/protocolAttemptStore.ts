@@ -97,6 +97,7 @@ export async function applyOidcProtocolAttemptSchema(db: Pick<DbClient, 'query'>
       purpose TEXT NOT NULL CHECK (purpose = '${ATTEMPT_PURPOSE}'),
       pkce_verifier_encrypted TEXT,
       nonce_encrypted TEXT,
+      browser_binding_hash TEXT,
       status TEXT NOT NULL CHECK (status IN ('pending', 'redeeming', 'completed', 'failed', 'cancelled')),
       expires_at TIMESTAMPTZ NOT NULL,
       claimed_at TIMESTAMPTZ,
@@ -111,7 +112,9 @@ export async function applyOidcProtocolAttemptSchema(db: Pick<DbClient, 'query'>
           AND pkce_verifier_encrypted IS NULL AND nonce_encrypted IS NULL)
         OR (status = 'cancelled' AND claimed_at IS NULL AND finished_at IS NOT NULL
           AND pkce_verifier_encrypted IS NULL AND nonce_encrypted IS NULL)
-      )
+      ),
+      CONSTRAINT oidc_protocol_attempts_browser_binding_hash_format
+        CHECK (browser_binding_hash IS NULL OR browser_binding_hash ~ '^[0-9a-f]{64}$')
     );
 
     CREATE INDEX IF NOT EXISTS oidc_protocol_attempts_pending_expiry_idx
