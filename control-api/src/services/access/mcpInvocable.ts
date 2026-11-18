@@ -38,9 +38,8 @@ import {
   type AgentDirectoryEntry,
   buildAgentDirectoryEntry,
 } from '../directory/accessReconciliation.js'
-import { getUserAgents } from '../directory/agentAccess.js'
+import { getUserAgents, getUserReachableAgents } from '../directory/agentAccess.js'
 import { getUserContexts } from '../directory/contextAccess.js'
-import { getUserReachableAgents } from '../directory/index.js'
 import { isCanonicalUuid, isLive, isValidK8sName } from './brokerHostBinding.js'
 
 const log = rootLogger.child({ module: 'mcpInvocable' })
@@ -273,11 +272,11 @@ export async function allowedMcpServerNamesForContexts(
  * A Context is reached directly (`getUserContexts`, active users) or through
  * an agent the user reaches, directly or through any active team membership
  * (`getUserReachableAgents`, the broker's `hostAccessForUser` rule), whose Host
- * the agent directory shows via its `spec.contextRef`. Those are the sources
- * the flat `/mcp-servers` catalog and the per-agent connectors panel resolve
- * from, so anything either offers the user can be connected. `team_contexts`
- * is not counted. A non-canonical `userId` reaches no agents; the direct read
- * is unchanged.
+ * the agent directory shows via its `spec.contextRef`. Consent follows the
+ * broker's Host-entry rule (`hostAccessForUser`), a superset of what the flat
+ * `/mcp-servers` catalog and the per-agent connectors panel offer, so anything
+ * either offers the user can be connected. `team_contexts` is not counted. A
+ * non-canonical `userId` reaches no agents; the direct read is unchanged.
  *
  * Agents are read only when the direct Contexts do not enable the server, so
  * a Host read failure cannot break consent that direct membership already

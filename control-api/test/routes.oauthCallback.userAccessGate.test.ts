@@ -12,13 +12,14 @@ import { MockGateway } from './mockGateway.js'
 /**
  * The per-user (`grantScope: user`) consent callback re-checks access through the
  * PRODUCTION wiring of `userServerAccessReader` in `createOAuthCallbackRouter`:
- * some Context the signed user reaches — directly or through an assigned
- * agent's Host — must allowlist the server. The server's own `spec.contextRef`
+ * some Context the signed user reaches — directly (`user_contexts`) or
+ * through an agent assigned to the user directly or through an active team
+ * (`getUserReachableAgents`) — must allowlist the server. The server's own `spec.contextRef`
  * is deliberately a Context the user is NOT a member of, so only the allowlist
  * rule can decide the outcome.
  *
  * Contexts are written through the real allowlist writer, membership is the
- * `user_contexts` / `user_agents` reads on the mocked pool (the same stand-in
+ * `user_contexts` / `user_agents` / team reads on the mocked pool (the same stand-in
  * the sibling suites use), Host CRs are hand-written, and the state is signed
  * by the real signer. The provider token endpoint is the only network edge:
  * `globalThis.fetch`, which the route wires as its baked-lane transport.

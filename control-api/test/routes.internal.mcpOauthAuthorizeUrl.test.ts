@@ -17,7 +17,8 @@ import { MockGateway } from './mockGateway.js'
  * Membership gate by flavor:
  *   - `user`    → the user must reach at least one Context whose
  *     `spec.mcpServers` allowlist names the server — directly (user_contexts)
- *     or through an assigned agent's Host (user_agents → Host.contextRef);
+ *     or through an agent assigned to the user directly or through an active team
+ *     (`getUserReachableAgents`), via the agent's Host contextRef;
  *     `spec.contextRef` is irrelevant and the body `contextId` is ignored.
  *   - `context` → covered by routes.internal.mcpOauth.contextGate.test.ts.
  */

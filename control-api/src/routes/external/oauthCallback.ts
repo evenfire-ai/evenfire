@@ -119,8 +119,9 @@ export function buildOAuthCallbackDeps(gateway: K8sGateway): CallbackDeps {
         mcpServerName,
         requireAllowlist: true,
       }),
-    // Per-user mcp consent requires some Context the user reaches (directly or
-    // through an assigned agent) to still allowlist the server — the same rule
+    // Per-user mcp consent requires some Context the user reaches (directly
+    // (`user_contexts`) or through an agent assigned to the user directly or
+    // through an active team, `getUserReachableAgents`) to still allowlist the server — the same rule
     // the authorize-URL mint applies.
     userServerAccessReader: (userId, mcpServerName) =>
       userHasContextEnablingMcpServer({

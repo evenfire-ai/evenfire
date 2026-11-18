@@ -48,6 +48,7 @@ describe('getUserReachableAgents', () => {
       'JOIN team_agents',
       "tm.status = 'active'",
       "lifecycle_state = 'active'",
+      'tm.user_id = $1::uuid',
       '$1::uuid',
     ]) {
       expect(sql).toContain(token)
