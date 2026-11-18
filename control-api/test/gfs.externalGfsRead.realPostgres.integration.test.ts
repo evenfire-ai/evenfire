@@ -365,7 +365,7 @@ describeRealPostgres('external GFS typed read on real gfsc and PostgreSQL', () =
     })
   })
 
-  it('maps a principal gfsc denies today to 403; the reason flag stays off until gfsc sends it', async () => {
+  it('maps a principal gfsc denies to 403 with principalDenied', async () => {
     const lifecycle = await controlPool!.query<{ lifecycle_version: number | string }>(
       `SELECT lifecycle_version FROM users WHERE id = $1`,
       [userId]
@@ -377,9 +377,11 @@ describeRealPostgres('external GFS typed read on real gfsc and PostgreSQL', () =
       authGeneration: Number(lifecycle.rows[0]?.lifecycle_version) + 1,
       principalType: 'user',
     })
-    const result = await read(grantedFileId, stale.token)
-    expect(result.status).toBe(403)
-    expect(result.principalDenied).toBe(false)
+    expect(await read(grantedFileId, stale.token)).toEqual({
+      status: 403,
+      principalDenied: true,
+      responded: true,
+    })
   })
 
   it('maps a gfsc 5xx to transient with a response', async () => {
