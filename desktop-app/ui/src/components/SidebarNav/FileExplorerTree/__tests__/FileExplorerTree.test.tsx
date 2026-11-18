@@ -2368,6 +2368,56 @@ describe('FileExplorerTree — sanitizes GFS names in Move outcome toasts', () =
   })
 })
 describe('FileExplorerTree — resource action menus', () => {
+  it('projects the literal sidebar action contract for writable child kinds', async () => {
+    const root = accessibleResource('root-contract', 'Contract root', 'directory')
+    const folder = childView('child-folder', 'Contract folder', 'directory', {
+      parentResourceId: root.resourceId,
+      readable: true,
+    })
+    const file = childView('child-file', 'contract.md', 'file', {
+      parentResourceId: root.resourceId,
+      readable: true,
+    })
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([root])),
+      listChildren: vi.fn(async () => listChildrenPage([folder, file])),
+      affordances: vi.fn(async () =>
+        resourceAffordances(['read', 'write', 'delete', 'manage_acl', 'share'])
+      ),
+    })
+    renderTree()
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Contract root' }))
+
+    for (const [name, expected] of [
+      [
+        'Contract folder',
+        ['share', 'open-folder', 'rename', 'move', 'new-folder', 'upload-file', 'delete'],
+      ],
+      [
+        'contract.md',
+        ['share', 'rename', 'move', 'copy-content', 'preview', 'download', 'replace', 'delete'],
+      ],
+    ] as const) {
+      openContextMenuFor(await screen.findByRole('button', { name }))
+      const menu = await screen.findByRole('menu', { name: `Actions for ${name}` })
+      await waitFor(() => expect(menu.querySelector('[data-gfs-action="share"]')).not.toBeNull())
+      const ids = Array.from(
+        menu.querySelectorAll<HTMLElement>('[data-gfs-action]'),
+        node => node.dataset.gfsAction
+      )
+      expect(ids.sort()).toEqual([...expected].sort())
+      expect(ids).not.toEqual(expect.arrayContaining(['refresh', 'open-route', 'download-zip']))
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+      const flyout = await screen.findByRole('menu', { name: `Share options for ${name}` })
+      expect(within(flyout).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+      expect(
+        within(flyout).getByRole('menuitem', {
+          name: name.endsWith('.md') ? 'Copy file ID' : 'Copy folder ID',
+        })
+      ).toBeTruthy()
+    }
+  })
+
   it('hides Move on parentless roots and preserves exact-parent child Move', async () => {
     const folder = accessibleResource('root-folder', 'Shared folder', 'directory')
     const file = accessibleResource('root-file', 'Shared file.txt', 'file')

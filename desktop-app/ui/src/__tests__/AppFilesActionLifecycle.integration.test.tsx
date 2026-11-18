@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useReducer } from 'react'
+import { useCallback, useReducer, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClientProvider } from '@tanstack/react-query'
 import {
@@ -46,6 +46,7 @@ import {
   accessibleResource,
   childView,
   gfsRouteFailureMessage,
+  grantsListPage,
   listAccessiblePage,
   listChildrenPage,
   previewDownloadResult,
@@ -53,6 +54,7 @@ import {
   resolvedDirectory,
   resolvedFile,
   resourceAffordances,
+  sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 
 type AppController = ReturnType<typeof useAppController>
@@ -97,6 +99,10 @@ const appHarness = vi.hoisted(() => ({
   d5aPostPermissionAckIds: new Set<number>(),
   filesPageRenderCount: 0,
   filesPageLastLocation: null as { gfsUri: string | null; name: string | null } | null,
+  filesPageLocationEvents: [] as Array<string | null>,
+  stableFilesLocationCallback: false,
+  heldLocationUri: null as string | null,
+  heldLocationDeliveries: [] as Array<() => void>,
   filesPageReportLocation: null as ((gfsUri: string | null, name: string | null) => void) | null,
   previewPagePendingActions: [] as unknown[],
   sandboxUiShortcutAppRef: null as string | null,
@@ -184,7 +190,10 @@ vi.mock('@components/ChatViewWorkspace', () => ({
   ChatViewWorkspace: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
 vi.mock('@components/CommandPalette', () => ({ CommandPalette: () => null }))
-vi.mock('@components/GfsImagePreview', () => ({ GfsImagePreview: () => null }))
+vi.mock('@components/GfsImagePreview', async importOriginal => ({
+  ...(await importOriginal<typeof import('@components/GfsImagePreview')>()),
+  GfsImagePreview: () => null,
+}))
 vi.mock('@components/PluginConsentModal', () => ({ PluginConsentModal: () => null }))
 vi.mock('@components/RightRailShell', () => ({
   RightRailShell: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -212,6 +221,13 @@ vi.mock('@pages/FilesPage', async importOriginal => {
   return {
     ...actual,
     FilesPage: (props: React.ComponentProps<typeof actual.FilesPage>) => {
+      const currentLocationCallback = useRef(props.onLocationChange)
+      currentLocationCallback.current = props.onLocationChange
+      const stableLocationCallback = useCallback((gfsUri: string | null, name: string | null) => {
+        appHarness.filesPageLastLocation = { gfsUri, name }
+        appHarness.filesPageLocationEvents.push(gfsUri)
+        currentLocationCallback.current?.(gfsUri, name)
+      }, [])
       appHarness.filesPageRenderCount += 1
       appHarness.filesPageLatestPendingAction = props.pendingResourceAction ?? null
       appHarness.filesPageReportLocation = props.onLocationChange ?? null
@@ -231,10 +247,23 @@ vi.mock('@pages/FilesPage', async importOriginal => {
       return (
         <actual.FilesPage
           {...props}
-          onLocationChange={(gfsUri, name) => {
-            appHarness.filesPageLastLocation = { gfsUri, name }
-            props.onLocationChange?.(gfsUri, name)
-          }}
+          onLocationChange={
+            appHarness.stableFilesLocationCallback
+              ? stableLocationCallback
+              : (gfsUri, name) => {
+                  appHarness.filesPageLastLocation = { gfsUri, name }
+                  appHarness.filesPageLocationEvents.push(gfsUri)
+                  if (
+                    appHarness.heldLocationUri !== null &&
+                    gfsUri === appHarness.heldLocationUri
+                  ) {
+                    const deliver = props.onLocationChange
+                    appHarness.heldLocationDeliveries.push(() => deliver?.(gfsUri, name))
+                  } else {
+                    props.onLocationChange?.(gfsUri, name)
+                  }
+                }
+          }
           onPendingResourceActionHandled={requestId => {
             const resourceUri = appHarness.filesPageResourceByRequestId.get(requestId) ?? null
             const permissionSettled = resourceUri
@@ -532,7 +561,7 @@ function installClerum(
       listChildrenPage(options.childRowsByParent?.get(resourceId) ?? [])
     ),
     resolve: resolveResourceByUri,
-    affordances: vi.fn(async () =>
+    affordances: vi.fn(async (_resourceId: string, _drive?: string) =>
       resourceAffordances(options.affordanceBits ?? ['read', 'write', 'delete'])
     ),
     deleteResource,
@@ -875,6 +904,10 @@ beforeEach(() => {
   appHarness.filesPageCurrentnessById.clear()
   appHarness.filesPageRenderCount = 0
   appHarness.filesPageLastLocation = null
+  appHarness.filesPageLocationEvents = []
+  appHarness.stableFilesLocationCallback = false
+  appHarness.heldLocationUri = null
+  appHarness.heldLocationDeliveries = []
   appHarness.filesPageReportLocation = null
   appHarness.previewPagePendingActions = []
   appHarness.sandboxUiShortcutAppRef = null
@@ -1017,6 +1050,1132 @@ describe('App → Files action lifecycle integration', () => {
     expect({ linkInputs: gfs.copyDeepLink.mock.calls, copiedIds: writeText.mock.calls }).toEqual(
       filesOutcome
     )
+  })
+
+  it('retires a sidebar Share dialog when the same Files owner opens a new link', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Share parent')
+    )
+    const file = await resolveResource(
+      resolvedFile('22222222222222222222222222222222', 'share-target.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const nextFolder = await resolveResource(
+      resolvedDirectory('33333333333333333333333333333333', 'New destination')
+    )
+    const { gfs } = installClerum([parent, file, nextFolder], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', { gfsUri: parent.gfsUri }),
+        accessibleResource(nextFolder.resourceId, nextFolder.name, 'directory', {
+          gfsUri: nextFolder.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+              gfsUri: file.gfsUri,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+      affordanceBits: ['read', 'manage_acl'],
+    })
+    Object.assign(gfs, {
+      listGrants: vi.fn(async () => grantsListPage([])),
+      listShares: vi.fn(async () => sharesListPage([])),
+    })
+    Object.assign(window.clerum.team, { directory: vi.fn(async () => ({ items: [] })) })
+    Object.assign(window.clerum.agents, { listMine: vi.fn(async () => []) })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(parent.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const row = await screen.findByRole('treeitem', { name: /Share parent/ })
+    fireEvent.click(within(row).getByRole('button', { name: 'Expand Share parent' }))
+    await chooseRowAction(file.name, 'Share')
+    expect(await screen.findByRole('dialog', { name: `Share file ${file.name}` })).toBeTruthy()
+    const link: GfsResourceDeepLinkEnvelope = {
+      id: 81,
+      uri: nextFolder.gfsUri,
+      userNavigationGenerationAtActivation: 0,
+    }
+    await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+    act(() => appHarness.emitGfsDeepLink?.(link))
+    await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(nextFolder.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: ownerId,
+        kind: 'files',
+        files: { path: nextFolder.gfsUri },
+      })
+    )
+    expect(screen.queryByRole('dialog', { name: `Share file ${file.name}` })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: `Share folder ${nextFolder.name}` })).toBeNull()
+  })
+
+  it('keeps the Files path when a transient Share refresh meets a failed link', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Share parent')
+    )
+    const file = await resolveResource(
+      resolvedFile('22222222222222222222222222222222', 'share-target.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const nextFolder = await resolveResource(
+      resolvedDirectory('33333333333333333333333333333333', 'New destination')
+    )
+    const { gfs } = installClerum([parent, file, nextFolder], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', { gfsUri: parent.gfsUri }),
+        accessibleResource(nextFolder.resourceId, nextFolder.name, 'directory', {
+          gfsUri: nextFolder.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+              gfsUri: file.gfsUri,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+      affordanceBits: ['read', 'manage_acl'],
+    })
+    Object.assign(gfs, {
+      listGrants: vi.fn(async () => grantsListPage([])),
+      listShares: vi.fn(async () => sharesListPage([])),
+    })
+    Object.assign(window.clerum.team, { directory: vi.fn(async () => ({ items: [] })) })
+    Object.assign(window.clerum.agents, { listMine: vi.fn(async () => []) })
+    let emitChange:
+      | ((event: {
+          type: 'scope.invalidated'
+          schemaVersion: 1
+          cursor: string
+          scopes: ['gfs']
+        }) => void)
+      | undefined
+    Object.assign(window.clerum, {
+      entityChanges: {
+        subscribe: vi.fn(async (handler: typeof emitChange) => {
+          emitChange = handler
+          return async () => undefined
+        }),
+      },
+    })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(parent.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const row = await screen.findByRole('treeitem', { name: /Share parent/ })
+    fireEvent.click(within(row).getByRole('button', { name: 'Expand Share parent' }))
+    await chooseRowAction(file.name, 'Share')
+    expect(await screen.findByRole('dialog', { name: `Share file ${file.name}` })).toBeTruthy()
+    const background = deferred<unknown>()
+    const originalResolve = gfs.resolve.getMockImplementation()
+    if (!originalResolve) throw new Error('Expected the GFS resolve producer')
+    const denied = await gfsRouteFailureMessage(
+      client => client.resolveUri(nextFolder.gfsUri, 'fixture-token'),
+      403,
+      { code: 'forbidden', message: 'Destination access denied' }
+    )
+    const backgroundStarted = vi.fn()
+    gfs.resolve.mockImplementation(uri => {
+      if (uri === file.gfsUri) {
+        backgroundStarted()
+        return background.promise
+      }
+      if (uri === nextFolder.gfsUri) return Promise.reject(new Error(denied))
+      return originalResolve(uri)
+    })
+    await waitFor(() => expect(emitChange).toBeTypeOf('function'))
+    act(() =>
+      emitChange?.({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: '00000000-0000-0000-0000-000000000001',
+        scopes: ['gfs'],
+      })
+    )
+    await waitFor(() => expect(backgroundStarted).toHaveBeenCalled())
+    const link: GfsResourceDeepLinkEnvelope = {
+      id: 81,
+      uri: nextFolder.gfsUri,
+      userNavigationGenerationAtActivation: 0,
+    }
+    await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+    act(() => appHarness.emitGfsDeepLink?.(link))
+    await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(nextFolder.gfsUri))
+    await act(async () => {
+      background.resolve(file)
+      await background.promise
+    })
+    expect(
+      await screen.findByText('You do not have permission to open this resource.')
+    ).toBeTruthy()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: ownerId,
+      kind: 'files',
+      files: { path: parent.gfsUri },
+    })
+  })
+
+  it('keeps the Files path when only the transient Share target is denied', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Share parent')
+    )
+    const file = await resolveResource(
+      resolvedFile('22222222222222222222222222222222', 'share-target.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const nextFolder = await resolveResource(
+      resolvedDirectory('33333333333333333333333333333333', 'New destination')
+    )
+    const { gfs } = installClerum([parent, file, nextFolder], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', { gfsUri: parent.gfsUri }),
+        accessibleResource(nextFolder.resourceId, nextFolder.name, 'directory', {
+          gfsUri: nextFolder.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+              gfsUri: file.gfsUri,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+      affordanceBits: ['read', 'manage_acl'],
+    })
+    Object.assign(gfs, {
+      listGrants: vi.fn(async () => grantsListPage([])),
+      listShares: vi.fn(async () => sharesListPage([])),
+    })
+    Object.assign(window.clerum.team, { directory: vi.fn(async () => ({ items: [] })) })
+    Object.assign(window.clerum.agents, { listMine: vi.fn(async () => []) })
+    let emitChange:
+      | ((event: {
+          type: 'scope.invalidated'
+          schemaVersion: 1
+          cursor: string
+          scopes: ['gfs']
+        }) => void)
+      | undefined
+    Object.assign(window.clerum, {
+      entityChanges: {
+        subscribe: vi.fn(async (handler: typeof emitChange) => {
+          emitChange = handler
+          return async () => undefined
+        }),
+      },
+    })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(parent.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    appHarness.heldLocationUri = file.gfsUri
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const row = await screen.findByRole('treeitem', { name: /Share parent/ })
+    fireEvent.click(within(row).getByRole('button', { name: 'Expand Share parent' }))
+    await chooseRowAction(file.name, 'Share')
+    expect(await screen.findByRole('dialog', { name: `Share file ${file.name}` })).toBeTruthy()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: ownerId,
+      kind: 'files',
+      files: { path: parent.gfsUri },
+    })
+    expect(appHarness.heldLocationDeliveries.length).toBeGreaterThan(0)
+    const originalResolve = gfs.resolve.getMockImplementation()
+    if (!originalResolve) throw new Error('Expected the GFS resolve producer')
+    const denied = await gfsRouteFailureMessage(
+      client => client.resolveUri(file.gfsUri, 'fixture-token'),
+      403,
+      { code: 'forbidden', message: 'Share target denied' }
+    )
+    const targetDenial = vi.fn()
+    gfs.resolve.mockImplementation(uri => {
+      if (uri === file.gfsUri) {
+        targetDenial()
+        return Promise.reject(new Error(denied))
+      }
+      return originalResolve(uri)
+    })
+    await waitFor(() => expect(emitChange).toBeTypeOf('function'))
+    act(() =>
+      emitChange?.({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: '00000000-0000-0000-0000-000000000002',
+        scopes: ['gfs'],
+      })
+    )
+    await waitFor(() => expect(targetDenial).toHaveBeenCalled())
+    expect(await screen.findByText('This folder or file is no longer available.')).toBeTruthy()
+    await expect(gfs.resolve(parent.gfsUri)).resolves.toMatchObject({ gfsUri: parent.gfsUri })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: ownerId,
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+    )
+  })
+
+  it.each([true, false])('checks a queued Share grant with navigation=%s', async navigateAway => {
+    const parent = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Share parent')
+    )
+    const file = await resolveResource(
+      resolvedFile('22222222222222222222222222222222', 'share-target.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const nextFolder = await resolveResource(
+      resolvedDirectory('33333333333333333333333333333333', 'New destination')
+    )
+    const { gfs } = installClerum([parent, file, nextFolder], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', { gfsUri: parent.gfsUri }),
+        accessibleResource(nextFolder.resourceId, nextFolder.name, 'directory', {
+          gfsUri: nextFolder.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+              gfsUri: file.gfsUri,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+      affordanceBits: ['read', 'write', 'share', 'manage_acl'],
+    })
+    const grant = vi.fn(async () => undefined)
+    Object.assign(gfs, {
+      grant,
+      listGrants: vi.fn(async () => grantsListPage([])),
+      listShares: vi.fn(async () => sharesListPage([])),
+    })
+    Object.assign(window.clerum.team, {
+      directory: vi.fn(async () => ({
+        currentTeamId: 'team-1',
+        items: [
+          {
+            team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+            members: [
+              {
+                id: 'user-2',
+                email: 'test2@clerum.io',
+                name: 'Test Two',
+                role: 'member',
+                status: 'active',
+              },
+            ],
+            contextIds: [],
+            agentNames: [],
+          },
+        ],
+      })),
+    })
+    Object.assign(window.clerum.agents, { listMine: vi.fn(async () => []) })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(parent.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const row = await screen.findByRole('treeitem', { name: /Share parent/ })
+    fireEvent.click(within(row).getByRole('button', { name: 'Expand Share parent' }))
+    await chooseRowAction(file.name, 'Share')
+    const dialog = await screen.findByRole('dialog', { name: `Share file ${file.name}` })
+    const picker = within(dialog).getByRole('combobox', { name: 'Add people, teams, or agents' })
+    fireEvent.focus(picker)
+    fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const originalAffordances = gfs.affordances.getMockImplementation()
+    if (!originalAffordances) throw new Error('Expected affordance producer')
+    const held = vi.fn()
+    gfs.affordances.mockImplementation((resourceId, drive) => {
+      if (resourceId === file.resourceId) {
+        held()
+        return pendingPermission.promise
+      }
+      return originalAffordances(resourceId, drive)
+    })
+    await desktopQueryClient.invalidateQueries({
+      predicate: query => query.queryKey.includes(file.resourceId),
+      refetchType: 'none',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Share' }))
+    await waitFor(() => expect(held).toHaveBeenCalled())
+    if (navigateAway) {
+      const link: GfsResourceDeepLinkEnvelope = {
+        id: 81,
+        uri: nextFolder.gfsUri,
+        userNavigationGenerationAtActivation: 0,
+      }
+      await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+      act(() => appHarness.emitGfsDeepLink?.(link))
+      await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+      await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(nextFolder.gfsUri))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          id: ownerId,
+          kind: 'files',
+          files: { path: nextFolder.gfsUri },
+        })
+      )
+    }
+    await act(async () => {
+      pendingPermission.resolve(await resourceAffordances(['read', 'write', 'share', 'manage_acl']))
+      await pendingPermission.promise
+    })
+    if (navigateAway) expect(grant).not.toHaveBeenCalled()
+    else
+      await waitFor(() =>
+        expect(grant).toHaveBeenCalledWith(
+          file.resourceId,
+          ['user:user-2'],
+          ['read', 'share'],
+          'main',
+          false
+        )
+      )
+  })
+
+  it.each([true, false])(
+    'checks a queued Share role change with navigation=%s',
+    async navigateAway => {
+      const parent = await resolveResource(
+        resolvedDirectory('11111111111111111111111111111111', 'Share parent')
+      )
+      const file = await resolveResource(
+        resolvedFile('22222222222222222222222222222222', 'share-target.txt', {
+          parentResourceId: parent.resourceId,
+        })
+      )
+      const nextFolder = await resolveResource(
+        resolvedDirectory('33333333333333333333333333333333', 'New destination')
+      )
+      const { gfs } = installClerum([parent, file, nextFolder], new Map(), {
+        accessibleRows: [
+          accessibleResource(parent.resourceId, parent.name, 'directory', {
+            gfsUri: parent.gfsUri,
+          }),
+          accessibleResource(nextFolder.resourceId, nextFolder.name, 'directory', {
+            gfsUri: nextFolder.gfsUri,
+          }),
+        ],
+        childRowsByParent: new Map([
+          [
+            parent.resourceId,
+            [
+              childView(file.resourceId, file.name, 'file', {
+                parentResourceId: parent.resourceId,
+                gfsUri: file.gfsUri,
+                version: file.version,
+              }),
+            ],
+          ],
+        ]),
+        affordanceBits: ['read', 'write', 'share', 'manage_acl'],
+      })
+      const grant = vi.fn(async () => undefined)
+      Object.assign(gfs, {
+        grant,
+        listGrants: vi.fn(async (resourceId: string) =>
+          grantsListPage(
+            resourceId === file.resourceId
+              ? [
+                  {
+                    id: 'direct-grant-1',
+                    drive: 'main',
+                    resourceId: file.resourceId,
+                    subject: { type: 'user', id: 'user-2' },
+                    permissions: ['read'],
+                    inherit: false,
+                  },
+                ]
+              : []
+          )
+        ),
+        listShares: vi.fn(async () => sharesListPage([])),
+      })
+      Object.assign(window.clerum.team, {
+        directory: vi.fn(async () => ({
+          currentTeamId: 'team-1',
+          items: [
+            {
+              team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+              members: [
+                {
+                  id: 'user-2',
+                  email: 'test2@clerum.io',
+                  name: 'Test Two',
+                  role: 'member',
+                  status: 'active',
+                },
+              ],
+              contextIds: [],
+              agentNames: [],
+            },
+          ],
+        })),
+      })
+      Object.assign(window.clerum.agents, { listMine: vi.fn(async () => []) })
+      appHarness.useRealNavigationController = true
+      renderApp()
+      act(() => appHarness.controller.openFilesSectionWithReceipt(parent.gfsUri))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          kind: 'files',
+          files: { path: parent.gfsUri },
+        })
+      )
+      const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      const row = await screen.findByRole('treeitem', { name: /Share parent/ })
+      fireEvent.click(within(row).getByRole('button', { name: 'Expand Share parent' }))
+      await chooseRowAction(file.name, 'Share')
+      const dialog = await screen.findByRole('dialog', { name: `Share file ${file.name}` })
+      const role = await within(dialog).findByRole('button', { name: 'Access role for Test Two' })
+      fireEvent.click(role)
+      const editor = await screen.findByRole('option', { name: 'Editor' })
+      const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+      const originalAffordances = gfs.affordances.getMockImplementation()
+      if (!originalAffordances) throw new Error('Expected affordance producer')
+      const held = vi.fn()
+      gfs.affordances.mockImplementation((resourceId, drive) => {
+        if (resourceId === file.resourceId) {
+          held()
+          return pendingPermission.promise
+        }
+        return originalAffordances(resourceId, drive)
+      })
+      await desktopQueryClient.invalidateQueries({
+        predicate: query => query.queryKey.includes(file.resourceId),
+        refetchType: 'none',
+      })
+      fireEvent.click(editor)
+      await waitFor(() => expect(held).toHaveBeenCalled())
+      if (navigateAway) {
+        const link: GfsResourceDeepLinkEnvelope = {
+          id: 81,
+          uri: nextFolder.gfsUri,
+          userNavigationGenerationAtActivation: 0,
+        }
+        await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+        act(() => appHarness.emitGfsDeepLink?.(link))
+        await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+        fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+        await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(nextFolder.gfsUri))
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+            id: ownerId,
+            kind: 'files',
+            files: { path: nextFolder.gfsUri },
+          })
+        )
+      }
+      await act(async () => {
+        pendingPermission.resolve(
+          await resourceAffordances(['read', 'write', 'share', 'manage_acl'])
+        )
+        await pendingPermission.promise
+      })
+      if (navigateAway) expect(grant).not.toHaveBeenCalled()
+      else {
+        await waitFor(() =>
+          expect(grant).toHaveBeenCalledWith(
+            file.resourceId,
+            ['user:user-2'],
+            ['read', 'write', 'manage_acl', 'share'],
+            'main',
+            false
+          )
+        )
+        expect(grant).toHaveBeenCalledTimes(1)
+      }
+    }
+  )
+
+  it.each([true, false])('checks a queued Share revoke with navigation=%s', async navigateAway => {
+    const parent = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Share parent')
+    )
+    const file = await resolveResource(
+      resolvedFile('22222222222222222222222222222222', 'share-target.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const nextFolder = await resolveResource(
+      resolvedDirectory('33333333333333333333333333333333', 'New destination')
+    )
+    const { gfs } = installClerum([parent, file, nextFolder], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', { gfsUri: parent.gfsUri }),
+        accessibleResource(nextFolder.resourceId, nextFolder.name, 'directory', {
+          gfsUri: nextFolder.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+              gfsUri: file.gfsUri,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+      affordanceBits: ['read', 'write', 'share', 'manage_acl'],
+    })
+    const revokeGrant = vi.fn(async () => undefined)
+    Object.assign(gfs, {
+      revokeGrant,
+      listGrants: vi.fn(async (resourceId: string) =>
+        grantsListPage(
+          resourceId === file.resourceId
+            ? [
+                {
+                  id: 'direct-grant-1',
+                  drive: 'main',
+                  resourceId: file.resourceId,
+                  subject: { type: 'user', id: 'user-2' },
+                  permissions: ['read'],
+                  inherit: false,
+                },
+              ]
+            : []
+        )
+      ),
+      listShares: vi.fn(async () => sharesListPage([])),
+    })
+    Object.assign(window.clerum.team, {
+      directory: vi.fn(async () => ({
+        currentTeamId: 'team-1',
+        items: [
+          {
+            team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+            members: [
+              {
+                id: 'user-2',
+                email: 'test2@clerum.io',
+                name: 'Test Two',
+                role: 'member',
+                status: 'active',
+              },
+            ],
+            contextIds: [],
+            agentNames: [],
+          },
+        ],
+      })),
+    })
+    Object.assign(window.clerum.agents, { listMine: vi.fn(async () => []) })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(parent.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const row = await screen.findByRole('treeitem', { name: /Share parent/ })
+    fireEvent.click(within(row).getByRole('button', { name: 'Expand Share parent' }))
+    await chooseRowAction(file.name, 'Share')
+    const dialog = await screen.findByRole('dialog', { name: `Share file ${file.name}` })
+    const actions = await within(dialog).findByRole('button', { name: 'Actions for Test Two' })
+    fireEvent.click(actions)
+    const remove = await screen.findByRole('menuitem', { name: 'Remove access' })
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const originalAffordances = gfs.affordances.getMockImplementation()
+    if (!originalAffordances) throw new Error('Expected affordance producer')
+    const held = vi.fn()
+    gfs.affordances.mockImplementation((resourceId, drive) => {
+      if (resourceId === file.resourceId) {
+        held()
+        return pendingPermission.promise
+      }
+      return originalAffordances(resourceId, drive)
+    })
+    await desktopQueryClient.invalidateQueries({
+      predicate: query => query.queryKey.includes(file.resourceId),
+      refetchType: 'none',
+    })
+    fireEvent.click(remove)
+    await waitFor(() => expect(held).toHaveBeenCalled())
+    if (navigateAway) {
+      const link: GfsResourceDeepLinkEnvelope = {
+        id: 81,
+        uri: nextFolder.gfsUri,
+        userNavigationGenerationAtActivation: 0,
+      }
+      await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+      act(() => appHarness.emitGfsDeepLink?.(link))
+      await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+      await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(nextFolder.gfsUri))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          id: ownerId,
+          kind: 'files',
+          files: { path: nextFolder.gfsUri },
+        })
+      )
+    }
+    await act(async () => {
+      pendingPermission.resolve(await resourceAffordances(['read', 'write', 'share', 'manage_acl']))
+      await pendingPermission.promise
+    })
+    if (navigateAway) expect(revokeGrant).not.toHaveBeenCalled()
+    else {
+      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('direct-grant-1'))
+      expect(revokeGrant).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it.each([true, false])('stops inherited revokes after navigation=%s', async navigateAway => {
+    const outer = await resolveResource(
+      resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Outer')
+    )
+    const inner = await resolveResource(
+      resolvedDirectory('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'Inner', {
+        parentResourceId: outer.resourceId,
+      })
+    )
+    const file = await resolveResource(
+      resolvedFile('cccccccccccccccccccccccccccccccc', 'nested.txt', {
+        parentResourceId: inner.resourceId,
+      })
+    )
+    const next = await resolveResource(
+      resolvedDirectory('dddddddddddddddddddddddddddddddd', 'Destination')
+    )
+    const { gfs } = installClerum([outer, inner, file, next], new Map(), {
+      accessibleRows: [
+        accessibleResource(outer.resourceId, outer.name, 'directory', { gfsUri: outer.gfsUri }),
+      ],
+      childRowsByParent: new Map([
+        [
+          outer.resourceId,
+          [
+            childView(inner.resourceId, inner.name, 'directory', {
+              parentResourceId: outer.resourceId,
+              gfsUri: inner.gfsUri,
+            }),
+          ],
+        ],
+        [
+          inner.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: inner.resourceId,
+              gfsUri: file.gfsUri,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+      affordanceBits: ['read', 'write', 'share', 'manage_acl'],
+    })
+    const first = deferred<void>()
+    const revokeGrant = vi.fn((id: string) =>
+      id === 'inner-grant' ? first.promise : Promise.resolve()
+    )
+    Object.assign(gfs, {
+      revokeGrant,
+      listGrants: vi.fn(async (resourceId: string) =>
+        grantsListPage(
+          resourceId === inner.resourceId || resourceId === outer.resourceId
+            ? [
+                {
+                  id: resourceId === inner.resourceId ? 'inner-grant' : 'outer-grant',
+                  drive: 'main',
+                  resourceId,
+                  subject: { type: 'user', id: 'user-2' },
+                  permissions: ['read'],
+                  inherit: true,
+                },
+              ]
+            : []
+        )
+      ),
+      listShares: vi.fn(async () => sharesListPage([])),
+    })
+    Object.assign(window.clerum.team, {
+      directory: vi.fn(async () => ({
+        currentTeamId: 'team-1',
+        items: [
+          {
+            team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+            members: [
+              {
+                id: 'user-2',
+                email: 'test2@clerum.io',
+                name: 'Test Two',
+                role: 'member',
+                status: 'active',
+              },
+            ],
+            contextIds: [],
+            agentNames: [],
+          },
+        ],
+      })),
+    })
+    Object.assign(window.clerum.agents, { listMine: vi.fn(async () => []) })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(inner.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: inner.gfsUri },
+      })
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const outerRow = await screen.findByRole('treeitem', { name: /Outer/ })
+    fireEvent.click(within(outerRow).getByRole('button', { name: 'Expand Outer' }))
+    const innerRow = await findResourceTreeRow('Inner')
+    fireEvent.click(within(innerRow).getByRole('button', { name: 'Expand Inner' }))
+    await chooseRowAction(file.name, 'Share')
+    const dialog = await screen.findByRole('dialog', { name: `Share file ${file.name}` })
+    const accessRow = await within(dialog).findByTestId('gfs-access-row-inherited-user:user-2')
+    fireEvent.click(within(accessRow).getByRole('button', { name: 'Actions for Test Two' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    const confirm = await screen.findByRole('alertdialog')
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('inner-grant'))
+    expect(revokeGrant).not.toHaveBeenCalledWith('outer-grant')
+    if (navigateAway) {
+      await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+      act(() =>
+        appHarness.emitGfsDeepLink?.({
+          id: 99,
+          uri: next.gfsUri,
+          userNavigationGenerationAtActivation: 0,
+        })
+      )
+      await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          id: ownerId,
+          kind: 'files',
+          files: { path: next.gfsUri },
+        })
+      )
+    }
+    await act(async () => {
+      first.resolve()
+      await first.promise
+    })
+    if (navigateAway) expect(revokeGrant).not.toHaveBeenCalledWith('outer-grant')
+    else await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('outer-grant'))
+  })
+
+  it.each([true, false])('stops inherited role updates after navigation=%s', async navigateAway => {
+    const outer = await resolveResource(
+      resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Outer')
+    )
+    const inner = await resolveResource(
+      resolvedDirectory('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'Inner', {
+        parentResourceId: outer.resourceId,
+      })
+    )
+    const file = await resolveResource(
+      resolvedFile('cccccccccccccccccccccccccccccccc', 'nested.txt', {
+        parentResourceId: inner.resourceId,
+      })
+    )
+    const next = await resolveResource(
+      resolvedDirectory('dddddddddddddddddddddddddddddddd', 'Destination')
+    )
+    const { gfs } = installClerum([outer, inner, file, next], new Map(), {
+      accessibleRows: [
+        accessibleResource(outer.resourceId, outer.name, 'directory', { gfsUri: outer.gfsUri }),
+      ],
+      childRowsByParent: new Map([
+        [
+          outer.resourceId,
+          [
+            childView(inner.resourceId, inner.name, 'directory', {
+              parentResourceId: outer.resourceId,
+              gfsUri: inner.gfsUri,
+            }),
+          ],
+        ],
+        [
+          inner.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: inner.resourceId,
+              gfsUri: file.gfsUri,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+      affordanceBits: ['read', 'write', 'share', 'manage_acl'],
+    })
+    const first = deferred<void>()
+    const grant = vi.fn((id: string) =>
+      id === inner.resourceId ? first.promise : Promise.resolve()
+    )
+    Object.assign(gfs, {
+      grant,
+      listGrants: vi.fn(async (resourceId: string) =>
+        grantsListPage(
+          resourceId === inner.resourceId || resourceId === outer.resourceId
+            ? [
+                {
+                  id: resourceId === inner.resourceId ? 'inner-grant' : 'outer-grant',
+                  drive: 'main',
+                  resourceId,
+                  subject: { type: 'user', id: 'user-2' },
+                  permissions: ['read', 'write'],
+                  inherit: true,
+                },
+              ]
+            : []
+        )
+      ),
+      listShares: vi.fn(async () => sharesListPage([])),
+    })
+    Object.assign(window.clerum.team, {
+      directory: vi.fn(async () => ({
+        currentTeamId: 'team-1',
+        items: [
+          {
+            team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+            members: [
+              {
+                id: 'user-2',
+                email: 'test2@clerum.io',
+                name: 'Test Two',
+                role: 'member',
+                status: 'active',
+              },
+            ],
+            contextIds: [],
+            agentNames: [],
+          },
+        ],
+      })),
+    })
+    Object.assign(window.clerum.agents, { listMine: vi.fn(async () => []) })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(inner.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: inner.gfsUri },
+      })
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const outerRow = await screen.findByRole('treeitem', { name: /Outer/ })
+    fireEvent.click(within(outerRow).getByRole('button', { name: 'Expand Outer' }))
+    const innerRow = await findResourceTreeRow('Inner')
+    fireEvent.click(within(innerRow).getByRole('button', { name: 'Expand Inner' }))
+    await chooseRowAction(file.name, 'Share')
+    const dialog = await screen.findByRole('dialog', { name: `Share file ${file.name}` })
+    const accessRow = await within(dialog).findByTestId('gfs-access-row-inherited-user:user-2')
+    fireEvent.click(within(accessRow).getByRole('button', { name: 'Access role for Test Two' }))
+    fireEvent.click(await screen.findByRole('option', { name: 'Read' }))
+    const confirm = await screen.findByRole('alertdialog')
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Update role' }))
+    await waitFor(() => expect(grant).toHaveBeenCalledTimes(1))
+    expect(grant.mock.calls[0]?.[0]).toBe(inner.resourceId)
+    if (navigateAway) {
+      await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+      act(() =>
+        appHarness.emitGfsDeepLink?.({
+          id: 99,
+          uri: next.gfsUri,
+          userNavigationGenerationAtActivation: 0,
+        })
+      )
+      await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          id: ownerId,
+          kind: 'files',
+          files: { path: next.gfsUri },
+        })
+      )
+    }
+    await act(async () => {
+      first.resolve()
+      await first.promise
+    })
+    if (navigateAway) {
+      if (grant.mock.calls.length > 1) expect(grant.mock.calls[1]?.[0]).toBe(outer.resourceId)
+      expect(grant).toHaveBeenCalledTimes(1)
+    } else {
+      await waitFor(() => expect(grant).toHaveBeenCalledTimes(2))
+      expect(grant.mock.calls[1]?.[0]).toBe(outer.resourceId)
+    }
+  })
+
+  it('characterizes passive Files rehydration before sidebar Share permission', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Share parent')
+    )
+    const file = await resolveResource(
+      resolvedFile('22222222222222222222222222222222', 'share-target.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const { gfs } = installClerum([parent, file], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', { gfsUri: parent.gfsUri }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+              gfsUri: file.gfsUri,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+      affordanceBits: ['read', 'manage_acl'],
+    })
+    Object.assign(gfs, {
+      listGrants: vi.fn(async () => grantsListPage([])),
+      listShares: vi.fn(async () => sharesListPage([])),
+    })
+    Object.assign(window.clerum.team, { directory: vi.fn(async () => ({ items: [] })) })
+    Object.assign(window.clerum.agents, { listMine: vi.fn(async () => []) })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(parent.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const row = await screen.findByRole('treeitem', { name: /Share parent/ })
+    fireEvent.click(within(row).getByRole('button', { name: 'Expand Share parent' }))
+    await findResourceTreeRow(file.name)
+    fireEvent.click(screen.getByTestId('nav-chat'))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+    )
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const pendingSeed = deferred<unknown>()
+    const originalResolve = gfs.resolve.getMockImplementation()
+    if (!originalResolve) throw new Error('Expected resolve producer')
+    const seedStarted = vi.fn()
+    gfs.resolve.mockImplementation(uri => {
+      if (uri === parent.gfsUri) {
+        seedStarted()
+        return pendingSeed.promise
+      }
+      return originalResolve(uri)
+    })
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const originalAffordances = gfs.affordances.getMockImplementation()
+    if (!originalAffordances) throw new Error('Expected affordance producer')
+    const permissionStarted = vi.fn()
+    gfs.affordances.mockImplementation((resourceId, drive) => {
+      if (resourceId === file.resourceId) {
+        permissionStarted()
+        return pendingPermission.promise
+      }
+      return originalAffordances(resourceId, drive)
+    })
+    await desktopQueryClient.invalidateQueries({
+      predicate: query => query.queryKey.includes(file.resourceId),
+      refetchType: 'none',
+    })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+    await waitFor(() => expect(seedStarted).toHaveBeenCalled())
+    expect(permissionStarted).not.toHaveBeenCalled()
+    await act(async () => {
+      pendingSeed.resolve(parent)
+      await pendingSeed.promise
+    })
+    await waitFor(() => expect(appHarness.filesPageLocationEvents).toContain(parent.gfsUri))
+    await waitFor(() => expect(permissionStarted).toHaveBeenCalled())
+    await act(async () => {
+      pendingPermission.resolve(await resourceAffordances(['read', 'manage_acl']))
+      await pendingPermission.promise
+    })
+    expect(await screen.findByRole('dialog', { name: `Share file ${file.name}` })).toBeTruthy()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: ownerId,
+      kind: 'files',
+      files: { path: parent.gfsUri },
+    })
   })
 
   it('opens the same Files-owned Share dialog from a sidebar action', async () => {
@@ -1681,6 +2840,45 @@ describe('App → Files action lifecycle integration', () => {
     }).toEqual(d5bExpected)
   })
 
+  it('reports a rate-limited Sidebar target without revoking the session', async () => {
+    const file = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'rate-limited.txt', { version: 7 })
+    )
+    const { gfs } = installClerum([file], new Map(), { affordanceBits: ['read', 'write'] })
+    const renameResource = vi.fn(async () => ({}))
+    Object.assign(gfs, { renameResource })
+    const rateLimited = await gfsRouteFailureMessage(
+      client => client.resolveUri(file.gfsUri, 'fixture-session-token'),
+      429,
+      { code: 'rate_limited', message: 'Try again later' }
+    )
+    const originalResolve = gfs.resolve.getMockImplementation()
+    if (!originalResolve) throw new Error('Expected the GFS resolve producer')
+    gfs.resolve.mockImplementation(uri =>
+      uri === file.gfsUri ? Promise.reject(new Error(rateLimited)) : originalResolve(uri)
+    )
+    appHarness.useRealNavigationController = true
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    await chooseRowAction(file.name, 'Rename')
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(file.gfsUri))
+    await waitFor(() =>
+      expect(appHarness.controller.pushToast).toHaveBeenCalledWith(rateLimited, 'error')
+    )
+    await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+    const access = desktopQueryClient
+      .getQueryCache()
+      .findAll()
+      .find(query => query.queryKey[1] === 'gfs-access')
+    expect(access?.state.data).not.toMatchObject({ status: 'revoked' })
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
+    gfs.resolve.mockImplementation(originalResolve)
+    await chooseRowAction(file.name, 'Rename')
+    expect(await screen.findByRole('form', { name: 'Rename resource' })).toBeTruthy()
+  })
+
   it('fails closed when target resolution returns a typed session-authority 403', async () => {
     const file = await resolveResource(
       resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'authority-target.txt', { version: 7 })
@@ -2042,6 +3240,81 @@ describe('App → Files action lifecycle integration', () => {
     ).toHaveLength(1)
   })
 
+  it.each([true, false])(
+    'copies the exact shared file ID with parent denied=%s',
+    async parentDenied => {
+      const parentId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const file = await resolveResource(
+        resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'shared.txt', {
+          parentResourceId: parentId,
+        })
+      )
+      const parentUri = `gfs://main/${parentId}`
+      const parent = await resolveResource(resolvedDirectory(parentId, 'Parent'))
+      const { gfs } = installClerum([file, parent], new Map(), {
+        accessibleRows: [
+          accessibleResource(file.resourceId, file.name, 'file', {
+            gfsUri: file.gfsUri,
+            parentResourceId: parentId,
+            version: file.version,
+          }),
+        ],
+        childRowsByParent: new Map([
+          [
+            parentId,
+            [
+              childView(file.resourceId, file.name, 'file', {
+                gfsUri: file.gfsUri,
+                parentResourceId: parentId,
+                version: file.version,
+              }),
+            ],
+          ],
+        ]),
+        affordanceBits: ['read'],
+      })
+      const denial = await gfsRouteFailureMessage(
+        client => client.resolveUri(parentUri, 'fixture-token'),
+        403,
+        { code: 'forbidden', message: 'Parent access denied' }
+      )
+      const original = gfs.resolve.getMockImplementation()
+      if (!original) throw new Error('Expected the GFS resolve producer')
+      gfs.resolve.mockImplementation(uri =>
+        uri === parentUri && parentDenied ? Promise.reject(new Error(denial)) : original(uri)
+      )
+      const writeText = vi.fn(async (_text: string) => undefined)
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+      appHarness.useRealNavigationController = true
+      renderApp()
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      await findResourceTreeRow(file.name)
+      await chooseRowAction(file.name, 'Copy file ID')
+      try {
+        await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+      } catch (error) {
+        if (parentDenied) expect(gfs.resolve).toHaveBeenCalledWith(parentUri)
+        throw error
+      }
+    }
+  )
+
+  it('retains the active Files owner and its location for an offscreen sidebar action', async () => {
+    const { sourceFolder, targetFolder } = await openLiveTargetInSameFilesTab()
+
+    await chooseRowAction(sourceFolder.name, 'New folder')
+    const dialog = await screen.findByRole('dialog', { name: 'New folder' })
+    expect(dialog.textContent).toContain(`Create a new folder in ${sourceFolder.name}.`)
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: 'same-files-tab',
+      kind: 'files',
+      files: { path: targetFolder.gfsUri },
+    })
+    expect(
+      appHarness.controller.workspaceTabs.tabs.filter(tab => tab.kind === 'files')
+    ).toHaveLength(1)
+  })
+
   it('opens the exact ancestor destination when acting on A after the same tab moves A → B', async () => {
     const { sourceFolder, targetFolder, createFolder } = await openLiveTargetInSameFilesTab()
 
@@ -2129,6 +3402,184 @@ describe('App → Files action lifecycle integration', () => {
     expect(createFolder.mock.calls.map(call => [...call])).toEqual(filesCalls)
   })
 
+  it.each([true, false])(
+    'checks a held sidebar upload permission with navigation=%s',
+    async navigateAway => {
+      const { targetFolder, gfs, createFileFromPath } = await openLiveTargetInSameFilesTab()
+      const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
+      const uploadInput = within(filesBrowser).getByLabelText('Upload file', {
+        selector: 'input[type="file"]',
+      }) as HTMLInputElement
+      const chooser = vi.spyOn(uploadInput, 'click').mockImplementation(() => undefined)
+      await chooseRowAction(targetFolder.name, 'Upload file')
+      await waitFor(() => expect(chooser).toHaveBeenCalledTimes(1))
+
+      const permission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+      const original = gfs.affordances.getMockImplementation()
+      if (!original) throw new Error('Expected producer-backed affordances')
+      const held = vi.fn()
+      gfs.affordances.mockImplementation((resourceId, drive) => {
+        if (resourceId === targetFolder.resourceId) {
+          held()
+          return permission.promise
+        }
+        return original(resourceId, drive)
+      })
+      await desktopQueryClient.invalidateQueries({
+        predicate: query => query.queryKey.includes(targetFolder.resourceId),
+        refetchType: 'none',
+      })
+      const upload = new File(['sidebar upload'], 'upload.md', { type: 'text/markdown' })
+      fireEvent.change(uploadInput, { target: { files: [upload] } })
+      await waitFor(() => expect(held).toHaveBeenCalled())
+      if (navigateAway) {
+        fireEvent.click(screen.getByTestId('nav-chat'))
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+        )
+      }
+      await act(async () => {
+        permission.resolve(await resourceAffordances(['read', 'write', 'delete']))
+        await permission.promise
+      })
+      if (navigateAway) expect(createFileFromPath).not.toHaveBeenCalled()
+      else await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(1))
+    }
+  )
+
+  it.each([true, false])(
+    'checks a sidebar upload conflict settlement with navigation=%s',
+    async navigateAway => {
+      const { targetFolder, createFileFromPath } = await openLiveTargetInSameFilesTab()
+      const conflict = await gfsRouteFailureMessage(
+        client =>
+          client.createResource(
+            {
+              parentResourceId: targetFolder.resourceId,
+              drive: 'main',
+              name: 'upload.md',
+              kind: 'file',
+              encodedData: 'YQ==',
+            },
+            'fixture-token'
+          ),
+        409,
+        { code: 'name_conflict', message: 'resource already exists' }
+      )
+      const input = within(
+        screen.getByRole('region', { name: 'EvenDrive browser' })
+      ).getByLabelText('Upload file', { selector: 'input[type="file"]' }) as HTMLInputElement
+      const chooser = vi.spyOn(input, 'click').mockImplementation(() => undefined)
+      const firstAttempt = deferred<{}>()
+      createFileFromPath.mockImplementationOnce(() => firstAttempt.promise)
+      await chooseRowAction(targetFolder.name, 'Upload file')
+      await waitFor(() => expect(chooser).toHaveBeenCalledTimes(1))
+      fireEvent.change(input, {
+        target: { files: [new File(['data'], 'upload.md', { type: 'text/markdown' })] },
+      })
+      await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(1))
+      if (navigateAway) {
+        fireEvent.click(screen.getByTestId('nav-chat'))
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+        )
+      }
+      await act(async () => {
+        firstAttempt.reject(new Error(conflict))
+        try {
+          await firstAttempt.promise
+        } catch {}
+      })
+      if (navigateAway) expect(createFileFromPath).toHaveBeenCalledTimes(1)
+      else {
+        await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(2))
+        expect(createFileFromPath).toHaveBeenNthCalledWith(
+          2,
+          targetFolder.resourceId,
+          expect.any(String),
+          'upload.md',
+          'main'
+        )
+      }
+    }
+  )
+
+  it.each([true, false])('checks a sidebar upload retry with navigation=%s', async navigateAway => {
+    const { targetFolder, gfs, createFileFromPath } = await openLiveTargetInSameFilesTab()
+    const conflict = await gfsRouteFailureMessage(
+      client =>
+        client.createResource(
+          {
+            parentResourceId: targetFolder.resourceId,
+            drive: 'main',
+            name: 'upload.md',
+            kind: 'file',
+            encodedData: 'YQ==',
+          },
+          'fixture-token'
+        ),
+      409,
+      { code: 'name_conflict', message: 'resource already exists' }
+    )
+    const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    const input = within(filesBrowser).getByLabelText('Upload file', {
+      selector: 'input[type="file"]',
+    }) as HTMLInputElement
+    const chooser = vi.spyOn(input, 'click').mockImplementation(() => undefined)
+    const firstAttempt = deferred<{}>()
+    createFileFromPath.mockImplementationOnce(() => firstAttempt.promise)
+    await chooseRowAction(targetFolder.name, 'Upload file')
+    await waitFor(() => expect(chooser).toHaveBeenCalledTimes(1))
+    fireEvent.change(input, {
+      target: { files: [new File(['data'], 'upload.md', { type: 'text/markdown' })] },
+    })
+    await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(1))
+    const permission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const original = gfs.affordances.getMockImplementation()
+    if (!original) throw new Error('Expected producer-backed affordances')
+    const held = vi.fn()
+    gfs.affordances.mockImplementation((resourceId, drive) => {
+      if (resourceId === targetFolder.resourceId) {
+        held()
+        return permission.promise
+      }
+      return original(resourceId, drive)
+    })
+    await desktopQueryClient.invalidateQueries({
+      predicate: query =>
+        query.queryKey.includes(targetFolder.resourceId) && query.queryKey.includes('affordances'),
+      refetchType: 'none',
+    })
+    await act(async () => {
+      firstAttempt.reject(new Error(conflict))
+      try {
+        await firstAttempt.promise
+      } catch {}
+    })
+    await waitFor(() => expect(held).toHaveBeenCalled())
+    if (navigateAway) {
+      fireEvent.click(screen.getByTestId('nav-chat'))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+      )
+    }
+    await act(async () => {
+      permission.resolve(await resourceAffordances(['read', 'write', 'delete']))
+      await permission.promise
+    })
+    if (navigateAway) expect(createFileFromPath).toHaveBeenCalledTimes(1)
+    else {
+      await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(2))
+      expect(createFileFromPath).toHaveBeenNthCalledWith(
+        2,
+        targetFolder.resourceId,
+        expect.any(String),
+        'upload.md',
+        'main'
+      )
+    }
+  })
+
   it('matches the Files upload handler and destination for the clicked folder', async () => {
     const { targetFolder, createFileFromPath } = await openLiveTargetInSameFilesTab()
     const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
@@ -2158,6 +3609,39 @@ describe('App → Files action lifecycle integration', () => {
       'sidebar-upload.md',
       'main',
     ])
+  })
+
+  it('does not start a sidebar save after navigation while downloaded bytes are pending', async () => {
+    const file = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'download-target.txt')
+    )
+    const producedBytes = await previewDownloadResult(file)
+    const pendingBytes = deferred<typeof producedBytes>()
+    const { gfs } = installClerum([file])
+    const download = vi.fn(() => pendingBytes.promise)
+    Object.assign(gfs, { download })
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:held'),
+    })
+    const save = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    await chooseRowAction(file.name, 'Download')
+    await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
+    fireEvent.click(screen.getByTestId('nav-chat'))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+    )
+    await act(async () => {
+      pendingBytes.resolve(producedBytes)
+      await pendingBytes.promise
+    })
+    expect(save).not.toHaveBeenCalled()
   })
 
   it('uses the Files save-to-disk handler for Download from the sidebar', async () => {
@@ -2211,6 +3695,163 @@ describe('App → Files action lifecycle integration', () => {
       'success'
     )
   })
+
+  it.each(['changed', 'same', 'conflict'] as const)(
+    'preserves the original Replace version for %s',
+    async scenario => {
+      const file = await resolveResource(
+        resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'replace-target.bin', { version: 7 })
+      )
+      const newer = await resolveResource(
+        resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'replace-target.bin', { version: 8 })
+      )
+      const { gfs, replaceFileFromPath } = installClerum([file], new Map(), {
+        affordanceBits: ['read', 'write'],
+      })
+      const conflict = await gfsRouteFailureMessage(
+        client =>
+          client.replaceFile(
+            { resourceId: file.resourceId, encodedData: 'bmV3', drive: 'main', ifMatch: 7 },
+            'fixture-token'
+          ),
+        409,
+        { code: 'version_conflict', message: 'The file changed' }
+      )
+      if (scenario === 'conflict') replaceFileFromPath.mockRejectedValueOnce(new Error(conflict))
+      appHarness.controller = makeController(
+        openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+      )
+      renderApp()
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      const row = await findResourceTreeRow(file.name)
+      const menu = await openRowActions(file.name)
+      const replace = await within(menu).findByRole('menuitem', { name: 'Replace file' })
+      const input = within(row).getByLabelText(`Replace ${file.name}`) as HTMLInputElement
+      const chooser = vi.spyOn(input, 'click').mockImplementation(() => undefined)
+      fireEvent.click(replace)
+      await waitFor(() => expect(chooser).toHaveBeenCalledTimes(1))
+      const originalResolve = gfs.resolve.getMockImplementation()
+      if (!originalResolve) throw new Error('Expected GFS resolve producer')
+      const checked = vi.fn()
+      gfs.resolve.mockImplementation(uri => {
+        if (uri === file.gfsUri) {
+          checked()
+          return Promise.resolve(scenario === 'changed' ? newer : file)
+        }
+        return originalResolve(uri)
+      })
+      const replacement = new File(['replacement bytes'], 'replacement.txt', { type: 'text/plain' })
+      fireEvent.change(input, { target: { files: [replacement] } })
+      await waitFor(() => expect(checked).toHaveBeenCalled())
+      if (scenario === 'changed') {
+        await waitFor(() =>
+          expect(appHarness.controller.pushToast).toHaveBeenCalledWith(
+            'This resource changed before the action could run.',
+            'error'
+          )
+        )
+        expect(replaceFileFromPath).not.toHaveBeenCalled()
+      } else {
+        await waitFor(() =>
+          expect(replaceFileFromPath).toHaveBeenCalledWith(
+            file.resourceId,
+            replacement.name,
+            'main',
+            7
+          )
+        )
+        expect(gfs.getPathForFile).toHaveBeenCalledWith(replacement)
+        if (scenario === 'conflict') {
+          await waitFor(() =>
+            expect(appHarness.controller.pushToast).toHaveBeenCalledWith(conflict, 'error')
+          )
+          expect(appHarness.controller.pushToast).not.toHaveBeenCalledWith(
+            `Replaced ${file.name}`,
+            'success'
+          )
+        }
+      }
+    }
+  )
+
+  it.each([
+    { changeSession: true, fails: false },
+    { changeSession: false, fails: false },
+    { changeSession: true, fails: true },
+    { changeSession: false, fails: true },
+  ])(
+    'scopes an already-started Replace result for $changeSession / failure $fails',
+    async ({ changeSession, fails }) => {
+      const file = await resolveResource(
+        resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'session-replace.bin', { version: 7 })
+      )
+      const { gfs, replaceFileFromPath } = installClerum([file], new Map(), {
+        affordanceBits: ['read', 'write'],
+      })
+      const failure = await gfsRouteFailureMessage(
+        client =>
+          client.replaceFile(
+            { resourceId: file.resourceId, encodedData: 'bmV3', drive: 'main', ifMatch: 7 },
+            'fixture-token'
+          ),
+        500,
+        { code: 'internal_error', message: 'Replace failed' }
+      )
+      const pending = deferred<object>()
+      replaceFileFromPath.mockImplementationOnce(() => pending.promise)
+      appHarness.controller = makeController(
+        openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+      )
+      renderApp()
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      const row = await findResourceTreeRow(file.name)
+      const menu = await openRowActions(file.name)
+      const replace = await within(menu).findByRole('menuitem', { name: 'Replace file' })
+      const input = within(row).getByLabelText(`Replace ${file.name}`) as HTMLInputElement
+      const chooser = vi.spyOn(input, 'click').mockImplementation(() => undefined)
+      fireEvent.click(replace)
+      await waitFor(() => expect(chooser).toHaveBeenCalledTimes(1))
+      const selected = new File(['new content'], 'replacement.txt')
+      fireEvent.change(input, { target: { files: [selected] } })
+      await waitFor(() =>
+        expect(replaceFileFromPath).toHaveBeenCalledWith(file.resourceId, selected.name, 'main', 7)
+      )
+      expect(gfs.getPathForFile).toHaveBeenCalledWith(selected)
+      if (changeSession) {
+        act(() => {
+          appHarness.controller.sessionGeneration = 2
+          appHarness.forceRender()
+        })
+      }
+      await act(async () => {
+        if (fails) pending.reject(new Error(failure))
+        else pending.resolve({})
+        try {
+          await pending.promise
+        } catch {
+          /* the real mutation consumes the failure */
+        }
+      })
+      await waitFor(() =>
+        expect(
+          desktopQueryClient
+            .getMutationCache()
+            .getAll()
+            .some(mutation => mutation.state.status === (fails ? 'error' : 'success'))
+        ).toBe(true)
+      )
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(replaceFileFromPath).toHaveBeenCalledTimes(1)
+      const outcomes = recordedToastCalls().filter(([message, tone]) =>
+        fails
+          ? message === failure && tone === 'error'
+          : message === `Replaced ${file.name}` && tone === 'success'
+      )
+      expect(outcomes).toHaveLength(changeSession ? 0 : 1)
+    }
+  )
 
   it('completes Replace through the Files handler with the selected file and clicked version', async () => {
     const file = await resolveResource(
@@ -4081,6 +5722,1062 @@ describe('App → Files action lifecycle integration', () => {
     expect(gfs.downloadPreview).toHaveBeenCalledWith(markdown.gfsUri, expect.any(Number))
   })
 
+  it('models generated Download completion and navigation histories', async () => {
+    type Model = { navigated: boolean; released: boolean }
+    type Real = { release: () => Promise<void>; save: ReturnType<typeof vi.fn> }
+    const coverage = { histories: 0, releaseAfterNavigation: 0, releaseBeforeNavigation: 0 }
+    const mismatches: Array<{ navigated: boolean; expected: number; actual: number }> = []
+    class Navigate implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return !model.navigated
+      }
+      async run(model: Model) {
+        fireEvent.click(screen.getByTestId('nav-chat'))
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+        )
+        model.navigated = true
+      }
+      toString() {
+        return 'navigate Chat'
+      }
+    }
+    class Release implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return !model.released
+      }
+      async run(model: Model, real: Real) {
+        await real.release()
+        model.released = true
+        const expected = model.navigated ? 0 : 1
+        const actual = real.save.mock.calls.length
+        if (model.navigated) coverage.releaseAfterNavigation += 1
+        else coverage.releaseBeforeNavigation += 1
+        if (actual !== expected) mismatches.push({ navigated: model.navigated, expected, actual })
+      }
+      toString() {
+        return 'deliver downloaded bytes'
+      }
+    }
+    await fc.assert(
+      fc.asyncProperty(
+        fc.commands([fc.constant(new Navigate()), fc.constant(new Release())], { maxCommands: 4 }),
+        async commands => {
+          cleanup()
+          vi.restoreAllMocks()
+          mockSidebarBounds()
+          desktopQueryClient.clear()
+          appHarness.controller = makeController()
+          appHarness.useRealNavigationController = true
+          const file = await resolveResource(
+            resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'generated-download.txt')
+          )
+          const produced = await previewDownloadResult(file)
+          const pending = deferred<typeof produced>()
+          const { gfs } = installClerum([file])
+          const download = vi.fn(() => pending.promise)
+          Object.assign(gfs, { download })
+          Object.defineProperty(URL, 'createObjectURL', {
+            configurable: true,
+            value: vi.fn(() => 'blob:generated'),
+          })
+          const save = vi.fn()
+          vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(save)
+          renderApp()
+          act(() => appHarness.controller.openFilesSectionWithReceipt(null))
+          await waitFor(() =>
+            expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
+          )
+          fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+          await findResourceTreeRow(file.name)
+          await chooseRowAction(file.name, 'Download')
+          await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
+          const model: Model = { navigated: false, released: false }
+          const real: Real = {
+            save,
+            release: async () => {
+              await act(async () => {
+                pending.resolve(produced)
+                await pending.promise
+              })
+            },
+          }
+          await fc.asyncModelRun(() => ({ model, real }), commands)
+          if (!model.released) await new Release().run(model, real)
+          coverage.histories += 1
+        }
+      ),
+      { numRuns: 24, seed: 108513 }
+    )
+    process.stdout.write(
+      `Download model coverage ${JSON.stringify(coverage)} mismatches ${JSON.stringify(mismatches)}\n`
+    )
+    expect(coverage.histories).toBe(24)
+    expect(coverage.releaseAfterNavigation).toBeGreaterThan(0)
+    expect(coverage.releaseBeforeNavigation).toBeGreaterThan(0)
+    expect(mismatches).toEqual([])
+  })
+
+  it('models generated Files and Chat tab switches without losing the Files path', async () => {
+    type Model = { active: 'files' | 'chat'; path: string }
+    type Real = { ownerId: string }
+    const observed = { histories: 0, toChat: 0, toFiles: 0 }
+    const verify = (model: Model, real: Real) => {
+      const tabs = appHarness.controller.workspaceTabs
+      expect(activeWorkspaceTab(tabs)?.kind).toBe(model.active)
+      expect(tabs.tabs.find(tab => tab.id === real.ownerId)).toMatchObject({
+        kind: 'files',
+        files: { path: model.path },
+      })
+    }
+    class ToChat implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return model.active === 'files'
+      }
+      async run(model: Model, real: Real) {
+        fireEvent.click(screen.getByTestId('nav-chat'))
+        model.active = 'chat'
+        await waitFor(() => verify(model, real))
+        observed.toChat += 1
+      }
+      toString() {
+        return 'select Chat'
+      }
+    }
+    class ToFiles implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return model.active === 'chat'
+      }
+      async run(model: Model, real: Real) {
+        const tab = getWorkspaceTabButtons('Files').find(
+          button => button.getAttribute('aria-pressed') !== 'true'
+        )
+        if (!tab) throw new Error('Expected the Files tab')
+        fireEvent.click(tab)
+        model.active = 'files'
+        await waitFor(() => verify(model, real))
+        observed.toFiles += 1
+      }
+      toString() {
+        return 'select Files'
+      }
+    }
+    await fc.assert(
+      fc.asyncProperty(
+        fc.commands([fc.constant(new ToChat()), fc.constant(new ToFiles())], { maxCommands: 6 }),
+        async commands => {
+          cleanup()
+          desktopQueryClient.clear()
+          appHarness.controller = makeController()
+          appHarness.useRealNavigationController = true
+          appHarness.heldLocationUri = null
+          appHarness.heldLocationDeliveries = []
+          const folder = await resolveResource(
+            resolvedDirectory('99999999999999999999999999999999', 'Stable folder')
+          )
+          installClerum([folder])
+          renderApp()
+          act(() => appHarness.controller.openFilesSectionWithReceipt(folder.gfsUri))
+          await waitFor(() =>
+            expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+              kind: 'files',
+              files: { path: folder.gfsUri },
+            })
+          )
+          const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)!.id
+          await fc.asyncModelRun(
+            () => ({ model: { active: 'files' as const, path: folder.gfsUri }, real: { ownerId } }),
+            commands
+          )
+          observed.histories += 1
+        }
+      ),
+      { numRuns: 24, seed: 108511 }
+    )
+    expect(observed.histories).toBe(24)
+    process.stdout.write(`Files tab model coverage ${JSON.stringify(observed)}\n`)
+    expect(observed.toChat).toBeGreaterThan(0)
+    expect(observed.toFiles).toBeGreaterThan(0)
+  })
+
+  it('schedules competing real Files link completions against the latest-success model', async () => {
+    const observedOrders = new Set<string>()
+    let histories = 0
+    await fc.assert(
+      fc.asyncProperty(fc.scheduler(), async scheduler => {
+        cleanup()
+        desktopQueryClient.clear()
+        appHarness.controller = makeController()
+        appHarness.useRealNavigationController = true
+        appHarness.heldLocationUri = null
+        appHarness.heldLocationDeliveries = []
+        const initial = await resolveResource(
+          resolvedDirectory('11111111111111111111111111111111', 'Initial')
+        )
+        const second = await resolveResource(
+          resolvedDirectory('22222222222222222222222222222222', 'Second')
+        )
+        const third = await resolveResource(
+          resolvedDirectory('33333333333333333333333333333333', 'Third')
+        )
+        const { gfs } = installClerum([initial, second, third])
+        renderApp()
+        act(() => appHarness.controller.openFilesSectionWithReceipt(initial.gfsUri))
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+            kind: 'files',
+            files: { path: initial.gfsUri },
+          })
+        )
+        const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)!.id
+        const pendingSecond = deferred<unknown>()
+        const pendingThird = deferred<unknown>()
+        const original = gfs.resolve.getMockImplementation()
+        if (!original) throw new Error('Expected the GFS resolve producer')
+        gfs.resolve.mockImplementation(uri =>
+          uri === second.gfsUri
+            ? pendingSecond.promise
+            : uri === third.gfsUri
+              ? pendingThird.promise
+              : original(uri)
+        )
+        const openLink = async (id: number, uri: string) => {
+          await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+          act(() =>
+            appHarness.emitGfsDeepLink?.({ id, uri, userNavigationGenerationAtActivation: 0 })
+          )
+          await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+          fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+          await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(uri))
+        }
+        await openLink(191, second.gfsUri)
+        fireEvent.click(screen.getByRole('button', { name: 'Shared with me' }))
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+            id: ownerId,
+            kind: 'files',
+            files: { path: null },
+          })
+        )
+        await openLink(192, third.gfsUri)
+        const releaseSecond = scheduler
+          .schedule(Promise.resolve(second), 'Q2')
+          .then(pendingSecond.resolve)
+        const releaseThird = scheduler
+          .schedule(Promise.resolve(third), 'Q3')
+          .then(pendingThird.resolve)
+        expect(scheduler.count()).toBe(2)
+        await act(async () => {
+          await scheduler.waitIdle()
+          await Promise.all([releaseSecond, releaseThird])
+        })
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+            id: ownerId,
+            kind: 'files',
+            files: { path: third.gfsUri },
+          })
+        )
+        observedOrders.add(
+          scheduler
+            .report()
+            .map(item => item.label)
+            .join('→')
+        )
+        histories += 1
+      }),
+      { numRuns: 12, seed: 108512 }
+    )
+    process.stdout.write(
+      `Files link scheduler coverage ${JSON.stringify({ histories, orders: [...observedOrders] })}\n`
+    )
+    expect(histories).toBe(12)
+    expect(observedOrders).toEqual(new Set(['Q2→Q3', 'Q3→Q2']))
+  })
+
+  it('preserves an explicit root selection against a pending Files link', async () => {
+    const initial = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Initial')
+    )
+    const next = await resolveResource(
+      resolvedDirectory('22222222222222222222222222222222', 'Pending')
+    )
+    const { gfs } = installClerum([initial, next])
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(initial.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: initial.gfsUri },
+      })
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    const pending = deferred<unknown>()
+    holdExactTargetResolve(gfs, next.gfsUri, pending)
+    await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+    act(() =>
+      appHarness.emitGfsDeepLink?.({
+        id: 94,
+        uri: next.gfsUri,
+        userNavigationGenerationAtActivation: 0,
+      })
+    )
+    await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(next.gfsUri))
+    const root = screen.getByRole('button', { name: 'Shared with me' }) as HTMLButtonElement
+    expect(root.disabled).toBe(false)
+    fireEvent.click(root)
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: ownerId,
+        kind: 'files',
+        files: { path: null },
+      })
+    )
+    await act(async () => {
+      pending.resolve(next)
+      await pending.promise
+    })
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: ownerId,
+      kind: 'files',
+      files: { path: null },
+    })
+  })
+
+  it('clears a denied current folder while a later link resolves', async () => {
+    const initial = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Denied folder')
+    )
+    const next = await resolveResource(
+      resolvedDirectory('22222222222222222222222222222222', 'Pending destination')
+    )
+    const { gfs } = installClerum([initial, next])
+    const deniedChildren = await gfsRouteFailureMessage(
+      client => client.listChildren(initial.resourceId, 'fixture-token', { drive: 'main' }),
+      403,
+      { code: 'forbidden', message: 'Current folder denied' }
+    )
+    const deniedNext = await gfsRouteFailureMessage(
+      client => client.resolveUri(next.gfsUri, 'fixture-token'),
+      403,
+      { code: 'forbidden', message: 'Destination denied' }
+    )
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(initial.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: initial.gfsUri },
+      })
+    )
+    await waitFor(() =>
+      expect(gfs.listChildren).toHaveBeenCalledWith(initial.resourceId, 'main', undefined)
+    )
+    const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    appHarness.filesPageLocationEvents = []
+    const pending = deferred<unknown>()
+    holdExactTargetResolve(gfs, next.gfsUri, pending)
+    await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+    act(() =>
+      appHarness.emitGfsDeepLink?.({
+        id: 93,
+        uri: next.gfsUri,
+        userNavigationGenerationAtActivation: 0,
+      })
+    )
+    await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(next.gfsUri))
+    expect(appHarness.filesPageLocationEvents).toContain(initial.gfsUri)
+    const originalChildren = gfs.listChildren.getMockImplementation()
+    if (!originalChildren) throw new Error('Expected children producer')
+    const currentDenial = vi.fn()
+    gfs.listChildren.mockImplementation((resourceId, ...args) => {
+      if (resourceId === initial.resourceId) {
+        currentDenial()
+        return Promise.reject(new Error(deniedChildren))
+      }
+      return originalChildren(resourceId, ...args)
+    })
+    await act(async () => {
+      await desktopQueryClient.invalidateQueries({
+        predicate: query =>
+          query.queryKey.includes('children') && query.queryKey.includes(initial.resourceId),
+        refetchType: 'active',
+      })
+    })
+    expect(currentDenial).toHaveBeenCalled()
+    expect(await screen.findByText('This folder or file is no longer available.')).toBeTruthy()
+    await act(async () => {
+      pending.reject(new Error(deniedNext))
+      try {
+        await pending.promise
+      } catch {
+        /* rejection consumed by the actual link */
+      }
+    })
+    expect(
+      await screen.findByText('You do not have permission to open this resource.')
+    ).toBeTruthy()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: ownerId,
+      kind: 'files',
+      files: { path: null },
+    })
+  })
+
+  it.each([true, false])(
+    'persists current-folder denial while the next Files seed is pending with stable callback=%s',
+    async stableCallback => {
+      const initial = await resolveResource(
+        resolvedDirectory('11111111111111111111111111111111', 'Denied folder')
+      )
+      const next = await resolveResource(
+        resolvedDirectory('22222222222222222222222222222222', 'Pending destination')
+      )
+      const { gfs } = installClerum([initial, next])
+      const deniedChildren = await gfsRouteFailureMessage(
+        client => client.listChildren(initial.resourceId, 'fixture-token', { drive: 'main' }),
+        403,
+        { code: 'forbidden', message: 'Current folder denied' }
+      )
+      const deniedNext = await gfsRouteFailureMessage(
+        client => client.resolveUri(next.gfsUri, 'fixture-token'),
+        403,
+        { code: 'forbidden', message: 'Destination denied' }
+      )
+      appHarness.useRealNavigationController = true
+      appHarness.stableFilesLocationCallback = stableCallback
+      renderApp()
+      act(() => appHarness.controller.openFilesSectionWithReceipt(initial.gfsUri))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          kind: 'files',
+          files: { path: initial.gfsUri },
+        })
+      )
+      await waitFor(() =>
+        expect(gfs.listChildren).toHaveBeenCalledWith(initial.resourceId, 'main', undefined)
+      )
+      const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+      appHarness.filesPageLocationEvents = []
+      const pending = deferred<unknown>()
+      holdExactTargetResolve(gfs, next.gfsUri, pending)
+      await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+      act(() =>
+        appHarness.emitGfsDeepLink?.({
+          id: 93,
+          uri: next.gfsUri,
+          userNavigationGenerationAtActivation: 0,
+        })
+      )
+      await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+      await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(next.gfsUri))
+      if (stableCallback) expect(appHarness.filesPageLocationEvents).not.toContain(initial.gfsUri)
+      else expect(appHarness.filesPageLocationEvents).toContain(initial.gfsUri)
+      const originalChildren = gfs.listChildren.getMockImplementation()
+      if (!originalChildren) throw new Error('Expected children producer')
+      const currentDenial = vi.fn()
+      gfs.listChildren.mockImplementation((resourceId, ...args) => {
+        if (resourceId === initial.resourceId) {
+          currentDenial()
+          return Promise.reject(new Error(deniedChildren))
+        }
+        return originalChildren(resourceId, ...args)
+      })
+      await act(async () => {
+        await desktopQueryClient.invalidateQueries({
+          predicate: query =>
+            query.queryKey.includes('children') && query.queryKey.includes(initial.resourceId),
+          refetchType: 'active',
+        })
+      })
+      expect(currentDenial).toHaveBeenCalled()
+      expect(await screen.findByText('This folder or file is no longer available.')).toBeTruthy()
+      await act(async () => {
+        pending.reject(new Error(deniedNext))
+        try {
+          await pending.promise
+        } catch {
+          /* rejection consumed by the actual link */
+        }
+      })
+      expect(
+        await screen.findByText('You do not have permission to open this resource.')
+      ).toBeTruthy()
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: ownerId,
+        kind: 'files',
+        files: { path: null },
+      })
+    }
+  )
+
+  it.each(['root', 'denied'] as const)(
+    'preserves newer %s null against an older committed Files location delivery',
+    async terminalKind => {
+      const initial = await resolveResource(
+        resolvedDirectory('11111111111111111111111111111111', 'Initial')
+      )
+      const second = await resolveResource(
+        resolvedDirectory('22222222222222222222222222222222', 'Second')
+      )
+      const { gfs } = installClerum([initial, second])
+      const deniedChildren = await gfsRouteFailureMessage(
+        client => client.listChildren(second.resourceId, 'fixture-token', { drive: 'main' }),
+        403,
+        { code: 'forbidden', message: 'Second folder denied' }
+      )
+      appHarness.useRealNavigationController = true
+      renderApp()
+      act(() => appHarness.controller.openFilesSectionWithReceipt(initial.gfsUri))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          kind: 'files',
+          files: { path: initial.gfsUri },
+        })
+      )
+      const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+      appHarness.heldLocationUri = second.gfsUri
+      await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+      act(() =>
+        appHarness.emitGfsDeepLink?.({
+          id: 95,
+          uri: second.gfsUri,
+          userNavigationGenerationAtActivation: 0,
+        })
+      )
+      await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+      await waitFor(() => expect(appHarness.heldLocationDeliveries.length).toBeGreaterThan(0))
+      expect(
+        within(screen.getByRole('navigation', { name: 'File location' })).getByText('Second')
+      ).toBeTruthy()
+      const oldDelivery = appHarness.heldLocationDeliveries[0]!
+      if (terminalKind === 'root') {
+        fireEvent.click(screen.getByRole('button', { name: 'Shared with me' }))
+      } else {
+        await waitFor(() =>
+          expect(gfs.listChildren).toHaveBeenCalledWith(second.resourceId, 'main', undefined)
+        )
+        const originalChildren = gfs.listChildren.getMockImplementation()
+        if (!originalChildren) throw new Error('Expected children producer')
+        const targetDenial = vi.fn()
+        gfs.listChildren.mockImplementation((resourceId, ...args) => {
+          if (resourceId === second.resourceId) {
+            targetDenial()
+            return Promise.reject(new Error(deniedChildren))
+          }
+          return originalChildren(resourceId, ...args)
+        })
+        await act(async () => {
+          await desktopQueryClient.invalidateQueries({
+            predicate: query =>
+              query.queryKey.includes('children') && query.queryKey.includes(second.resourceId),
+            refetchType: 'active',
+          })
+        })
+        expect(targetDenial).toHaveBeenCalled()
+        expect(await screen.findByText('This folder or file is no longer available.')).toBeTruthy()
+      }
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          id: ownerId,
+          kind: 'files',
+          files: { path: null },
+        })
+      )
+      appHarness.heldLocationUri = null
+      act(() => oldDelivery())
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: ownerId,
+        kind: 'files',
+        files: { path: null },
+      })
+    }
+  )
+
+  it.each([true, false])(
+    'orders a held committed Files location when the next link fails=%s',
+    async thirdFails => {
+      const initial = await resolveResource(
+        resolvedDirectory('11111111111111111111111111111111', 'Initial')
+      )
+      const second = await resolveResource(
+        resolvedDirectory('22222222222222222222222222222222', 'Second')
+      )
+      const third = await resolveResource(
+        resolvedDirectory('33333333333333333333333333333333', 'Third')
+      )
+      const { gfs } = installClerum([initial, second, third])
+      const denial = await gfsRouteFailureMessage(
+        client => client.resolveUri(third.gfsUri, 'fixture-token'),
+        403,
+        { code: 'forbidden', message: 'Third denied' }
+      )
+      const resolve = gfs.resolve.getMockImplementation()
+      if (!resolve) throw new Error('Expected GFS resolve producer')
+      gfs.resolve.mockImplementation(uri =>
+        uri === third.gfsUri && thirdFails ? Promise.reject(new Error(denial)) : resolve(uri)
+      )
+      appHarness.useRealNavigationController = true
+      renderApp()
+      act(() => appHarness.controller.openFilesSectionWithReceipt(initial.gfsUri))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          kind: 'files',
+          files: { path: initial.gfsUri },
+        })
+      )
+      const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+      appHarness.heldLocationUri = second.gfsUri
+      const openLink = async (id: number, uri: string) => {
+        await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+        act(() =>
+          appHarness.emitGfsDeepLink?.({ id, uri, userNavigationGenerationAtActivation: 0 })
+        )
+        await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+        fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+      }
+      await openLink(91, second.gfsUri)
+      await waitFor(() => expect(appHarness.heldLocationDeliveries.length).toBeGreaterThan(0))
+      expect(
+        within(screen.getByRole('navigation', { name: 'File location' })).getByText('Second')
+      ).toBeTruthy()
+      const secondDelivery = appHarness.heldLocationDeliveries[0]!
+      await openLink(92, third.gfsUri)
+      if (thirdFails) {
+        expect(
+          await screen.findByText('You do not have permission to open this resource.')
+        ).toBeTruthy()
+      } else {
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+            id: ownerId,
+            kind: 'files',
+            files: { path: third.gfsUri },
+          })
+        )
+      }
+      appHarness.heldLocationUri = null
+      act(() => secondDelivery())
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          id: ownerId,
+          kind: 'files',
+          files: { path: thirdFails ? second.gfsUri : third.gfsUri },
+        })
+      )
+    }
+  )
+
+  it.each(
+    (['failure', 'success', 'root', 'denied'] as const).flatMap(outcome =>
+      [false, true].map(deliverLocationFirst => ({ outcome, deliverLocationFirst }))
+    )
+  )(
+    'orders background refresh with newer $outcome and location-first=$deliverLocationFirst',
+    async ({ outcome, deliverLocationFirst }) => {
+      const initial = await resolveResource(
+        resolvedDirectory('11111111111111111111111111111111', 'Initial')
+      )
+      const second = await resolveResource(
+        resolvedDirectory('22222222222222222222222222222222', 'Second')
+      )
+      const third = await resolveResource(
+        resolvedDirectory('33333333333333333333333333333333', 'Third')
+      )
+      const { gfs } = installClerum([initial, second, third])
+      const denial = await gfsRouteFailureMessage(
+        client => client.resolveUri(third.gfsUri, 'fixture-token'),
+        403,
+        { code: 'forbidden', message: 'Third denied' }
+      )
+      let emitChange:
+        | ((event: {
+            type: 'scope.invalidated'
+            schemaVersion: 1
+            cursor: string
+            scopes: ['gfs']
+          }) => void)
+        | undefined
+      Object.assign(window.clerum, {
+        entityChanges: {
+          subscribe: vi.fn(async (handler: typeof emitChange) => {
+            emitChange = handler
+            return async () => undefined
+          }),
+        },
+      })
+      appHarness.useRealNavigationController = true
+      renderApp()
+      act(() => appHarness.controller.openFilesSectionWithReceipt(initial.gfsUri))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          kind: 'files',
+          files: { path: initial.gfsUri },
+        })
+      )
+      const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+      appHarness.heldLocationUri = second.gfsUri
+      const openLink = async (id: number, uri: string) => {
+        await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+        act(() =>
+          appHarness.emitGfsDeepLink?.({ id, uri, userNavigationGenerationAtActivation: 0 })
+        )
+        await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+        fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+      }
+      await openLink(96, second.gfsUri)
+      await waitFor(() => expect(appHarness.heldLocationDeliveries.length).toBeGreaterThan(0))
+      expect(
+        within(screen.getByRole('navigation', { name: 'File location' })).getByText('Second')
+      ).toBeTruthy()
+      const oldDelivery = appHarness.heldLocationDeliveries[0]!
+      const originalResolve = gfs.resolve.getMockImplementation()
+      if (!originalResolve) throw new Error('Expected GFS resolve producer')
+      const background = deferred<unknown>()
+      const backgroundStarted = vi.fn()
+      gfs.resolve.mockImplementation(uri => {
+        if (uri === second.gfsUri) {
+          backgroundStarted()
+          return background.promise
+        }
+        if (uri === third.gfsUri && outcome === 'failure') return Promise.reject(new Error(denial))
+        return originalResolve(uri)
+      })
+      await waitFor(() => expect(emitChange).toBeTypeOf('function'))
+      act(() =>
+        emitChange?.({
+          type: 'scope.invalidated',
+          schemaVersion: 1,
+          cursor: '00000000-0000-0000-0000-000000000003',
+          scopes: ['gfs'],
+        })
+      )
+      await waitFor(() => expect(backgroundStarted).toHaveBeenCalled())
+      if (outcome === 'failure' || outcome === 'success') {
+        await openLink(97, third.gfsUri)
+        if (outcome === 'failure') {
+          expect(
+            await screen.findByText('You do not have permission to open this resource.')
+          ).toBeTruthy()
+        } else {
+          await waitFor(() =>
+            expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+              id: ownerId,
+              kind: 'files',
+              files: { path: third.gfsUri },
+            })
+          )
+        }
+      } else if (outcome === 'root') {
+        fireEvent.click(screen.getByRole('button', { name: 'Shared with me' }))
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+            id: ownerId,
+            kind: 'files',
+            files: { path: null },
+          })
+        )
+      } else {
+        const deniedChildren = await gfsRouteFailureMessage(
+          client => client.listChildren(second.resourceId, 'fixture-token', { drive: 'main' }),
+          403,
+          { code: 'forbidden', message: 'Second folder denied' }
+        )
+        const originalChildren = gfs.listChildren.getMockImplementation()
+        if (!originalChildren) throw new Error('Expected children producer')
+        const denied = vi.fn()
+        gfs.listChildren.mockImplementation((resourceId, ...args) => {
+          if (resourceId === second.resourceId) {
+            denied()
+            return Promise.reject(new Error(deniedChildren))
+          }
+          return originalChildren(resourceId, ...args)
+        })
+        await act(async () => {
+          await desktopQueryClient.invalidateQueries({
+            predicate: query =>
+              query.queryKey.includes('children') && query.queryKey.includes(second.resourceId),
+            refetchType: 'active',
+          })
+        })
+        expect(denied).toHaveBeenCalled()
+        expect(await screen.findByText('This folder or file is no longer available.')).toBeTruthy()
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+            id: ownerId,
+            kind: 'files',
+            files: { path: null },
+          })
+        )
+      }
+      if (deliverLocationFirst) {
+        appHarness.heldLocationUri = null
+        act(() => oldDelivery())
+      }
+      await act(async () => {
+        background.resolve(second)
+        await background.promise
+      })
+      if (!deliverLocationFirst) {
+        appHarness.heldLocationUri = null
+        act(() => oldDelivery())
+      }
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          id: ownerId,
+          kind: 'files',
+          files: {
+            path:
+              outcome === 'failure' ? second.gfsUri : outcome === 'success' ? third.gfsUri : null,
+          },
+        })
+      )
+    }
+  )
+
+  it('models generated background and location delivery after newer navigation', async () => {
+    type Outcome = 'failure' | 'success' | 'root'
+    type Model = { locationQueued: boolean; backgroundQueued: boolean; drained: boolean }
+    type Real = {
+      scheduler: Scheduler
+      queueLocation: () => void
+      queueBackground: () => void
+      drain: () => Promise<void>
+    }
+    class QueueLocation implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return !model.locationQueued && !model.drained
+      }
+      async run(model: Model, real: Real) {
+        real.queueLocation()
+        model.locationQueued = true
+      }
+      toString() {
+        return 'queue committed Q2 delivery'
+      }
+    }
+    class QueueBackground implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return !model.backgroundQueued && !model.drained
+      }
+      async run(model: Model, real: Real) {
+        real.queueBackground()
+        model.backgroundQueued = true
+      }
+      toString() {
+        return 'queue background resolution'
+      }
+    }
+    class Drain implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.locationQueued && model.backgroundQueued && !model.drained
+      }
+      async run(model: Model, real: Real) {
+        await real.drain()
+        model.drained = true
+      }
+      toString() {
+        return 'drain both completions'
+      }
+    }
+    const arbitraryCommands = fc
+      .commands(
+        [
+          fc.constant(new QueueLocation()),
+          fc.constant(new QueueBackground()),
+          fc.constant(new Drain()),
+        ],
+        { maxCommands: 7 }
+      )
+      .filter(generated => {
+        const names = [...generated].map(command => command.toString())
+        const location = names.indexOf('queue committed Q2 delivery')
+        const background = names.indexOf('queue background resolution')
+        const drain = names.indexOf('drain both completions')
+        return location >= 0 && background >= 0 && drain > location && drain > background
+      })
+    const coverage: Record<Outcome, number> = { failure: 0, success: 0, root: 0 }
+    const orders: Record<string, number> = {}
+    const mismatches: Array<{ outcome: Outcome; expected: string | null; actual: string | null }> =
+      []
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.constantFrom<Outcome>('failure', 'success', 'root'),
+        arbitraryCommands,
+        async (scheduler, outcome, commands) => {
+          cleanup()
+          vi.restoreAllMocks()
+          mockSidebarBounds()
+          desktopQueryClient.clear()
+          appHarness.controller = makeController()
+          appHarness.useRealNavigationController = true
+          appHarness.heldLocationUri = null
+          appHarness.heldLocationDeliveries = []
+          const initial = await resolveResource(
+            resolvedDirectory('11111111111111111111111111111111', 'Initial')
+          )
+          const second = await resolveResource(
+            resolvedDirectory('22222222222222222222222222222222', 'Second')
+          )
+          const third = await resolveResource(
+            resolvedDirectory('33333333333333333333333333333333', 'Third')
+          )
+          const { gfs } = installClerum([initial, second, third])
+          const denial = await gfsRouteFailureMessage(
+            client => client.resolveUri(third.gfsUri, 'fixture-token'),
+            403,
+            { code: 'forbidden', message: 'Third denied' }
+          )
+          let emitChange:
+            | ((event: {
+                type: 'scope.invalidated'
+                schemaVersion: 1
+                cursor: string
+                scopes: ['gfs']
+              }) => void)
+            | undefined
+          Object.assign(window.clerum, {
+            entityChanges: {
+              subscribe: vi.fn(async (handler: typeof emitChange) => {
+                emitChange = handler
+                return async () => undefined
+              }),
+            },
+          })
+          renderApp()
+          act(() => appHarness.controller.openFilesSectionWithReceipt(initial.gfsUri))
+          await waitFor(() =>
+            expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+              kind: 'files',
+              files: { path: initial.gfsUri },
+            })
+          )
+          const ownerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)!.id
+          const openLink = async (id: number, uri: string) => {
+            await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+            act(() =>
+              appHarness.emitGfsDeepLink?.({ id, uri, userNavigationGenerationAtActivation: 0 })
+            )
+            await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+            fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+          }
+          appHarness.heldLocationUri = second.gfsUri
+          await openLink(101, second.gfsUri)
+          await waitFor(() => expect(appHarness.heldLocationDeliveries.length).toBeGreaterThan(0))
+          expect(
+            within(screen.getByRole('navigation', { name: 'File location' })).getByText('Second')
+          ).toBeTruthy()
+          const oldDelivery = appHarness.heldLocationDeliveries[0]!
+          const originalResolve = gfs.resolve.getMockImplementation()
+          if (!originalResolve) throw new Error('Expected resolve producer')
+          const background = deferred<unknown>()
+          const backgroundStarted = vi.fn()
+          gfs.resolve.mockImplementation(uri => {
+            if (uri === second.gfsUri) {
+              backgroundStarted()
+              return background.promise
+            }
+            if (uri === third.gfsUri && outcome === 'failure')
+              return Promise.reject(new Error(denial))
+            return originalResolve(uri)
+          })
+          await waitFor(() => expect(emitChange).toBeTypeOf('function'))
+          act(() =>
+            emitChange?.({
+              type: 'scope.invalidated',
+              schemaVersion: 1,
+              cursor: '00000000-0000-0000-0000-000000000003',
+              scopes: ['gfs'],
+            })
+          )
+          await waitFor(() => expect(backgroundStarted).toHaveBeenCalled())
+          if (outcome === 'root') {
+            fireEvent.click(screen.getByRole('button', { name: 'Shared with me' }))
+            await waitFor(() =>
+              expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+                id: ownerId,
+                files: { path: null },
+              })
+            )
+          } else {
+            await openLink(102, third.gfsUri)
+            if (outcome === 'failure')
+              expect(
+                await screen.findByText('You do not have permission to open this resource.')
+              ).toBeTruthy()
+            else
+              await waitFor(() =>
+                expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+                  id: ownerId,
+                  files: { path: third.gfsUri },
+                })
+              )
+          }
+          const delivered: string[] = []
+          const tasks: Promise<void>[] = []
+          const model: Model = { locationQueued: false, backgroundQueued: false, drained: false }
+          const real: Real = {
+            scheduler,
+            queueLocation: () => {
+              tasks.push(
+                scheduler.scheduleFunction(async () => {
+                  delivered.push('location')
+                  appHarness.heldLocationUri = null
+                  oldDelivery()
+                })()
+              )
+            },
+            queueBackground: () => {
+              tasks.push(
+                scheduler.scheduleFunction(async () => {
+                  delivered.push('background')
+                  background.resolve(second)
+                  await background.promise
+                })()
+              )
+            },
+            drain: async () => {
+              await act(async () => {
+                await scheduler.waitAll()
+                await Promise.all(tasks)
+              })
+            },
+          }
+          await fc.asyncModelRun(() => ({ model, real }), commands)
+          expect(model.drained).toBe(true)
+          expect(delivered).toHaveLength(2)
+          const order = delivered.join('-')
+          orders[order] = (orders[order] ?? 0) + 1
+          coverage[outcome]++
+          const expected =
+            outcome === 'failure' ? second.gfsUri : outcome === 'success' ? third.gfsUri : null
+          const owner = appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === ownerId)
+          if (!owner || owner.kind !== 'files' || !owner.files)
+            throw new Error('Files owner disappeared')
+          const actual = owner.files.path
+          if (actual !== expected) mismatches.push({ outcome, expected, actual })
+        }
+      ),
+      { numRuns: 24, maxSkipsPerRun: 1000, seed: 108516 }
+    )
+    process.stdout.write(
+      `Location model coverage ${JSON.stringify({ coverage, orders, mismatches })}\n`
+    )
+    expect(Object.values(coverage).every(count => count > 0)).toBe(true)
+    expect(orders['location-background']).toBeGreaterThan(0)
+    expect(orders['background-location']).toBeGreaterThan(0)
+    expect(mismatches).toEqual([])
+  }, 60000)
+
   it('lets a confirmed GFS deep link replace the action owner expected location', async () => {
     const parent = await resolveResource(
       resolvedDirectory('11111111111111111111111111111111', 'Vault')
@@ -4401,6 +7098,45 @@ describe('App → Files action lifecycle integration', () => {
     expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
     expect(within(menu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
     expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('does not copy invalid image bytes from a real Sidebar copy request', async () => {
+    const resource = await resolveResource(
+      resolvedFile('66666666666666666666666666666666', 'broken.png')
+    )
+    const { gfs } = installClerum([resource])
+    gfs.downloadPreview.mockImplementation(async () =>
+      previewDownloadResult(resource, new Uint8Array([1, 2, 3]).buffer)
+    )
+    const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL')
+    const write = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { write } })
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:invalid'),
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    vi.stubGlobal('ClipboardItem', class ClipboardItem {})
+    try {
+      renderApp()
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      await findResourceTreeRow(resource.name)
+      await chooseRowAction(resource.name, 'Copy content')
+      await expectActionAtConsumer(
+        appHarness.previewPagePendingActions,
+        resource.gfsUri,
+        'copy-content'
+      )
+      const image = await screen.findByAltText('Preview of broken.png')
+      fireEvent.error(image)
+      expect(await screen.findByText('This image could not be displayed')).toBeTruthy()
+      await act(async () => {})
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+      if (revokeDescriptor) Object.defineProperty(URL, 'revokeObjectURL', revokeDescriptor)
+      else Reflect.deleteProperty(URL, 'revokeObjectURL')
+    }
   })
 
   it('keeps copy-content owned by the matching Preview page', async () => {

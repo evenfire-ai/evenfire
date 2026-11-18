@@ -14,7 +14,13 @@ import {
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
-import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  gfsRouteFailureMessage,
+  previewDownloadResult,
+  resolveDeniedMessage,
+  resolveResource,
+  resolvedFile,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
 
@@ -1069,6 +1075,130 @@ describe('FilePreviewPage', () => {
     fireEvent.click(copyContent)
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('data:image/png;base64,AQID'))
+  })
+
+  it('copies a sidebar image only after its current image load succeeds', async () => {
+    const resource = await resolveResource(
+      resolvedFile('2123456789abcdef0123456789abcdef', 'valid.png')
+    )
+    const bytes = await previewDownloadResult(resource, new Uint8Array([137, 80, 78, 71]).buffer)
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    const write = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { write } })
+    vi.stubGlobal('ClipboardItem', class ClipboardItem {})
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubGfs({ downloadPreview: async () => bytes, resolve: async () => resource })
+    const handled = vi.fn()
+    try {
+      render(
+        <FilePreviewPage
+          gfsUri={resource.gfsUri}
+          fileName="valid.png"
+          fileKind="image"
+          mimeType="image/png"
+          byteLength={4}
+          pendingResourceAction={{ id: 44, targetUri: resource.gfsUri, actionId: 'copy-content' }}
+          onPendingResourceActionHandled={handled}
+        />
+      )
+      const image = await screen.findByAltText('Preview of valid.png')
+      expect(write).not.toHaveBeenCalled()
+      fireEvent.load(image)
+      await waitFor(() => expect(write).toHaveBeenCalledTimes(1))
+      expect(handled).toHaveBeenCalledWith(44)
+    } finally {
+      vi.unstubAllGlobals()
+      if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
+  })
+
+  it('does not copy sidebar image content before the current image decodes', async () => {
+    const resource = await resolveResource(
+      resolvedFile('1123456789abcdef0123456789abcdef', 'invalid.png')
+    )
+    const bytes = await previewDownloadResult(resource, new Uint8Array([1, 2, 3]).buffer)
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    const write = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { write } })
+    vi.stubGlobal('ClipboardItem', class ClipboardItem {})
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubGfs({ downloadPreview: async () => bytes, resolve: async () => resource })
+    const handled = vi.fn()
+    try {
+      render(
+        <FilePreviewPage
+          gfsUri={resource.gfsUri}
+          fileName="invalid.png"
+          fileKind="image"
+          mimeType="image/png"
+          byteLength={3}
+          pendingResourceAction={{ id: 43, targetUri: resource.gfsUri, actionId: 'copy-content' }}
+          onPendingResourceActionHandled={handled}
+        />
+      )
+      const image = await screen.findByAltText('Preview of invalid.png')
+      fireEvent.error(image)
+      expect(await screen.findByText('This image could not be displayed')).toBeTruthy()
+      await act(async () => {})
+      expect(handled).toHaveBeenCalledWith(43)
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+      if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
+  })
+
+  it('retires a failed sidebar copy before a successful Markdown refresh', async () => {
+    const resource = await resolveResource(
+      resolvedFile('0123456789abcdef0123456789abcdef', 'retry.md')
+    )
+    const bytes = await previewDownloadResult(
+      resource,
+      new TextEncoder().encode('# Recovered document').buffer
+    )
+    const failure = await gfsRouteFailureMessage(
+      client => client.download(resource.gfsUri, 'fixture-token', { maxBytes: 2_097_152 }),
+      500,
+      { code: 'internal', message: 'Initial download failed' }
+    )
+    const downloadPreview = vi
+      .fn()
+      .mockRejectedValueOnce(new Error(failure))
+      .mockResolvedValue(bytes)
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubGfs({ downloadPreview, resolve: async () => resource })
+    const handled = vi.fn()
+    const titlebar = document.createElement('div')
+    document.body.appendChild(titlebar)
+    try {
+      render(
+        <FilePreviewPage
+          gfsUri={resource.gfsUri}
+          fileName="retry.md"
+          fileKind="markdown"
+          byteLength={3}
+          titlebarLeadingTarget={titlebar}
+          pendingResourceAction={{ id: 42, targetUri: resource.gfsUri, actionId: 'copy-content' }}
+          onPendingResourceActionHandled={handled}
+        />
+      )
+      expect(await screen.findByText(/Initial download failed/)).toBeTruthy()
+      expect(writeText).not.toHaveBeenCalled()
+      fireEvent.click(within(titlebar).getByRole('button', { name: 'Refresh' }))
+      expect(await screen.findByRole('heading', { name: 'Recovered document' })).toBeTruthy()
+      await act(async () => {})
+      expect(handled).toHaveBeenCalledWith(42)
+      expect(writeText).not.toHaveBeenCalled()
+    } finally {
+      titlebar.remove()
+      if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   it('refreshes by revalidating and reloading the exact preview resource', async () => {
