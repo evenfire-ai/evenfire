@@ -217,7 +217,7 @@ describe('fixtures', () => {
     }
   })
 
-  it('refusal fixtures carry the notice the admission steps assign to their reason', () => {
+  it('refusal fixtures carry the notice pinned for their reason', () => {
     // The validator accepts any notice with any reason (index.cjs checks the two vocabularies independently); this table pins the notice each fixture carries, not a rule the validator enforces.
     const notice = {
       receipt_invalid: 'none', not_eligible_bot: 'none',
