@@ -428,7 +428,7 @@ describe('D34 PR1 migration runner', () => {
   // gfsWatch.authzSessionTriggers.realPostgres.integration.test.ts; these cases
   // pin the runner's bounds around it.
   describe('lock retries', () => {
-    const retried = PR1_MIGRATION_VERSIONS[PR1_MIGRATION_VERSIONS.length - 1]
+    const retried = '0147_gfs_watch_session_users_notify'
 
     function lockFailingRun(failures: Array<{ code?: string }>, lockRetries?: number) {
       const transactions: string[] = []
