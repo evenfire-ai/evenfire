@@ -36,7 +36,7 @@ make deploy-playwright
 
 See [`mcpserver.yaml`](./mcpserver.yaml) for the full CRD spec. Key fields:
 
-- **Image**: `ghcr.io/evenfire-ai/playwright-server@sha256:fc603bbc05d216ca9394940463e5e216d0a48732c24555fb9b67d20775fccf73` (digest-pinned build of this Dockerfile)
+- **Image**: `ghcr.io/evenfire-ai/playwright-server@sha256:2e5ef0183d6dda21e0797ef32f1cbba2e07e38ec93b67bd3675079c5729ffa74` (verified Node and Chromium image)
 - **Namespace**: `mcp-server`
 - **Transport**: StreamableHTTP at `http://playwright-server.mcp-server.svc.cluster.local:8931/mcp`
 - **Resources**: 512Mi/250m request, 1Gi/1000m limit
@@ -61,8 +61,10 @@ For new builds, the Dockerfile keeps the pinned upstream application and
 system dependencies, replaces Node with the official digest-pinned 24.22.3 glibc
 binary, and installs Chromium at build time using the bundled Playwright CLI.
 This is temporary until a patched official Playwright image is available. The
-deployment manifest still pins the published build with Node 24.22.1.
-Advance its digest and the cluster probe together once the updated image is published.
+deployment manifest pins the multi-architecture image built from the combined
+[security candidate](https://github.com/evenfire-ai/evenfire/commit/9a461918d4ac0538a9891d872d6f27630c0e25e3)
+with Node 24.22.3 and Chrome Headless Shell 157.0.8103.78. The cluster probe
+checks the pinned image identity, Node version, and Chromium major version.
 
 `test/runtime-smoke.cjs` runs inside the isolated Linux container. It starts the
 real MCP HTTP server and Chromium, navigates to a loopback fixture, clicks the
