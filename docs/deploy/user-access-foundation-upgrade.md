@@ -183,6 +183,19 @@ before this release.
   when a first password was set from an invitation, and the session from which
   a user changed their password in Profile UI. No other session is affected by
   the backfill.
+- `0139_gfs_resource_changed_notify` creates (or replaces) the function
+  `gfs_resource_changed_notify()` and the `AFTER INSERT OR UPDATE OR DELETE`
+  row trigger of the same name on the existing table `gfs_resources`, in one
+  bounded transaction. `CREATE OR REPLACE FUNCTION` and the `REVOKE` on it take
+  no table lock. `CREATE OR REPLACE TRIGGER` takes `SHARE ROW EXCLUSIVE` on
+  `gfs_resources` until `0139`'s transaction commits: inserts, updates and
+  deletes on `gfs_resources` (from control-api and the GFS controller) are
+  blocked for that time, plain reads are not. The wait for that lock is bounded
+  at 10 s (`lock_timeout`), with no retry inside the Job, so a transaction
+  that has written to `gfs_resources` and stays open longer fails that Job
+  attempt. While the migration waits, later writes to `gfs_resources` queue
+  behind it. The migration neither scans nor rewrites the table, so its duration
+  does not depend on its size.
 - `0140_gfs_authz_grants_notify` through `0145_gfs_watch_session_users_notify`
   each run in their own bounded transaction (10 s `lock_timeout`, 15 s
   `statement_timeout`) and install `AFTER ROW` triggers on one existing table
