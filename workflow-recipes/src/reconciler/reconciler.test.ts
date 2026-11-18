@@ -47,6 +47,9 @@ import {
   resolveScopedStatefulSetResourceName,
   resolveScopedWorkloadResourceName,
   resolveWorkloadRuntimeResourceName,
+  uiIngressPolicyName,
+  workloadEgressPolicyName,
+  workloadIngressPolicyName,
 } from './resourceBuilder'
 import { deniedSecretRevocationDigest } from './secretOwnership'
 import {
@@ -57,6 +60,28 @@ import {
 } from './workflowRecipeReconciler'
 
 // ─── Mock K8s client ────────────────────────────────────────────────
+
+/**
+ * Issue #1529 — the objects the list doubles answer with, by
+ * `<namespace>/<kind>`. A list answers with them without applying its label
+ * selector, so the reconciler's own per-object check decides. Emptied before
+ * every test.
+ */
+const listedObjects = new Map<string, Array<Record<string, unknown>>>()
+
+function seedListedObjects(
+  namespace: string,
+  kind: string,
+  objects: Array<Record<string, unknown>>
+): void {
+  listedObjects.set(`${namespace}/${kind}`, objects)
+}
+
+function listAnswer(kind: string) {
+  return async ({ namespace }: { namespace: string }) => ({
+    items: structuredClone(listedObjects.get(`${namespace}/${kind}`) ?? []),
+  })
+}
 
 const mockAppsApi = {
   createNamespacedDeployment: vi.fn().mockResolvedValue({}),
@@ -72,6 +97,9 @@ const mockAppsApi = {
   readNamespacedDaemonSet: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
   replaceNamespacedDaemonSet: vi.fn().mockResolvedValue({}),
   deleteNamespacedDaemonSet: vi.fn().mockResolvedValue({}),
+  listNamespacedDeployment: vi.fn().mockResolvedValue({ items: [] }),
+  listNamespacedStatefulSet: vi.fn().mockResolvedValue({ items: [] }),
+  listNamespacedDaemonSet: vi.fn().mockResolvedValue({ items: [] }),
 }
 
 const mockBatchApi = {
@@ -83,6 +111,8 @@ const mockBatchApi = {
   readNamespacedJob: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
   replaceNamespacedJob: vi.fn().mockResolvedValue({}),
   deleteNamespacedJob: vi.fn().mockResolvedValue({}),
+  listNamespacedCronJob: vi.fn().mockResolvedValue({ items: [] }),
+  listNamespacedJob: vi.fn().mockResolvedValue({ items: [] }),
 }
 
 const mockCoreApi = {
@@ -93,6 +123,7 @@ const mockCoreApi = {
   replaceNamespacedService: vi.fn().mockResolvedValue({}),
   deleteNamespacedService: vi.fn().mockResolvedValue({}),
   deleteCollectionNamespacedService: vi.fn().mockResolvedValue({}),
+  listNamespacedService: vi.fn().mockResolvedValue({ items: [] }),
   createNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
   readNamespacedPersistentVolumeClaim: vi.fn().mockRejectedValue({ code: 404 }),
   deleteNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
@@ -118,8 +149,8 @@ async function echoPatchedStatus({
 
 /**
  * Status merge of the CR-store fakes: top-level keys replace, as before; the
- * issue #1349 run records merge by key as a JSON merge patch does, and a null
- * (top-level or per key) deletes.
+ * issue #1349 run records and the workload name ledger (issue #1529) merge by
+ * key as a JSON merge patch does, and a null (top-level or per key) deletes.
  */
 function mergeStatusPatch(
   previous: WorkflowRecipeCRD['status'],
@@ -127,7 +158,11 @@ function mergeStatusPatch(
 ): WorkflowRecipeCRD['status'] {
   const previousStatus = (previous ?? {}) as Record<string, unknown>
   const nextStatus: Record<string, unknown> = { ...previousStatus, ...patch }
-  for (const recordKey of ['terminalRunTeardown', 'secretOwnershipRevocations']) {
+  for (const recordKey of [
+    'terminalRunTeardown',
+    'secretOwnershipRevocations',
+    'workloadInstances',
+  ]) {
     const patched = patch?.[recordKey]
     if (patched === undefined || patched === null) continue
     const merged: Record<string, unknown> = {
@@ -149,7 +184,10 @@ function mergeStatusPatch(
  * Issue #1349 — a one-recipe CR store: the status patch merges into it and
  * GET answers from it, so pass 2 of a test reads what pass 1 stored. A JSON
  * Patch status body (an array) is applied atomically with `applyJsonPatch`; an
- * operation that does not apply throws `{ code: 422 }` and stores nothing. `prune`
+ * operation that does not apply throws a 422 whose body is the API server's
+ * generic `Status` ("the server rejected our request due to an error in our
+ * request", reason `Invalid`, the patch error in `details.causes[0].message`)
+ * and stores nothing. `prune`
  * drops status keys as an API server with an older CRD does; a dotted key
  * (`terminalRunTeardown.noSecretBearingWorkloads`) drops one field of a record.
  * `onGet` is called with a copy of the stored recipe on every GET of it: it
@@ -177,12 +215,24 @@ function installRecipeStore(
     if (Array.isArray(body)) {
       // A JSON Patch on the status subresource: applied atomically to the stored
       // object; an operation that does not apply (a failed `test`, a missing
-      // parent) is a 422, as from the API server, and stores nothing.
+      // parent) is a 422 with the API server's generic body, and stores nothing.
       let patched: { status?: Record<string, unknown> }
       try {
         patched = applyJsonPatch({ status: structuredClone(live.status ?? {}) }, body)
       } catch (error) {
-        throw { code: 422, message: (error as Error).message }
+        throw {
+          code: 422,
+          body: {
+            kind: 'Status',
+            status: 'Failure',
+            reason: 'Invalid',
+            code: 422,
+            message: 'the server rejected our request due to an error in our request',
+            details: {
+              causes: [{ reason: 'UnexpectedServerResponse', message: (error as Error).message }],
+            },
+          },
+        }
       }
       const status = patched.status ?? {}
       for (const key of options.prune ?? []) {
@@ -593,6 +643,11 @@ function jsonPatchOpAt(body: unknown, path: string): JsonPatchOperation | undefi
 }
 
 const NO_SECRET_BEARING_FACT_PATH = '/status/terminalRunTeardown/noSecretBearingWorkloads'
+/** The `error` line of a status record (or the terminal fact) that was not stored. */
+const RECORD_NOT_STORED_ERROR = 'Run status record was not stored; requeueing'
+/** R2-L4 — the `warn` line of a fact patch the API server did not apply. */
+const FACT_NOT_APPLIED_WARNING =
+  'Terminal teardown record changed since it was read; the fact was not added; requeueing'
 
 /**
  * The bodies of the status patches that write the terminal
@@ -732,6 +787,19 @@ function readsOf(read: ReturnType<typeof vi.fn>, name: string, namespace: string
 describe('WorkflowRecipeReconciler', () => {
   let reconciler: WorkflowRecipeReconciler
 
+  /**
+   * Publish a pass's result as the watcher does: patch the status only when
+   * shouldPatchRecipeStatus says the result changed it. Returns whether it patched.
+   */
+  async function publishAsWatcher(
+    recipe: WorkflowRecipeCRD,
+    result: Parameters<typeof shouldPatchRecipeStatus>[1]
+  ): Promise<boolean> {
+    if (!shouldPatchRecipeStatus(recipe, result)) return false
+    await reconciler.patchStatus(recipe, result)
+    return true
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
     mockVerifyWorkflowRunProvenance.mockResolvedValue('verified')
@@ -836,6 +904,20 @@ describe('WorkflowRecipeReconciler', () => {
     mockNetworkingApi.deleteNamespacedNetworkPolicy.mockResolvedValue({})
     mockNetworkingApi.listNamespacedNetworkPolicy.mockReset()
     mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+    // Issue #1529 — the lists of the removed-workload prune answer from
+    // `listedObjects`; no test starts with a seeded object.
+    listedObjects.clear()
+    mockAppsApi.listNamespacedDeployment.mockReset().mockImplementation(listAnswer('Deployment'))
+    mockAppsApi.listNamespacedStatefulSet.mockReset().mockImplementation(listAnswer('StatefulSet'))
+    mockAppsApi.listNamespacedDaemonSet.mockReset().mockImplementation(listAnswer('DaemonSet'))
+    mockBatchApi.listNamespacedCronJob.mockReset().mockImplementation(listAnswer('CronJob'))
+    mockBatchApi.listNamespacedJob.mockReset().mockImplementation(listAnswer('Job'))
+    mockCoreApi.listNamespacedService.mockReset().mockImplementation(listAnswer('Service'))
+    mockCustomApi.listNamespacedCustomObject
+      .mockReset()
+      .mockImplementation(async (args: { namespace: string; plural?: string }) =>
+        args.plural === 'mcpservers' ? listAnswer('McpServer')(args) : { items: [] }
+      )
     const kc = new k8s.KubeConfig()
     reconciler = new WorkflowRecipeReconciler(kc, undefined, {
       verifyWorkflowRunProvenance: mockVerifyWorkflowRunProvenance,
@@ -3879,16 +3961,24 @@ describe('WorkflowRecipeReconciler', () => {
             steps: [{ id: 'run', run: snippetRun() }],
           },
         })
-        const deployWorkflowWorkloads = () =>
-          (
-            reconciler as unknown as {
-              deployWorkflowWorkloads: (
-                r: WorkflowRecipeCRD,
-                n: string,
-                oauthBrokerTokenReapedEarly: boolean
-              ) => Promise<unknown>
-            }
-          ).deployWorkflowWorkloads(recipe, recipe.metadata.name, false)
+        // Issue #1528 — the deploy pass makes the single live read and hands it
+        // to deployWorkflowWorkloads; this direct call does the same.
+        const internals = reconciler as unknown as {
+          readLiveRecipeForDeployPass: (r: WorkflowRecipeCRD) => Promise<unknown>
+          deployWorkflowWorkloads: (
+            r: WorkflowRecipeCRD,
+            n: string,
+            oauthBrokerTokenReapedEarly: boolean,
+            deployRead: unknown
+          ) => Promise<unknown>
+        }
+        const deployWorkflowWorkloads = async () =>
+          internals.deployWorkflowWorkloads(
+            recipe,
+            recipe.metadata.name,
+            false,
+            await internals.readLiveRecipeForDeployPass(recipe)
+          )
         await deployWorkflowWorkloads()
         const created = onlyPost(mockCoreApi.createNamespacedService)
         const name = created.body.metadata.name
@@ -4850,6 +4940,121 @@ describe('WorkflowRecipeReconciler', () => {
         const annotations = (await stored(name)).spec!.template.metadata?.annotations ?? {}
         expect(annotations['kubectl.kubernetes.io/restartedAt']).toBe('2026-11-16T10:00:00Z')
         expect(annotations).not.toHaveProperty('example.com/injected')
+      })
+
+      // Issue #1530 — the API server stores a quantity in its canonical spelling, so a
+      // claim template size is compared by amount.
+      const withClaim = (size: string, replicas = 1): StsWorkload =>
+        ({
+          id: 'db',
+          type: 'statefulset',
+          image: 'postgres:16',
+          replicas,
+          volumeClaimTemplates: [{ name: 'data', size, accessMode: 'ReadWriteOnce' }],
+        }) as StsWorkload
+      const storeClaimSize = async (name: string, size: string) => {
+        const live = await stored(name)
+        live.spec!.volumeClaimTemplates![0].spec!.resources!.requests!.storage = size
+        await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+      }
+
+      it.each([
+        ['1024Mi', '1Gi'],
+        ['1.5Gi', '1536Mi'],
+        ['0.5Gi', '512Mi'],
+        ['2048Mi', '2Gi'],
+      ])(
+        'T-1530-2: a claim template size %s stored as %s is not immutable drift (issue #1530)',
+        async (specSize, storedSize) => {
+          const name = stsNameOf(withClaim(specSize))
+          await ensure(withClaim(specSize))
+          await storeClaimSize(name, storedSize)
+          mockAppsApi.patchNamespacedStatefulSet.mockClear()
+
+          await ensure(withClaim(specSize, 2))
+
+          expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+          expect((await stored(name)).spec!.replicas).toBe(2)
+        }
+      )
+
+      it.each([
+        ['2Gi', '1Gi'],
+        ['1G', '1Gi'],
+        ['plenty', '1Gi'],
+        ['1e3', '1k'],
+        // 65 characters, over MAX_QUANTITY_LENGTH: the same amount as 1Gi, still compared as text.
+        [`1.${'0'.repeat(61)}Gi`, '1Gi'],
+      ])(
+        'T-1530-3: a claim template size %s against a stored %s is still immutable drift (issue #1530)',
+        async (specSize, storedSize) => {
+          const name = stsNameOf(withClaim(specSize))
+          await ensure(withClaim(specSize))
+          await storeClaimSize(name, storedSize)
+          mockAppsApi.patchNamespacedStatefulSet.mockClear()
+
+          await expect(ensure(withClaim(specSize, 2))).rejects.toMatchObject({
+            name: 'ImmutableStatefulSetDriftError',
+            condition: {
+              message: expect.stringContaining('spec.volumeClaimTemplates'),
+            },
+          })
+          expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
+          expect((await stored(name)).spec!.replicas).toBe(1)
+        }
+      )
+
+      // Issue #1518 — the drift error says whether the stored spec hash is the
+      // desired one, and only its condition names the last writer.
+      const driftOnStaleHash = async (managedFields: k8s.V1ManagedFieldsEntry[] | undefined) => {
+        const oldWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:15' }
+        const newWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:16' }
+        const name = stsNameOf(oldWorkload)
+        await ensure(oldWorkload)
+        const live = await stored(name)
+        live.spec!.serviceName = 'renamed-by-hand'
+        live.metadata!.managedFields = managedFields
+        await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+        const error = await ensure(newWorkload).then(
+          () => undefined,
+          (rejection: unknown) => rejection as Error & { condition: { message: string } }
+        )
+        expect(error?.name).toBe('ImmutableStatefulSetDriftError')
+        const head =
+          `ImmutableStatefulSetDrift: StatefulSet "${name}" in ${namespace} has immutable drift ` +
+          'in spec.serviceName; WRC will not full-replace StatefulSets. '
+        const tail = 'Recreate through an explicit data-safe migration.'
+        for (const text of [error!.message, error!.condition.message]) {
+          expect(text.startsWith(head)).toBe(true)
+          expect(text.endsWith(tail)).toBe(true)
+          expect(text).toContain('The stored spec hash is not the desired one')
+        }
+        return error!
+      }
+
+      it('T-1518-4 (i): a drift on a stale hash says so, and a live object without managedFields names no writer (issue #1518)', async () => {
+        const error = await driftOnStaleHash(undefined)
+
+        expect(error.condition.message).toContain('The live object records no field manager.')
+        expect(error.message).not.toContain('field manager')
+      })
+
+      it('T-1518-4 (ii): the last writer is named in the condition message only, so a manager name is never classified as retryable (issue #1518)', async () => {
+        const error = await driftOnStaleHash([
+          {
+            manager: 'connect ETIMEDOUT',
+            operation: 'Update',
+            time: new Date('2026-11-17T10:00:00Z'),
+          },
+        ])
+
+        // Witness: the same error names the manager in its condition message.
+        expect(error.condition.message).toContain(
+          'Last writer of the live object (metadata.managedFields): "connect ETIMEDOUT". '
+        )
+        expect(error.message).not.toContain('connect ETIMEDOUT')
+        expect(isRetryableInfraError(error.message)).toBe(false)
+        expect(isRetryableInfraError('connect ETIMEDOUT')).toBe(true)
       })
 
       it('T-P1-4: an existing StatefulSet without annotations gets the hash annotation', async () => {
@@ -8481,8 +8686,8 @@ describe('WorkflowRecipeReconciler', () => {
       .mockRejectedValueOnce({ code: 404 })
       .mockRejectedValueOnce({ code: 404 })
       .mockRejectedValueOnce({ code: 404 })
-      // Issue #1349 (B-M1) — the live read that clears revocation entries before
-      // the render.
+      // Issue #1349 (B-M1) — the pass's single live read (issue #1528), whose
+      // object the revocation clear uses before the render.
       .mockRejectedValueOnce({ code: 404 })
 
     const recipe = makeRecipe({
@@ -12689,7 +12894,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(revocationPatches()).toHaveLength(0)
     })
 
-    it('T2.4 the non-workflow loop revokes a denied workload once per denied Secret version', async () => {
+    it('T2.4 the non-workflow revocation round revokes a denied workload once per denied Secret version', async () => {
       denySecrets({ 'qa-creds': '7' })
       const store = installRecipeStore(
         makeRecipe({ spec: { workloads: [deniedDeployment('qa-api', 'qa-creds')] } })
@@ -12714,9 +12919,504 @@ describe('WorkflowRecipeReconciler', () => {
       expect(second.requeueAfterMs).toBeUndefined()
     })
 
+    // Row (c) — a deploy pass revokes every denied workload before it delegates or
+    // renders anything, and a failed revocation does not stop the others. Each
+    // pass is driven as the watcher drives it.
+    describe('row (c): a failed revocation does not stop the other denied workloads', () => {
+      type RecipeStore = ReturnType<typeof installRecipeStore>
+
+      const DEPLOYING = {
+        phase: 'deploying',
+        message: 'Workflow infrastructure created',
+        workflowPhase: 'initializing',
+      }
+
+      /** Secret name -> owner label and resourceVersion; other Secrets 404. */
+      function secrets(entries: Record<string, { owner: string; rv: string }>): void {
+        mockCoreApi.readNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => {
+          const entry = entries[name]
+          if (entry === undefined) throw { code: 404 }
+          return {
+            metadata: {
+              resourceVersion: entry.rv,
+              labels: { 'clerum.io/owner-recipe': entry.owner },
+            },
+            data: { token: 'eA==' },
+          }
+        })
+      }
+      const owned = (...names: string[]) =>
+        Object.fromEntries(names.map(name => [name, { owner: 'test-recipe', rv: '5' }]))
+      const denied = (...names: string[]) =>
+        Object.fromEntries(names.map(name => [name, { owner: 'some-other-recipe', rv: '6' }]))
+
+      const db = (overrides: Record<string, unknown> = {}): WorkloadDef =>
+        ({
+          id: 'db',
+          type: 'statefulset',
+          image: 'postgres:16',
+          port: 5432,
+          envSecret: { name: 'db-creds', keys: [{ secretKey: 'token', envVar: 'TOKEN' }] },
+          ...overrides,
+        }) as WorkloadDef
+      const after = (workload: WorkloadDef, dependsOn: string[]): WorkloadDef =>
+        ({ ...workload, dependsOn }) as WorkloadDef
+
+      /** Deployment creates and replaces of one workload. */
+      const deploymentWrites = (workloadId: string) =>
+        [
+          ...mockAppsApi.createNamespacedDeployment.mock.calls,
+          ...mockAppsApi.replaceNamespacedDeployment.mock.calls,
+        ].filter(([arg]) => arg.body?.metadata?.labels?.['clerum.io/workload'] === workloadId)
+          .length
+      const statefulSetReadsOf = (name: string) =>
+        mockAppsApi.readNamespacedStatefulSet.mock.calls.filter(([arg]) => arg.name === name).length
+      const secretReads = () => mockCoreApi.readNamespacedSecret.mock.calls.length
+      const storedCondition = (store: RecipeStore, type: string) =>
+        store.current().status?.conditions?.find(c => c.type === type)
+      const revocations = (store: RecipeStore) =>
+        store.current().status?.secretOwnershipRevocations ?? {}
+
+      /** One watcher pass: reconcile the stored recipe, then publish its result. */
+      async function pass(store: RecipeStore, recipe: WorkflowRecipeCRD = store.current()) {
+        const result = await reconciler.reconcile(recipe)
+        const patched = await publishAsWatcher(recipe, result)
+        return { result, patched }
+      }
+
+      /**
+       * Passes 1 and 2 with every Secret owned: `db` and `qa-api` (after `db`) are
+       * created with their credentials, and between the passes the stored `db`
+       * StatefulSet is given another `serviceName`, an immutable drift. The
+       * spec-hash gate skips `db` on pass 2, so the drift is not noticed yet.
+       */
+      async function setUpLiveRun(qaSecret: Record<string, { owner: string; rv: string }>) {
+        const inner = stubInner(DEPLOYING)
+        secrets({ ...owned('db-creds'), ...qaSecret })
+        const store = installRecipeStore(
+          runChild([db(), after(deniedDeployment('qa-api', 'qa-creds'), ['db'])], {
+            phase: 'candidate',
+          })
+        )
+
+        const first = await pass(store)
+        expect(first.result.phase).toBe('deploying')
+        expect(inner.reconcile).toHaveBeenCalledTimes(1)
+        const dbBody = mockAppsApi.createNamespacedStatefulSet.mock.calls
+          .map(([arg]) => arg.body)
+          .find(body => body?.metadata?.labels?.['clerum.io/workload'] === 'db')
+        const qaBody = mockAppsApi.createNamespacedDeployment.mock.calls
+          .map(([arg]) => arg.body)
+          .find(body => body?.metadata?.labels?.['clerum.io/workload'] === 'qa-api')
+        expect(JSON.stringify(dbBody.spec.template)).toContain('db-creds')
+        expect(JSON.stringify(qaBody.spec.template)).toContain('qa-creds')
+        const dbName = dbBody.metadata.name as string
+        const namespace = 'sandbox-recipes'
+        const readDb = async () =>
+          (await mockAppsApi.readNamespacedStatefulSet({
+            name: dbName,
+            namespace,
+          })) as k8s.V1StatefulSet
+        const setServiceName = async (serviceName: string) => {
+          const live = await readDb()
+          live.spec!.serviceName = serviceName
+          await mockAppsApi.replaceNamespacedStatefulSet({ name: dbName, namespace, body: live })
+        }
+        const serviceName = (await readDb()).spec!.serviceName!
+        await setServiceName('renamed-by-hand')
+
+        const second = await pass(store)
+        expect(second.result.phase).toBe('deploying')
+        expect(inner.reconcile).toHaveBeenCalledTimes(2)
+
+        mockAppsApi.patchNamespacedStatefulSet.mockClear()
+        mockAppsApi.deleteNamespacedDeployment.mockClear()
+        mockCoreApi.deleteCollectionNamespacedPod.mockClear()
+        return {
+          inner,
+          store,
+          dbName,
+          readDb,
+          restoreServiceName: () => setServiceName(serviceName),
+        }
+      }
+
+      it('T-ROWC-1: a denied StatefulSet with immutable drift does not keep a later denied Deployment live', async () => {
+        const { inner, store, dbName, readDb, restoreServiceName } = await setUpLiveRun(
+          owned('qa-creds')
+        )
+        const qaWritesAtDenial = deploymentWrites('qa-api')
+        secrets(denied('db-creds', 'qa-creds'))
+
+        // Pass 3: qa-api is torn down although db's revocation fails first.
+        const dbReadsBefore3 = statefulSetReadsOf(dbName)
+        const secretReadsBefore3 = secretReads()
+        const third = await pass(store)
+
+        expect(secretReads()).toBeGreaterThan(secretReadsBefore3)
+        expect(statefulSetReadsOf(dbName)).toBeGreaterThan(dbReadsBefore3)
+        expect(deploymentDeletes('qa-api')).toBe(1)
+        expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+        expect(revocations(store)).not.toHaveProperty('db')
+        expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
+        expect(mockCoreApi.deleteCollectionNamespacedPod).not.toHaveBeenCalled()
+        expect(JSON.stringify((await readDb()).spec!.template)).toContain('db-creds')
+        expect(third.result.phase).toBe('degraded')
+        expect(third.result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(third.result.message).toMatch(
+          /^Issue #637: teardown of denied workflow workload "db" failed; requeueing to retry revocation: ImmutableStatefulSetDrift: /
+        )
+        expect(third.result.message).not.toContain('"qa-api"')
+        expect(third.patched).toBe(true)
+        const deniedAfter3 = storedCondition(store, 'EnvSecretOwnershipDenied')
+        expect(deniedAfter3?.status).toBe('True')
+        expect(deniedAfter3?.message).toContain('workload "db"')
+        expect(deniedAfter3?.message).toContain('workload "qa-api"')
+        const driftAfter3 = storedCondition(store, 'StatefulSetImmutableDrift')
+        expect(driftAfter3?.status).toBe('True')
+        expect(driftAfter3?.message).toContain('spec.serviceName')
+        expect(inner.reconcile).toHaveBeenCalledTimes(2)
+
+        // Pass 4: the same failure; nothing is torn down or recorded again.
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+        const dbReadsBefore4 = statefulSetReadsOf(dbName)
+        const secretReadsBefore4 = secretReads()
+        const fourth = await pass(store)
+
+        expect(secretReads()).toBeGreaterThan(secretReadsBefore4)
+        expect(statefulSetReadsOf(dbName)).toBeGreaterThan(dbReadsBefore4)
+        expect(deniedCondition(fourth.result)).toBe('True')
+        expect(fourth.result.workloadConditions?.map(c => c.type)).toEqual([
+          'StatefulSetImmutableDrift',
+        ])
+        expect(fourth.patched).toBe(false)
+        expect(deploymentDeletes('qa-api')).toBe(1)
+        expect(revocationPatches()).toHaveLength(0)
+
+        // Pass 5: the drift is gone, so db is revoked and the run is rendered again.
+        await restoreServiceName()
+        const fifth = await pass(store)
+
+        expect(inner.reconcile).toHaveBeenCalledTimes(3)
+        expect(fifth.result.phase).toBe('deploying')
+        expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+        expect(mockCoreApi.deleteCollectionNamespacedPod).toHaveBeenCalledTimes(1)
+        expect(revocations(store)['db']).toMatch(/^sha256:[0-9a-f]{64}$/)
+        expect(deploymentWrites('qa-api')).toBe(qaWritesAtDenial)
+        expect(storedCondition(store, 'StatefulSetImmutableDrift')).toBeUndefined()
+        expect(storedCondition(store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+      })
+
+      it('T-ROWC-2: every denied workload is torn down although others fail, and each failure is named', async () => {
+        const inner = stubInner(DEPLOYING)
+        const ids = ['a-api', 'b-api', 'c-api']
+        const creds = ids.map(id => `${id}-creds`)
+        secrets(owned(...creds))
+        const store = installRecipeStore(
+          runChild(
+            [
+              deniedDeployment('a-api', 'a-api-creds'),
+              after(deniedDeployment('b-api', 'b-api-creds'), ['a-api']),
+              deniedDeployment('c-api', 'c-api-creds'),
+            ],
+            { phase: 'candidate' }
+          )
+        )
+        await pass(store)
+        expect(ids.map(deploymentWrites)).toEqual([1, 1, 1])
+        expect(inner.reconcile).toHaveBeenCalledTimes(1)
+
+        secrets(denied(...creds))
+        mockAppsApi.deleteNamespacedDeployment.mockImplementation(
+          async ({ name }: { name: string }) => {
+            if (name.includes('-a-api-') || name.includes('-c-api-')) {
+              throw Object.assign(new Error('apiserver 500'), { code: 500 })
+            }
+            return {}
+          }
+        )
+        const secretReadsBefore = secretReads()
+        const failing = await pass(store)
+
+        expect(secretReads()).toBeGreaterThan(secretReadsBefore)
+        expect(ids.map(deploymentDeletes)).toEqual([1, 1, 1])
+        expect(Object.keys(revocations(store))).toEqual(['b-api'])
+        expect(failing.result.phase).toBe('degraded')
+        expect(failing.result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(failing.result.message).toBe(
+          'Issue #637: teardown of denied workflow workload "a-api" failed; requeueing to retry revocation: apiserver 500' +
+            ' | ' +
+            'Issue #637: teardown of denied workflow workload "c-api" failed; requeueing to retry revocation: apiserver 500'
+        )
+        expect(failing.result.workloadConditions).toEqual([])
+        expect(failing.patched).toBe(true)
+        const deniedStored = storedCondition(store, 'EnvSecretOwnershipDenied')
+        expect(deniedStored?.status).toBe('True')
+        for (const id of ids) expect(deniedStored?.message).toContain(`workload "${id}"`)
+        expect(inner.reconcile).toHaveBeenCalledTimes(1)
+
+        // The deletes succeed again: only the two failed workloads are torn down.
+        mockAppsApi.deleteNamespacedDeployment.mockImplementation(async () => ({}))
+        const healed = await pass(store)
+
+        expect(ids.map(deploymentDeletes)).toEqual([2, 1, 2])
+        expect(Object.keys(revocations(store)).sort()).toEqual(ids)
+        expect(inner.reconcile).toHaveBeenCalledTimes(2)
+        expect(healed.result.phase).toBe('deploying')
+        expect(ids.map(deploymentWrites)).toEqual([1, 1, 1])
+      })
+
+      it('T-ROWC-3: a denied workload is torn down before MCP pre-deploy fails', async () => {
+        const inner = stubInner(DEPLOYING)
+        denySecrets({ 'qa-creds': '7' })
+        mockCustomApi.replaceNamespacedCustomObject.mockRejectedValueOnce(new Error('api down'))
+        const recipe = runChild(
+          [
+            deniedDeployment('qa-api', 'qa-creds'),
+            {
+              id: 'web-search',
+              type: 'deployment',
+              image: 'clerum/web-search:test',
+              port: 3000,
+              transport: { type: 'streamableHttp', path: '/mcp' },
+            } as WorkloadDef,
+          ],
+          { phase: 'candidate' }
+        )
+        recipe.spec.steps = [{ id: 'research', instruction: 'search', mcpServers: ['web-search'] }]
+        const store = installRecipeStore(recipe)
+
+        const { result } = await pass(store)
+
+        // Witness: pre-deploy was attempted and failed.
+        expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalled()
+        expect(result.phase).toBe('degraded')
+        expect(result.message).toContain('Pre-deploy failed for workflow "test-recipe"')
+        expect(deploymentDeletes('qa-api')).toBe(1)
+        expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+        expect(inner.reconcile).not.toHaveBeenCalled()
+      })
+
+      it('T-ROWC-4: a StatefulSet that is not denied and fails to render does not keep a later denied Deployment live', async () => {
+        const { inner, store, dbName } = await setUpLiveRun(owned('qa-creds'))
+        secrets({ ...owned('db-creds'), ...denied('qa-creds') })
+        // The spec changes, so the spec-hash gate does not skip db and its drift is seen.
+        const edited = store.current()
+        edited.spec.workloads = [
+          db({ image: 'postgres:17' }),
+          after(deniedDeployment('qa-api', 'qa-creds'), ['db']),
+        ]
+        const dbReadsBefore = statefulSetReadsOf(dbName)
+
+        const { result } = await pass(store, edited)
+
+        expect(statefulSetReadsOf(dbName)).toBeGreaterThan(dbReadsBefore)
+        expect(deploymentDeletes('qa-api')).toBe(1)
+        expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+        expect(result.phase).toBe('failed')
+        expect(result.workflowPhase).toBe('failed')
+        expect(result.workloadConditions).toEqual([
+          expect.objectContaining({
+            type: 'StatefulSetImmutableDrift',
+            status: 'True',
+            message: expect.stringContaining('spec.serviceName'),
+          }),
+        ])
+        expect(inner.reconcile).toHaveBeenCalledTimes(2)
+      })
+
+      // The non-workflow pass revokes the denied workloads right after the verdict
+      // too, before MCP pre-deploy, the readiness wait and the stale check. A
+      // failed revocation does not end that pass: it continues and requeues.
+      describe('non-workflow pass', () => {
+        const webSearch = {
+          id: 'web-search',
+          type: 'deployment',
+          image: 'clerum/web-search:test',
+          port: 3000,
+          transport: { type: 'streamableHttp', path: '/mcp' },
+        } as WorkloadDef
+        const transportRecipe = () =>
+          makeRecipe({
+            spec: {
+              contextRef: 'default',
+              workloads: [deniedDeployment('qa-api', 'qa-creds'), webSearch],
+            },
+          })
+        const preDeployCalls = () => mockCustomApi.replaceNamespacedCustomObject.mock.calls.length
+        const mcpServerWrites = () =>
+          [
+            ...mockCustomApi.createNamespacedCustomObject.mock.calls,
+            ...mockCustomApi.replaceNamespacedCustomObject.mock.calls,
+          ].filter(([arg]) => arg?.plural === 'mcpservers').length
+
+        afterEach(() => {
+          mockCustomApi.replaceNamespacedCustomObject.mockReset().mockResolvedValue({})
+        })
+
+        it('T-ROWC-NW-1: a denied workload is torn down although MCP pre-deploy fails on every pass', async () => {
+          denySecrets({ 'qa-creds': '7' })
+          mockCustomApi.replaceNamespacedCustomObject.mockRejectedValue(
+            new Error('API unavailable')
+          )
+          const store = installRecipeStore(transportRecipe())
+
+          // Pass 1: pre-deploy fails after the revocation.
+          const first = await pass(store)
+
+          expect(preDeployCalls()).toBeGreaterThan(0)
+          expect(first.result.phase).toBe('degraded')
+          expect(first.result.message).toContain(
+            'Pre-deploy failed for WorkflowRecipe "test-recipe"'
+          )
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+
+          // Pass 2: pre-deploy fails again; nothing is torn down or recorded again.
+          mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+          const preDeployBefore2 = preDeployCalls()
+          const secretReadsBefore2 = secretReads()
+          const second = await pass(store)
+
+          expect(preDeployCalls()).toBeGreaterThan(preDeployBefore2)
+          expect(secretReads()).toBeGreaterThan(secretReadsBefore2)
+          expect(second.result.message).toContain(
+            'Pre-deploy failed for WorkflowRecipe "test-recipe"'
+          )
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocationPatches()).toHaveLength(0)
+
+          // Pass 3: pre-deploy succeeds; the denied workload is skipped, the
+          // transport workload is rendered.
+          mockCustomApi.replaceNamespacedCustomObject.mockResolvedValue({})
+          const preDeployBefore3 = preDeployCalls()
+          const third = await pass(store)
+
+          expect(preDeployCalls()).toBeGreaterThan(preDeployBefore3)
+          expect(deploymentWrites('web-search')).toBeGreaterThan(0)
+          expect(third.result.workloadStatuses).toContainEqual(
+            expect.objectContaining({
+              id: 'qa-api',
+              phase: 'failed',
+              message: expect.stringMatching(/^EnvSecretOwnershipDenied: /),
+            })
+          )
+          expect(deniedCondition(third.result)).toBe('True')
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(deploymentWrites('qa-api')).toBe(0)
+        })
+
+        it('T-ROWC-NW-2: a denied workload is torn down although the readiness wait fails', async () => {
+          denySecrets({ 'qa-creds': '7' })
+          const readinessWait = vi
+            .spyOn(
+              reconciler as unknown as {
+                waitForTransportNetworkReadiness: (...args: unknown[]) => Promise<void>
+              },
+              'waitForTransportNetworkReadiness'
+            )
+            .mockRejectedValue(new Error('network isolation was never confirmed'))
+          const store = installRecipeStore(transportRecipe())
+
+          const { result } = await pass(store)
+          const readinessWaits = readinessWait.mock.calls.length
+          readinessWait.mockRestore()
+
+          // Witness: pre-deploy succeeded and the pass reached the wait.
+          expect(readinessWaits).toBe(1)
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+          expect(result.phase).toBe('failed')
+          expect(store.current().status?.phase).toBe('failed')
+        })
+
+        it('T-ROWC-NW-3: a denied workload is torn down although the recipe is deleting at the stale check', async () => {
+          denySecrets({ 'qa-creds': '7' })
+          let recipeReads = 0
+          let deletingReads = 0
+          // The recipe is answered as deleting once the McpServers were
+          // pre-deployed, so only the stale check after pre-deploy sees it; the
+          // first check of the pass and the record-clear read get the live recipe.
+          const store = installRecipeStore(transportRecipe(), {
+            onGet: stored => {
+              recipeReads += 1
+              if (mcpServerWrites() === 0) return undefined
+              deletingReads += 1
+              return {
+                ...stored,
+                metadata: { ...stored.metadata, deletionTimestamp: '2026-11-17T00:00:00Z' },
+              }
+            },
+          })
+
+          const { result } = await pass(store)
+
+          expect(recipeReads).toBeGreaterThanOrEqual(2)
+          expect(deletingReads).toBe(1)
+          expect(mcpServerWrites()).toBeGreaterThan(0)
+          expect(result.message).toBe(
+            'Recipe deleted during reconcile; skipped post-network materialization'
+          )
+          expect(result.skipStatusPatch).toBe(true)
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+        })
+
+        it('T-ROWC-NW-4: a failed revocation does not stop the others and the pass continues and requeues', async () => {
+          denySecrets({ 'db-creds': '7', 'qa-creds': '7' })
+          const okWorkload = { id: 'ok-api', type: 'deployment', image: 'ok:test' } as WorkloadDef
+          const recipe = deniedStatefulSetRecipe('non-workflow deploy', [
+            db(),
+            deniedDeployment('qa-api', 'qa-creds'),
+            okWorkload,
+          ])
+          const name = await storeCredentialedStatefulSet(recipe)
+          const namespace = recipe.metadata.namespace
+          const drifted = (await mockAppsApi.readNamespacedStatefulSet({
+            name,
+            namespace,
+          })) as k8s.V1StatefulSet
+          drifted.spec!.serviceName = 'renamed-by-hand'
+          await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: drifted })
+          const store = installRecipeStore(recipe)
+          const dbReadsBefore = statefulSetReadsOf(name)
+          const errorLog = captureLogger('error')
+
+          const { result } = await pass(store)
+          const errors = errorLog.mock.calls.map(([message, context]) => [
+            message,
+            (context as { err?: Error } | undefined)?.err?.name,
+          ])
+          errorLog.mockRestore()
+
+          // Witness: db was read and its revocation was refused for the drift.
+          expect(statefulSetReadsOf(name)).toBeGreaterThan(dbReadsBefore)
+          expect(errors).toContainEqual([
+            'Teardown of denied workload failed; will requeue',
+            'ImmutableStatefulSetDriftError',
+          ])
+          expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
+          expect(mockCoreApi.deleteCollectionNamespacedPod).not.toHaveBeenCalled()
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+          expect(revocations(store)).not.toHaveProperty('db')
+          expect(deploymentWrites('ok-api')).toBe(1)
+          expect(result.workloadStatuses?.map(status => status.id).sort()).toEqual([
+            'db',
+            'ok-api',
+            'qa-api',
+          ])
+          expect(result.phase).toBe('degraded')
+          expect(deniedCondition(result)).toBe('True')
+          expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        })
+      })
+    })
+
     // R1-M1 — a denied StatefulSet is kept, and after its revocation is recorded
     // it keeps following the spec through the spec-hash gate: no second Pod
-    // delete, no record write. The three callers of teardownDeniedWorkload.
+    // delete, no record write. The three callers of the revocation round
+    // (revokeDeniedWorkloads), which calls teardownDeniedWorkload.
     const DENIED_CALLERS = ['non-workflow deploy', 'workflow deploy', 'steady enforcer'] as const
     type DeniedCaller = (typeof DENIED_CALLERS)[number]
 
@@ -12778,6 +13478,98 @@ describe('WorkflowRecipeReconciler', () => {
     })
     const statefulSetReads = (name: string) =>
       mockAppsApi.readNamespacedStatefulSet.mock.calls.filter(([arg]) => arg.name === name).length
+    const storedConditionOf = (store: { current: () => WorkflowRecipeCRD }, type: string) =>
+      store.current().status?.conditions?.find(c => c.type === type)
+
+    /**
+     * R2-L1 — `name` is deleted right after its next read, as by an operator
+     * between the revocation's read and its write. From then on the API server
+     * answers a read or a JSON Patch of it with 404, and a create is accepted
+     * (recorded; the object counts as present again).
+     */
+    function deleteStatefulSetAfterNextRead(name: string): void {
+      const storeRead = mockAppsApi.readNamespacedStatefulSet.getMockImplementation()!
+      const storePatch = mockAppsApi.patchNamespacedStatefulSet.getMockImplementation()!
+      const storeCreate = mockAppsApi.createNamespacedStatefulSet.getMockImplementation()!
+      let deleted = false
+      let readSinceArmed = false
+      mockAppsApi.readNamespacedStatefulSet.mockImplementation(async (arg: { name: string }) => {
+        if (arg.name !== name) return storeRead(arg)
+        if (deleted) throw { code: 404 }
+        const answer = await storeRead(arg)
+        if (!readSinceArmed) {
+          readSinceArmed = true
+          deleted = true
+        }
+        return answer
+      })
+      mockAppsApi.patchNamespacedStatefulSet.mockImplementation(async (arg: { name: string }) => {
+        if (arg.name === name && deleted) throw { code: 404 }
+        return storePatch(arg)
+      })
+      mockAppsApi.createNamespacedStatefulSet.mockImplementation(
+        async (arg: { body: { metadata: { name: string } } }) => {
+          if (arg.body.metadata.name !== name || !deleted) return storeCreate(arg)
+          deleted = false
+          return {}
+        }
+      )
+    }
+
+    /** The name of `db`'s headless Service, as buildStatefulSet renders it. */
+    function headlessServiceNameOf(recipe: WorkflowRecipeCRD): string {
+      return buildStatefulSet(
+        recipe.spec.workloads!.find(w => w.id === 'db') as Parameters<typeof buildStatefulSet>[0],
+        recipe,
+        'minimal',
+        new Map()
+      ).headlessService.metadata!.name!
+    }
+
+    /**
+     * Issue #1518 — the first revocation of `db` meets immutable drift: its stored
+     * StatefulSet was given another `serviceName` outside WRC. Runs one pass as the
+     * watcher does (reconcile, then publish). Witnesses: the pass read the
+     * StatefulSet, and the teardown failure was logged with the drift error.
+     */
+    async function firstRevocationMeetsDrift(caller: DeniedCaller) {
+      const inner = caller === 'non-workflow deploy' ? undefined : stubInner()
+      denySecrets({ 'db-creds': '7' })
+      const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet()])
+      const name = await storeCredentialedStatefulSet(recipe)
+      const namespace = recipe.metadata.namespace
+      const readLive = async () =>
+        (await mockAppsApi.readNamespacedStatefulSet({ name, namespace })) as k8s.V1StatefulSet
+      const setServiceName = async (serviceName: string) => {
+        const live = await readLive()
+        live.spec!.serviceName = serviceName
+        await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+      }
+      const serviceName = (await readLive()).spec!.serviceName!
+      await setServiceName('renamed-by-hand')
+      const store = installRecipeStore(recipe)
+      const errorLog = captureLogger('error')
+      const readsBefore = statefulSetReads(name)
+
+      const before = store.current()
+      const result = await reconciler.reconcile(before)
+      const failureErrors = errorLog.mock.calls
+        .map(([, context]) => (context as { err?: Error } | undefined)?.err?.name)
+        .filter(errorName => errorName === 'ImmutableStatefulSetDriftError').length
+      errorLog.mockRestore()
+      const patched = await publishAsWatcher(before, result)
+
+      expect(statefulSetReads(name)).toBeGreaterThan(readsBefore)
+      expect(failureErrors).toBe(1)
+      return {
+        store,
+        name,
+        result,
+        patched,
+        innerCalls: () => inner?.reconcile.mock.calls.length ?? 0,
+        restoreServiceName: () => setServiceName(serviceName),
+      }
+    }
 
     for (const caller of DENIED_CALLERS) {
       it(`T-R3-M1-1 (${caller}): a StatefulSet revoked for a denial takes a later spec edit through the hash gate, with no Pod delete and no record write`, async () => {
@@ -12804,10 +13596,11 @@ describe('WorkflowRecipeReconciler', () => {
         expect(JSON.stringify((await stored()).spec!.template)).not.toContain('db-creds')
         mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
 
-        // Pass 2, same spec. Witness: the pass read the revoked StatefulSet.
+        // Pass 2, same spec. Witness: the pass read the revoked StatefulSet, once
+        // (R2-L1: the update uses the object the revocation read).
         const readsBeforePass2 = statefulSetReads(name)
         await reconciler.reconcile(store.current())
-        expect(statefulSetReads(name)).toBeGreaterThan(readsBeforePass2)
+        expect(statefulSetReads(name)).toBe(readsBeforePass2 + 1)
         expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
 
         // Pass 3, image and isolation level edited: one more patch, still
@@ -12822,10 +13615,10 @@ describe('WorkflowRecipeReconciler', () => {
         expect(JSON.stringify(afterEdit.spec!.template)).not.toContain('db-creds')
 
         // Pass 4, the edited spec again: nothing is written. Witness: the pass
-        // read the StatefulSet.
+        // read the StatefulSet, once.
         const readsBeforePass4 = statefulSetReads(name)
         await reconciler.reconcile(edited())
-        expect(statefulSetReads(name)).toBeGreaterThan(readsBeforePass4)
+        expect(statefulSetReads(name)).toBe(readsBeforePass4 + 1)
         expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
         expect(revocationPatches()).toHaveLength(0)
         expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(digest)
@@ -12843,7 +13636,119 @@ describe('WorkflowRecipeReconciler', () => {
         expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
       })
 
-      it(`T-R3-M1-2 (${caller}): a failed update of a revoked StatefulSet is retried and neither deletes its Pods nor writes a record`, async () => {
+      it(`T-L1-1 (${caller}): a StatefulSet deleted after the first revocation read it is not created again, and its revocation is recorded on the next pass`, async () => {
+        if (caller !== 'non-workflow deploy') stubInner()
+        denySecrets({ 'db-creds': '7' })
+        const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet()])
+        const name = await storeCredentialedStatefulSet(recipe)
+        const store = installRecipeStore(recipe)
+        deleteStatefulSetAfterNextRead(name)
+        const errorLog = captureLogger('error')
+        const readsBefore = statefulSetReads(name)
+
+        const result = await reconciler.reconcile(store.current())
+        const errors = errorLog.mock.calls.map(([message, context]) => [
+          message,
+          (context as { err?: { code?: number } } | undefined)?.err?.code,
+        ])
+        errorLog.mockRestore()
+
+        // Witness: the revocation sent its patch to the deleted object and the
+        // caller logged the 404 as a failed teardown.
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 0 })
+        expect(errors).toContainEqual([
+          caller === 'non-workflow deploy'
+            ? 'Teardown of denied workload failed; will requeue'
+            : 'Denied workload teardown failed; requeueing',
+          404,
+        ])
+        expect(statefulSetReads(name)).toBe(readsBefore + 1)
+        if (caller === 'workflow deploy') {
+          expect(result.phase).toBe('degraded')
+          expect(result.message).toMatch(
+            /^Issue #637: teardown of denied workflow workload "db" failed; requeueing to retry revocation: /
+          )
+        }
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(store.current().status?.secretOwnershipRevocations ?? {}).not.toHaveProperty('db')
+
+        // Pass 2 reads the StatefulSet as absent and records the revocation.
+        const readsBeforePass2 = statefulSetReads(name)
+        await reconciler.reconcile(store.current())
+        expect(statefulSetReads(name)).toBe(readsBeforePass2 + 1)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 0 })
+        expect(store.current().status?.secretOwnershipRevocations?.['db']).toMatch(
+          /^sha256:[0-9a-f]{64}$/
+        )
+      })
+
+      it(`T-L1-2 (${caller}): a revoked StatefulSet deleted after the read is not created again when its spec hash is unchanged`, async () => {
+        if (caller !== 'non-workflow deploy') stubInner()
+        denySecrets({ 'db-creds': '7' })
+        const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet()])
+        const name = await storeCredentialedStatefulSet(recipe)
+        const namespace = recipe.metadata.namespace
+        const headlessName = headlessServiceNameOf(recipe)
+        const store = installRecipeStore(recipe)
+
+        // Pass 1 revokes and records the current digest.
+        const pass1Recipe = store.current()
+        const pass1 = await reconciler.reconcile(pass1Recipe)
+        if (caller !== 'workflow deploy') await publishAsWatcher(pass1Recipe, pass1)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+        const digest = store.current().status?.secretOwnershipRevocations?.['db']
+        expect(digest).toMatch(/^sha256:/)
+
+        deleteStatefulSetAfterNextRead(name)
+        const infoLog = captureLogger('info')
+        const readsBefore = statefulSetReads(name)
+        const headlessReadsBefore = readsOf(
+          mockCoreApi.readNamespacedService,
+          headlessName,
+          namespace
+        )
+
+        const result = await reconciler.reconcile(store.current())
+        const hashSkips = infoLog.mock.calls.filter(
+          ([message, context]) =>
+            message === 'StatefulSet spec hash unchanged; skipping update' &&
+            (context as { name?: string } | undefined)?.name === name
+        ).length
+        infoLog.mockRestore()
+
+        // Witness: the update was prepared (headless Service read) and the hash
+        // gate decided on the object the revocation read.
+        expect(readsOf(mockCoreApi.readNamespacedService, headlessName, namespace)).toBe(
+          headlessReadsBefore + 1
+        )
+        expect(hashSkips).toBe(1)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+        expect(statefulSetReads(name)).toBe(readsBefore + 1)
+        expect(result.requeueAfterMs).toBeUndefined()
+        expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(digest)
+      })
+
+      it(`T-L1-3 (${caller}): a steady revoked StatefulSet is read once per pass`, async () => {
+        if (caller !== 'non-workflow deploy') stubInner()
+        denySecrets({ 'db-creds': '7' })
+        const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet()])
+        const name = await storeCredentialedStatefulSet(recipe)
+        const store = installRecipeStore(recipe)
+
+        const pass1Recipe = store.current()
+        const pass1 = await reconciler.reconcile(pass1Recipe)
+        if (caller !== 'workflow deploy') await publishAsWatcher(pass1Recipe, pass1)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+
+        for (const pass of [2, 3]) {
+          const readsBefore = statefulSetReads(name)
+          await reconciler.reconcile(store.current())
+          expect(statefulSetReads(name), `pass ${pass}`).toBe(readsBefore + 1)
+        }
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+      })
+
+      it(`T-1518-2 / T-R3-M1-2 (${caller}): a failed update of a revoked StatefulSet is retried, neither deletes its Pods nor writes a record, and publishes the drift`, async () => {
         const inner = caller === 'non-workflow deploy' ? undefined : stubInner()
         denySecrets({ 'db-creds': '7' })
         // ok-api is ordered after db.
@@ -12860,7 +13765,11 @@ describe('WorkflowRecipeReconciler', () => {
         const stored = async () =>
           (await mockAppsApi.readNamespacedStatefulSet({ name, namespace })) as k8s.V1StatefulSet
 
-        await reconciler.reconcile(store.current())
+        // Pass 1 revokes. The workflow deploy pass is not published, so the stored
+        // phase stays `candidate` and pass 2 enters the deploy path again.
+        const pass1Recipe = store.current()
+        const pass1 = await reconciler.reconcile(pass1Recipe)
+        if (caller !== 'workflow deploy') await publishAsWatcher(pass1Recipe, pass1)
         expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
         const digest = store.current().status?.secretOwnershipRevocations?.['db']
         expect(digest).toMatch(/^sha256:/)
@@ -12904,19 +13813,155 @@ describe('WorkflowRecipeReconciler', () => {
             'ImmutableStatefulSetDriftError',
           ])
           expect(result.message).toBe(
-            'EnvSecretOwnershipDenied recheck deferred: update of revoked StatefulSet failed for db — requeuing'
+            'EnvSecretOwnershipDenied: update of revoked StatefulSet failed for db ' +
+              '(StatefulSet immutable drift: db) — requeuing'
           )
-          expect(result.skipStatusPatch).toBe(true)
+          expect(result.skipStatusPatch).toBeUndefined()
         }
         expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
         expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
         expect((await stored()).spec!.template.spec!.containers[0].image).toBe('postgres:16')
         expect(revocationPatches()).toHaveLength(0)
         expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(digest)
+
+        // Issue #1518 — the pass is published with the denial and the drift.
+        expect(await publishAsWatcher(edited, result)).toBe(true)
+        const drift = storedConditionOf(store, 'StatefulSetImmutableDrift')
+        expect(drift?.status).toBe('True')
+        expect(drift?.message).toContain('spec.serviceName')
+        expect(storedConditionOf(store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+      })
+
+      it(`T-1518-1 (${caller}): a first revocation that meets immutable drift publishes the drift and the denial once`, async () => {
+        vi.useFakeTimers()
+        onTestFinished(() => {
+          vi.useRealTimers()
+        })
+        vi.setSystemTime(new Date('2026-11-17T10:00:00.000Z'))
+        const run = await firstRevocationMeetsDrift(caller)
+
+        expect(run.patched).toBe(true)
+        const drift = storedConditionOf(run.store, 'StatefulSetImmutableDrift')
+        expect(drift?.status).toBe('True')
+        expect(drift?.message).toContain('spec.serviceName')
+        expect(drift?.message).toContain('The stored spec hash is not the desired one')
+        expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+        expect(run.result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(statefulSetWrites()).toEqual({ patches: 0, creates: 0, podDeletes: 0 })
+        expect(run.store.current().status?.secretOwnershipRevocations?.['db']).toBeUndefined()
+        expect(revocationPatches()).toHaveLength(0)
+        if (caller === 'workflow deploy') {
+          expect(run.result.message).toMatch(
+            /^Issue #637: teardown of denied workflow workload "db" failed; requeueing to retry revocation: ImmutableStatefulSetDrift: /
+          )
+          expect(run.innerCalls()).toBe(0)
+        } else if (caller === 'steady enforcer') {
+          expect(run.result.message).toBe(
+            'EnvSecretOwnershipDenied: teardown failed for db (StatefulSet immutable drift: db) — requeuing'
+          )
+          expect(run.result.skipStatusPatch).toBeUndefined()
+        } else {
+          expect(run.result.phase).toBe('degraded')
+        }
+
+        // A second pass over the same drift does not patch the status. Witness:
+        // the pass read the StatefulSet again and still carries the condition, with
+        // a later lastTransitionTime.
+        vi.setSystemTime(new Date('2026-11-17T10:01:00.000Z'))
+        const readsBeforePass2 = statefulSetReads(run.name)
+        const pass2Recipe = run.store.current()
+        const pass2 = await reconciler.reconcile(pass2Recipe)
+        expect(statefulSetReads(run.name)).toBeGreaterThan(readsBeforePass2)
+        const pass2Drift = pass2.workloadConditions?.find(
+          c => c.type === 'StatefulSetImmutableDrift'
+        )
+        expect(pass2Drift?.message).toBe(drift?.message)
+        expect(pass2Drift?.lastTransitionTime).not.toBe(drift?.lastTransitionTime)
+        expect(await publishAsWatcher(pass2Recipe, pass2)).toBe(false)
+        expect(statefulSetWrites()).toEqual({ patches: 0, creates: 0, podDeletes: 0 })
+      })
+
+      it(`T-1518-8 (${caller}): once the drift is resolved the revocation is applied and the drift condition is cleared`, async () => {
+        const run = await firstRevocationMeetsDrift(caller)
+        // Witness: the drift condition was stored by the blocked pass.
+        expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')?.status).toBe('True')
+        const innerCallsBefore = run.innerCalls()
+
+        await run.restoreServiceName()
+        const recipe = run.store.current()
+        const result = await reconciler.reconcile(recipe)
+
+        expect(await publishAsWatcher(recipe, result)).toBe(true)
+        expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')).toBeUndefined()
+        expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+        expect(run.store.current().status?.secretOwnershipRevocations?.['db']).toMatch(
+          /^sha256:[0-9a-f]{64}$/
+        )
+        if (caller === 'workflow deploy') {
+          // The pass left the degraded state and reached the inner reconcile.
+          expect(run.innerCalls()).toBeGreaterThan(innerCallsBefore)
+        }
       })
     }
 
-    it('T-R3-M1-4: the steady enforcer names a failed teardown and a failed update of a revoked StatefulSet separately', async () => {
+    it('T-1518-9: the status refresh drops both conditions and the forced reconcile writes them back (inherited, filed)', async () => {
+      const run = await firstRevocationMeetsDrift('non-workflow deploy')
+      // Witness: the blocked pass stored both conditions.
+      expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')?.status).toBe('True')
+      expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+
+      // The 30-second refresh as the watcher runs it (refreshWorkloadStatusOnly).
+      const refreshed = run.store.current()
+      const observed = await reconciler.observeCurrentWorkloadStatus(refreshed)
+      expect(await publishAsWatcher(refreshed, observed)).toBe(true)
+      expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')).toBeUndefined()
+      expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')).toBeUndefined()
+
+      // The forced reconcile that follows writes both back.
+      const forced = run.store.current()
+      const result = await reconciler.reconcile(forced)
+      expect(await publishAsWatcher(forced, result)).toBe(true)
+      expect(storedConditionOf(run.store, 'StatefulSetImmutableDrift')?.status).toBe('True')
+      expect(storedConditionOf(run.store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
+    })
+
+    it('T-1518-7: the steady enforcer defers a failed teardown without immutable drift and publishes nothing', async () => {
+      stubInner()
+      denySecrets({ 'qa-creds': '7' })
+      const store = installRecipeStore(
+        runChild([deniedDeployment('qa-api', 'qa-creds')], {
+          phase: 'active',
+          workflowExecution: { phase: 'running' },
+        })
+      )
+      mockAppsApi.deleteNamespacedDeployment.mockRejectedValue({
+        code: 500,
+        message: 'apiserver boom',
+      })
+      const errorLog = captureLogger('error')
+
+      const recipe = store.current()
+      const result = await reconciler.reconcile(recipe)
+      const failureLogs = errorLog.mock.calls.filter(
+        ([message]) => message === 'Denied workload teardown failed; requeueing'
+      ).length
+      errorLog.mockRestore()
+
+      // Witness: the teardown ran and failed.
+      expect(deploymentDeletes('qa-api')).toBeGreaterThan(0)
+      expect(failureLogs).toBe(1)
+      expect(result.message).toBe(
+        'EnvSecretOwnershipDenied recheck deferred: teardown failed for qa-api — requeuing'
+      )
+      expect(result.skipStatusPatch).toBe(true)
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.workloadConditions).toBeUndefined()
+      expect(result.secretOwnershipConditions).toBeUndefined()
+      expect(await publishAsWatcher(recipe, result)).toBe(false)
+    })
+
+    it('T-1518-6 / T-R3-M1-4: the steady enforcer names a failed teardown and a failed update of a revoked StatefulSet separately and publishes the drift', async () => {
       stubInner()
       denySecrets({ 'db-creds': '7', 'qa-creds': '7' })
       const workloads = (image: string) => [
@@ -12928,7 +13973,8 @@ describe('WorkflowRecipeReconciler', () => {
       const namespace = recipe.metadata.namespace
       const store = installRecipeStore(recipe)
 
-      await reconciler.reconcile(store.current())
+      const pass1Recipe = store.current()
+      await publishAsWatcher(pass1Recipe, await reconciler.reconcile(pass1Recipe))
       // Witness: both workloads were revoked and recorded.
       expect(Object.keys(store.current().status?.secretOwnershipRevocations ?? {}).sort()).toEqual([
         'db',
@@ -12954,10 +14000,15 @@ describe('WorkflowRecipeReconciler', () => {
       const result = await reconciler.reconcile(edited)
 
       expect(result.message).toBe(
-        'EnvSecretOwnershipDenied recheck deferred: teardown failed for qa-api; ' +
-          'update of revoked StatefulSet failed for db — requeuing'
+        'EnvSecretOwnershipDenied: teardown failed for qa-api; ' +
+          'update of revoked StatefulSet failed for db (StatefulSet immutable drift: db) — requeuing'
       )
       expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(await publishAsWatcher(edited, result)).toBe(true)
+      const drift = storedConditionOf(store, 'StatefulSetImmutableDrift')
+      expect(drift?.status).toBe('True')
+      expect(drift?.message).toContain('spec.serviceName')
+      expect(storedConditionOf(store, 'EnvSecretOwnershipDenied')?.status).toBe('True')
     })
 
     it('T-R3-M1-3: a revoked transport StatefulSet is updated without deleting its McpServer delegation again', async () => {
@@ -12989,6 +14040,31 @@ describe('WorkflowRecipeReconciler', () => {
       expect(delegationDeletes()).toBe(1)
     })
 
+    it('T-1530-4: a denied StatefulSet whose claim template size is stored in canonical form is revoked (issue #1530)', async () => {
+      denySecrets({ 'db-creds': '7' })
+      const recipe = deniedStatefulSetRecipe('non-workflow deploy', [
+        dbStatefulSet({
+          volumeClaimTemplates: [{ name: 'data', size: '1024Mi', accessMode: 'ReadWriteOnce' }],
+        }),
+      ])
+      const name = await storeCredentialedStatefulSet(recipe)
+      const namespace = recipe.metadata.namespace
+      const stored = async () =>
+        (await mockAppsApi.readNamespacedStatefulSet({ name, namespace })) as k8s.V1StatefulSet
+      // The API server stores 1024Mi as 1Gi.
+      const live = await stored()
+      live.spec!.volumeClaimTemplates![0].spec!.resources!.requests!.storage = '1Gi'
+      await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: live })
+      const store = installRecipeStore(recipe)
+
+      const result = await reconciler.reconcile(store.current())
+
+      expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+      expect(JSON.stringify((await stored()).spec!.template)).not.toContain('db-creds')
+      expect(store.current().status?.secretOwnershipRevocations?.['db']).toMatch(/^sha256:/)
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
     /** A Deployment that declares volumeClaimTemplates; only a StatefulSet turns them into PVCs. */
     function deniedDeploymentWithClaims(id: string, secretName: string): WorkloadDef {
       return {
@@ -12997,7 +14073,7 @@ describe('WorkflowRecipeReconciler', () => {
       } as unknown as WorkloadDef
     }
 
-    it('T-P2-1 the non-workflow loop deletes a denied Deployment that declares volumeClaimTemplates', async () => {
+    it('T-P2-1 the non-workflow revocation round deletes a denied Deployment that declares volumeClaimTemplates', async () => {
       mockCoreApi.readNamespacedSecret.mockImplementation(async () => ({
         metadata: { resourceVersion: '5', labels: { 'clerum.io/owner-recipe': 'test-recipe' } },
         data: { token: 'eA==' },
@@ -13528,7 +14604,8 @@ describe('WorkflowRecipeReconciler', () => {
           String(arg.name).includes('-qa-api-')
         ).length
       // Before the clear existed (c5efc1e91) this fixture sent two recipe GETs per
-      // pass; the clear adds its one live read.
+      // pass; the pass's single live read (issue #1528), made right before the
+      // clear, adds one.
       const recipeGetsPerPassBeforeTheClear = 2
 
       for (const pass of [1, 2]) {
@@ -13537,8 +14614,7 @@ describe('WorkflowRecipeReconciler', () => {
 
         await reconciler.reconcile(store.current())
 
-        // Witness: the pass reached the workload's render and made the clear's
-        // live read.
+        // Witness: the pass reached the workload's render and made its live read.
         expect(deploymentReads(), `pass ${pass}`).toBeGreaterThan(readsBefore)
         expect(recipeGets() - getsBefore, `pass ${pass}`).toBe(recipeGetsPerPassBeforeTheClear + 1)
       }
@@ -13592,12 +14668,13 @@ describe('WorkflowRecipeReconciler', () => {
       mockCoreApi.readNamespacedSecret.mock.calls.some(([arg]) => arg.name === secretName)
 
     for (const path of ['non-workflow', 'workflow'] as const) {
-      it(`T-R2-${path === 'workflow' ? '2' : '1'} the ${path} deploy path renders nothing and requeues when the live read of the revocation clear fails`, async () => {
+      it(`T-R2-${path === 'workflow' ? '2' : '1'} the ${path} deploy path renders nothing and requeues when the pass's live read of the recipe fails`, async () => {
         const inner = path === 'workflow' ? stubInner() : undefined
         classifySecrets({}, { 'own-creds': '9' })
         const workloads = [deniedDeployment('qa-api', 'own-creds')]
         const readError = { code: 503, message: 'apiserver unavailable' }
         let failedReads = 0
+        let readsInPass = 0
         let readsAfterClassification = 0
         const store = installRecipeStore(
           withRevocations(
@@ -13607,12 +14684,19 @@ describe('WorkflowRecipeReconciler', () => {
             { 'qa-api': STORED_DIGEST }
           ),
           {
-            // The clear's live read is the first recipe read after the pass
-            // classified the Secret; that read fails once.
+            // Issue #1528 — the deploy pass's single live read, which the clear
+            // uses, fails once. On the workflow path it is the pass's second
+            // recipe read (after the initial liveness check), before the Secret
+            // classification; on the non-workflow path it is the first recipe
+            // read after the classification.
             onGet: () => {
-              if (!secretWasRead('own-creds')) return undefined
-              readsAfterClassification += 1
-              if (failedReads === 0) {
+              readsInPass += 1
+              if (secretWasRead('own-creds')) readsAfterClassification += 1
+              const isTheLiveRead =
+                path === 'workflow'
+                  ? readsInPass === 2
+                  : secretWasRead('own-creds') && readsAfterClassification === 1
+              if (failedReads === 0 && isTheLiveRead) {
                 failedReads += 1
                 throw readError
               }
@@ -13623,17 +14707,21 @@ describe('WorkflowRecipeReconciler', () => {
 
         const failed = await reconciler.reconcile(store.current())
 
-        // Witness: the read after the classification failed once.
+        // Witness: the live read failed once.
         expect(failedReads).toBe(1)
+        expect(failed.phase).toBe('degraded')
+        expect(failed.skipStatusPatch).not.toBe(true)
+        expect(failed.message).toContain('could not be read before deploying')
         expect(failed.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
         expect(deploymentRenders('qa-api')).toBe(0)
         expect(revocationRemovals()).toHaveLength(0)
         expect(store.current().status?.secretOwnershipRevocations?.['qa-api']).toBe(STORED_DIGEST)
         if (inner) expect(inner.reconcile).not.toHaveBeenCalled()
 
-        // Pass 2 (healthy): the clear's read is the first recipe read after the
-        // Secret classification, so its removal patch follows exactly one such read.
+        // Pass 2 (healthy): the removal patch follows the pass's single live read,
+        // with no other recipe read in between.
         mockCoreApi.readNamespacedSecret.mockClear()
+        readsInPass = 0
         readsAfterClassification = 0
         let readsAtRemovalPatch: number | undefined
         const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
@@ -13641,7 +14729,7 @@ describe('WorkflowRecipeReconciler', () => {
           async (arg: { body?: { status?: { secretOwnershipRevocations?: object } } }) => {
             const entries = arg.body?.status?.secretOwnershipRevocations
             if (entries && Object.values(entries).some(value => value === null)) {
-              readsAtRemovalPatch ??= readsAfterClassification
+              readsAtRemovalPatch ??= path === 'workflow' ? readsInPass : readsAfterClassification
             }
             return storePatch(arg)
           }
@@ -13649,7 +14737,7 @@ describe('WorkflowRecipeReconciler', () => {
 
         await reconciler.reconcile(store.current())
 
-        expect(readsAtRemovalPatch).toBe(1)
+        expect(readsAtRemovalPatch).toBe(path === 'workflow' ? 2 : 1)
         expect(store.current().status?.secretOwnershipRevocations).not.toHaveProperty('qa-api')
         expect(deploymentRenders('qa-api')).toBeGreaterThanOrEqual(1)
       })
@@ -13683,7 +14771,7 @@ describe('WorkflowRecipeReconciler', () => {
           ),
           {
             // From the Secret classification on, the API server answers with the
-            // other object: the clear's read and the liveness check after it.
+            // other object: the pass's live read and the liveness check after it.
             onGet: stored => {
               if (!secretWasRead('own-creds')) return undefined
               answered += 1
@@ -13695,8 +14783,8 @@ describe('WorkflowRecipeReconciler', () => {
 
         const result = await reconciler.reconcile(passObject)
 
-        // Witness: the clear's read and the later liveness check got that answer,
-        // and the pass stopped at that check.
+        // Witness: the pass's live read and the later liveness check got that
+        // answer, and the pass stopped at that check.
         expect(answered).toBeGreaterThanOrEqual(2)
         expect(result.message).toContain('Recipe deleted during reconcile')
         expect(revocationRemovals()).toHaveLength(0)
@@ -13739,6 +14827,1046 @@ describe('WorkflowRecipeReconciler', () => {
       expect(deploymentRenders('qa-api')).toBeGreaterThanOrEqual(1)
       expect(revocationPatches()).toHaveLength(0)
       expect(passObject.status?.secretOwnershipRevocations).not.toHaveProperty('qa-api')
+    })
+
+    // ─── Issue #1528 — one live read of the recipe per deploy pass ───────────
+
+    /** GETs of the test recipe sent so far. */
+    const recipeGets = () =>
+      mockCustomApi.getNamespacedCustomObject.mock.calls.filter(
+        ([arg]) => arg.plural === 'workflowrecipes' && arg.name === 'test-recipe'
+      ).length
+
+    /** Status patches that remove the terminal run teardown record. */
+    const terminalRecordClears = () =>
+      mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
+        ([arg]) => arg.body?.status?.terminalRunTeardown === null
+      ).length
+
+    /** Create/replace/patch requests of McpServer objects. */
+    const mcpServerWrites = () =>
+      [
+        ...mockCustomApi.createNamespacedCustomObject.mock.calls,
+        ...mockCustomApi.replaceNamespacedCustomObject.mock.calls,
+        ...mockCustomApi.patchNamespacedCustomObject.mock.calls,
+      ].filter(([arg]) => (arg as { plural?: string }).plural === 'mcpservers').length
+
+    const TERMINAL_RECORD = {
+      completedAt: '2026-11-12T10:00:00.000Z',
+      noSecretBearingWorkloads: true,
+    }
+
+    /** Seeds a stored terminal run teardown record, as a terminal pass would have. */
+    function withTerminalRecord(recipe: WorkflowRecipeCRD): WorkflowRecipeCRD {
+      recipe.status = {
+        ...(recipe.status ?? {}),
+        terminalRunTeardown: { ...TERMINAL_RECORD },
+      } as WorkflowRecipeCRD['status']
+      return recipe
+    }
+
+    /** `recipe` without the workflow run label. */
+    function withoutRunLabel(recipe: WorkflowRecipeCRD): WorkflowRecipeCRD {
+      delete recipe.metadata.labels!['clerum.io/workflow-run-id']
+      return recipe
+    }
+
+    for (const row of [
+      // Measured on the PR-1 head f20f696f9 with this fixture: 5 and 4 recipe GETs.
+      { id: 'T-1528-1', runLabel: true, getsBefore: 5 },
+      { id: 'T-1528-2', runLabel: false, getsBefore: 4 },
+    ]) {
+      it(`${row.id} a workflow deploy pass ${row.runLabel ? 'with' : 'without'} the run label reads the live recipe once and still clears what only the store holds`, async () => {
+        const inner = stubInner()
+        classifySecrets({}, { 'own-creds': '9' })
+        const child = runChild([deniedDeployment('qa-api', 'own-creds')], { phase: 'candidate' })
+        const seeded = withRevocations(
+          row.runLabel ? withTerminalRecord(child) : withoutRunLabel(child),
+          { 'qa-api': STORED_DIGEST }
+        )
+        const store = installRecipeStore(seeded)
+        // The pass runs on an object that lacks both stored records.
+        const passObject = store.current()
+        delete passObject.status!.secretOwnershipRevocations
+        delete passObject.status!.terminalRunTeardown
+        const getsBefore = recipeGets()
+
+        await reconciler.reconcile(passObject)
+
+        // Witnesses: both clears ran on the stored records, and the workload rendered.
+        expect(store.current().status?.secretOwnershipRevocations).not.toHaveProperty('qa-api')
+        if (row.runLabel) {
+          expect(store.current().status?.terminalRunTeardown).toBeUndefined()
+          expect(terminalRecordClears()).toBe(1)
+        }
+        expect(deploymentRenders('qa-api')).toBeGreaterThanOrEqual(1)
+        expect(inner.reconcile).toHaveBeenCalledTimes(1)
+        expect(recipeGets() - getsBefore).toBe(row.getsBefore - (row.runLabel ? 2 : 1))
+      })
+    }
+
+    it('T-1528-4 a workflow deploy pass whose single live read answers 404 renders nothing and reads the recipe no further before it skips', async () => {
+      stubInner()
+      classifySecrets({}, { 'own-creds': '9' })
+      let readsInPass = 0
+      const store = installRecipeStore(
+        runChild([deniedDeployment('qa-api', 'own-creds')], { phase: 'candidate' }),
+        {
+          // The pass's first read is its initial liveness check; the second is the
+          // deploy pass's single live read, which finds the recipe gone.
+          onGet: () => {
+            readsInPass += 1
+            if (readsInPass === 2) throw { code: 404 }
+            return undefined
+          },
+        }
+      )
+      const warnLog = captureLogger('warn')
+      let readsAtSkip: number | undefined
+      warnLog.mockImplementation((message: string) => {
+        if (message === 'Skipping workload deployment because the recipe is gone or deleting') {
+          readsAtSkip ??= readsInPass
+        }
+      })
+
+      await reconciler.reconcile(store.current())
+      warnLog.mockRestore()
+
+      // Witness: the skip was logged, after exactly the two reads.
+      expect(readsAtSkip).toBe(2)
+      expect(deploymentRenders('qa-api')).toBe(0)
+      expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(mcpServerWrites()).toBe(0)
+    })
+
+    it('T-1528-5 a non-workflow pass whose workloads are all denied reads the live recipe once before it revokes', async () => {
+      classifySecrets({ 'qa-creds': '7' })
+      let readsAfterClassification = 0
+      const store = installRecipeStore(
+        withRevocations(
+          makeRecipe({ spec: { workloads: [deniedDeployment('qa-api', 'qa-creds')] } }),
+          { 'qa-api': STORED_DIGEST }
+        ),
+        {
+          onGet: () => {
+            if (secretWasRead('qa-creds')) readsAfterClassification += 1
+            return undefined
+          },
+        }
+      )
+      let readsAtFirstTeardown: number | undefined
+      const storeDelete = mockAppsApi.deleteNamespacedDeployment.getMockImplementation()
+      mockAppsApi.deleteNamespacedDeployment.mockImplementation(async (...args: unknown[]) => {
+        readsAtFirstTeardown ??= readsAfterClassification
+        return storeDelete ? storeDelete(...(args as [never])) : {}
+      })
+      onTestFinished(() => {
+        if (storeDelete) mockAppsApi.deleteNamespacedDeployment.mockImplementation(storeDelete)
+        else mockAppsApi.deleteNamespacedDeployment.mockReset()
+      })
+
+      await reconciler.reconcile(store.current())
+
+      // Witness: the denied workload was torn down and its revocation recorded.
+      expect(deploymentDeletes('qa-api')).toBe(1)
+      expect(store.current().status?.secretOwnershipRevocations?.['qa-api']).toMatch(
+        /^sha256:[0-9a-f]{64}$/
+      )
+      expect(readsAtFirstTeardown).toBe(1)
+    })
+
+    it('T-1528-6 a workflow deploy pass without the run label requeues when its single live read fails', async () => {
+      const inner = stubInner()
+      classifySecrets({}, { 'own-creds': '9' })
+      let readsInPass = 0
+      let failedReads = 0
+      const store = installRecipeStore(
+        withoutRunLabel(
+          runChild([deniedDeployment('qa-api', 'own-creds')], { phase: 'candidate' })
+        ),
+        {
+          onGet: () => {
+            readsInPass += 1
+            if (readsInPass === 2) {
+              failedReads += 1
+              throw { code: 503, message: 'apiserver unavailable' }
+            }
+            return undefined
+          },
+        }
+      )
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness: the single read was made and failed.
+      expect(failedReads).toBe(1)
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.workflowPhase).toBeUndefined()
+      expect(result.message).toContain('could not be read before deploying')
+      expect(deploymentRenders('qa-api')).toBe(0)
+      expect(mcpServerWrites()).toBe(0)
+      expect(inner.reconcile).not.toHaveBeenCalled()
+    })
+
+    it('T-1528-7 a workflow deploy pass with the run label and no workloads requeues when its single live read fails', async () => {
+      const inner = stubInner()
+      let readsInPass = 0
+      let failedReads = 0
+      const store = installRecipeStore(withTerminalRecord(runChild([], { phase: 'candidate' })), {
+        onGet: () => {
+          readsInPass += 1
+          if (readsInPass === 2) {
+            failedReads += 1
+            throw { code: 503, message: 'apiserver unavailable' }
+          }
+          return undefined
+        },
+      })
+      const passObject = store.current()
+      delete passObject.status!.terminalRunTeardown
+
+      const result = await reconciler.reconcile(passObject)
+
+      // Witness: the single read was made and failed; only it produces this message.
+      expect(failedReads).toBe(1)
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.workflowPhase).toBeUndefined()
+      expect(result.message).toContain('could not be read before deploying')
+      expect(terminalRecordClears()).toBe(0)
+      expect(store.current().status?.terminalRunTeardown).toEqual(TERMINAL_RECORD)
+      expect(inner.reconcile).not.toHaveBeenCalled()
+    })
+
+    it('T-1528-8 a workflow deploy pass requeues when the API server stops answering after the Secret classification', async () => {
+      const inner = stubInner()
+      classifySecrets({}, { 'own-creds': '9' })
+      let failedReads = 0
+      const store = installRecipeStore(
+        runChild([deniedDeployment('qa-api', 'own-creds')], { phase: 'candidate' }),
+        {
+          onGet: () => {
+            if (!secretWasRead('own-creds')) return undefined
+            failedReads += 1
+            throw { code: 503, message: 'apiserver unavailable' }
+          },
+        }
+      )
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness: the Secret was classified and one later recipe read failed.
+      expect(secretWasRead('own-creds')).toBe(true)
+      expect(failedReads).toBe(1)
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.workflowPhase).toBeUndefined()
+      expect(deploymentRenders('qa-api')).toBe(0)
+      expect(inner.reconcile).not.toHaveBeenCalled()
+    })
+
+    it('T-1528-9 a workflow deploy pass requeues when the recipe read before the MCP delegation fails', async () => {
+      const inner = stubInner()
+      const transportWorkload = {
+        ...deniedDeployment('mcp-api', 'mcp-creds'),
+        port: 3000,
+        transport: { type: 'streamableHttp', path: '/mcp' },
+      } as WorkloadDef
+      classifySecrets({}, { 'mcp-creds': '9' })
+      let failedReads = 0
+      let mcpServerWritesAtFailedRead: number | undefined
+      const store = installRecipeStore(runChild([transportWorkload], { phase: 'candidate' }), {
+        // The first recipe read after the workload's Deployment was rendered is
+        // the check before the MCP delegation; it fails once.
+        onGet: () => {
+          if (deploymentRenders('mcp-api') === 0 || failedReads > 0) return undefined
+          failedReads += 1
+          mcpServerWritesAtFailedRead = mcpServerWrites()
+          throw { code: 503, message: 'apiserver unavailable' }
+        },
+      })
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness: the pass rendered the workload, then that read failed.
+      expect(deploymentRenders('mcp-api')).toBeGreaterThanOrEqual(1)
+      expect(failedReads).toBe(1)
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.workflowPhase).toBeUndefined()
+      expect(result.message).toContain('could not be read during the workflow deploy')
+      expect(mcpServerWrites()).toBe(mcpServerWritesAtFailedRead)
+      expect(inner.reconcile).not.toHaveBeenCalled()
+    })
+
+    // ─── Issue #1528 (R1-L5) — entries of workloads the pass no longer renders ───
+
+    /** Digest of a `db-creds` denial at resourceVersion 7, as the revocation round stores it. */
+    const dbDenialDigest = () =>
+      deniedSecretRevocationDigest(
+        ['db-creds'],
+        new Map([['db-creds', { state: 'denied', versions: ['sandbox-recipes/7'] }]])
+      )
+    const GONE_DIGEST = `sha256:${'c'.repeat(64)}`
+
+    for (const path of ['non-workflow', 'workflow'] as const) {
+      const recipeFor = (workloads: WorkloadDef[]) =>
+        path === 'workflow'
+          ? runChild(workloads, { phase: 'candidate' })
+          : makeRecipe({ spec: { workloads } })
+
+      it(`T-1528-C1 the ${path} deploy pass removes the entry of a workload no longer in the spec with the stale entries of rendered workloads`, async () => {
+        if (path === 'workflow') stubInner()
+        classifySecrets({ 'db-creds': '7' }, { 'own-creds': '9' })
+        const store = installRecipeStore(
+          withRevocations(
+            recipeFor([deniedDeployment('api', 'own-creds'), deniedDeployment('db', 'db-creds')]),
+            { api: STORED_DIGEST, db: dbDenialDigest(), gone: GONE_DIGEST }
+          )
+        )
+        const passObject = store.current()
+
+        await reconciler.reconcile(passObject)
+
+        // Witness: the removal patch was sent, and names the removed keys only.
+        expect(revocationRemovals()).toEqual([{ api: null, gone: null }])
+        expect(store.current().status?.secretOwnershipRevocations).toEqual({
+          db: dbDenialDigest(),
+        })
+        expect(passObject.status?.secretOwnershipRevocations).toEqual({ db: dbDenialDigest() })
+        // The denied `db` keeps its entry, so the round does not tear it down again.
+        expect(deploymentDeletes('db')).toBe(0)
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-1528-C3 the ${path} deploy pass on an older generation keeps the entry of a workload only the stored spec has`, async () => {
+        if (path === 'workflow') stubInner()
+        classifySecrets({}, { 'own-creds': '9' })
+        const stored = withRevocations(
+          recipeFor([deniedDeployment('api', 'own-creds'), deniedDeployment('late', 'own-creds')]),
+          { late: STORED_DIGEST }
+        )
+        stored.metadata.generation = 2
+        const store = installRecipeStore(stored)
+        // The pass runs on the object of generation 1, before `late` was added.
+        const passObject = store.current()
+        passObject.metadata.generation = 1
+        passObject.spec.workloads = [deniedDeployment('api', 'own-creds')]
+        const getsBefore = recipeGets()
+
+        await reconciler.reconcile(passObject)
+
+        expect(store.current().status?.secretOwnershipRevocations).toEqual({
+          late: STORED_DIGEST,
+        })
+        expect(revocationRemovals()).toEqual([])
+        // Witnesses: the pass made its single live read and rendered `api`.
+        expect(recipeGets() - getsBefore).toBe(3)
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+    }
+
+    it('T-1528-C2 a non-workflow pass whose workloads are all denied removes the entry of a workload no longer in the spec', async () => {
+      classifySecrets({ 'db-creds': '7' })
+      const store = installRecipeStore(
+        withRevocations(makeRecipe({ spec: { workloads: [deniedDeployment('db', 'db-creds')] } }), {
+          db: dbDenialDigest(),
+          gone: GONE_DIGEST,
+        })
+      )
+
+      await reconciler.reconcile(store.current())
+
+      // Witness: the removal patch was sent, and names `gone` only.
+      expect(revocationRemovals()).toEqual([{ gone: null }])
+      expect(store.current().status?.secretOwnershipRevocations).toEqual({
+        db: dbDenialDigest(),
+      })
+      expect(deploymentDeletes('db')).toBe(0)
+    })
+
+    // ─── Issue #1529 — objects of a workload removed from the spec ───────────
+
+    const PRUNE_SELECTOR = 'clerum.io/managed-by=workflow-recipes,clerum.io/recipe=test-recipe'
+    const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet', 'CronJob', 'Job', 'Service']
+    /** The (namespace, kind) pairs a pruning pass lists, sorted. */
+    const PRUNE_LIST_PAIRS = [
+      ...WORKLOAD_KINDS.flatMap(kind => [`sandbox-recipes/${kind}`, `mcp-server/${kind}`]),
+      'mcp-server/McpServer',
+      'sandbox-ui/Deployment',
+      'sandbox-ui/Service',
+    ].sort()
+
+    /**
+     * The list calls of the prune as `<namespace>/<kind>`, sorted. Each carries
+     * the recipe's selector. No other step of a pass lists these kinds.
+     */
+    function pruneLists(): string[] {
+      type ListArg = { namespace: string; labelSelector?: string; plural?: string }
+      const byKind: Array<[string, ReturnType<typeof vi.fn>]> = [
+        ['Deployment', mockAppsApi.listNamespacedDeployment],
+        ['StatefulSet', mockAppsApi.listNamespacedStatefulSet],
+        ['DaemonSet', mockAppsApi.listNamespacedDaemonSet],
+        ['CronJob', mockBatchApi.listNamespacedCronJob],
+        ['Job', mockBatchApi.listNamespacedJob],
+        ['Service', mockCoreApi.listNamespacedService],
+      ]
+      const calls: Array<[string, ListArg]> = byKind.flatMap(([kind, mock]) =>
+        mock.mock.calls.map(([arg]) => [kind, arg as ListArg] as [string, ListArg])
+      )
+      for (const [arg] of mockCustomApi.listNamespacedCustomObject.mock.calls) {
+        if ((arg as ListArg).plural === 'mcpservers') calls.push(['McpServer', arg as ListArg])
+      }
+      for (const [, arg] of calls) expect(arg.labelSelector).toBe(PRUNE_SELECTOR)
+      return calls.map(([kind, arg]) => `${arg.namespace}/${kind}`).sort()
+    }
+
+    /**
+     * Delete requests of the pass for the kinds a workload renders, as
+     * `<kind>:<namespace>/<name>`. NetworkPolicies are left out: other steps of
+     * every pass delete policies too (T-1529-NP checks the per-workload ones).
+     */
+    function objectDeletes(): string[] {
+      type DeleteArg = { namespace: string; name: string; plural?: string }
+      const byKind: Array<[string, ReturnType<typeof vi.fn>]> = [
+        ['Deployment', mockAppsApi.deleteNamespacedDeployment],
+        ['StatefulSet', mockAppsApi.deleteNamespacedStatefulSet],
+        ['DaemonSet', mockAppsApi.deleteNamespacedDaemonSet],
+        ['CronJob', mockBatchApi.deleteNamespacedCronJob],
+        ['Job', mockBatchApi.deleteNamespacedJob],
+        ['Service', mockCoreApi.deleteNamespacedService],
+        ['CustomObject', mockCustomApi.deleteNamespacedCustomObject],
+      ]
+      return byKind.flatMap(([kind, mock]) =>
+        mock.mock.calls.map(([arg]) => {
+          const { namespace, name, plural } = arg as DeleteArg
+          return `${plural === 'mcpservers' ? 'McpServer' : kind}:${namespace}/${name}`
+        })
+      )
+    }
+
+    /** Status patch bodies that remove keys of the workload name ledger. */
+    function ledgerRemovals(): Array<Record<string, unknown>> {
+      return mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls
+        .map(([arg]) => arg.body)
+        .filter(
+          (body): body is Record<string, unknown> =>
+            !Array.isArray(body) &&
+            Object.values((body?.status?.workloadInstances ?? {}) as Record<string, unknown>).some(
+              value => value === null
+            )
+        )
+    }
+
+    /** An object as WRC renders it for `workloadId`, as a list answers with it. */
+    function listedObject(
+      kind: string,
+      name: string,
+      workloadId: string | undefined,
+      options: {
+        namespace?: string
+        labels?: Record<string, string | undefined>
+        ownerUid?: string | null
+        spec?: Record<string, unknown>
+      } = {}
+    ): Record<string, unknown> {
+      const labels: Record<string, string> = {}
+      for (const [key, value] of Object.entries({
+        'clerum.io/managed-by': 'workflow-recipes',
+        'clerum.io/recipe': 'test-recipe',
+        'clerum.io/workload': workloadId,
+        ...options.labels,
+      })) {
+        if (value !== undefined) labels[key] = value
+      }
+      return {
+        kind,
+        metadata: {
+          name,
+          namespace: options.namespace ?? 'sandbox-recipes',
+          labels,
+          ...(options.ownerUid === null
+            ? {}
+            : {
+                ownerReferences: [
+                  {
+                    apiVersion: 'clerum.io/v1alpha1',
+                    kind: 'WorkflowRecipe',
+                    name: 'test-recipe',
+                    uid: options.ownerUid ?? 'uid-123',
+                    controller: true,
+                  },
+                ],
+              }),
+        },
+        ...(options.spec ? { spec: options.spec } : {}),
+      }
+    }
+
+    const instanceName = (id: string) => `test-recipe-${id}-0001`
+    const ledger = (ids: string[]) => Object.fromEntries(ids.map(id => [id, instanceName(id)]))
+    const plainDeployment = (id: string): WorkloadDef =>
+      ({ id, type: 'deployment', image: `${id}:test`, port: 8080 }) as WorkloadDef
+
+    function prunePassRecipe(
+      path: 'non-workflow' | 'workflow',
+      workloads: WorkloadDef[],
+      ledgerIds: string[]
+    ): WorkflowRecipeCRD {
+      return path === 'workflow'
+        ? runChild(workloads, { phase: 'candidate', workloadInstances: ledger(ledgerIds) })
+        : makeRecipe({
+            spec: { workloads },
+            status: {
+              phase: 'approved',
+              workloadInstances: ledger(ledgerIds),
+            } as unknown as WorkflowRecipeCRD['status'],
+          })
+    }
+
+    /** Seeds, in sandbox-recipes, the Deployment and the Service of each id. */
+    function seedDeploymentsAndServices(ids: string[]): void {
+      seedListedObjects(
+        'sandbox-recipes',
+        'Deployment',
+        ids.map(id => listedObject('Deployment', instanceName(id), id))
+      )
+      seedListedObjects(
+        'sandbox-recipes',
+        'Service',
+        ids.map(id => listedObject('Service', instanceName(id), id))
+      )
+    }
+
+    /** Reads of the Deployment of `workloadId`, as the render makes them. */
+    const deploymentReadsOf = (workloadId: string) =>
+      mockAppsApi.readNamespacedDeployment.mock.calls.filter(
+        ([arg]) => arg.name === instanceName(workloadId)
+      ).length
+
+    for (const path of ['non-workflow', 'workflow'] as const) {
+      it(`T-1529-1 the ${path} deploy pass deletes the Deployment and the Service of a workload removed from the spec and clears its ledger key`, async () => {
+        if (path === 'workflow') stubInner()
+        const store = installRecipeStore(
+          prunePassRecipe(path, [plainDeployment('api')], ['api', 'old'])
+        )
+        seedDeploymentsAndServices(['api', 'old'])
+        const passObject = store.current()
+
+        await reconciler.reconcile(passObject)
+
+        // Witness: every (namespace, kind) pair was listed once, and the
+        // answers held the objects of `api` too.
+        expect(pruneLists()).toEqual(PRUNE_LIST_PAIRS)
+        expect(objectDeletes()).toEqual([
+          `Deployment:sandbox-recipes/${instanceName('old')}`,
+          `Service:sandbox-recipes/${instanceName('old')}`,
+        ])
+        expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+        expect(passObject.status?.workloadInstances).toEqual(ledger(['api']))
+        expect(ledgerRemovals()).toEqual([{ status: { workloadInstances: { old: null } } }])
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-1529-6 the ${path} deploy pass after a prune lists nothing and deletes nothing`, async () => {
+        if (path === 'workflow') stubInner()
+        const store = installRecipeStore(
+          prunePassRecipe(path, [plainDeployment('api')], ['api', 'old'])
+        )
+        seedDeploymentsAndServices(['api', 'old'])
+        await reconciler.reconcile(store.current())
+        expect(objectDeletes()).toHaveLength(2)
+        vi.clearAllMocks()
+        const getsBefore = recipeGets()
+        const apiReadsBefore = deploymentReadsOf('api')
+
+        await reconciler.reconcile(store.current())
+
+        expect(pruneLists()).toEqual([])
+        expect(objectDeletes()).toEqual([])
+        expect(ledgerRemovals()).toEqual([])
+        // Witnesses: the second pass made its single deploy-pass read and
+        // reached the render of `api`.
+        expect(recipeGets() - getsBefore).toBe(3)
+        expect(deploymentReadsOf('api') - apiReadsBefore).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-1529-GEN the ${path} deploy pass on an older generation lists and deletes nothing`, async () => {
+        if (path === 'workflow') stubInner()
+        const stored = prunePassRecipe(
+          path,
+          [plainDeployment('api'), plainDeployment('late')],
+          ['api', 'late']
+        )
+        stored.metadata.generation = 2
+        const store = installRecipeStore(stored)
+        seedDeploymentsAndServices(['api', 'late'])
+        const passObject = store.current()
+        passObject.metadata.generation = 1
+        passObject.spec.workloads = [plainDeployment('api')]
+        const getsBefore = recipeGets()
+
+        await reconciler.reconcile(passObject)
+
+        expect(pruneLists()).toEqual([])
+        expect(objectDeletes()).toEqual([])
+        expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'late']))
+        // Witnesses: the single read happened and `api` was rendered.
+        expect(recipeGets() - getsBefore).toBe(3)
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-1529-FAIL the ${path} deploy pass revokes a denied workload, then requeues before rendering when a delete of a removed object fails`, async () => {
+        const inner = path === 'workflow' ? stubInner() : undefined
+        classifySecrets({ 'qa-creds': '7' })
+        const store = installRecipeStore(
+          prunePassRecipe(
+            path,
+            [plainDeployment('api'), deniedDeployment('qa', 'qa-creds')],
+            ['api', 'qa', 'old']
+          )
+        )
+        seedDeploymentsAndServices(['old'])
+        let failOldDelete = true
+        mockAppsApi.deleteNamespacedDeployment.mockImplementation(
+          async ({ name }: { name: string }) => {
+            if (failOldDelete && name === instanceName('old')) throw { code: 403 }
+            return {}
+          }
+        )
+
+        const result = await reconciler.reconcile(store.current())
+
+        // Witness for the negatives: both deletes of the removed objects were sent.
+        expect(objectDeletes()).toEqual(
+          expect.arrayContaining([
+            `Deployment:sandbox-recipes/${instanceName('old')}`,
+            `Service:sandbox-recipes/${instanceName('old')}`,
+          ])
+        )
+        // The revocation round ran before the prune.
+        expect(deploymentDeletes('qa')).toBe(1)
+        expect(store.current().status?.secretOwnershipRevocations?.qa).toMatch(
+          /^sha256:[0-9a-f]{64}$/
+        )
+        expect(deploymentRenders('api')).toBe(0)
+        expect(ledgerRemovals()).toEqual([])
+        expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'qa', 'old']))
+        expect(result.phase).toBe('degraded')
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(result.message).toMatch(/^Objects of workload\(s\) old removed from WorkflowRecipe/)
+        if (inner) expect(inner.reconcile).not.toHaveBeenCalled()
+
+        // Pass 2 on the stored object: the delete succeeds.
+        failOldDelete = false
+        await reconciler.reconcile(store.current())
+
+        expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'qa']))
+        expect(deploymentDeletes('qa')).toBe(1)
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-ORD-1 the ${path} deploy pass clears, revokes, prunes and clears the ledger key, in that order, before it renders`, async () => {
+        if (path === 'workflow') stubInner()
+        classifySecrets({ 'db-creds': '7' }, { 'own-creds': '9' })
+        // `db`'s entry is the digest of its denial at version 6; the pass object
+        // carries it too, so the round sees a new Secret version.
+        const previousDbDigest = deniedSecretRevocationDigest(
+          ['db-creds'],
+          new Map([['db-creds', { state: 'denied', versions: ['sandbox-recipes/6'] }]])
+        )
+        const store = installRecipeStore(
+          withRevocations(
+            prunePassRecipe(
+              path,
+              [deniedDeployment('api', 'own-creds'), deniedDeployment('db', 'db-creds')],
+              ['api', 'db', 'old']
+            ),
+            { api: STORED_DIGEST, db: previousDbDigest }
+          )
+        )
+        seedListedObjects('sandbox-recipes', 'Deployment', [
+          listedObject('Deployment', instanceName('old'), 'old'),
+        ])
+
+        await reconciler.reconcile(store.current())
+
+        // (a)
+        const stored = store.current().status
+        expect(stored?.secretOwnershipRevocations?.db).toMatch(/^sha256:[0-9a-f]{64}$/)
+        expect(stored?.secretOwnershipRevocations?.db).not.toBe(previousDbDigest)
+        expect(stored?.secretOwnershipRevocations).not.toHaveProperty('api')
+        expect(stored?.workloadInstances).toEqual(ledger(['api', 'db']))
+
+        // (b) The call order, from the mocks' invocation order.
+        type StatusBody = {
+          status?: {
+            secretOwnershipRevocations?: Record<string, unknown>
+            workloadInstances?: Record<string, unknown>
+          }
+        }
+        const statusCalls = mockCustomApi.patchNamespacedCustomObjectStatus.mock
+        const orderOfStatus = (matches: (body: StatusBody) => boolean) => {
+          const index = statusCalls.calls.findIndex(([arg]) => matches(arg.body ?? {}))
+          expect(index).toBeGreaterThanOrEqual(0)
+          return statusCalls.invocationCallOrder[index]
+        }
+        const orderOfDelete = (name: string) => {
+          const index = mockAppsApi.deleteNamespacedDeployment.mock.calls.findIndex(
+            ([arg]) => arg.name === name
+          )
+          expect(index).toBeGreaterThanOrEqual(0)
+          return mockAppsApi.deleteNamespacedDeployment.mock.invocationCallOrder[index]
+        }
+        const clear = orderOfStatus(body => body.status?.secretOwnershipRevocations?.api === null)
+        expect(revocationRemovals()).toEqual([{ api: null }])
+        const clearBody = statusCalls.calls.find(
+          ([arg]) => arg.body?.status?.secretOwnershipRevocations?.api === null
+        )![0].body
+        expect(clearBody).toEqual({ status: { secretOwnershipRevocations: { api: null } } })
+        const dbDelete = orderOfDelete(instanceName('db'))
+        const dbRecord = orderOfStatus(body =>
+          /^sha256:/.test(String(body.status?.secretOwnershipRevocations?.db ?? ''))
+        )
+        const oldDelete = orderOfDelete(instanceName('old'))
+        const ledgerPatch = orderOfStatus(body => body.status?.workloadInstances?.old === null)
+        const firstApiWrite = Math.min(
+          ...[
+            mockAppsApi.createNamespacedDeployment,
+            mockAppsApi.replaceNamespacedDeployment,
+          ].flatMap(mock =>
+            mock.mock.calls
+              .map(([arg], index) =>
+                arg.body?.metadata?.labels?.['clerum.io/workload'] === 'api'
+                  ? mock.mock.invocationCallOrder[index]
+                  : undefined
+              )
+              .filter((order): order is number => order !== undefined)
+          )
+        )
+        expect([clear, dbDelete, dbRecord, oldDelete, ledgerPatch, firstApiWrite]).toEqual(
+          [clear, dbDelete, dbRecord, oldDelete, ledgerPatch, firstApiWrite].sort((a, b) => a - b)
+        )
+        expect(Number.isFinite(firstApiWrite)).toBe(true)
+      })
+    }
+
+    it('T-1529-2 a non-workflow pass deletes every kind of object of removed workloads in its own namespace and keeps the claims', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe(
+          'non-workflow',
+          [plainDeployment('api')],
+          ['api', 'db', 'cron', 'batch', 'agent', 'mcp', 'ui']
+        )
+      )
+      seedListedObjects('sandbox-recipes', 'StatefulSet', [
+        listedObject('StatefulSet', instanceName('db'), 'db', { ownerUid: null }),
+      ])
+      seedListedObjects('sandbox-recipes', 'Service', [
+        listedObject('Service', 'db-custom-headless', 'db', { ownerUid: null }),
+      ])
+      seedListedObjects('sandbox-recipes', 'CronJob', [
+        listedObject('CronJob', instanceName('cron'), 'cron'),
+      ])
+      seedListedObjects('sandbox-recipes', 'Job', [
+        listedObject('Job', instanceName('batch'), 'batch'),
+      ])
+      seedListedObjects('sandbox-recipes', 'DaemonSet', [
+        listedObject('DaemonSet', instanceName('agent'), 'agent'),
+      ])
+      seedListedObjects('mcp-server', 'Deployment', [
+        listedObject('Deployment', instanceName('mcp'), 'mcp', {
+          namespace: 'mcp-server',
+          ownerUid: null,
+        }),
+      ])
+      seedListedObjects('mcp-server', 'McpServer', [
+        listedObject('McpServer', 'test-recipe-mcp', 'mcp', {
+          namespace: 'mcp-server',
+          ownerUid: null,
+        }),
+      ])
+      seedListedObjects('mcp-server', 'Service', [
+        listedObject('Service', 'test-recipe-mcp', 'mcp', {
+          namespace: 'mcp-server',
+          ownerUid: null,
+        }),
+      ])
+      seedListedObjects('sandbox-ui', 'Deployment', [
+        listedObject('Deployment', instanceName('ui'), 'ui', {
+          namespace: 'sandbox-ui',
+          ownerUid: null,
+        }),
+      ])
+      seedListedObjects('sandbox-ui', 'Service', [
+        listedObject('Service', instanceName('ui'), 'ui', {
+          namespace: 'sandbox-ui',
+          ownerUid: null,
+        }),
+      ])
+
+      await reconciler.reconcile(store.current())
+
+      expect(objectDeletes().sort()).toEqual(
+        [
+          `StatefulSet:sandbox-recipes/${instanceName('db')}`,
+          'Service:sandbox-recipes/db-custom-headless',
+          `CronJob:sandbox-recipes/${instanceName('cron')}`,
+          `Job:sandbox-recipes/${instanceName('batch')}`,
+          `DaemonSet:sandbox-recipes/${instanceName('agent')}`,
+          `Deployment:mcp-server/${instanceName('mcp')}`,
+          'McpServer:mcp-server/test-recipe-mcp',
+          'Service:mcp-server/test-recipe-mcp',
+          `Deployment:sandbox-ui/${instanceName('ui')}`,
+          `Service:sandbox-ui/${instanceName('ui')}`,
+        ].sort()
+      )
+      expect(mockBatchApi.deleteNamespacedCronJob).toHaveBeenCalledWith(
+        expect.objectContaining({ propagationPolicy: 'Background' })
+      )
+      expect(mockBatchApi.deleteNamespacedJob).toHaveBeenCalledWith(
+        expect.objectContaining({ propagationPolicy: 'Background' })
+      )
+      // Witness for the claims: the StatefulSet itself was deleted.
+      expect(mockAppsApi.deleteNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+      expect(mockCoreApi.deleteNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+      // Witness for the next negative: the ten deletes above went out by name.
+      // The prune sends no collection delete.
+      expect(mockCoreApi.deleteCollectionNamespacedService).not.toHaveBeenCalled()
+      expect(mockCoreApi.deleteCollectionNamespacedPod).not.toHaveBeenCalled()
+      expect(mockCustomApi.deleteCollectionNamespacedCustomObject).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.deleteCollectionNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+    })
+
+    it('T-1529-3 a non-workflow pass deletes only the objects of a removed workload of this recipe incarnation', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+      seedListedObjects('sandbox-recipes', 'Deployment', [
+        listedObject('Deployment', 'a-other-recipe', 'old', {
+          labels: { 'clerum.io/recipe': 'other-recipe' },
+        }),
+        listedObject('Deployment', 'b-other-incarnation', 'old', { ownerUid: 'uid-previous' }),
+        listedObject('Deployment', 'c-hcc', 'old', {
+          labels: { 'clerum.io/managed-by': 'host-context-controller' },
+        }),
+        listedObject('Deployment', 'd-no-workload-label', undefined),
+        listedObject('Deployment', 'e-rendered-workload', 'api'),
+        listedObject('Deployment', instanceName('old'), 'old'),
+      ])
+      const warnLog = captureLogger('warn')
+
+      await reconciler.reconcile(store.current())
+      warnLog.mockRestore()
+
+      // Witness: the one removed object of the same answer was deleted.
+      expect(objectDeletes()).toEqual([`Deployment:sandbox-recipes/${instanceName('old')}`])
+      expect(warnLog).toHaveBeenCalledWith(
+        expect.stringContaining('another WorkflowRecipe'),
+        expect.objectContaining({ value2: 'b-other-incarnation' })
+      )
+    })
+
+    it('T-1529-4 a non-workflow pass with nothing left to delete clears the ledger key with one patch', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+
+      await reconciler.reconcile(store.current())
+
+      // Witness: the lists were called.
+      expect(pruneLists()).toEqual(PRUNE_LIST_PAIRS)
+      expect(objectDeletes()).toEqual([])
+      expect(ledgerRemovals()).toEqual([{ status: { workloadInstances: { old: null } } }])
+      expect(revocationPatches()).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+    })
+
+    it('T-1529-LIST-FAIL a non-workflow pass whose list of a removed kind fails requeues and keeps the ledger key', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+      seedDeploymentsAndServices(['old'])
+      mockCoreApi.listNamespacedService.mockImplementation(
+        async ({ namespace }: { namespace: string }) => {
+          if (namespace === 'sandbox-recipes') throw { code: 500 }
+          return { items: [] }
+        }
+      )
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness for the negatives: the prune ran and deleted what it could list.
+      expect(objectDeletes()).toEqual([`Deployment:sandbox-recipes/${instanceName('old')}`])
+      expect(ledgerRemovals()).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'old']))
+      expect(deploymentRenders('api')).toBe(0)
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.message).toMatch(/^Objects of workload\(s\) old removed from WorkflowRecipe/)
+    })
+
+    it('T-1529-5 a non-workflow pass whose ledger equals the rendered ids lists nothing', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api'])
+      )
+      const getsBefore = recipeGets()
+
+      await reconciler.reconcile(store.current())
+
+      expect(pruneLists()).toEqual([])
+      expect(objectDeletes()).toEqual([])
+      expect(ledgerRemovals()).toEqual([])
+      // Witnesses: the single read happened and `api` was rendered.
+      expect(recipeGets() - getsBefore).toBe(3)
+      expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+    })
+
+    it('T-1529-NP a non-workflow pass deletes the per-workload NetworkPolicies of a removed workload with their preconditions', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+      const policyNamesOf = (id: string) => [
+        workloadEgressPolicyName('test-recipe', id),
+        workloadIngressPolicyName('test-recipe', id),
+        uiIngressPolicyName('test-recipe', id),
+      ]
+      const policyNames = policyNamesOf('old')
+      // `api`'s policies exist too. The render of `api` later in the pass may
+      // delete them (it contracts the policies of a workload without bindings);
+      // the prune, which runs before the ledger patch, must not.
+      const keptPolicyNames = policyNamesOf('api')
+      const fallback = mockNetworkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        async (arg: { name: string; namespace: string }) =>
+          policyNames.includes(arg.name) || keptPolicyNames.includes(arg.name)
+            ? {
+                metadata: {
+                  name: arg.name,
+                  namespace: arg.namespace,
+                  uid: `uid-${arg.name}`,
+                  resourceVersion: '5',
+                  labels: {
+                    'clerum.io/managed-by': 'workflow-recipes',
+                    'clerum.io/recipe': 'test-recipe',
+                    'clerum.io/workload': policyNames.includes(arg.name) ? 'old' : 'api',
+                  },
+                },
+                spec: { podSelector: {}, policyTypes: ['Egress'] },
+              }
+            : fallback(arg)
+      )
+
+      await reconciler.reconcile(store.current())
+
+      const deleteMock = mockNetworkingApi.deleteNamespacedNetworkPolicy.mock
+      const policyDeletes = deleteMock.calls.map(([arg]) => arg as { name: string })
+      expect(policyDeletes.filter(arg => policyNames.includes(arg.name))).toEqual(
+        policyNames.map(name => ({
+          name,
+          namespace: 'sandbox-recipes',
+          body: { preconditions: { uid: `uid-${name}`, resourceVersion: '5' } },
+        }))
+      )
+      const statusCalls = mockCustomApi.patchNamespacedCustomObjectStatus.mock
+      const ledgerPatchIndex = statusCalls.calls.findIndex(
+        ([arg]) => arg.body?.status?.workloadInstances?.old === null
+      )
+      expect(ledgerPatchIndex).toBeGreaterThanOrEqual(0)
+      const ledgerPatch = statusCalls.invocationCallOrder[ledgerPatchIndex]
+      const deletedBeforeLedgerPatch = policyDeletes
+        .filter((_, index) => deleteMock.invocationCallOrder[index] < ledgerPatch)
+        .map(arg => arg.name)
+      // Witness: the prune's deletes of `old`'s policies precede the ledger patch.
+      expect(deletedBeforeLedgerPatch).toEqual(expect.arrayContaining(policyNames))
+      // The prune deleted no policy of `api`.
+      expect(deletedBeforeLedgerPatch.filter(name => keptPolicyNames.includes(name))).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+    })
+
+    it('T-1529-INC a non-workflow pass deletes the objects of a deployed workload that includeWhen now excludes', async () => {
+      const recipe = prunePassRecipe(
+        'non-workflow',
+        [
+          plainDeployment('api'),
+          { ...plainDeployment('opt'), includeWhen: '{{inputs.optEnabled}}' } as WorkloadDef,
+        ],
+        ['api', 'opt']
+      )
+      recipe.spec.inputs = { optEnabled: false }
+      const store = installRecipeStore(recipe)
+      seedDeploymentsAndServices(['api', 'opt'])
+
+      await reconciler.reconcile(store.current())
+
+      expect(objectDeletes()).toEqual([
+        `Deployment:sandbox-recipes/${instanceName('opt')}`,
+        `Service:sandbox-recipes/${instanceName('opt')}`,
+      ])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+    })
+
+    it('T-1529-RET a non-workflow pass does not delete a removed StatefulSet whose claims would be deleted with it, and requeues', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'db', 'old'])
+      )
+      seedListedObjects('sandbox-recipes', 'StatefulSet', [
+        listedObject('StatefulSet', instanceName('db'), 'db', {
+          spec: { persistentVolumeClaimRetentionPolicy: { whenDeleted: 'Delete' } },
+        }),
+      ])
+      seedListedObjects('sandbox-recipes', 'Deployment', [
+        listedObject('Deployment', instanceName('old'), 'old'),
+      ])
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness: the other removed object of the same pass was deleted.
+      expect(objectDeletes()).toEqual([`Deployment:sandbox-recipes/${instanceName('old')}`])
+      expect(mockAppsApi.deleteNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.message).toContain(`StatefulSet "${instanceName('db')}"`)
+      expect(result.message).toContain('whenDeleted: Delete')
+      expect(ledgerRemovals()).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'db', 'old']))
+    })
+
+    it('T-1529-LEDGER-FAIL a workflow pass whose ledger patch fails requeues, keeps the key, and the next pass clears it', async () => {
+      const inner = stubInner()
+      const store = installRecipeStore(
+        prunePassRecipe('workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+      seedDeploymentsAndServices(['old'])
+      const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+      let failLedgerPatch = true
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async (arg, ...rest) => {
+        if (failLedgerPatch && arg.body?.status?.workloadInstances?.old === null) {
+          throw { code: 503 }
+        }
+        return storePatch(arg, ...rest)
+      })
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness: the prune deleted both objects, then the ledger patch was sent.
+      expect(objectDeletes()).toHaveLength(2)
+      expect(ledgerRemovals()).toHaveLength(1)
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(inner.reconcile).not.toHaveBeenCalled()
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'old']))
+
+      failLedgerPatch = false
+      vi.clearAllMocks()
+      listedObjects.clear()
+      await reconciler.reconcile(store.current())
+
+      expect(pruneLists()).toEqual(PRUNE_LIST_PAIRS)
+      expect(objectDeletes()).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
     })
   })
 
@@ -14177,7 +16305,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(stub.teardownComputePodsForTerminalRun).not.toHaveBeenCalled()
     })
 
-    it('T-R2-3 a deploy pass creates nothing and rejects when the live read of the terminal record clear fails', async () => {
+    it('T-R2-3 a deploy pass creates nothing and requeues when its live read of the recipe fails before the terminal record clear', async () => {
       const stub = stubWorkflowReconciler()
       const recorded = makeTerminalRunRecipe({ name: 'wf-run-read-fails', phase: 'failed' })
       recorded.status = {
@@ -14226,18 +16354,23 @@ describe('WorkflowRecipeReconciler', () => {
         }
       })
 
-      await expect(reconciler.reconcile(stale)).rejects.toBe(readError)
+      const failed = await reconciler.reconcile(stale)
 
-      // Witness: one read failed, the second of the pass.
+      // Witness: one read failed, the second of the pass (its single live read).
       expect(failedReads).toBe(1)
+      expect(failed.phase).toBe('degraded')
+      expect(failed.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(failed.workflowPhase).toBeUndefined()
+      expect(failed.message).toContain('could not be read before deploying')
       expect(stub.reconcile).not.toHaveBeenCalled()
       expect(clearPatches()).toBe(0)
       expect(store.current().status?.terminalRunTeardown?.completedAt).toBe(
         '2026-11-12T10:00:00.000Z'
       )
 
-      // The API server answers again. The second recipe read of a pass is the
-      // clear's: it is the last one before the clear's patch.
+      // The API server answers again. The second recipe read of a pass is its
+      // single live read, which the clear uses: it is the last one before the
+      // clear's patch.
       unavailable = false
       readsInPass = 0
       let readsAtClearPatch: number | undefined
@@ -14256,7 +16389,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(storedAtInnerReconcile).toBeUndefined()
     })
 
-    it('T-R2-3b a deploy pass creates nothing and rejects when the terminal record clear cannot be patched', async () => {
+    it('T-R2-3b a deploy pass creates nothing and requeues when the terminal record clear cannot be patched', async () => {
       const stub = stubWorkflowReconciler()
       const recorded = makeTerminalRunRecipe({ name: 'wf-run-patch-fails', phase: 'failed' })
       recorded.status = {
@@ -14287,10 +16420,15 @@ describe('WorkflowRecipeReconciler', () => {
         workflowExecution: { phase: 'initializing' },
       } as WorkflowRecipeCRD['status']
 
-      await expect(reconciler.reconcile(stale)).rejects.toBe(patchError)
+      const failed = await reconciler.reconcile(stale)
 
       // Witness: the clear's patch was sent once and rejected.
       expect(rejectedClears).toBe(1)
+      expect(failed.phase).toBe('degraded')
+      expect(failed.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(failed.workflowPhase).toBeUndefined()
+      expect(failed.message).toMatch(/^Terminal run teardown record of WorkflowRecipe /)
+      expect(failed.message).toContain('could not be cleared')
       expect(stub.reconcile).not.toHaveBeenCalled()
       expect(store.current().status?.terminalRunTeardown?.completedAt).toBe(
         '2026-11-12T10:00:00.000Z'
@@ -14695,13 +16833,13 @@ describe('WorkflowRecipeReconciler', () => {
         } as WorkflowRecipeCRD['status']
         const store = installRecipeStore(live)
         mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
-        const errorLog = captureLogger('error')
+        const logs = captureLoggerLevels(['warn', 'error'] as const)
 
         const result = await reconciler.reconcile(stale)
-        const notStored = errorLog.mock.calls.find(
-          ([message]) => message === 'Run status record was not stored; requeueing'
+        logs.restore()
+        const notApplied = logs.calls.warn.mock.calls.find(
+          ([message]) => message === FACT_NOT_APPLIED_WARNING
         )
-        errorLog.mockRestore()
 
         // Witness: the pass sent the fact, guarded by the completedAt it holds.
         expect(noSecretBearingFactWrites()).toEqual([
@@ -14716,14 +16854,78 @@ describe('WorkflowRecipeReconciler', () => {
         ])
         // The API server refused it: nothing was stored, the pass is retried.
         expect(store.current().status?.terminalRunTeardown).toEqual(row.storedRecord)
-        expect(notStored).toBeDefined()
-        expect((notStored![1] as { err: { code?: number } }).err.code).toBe(422)
+        // R2-L4 — the patch the API server did not apply is a stale read,
+        // logged at warn; the warn entry is the witness for the negative.
+        expect(notApplied).toBeDefined()
+        expect((notApplied![1] as { err: { code?: number } }).err.code).toBe(422)
+        expect(
+          logs.calls.error.mock.calls.filter(([message]) => message === RECORD_NOT_STORED_ERROR)
+        ).toEqual([])
         expect(stale.status?.terminalRunTeardown).not.toHaveProperty('noSecretBearingWorkloads')
         expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
       })
     }
 
-    it('a fact the API server pruned (older CRD) is not reported as stored (issue #1349, T1.8 L-1)', async () => {
+    // R2-L4 — a failure other than the unapplied patch stays an error.
+    for (const row of [
+      {
+        id: 'T-L4-2',
+        label: 'a 422 with a validation message',
+        error: {
+          code: 422,
+          body: {
+            reason: 'Invalid',
+            message:
+              'WorkflowRecipe.clerum.io "wf-run" is invalid: status.terminalRunTeardown.completedAt: Required value',
+          },
+        },
+      },
+      { id: 'T-L4-3', label: 'a 503', error: { code: 503 } },
+    ]) {
+      it(`${row.id}: a fact patch rejected with ${row.label} is logged as an error, not as a stale read (issue #1349)`, async () => {
+        stubWorkflowReconciler()
+        const store = installRecipeStore(
+          secretBearingTerminalRun('wf-run-fact-rejected', 'parent-recipe')
+        )
+        const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async args => {
+          if (
+            Array.isArray(args.body) &&
+            args.body.some((op: { path?: string }) => op.path === NO_SECRET_BEARING_FACT_PATH)
+          ) {
+            throw row.error
+          }
+          return storePatch(args)
+        })
+        const logs = captureLoggerLevels(['warn', 'error'] as const)
+        const recipe = store.current()
+
+        const result = await reconciler.reconcile(recipe)
+        logs.restore()
+
+        // Witness: the fact was sent, and the error entry carries its rejection.
+        expect(noSecretBearingFactWrites()).toHaveLength(1)
+        const notStored = logs.calls.error.mock.calls.find(
+          ([message]) => message === RECORD_NOT_STORED_ERROR
+        )
+        expect(notStored).toBeDefined()
+        expect((notStored![1] as { err: unknown }).err).toBe(row.error)
+        expect(
+          logs.calls.warn.mock.calls.filter(([message]) => message === FACT_NOT_APPLIED_WARNING)
+        ).toEqual([])
+        expect(recipe.status?.terminalRunTeardown).not.toHaveProperty('noSecretBearingWorkloads')
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      })
+    }
+
+    // Hypothetical shape: a CRD that declares terminalRunTeardown.completedAt but
+    // not noSecretBearingWorkloads. No CRD revision has it: both fields were added
+    // together, and a real older CRD drops the whole object, so publishStatusRecord
+    // fails first (see 'a record the API server pruned (older CRD) is not reported
+    // as stored'). This test pins the read-back check of
+    // publishNoSecretBearingWorkloads: a 200 answer without the fact is not
+    // reported as stored, and it is logged at error, not as the unapplied patch.
+    it('a fact missing from the patch answer (hypothetical CRD without the field) is not reported as stored (issue #1349, T1.8 L-1)', async () => {
       stubWorkflowReconciler()
       const store = installRecipeStore(
         secretBearingTerminalRun('wf-run-fact-pruned', 'parent-recipe'),
@@ -14731,21 +16933,25 @@ describe('WorkflowRecipeReconciler', () => {
           prune: ['terminalRunTeardown.noSecretBearingWorkloads'],
         }
       )
-      const errorLog = captureLogger('error')
+      const logs = captureLoggerLevels(['warn', 'error'] as const)
       const recipe = store.current()
 
       const result = await reconciler.reconcile(recipe)
-      errorLog.mockRestore()
+      logs.restore()
 
       // Witness: the fact was sent.
       expect(noSecretBearingFactWrites()).toHaveLength(1)
-      const notStored = errorLog.mock.calls.find(
-        ([message]) => message === 'Run status record was not stored; requeueing'
+      const notStored = logs.calls.error.mock.calls.find(
+        ([message]) => message === RECORD_NOT_STORED_ERROR
       )
       expect(notStored).toBeDefined()
       expect(String((notStored![1] as { err: Error }).err.message)).toContain(
         'terminalRunTeardown.noSecretBearingWorkloads'
       )
+      // The error entry above is the witness for this negative.
+      expect(
+        logs.calls.warn.mock.calls.filter(([message]) => message === FACT_NOT_APPLIED_WARNING)
+      ).toEqual([])
       expect(recipe.status?.terminalRunTeardown?.completedAt).toEqual(expect.any(String))
       expect(recipe.status?.terminalRunTeardown).not.toHaveProperty('noSecretBearingWorkloads')
       expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
@@ -18824,6 +21030,109 @@ describe('WorkflowRecipeReconciler', () => {
         expect(mockCoreApi.deleteCollectionNamespacedPod).toHaveBeenCalledTimes(1)
         expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(firstDigest)
         expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      } finally {
+        mockCustomApi.patchNamespacedCustomObjectStatus
+          .mockReset()
+          .mockImplementation(echoPatchedStatus)
+      }
+    })
+
+    it('T-1518-3: a drift on the desired stored hash blames an outside writer and names the latest field manager of the object in the condition only (issue #1518)', async () => {
+      const denyAt = (resourceVersion: string) =>
+        mockCoreApi.readNamespacedSecret.mockResolvedValue({
+          metadata: { resourceVersion, labels: { 'clerum.io/owner-recipe': 'some-other-recipe' } },
+          data: { 'db-password': 'eA==' },
+        })
+      denyAt('1')
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'db',
+              type: 'statefulset',
+              image: 'postgres:16',
+              port: 5432,
+              envSecret: {
+                name: 'db-creds',
+                keys: [{ secretKey: 'db-password', envVar: 'POSTGRES_PASSWORD' }],
+              },
+            },
+          ],
+        },
+        status: {
+          workloadInstances: { db: 'test-recipe-db-live' },
+        } as unknown as WorkflowRecipeCRD['status'],
+      })
+      const credentialed = buildStatefulSet(
+        recipe.spec.workloads![0] as Parameters<typeof buildStatefulSet>[0],
+        recipe,
+        'minimal',
+        new Map([['db-creds', { state: 'accessible', keys: new Set(['db-password']) }]])
+      ).statefulSet
+      const stsName = credentialed.metadata!.name!
+      const namespace = recipe.metadata.namespace!
+      const storedStatefulSet = async () =>
+        (await mockAppsApi.readNamespacedStatefulSet({
+          name: stsName,
+          namespace,
+        })) as k8s.V1StatefulSet
+      await mockAppsApi.createNamespacedStatefulSet({ namespace, body: credentialed })
+      const store = installRecipeStore(recipe)
+
+      try {
+        // Pass 1 revokes and stamps the desired hash.
+        await reconciler.reconcile(store.current())
+        const revoked = await storedStatefulSet()
+        const hash = revoked.metadata?.annotations?.['clerum.io/spec-hash']
+        expect(hash).toEqual(expect.any(String))
+
+        // An immutable field drifts while the annotation keeps the desired hash.
+        // helm and kubectl-replace share the latest object time; helm is later in
+        // the list. The status subresource entry is newer and is not a writer of
+        // the object.
+        const t1 = new Date('2026-11-17T10:00:00Z')
+        const t2 = new Date('2026-11-17T10:05:00Z')
+        const t3 = new Date('2026-11-17T10:09:00Z')
+        const drifted = structuredClone(revoked)
+        drifted.spec!.serviceName = 'manually-mutated-headless-service'
+        drifted.metadata!.managedFields = [
+          { manager: 'wrc-test', operation: 'Update', time: t1 },
+          { manager: 'kubectl-replace', operation: 'Update', time: t2 },
+          { manager: 'helm', operation: 'Update', time: t2 },
+          {
+            manager: 'kube-controller-manager',
+            operation: 'Update',
+            subresource: 'status',
+            time: t3,
+          },
+        ]
+        await mockAppsApi.replaceNamespacedStatefulSet({ name: stsName, namespace, body: drifted })
+        expect((await storedStatefulSet()).metadata?.annotations?.['clerum.io/spec-hash']).toBe(
+          hash
+        )
+
+        // A new denial version, so the revocation runs again and meets the drift.
+        denyAt('2')
+        const errorLog = captureLogger('error')
+        const result = await reconciler.reconcile(store.current())
+        errorLog.mockRestore()
+
+        const teardownFailure = errorLog.mock.calls.find(
+          ([message]) => message === 'Teardown of denied workload failed; will requeue'
+        )
+        expect(teardownFailure).toBeDefined()
+        const err = (teardownFailure![1] as { err: Error & { condition: { message: string } } }).err
+        expect(err.name).toBe('ImmutableStatefulSetDriftError')
+        const conditionMessage = err.condition.message
+        expect(conditionMessage).toContain('The stored spec hash is the desired one')
+        expect(conditionMessage).toContain('"helm"')
+        expect(conditionMessage).not.toContain('"kubectl-replace"')
+        expect(conditionMessage).not.toContain('kube-controller-manager')
+        // Witness for the negative below: the condition of the same error names helm.
+        expect(err.message).not.toContain('"helm"')
+        expect(err.message).toContain('The stored spec hash is the desired one')
+        // The pass publishes that condition (issue #1518).
+        expect(result.workloadConditions).toContainEqual(err.condition)
       } finally {
         mockCustomApi.patchNamespacedCustomObjectStatus
           .mockReset()

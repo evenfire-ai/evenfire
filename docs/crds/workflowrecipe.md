@@ -675,6 +675,7 @@ workloads:
         storageClass: do-block-storage
         accessMode: ReadWriteOnce
         size: 10Gi
+        # Immutable once the StatefulSet exists. WRC compares it with the stored value by amount when written as digits, an optional fraction and an optional suffix in at most 64 characters (1024Mi equals a stored 1Gi), and as text otherwise.
     # PVCs created from volumeClaimTemplates include WorkflowRecipe labels for queryability:
     # - clerum.io/workload: <workload-id>
     # - clerum.io/recipe: <recipe-name>
@@ -682,6 +683,28 @@ workloads:
     # - clerum.io/managed-by: workflow-recipes
     # PVCs do NOT have ownerReferences (data retention on recipe deletion)
 ```
+
+**Removing a workload.** When a workload leaves `spec.workloads`, or a
+steps-less recipe's `includeWhen` excludes a workload that was deployed, the
+next deploy pass on the stored generation deletes the objects WRC created for
+it: the workload object, its Services (including a headless Service with a
+custom `serviceName`), its McpServer and transport Service, and its
+`wl-egress-*`, `wl-ingress-*` and `ui-ingress-*` NetworkPolicies. It then
+removes the workload's key from `status.workloadInstances`. The pass finds the
+workloads to delete from that map, and the objects by the labels
+`clerum.io/managed-by=workflow-recipes`, `clerum.io/recipe` and
+`clerum.io/workload`; an object whose WorkflowRecipe ownerReference names
+another uid is left to the garbage collector. PersistentVolumeClaims of a
+StatefulSet's claim templates are kept, so a workload added back under the
+same id mounts them again. A StatefulSet whose
+`persistentVolumeClaimRetentionPolicy.whenDeleted` is `Delete` is not deleted:
+the recipe stays `degraded` and requeues, naming it, until an operator changes
+the policy or deletes it. Any other failed delete also requeues before the
+pass delegates or renders anything. A steps-based recipe prunes only on passes
+that reach its workload deployment (first deploy, `deploying` requeues,
+recovery, the Plugin Workload SDK fall-throughs); a steady recipe does not.
+No pass prunes a recipe whose last workload was removed, or a steps-less
+recipe whose `includeWhen` conditions exclude every workload.
 
 ### 3.3 Resource Schema
 
@@ -861,6 +884,20 @@ which is deny-by-default), the reconciler **fails closed**: it does NOT render
 the offending workload, tears down any prior instance, and marks the recipe
 `NotReady` with an `EnvSecretOwnershipDenied` condition naming the Secret and the
 label to add. The credential is never injected into the workload's runtime.
+On every deploy pass, every denied workload is revoked before any workload is
+delegated or rendered, and a failed revocation does not stop the others. Right
+after the revocation, and still before any delegation or render, the pass
+deletes the objects of workloads removed from the spec (§3.2, "Removing a
+workload").
+
+A denied StatefulSet is kept (its PVCs hold data) and re-rendered without the
+denied refs. When its immutable fields differ from the desired ones, the
+revocation is not applied: the Pods keep their template, and the status carries
+a `StatefulSetImmutableDrift` condition next to `EnvSecretOwnershipDenied` until
+the drift is resolved. The condition message says whether the stored spec hash
+is the desired one (when it is, the recipe did not change those fields and the
+live object was changed outside WRC) and names the last field manager of the
+live object, or says that it records none.
 
 Enforcement points: the WRC reconciler is authoritative (it sees every reconcile
 and re-evaluates on Secret label/delete changes); Control API additionally
@@ -3182,7 +3219,9 @@ status:
 
   artifacts: []
 
-  # Maps of recipe id -> materialized Kubernetes object name
+  # Maps of recipe id -> materialized Kubernetes object name. A workloadInstances
+  # key is removed after the objects of a workload the recipe no longer renders
+  # were deleted (§3.2, "Removing a workload").
   workloadInstances:
     mcp-server: knowledge-base-mcp-server
   resourceInstances:
@@ -3230,9 +3269,9 @@ A matching `conditions[]` entry records the reason (for example
 
 | Field | Description |
 | --- | --- |
-| `terminalRunTeardown.completedAt` | Date-time. Set when the terminal compute teardown of a run-scoped recipe (label `clerum.io/workflow-run-id`) completed. While it is set, WRC does not repeat that teardown. WRC removes the whole `terminalRunTeardown` object before it deploys the run again. |
+| `terminalRunTeardown.completedAt` | Date-time. Set when the terminal compute teardown of a run-scoped recipe (label `clerum.io/workflow-run-id`) completed. While it is set, WRC does not repeat that teardown. WRC removes the whole `terminalRunTeardown` object before it deploys the run again. Required whenever `terminalRunTeardown` is present. |
 | `terminalRunTeardown.noSecretBearingWorkloads` | Boolean, written only as `true`. The terminal pass of a run whose compute teardown is recorded, and that has a workload naming a Secret (`envSecret` or `imagePullSecrets`), sets it when every such workload has been deleted, by the terminal teardown or by the Secret-denial teardown (a denied StatefulSet is kept, so it prevents the fact), and no Secret-ownership requeue or revocation record is pending. The periodic Secret-ownership recheck skips a recorded terminal run child that carries it and is not latched by a transient error; Secret key-set or ownership changes still reach the child through the Secret watcher. WRC adds it with a JSON Patch that the API server applies only while the stored `completedAt` is the one the pass holds. |
-| `secretOwnershipRevocations` | Map of workload id to a `sha256:<hex>` digest of the denied Secrets (name, namespace and `resourceVersion`) the workload was torn down for. WRC does not repeat the teardown while the denial has the stored digest. An entry is removed before WRC renders that workload, or delegates it to an McpServer, in a pass that did not deny it. A denied StatefulSet is kept: while its entry stands WRC still applies spec changes to it, without the denied refs, through its normal update, and does not delete its Pods again. |
+| `secretOwnershipRevocations` | Map of workload id to a `sha256:<hex>` digest of the denied Secrets (name, namespace and `resourceVersion`) the workload was torn down for. WRC does not repeat the teardown while the denial has the stored digest. An entry is removed before WRC renders that workload, or delegates it to an McpServer, in a pass that did not deny it. An entry is also removed, in the same status patch, when its workload is no longer rendered: it left `spec.workloads`, or its `includeWhen` now excludes it, and the pass runs on the stored generation of the recipe. A denied StatefulSet is kept: while its entry stands WRC still applies spec changes to it, without the denied refs, through its normal update, and does not delete its Pods again. A revocation of a kept StatefulSet that fails on immutable drift writes no entry, and WRC publishes `StatefulSetImmutableDrift` for it, as for a failed update of a kept StatefulSet whose entry stands (§3.4.1). |
 
 The status schema is closed. On a cluster whose installed CRD predates these two
 fields the API server prunes them; WRC then logs an error naming the CRD and

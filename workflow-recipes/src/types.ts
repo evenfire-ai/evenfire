@@ -773,7 +773,11 @@ export interface WorkflowRecipeStatus {
   conditions?: StatusCondition[]
 
   // ─── Workload Instance Mapping (UUID naming) ────────────────────────
-  /** Mapping of workload ID → K8s resource name (UUID-based). Persisted on first deploy. */
+  /**
+   * Mapping of workload ID → K8s resource name (UUID-based). Persisted on first
+   * deploy. A key is removed after the objects of a workload the recipe no
+   * longer renders were deleted (issue #1529).
+   */
   workloadInstances?: Record<string, string>
 
   // ─── Resource Instance Mapping (UUID naming) ────────────────────────

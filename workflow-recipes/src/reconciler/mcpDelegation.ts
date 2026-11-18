@@ -882,6 +882,50 @@ async function deleteMcpServer(
 }
 
 /**
+ * Issue #1529 — delete the McpServers of the workloads removed from the
+ * recipe's spec. Lists the McpServers in `namespace` with the recipe's
+ * selector and deletes each one `isPrunable` accepts (the caller's check of
+ * the labels, the removed ids and the owner). Deleting an McpServer makes HCC
+ * remove a Deployment it manages for it. Every delete is attempted, a 404
+ * counts as deleted, and the first other error is thrown after the loop.
+ */
+export async function deleteRemovedWorkloadMcpServers(
+  deps: DelegationDeps,
+  recipe: WorkflowRecipeCRD,
+  removedIds: ReadonlySet<string>,
+  namespace: string,
+  isPrunable: (object: k8s.KubernetesObject) => boolean
+): Promise<void> {
+  if (removedIds.size === 0) return
+  const log = createLogger('wrc', recipe.metadata.name)
+  const list = (await deps.customApi.listNamespacedCustomObject({
+    group: CRD_GROUP,
+    version: CRD_VERSION,
+    namespace,
+    plural: MCPSERVER_PLURAL,
+    labelSelector: `clerum.io/managed-by=workflow-recipes,clerum.io/recipe=${recipe.metadata.name}`,
+  })) as { items?: k8s.KubernetesObject[] }
+  const errors: unknown[] = []
+  // A list response without `items` holds no McpServer.
+  for (const server of list.items ?? []) {
+    const name = server.metadata?.name
+    if (!name || !isPrunable(server)) continue
+    try {
+      await deleteMcpServer(deps, name, namespace, log)
+    } catch (error) {
+      // Not dropped: logged here and the first one is thrown after the loop,
+      // once every other McpServer has been attempted.
+      log.error('Failed to delete McpServer of a removed workload', {
+        mcpServer: name,
+        err: error,
+      })
+      errors.push(error)
+    }
+  }
+  if (errors.length > 0) throw errors[0]
+}
+
+/**
  * Issue #637 — tear down a single transport workload's delegation (McpServer CRD
  * + transport Service) when its Secret ownership was REVOKED after it was already
  * delegated. The create-time gate (preDeploy/delegate skip) only stops NEW foreign

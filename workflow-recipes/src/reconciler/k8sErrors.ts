@@ -30,6 +30,29 @@ export function getErrorCode(error: unknown): number | undefined {
 }
 
 /**
+ * The sentence of the API server's generic 422 answer, which carries no field
+ * details. `workflow/restEndpoints.ts` relies on the same sentence.
+ */
+const JSON_PATCH_NOT_APPLIED_TEXT = 'the server rejected our request'
+
+/**
+ * True when the API server did not apply a JSON Patch (a failed `test`
+ * operation, or a path whose parent is gone): a 422 with the generic sentence
+ * above. A schema failure is a 422 with an actual validation message and does
+ * not match. The client's `ApiException` keeps the parsed body in `body` (an
+ * object for JSON) and repeats the raw body inside `message`, so the sentence
+ * is looked up in `body.message` first, then in `message`. The word "test" is
+ * not used as a signal: recipe names can contain it.
+ */
+export function isJsonPatchNotApplied(error: unknown): boolean {
+  if (getErrorCode(error) !== 422) return false
+  const e = error as { body?: { message?: unknown }; message?: unknown }
+  // No message anywhere is not the generic answer: it matches nothing below.
+  const text = String(e.body?.message ?? e.message ?? '').toLowerCase()
+  return text.includes(JSON_PATCH_NOT_APPLIED_TEXT)
+}
+
+/**
  * Node/undici socket-level error codes that signal a transient, retryable
  * connectivity problem between the controller and the API server (or any
  * upstream we fetch during reconcile) — NOT a problem with the recipe itself.
