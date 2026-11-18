@@ -4,7 +4,7 @@ import type { ToolRegistry } from '../../interfaces'
 import { ApprovalController } from '../approvalController'
 import { UnifiedApprovalGateController } from '../mcpApprovalGateController'
 
-// The real approval decision and the real approve() expansion, joined through one
+// The real approval decision and the real approve() grants, joined through one
 // conversation. The empty registry plus the per-tool overrides make every native
 // tool here approval-gated; MCP tools are gated by their name.
 const registry: ToolRegistry = { get: () => null, register: () => {}, listDefinitions: () => [] }
@@ -49,65 +49,53 @@ async function harness(sessionKey: string) {
   return { conversation, call, approve, nextTurn }
 }
 
-describe('session-scoped approvals next to turn-wide MCP approvals', () => {
-  it("an MCP turn-wide approval adds '*' that does not cover shell_exec", async () => {
-    const h = await harness('scope-user:rpc:scope-agent:mcp-wildcard')
+describe('per-call approvals next to session-scoped approvals', () => {
+  it('an MCP approval runs that call only: no wildcard, no server prefix', async () => {
+    const h = await harness('scope-user:rpc:scope-agent:mcp-per-call')
     expect(await h.call('mongodb-server__find')).toBe('suspend')
     await h.approve()
-    expect(h.conversation.auto_approved_tools).toEqual(new Set(['*', 'mongodb-server']))
+    expect(h.conversation.auto_approved_tools).toEqual(new Set())
 
-    // Witness: '*' covers another MCP server's tool in the same turn.
-    expect(await h.call('airtable-server__list_tables')).toBe('proceed')
-    expect(await h.call('shell_exec')).toBe('suspend')
-    expect(h.conversation.pending_approval?.tool_name).toBe('shell_exec')
-  })
-
-  it("keeps MCP behaviour: '*' covers other MCP tools in the turn and the server prefix persists", async () => {
-    const h = await harness('scope-user:rpc:scope-agent:mcp-prefix')
-    expect(await h.call('mongodb-server__find')).toBe('suspend')
+    // Witness: every later call asks, on the same server or another one.
+    expect(await h.call('mongodb-server__insert_many')).toBe('suspend')
     await h.approve()
-    expect(await h.call('airtable-server__list_tables')).toBe('proceed')
-    expect(await h.call('mongodb-server__insert_many')).toBe('proceed')
-
-    await h.nextTurn()
-
-    expect(h.conversation.auto_approved_tools).toEqual(new Set(['mongodb-server']))
-    // Witness: the persisted prefix still covers its server in the next turn.
-    expect(await h.call('mongodb-server__aggregate')).toBe('proceed')
     expect(await h.call('airtable-server__list_tables')).toBe('suspend')
   })
 
-  it("shell_exec approval after an MCP '*' covers shell_exec without revoking '*'", async () => {
-    const h = await harness('scope-user:rpc:scope-agent:mcp-then-shell')
+  it('a plain shell_exec approval covers shell_exec for the task only', async () => {
+    const h = await harness('scope-user:rpc:scope-agent:shell-task')
     expect(await h.call('mongodb-server__find')).toBe('suspend')
     await h.approve()
     expect(await h.call('shell_exec')).toBe('suspend')
     await h.approve()
 
     expect(await h.call('shell_exec')).toBe('proceed')
-    expect(await h.call('airtable-server__list_tables')).toBe('proceed')
     expect(await h.call('http_request')).toBe('suspend')
+    await h.approve()
+    expect(await h.call('airtable-server__list_tables')).toBe('suspend')
+    await h.approve()
+
+    await h.nextTurn()
+    expect(await h.call('shell_exec')).toBe('suspend')
   })
 
-  it("keeps workflow_trigger turn-wide: '*' covers other gated tools this turn, and a new turn asks again", async () => {
+  it('a plain workflow_trigger approval grants nothing, so the next call asks again', async () => {
     const h = await harness('scope-user:rpc:scope-agent:workflow')
     expect(await h.call('workflow_trigger')).toBe('suspend')
     await h.approve()
-    expect(h.conversation.auto_approved_tools).toEqual(new Set(['*']))
+    expect(h.conversation.auto_approved_tools).toEqual(new Set())
+    expect(h.conversation.task_approved_tools?.size ?? 0).toBe(0)
 
-    // Witness: '*' from workflow_trigger covers the next workflow_trigger and an MCP tool.
-    expect(await h.call('workflow_trigger')).toBe('proceed')
-    expect(await h.call('mongodb-server__find')).toBe('proceed')
-
-    await h.nextTurn()
     expect(await h.call('workflow_trigger')).toBe('suspend')
+    await h.approve()
+    expect(await h.call('mongodb-server__find')).toBe('suspend')
   })
 
-  it('keeps workflow_trigger "always" approval across turns through its tool name', async () => {
+  it('Always approve stores only the exact tool name, across turns', async () => {
     const h = await harness('scope-user:rpc:scope-agent:workflow-always')
     expect(await h.call('workflow_trigger')).toBe('suspend')
     await h.approve(true)
-    expect(h.conversation.auto_approved_tools).toEqual(new Set(['*', 'workflow_trigger']))
+    expect(h.conversation.auto_approved_tools).toEqual(new Set(['workflow_trigger']))
 
     await h.nextTurn()
 
