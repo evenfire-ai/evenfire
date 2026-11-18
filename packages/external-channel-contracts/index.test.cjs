@@ -529,4 +529,23 @@ describe('per-field rejections', () => {
     ]
     checkRows(validateStage1ExecutionPrincipal, member, rows)
   })
+
+  it('refuses integers above Number.MAX_SAFE_INTEGER and accepts the bound', () => {
+    const message = load('receipt.slack.message.json')
+    const admitted = load('admission.admitted.json')
+    const member = load('principal.member.json')
+    const MAX = Number.MAX_SAFE_INTEGER
+    const accepted = assertAccepts(validateProviderEventReceiptClaims, { ...message, iat: MAX - 600, exp: MAX })
+    assert.equal(accepted.exp, MAX)
+    assert.equal(assertAccepts(validateChannelAdmission, { ...admitted, policyVersion: MAX }).policyVersion, MAX)
+    assert.equal(assertAccepts(validateStage1ExecutionPrincipal, { ...member, policyVersion: MAX }).policyVersion, MAX)
+    for (const [label, validator, value, code, field] of [
+      ['receipt iat=2**53', validateProviderEventReceiptClaims, { ...message, iat: 2 ** 53, exp: 2 ** 53 + 600 }, RECEIPT_ERROR, 'iat'],
+      ['receipt exp=MAX+1', validateProviderEventReceiptClaims, { ...message, iat: MAX - 599, exp: MAX + 1 }, RECEIPT_ERROR, 'exp'],
+      ['admission policyVersion=2**53', validateChannelAdmission, { ...admitted, policyVersion: 2 ** 53 }, ADMISSION_ERROR, 'policyVersion'],
+      ['principal policyVersion=2**53', validateStage1ExecutionPrincipal, { ...member, policyVersion: 2 ** 53 }, 'invalid_execution_principal', 'policyVersion'],
+    ]) {
+      assertRejects(validator, value, code, field, label)
+    }
+  })
 })
