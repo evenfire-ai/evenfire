@@ -555,17 +555,14 @@ describe('unresolved notice link', () => {
   })
 
   it('links straight to the Teams tab, not the Profile UI root', async () => {
-    // The root drops the user on Profile with no indication of where to go, and
-    // the path they need is four levels in (Settings > Social channels > Teams >
-    // Connect). Deep-link to the tab that owns the Connect button.
+    // Deep-link to Social channels > Teams > Connect so the recipient lands
+    // on the provider that rejected their message.
     const { deliver, sendMessage } = buildReader({
       medium: 'teams',
       profileUiUrl: 'https://profile.example.com',
     })
     await deliver()
-    expect(sendMessage.mock.calls[0][1]).toContain(
-      'https://profile.example.com/settings/social/teams'
-    )
+    expect(sendMessage.mock.calls[0][1]).toContain('https://profile.example.com/channels/teams')
   })
 
   it('links straight to the Slack tab too', async () => {
@@ -574,9 +571,7 @@ describe('unresolved notice link', () => {
       profileUiUrl: 'https://profile.example.com',
     })
     await deliver('C1', 'U1')
-    expect(sendEphemeral.mock.calls[0][2]).toContain(
-      'https://profile.example.com/settings/social/slack'
-    )
+    expect(sendEphemeral.mock.calls[0][2]).toContain('https://profile.example.com/channels/slack')
   })
 
   it('does not double the slash when the configured URL has a trailing one', async () => {
@@ -585,10 +580,8 @@ describe('unresolved notice link', () => {
       profileUiUrl: 'https://profile.example.com/',
     })
     await deliver()
-    expect(sendMessage.mock.calls[0][1]).toContain(
-      'https://profile.example.com/settings/social/teams'
-    )
-    expect(sendMessage.mock.calls[0][1]).not.toContain('.com//settings')
+    expect(sendMessage.mock.calls[0][1]).toContain('https://profile.example.com/channels/teams')
+    expect(sendMessage.mock.calls[0][1]).not.toContain('.com//channels')
   })
 
   it('pins the Teams copy exactly, the way the Slack copy is pinned', async () => {
@@ -599,11 +592,11 @@ describe('unresolved notice link', () => {
     await deliver()
     expect(sendMessage.mock.calls[0][1]).toBe(
       "I can't accept messages from this Teams account. If you haven't linked it yet on the " +
-        'profile UI, open Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
+        'profile UI, open Social channels > Teams and choose Connect Microsoft Teams. ' +
         'If you think you should already have access, contact your admin.'
     )
     expect(sendMessage.mock.calls[0][1]).not.toContain('undefined')
-    expect(sendMessage.mock.calls[0][1]).not.toContain('/settings/social')
+    expect(sendMessage.mock.calls[0][1]).not.toContain('/channels')
   })
 
   it('sends the copy unchanged when no profile URL is configured', async () => {
@@ -612,11 +605,11 @@ describe('unresolved notice link', () => {
     const text = sendEphemeral.mock.calls[0][2]
     expect(text).toBe(
       "I can't accept messages from this Slack account. If you haven't linked it yet on the " +
-        'profile UI, open Settings > Social channels > Slack and choose Connect Slack. ' +
+        'profile UI, open Social channels > Slack and choose Connect Slack. ' +
         'If you think you should already have access, contact your admin.'
     )
     expect(text).not.toContain('undefined')
     // No profile URL configured means no dangling path fragment either.
-    expect(text).not.toContain('/settings/social')
+    expect(text).not.toContain('/channels')
   })
 })
