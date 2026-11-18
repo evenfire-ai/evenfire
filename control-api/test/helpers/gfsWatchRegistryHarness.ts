@@ -225,6 +225,14 @@ export type BuiltRegistry = {
     keys: Iterable<GfsKey>,
     opts?: { requestId?: string; srvDeadlineMs?: number; watchSignal?: AbortSignal }
   ): { socket: FakeSocket; outcome: Promise<WatchOpenOutcome>; settled: () => boolean }
+  /**
+   * `count` opens of one authenticated session issued in the same tick, with
+   * no await between them, so admission sees them back to back.
+   */
+  openBurst(
+    user: TestUser,
+    count: number
+  ): Promise<{ socket: FakeSocket; outcome: Promise<WatchOpenOutcome> }[]>
   /** Connection that owns `socket`, once admitted. */
   connOf(socket: FakeSocket): WatchConnection | undefined
   settle(predicate?: () => boolean, timeoutMs?: number): Promise<void>
@@ -524,6 +532,29 @@ export async function createRegistryHarness(adminUrl: string) {
         opening.add(outcome)
         void outcome.finally(() => opening.delete(outcome))
         return { socket, outcome, settled: () => done }
+      },
+      async openBurst(user, count) {
+        const authentication = await user.authenticate()
+        const out: { socket: FakeSocket; outcome: Promise<WatchOpenOutcome> }[] = []
+        for (let i = 0; i < count; i += 1) {
+          const socket = new FakeSocket(() => registry.listenerReady())
+          sockets.push(socket)
+          const before = new Set(registry.state.byConnId.values())
+          const outcome = registry.open({
+            authentication,
+            keys: new Set(),
+            socket,
+            srvDeadline: registry.now() + 12_000,
+            watchSignal: new AbortController().signal,
+            requestId: randomUUID(),
+          })
+          for (const c of registry.state.byConnId.values()) if (!before.has(c)) socket.conn = c
+          if (socket.conn) socket.admittedVt = registry.now()
+          opening.add(outcome)
+          void outcome.finally(() => opening.delete(outcome))
+          out.push({ socket, outcome })
+        }
+        return out
       },
       connOf(socket) {
         return socket.conn ?? undefined

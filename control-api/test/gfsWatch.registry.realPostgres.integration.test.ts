@@ -1294,6 +1294,31 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     await ready(carol, [])
   })
 
+  it('admits exactly the per-user cap out of cap + 1 opens issued in the same tick', async () => {
+    b = await h.build({ maxConnectionsPerPrincipal: 3 })
+    const user = await h.createUser()
+    const burst = await b.openBurst(user, 4)
+    const outcomes = await Promise.all(burst.map(o => o.outcome))
+    expect(outcomes.filter(o => o.kind === 'stream')).toHaveLength(3)
+    expect(outcomes.filter(o => o.kind !== 'stream')).toEqual([
+      { kind: 'reply', status: 429, code: 'admission_full', retryAfterSec: 5 },
+    ])
+  })
+
+  it('admits exactly the process cap out of cap + 1 opens of different users in the same tick', async () => {
+    b = await h.build({ maxConnections: 2 })
+    const users = await Promise.all([h.createUser(), h.createUser(), h.createUser()])
+    const authentications = await Promise.all(users.map(u => u.authenticate()))
+    const burst = users.map((u, i) =>
+      b.openBurst({ ...u, authenticate: async () => authentications[i]! }, 1)
+    )
+    const outcomes = await Promise.all((await Promise.all(burst)).flat().map(o => o.outcome))
+    expect(outcomes.filter(o => o.kind === 'stream')).toHaveLength(2)
+    expect(outcomes.filter(o => o.kind !== 'stream')).toEqual([
+      { kind: 'reply', status: 429, code: 'admission_full', retryAfterSec: 5 },
+    ])
+  })
+
   it('caps reads in flight per process and leaves no permit or waiter behind (T-SB83, I42)', async () => {
     const { createReadSlots } = await import('../src/services/gfsWatch/readSlots.js')
     const clockless = { now: () => 0 }
