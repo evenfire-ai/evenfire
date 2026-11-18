@@ -27,6 +27,7 @@ import { PromptCache } from '../../llm/promptCache'
 import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
+import { PRINCIPAL_DENIAL_COPY } from '../connectorPrincipal'
 import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
 
 vi.mock('../../config', () => ({
@@ -189,15 +190,18 @@ function enableWorkflowProcessEnv(): () => void {
   }
 }
 
-function attachTelegramProviderIdentity(task: Task): void {
+function attachTelegramProviderIdentity(task: Task, providerChannelType?: string | null): void {
   task.sourceMessage!.providerIdentity = {
     medium: 'telegram',
     providerUserId: 'tg-user-1',
     providerChannelId: 'test-channel',
   }
+  if (arguments.length === 2) {
+    task.sourceMessage!.providerIdentity.providerChannelType = providerChannelType
+  }
 }
 
-function attachSlackProviderIdentity(task: Task): void {
+function attachSlackProviderIdentity(task: Task, providerChannelType?: string | null): void {
   task.sourceMessage!.channelType = 'slack'
   task.sourceMessage!.channelId = 'slack-channel'
   task.sourceMessage!.providerIdentity = {
@@ -206,9 +210,12 @@ function attachSlackProviderIdentity(task: Task): void {
     providerWorkspaceId: 'slack-workspace-1',
     providerChannelId: 'slack-channel',
   }
+  if (arguments.length === 2) {
+    task.sourceMessage!.providerIdentity.providerChannelType = providerChannelType
+  }
 }
 
-function attachTeamsProviderIdentity(task: Task): void {
+function attachTeamsProviderIdentity(task: Task, providerChannelType?: string | null): void {
   task.sourceMessage!.channelType = 'teams'
   task.sourceMessage!.channelId = 'teams-conversation'
   task.sourceMessage!.threadId = 'teams-thread-1'
@@ -219,6 +226,47 @@ function attachTeamsProviderIdentity(task: Task): void {
     providerChannelId: 'teams-conversation',
     providerEventId: 'teams:teams-tenant-1:teams-conversation:activity-1',
   }
+  if (arguments.length === 2) {
+    task.sourceMessage!.providerIdentity.providerChannelType = providerChannelType
+  }
+}
+
+function connectorManager() {
+  return {
+    getAllTools: () => [
+      { name: 'calendar__do', serverName: 'calendar', inputSchema: { type: 'object' } },
+    ],
+    callTool: vi.fn(async (toolName: string, _params: unknown, options: { userId?: string }) =>
+      options.userId
+        ? { toolName, result: { content: [{ type: 'text', text: 'ok' }] }, isError: false }
+        : {
+            toolName,
+            result: {
+              error: `Authentication required: calendar needs a per-user connection, but no user identity was provided`,
+            },
+            isError: true,
+            principalRequired: true,
+          }
+    ),
+    bootstrapUserCatalog: vi.fn(async () => ({
+      candidates: 0,
+      probed: 0,
+      admitted: 0,
+      pending: 0,
+      skipped: {},
+      waitedMs: 0,
+      timedOut: false,
+    })),
+  }
+}
+
+function runToolThroughLoop(toolName: string): { output: () => any } {
+  let out: any
+  vi.mocked(runToolUseLoop).mockImplementationOnce(async (loopConfig: any) => {
+    out = await loopConfig.toolRegistry.get(toolName).execute({})
+    return { type: 'response', content: 'done' } as any
+  })
+  return { output: () => out }
 }
 
 describe('TaskExecutor', () => {
@@ -2993,3 +3041,126 @@ describe('TaskExecutor hands the system prompt to the loop (R9-14)', () => {
     }
   })
 })
+
+const CONNECTOR_USER_ID = '00000000-0000-4000-8000-000000000001'
+
+describe('connector principal (T2)', () => {
+  beforeEach(() => {
+    vi.mocked(resolveProviderWorkflowCallerContext).mockReset()
+  })
+
+  it('Teams personal chat, resolve to a UUID: bootstrap and callTool use the UUID, never the sender', async () => {
+    vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce({
+      targetUserId: CONNECTOR_USER_ID,
+      originChannelType: 'teams',
+    } as any)
+    const manager = connectorManager()
+    const deps = createDeps({ mcpManager: manager as any })
+    const task = createTask('read my mail', 'teams-user-1')
+    attachTeamsProviderIdentity(task, 'personal')
+    const { output } = runToolThroughLoop('calendar__do')
+    await new TaskExecutor(task, deps).run()
+    expect(manager.bootstrapUserCatalog).toHaveBeenCalledWith(CONNECTOR_USER_ID, expect.anything())
+    expect(manager.callTool).toHaveBeenCalledWith(
+      'calendar__do',
+      {},
+      expect.objectContaining({ userId: CONNECTOR_USER_ID })
+    )
+    expect(JSON.stringify(manager.callTool.mock.calls)).not.toContain('teams-user-1')
+    expect(output().is_error).toBeFalsy()
+  })
+
+  it('Teams personal chat, resolve to null: no bootstrap, no userId, unverified copy', async () => {
+    vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce(null)
+    const manager = connectorManager()
+    const deps = createDeps({ mcpManager: manager as any })
+    const task = createTask('read my mail', 'teams-user-1')
+    attachTeamsProviderIdentity(task, 'personal')
+    const { output } = runToolThroughLoop('calendar__do')
+    await new TaskExecutor(task, deps).run()
+    expect(manager.bootstrapUserCatalog).not.toHaveBeenCalled()
+    const options = manager.callTool.mock.calls[0][2]
+    expect('userId' in options && options.userId !== undefined).toBe(false)
+    expect(output().content).toBe(PRINCIPAL_DENIAL_COPY.unverified)
+  })
+
+  it('rpc task: sender is the principal, no denial', async () => {
+    const manager = connectorManager()
+    const deps = createDeps({ mcpManager: manager as any })
+    const task = createTask('x', CONNECTOR_USER_ID)
+    task.sourceMessage!.channelType = 'rpc'
+    const { output } = runToolThroughLoop('calendar__do')
+    await new TaskExecutor(task, deps).run()
+    expect(manager.bootstrapUserCatalog).toHaveBeenCalledWith(CONNECTOR_USER_ID, expect.anything())
+    expect(manager.callTool).toHaveBeenCalledWith(
+      'calendar__do',
+      {},
+      expect.objectContaining({ userId: CONNECTOR_USER_ID })
+    )
+    expect(resolveProviderWorkflowCallerContext).not.toHaveBeenCalled()
+    expect(output().is_error).toBeFalsy()
+  })
+
+  it('channel-origin cron without provider identity: principal withheld, never the sender', async () => {
+    const manager = connectorManager()
+    const deps = createDeps({ mcpManager: manager as any })
+    const task = createTask('nightly', '516801777')
+    task.source = 'cron'
+    const { output } = runToolThroughLoop('calendar__do')
+    await new TaskExecutor(task, deps).run()
+    expect(manager.bootstrapUserCatalog).not.toHaveBeenCalled()
+    expect(manager.callTool.mock.calls[0][2].userId).toBeUndefined()
+    expect(output().content).toBe(PRINCIPAL_DENIAL_COPY.not_direct_message)
+  })
+})
+
+const CONVERSATION_TYPES = [
+  'personal',
+  'im',
+  'private',
+  'groupChat',
+  'channel',
+  'mpim',
+  'group',
+  'supergroup',
+  '',
+  null,
+  undefined,
+  'PERSONAL',
+] as const
+const ALLOWED_CONVERSATION_TYPE = { teams: 'personal', slack: 'im', telegram: 'private' }
+
+describe.each(['teams', 'slack', 'telegram'] as const)(
+  'conversation-type allowlist - %s (T3)',
+  medium => {
+    beforeEach(() => {
+      vi.mocked(resolveProviderWorkflowCallerContext).mockReset()
+      vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValue({
+        targetUserId: CONNECTOR_USER_ID,
+      } as any)
+    })
+
+    it.each(CONVERSATION_TYPES)('providerChannelType=%j', async type => {
+      const attach = {
+        teams: attachTeamsProviderIdentity,
+        slack: attachSlackProviderIdentity,
+        telegram: attachTelegramProviderIdentity,
+      }[medium]
+      const manager = connectorManager()
+      const deps = createDeps({ mcpManager: manager as any })
+      const task = createTask('x', 'teams-user-1')
+      attach(task, type)
+      const { output } = runToolThroughLoop('calendar__do')
+      await new TaskExecutor(task, deps).run()
+      const options = manager.callTool.mock.calls[0][2]
+      if (type === ALLOWED_CONVERSATION_TYPE[medium]) {
+        expect(options.userId).toBe(CONNECTOR_USER_ID)
+        expect(output().is_error).toBeFalsy()
+      } else {
+        expect(options.userId).toBeUndefined()
+        expect(output().content).toBe(PRINCIPAL_DENIAL_COPY.not_direct_message)
+        expect(output().content).not.toContain('no user identity was provided')
+      }
+    })
+  }
+)

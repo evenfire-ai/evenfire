@@ -238,9 +238,9 @@ class McpToolAdapter implements Tool {
         }
       }
       // Principal binding (PR #319 C2/H1): the broker grant subject is ALWAYS
-      // `this.userId` — the authenticated task sender baked in at construction
-      // (taskExecutor threads `task.sourceMessage.sender`, itself bound to the
-      // rpc-proxy edge `auth.sub` in handleMessageRoute). `params` is model /
+      // `this.userId` — the connector principal baked in at construction
+      // (taskExecutor threads the chosen principal: the rpc-proxy edge `auth.sub`
+      // for rpc tasks, the linked Evenfire user for channel tasks). `params` is model /
       // tool-arg data and is forwarded as the call payload only; it can NEVER
       // become the identity, so a `userId` field inside `params` cannot spoof
       // another user's broker token.

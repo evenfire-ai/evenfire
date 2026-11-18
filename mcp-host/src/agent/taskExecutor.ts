@@ -131,6 +131,7 @@ import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
+import { chooseConnectorPrincipal } from './connectorPrincipal'
 import type { CronScheduler } from './cronScheduler'
 import { referencedFilesForTurnContext } from './fileReferenceResolver'
 import {
@@ -2204,9 +2205,8 @@ export class TaskExecutor {
    * this turn's wait: the admissions belong to the manager, are coalesced there,
    * and outlive the turn.
    */
-  private async bootstrapMcpCatalog(): Promise<void> {
+  private async bootstrapMcpCatalog(userId: string | undefined): Promise<void> {
     const manager = this.deps.mcpManager
-    const userId = this.task.sourceMessage?.sender
     if (!manager || !userId) return
     const started = Date.now()
     try {
@@ -2243,6 +2243,18 @@ export class TaskExecutor {
       this.workflowCallerContextOverride === undefined
         ? await this.prepareChannelWorkflowCallerContext()
         : this.workflowCallerContextOverride
+    // The connector principal is the linked Evenfire user, never the channel
+    // sender: `sender` stays the session key and approval binding.
+    const principal = chooseConnectorPrincipal(this.task, workflowCallerContext)
+    logger.info(
+      {
+        taskId: this.taskId,
+        channel: this.task.sourceMessage?.channelType,
+        principalChosen: !!principal.userId,
+        denial: principal.denial,
+      },
+      'Connector principal chosen'
+    )
     // Failover reuses this registry: any Codex provider in the chain requires
     // Codex-compatible presentation before the first provider attempt.
     const presentation = resolveToolPresentation(
@@ -2316,16 +2328,15 @@ export class TaskExecutor {
     // read, so grant-backed tools exist in the very first turn instead of after a
     // failed lazy call. Best-effort: a failure here must never invalidate the
     // registry promise or the task.
-    await this.bootstrapMcpCatalog()
+    await this.bootstrapMcpCatalog(principal.userId)
     const mcpRegistry = this.deps.mcpManager
       ? // Thread the authenticated caller identity so oauth grantScope='user'
         // tools dispatch to the caller's per-user partition (fail-closed when
         // absent). buildToolRegistry runs per turn, so one userId per adapter.
-        new McpToolRegistryAdapter(
-          this.deps.mcpManager,
-          this.task.sourceMessage?.sender ?? undefined,
-          { strictValidation: presentation.codexMode !== undefined }
-        )
+        new McpToolRegistryAdapter(this.deps.mcpManager, principal.userId, {
+          strictValidation: presentation.codexMode !== undefined,
+          principalDenial: principal.denial,
+        })
       : nativeRegistry
     const compositeRegistry = this.deps.mcpManager
       ? new CompositeToolRegistry(nativeRegistry, mcpRegistry)
