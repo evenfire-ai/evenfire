@@ -33,7 +33,7 @@ import {
 } from './playwright-mcp-cluster-probe.mjs'
 
 const image =
-  'ghcr.io/evenfire-ai/playwright-server@sha256:fc603bbc05d216ca9394940463e5e216d0a48732c24555fb9b67d20775fccf73'
+  'ghcr.io/evenfire-ai/playwright-server@sha256:2e5ef0183d6dda21e0797ef32f1cbba2e07e38ec93b67bd3675079c5729ffa74'
 const runId = 'pw-mcp-0123456789ab'
 const manifest = {
   apiVersion: 'clerum.io/v1alpha1',
@@ -156,7 +156,7 @@ if (tool === 'bash') {
           status: {
             conditions: [{ type: 'Ready', status: 'True' }],
             containerStatuses: [
-              { name: 'mcp-server', imageID: 'containerd://sha256:aaf77f4dcbb3d2cb71680f5608145cacaa2a75aa645f84f65cd179f364d5e710' },
+              { name: 'mcp-server', imageID: 'containerd://sha256:408686cc898d21ec1ef7d50679735e24fbac87637f75e7d575101685b834c5e0' },
             ],
           },
         },
@@ -165,13 +165,13 @@ if (tool === 'bash') {
   } else if (key === 'get node node-a -o json') {
     output = JSON.stringify({ status: { nodeInfo: { architecture: 'amd64' } } })
   } else if (key === 'exec pod/pod-a -c mcp-server -- node --version') {
-    output = 'v24.22.1\\n'
+    output = 'v24.22.3\\n'
   } else if (key === 'exec -i pod/pod-a -c mcp-server -- node --input-type=commonjs -') {
     readFileSync(0, 'utf8')
     output = JSON.stringify({
       status: 'PASS',
-      nodeVersion: '24.22.1',
-      browserVersion: 'HeadlessChrome/130.0.0.0',
+      nodeVersion: '24.22.3',
+      browserVersion: 'HeadlessChrome/157.0.0.0',
       navigation: true,
       realClick: true,
       screenshotBytes: 100,
@@ -525,14 +525,14 @@ test('requires Node 24 and the exact inherited profile and worktree', () => {
     CONTROL_API_REAL_PG_CONTEXT: profile,
     T2_PROJECT_DIR: repoRoot,
   }
-  assert.equal(assertLane(env, repoRoot, '24.22.1'), profile)
+  assert.equal(assertLane(env, repoRoot, '24.22.3'), profile)
   for (const bad of [
     { ...env, T2_CONTEXT: 'other' },
     { ...env, MINIKUBE_PROFILE: 'other' },
     { ...env, CONTROL_API_REAL_PG_CONTEXT: 'other' },
     { ...env, T2_PROJECT_DIR: '/' },
   ])
-    assert.throws(() => assertLane(bad, repoRoot, '24.22.1'), /LANE_IDENTITY_INVALID/)
+    assert.throws(() => assertLane(bad, repoRoot, '24.22.3'), /LANE_IDENTITY_INVALID/)
   assert.throws(() => assertLane(env, repoRoot, '22.22.0'), /LANE_IDENTITY_INVALID/)
 })
 
@@ -565,10 +565,14 @@ test('the probe accepts the checked-in Playwright manifest', () => {
 
 test('accepts only the approved image index or matching architecture digest', () => {
   const index = image.split('@')[1]
-  const arm = 'sha256:6402f88ad9f26102e910f5412cf5f09c5cfdc6bc7ff2eb277d334f43a4f457e0'
+  const arm = 'sha256:f09fd84358ddd593f4b7cf99d319e8aa4176d93743f1d09bd41743d59178484e'
   assert.equal(imageIdentity(image, 'arm64', `containerd://${arm}`), arm)
   assert.equal(imageIdentity(image, 'amd64', `docker-pullable://fixture@${index}`), index)
   assert.throws(() => imageIdentity(image, 'amd64', `containerd://${arm}`), /POD_IMAGE_INVALID/)
+  assert.throws(
+    () => imageIdentity(image, 'arm64', 'containerd://sha256:fc603bbc05d216ca9394940463e5e216d0a48732c24555fb9b67d20775fccf73'),
+    /POD_IMAGE_INVALID/
+  )
   assert.throws(() => imageIdentity(image, 'unknown', `containerd://${index}`), /POD_IMAGE_INVALID/)
   assert.throws(() => imageIdentity('other', 'arm64', `containerd://${arm}`), /POD_IMAGE_INVALID/)
 })
@@ -885,8 +889,8 @@ test('checks that the fixture Deployment and pods disappear after deleting the s
 test('requires actual runtime evidence and rejects empty or malformed reports', () => {
   const pass = {
     status: 'PASS',
-    nodeVersion: '24.22.1',
-    browserVersion: 'HeadlessChrome/146.0.0.0',
+    nodeVersion: '24.22.3',
+    browserVersion: 'HeadlessChrome/157.0.0.0',
     navigation: true,
     realClick: true,
     screenshotBytes: 128,
@@ -899,7 +903,8 @@ test('requires actual runtime evidence and rejects empty or malformed reports', 
     JSON.stringify({ ...pass, realClick: false }),
     JSON.stringify({ ...pass, screenshotBytes: 0 }),
     JSON.stringify({ ...pass, screenshotSha256: 'not-a-digest' }),
-    JSON.stringify({ ...pass, nodeVersion: '22.22.0' }),
+    JSON.stringify({ ...pass, nodeVersion: '24.22.1' }),
+    JSON.stringify({ ...pass, browserVersion: 'HeadlessChrome/146.0.0.0' }),
     JSON.stringify({ ...pass, browserVersion: 'other' }),
   ])
     assert.throws(() => runtimeReport(bad), /RUNTIME_REPORT_INVALID/)
