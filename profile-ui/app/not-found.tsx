@@ -21,9 +21,9 @@ export function ProfileNotFoundContent() {
             Page not found
           </h1>
           <p className="cu-not-found__copy">
-            This Profile UI route is not available. Return home to continue from your profile.
+            This Profile UI route is not available. Return to your profile to continue.
           </p>
-          <Link className="cu-btn cu-btn--primary cu-not-found__button" href={PROFILE_ROUTES.home}>
+          <Link className="cu-btn cu-btn--primary cu-not-found__button" href={PROFILE_ROUTES.root}>
             Back to Profile UI
           </Link>
         </div>
