@@ -10,4 +10,5 @@ export type TelegramVerificationPanelProps = {
   disabled: boolean
   onAccountsRefresh: () => Promise<WorkflowApprovalMediumAccount[]>
   onRemoveAccount: (accountId: string, isDisconnected: boolean) => void
+  connectRequestCount?: number
 }
