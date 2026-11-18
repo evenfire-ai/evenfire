@@ -13,10 +13,11 @@ import { MockGateway } from './mockGateway.js'
 /**
  * The access rule shared by the per-user OAuth connect gate and its callback:
  * a user may connect a server iff some Context they reach allowlists it in
- * `spec.mcpServers` — directly (user_contexts) or through an assigned agent
- * (user_agents → a Host the agent directory shows → its contextRef). Those are
- * the sources of the flat `/mcp-servers` catalog and the connectors panel; team
- * membership does not count. Membership is answered at the pool (the real
+ * `spec.mcpServers` — directly (user_contexts) or through an agent assigned
+ * directly or via an active team (getUserReachableAgents → a Host the agent
+ * directory shows → its contextRef). Those are the sources of the flat
+ * `/mcp-servers` catalog and the connectors panel; `team_contexts` still does
+ * not count. Membership is answered at the pool (the real
  * readers' SQL runs through it); allowlists are written through the real
  * allowlist writer onto the gateway fake; Host CRs are hand-written (no
  * exported producer).
@@ -86,15 +87,28 @@ describe('userHasContextEnablingMcpServer', () => {
     expect(listSpy).not.toHaveBeenCalled()
   })
 
-  it('team membership does not count: neither team_contexts nor team_agents is read', async () => {
+  it('an agent reached only through an active team counts', async () => {
     await seedAllowlistedContext(gateway, 'ctx-team', ['notion'])
     await seedAgentHost(gateway, 'host-team', 'ctx-team')
+    membership(mockPoolQuery, { contexts: { [USER]: [] }, teamAgents: { [USER]: ['host-team'] } })
+    expect(await check(gateway, USER, 'notion')).toBe(true)
+  })
+
+  it('a team agent of another user does not count', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-team', ['notion'])
+    await seedAgentHost(gateway, 'host-team', 'ctx-team')
+    membership(mockPoolQuery, { teamAgents: { [OTHER]: ['host-team'] } })
+    expect(await check(gateway, USER, 'notion')).toBe(false)
+  })
+
+  it('agents come from one reachable-agents statement; team_contexts is never read', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-team', ['notion'])
     membership(mockPoolQuery, { contexts: { [USER]: [] }, agents: { [USER]: [] } })
     expect(await check(gateway, USER, 'notion')).toBe(false)
     const sqls = mockPoolQuery.mock.calls.map(([sql]) => String(sql))
-    expect(sqls.some(sql => sql.includes('FROM user_contexts'))).toBe(true)
-    expect(sqls.some(sql => sql.includes('FROM user_agents'))).toBe(true)
-    expect(sqls.some(sql => /team_contexts|team_agents/.test(sql))).toBe(false)
+    expect(sqls.filter(sql => sql.includes('team_agents'))).toHaveLength(1)
+    expect(sqls.some(sql => sql.includes('UNION'))).toBe(true)
+    expect(sqls.some(sql => sql.includes('team_contexts'))).toBe(false)
   })
 
   it('propagates a Context list failure instead of answering false', async () => {

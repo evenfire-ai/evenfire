@@ -23,6 +23,7 @@ import { MockGateway } from './mockGateway.js'
  */
 
 const USER = '77777777-7777-4777-8777-777777777777'
+const OTHER = '88888888-8888-4888-8888-888888888888'
 
 const mockPoolQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
@@ -117,7 +118,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
 
   it('mints an authorize-URL whose signed state binds the forwarded userId + the SERVER oauthClientId', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
-    // user-7 is a member of ctx-9, whose allowlist enables gdrive.
+    // USER is a member of ctx-9, whose allowlist enables gdrive.
     await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
     membership(mockPoolQuery, { contexts: { [USER]: ['ctx-9'] } })
     const res = await post(app)
@@ -238,6 +239,35 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
   })
 
+  it('user flavor: reached only through a team agent whose Context allowlists it mints OK', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
+    await seedAllowlistedContext(gateway, 'ctx-owner', [])
+    await seedAllowlistedContext(gateway, 'ctx-team', ['gdrive'])
+    await seedAgentHost(gateway, 'host-team', 'ctx-team')
+    membership(mockPoolQuery, { contexts: { [USER]: [] }, teamAgents: { [USER]: ['host-team'] } })
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: USER })
+    expect(res.status).toBe(200)
+    expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
+  })
+
+  it('user flavor: a team agent of another user does not count → 403, NO authorizeUrl', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
+    await seedAllowlistedContext(gateway, 'ctx-owner', [])
+    await seedAllowlistedContext(gateway, 'ctx-team', ['gdrive'])
+    await seedAgentHost(gateway, 'host-team', 'ctx-team')
+    membership(mockPoolQuery, { teamAgents: { [OTHER]: ['host-team'] } })
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: USER })
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'context_membership_denied' })
+    expect(res.body.authorizeUrl).toBeUndefined()
+  })
+
   it('user flavor: the body contextId is ignored (neither required nor cross-checked)', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
@@ -252,11 +282,11 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('user flavor: no Context of the user allowlists the server → 403, NO authorizeUrl', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
     await seedAllowlistedContext(gateway, 'ctx-other', ['some-other-server'])
-    membership(mockPoolQuery, { contexts: { 'user-8': ['ctx-other'] } })
+    membership(mockPoolQuery, { contexts: { [OTHER]: ['ctx-other'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-8' })
+      .send({ mcpServerName: 'gdrive', userId: OTHER })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('context_membership_denied')
     expect(res.body.authorizeUrl).toBeUndefined()
@@ -265,11 +295,11 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('user flavor: a user with no Contexts at all → 403', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
     await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
-    membership(mockPoolQuery, { contexts: { 'user-8': [] } })
+    membership(mockPoolQuery, { contexts: { [OTHER]: [] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-8' })
+      .send({ mcpServerName: 'gdrive', userId: OTHER })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('context_membership_denied')
   })
@@ -282,11 +312,11 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
     await seedAllowlistedContext(gateway, 'ctx-other', [])
-    membership(mockPoolQuery, { contexts: { 'user-8': ['ctx-other'] } })
+    membership(mockPoolQuery, { contexts: { [OTHER]: ['ctx-other'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-8' })
+      .send({ mcpServerName: 'gdrive', userId: OTHER })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('context_membership_denied')
     expect(res.body.authorizeUrl).toBeUndefined()
@@ -353,11 +383,11 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     // Member of ctx-9, which enables gdrive, so we reach the Secret read (past
     // the membership gate).
     await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
-    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-9'] } })
+    membership(mockPoolQuery, { contexts: { [USER]: ['ctx-9'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
+      .send({ mcpServerName: 'gdrive', userId: USER })
     expect(res.status).toBe(503)
     expect(res.body.error).toBe('integration_not_configured')
   })

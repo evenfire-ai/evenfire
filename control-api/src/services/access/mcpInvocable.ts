@@ -40,6 +40,7 @@ import {
 } from '../directory/accessReconciliation.js'
 import { getUserAgents } from '../directory/agentAccess.js'
 import { getUserContexts } from '../directory/contextAccess.js'
+import { getUserReachableAgents } from '../directory/index.js'
 import { isCanonicalUuid, isLive, isValidK8sName } from './brokerHostBinding.js'
 
 const log = rootLogger.child({ module: 'mcpInvocable' })
@@ -270,14 +271,13 @@ export async function allowedMcpServerNamesForContexts(
  * follows the allowlists.
  *
  * A Context is reached directly (`getUserContexts`, active users) or through
- * an agent assigned to the user (`getUserAgents` → a Host the agent directory
- * shows → its `spec.contextRef`). Those are the two sources the flat
- * `/mcp-servers` catalog and the per-agent connectors panel resolve from, so
- * anything either offers the user can be connected. Team access
- * (`team_contexts`, `team_agents`) is not counted here, even though the broker
- * and the desktop chat catalog do admit team agents: this path has no trusted
- * team id. So a user who reaches a server only through a team can be offered
- * it and still have this consent check reject it — a known gap.
+ * an agent the user reaches, directly or through any active team membership
+ * (`getUserReachableAgents`, the broker's `hostAccessForUser` rule), whose Host
+ * the agent directory shows via its `spec.contextRef`. Those are the sources
+ * the flat `/mcp-servers` catalog and the per-agent connectors panel resolve
+ * from, so anything either offers the user can be connected. `team_contexts`
+ * is not counted. A non-canonical `userId` reaches no agents; the direct read
+ * is unchanged.
  *
  * Agents are read only when the direct Contexts do not enable the server, so
  * a Host read failure cannot break consent that direct membership already
@@ -300,7 +300,7 @@ export async function userHasContextEnablingMcpServer(opts: {
   )
   if (direct.has(opts.mcpServerName)) return true
 
-  const { agentNames } = await getUserAgents(opts.userId)
+  const { agentNames } = await getUserReachableAgents(opts.userId)
   const hosts = await loadVisibleAgentHosts(opts.gateway, opts.hostsNamespace, agentNames)
   const agentContextNames: string[] = []
   for (const { host } of hosts) {
@@ -326,6 +326,11 @@ export async function userHasContextEnablingMcpServer(opts: {
  * the Context must also allowlist `mcpServerName` exactly. Revocation does not
  * require it, so a member can still remove a grant the Context no longer
  * enables.
+ *
+ * Team reach is deliberately not counted here: the user must reach the Context
+ * directly or through a directly assigned agent (`getUserAgents`, not
+ * `getUserReachableAgents`), because a shared grant plants a credential for the
+ * whole Context. This is the remaining, accepted gap, outside #1175.
  *
  * A malformed name or a userId that is not a canonical UUID is a plain denial,
  * decided before any read: the membership columns are UUIDs and would turn it
