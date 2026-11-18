@@ -1,9 +1,13 @@
 import { createHash, randomBytes } from 'node:crypto'
+import { isIP } from 'node:net'
 import { EXTERNAL_REST_API_INTERNAL_URL } from '../../constants/serverApi'
 
 export const OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS = 600
 /** Control API and Profile UI clocks can differ by a small amount. */
 export const OIDC_BROWSER_CLOCK_SKEW_SECONDS = 60
+/** Same budget Control API uses for one OIDC operation. Profile UI waits longer so that budget can answer first. */
+export const OIDC_OPERATION_DEADLINE_MS = 12_000
+export const OIDC_PROFILE_FETCH_TIMEOUT_MS = OIDC_OPERATION_DEADLINE_MS + 2_000
 
 const BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
@@ -32,7 +36,8 @@ export class OidcProfileFlowError extends Error {
   constructor(
     readonly status: number,
     readonly code: OidcFailureCode,
-    readonly retryable: boolean
+    readonly retryable: boolean,
+    readonly retryAfterSeconds?: number
   ) {
     super('OIDC profile flow request failed')
   }
@@ -50,7 +55,7 @@ function json(body: unknown, status = 200, headers: Record<string, string> = {})
   })
 }
 
-export function noStoreText(message: string, status: number): Response {
+export function noStoreText(message: string, status: number, retryAfterSeconds?: number): Response {
   return new Response(message, {
     status,
     headers: {
@@ -58,8 +63,17 @@ export function noStoreText(message: string, status: number): Response {
       'content-type': 'text/plain; charset=utf-8',
       'referrer-policy': 'no-referrer',
       'x-content-type-options': 'nosniff',
+      ...(retryAfterSeconds !== undefined && retryAfterSeconds > 0
+        ? { 'retry-after': String(Math.ceil(retryAfterSeconds)) }
+        : {}),
     },
   })
+}
+
+export function oidcClientKey(request: Request): string | undefined {
+  const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? ''
+  if (!forwarded || isIP(forwarded) === 0) return undefined
+  return createHash('sha256').update(forwarded).digest('hex')
 }
 
 function externalUrl(path: string): string {
@@ -67,30 +81,45 @@ function externalUrl(path: string): string {
   return `${base}/api/v1${path}`
 }
 
-async function requestExternal<T>(path: string, init?: RequestInit): Promise<T> {
-  const operationMayConsumeAttempt = path.endsWith('/complete') || path.endsWith('/cancel')
-  const retryWhenOutcomeIsUnknown = !operationMayConsumeAttempt
+async function requestExternal<T>(
+  path: string,
+  init?: RequestInit,
+  clientKey?: string
+): Promise<T> {
   let response: Response
   try {
     response = await fetch(externalUrl(path), {
       ...init,
       cache: 'no-store',
       redirect: 'error',
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(OIDC_PROFILE_FETCH_TIMEOUT_MS),
       headers: {
         accept: 'application/json',
+        'x-oidc-operation-deadline-ms': String(OIDC_OPERATION_DEADLINE_MS),
+        ...(clientKey ? { 'x-oidc-client-key': clientKey } : {}),
         ...(init?.body ? { 'content-type': 'application/json' } : {}),
+        ...((init?.headers as Record<string, string> | undefined) ?? {}),
       },
     })
   } catch {
-    throw new OidcProfileFlowError(503, 'oidc_unavailable', retryWhenOutcomeIsUnknown)
+    // The attempt may still be pending. Keep it reusable until a response says otherwise.
+    throw new OidcProfileFlowError(503, 'oidc_unavailable', true)
   }
 
+  if (response.status === 429) {
+    const retryAfter = Number(response.headers.get('retry-after'))
+    throw new OidcProfileFlowError(
+      429,
+      'oidc_unavailable',
+      true,
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined
+    )
+  }
   let body: unknown
   try {
     body = await response.json()
   } catch {
-    throw new OidcProfileFlowError(503, 'oidc_unavailable', retryWhenOutcomeIsUnknown)
+    throw new OidcProfileFlowError(503, 'oidc_unavailable', true)
   }
   if (!response.ok) {
     const error =
@@ -101,28 +130,35 @@ async function requestExternal<T>(path: string, init?: RequestInit): Promise<T> 
       SAFE_FAILURE_SET.has(body.error)
         ? (body.error as OidcFailureCode)
         : 'oidc_unavailable'
-    const retryable =
+    const retryableCode =
       error === 'oidc_provider_unavailable' ||
       error === 'oidc_storage_unavailable' ||
-      error === 'oidc_unavailable'
+      error === 'oidc_unavailable' ||
+      error === 'oidc_operation_cancelled'
     const retrySameAttempt =
       body &&
       typeof body === 'object' &&
       'retrySameAttempt' in body &&
       typeof body.retrySameAttempt === 'boolean'
         ? body.retrySameAttempt
-        : retryWhenOutcomeIsUnknown
+        : true
     throw new OidcProfileFlowError(
-      [400, 404, 503].includes(response.status) ? response.status : 503,
+      [400, 404, 429, 503].includes(response.status) ? response.status : 503,
       error,
-      retryable && retrySameAttempt !== false
+      retryableCode && retrySameAttempt !== false
     )
   }
   return body as T
 }
 
-export async function getOidcProfileConfiguration(): Promise<OidcProfileConfiguration> {
-  const config = await requestExternal<OidcProfileConfiguration>('/oidc/profile-flow/configuration')
+export async function getOidcProfileConfiguration(
+  request: Request
+): Promise<OidcProfileConfiguration> {
+  const config = await requestExternal<OidcProfileConfiguration>(
+    '/oidc/profile-flow/configuration',
+    undefined,
+    oidcClientKey(request)
+  )
   if (
     !config ||
     typeof config.redirectUri !== 'string' ||
@@ -218,19 +254,27 @@ export function clearBrowserCookie(name: string): string {
 
 export async function postOidcProfileFlow<T>(
   route: 'attempts' | 'complete' | 'cancel',
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  request: Request
 ): Promise<T> {
-  return requestExternal<T>(`/oidc/profile-flow/${route}`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
+  return requestExternal<T>(
+    `/oidc/profile-flow/${route}`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+    oidcClientKey(request)
+  )
 }
 
-export async function beginOidcAttempt(browserBinding: string): Promise<{
+export async function beginOidcAttempt(
+  browserBinding: string,
+  request: Request
+): Promise<{
   authorizationUrl: string
   expiresAt: string
 }> {
-  return postOidcProfileFlow('attempts', { browserBinding })
+  return postOidcProfileFlow('attempts', { browserBinding }, request)
 }
 
 export function validateAuthorizationUrl(rawUrl: unknown, callback: string): URL | undefined {

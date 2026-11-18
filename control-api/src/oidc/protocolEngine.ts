@@ -313,6 +313,7 @@ export class OidcProtocolEngine {
         return await this.completeIdentityProofAttemptInternal(input)
       } catch (error) {
         if (options.signal?.aborted && !(error instanceof OidcPersistenceFailure)) {
+          if (error instanceof OidcCallerCancelledError) throw error
           throw new OidcCallerCancelledError()
         }
         throw error
@@ -435,7 +436,7 @@ export class OidcProtocolEngine {
         )
       }
       if (error instanceof OidcPersistenceFailure) throw error
-      if (error instanceof OidcCallerCancelledError) throw error
+      if (error instanceof OidcCallerCancelledError) throw new OidcCallerCancelledError(true)
       if (
         error instanceof OidcProviderUnavailableError ||
         transportFailure?.kind === 'unavailable'

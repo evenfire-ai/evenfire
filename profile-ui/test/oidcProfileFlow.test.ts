@@ -282,7 +282,7 @@ test('provider outage during completion preserves the browser cookie for retry',
   }
 })
 
-test('an unknown completion outcome does not claim the attempt can be retried', async () => {
+test('an unknown completion outcome keeps the browser cookie', async () => {
   const restore = mockExternalApi(url => {
     if (url.pathname.endsWith('/configuration')) return configurationResponse()
     throw new Error('upstream outcome unavailable')
@@ -295,9 +295,31 @@ test('an unknown completion outcome does not claim the attempt can be retried', 
     )
     const text = await response.text()
     assert.equal(response.status, 503)
-    assert.doesNotMatch(text, /retry this attempt/i)
-    assert.match(text, /start a new sign-in attempt/i)
-    assert.match(response.headers.get('set-cookie') ?? '', /Max-Age=0/)
+    assert.match(text, /retry this attempt/i)
+    assert.equal(response.headers.get('set-cookie'), null)
+  } finally {
+    restore()
+  }
+})
+
+test('a rate limit before completion keeps the browser cookie and Retry-After', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return configurationResponse()
+    return Response.json(
+      { error: 'oidc_unavailable' },
+      { status: 429, headers: { 'retry-after': '30' } }
+    )
+  })
+  try {
+    const response = await GET(
+      new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+        headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+      })
+    )
+    assert.equal(response.status, 429)
+    assert.equal(response.headers.get('retry-after'), '30')
+    assert.equal(response.headers.get('set-cookie'), null)
+    assert.match(await response.text(), /retry this attempt later/i)
   } finally {
     restore()
   }

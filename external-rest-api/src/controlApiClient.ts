@@ -218,6 +218,7 @@ export async function controlApiRequestWithStatus<T>(
     body?: unknown
     userSessionToken?: string
     extraHeaders?: Record<string, string>
+    signal?: AbortSignal
   }
 ): Promise<ControlApiResponse<T>> {
   // Build and validate the URL before any credential enters a request object.
@@ -240,7 +241,7 @@ export async function controlApiRequestWithStatus<T>(
     method === 'GET' || method === 'HEAD' ? 'read' : 'mutation'
   let response: Response
   try {
-    response = await fetch(url, { method, headers, body })
+    response = await fetch(url, { method, headers, body, signal: options?.signal })
   } catch {
     throw new ControlApiTransportError(operation, 'dispatch')
   }

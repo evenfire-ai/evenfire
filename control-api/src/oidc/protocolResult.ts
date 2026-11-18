@@ -57,7 +57,7 @@ export class OidcAttemptRejectedError extends OidcProviderIncompatibleError {
 export class OidcCallerCancelledError extends Error {
   readonly category: OidcProtocolOutcome = 'caller-cancelled'
 
-  constructor() {
+  constructor(readonly consumedAttempt = false) {
     super('OIDC protocol operation was cancelled by its caller')
     this.name = 'OidcCallerCancelledError'
   }

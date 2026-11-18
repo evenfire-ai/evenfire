@@ -46,7 +46,9 @@ describe('Control API OIDC Profile UI foundation boundary', () => {
       authorizationUrl: 'https://issuer.example.test/authorize?state=opaque-state',
       expiresAt: '2026-10-30T18:00:00.000Z',
     })
-    expect(beginIdentityProofAttempt).toHaveBeenCalledWith({ browserBinding })
+    expect(beginIdentityProofAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({ browserBinding, signal: expect.any(AbortSignal) })
+    )
     expect(JSON.stringify(response.body)).not.toContain('must-not-be-forwarded')
   })
 
@@ -73,12 +75,15 @@ describe('Control API OIDC Profile UI foundation boundary', () => {
       outcome: 'identity_proof_verified',
       memberAuthenticationActivated: false,
     })
-    expect(completeIdentityProofAttempt).toHaveBeenCalledWith({
-      state: 'S'.repeat(43),
-      code: 'provider-code',
-      browserBinding: 'B'.repeat(43),
-      issuer: provider.issuer,
-    })
+    expect(completeIdentityProofAttempt).toHaveBeenCalledWith(
+      {
+        state: 'S'.repeat(43),
+        code: 'provider-code',
+        browserBinding: 'B'.repeat(43),
+        issuer: provider.issuer,
+      },
+      { signal: expect.any(AbortSignal) }
+    )
     expect(JSON.stringify(response.body)).not.toMatch(
       /opaque-provider-subject|private@example|private-tenant/
     )

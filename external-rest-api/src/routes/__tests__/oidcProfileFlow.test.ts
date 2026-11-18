@@ -33,9 +33,14 @@ describe('External REST OIDC Profile UI bridge', () => {
       authorizationUrl: 'https://issuer.example.test/authorize?state=opaque',
       expiresAt: '2026-10-30T18:00:00.000Z',
     })
-    expect(requestSpy).toHaveBeenCalledWith('POST', '/external/oidc/profile-flow/attempts', {
-      body: { browserBinding: 'B'.repeat(43) },
-    })
+    expect(requestSpy).toHaveBeenCalledWith(
+      'POST',
+      '/external/oidc/profile-flow/attempts',
+      expect.objectContaining({
+        body: { browserBinding: 'B'.repeat(43) },
+        extraHeaders: { 'x-oidc-operation-deadline-ms': '12000' },
+      })
+    )
   })
 
   it('returns only the verified-proof completion outcome, never the proof payload', async () => {
@@ -57,6 +62,32 @@ describe('External REST OIDC Profile UI bridge', () => {
       memberAuthenticationActivated: false,
     })
     expect(JSON.stringify(response.body)).not.toContain('must-not-escape')
+  })
+
+  it('limits each browser separately and keeps an aggregate connection budget', async () => {
+    requestSpy.mockResolvedValue({
+      data: {
+        authorizationUrl: 'https://issuer.example.test/authorize?state=opaque',
+        expiresAt: '2026-10-30T18:00:00.000Z',
+      },
+      status: 200,
+    } as never)
+    const server = app()
+    const send = (key: string) =>
+      request(server)
+        .post('/oidc/profile-flow/attempts')
+        .set('x-oidc-client-key', key)
+        .send({ browserBinding: 'B'.repeat(43) })
+    const first = 'a'.repeat(64)
+    const second = 'b'.repeat(64)
+    for (let i = 0; i < 60; i++) {
+      expect((await send(first)).status).toBe(200)
+    }
+    const limited = await send(first)
+    expect(limited.status).toBe(429)
+    expect(limited.headers['retry-after']).toMatch(/^[1-9][0-9]*$/)
+    expect(requestSpy).toHaveBeenCalledTimes(60)
+    expect((await send(second)).status).toBe(200)
   })
 
   it('does not forward an invalid binding or caller-selected URL/path', async () => {

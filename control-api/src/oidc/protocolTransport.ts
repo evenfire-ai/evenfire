@@ -22,6 +22,8 @@ import {
   validateOidcProviderProfile,
 } from './providerProfile.js'
 
+/** One budget for discovery, the token endpoint, and JWKS on a single operation. */
+export const OIDC_OPERATION_DEADLINE_MS = 12_000
 export const OIDC_REQUEST_TIMEOUT_MS = 15_000
 
 export class TrustedOidcTransport {

@@ -14,7 +14,7 @@ import {
 
 export async function POST(request: Request): Promise<Response> {
   try {
-    const configuration = await getOidcProfileConfiguration()
+    const configuration = await getOidcProfileConfiguration(request)
     if (!originMatchesCallback(request, configuration.redirectUri)) {
       return new Response('Request rejected.', {
         status: 403,
@@ -23,7 +23,7 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const browserBinding = newBrowserBinding()
-    const attempt = await beginOidcAttempt(browserBinding)
+    const attempt = await beginOidcAttempt(browserBinding, request)
     const authorizationUrl = validateAuthorizationUrl(
       attempt.authorizationUrl,
       configuration.redirectUri

@@ -12,6 +12,7 @@ import {
   OidcProviderIncompatibleError,
   OidcProviderUnavailableError,
 } from '../../oidc/protocolResult.js'
+import { OIDC_OPERATION_DEADLINE_MS } from '../../oidc/protocolTransport.js'
 
 const BROWSER_BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
@@ -69,10 +70,22 @@ function safeFailure(error: unknown, res: Response, includeRetryability = false)
     return
   }
   if (error instanceof OidcCallerCancelledError) {
-    res.status(503).json({ error: 'oidc_operation_cancelled' })
+    res.status(503).json({
+      error: 'oidc_operation_cancelled',
+      retrySameAttempt: !error.consumedAttempt,
+    })
     return
   }
   res.status(503).json({ error: 'oidc_unavailable' })
+}
+
+function oidcOperationSignal(req: { get(name: string): string | undefined }): AbortSignal {
+  const requested = Number(req.get('x-oidc-operation-deadline-ms'))
+  const budget =
+    Number.isInteger(requested) && requested > 0
+      ? Math.min(requested, OIDC_OPERATION_DEADLINE_MS)
+      : OIDC_OPERATION_DEADLINE_MS
+  return AbortSignal.timeout(budget)
 }
 
 function validBinding(value: unknown): value is string {
@@ -123,6 +136,7 @@ export function createExternalOidcProfileFlowRouter(
     try {
       const result = await createEngine(provider).beginIdentityProofAttempt({
         browserBinding: req.body.browserBinding,
+        signal: oidcOperationSignal(req),
       })
       return res.status(200).json({
         authorizationUrl: result.authorizationUrl,
@@ -153,12 +167,15 @@ export function createExternalOidcProfileFlowRouter(
       return res.status(400).json({ error: 'invalid_oidc_attempt' })
     }
     try {
-      await createEngine(provider).completeIdentityProofAttempt({
-        state,
-        code,
-        browserBinding,
-        ...(issuer !== undefined ? { issuer } : {}),
-      })
+      await createEngine(provider).completeIdentityProofAttempt(
+        {
+          state,
+          code,
+          browserBinding,
+          ...(issuer !== undefined ? { issuer } : {}),
+        },
+        { signal: oidcOperationSignal(req) }
+      )
       return res.status(200).json({
         outcome: 'identity_proof_verified',
         memberAuthenticationActivated: false,

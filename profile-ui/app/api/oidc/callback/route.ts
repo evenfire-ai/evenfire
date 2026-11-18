@@ -24,7 +24,7 @@ export async function GET(request: Request): Promise<Response> {
 
   let configuration: OidcProfileConfiguration
   try {
-    configuration = await getOidcProfileConfiguration()
+    configuration = await getOidcProfileConfiguration(request)
   } catch (error) {
     return responseForFlowError(error)
   }
@@ -48,17 +48,25 @@ export async function GET(request: Request): Promise<Response> {
 
   if (callback.kind === 'denied') {
     try {
-      const result = await postOidcProfileFlow<{ outcome: 'attempt_cancelled' }>('cancel', {
-        state: callback.state,
-        browserBinding,
-      })
+      const result = await postOidcProfileFlow<{ outcome: 'attempt_cancelled' }>(
+        'cancel',
+        {
+          state: callback.state,
+          browserBinding,
+        },
+        request
+      )
       if (result?.outcome !== 'attempt_cancelled') {
         throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
       }
       return terminalFailure('Sign-in was cancelled.', 400, callback.state)
     } catch (error) {
       if (error instanceof OidcProfileFlowError && error.retryable) {
-        return noStoreText('The cancellation could not be confirmed. Retry this attempt.', 503)
+        return noStoreText(
+          'The cancellation could not be confirmed. Retry this attempt.',
+          error.status === 429 ? 429 : 503,
+          error.retryAfterSeconds
+        )
       }
       if (
         error instanceof OidcProfileFlowError &&
@@ -82,12 +90,16 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   try {
-    const result = await postOidcProfileFlow<{ outcome: 'identity_proof_verified' }>('complete', {
-      state: callback.state,
-      code: callback.code,
-      browserBinding,
-      ...(callback.issuer !== undefined ? { issuer: callback.issuer } : {}),
-    })
+    const result = await postOidcProfileFlow<{ outcome: 'identity_proof_verified' }>(
+      'complete',
+      {
+        state: callback.state,
+        code: callback.code,
+        browserBinding,
+        ...(callback.issuer !== undefined ? { issuer: callback.issuer } : {}),
+      },
+      request
+    )
     if (result?.outcome !== 'identity_proof_verified') {
       throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
     }
@@ -99,8 +111,11 @@ export async function GET(request: Request): Promise<Response> {
   } catch (error) {
     if (error instanceof OidcProfileFlowError && error.retryable) {
       return noStoreText(
-        'The identity provider is temporarily unavailable. Retry this attempt.',
-        503
+        error.status === 429
+          ? 'Too many sign-in attempts. Retry this attempt later.'
+          : 'The identity provider is temporarily unavailable. Retry this attempt.',
+        error.status === 429 ? 429 : 503,
+        error.retryAfterSeconds
       )
     }
     if (
