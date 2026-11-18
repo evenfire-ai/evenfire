@@ -98,7 +98,7 @@ functions, and they stay after a rollback: `gfs_resource_changed_notify` on
 `gfs_shares`, `gfs_desktop_operator_links`, `control_admin_users` and
 `team_members`, `gfs_authz_changed_update_notify` on `control_admin_users` and
 `team_members`, and `gfs_watch_session_update_notify` and
-`gfs_watch_session_delete_notify` on `users` (from `0140` to `0145`). Every
+`gfs_watch_session_delete_notify` on `users` (from `0142` to `0147`). Every
 matching write to those tables still sends a `pg_notify` on the
 `gfs_resource_changed`, `gfs_authz_changed` or `gfs_watch_session` channel.
 No write fails because of them: nothing in the old image listens on those
@@ -184,10 +184,10 @@ before this release.
   The release adds `0137_user_access_foundation`,
   `0138_legacy_password_security_epoch_backfill`,
   `0139_llm_catalog_prune_columns`, `0140_llm_catalog_prune_episodes`,
-  `0141_gfs_resource_changed_notify`, `0140_gfs_authz_grants_notify`,
-  `0141_gfs_authz_shares_notify`, `0142_gfs_authz_operator_links_notify`,
-  `0143_gfs_authz_control_admins_notify`, `0144_gfs_authz_team_members_notify`
-  and `0145_gfs_watch_session_users_notify`. A
+  `0141_gfs_resource_changed_notify`, `0142_gfs_authz_grants_notify`,
+  `0143_gfs_authz_shares_notify`, `0144_gfs_authz_operator_links_notify`,
+  `0145_gfs_authz_control_admins_notify`, `0146_gfs_authz_team_members_notify`
+  and `0147_gfs_watch_session_users_notify`. A
   database where an earlier head of the catalog prune applied both parts as a
   single `0139` migration (branch profiles or local databases only) records
   `0139_llm_catalog_prune_columns` under its legacy alias without running it,
@@ -196,14 +196,14 @@ before this release.
   Windows). The migration session sets `client_connection_check_interval`,
   which the server rejects on other platforms, so that a killed Job pod does
   not leave its backend holding the migration advisory lock.
-- For a database already at `0136`, every statement of `0137` through `0145`
+- For a database already at `0136`, every statement of `0137` through `0147`
   waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
   bounded at 15 s (`statement_timeout`); the online index builds have their own
   120 s bound (below). The whole Job is bounded at 300 s
   (`activeDeadlineSeconds`).
 - For a database at `0130` through `0135`, the missing versions through `0136`
   commit in one transaction under the 10 s lock and 15 s statement bounds, with
-  no fence, then each of `0137` through `0145` in its own transaction.
+  no fence, then each of `0137` through `0147` in its own transaction.
 - An existing database below `0130` must already have `0126` to `0128`; the
   Job stops with an error otherwise. For such a database the 10 s lock bound
   does not hold before `0137`. The Job first sets the `0130` password-login
@@ -311,28 +311,28 @@ before this release.
   attempt. While the migration waits, later writes to `gfs_resources` queue
   behind it. The migration neither scans nor rewrites the table, so its duration
   does not depend on its size.
-- `0140_gfs_authz_grants_notify` through `0145_gfs_watch_session_users_notify`
+- `0142_gfs_authz_grants_notify` through `0147_gfs_watch_session_users_notify`
   each run in their own bounded transaction (10 s `lock_timeout`, 15 s
   `statement_timeout`) and install `AFTER ROW` triggers on one existing table
-  each. `0140` first creates (or replaces) the functions
+  each. `0142` first creates (or replaces) the functions
   `gfs_authz_subject_key()`, `gfs_authz_subject_notify()`,
   `gfs_authz_user_notify()`, `gfs_authz_admin_notify()` and
   `gfs_watch_session_notify()`; `CREATE OR REPLACE FUNCTION` and the `REVOKE`
   on them take no table lock. Every `CREATE OR REPLACE TRIGGER` takes
   `SHARE ROW EXCLUSIVE` on its table until that migration's transaction
   commits: inserts, updates and deletes on the table are blocked for that time,
-  plain reads are not. The tables are `gfs_grants` (`0140`), `gfs_shares`
-  (`0141`), `gfs_desktop_operator_links` (`0142`), `control_admin_users`
-  (`0143`, two triggers), `team_members` (`0144`, two triggers) and `users`
-  (`0145`, two triggers). Each migration holds only its own table's lock, so no
+  plain reads are not. The tables are `gfs_grants` (`0142`), `gfs_shares`
+  (`0143`), `gfs_desktop_operator_links` (`0144`), `control_admin_users`
+  (`0145`, two triggers), `team_members` (`0146`, two triggers) and `users`
+  (`0147`, two triggers). Each migration holds only its own table's lock, so no
   two of these tables are blocked at once. While a migration waits for its
   lock, later writes to that table queue behind it. None of them scans or
   rewrites its table, so their duration does not depend on table size.
-- `0140` to `0143` wait at most 10 s for their lock, with no retry inside the
+- `0142` to `0145` wait at most 10 s for their lock, with no retry inside the
   Job: a transaction that has written to `gfs_grants`, `gfs_shares`,
   `gfs_desktop_operator_links` or `control_admin_users` and stays open longer
   fails that Job attempt. `team_members` and `users` are written by every
-  sign-in, so `0144` and `0145` retry a lost lock wait (`lockRetries: 2`): after
+  sign-in, so `0146` and `0147` retry a lost lock wait (`lockRetries: 2`): after
   a 10 s `lock_timeout` the transaction rolls back, holds no lock, waits 1 s
   (then 2 s) and starts again, for at most three attempts. Each of the two can
   thus block sign-ins for up to about 30 s in total, in three 10 s windows
@@ -346,7 +346,7 @@ before this release.
   relation; `dev` had 7) and
   `deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv` (6
   column rows; new in this release). A mismatch stops the deploy after `0137`
-  through `0145` have committed, while the old control-api keeps serving. Compare
+  through `0147` have committed, while the old control-api keeps serving. Compare
   the target database's grants with both files before step 1.
 - `deploy/scripts/run-control-api-db-migration.sh` requires `--timeout` (or
   `TIMEOUT`) to be a number with a unit (`s`, `m` or `h`) and at least `360s`;

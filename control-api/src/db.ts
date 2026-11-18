@@ -6454,30 +6454,30 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGfsResourceChangedSchema,
   },
   {
-    version: '0140_gfs_authz_grants_notify',
+    version: '0142_gfs_authz_grants_notify',
     apply: applyGfsAuthzGrantsSchema,
   },
   {
-    version: '0141_gfs_authz_shares_notify',
+    version: '0143_gfs_authz_shares_notify',
     apply: applyGfsAuthzSharesSchema,
   },
   {
-    version: '0142_gfs_authz_operator_links_notify',
+    version: '0144_gfs_authz_operator_links_notify',
     apply: applyGfsAuthzOperatorLinksSchema,
   },
   {
-    version: '0143_gfs_authz_control_admins_notify',
+    version: '0145_gfs_authz_control_admins_notify',
     apply: applyGfsAuthzControlAdminsSchema,
   },
   {
-    version: '0144_gfs_authz_team_members_notify',
+    version: '0146_gfs_authz_team_members_notify',
     apply: applyGfsAuthzTeamMembersSchema,
     // Every login writes users and team_members: CREATE TRIGGER on them can
     // lose its lock wait at a busy moment, which should not fail the Job.
     lockRetries: 2,
   },
   {
-    version: '0145_gfs_watch_session_users_notify',
+    version: '0147_gfs_watch_session_users_notify',
     apply: applyGfsWatchSessionUsersSchema,
     lockRetries: 2,
   },

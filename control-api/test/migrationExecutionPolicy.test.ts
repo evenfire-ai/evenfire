@@ -57,12 +57,12 @@ describe('D34 migration execution policy', () => {
       '0139_llm_catalog_prune_columns',
       '0140_llm_catalog_prune_episodes',
       '0141_gfs_resource_changed_notify',
-      '0140_gfs_authz_grants_notify',
-      '0141_gfs_authz_shares_notify',
-      '0142_gfs_authz_operator_links_notify',
-      '0143_gfs_authz_control_admins_notify',
-      '0144_gfs_authz_team_members_notify',
-      '0145_gfs_watch_session_users_notify',
+      '0142_gfs_authz_grants_notify',
+      '0143_gfs_authz_shares_notify',
+      '0144_gfs_authz_operator_links_notify',
+      '0145_gfs_authz_control_admins_notify',
+      '0146_gfs_authz_team_members_notify',
+      '0147_gfs_watch_session_users_notify',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -114,21 +114,21 @@ describe('D34 migration execution policy', () => {
 
   it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
     // PR1 occupies the slots after dev's 0136 other than 0139 and 0140 (dev's
-    // catalog prune), and no shared environment holds a receipt for any of them. 0137 creates the user-session tables
-    // (sessions, security epochs, the v1 revocation ledger) and their runtime
-    // grants; the indexes it needs on pre-existing tables are built online by
-    // PR1_ONLINE_INDEX_PLAN. 0138 backfills the security epochs from historical
-    // password events. 0141 installs gfs_resource_changed_notify(), an AFTER
+    // catalog prune), and no shared environment holds a receipt for any of
+    // them. 0137 creates the user-session tables (sessions, security epochs,
+    // the v1 revocation ledger) and their runtime grants; the indexes it needs
+    // on pre-existing tables are built online by PR1_ONLINE_INDEX_PLAN. 0138
+    // backfills the security epochs from historical password events. 0141 installs gfs_resource_changed_notify(), an AFTER
     // ROW trigger on gfs_resources that sends one pg_notify per written row.
-    // 0140-0145 install the GFS watch revocation signals, one table per
-    // migration and transaction: 0140 creates the key function
+    // 0142-0147 install the GFS watch revocation signals, one table per
+    // migration and transaction: 0142 creates the key function
     // gfs_authz_subject_key() and the trigger functions
     // gfs_authz_subject_notify(), gfs_authz_user_notify(),
     // gfs_authz_admin_notify() and gfs_watch_session_notify(), plus the AFTER
-    // ROW trigger on gfs_grants; 0141-0145 add AFTER ROW triggers on
+    // ROW trigger on gfs_grants; 0143-0147 add AFTER ROW triggers on
     // gfs_shares, gfs_desktop_operator_links, control_admin_users,
     // team_members and users. Every login writes team_members and users, so
-    // 0144 and 0145 retry a lost lock wait twice; their lockRetries live in
+    // 0146 and 0147 retry a lost lock wait twice; their lockRetries live in
     // db.ts and are pinned by the lock-retry registration test below.
     const files = [
       [
@@ -148,7 +148,7 @@ describe('D34 migration execution policy', () => {
       const bytes = await readFile(new URL(`../${path}`, import.meta.url))
       expect(createHash('sha256').update(bytes).digest('hex'), path).toBe(expected)
     }
-    // The SQL of 0141 and 0140-0145 interpolates its channel names from notifySchemas.ts.
+    // The SQL of 0141-0147 interpolates its channel names from notifySchemas.ts.
     // That file is pinned by these values, not by its hash, because it also
     // carries runtime payload parsers that later changes extend.
     expect(GFS_RESOURCE_CHANGED_CHANNEL).toBe('gfs_resource_changed')
@@ -414,8 +414,8 @@ describe('D34 PR1 migration runner', () => {
       migration => (migration as { lockRetries?: number }).lockRetries !== undefined
     ).map(migration => [migration.version, (migration as { lockRetries?: number }).lockRetries])
     expect(withRetries).toEqual([
-      ['0144_gfs_authz_team_members_notify', 2],
-      ['0145_gfs_watch_session_users_notify', 2],
+      ['0146_gfs_authz_team_members_notify', 2],
+      ['0147_gfs_watch_session_users_notify', 2],
     ])
   })
 
@@ -690,12 +690,12 @@ describe('PR1 earlier-head guard', () => {
       '0139_llm_catalog_prune_columns',
       '0140_llm_catalog_prune_episodes',
       '0141_gfs_resource_changed_notify',
-      '0140_gfs_authz_grants_notify',
-      '0141_gfs_authz_shares_notify',
-      '0142_gfs_authz_operator_links_notify',
-      '0143_gfs_authz_control_admins_notify',
-      '0144_gfs_authz_team_members_notify',
-      '0145_gfs_watch_session_users_notify',
+      '0142_gfs_authz_grants_notify',
+      '0143_gfs_authz_shares_notify',
+      '0144_gfs_authz_operator_links_notify',
+      '0145_gfs_authz_control_admins_notify',
+      '0146_gfs_authz_team_members_notify',
+      '0147_gfs_watch_session_users_notify',
     ])
   })
 })
