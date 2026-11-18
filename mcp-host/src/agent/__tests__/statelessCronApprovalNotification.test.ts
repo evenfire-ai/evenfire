@@ -77,3 +77,28 @@ describe('buildApprovalNotification — cron×stateless prompt (cron×stateless)
     expect(msg.startsWith(STATELESS_CRON_APPROVAL_PROMPT)).toBe(false)
   })
 })
+
+describe('buildApprovalNotification — re-ask cards', () => {
+  it('keeps the stateless cost warning on a re-ask and says why it asks again', () => {
+    const msg = buildNotification(makeApproval({ reask: 'denials_active' }), channelConfig, 'slack')
+
+    expect(msg).toContain(STATELESS_CRON_APPROVAL_PROMPT)
+    expect(msg).toContain('another tool was denied in this chat')
+  })
+
+  it('says that this tool was denied earlier', () => {
+    const msg = buildNotification(
+      makeApproval({
+        tool_name: 'shell_exec',
+        description: 'Tool shell_exec requires approval',
+        parameters: { command: 'ls' },
+        reask: 'denied',
+      }),
+      channelConfig,
+      'telegram'
+    )
+
+    expect(msg).toContain('You denied this tool earlier in this chat.')
+    expect(msg).toContain('Tool `shell_exec` requires approval.')
+  })
+})

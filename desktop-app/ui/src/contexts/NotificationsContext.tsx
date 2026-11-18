@@ -1,6 +1,9 @@
 import { createContext, useContext } from 'react'
 import type { PendingWorkflowApproval } from '../../../src/types'
-import type { ApprovalDecisionTarget } from '../hooks/domain/approvalDecision'
+import type {
+  ApprovalDecisionSettlement,
+  ApprovalDecisionTarget,
+} from '../hooks/domain/approvalDecision'
 import type { AppNotification, ToastMessage, Tone } from '../uiTypes'
 
 export interface NotificationsContextValue {
@@ -24,7 +27,7 @@ export interface NotificationsContextValue {
   }) => void
   /** §4.7.4: central approval decider — the in-chat gate and in-flight placeholder
    *  funnel through it so the chat FSM badge converges from every surface. */
-  decideApproval: (target: ApprovalDecisionTarget) => Promise<void>
+  decideApproval: (target: ApprovalDecisionTarget) => Promise<ApprovalDecisionSettlement>
   handleOpenNotification: (notification: AppNotification) => Promise<void>
   handleApproveNotification: (notification: AppNotification) => Promise<void>
   handleDenyNotification: (notification: AppNotification) => Promise<void>

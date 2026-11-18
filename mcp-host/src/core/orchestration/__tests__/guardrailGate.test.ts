@@ -6,9 +6,17 @@
  * tool-loop suite).
  */
 import { describe, expect, it, vi } from 'vitest'
+import { ConversationManager } from '../../conversation/conversation'
+import { pendingApprovalWireFields } from '../../conversation/pendingApprovalView'
 import type { Decision, ToolLaneGuardrail } from '../../guardrails'
 import type { AgentEventEmitter, Safety, Tool, ToolRegistry } from '../../interfaces'
-import type { Conversation, ToolCall, ToolDefinition, ToolOutput } from '../../types'
+import type {
+  Conversation,
+  PendingApproval,
+  ToolCall,
+  ToolDefinition,
+  ToolOutput,
+} from '../../types'
 import type { LoopConfig } from '../loopConfig'
 import { admitToolCall } from '../toolCallPolicy'
 import { executeToolCalls } from '../toolUseLoopToolBatch'
@@ -279,11 +287,13 @@ describe('guardrail gate in executeToolCalls', () => {
     const tool = new StubTool('do_thing')
     const conversation: Partial<Conversation> = {
       pending_approval: {
+        request_id: 'req-1',
         tool_name: 'do_thing',
-        authorization_scope: 'turn_tools',
-      } as Conversation['pending_approval'],
-      // Legacy name-only pending rows are intentionally not reusable. This
-      // fixture models the producer's durable turn-wide consent classification.
+        tool_call_id: 'c1',
+        parameters: { a: 1 },
+        description: 'do the thing',
+        context_snapshot: [],
+      },
     }
     const config = makeConfig(tool, fixedGuardrail('ask'), conversation)
     const { pendingApproval } = await executeToolCalls([call], config, 0)
@@ -403,7 +413,7 @@ describe('exact guardrail ask one-shot binding', () => {
     expect(tool.calls).toHaveLength(0)
   })
 
-  it('preserves name-based reuse for proven turn-tools consent', async () => {
+  it('does not reuse a turn-tools approval for a different call of the same name', async () => {
     const tool = new StubTool('do_thing')
     const admission = await admitToolCall(
       { id: 'turn-2', name: 'do_thing', arguments: { command: 'different' } },
@@ -421,6 +431,33 @@ describe('exact guardrail ask one-shot binding', () => {
       0
     )
 
-    expect(admission.kind).toBe('execute')
+    expect(admission.kind).toBe('suspend')
+  })
+})
+
+describe('guardrail ask for a denied tool (RP726-02)', () => {
+  it('is an exact-scope denial re-ask, and approving it stores no grant', async () => {
+    const tool = new StubTool('do_thing')
+    const call: ToolCall = { id: 'denied-1', name: 'do_thing', arguments: { command: 'x' } }
+    const admission = await admitToolCall(
+      call,
+      makeConfig(tool, fixedGuardrail('ask'), { denials: new Map([['do_thing', 'user-a']]) }),
+      0
+    )
+
+    expect(admission.kind).toBe('suspend')
+    const approval = (admission as { approval: PendingApproval }).approval
+    expect(approval).toMatchObject({ authorization_scope: 'exact_invocation', reask: 'denied' })
+
+    const manager = new ConversationManager()
+    const conv = await manager.getOrCreate('user-a:rpc:agent:guardrail')
+    conv.denials = new Map([['do_thing', 'user-a']])
+    await manager.startTurn(conv, 'do it', 'task-1')
+    await manager.suspendForApproval(conv, approval)
+    await manager.approve(conv, true, 'user-a')
+
+    expect(conv.denials.has('do_thing')).toBe(false)
+    expect(conv.auto_approved_tools.has('do_thing')).toBe(false)
+    expect(pendingApprovalWireFields(approval).alwaysApproveAllowed).toBe(false)
   })
 })
