@@ -2372,6 +2372,44 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
     expect(brokerTransport.setHostModel).not.toHaveBeenCalled()
   })
 
+  it('sends text on a broker chat without a selection with no model, although the store resolves the Host default', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-1', modelSelectionRevision: 0 })
+    const rendered = renderController()
+    await settleMount()
+    const brokerCatalog: HostModelsResult = {
+      provider: 'codex-subscription',
+      hostDefault: 'gpt-5.5',
+      sessionModel: null,
+      degraded: false,
+      modelSelectionRevision: 0,
+      models: [
+        { name: 'gpt-5.3', imageInput: { state: 'supported', reason: 'supported' } },
+        { name: 'gpt-5.5', imageInput: { state: 'supported', reason: 'supported' } },
+      ],
+    }
+    await act(async () => {
+      await loadHostModels(
+        { getHostModels: vi.fn(async () => brokerCatalog), setHostModel: vi.fn() },
+        'agent-x',
+        null
+      )
+    })
+    // Positive witness: the store the send reads does name the Host default,
+    // so an absent `model` below is the text path omitting it, not an empty store.
+    expect(getHostModelSelectionSnapshot('agent-x', null).effectiveModel).toBe('gpt-5.5')
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('hello')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as Record<string, unknown>
+    expect(request.content).toBe('hello')
+    // The Host resolves a text send's model itself; pinning the default here
+    // would freeze it on the session even after the operator moves it.
+    expect('model' in request).toBe(false)
+    expect('modelSelectionRevision' in request).toBe(false)
+  })
+
   it('refuses a twenty-first attachment and sends twenty', async () => {
     const files = Array.from({ length: 21 }, (_, index) =>
       readyTextFile(`file-${index}`, `part-${index}.txt`, 10)
