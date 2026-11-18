@@ -57,6 +57,10 @@ afterAll(() => {
 describe('control-api process shutdown of the GFS watch pool', () => {
   it('ends the watch pool through its closer, before the core and rate-limit pools', async () => {
     expect(captured.shutdown).not.toBeNull()
+    // A boot that failed before parking would already have run this same
+    // shutdown through its fatal path, and the order below would still hold.
+    expect(exit).not.toHaveBeenCalled()
+    expect(order).toEqual([])
 
     await captured.shutdown!()
 
