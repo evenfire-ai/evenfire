@@ -113,6 +113,9 @@ describe('chat link policy (S-9)', () => {
   it.each([
     'mailto:?to=x',
     'mailto:a@b.co%3Fattach=x',
+    'mailto:a\u202Emoc.knab@evil.com',
+    'mailto:\u0430dmin@bank.com',
+    'mailto:a@-x',
     './nueva-carpeta',
     '/abs/path',
     '#section',

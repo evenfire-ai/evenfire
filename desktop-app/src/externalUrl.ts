@@ -3,9 +3,20 @@
 
 const MAILTO_PREFIX = /^mailto:/i
 const MAILTO_MAX_LENGTH = 2048
-// No `%` means no percent-decoding is needed: an encoded `?`, CR/LF or header
-// separator cannot hide inside a recipient that the mail client would decode.
-const MAILTO_RECIPIENT = /^[^\s\x00-\x1f\x7f%?&#<>"\\;:@,]+@[A-Za-z0-9.-]+$/
+// ASCII only: a bidi override, a zero-width character or a Cyrillic homoglyph
+// would make the recipient shown in the link title and the mail client's "To"
+// differ from the real one. The local part is RFC 5322 dot-atom minus `%`, `?`,
+// `&` and `#`: without `%` no percent-decoding is needed, so an encoded `?`,
+// CR/LF or header separator cannot hide inside a recipient the mail client
+// would decode, and the other three would start a query or fragment.
+// A single-label domain (`a@intranet`) is kept: it is a valid host, and ASCII
+// labels cannot spoof another one.
+const MAILTO_LOCAL_ATOM = "[A-Za-z0-9!$'*+/=^_`{|}~-]+"
+const MAILTO_DOMAIN_LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+const MAILTO_RECIPIENT = new RegExp(
+  `^${MAILTO_LOCAL_ATOM}(?:\\.${MAILTO_LOCAL_ATOM})*` +
+    `@${MAILTO_DOMAIN_LABEL}(?:\\.${MAILTO_DOMAIN_LABEL})*$`
+)
 
 /**
  * `mailto:` is reduced to its recipients: query fields such as `attach=` or

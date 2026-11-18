@@ -83,10 +83,29 @@ describe('app:openUrl (S-11)', () => {
     'mailto:a b@c.d',
     'mailto:a@b@c.d',
     'mailto:a@b.c/../x',
+    // Non-ASCII in the local part would disguise the recipient.
+    'mailto:a\u202Emoc.knab@evil.com',
+    'mailto:a\u200Bb@x.com',
+    'mailto:\u0430dmin@bank.com',
+    'mailto:.a@b.c',
+    'mailto:a..b@b.c',
+    'mailto:a@..',
+    'mailto:a@-x',
+    'mailto:a@x-',
+    'mailto:a@b.c.',
   ])('rejects %s (invalid recipient)', async url => {
     await expect(openUrl(url)).rejects.toThrow('invalid recipient')
     expect(electron.openExternal).not.toHaveBeenCalled()
   })
+
+  it.each(["mailto:o'brien+tag@mail.example.co.uk", 'mailto:a@intranet', 'mailto:x-y@a-b.c'])(
+    'opens %s (valid ASCII recipient)',
+    async url => {
+      await openUrl(url)
+
+      expect(electron.openExternal).toHaveBeenCalledWith(url)
+    }
+  )
 
   it('rejects an oversized mailto: URL', async () => {
     await expect(openUrl(`mailto:${'a'.repeat(2048)}@b.c`)).rejects.toThrow('too long')
