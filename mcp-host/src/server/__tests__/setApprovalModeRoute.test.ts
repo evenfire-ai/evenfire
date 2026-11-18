@@ -409,7 +409,9 @@ describe('session reads project the live approval config', () => {
       effective: snapshot(undefined).effective,
       hostSpec: {
         defaultPolicy: 'cli_only',
-        channels: { email: { enabled: true } },
+        // Explicit false: the email cap must read manual whatever the default,
+        // so a reader that parses the rpc-shaped key (allow_all) still fails.
+        channels: { email: { enabled: true, allowModeChange: false } },
         modeCeiling: 'allow_all',
       },
     }
