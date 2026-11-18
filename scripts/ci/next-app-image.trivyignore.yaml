@@ -38,6 +38,14 @@ vulnerabilities:
       - "usr/local/lib/node_modules/npm/node_modules/undici/package.json"
     expired_at: 2027-02-28
     statement: "npm CLI bundled in the node:24.22.1-alpine base image; at runtime npm only launches next start and makes no registry requests. Clears with a base image bump. https://github.com/evenfire-ai/evenfire/issues/1431 devDependency (jsdom) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-112366
+    # picomatch@4.0.4, picomatch@4.0.7
+    paths:
+      - "app/control-ui/node_modules/picomatch/package.json"
+      - "app/profile-ui/node_modules/picomatch/package.json"
+      - "usr/local/lib/node_modules/npm/node_modules/tinyglobby/node_modules/picomatch/package.json"
+    expired_at: 2027-02-28
+    statement: "npm CLI bundled in the node:24.22.1-alpine base image; at runtime npm only launches next start and makes no registry requests. Clears with a base image bump. https://github.com/evenfire-ai/evenfire/issues/1431 devDependency (vitest, vite) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
   - id: CVE-2026-112942
     # vite@8.3.0
     paths:
