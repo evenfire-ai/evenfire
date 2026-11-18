@@ -657,9 +657,22 @@ describe('async progress flow — SSE-driven approval', () => {
     )?.flatMap(row => row.map(button => button.text))
     expect(labels).toEqual(['Approve', 'Deny'])
     expect(rpcClient.sendMessage).toHaveBeenCalledTimes(2)
+
+    await reader.handleMessages([makeMessage('/approve always', 'msg-sync-reask-always')])
+    expect(rpcClient.sendApproval).toHaveBeenCalledWith(
+      '516801777',
+      'approval-sync-reask-1',
+      true,
+      'telegram',
+      'tg-chat-1'
+    )
+    expect(sent.map(call => call.content)).toContain('Approved. Processing...')
+    expect(sent.map(call => call.content)).not.toContain(
+      'Approved (always for this tool). Processing...'
+    )
   })
 
-  it('omits Always approve when the async send returns an approval without a taskId', async () => {
+  it('omits Always approve when the async send returns no task id', async () => {
     streamCalls.length = 0
     const sent: Array<{ content: string; options?: { telegramInlineKeyboard?: unknown } }> = []
     const adapter: ChannelAdapter = {
@@ -901,6 +914,8 @@ describe('async progress flow — SSE-driven approval', () => {
       'telegram',
       'tg-chat-1'
     )
+    // One plain acknowledgement per approval: the second card was answered too.
+    expect(sentReplies.filter(reply => reply === 'Approved. Processing...')).toHaveLength(2)
     expect(sentReplies).not.toContain('Approved (always for this tool). Processing...')
 
     streamCalls[0].fireTerminal({ taskId: 'task-poll-reask-1', status: 'cancelled' })
