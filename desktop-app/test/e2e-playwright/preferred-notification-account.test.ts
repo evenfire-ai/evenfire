@@ -37,29 +37,53 @@ const ACCOUNT_B: TelegramMediumBinding = {
 
 const PREFERRED_ACCOUNT_SELECT = '#preferred-notification-account'
 const NO_EXTERNAL_CHANNELS_NOTE =
-  'No external channels connected; deliveries will only reach the desktop app.'
+  'No external channels are connected. Connect one under Social channels.'
 
-async function loginProfileUi(page: Page, baseUrl: string): Promise<void> {
+async function loginProfileUi(page: Page): Promise<void> {
   // profile-ui uses a real email+password sign-in (LoginPanel), not a dev login.
   // The seeded password for the E2E user is provided via the desktop env.
   const password = process.env.E2E_DESKTOP_PASSWORD || process.env.E2E_TEST_PASSWORD || 'test123!'
-  await page.goto(baseUrl)
+  // E2E_GUARDIAN_NAVIGATION: root-entry — ordinary password login owns this session.
+  await page.goto('/')
   await page.getByLabel('Email').fill(E2E_EMAIL)
   await page.getByLabel('Password').fill(password)
+  const loginResponse = page.waitForResponse(
+    response =>
+      response.url().endsWith('/api/v1/auth/password-login') &&
+      response.request().method() === 'POST'
+  )
   await page.getByRole('button', { name: 'Sign in' }).click()
-  // The authenticated app renders its nav after sign-in; "Signed in as …" lives
-  // on /settings and /approval-channels, not the home, so confirm via the nav.
-  await expect(page.getByRole('link', { name: 'Approval Channels' })).toBeVisible({
+  expect((await loginResponse).status()).toBe(200)
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toBeVisible({
     timeout: 30_000,
   })
 }
 
 async function openApprovalChannels(page: Page, baseUrl: string): Promise<void> {
-  await page.getByRole('link', { name: 'Approval Channels' }).click()
-  await expect(page).toHaveURL(`${baseUrl}/approval-channels`)
-  // The page has both an h1 page-title and an h2 section-title named "Approval
-  // Channels"; pin the h1 to avoid a strict-mode match of two elements.
-  await expect(page.getByRole('heading', { name: 'Approval Channels', level: 1 })).toBeVisible()
+  await page.getByRole('link', { name: 'Settings', exact: true }).click()
+  await page.getByRole('tab', { name: 'Approval channels', exact: true }).click()
+  await expect(page).toHaveURL(`${baseUrl}/settings/approval-channels`)
+  await expect(page.getByRole('heading', { name: 'Preferred approval channel' })).toBeVisible()
+}
+
+async function editPreferredAccount(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Edit preferred channel' }).click()
+  await expect(preferredAccountSelect(page)).toBeVisible()
+}
+
+async function disconnectAccount(
+  page: Page,
+  baseUrl: string,
+  binding: TelegramMediumBinding
+): Promise<void> {
+  await page.getByRole('link', { name: 'Social channels' }).click()
+  await expect(page).toHaveURL(`${baseUrl}/channels/telegram`)
+  const row = page.getByRole('row').filter({ hasText: accountDisplayName(binding) })
+  await row.getByRole('button', { name: /Actions for/ }).click()
+  await page.getByRole('menuitem', { name: 'Delete connection' }).click()
+  await page.getByRole('button', { name: 'Delete connection', exact: true }).click()
+  await expect(page.getByText('Telegram identity disconnected.')).toBeVisible({ timeout: 30_000 })
+  await openApprovalChannels(page, baseUrl)
 }
 
 function preferredAccountSelect(page: Page) {
@@ -70,8 +94,24 @@ async function preferredOptionLabels(page: Page): Promise<string[]> {
   return preferredAccountSelect(page).locator('option').allTextContents()
 }
 
-function preferredAccountOptionLabel(binding: TelegramMediumBinding): string {
-  return `Telegram · chat ${binding.providerChannelId}`
+function accountDisplayName(binding: TelegramMediumBinding): string {
+  return `E2E Telegram ${binding.providerChannelId}`
+}
+
+function preferredAccountOptionLabel(binding: TelegramMediumBinding) {
+  return expect.stringContaining(accountDisplayName(binding))
+}
+
+function nameEnrolledAccounts(userId: string): void {
+  // Name real enrolled records so two private accounts on one target remain
+  // distinguishable through the same display-name contract used by the UI.
+  for (const binding of [ACCOUNT_A, ACCOUNT_B]) {
+    profilesSql(`UPDATE workflow_approval_medium_accounts
+      SET display_name = ${sqlLiteral(accountDisplayName(binding))}
+      WHERE user_id = ${sqlLiteral(userId)} AND medium = 'telegram'
+        AND provider_user_id = ${sqlLiteral(binding.providerUserId)}
+        AND provider_channel_id = ${sqlLiteral(binding.providerChannelId)};`)
+  }
 }
 
 /**
@@ -160,12 +200,13 @@ test.describe.serial('Profile UI preferred delivery account picker (Telegram)', 
       resetNotificationPreferences(userId)
       await enrollTelegramMedium(session.userToken, userId, ACCOUNT_A)
 
-      profilePage = await browser.newPage()
-      await loginProfileUi(profilePage, profileUiBaseUrl)
+      nameEnrolledAccounts(userId)
+      profilePage = await browser.newPage({ baseURL: profileUiBaseUrl })
+      await loginProfileUi(profilePage)
       await openApprovalChannels(profilePage, profileUiBaseUrl)
 
       // Picker is rendered with exactly one account option + the leading Automatico.
-      await expect(preferredAccountSelect(profilePage)).toBeVisible({ timeout: 30_000 })
+      await editPreferredAccount(profilePage)
       await expect
         .poll(() => preferredOptionLabels(profilePage!), {
           timeout: 30_000,
@@ -181,6 +222,10 @@ test.describe.serial('Profile UI preferred delivery account picker (Telegram)', 
       // Pick the account; the PUT must persist preferred_account_id to that id.
       const accountAId = mediumAccountId(userId, ACCOUNT_A)
       await preferredAccountSelect(profilePage).selectOption(accountAId)
+      await profilePage
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Save', exact: true })
+        .click()
       await expect(profilePage.getByText('Preferred channel updated.')).toBeVisible({
         timeout: 30_000,
       })
@@ -223,11 +268,12 @@ test.describe.serial('Profile UI preferred delivery account picker (Telegram)', 
       await enrollTelegramMedium(session.userToken, userId, ACCOUNT_A)
       await enrollTelegramMedium(session.userToken, userId, ACCOUNT_B)
 
-      profilePage = await browser.newPage()
-      await loginProfileUi(profilePage, profileUiBaseUrl)
+      nameEnrolledAccounts(userId)
+      profilePage = await browser.newPage({ baseURL: profileUiBaseUrl })
+      await loginProfileUi(profilePage)
       await openApprovalChannels(profilePage, profileUiBaseUrl)
 
-      await expect(preferredAccountSelect(profilePage)).toBeVisible({ timeout: 30_000 })
+      await editPreferredAccount(profilePage)
       await expect
         .poll(() => preferredOptionLabels(profilePage!), {
           timeout: 30_000,
@@ -249,6 +295,10 @@ test.describe.serial('Profile UI preferred delivery account picker (Telegram)', 
 
       const accountBId = mediumAccountId(userId, ACCOUNT_B)
       await preferredAccountSelect(profilePage).selectOption(accountBId)
+      await profilePage
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Save', exact: true })
+        .click()
       await expect(profilePage.getByText('Preferred channel updated.')).toBeVisible({
         timeout: 30_000,
       })
@@ -292,15 +342,20 @@ test.describe.serial('Profile UI preferred delivery account picker (Telegram)', 
       await enrollTelegramMedium(session.userToken, userId, ACCOUNT_A)
       await enrollTelegramMedium(session.userToken, userId, ACCOUNT_B)
 
-      profilePage = await browser.newPage()
-      await loginProfileUi(profilePage, profileUiBaseUrl)
+      nameEnrolledAccounts(userId)
+      profilePage = await browser.newPage({ baseURL: profileUiBaseUrl })
+      await loginProfileUi(profilePage)
       await openApprovalChannels(profilePage, profileUiBaseUrl)
 
-      await expect(preferredAccountSelect(profilePage)).toBeVisible({ timeout: 30_000 })
+      await editPreferredAccount(profilePage)
 
       // Set preferred = account A, confirm persistence.
       const accountAId = mediumAccountId(userId, ACCOUNT_A)
       await preferredAccountSelect(profilePage).selectOption(accountAId)
+      await profilePage
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Save', exact: true })
+        .click()
       await expect(profilePage.getByText('Preferred channel updated.')).toBeVisible({
         timeout: 30_000,
       })
@@ -312,14 +367,8 @@ test.describe.serial('Profile UI preferred delivery account picker (Telegram)', 
         })
         .toBe(accountAId)
 
-      // Disconnect account A from the Approval Channels list.
-      await profilePage
-        .locator('.member-row', { hasText: `Private chat ID ${ACCOUNT_A.providerChannelId}` })
-        .getByRole('button', { name: 'Disconnect' })
-        .click()
-      await expect(profilePage.getByText('Telegram identity disconnected.')).toBeVisible({
-        timeout: 30_000,
-      })
+      await disconnectAccount(profilePage, profileUiBaseUrl, ACCOUNT_A)
+      await editPreferredAccount(profilePage)
 
       // Backend lifecycle: disabling the preferred account clears preferred_account_id.
       await expect
@@ -343,8 +392,8 @@ test.describe.serial('Profile UI preferred delivery account picker (Telegram)', 
       // With only B left, B is the de-facto default delivery channel (backend COALESCE),
       // while the UI still shows Automatico until an explicit pick.
       const remainingLabels = await preferredOptionLabels(profilePage)
-      expect(remainingLabels).not.toContain(preferredAccountOptionLabel(ACCOUNT_A))
-      expect(remainingLabels).toContain(preferredAccountOptionLabel(ACCOUNT_B))
+      expect(remainingLabels).not.toContainEqual(preferredAccountOptionLabel(ACCOUNT_A))
+      expect(remainingLabels).toContainEqual(preferredAccountOptionLabel(ACCOUNT_B))
     } finally {
       if (profilePage) await profilePage.close().catch(() => undefined)
       if (userId) resetNotificationPreferences(userId)
@@ -376,21 +425,19 @@ test.describe.serial('Profile UI preferred delivery account picker (Telegram)', 
       await enrollTelegramMedium(session.userToken, userId, ACCOUNT_A)
       await enrollTelegramMedium(session.userToken, userId, ACCOUNT_B)
 
-      profilePage = await browser.newPage()
-      await loginProfileUi(profilePage, profileUiBaseUrl)
+      nameEnrolledAccounts(userId)
+      profilePage = await browser.newPage({ baseURL: profileUiBaseUrl })
+      await loginProfileUi(profilePage)
       await openApprovalChannels(profilePage, profileUiBaseUrl)
 
-      await expect(preferredAccountSelect(profilePage)).toBeVisible({ timeout: 30_000 })
+      await editPreferredAccount(profilePage)
 
-      // Disconnect both Telegram accounts.
+      await profilePage
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Cancel', exact: true })
+        .click()
       for (const binding of [ACCOUNT_A, ACCOUNT_B]) {
-        await profilePage
-          .locator('.member-row', { hasText: `Private chat ID ${binding.providerChannelId}` })
-          .getByRole('button', { name: 'Disconnect' })
-          .click()
-        await expect(profilePage.getByText('Telegram identity disconnected.')).toBeVisible({
-          timeout: 30_000,
-        })
+        await disconnectAccount(profilePage, profileUiBaseUrl, binding)
       }
 
       // Zero active accounts → the picker is not rendered; the desktop-only note shows.

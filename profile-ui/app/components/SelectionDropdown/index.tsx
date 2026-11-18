@@ -206,9 +206,9 @@ export function SelectionDropdown({
                     </span>
                     <span className="cu-selection-dropdown__option-copy">
                       <span className="cu-selection-dropdown__option-label">{option.label}</span>
-                      {option.description ? (
+                      {option.descriptionNode || option.description ? (
                         <span className="cu-selection-dropdown__option-description">
-                          {option.description}
+                          {option.descriptionNode ?? option.description}
                         </span>
                       ) : null}
                     </span>

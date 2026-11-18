@@ -8,6 +8,7 @@ import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { FormField } from '@components/FormField'
+import { ModalCloseButton } from '@components/ModalCloseButton'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { TextInput } from '@components/TextInput'
@@ -374,9 +375,7 @@ function RoleEditModal({
           <h3 id="edit-member-role-title" className="cu-modal-panel__title">
             Edit permissions
           </h3>
-          <button type="button" className="cu-btn cu-btn--ghost" onClick={onClose} disabled={busy}>
-            Close
-          </button>
+          <ModalCloseButton onClose={onClose} disabled={busy} />
         </div>
         <div className="cu-modal-panel__body">
           <p className="body-copy">
