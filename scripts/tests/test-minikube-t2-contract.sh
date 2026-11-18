@@ -40,6 +40,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-mutation-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-targeted-gfs-sync.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-lock-race.sh" \
+  "$ROOT/scripts/tests/test-minikube-t2-lock-arrival.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh" \
   "$ROOT/scripts/tests/test-real-postgres-local-preflight.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh" \

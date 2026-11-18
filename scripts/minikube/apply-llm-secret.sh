@@ -29,6 +29,7 @@
 #   CONTEXT   kubectl context / minikube profile (default: clerum-test)
 # ======================================================================
 
+set +x
 set -euo pipefail
 
 CONTEXT="${CONTEXT:-clerum-test}"
@@ -37,28 +38,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_DIR"
 
-# ── Resolve .env — read the MAIN checkout's .env when run from a worktree ──
-# LLM_SECRET_ENV_FILE overrides resolution entirely (used by tests so they never
-# touch the working-tree .env).
-ENV_FILE="${LLM_SECRET_ENV_FILE:-}"
-if [ -z "$ENV_FILE" ]; then
-  GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || true)"
-  if [ -n "$GIT_COMMON_DIR" ]; then
-    case "$GIT_COMMON_DIR" in
-      /*) GIT_COMMON_ABS="$GIT_COMMON_DIR" ;;
-      *)  GIT_COMMON_ABS="$(cd "$GIT_COMMON_DIR" && pwd)" ;;
-    esac
-    MAIN_REPO_DIR="$(cd "$GIT_COMMON_ABS/.." && pwd)"
-    if [ -f "$MAIN_REPO_DIR/.env" ]; then ENV_FILE="$MAIN_REPO_DIR/.env"; fi
+# Isolated local tests use process values only, including when a file override
+# is inherited. Normal runs retain the existing override and source semantics.
+if [ "${E2E_DISABLE_CANONICAL_DOTENV:-false}" != true ]; then
+  ENV_FILE="${LLM_SECRET_ENV_FILE:-}"
+  if [ -z "$ENV_FILE" ]; then
+    GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+    if [ -n "$GIT_COMMON_DIR" ]; then
+      case "$GIT_COMMON_DIR" in
+        /*) GIT_COMMON_ABS="$GIT_COMMON_DIR" ;;
+        *)  GIT_COMMON_ABS="$(cd "$GIT_COMMON_DIR" && pwd)" ;;
+      esac
+      MAIN_REPO_DIR="$(cd "$GIT_COMMON_ABS/.." && pwd)"
+      if [ -f "$MAIN_REPO_DIR/.env" ]; then ENV_FILE="$MAIN_REPO_DIR/.env"; fi
+    fi
+    if [ -z "$ENV_FILE" ] && [ -f .env ]; then ENV_FILE=".env"; fi
   fi
-  if [ -z "$ENV_FILE" ] && [ -f .env ]; then ENV_FILE=".env"; fi
-fi
-if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
-  # Sourced by design (unlike check-prereqs.sh, which grep-parses .env): the
-  # per-provider `${!env_name}` indirect expansion below needs the real values
-  # in the environment. This mirrors the original inline Makefile behavior. A
-  # normal KEY=value .env is safe; a malformed line could abort under set -e.
-  set -a; . "$ENV_FILE"; set +a
+  if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+    # Retain the historical source behavior for explicit, non-isolated runs.
+    set -a; . "$ENV_FILE"; set +a
+  fi
 fi
 
 # ── Provider credential slots ─────────────────────────────────────────
@@ -93,8 +92,9 @@ SLOTS=(
   "azure-openai-api-key|AZURE_OPENAI_API_KEY|"
 )
 
-# ── Build kubectl args; each dataKey is emitted at most once (no dup keys) ──
-ARGS=()
+# Keep values out of process arguments, including the base64 encoder's argv.
+DATA_KEYS=()
+DATA_VALUES=()
 REAL_KEYS=()
 for slot in "${SLOTS[@]}"; do
   data_key="${slot%%|*}"
@@ -104,17 +104,25 @@ for slot in "${SLOTS[@]}"; do
   # Indirect expansion (bash 3.2-safe): value of the env var named $env_name.
   value="${!env_name:-}"
   if [ -n "$value" ]; then
-    ARGS+=( "--from-literal=${data_key}=${value}" )
+    DATA_KEYS+=( "$data_key" )
+    DATA_VALUES+=( "$value" )
     REAL_KEYS+=( "$env_name" )
   elif [ -n "$placeholder" ]; then
-    ARGS+=( "--from-literal=${data_key}=${placeholder}" )
+    DATA_KEYS+=( "$data_key" )
+    DATA_VALUES+=( "$placeholder" )
   fi
 done
 
-kubectl --context="$CONTEXT" create secret generic chatllm-api-keys \
-  --namespace=mcp-host \
-  "${ARGS[@]}" \
-  --dry-run=client -o yaml | kubectl --context="$CONTEXT" apply -f -
+{
+  printf '%s' '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"chatllm-api-keys","namespace":"mcp-host"},"type":"Opaque","data":{'
+  separator=''
+  for ((i = 0; i < ${#DATA_KEYS[@]}; i++)); do
+    encoded="$(printf '%s' "${DATA_VALUES[$i]}" | base64 | tr -d '\n')"
+    printf '%s"%s":"%s"' "$separator" "${DATA_KEYS[$i]}" "$encoded"
+    separator=','
+  done
+  printf '%s\n' '}}'
+} | kubectl --context="$CONTEXT" apply -f -
 
 # The provider full-setup.sh will pick for the Host, by the shared rule: an
 # explicit CLERUM_MODEL_PROVIDER, else the first of the four original keys
