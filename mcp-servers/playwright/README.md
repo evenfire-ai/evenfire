@@ -2,11 +2,12 @@
 
 MCP server for browser automation, packaging the upstream Microsoft Playwright MCP image (`mcr.microsoft.com/playwright/mcp`, digest-pinned). Uses StreamableHTTP transport on port 8931.
 
-This is upstream-image packaging, not first-party source: the [`Dockerfile`](./Dockerfile) extends the pinned upstream image and pre-installs the Chromium browser (`playwright install chromium`). There is no `src/` in this directory, so the tool list is defined by the upstream image — per the CRD description, it provides browser automation tools for navigation, DOM interaction, code execution, and screenshot capture. See the upstream [Playwright MCP](https://github.com/microsoft/playwright-mcp) project for the current tool set.
+The [`Dockerfile`](./Dockerfile) extends the pinned upstream image and installs Chrome Headless Shell from Chrome for Testing. The upstream [Playwright MCP](https://github.com/microsoft/playwright-mcp) image supplies the tools for navigation, DOM interaction, code execution, and screenshots.
 
 ## Environment Variables / Secrets
 
-None. The CRD sets `auth.type: none` and there is no secret template — the server is configured entirely through container args in `mcpserver.yaml`:
+The image sets `PLAYWRIGHT_MCP_EXECUTABLE_PATH` to select the pinned browser.
+The CRD uses `auth.type: none` and reads its container arguments from `mcpserver.yaml`.
 
 - `--headless --browser chromium --no-sandbox`
 - `--host 0.0.0.0 --port 8931`
@@ -57,14 +58,21 @@ The pinned official image declares Node 22.22.0. The latest official release
 `v0.0.83` and the previous two stable tags declare Node 24.21.0 on amd64 and
 arm64, below the current security floor.
 
-For new builds, the Dockerfile keeps the pinned upstream application and
-system dependencies, replaces Node with the official digest-pinned 24.22.3 glibc
-binary, and installs Chromium at build time using the bundled Playwright CLI.
-This is temporary until a patched official Playwright image is available. The
-deployment manifest pins the multi-architecture image built from the combined
-[security candidate](https://github.com/evenfire-ai/evenfire/commit/9a461918d4ac0538a9891d872d6f27630c0e25e3)
-with Node 24.22.3 and Chrome Headless Shell 157.0.8103.78. The cluster probe
-checks the pinned image identity, Node version, and Chromium major version.
+The Dockerfile keeps the pinned upstream application and system dependencies
+and replaces Node with the official digest-pinned 24.22.3 glibc binary.
+This is temporary until a patched official Playwright image is available.
+
+## Chromium in new builds
+
+New builds select Chrome Headless Shell `157.0.8103.78` through the MCP executable
+setting. The Dockerfile verifies the official archive's SHA-256 for amd64 and
+arm64. The smoke test verifies the selected executable and starts a real session.
+[Chrome for Testing downloads](https://googlechromelabs.github.io/chrome-for-testing/157.0.8103.78.json) ·
+[CVE-2026-125350 fix](https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop_018223192.html?hl=fr)
+
+The deployment manifest and cluster probe pin the verified multi-architecture
+image from the [combined security candidate](https://github.com/evenfire-ai/evenfire/commit/9a461918d4ac0538a9891d872d6f27630c0e25e3).
+The probe checks the image identity, Node version, and Chromium major version.
 
 `test/runtime-smoke.cjs` runs inside the isolated Linux container. It starts the
 real MCP HTTP server and Chromium, navigates to a loopback fixture, clicks the
