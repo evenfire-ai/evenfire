@@ -1,5 +1,7 @@
-// Pure (no Electron imports) so the renderer can apply the exact rule main
-// enforces in `app:openUrl` and only render links that main will open.
+// Pure (no Electron imports) so the renderer applies the same `mailto:` rule
+// main enforces in `app:openUrl` and only renders mailto links main will open.
+// For http(s) the renderer canonicalises with `new URL().href`, which always
+// yields a lowercase `http://`/`https://` prefix that the check below accepts.
 
 const MAILTO_PREFIX = /^mailto:/i
 const MAILTO_MAX_LENGTH = 2048
