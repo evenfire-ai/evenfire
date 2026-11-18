@@ -94,3 +94,57 @@ describe('#1493 MCP_CATALOG_BOOTSTRAP_* numbers', () => {
     expect(buildMcpCatalogBootstrapConfig().backoffMs).toBe(1000)
   })
 })
+
+// R2-L1: a millisecond value that becomes a timer delay or an MCP request
+// timeout must fit the Node timer range. Node fires a larger delay after
+// about 1 ms, and an MCP request rejects a larger timeout.
+describe('R2-L1 timer-range bound', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS accepts 2147483647', () => {
+    expect(parseStatelessHeartbeatIntervalMs('2147483647')).toBe(2_147_483_647)
+  })
+
+  it.each(['2147483648', '9007199254740991'])(
+    'CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS refuses %s and names the maximum',
+    raw => {
+      expect(() => parseStatelessHeartbeatIntervalMs(raw)).toThrow(
+        /CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS='\d+' must be at most 2147483647/
+      )
+    }
+  )
+
+  // The message must name the bound: a probe timeout this large also fails
+  // the probe-timeout-below-wait-budget check, whose message names the variable.
+  it.each([
+    'MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS',
+    'MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS',
+    'MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS',
+  ])('%s refuses 2147483648 and names the maximum', name => {
+    vi.stubEnv(name, '2147483648')
+    expect(() => buildMcpCatalogBootstrapConfig()).toThrow(
+      new RegExp(`${name} must be at most 2147483647`)
+    )
+  })
+
+  it.each([
+    ['MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS', 'waitBudgetMs'],
+    ['MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS', 'connectTimeoutMs'],
+  ] as const)('%s accepts 2147483647', (name, field) => {
+    vi.stubEnv(name, '2147483647')
+    expect(buildMcpCatalogBootstrapConfig()[field]).toBe(2_147_483_647)
+  })
+
+  // These are added to the current time and never armed as timers, so the
+  // bound does not apply to them.
+  it.each([
+    ['MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS', 'negativeTtlMs'],
+    ['MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS', 'failureTtlMs'],
+    ['MCP_CATALOG_BOOTSTRAP_BACKOFF_MS', 'backoffMs'],
+  ] as const)('%s still accepts 2147483648', (name, field) => {
+    vi.stubEnv(name, '2147483648')
+    expect(buildMcpCatalogBootstrapConfig()[field]).toBe(2_147_483_648)
+  })
+})

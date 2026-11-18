@@ -611,9 +611,14 @@ variables and `CLERUM_DYNAMIC_TOOLS_THRESHOLD` also a fraction such as `2000.5`
 `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`, `CLERUM_DYNAMIC_TOOLS_THRESHOLD` and
 the catalog-bootstrap variables also used to accept a value above
 9007199254740991 (for example `99999999999999999999`); it now stops the pod.
-`CONTEXT_MAPPER_HEARTBEAT_POLL_MS` also stops the pod above 2147483647, the
-largest delay a timer holds; a larger value used to make the poll fire after
-about 1 ms.
+`CONTEXT_MAPPER_HEARTBEAT_POLL_MS` and `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`
+also stop the pod above 2147483647, the largest delay a timer holds; a larger
+value used to make the poll or the heartbeat fire after about 1 ms. The same
+bound applies to `MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS`,
+`MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS` and
+`MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS`: a larger wait budget or probe
+timeout used to end after about 1 ms, and a larger connect timeout used to fail
+every catalog-bootstrap connection.
 A value of only white space used to
 mean the default for the HCC variables and `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`;
 it now stops the pod. `deploy/base` sets the three HCC variables in plain

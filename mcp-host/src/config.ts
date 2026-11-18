@@ -470,13 +470,20 @@ export function resolveMcpHostRuntimeKind(input: {
  * Fail loud: a set value that is not a positive integer in plain digits
  * THROWS at config load time (same posture as CLERUM_DB_BARRIER_MODE). A
  * silent fallback to the default would let a typo'd cadence drive HCC's
- * suspend decisions. Unset or "" returns the 30s default.
+ * suspend decisions. Unset or "" returns the 30s default. The value drives a
+ * timer, so it must be at most 2147483647 ms: a larger delay makes the
+ * heartbeat fire after about 1 ms.
  */
 export function parseStatelessHeartbeatIntervalMs(raw: string | undefined): number {
   const parsed = plainPositiveIntegerOrDefault(raw, 30_000)
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(
       `[Config] CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS='${raw}' is not a positive integer in plain digits`
+    )
+  }
+  if (parsed > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `[Config] CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS='${raw}' must be at most ${MAX_TIMER_DELAY_MS}`
     )
   }
   return parsed
@@ -755,13 +762,19 @@ export function validateHccAuthorityTiming(
  * Parse one positive-integer knob, failing startup closed on a set-but-invalid
  * value rather than silently falling back — a mistyped probe budget must be
  * visible at boot, not degrade the shared rate-limit bucket in production.
- * Unset or "" means the default; anything else must be plain digits.
+ * Unset or "" means the default; anything else must be plain digits, at most
+ * `maximum`. A value used as a request or wait timeout passes
+ * MAX_TIMER_DELAY_MS, so a larger one stops the Host at boot instead of
+ * failing or ending its wait at runtime.
  */
-function parseBootstrapNumber(key: string, defaultValue: number): number {
+function parseBootstrapNumber(key: string, defaultValue: number, maximum: number): number {
   const raw = process.env[key]
   const value = plainPositiveIntegerOrDefault(raw, defaultValue)
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${key} must be a positive integer in plain digits (got '${raw}')`)
+  }
+  if (value > maximum) {
+    throw new Error(`${key} must be at most ${maximum} (got '${raw}')`)
   }
   return value
 }
@@ -782,13 +795,44 @@ const OAUTH_BROKER_SHARED_BUCKET_PER_MIN = 60
 export function buildMcpCatalogBootstrapConfig(): McpCatalogBootstrapConfig {
   const cfg: McpCatalogBootstrapConfig = {
     enabled: getEnvBool('MCP_CATALOG_BOOTSTRAP_ENABLED', true),
-    waitBudgetMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS', 4000),
-    probeTimeoutMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS', 2000),
-    connectTimeoutMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS', 8000),
-    negativeTtlMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS', 15000),
-    failureTtlMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS', 60000),
-    probesPerMin: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN', 20),
-    backoffMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_BACKOFF_MS', 30000),
+    // Timeouts: the wait budget and the probe timeout arm timers, and an MCP
+    // request rejects a connect timeout above the timer range.
+    waitBudgetMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS',
+      4000,
+      MAX_TIMER_DELAY_MS
+    ),
+    probeTimeoutMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS',
+      2000,
+      MAX_TIMER_DELAY_MS
+    ),
+    connectTimeoutMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS',
+      8000,
+      MAX_TIMER_DELAY_MS
+    ),
+    // TTLs and back-off are added to the current time, never armed as timers.
+    negativeTtlMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS',
+      15000,
+      Number.MAX_SAFE_INTEGER
+    ),
+    failureTtlMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS',
+      60000,
+      Number.MAX_SAFE_INTEGER
+    ),
+    probesPerMin: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN',
+      20,
+      Number.MAX_SAFE_INTEGER
+    ),
+    backoffMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_BACKOFF_MS',
+      30000,
+      Number.MAX_SAFE_INTEGER
+    ),
   }
   if (cfg.probeTimeoutMs >= cfg.waitBudgetMs) {
     throw new Error(
