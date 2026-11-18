@@ -659,6 +659,320 @@ describe('async progress flow — SSE-driven approval', () => {
     expect(rpcClient.sendMessage).toHaveBeenCalledTimes(2)
   })
 
+  it('omits Always approve when the async send returns an approval without a taskId', async () => {
+    streamCalls.length = 0
+    const sent: Array<{ content: string; options?: { telegramInlineKeyboard?: unknown } }> = []
+    const adapter: ChannelAdapter = {
+      channelType: 'telegram',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async (_channelId, content, _replyTo, _attachments, options) => {
+        sent.push({ content, options })
+        return `bot-msg-${sent.length}`
+      }),
+      editMessage: vi.fn(async () => undefined),
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-no-id-reask-1',
+          requestId: 'approval-no-id-reask-1',
+          userId: '516801777',
+          notification: 'Tool `shell_exec` was denied and must be approved again.',
+          alwaysApproveAllowed: false as const,
+        },
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['telegram', adapter]]),
+      channels: [makeChannel()],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([makeMessage('run the denied tool', 'msg-no-id-reask')])
+
+    // No taskId means no progress stream: the card comes from the sync branch.
+    expect(streamCalls).toHaveLength(0)
+    const approval = sent.find(call => call.content.includes('must be approved again'))
+    const labels = (
+      approval?.options?.telegramInlineKeyboard as Array<Array<{ text: string }>> | undefined
+    )?.flatMap(row => row.map(button => button.text))
+    expect(labels).toEqual(['Approve', 'Deny'])
+
+    await reader.handleMessages([makeMessage('/approve always', 'msg-no-id-reask-always')])
+    expect(rpcClient.sendApproval).toHaveBeenCalledWith(
+      '516801777',
+      'approval-no-id-reask-1',
+      true,
+      'telegram',
+      'tg-chat-1'
+    )
+    expect(sent.map(call => call.content)).toContain('Approved. Processing...')
+    expect(sent.map(call => call.content)).not.toContain(
+      'Approved (always for this tool). Processing...'
+    )
+  })
+
+  it('does not claim a lasting grant on an email card the Host cannot allowlist', async () => {
+    streamCalls.length = 0
+    const sent: string[] = []
+    const adapter: ChannelAdapter = {
+      channelType: 'email',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async (_channelId, content) => {
+        sent.push(content)
+        return `email-msg-${sent.length}`
+      }),
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-email-reask-1',
+          requestId: 'approval-email-reask-1',
+          userId: 'user@example.com',
+          notification: 'Tool `shell_exec` was denied and must be approved again.',
+          alwaysApproveAllowed: false as const,
+        },
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const emailMessage = (content: string, messageId: string): Message => ({
+      channelType: 'email',
+      channelId: 'support-inbox',
+      sender: 'user@example.com',
+      content,
+      timestamp: new Date('2026-05-12T12:00:00.000Z'),
+      messageId,
+    })
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['email', adapter]]),
+      channels: [
+        {
+          name: 'chatllm-email',
+          namespace: 'channels',
+          spec: {
+            hostRef: 'chatllm',
+            email: [{ channelId: 'support-inbox', emails: ['user@example.com'] }],
+          },
+        },
+      ],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([emailMessage('run the denied tool', 'email-reask')])
+    // Email takes the synchronous branch: one send, no progress stream.
+    expect(streamCalls).toHaveLength(0)
+    expect(rpcClient.sendMessage).toHaveBeenCalledTimes(1)
+    expect(sent).toContain('Tool `shell_exec` was denied and must be approved again.')
+
+    await reader.handleMessages([emailMessage('/approve always', 'email-reask-always')])
+    expect(rpcClient.sendApproval).toHaveBeenCalledWith(
+      'user@example.com',
+      'approval-email-reask-1',
+      true,
+      'email',
+      'support-inbox'
+    )
+    expect(sent).toContain('Approved. Processing...')
+    expect(sent).not.toContain('Approved (always for this tool). Processing...')
+  })
+
+  it('omits Always approve when result polling finds a second card the Host cannot allowlist', async () => {
+    vi.useFakeTimers()
+    try {
+      await pollingReaskScenario()
+    } finally {
+      // A failed assertion must not leave fake timers to the tests that follow.
+      vi.useRealTimers()
+    }
+  })
+
+  async function pollingReaskScenario(): Promise<void> {
+    streamCalls.length = 0
+    const sentReplies: string[] = []
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
+    const adapter: ChannelAdapter = {
+      channelType: 'telegram',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async (_channelId, content) => {
+        sentReplies.push(content)
+        return `bot-msg-${sentReplies.length}`
+      }),
+      editMessage,
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'pending' as const,
+        taskId: 'task-poll-reask-1',
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['telegram', adapter]]),
+      channels: [makeChannel()],
+      sleep: async () => undefined,
+    })
+
+    // First card: an ordinary approval that may store a grant.
+    rpcClient.getTaskResult.mockResolvedValueOnce({
+      success: true,
+      status: 'waiting_approval' as const,
+      approval: {
+        taskId: 'task-poll-reask-1',
+        requestId: 'approval-poll-1',
+        userId: '516801777',
+        notification: 'Tool `http_request` requires approval. Reply /approve or /deny.',
+      },
+    })
+    await reader.handleMessages([makeMessage('fetch and then run', 'msg-poll-reask')])
+    streamCalls[0].fireSuspended({
+      taskId: 'task-poll-reask-1',
+      requestId: 'approval-poll-1',
+      toolName: 'http_request',
+      displayName: 'HTTP · http_request',
+      reason: 'approval_required',
+    })
+    await vi.advanceTimersByTimeAsync(20)
+    await reader.handleMessages([makeMessage('/approve', 'msg-poll-approve-1')])
+    expect(sentReplies).toContain('Approved. Processing...')
+
+    // SSE stays silent; the polling fallback finds a second, exact-invocation card.
+    rpcClient.getTaskResult.mockResolvedValue({
+      success: true,
+      status: 'waiting_approval' as const,
+      approval: {
+        taskId: 'task-poll-reask-1',
+        requestId: 'approval-poll-2',
+        userId: '516801777',
+        notification: 'Tool `shell_exec` was denied and must be approved again.',
+        alwaysApproveAllowed: false as const,
+      },
+    })
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    const secondCard = editMessage.mock.calls.find(call =>
+      call[2].includes('must be approved again')
+    )
+    const labels = (
+      secondCard?.[3]?.telegramInlineKeyboard as Array<Array<{ text: string }>> | undefined
+    )?.flatMap(row => row.map(button => button.text))
+    expect(labels).toEqual(['Approve', 'Deny'])
+
+    await reader.handleMessages([makeMessage('/approve always', 'msg-poll-approve-2')])
+    expect(rpcClient.sendApproval).toHaveBeenLastCalledWith(
+      '516801777',
+      'approval-poll-2',
+      true,
+      'telegram',
+      'tg-chat-1'
+    )
+    expect(sentReplies).not.toContain('Approved (always for this tool). Processing...')
+
+    streamCalls[0].fireTerminal({ taskId: 'task-poll-reask-1', status: 'cancelled' })
+  }
+
+  it('confirms a lasting grant when the card may store one', async () => {
+    streamCalls.length = 0
+    const sentReplies: string[] = []
+    const adapter: ChannelAdapter = {
+      channelType: 'telegram',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async (_channelId, content) => {
+        sentReplies.push(content)
+        return `bot-msg-${sentReplies.length}`
+      }),
+      editMessage: vi.fn(async () => undefined),
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'pending' as const,
+        taskId: 'task-always-1',
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-always-1',
+          requestId: 'approval-always-1',
+          userId: '516801777',
+          notification: 'Tool `http_request` requires approval. Reply /approve or /deny.',
+        },
+      })),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['telegram', adapter]]),
+      channels: [makeChannel()],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([makeMessage('fetch the page', 'msg-always')])
+    streamCalls[0].fireSuspended({
+      taskId: 'task-always-1',
+      requestId: 'approval-always-1',
+      toolName: 'http_request',
+      displayName: 'HTTP · http_request',
+      reason: 'approval_required',
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    await reader.handleMessages([makeMessage('/approve always', 'msg-always-approve')])
+    expect(rpcClient.sendApproval).toHaveBeenCalledWith(
+      '516801777',
+      'approval-always-1',
+      true,
+      'telegram',
+      'tg-chat-1'
+    )
+    expect(sentReplies).toContain('Approved (always for this tool). Processing...')
+    streamCalls[0].fireTerminal({ taskId: 'task-always-1', status: 'cancelled' })
+  })
+
   it('renders Slack tool approval buttons in the originating thread', async () => {
     streamCalls.length = 0
     const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
