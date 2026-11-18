@@ -477,6 +477,188 @@ describe('async progress flow — SSE-driven approval', () => {
     )
   })
 
+  it('omits Slack Always approve when the Host cannot store a grant', async () => {
+    streamCalls.length = 0
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
+    const adapter: ChannelAdapter = {
+      channelType: 'slack',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async () => 'slack-status-reask-1'),
+      editMessage,
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'pending' as const,
+        taskId: 'task-slack-reask-1',
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-slack-reask-1',
+          requestId: 'approval-slack-reask-1',
+          userId: 'U123',
+          notification: 'Tool `shell_exec` was denied and must be approved again.',
+          alwaysApproveAllowed: false as const,
+        },
+      })),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['slack', adapter]]),
+      channels: [],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([makeSlackMessage('<@U999> run the denied tool')])
+    streamCalls[0].fireSuspended({
+      taskId: 'task-slack-reask-1',
+      requestId: 'approval-slack-reask-1',
+      toolName: 'shell_exec',
+      displayName: 'Shell',
+      reason: 'approval_required',
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const approvalEdit = editMessage.mock.calls.find(call =>
+      call[2].includes('must be approved again')
+    )
+    const actions = approvalEdit?.[3]?.slackBlocks?.find(block => block.type === 'actions')
+    expect(actions?.elements?.map(element => element.action_id)).toEqual([
+      'tool_approval_approve',
+      'tool_approval_deny',
+    ])
+    streamCalls[0].fireTerminal({ taskId: 'task-slack-reask-1', status: 'cancelled' })
+  })
+
+  it('omits Teams Always approve when the Host cannot store a grant', async () => {
+    streamCalls.length = 0
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
+    const adapter: ChannelAdapter = {
+      channelType: 'teams',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async () => 'teams-status-reask-1'),
+      editMessage,
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'pending' as const,
+        taskId: 'task-teams-reask-1',
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-teams-reask-1',
+          requestId: 'approval-teams-reask-1',
+          userId: 'teams-user-1',
+          notification: 'Tool `shell_exec` was denied and must be approved again.',
+          alwaysApproveAllowed: false as const,
+        },
+      })),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['teams', adapter]]),
+      channels: [],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([makeTeamsMessage('run the denied tool', { messageId: 'reask-1' })])
+    streamCalls[0].fireSuspended({
+      taskId: 'task-teams-reask-1',
+      requestId: 'approval-teams-reask-1',
+      toolName: 'shell_exec',
+      displayName: 'Shell',
+      reason: 'approval_required',
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const approvalEdit = editMessage.mock.calls.find(call =>
+      call[2].includes('must be approved again')
+    )
+    expect(approvalEdit?.[3]?.teamsActions?.map(action => action.title)).toEqual([
+      'Approve',
+      'Deny',
+    ])
+    streamCalls[0].fireTerminal({ taskId: 'task-teams-reask-1', status: 'cancelled' })
+  })
+
+  it('omits Always approve on the sync fallback when the Host cannot store a grant', async () => {
+    streamCalls.length = 0
+    const sent: Array<{ content: string; options?: { telegramInlineKeyboard?: unknown } }> = []
+    const adapter: ChannelAdapter = {
+      channelType: 'telegram',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async (_channelId, content, _replyTo, _attachments, options) => {
+        sent.push({ content, options })
+        return `bot-msg-${sent.length}`
+      }),
+      editMessage: vi.fn(async () => undefined),
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('progress unavailable'))
+        .mockResolvedValueOnce({
+          success: true,
+          status: 'waiting_approval' as const,
+          approval: {
+            taskId: 'task-sync-reask-1',
+            requestId: 'approval-sync-reask-1',
+            userId: '516801777',
+            notification: 'Tool `shell_exec` was denied and must be approved again.',
+            alwaysApproveAllowed: false as const,
+          },
+        }),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['telegram', adapter]]),
+      channels: [makeChannel()],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([makeMessage('run the denied tool', 'msg-sync-reask')])
+
+    const approval = sent.find(call => call.content.includes('must be approved again'))
+    const labels = (
+      approval?.options?.telegramInlineKeyboard as Array<Array<{ text: string }>> | undefined
+    )?.flatMap(row => row.map(button => button.text))
+    expect(labels).toEqual(['Approve', 'Deny'])
+    expect(rpcClient.sendMessage).toHaveBeenCalledTimes(2)
+  })
+
   it('renders Slack tool approval buttons in the originating thread', async () => {
     streamCalls.length = 0
     const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)

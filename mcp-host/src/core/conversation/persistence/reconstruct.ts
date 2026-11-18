@@ -8,7 +8,7 @@ import { parseTaskExecutionBudget } from '../../../agent/taskExecutionBudget'
  *
  * Anything ephemeral (`auto_approved_tools`, `compactionState`) is set to
  * empty defaults — by design (see T2.1 §11.3 and `aclaraciones/sqlite-persistence.md`).
- * `denied_tools` is durable (migration 016) and is rehydrated from the session row.
+ * `denied_tools` is durable (migration 018) and is rehydrated from the session row.
  */
 import type { MessageRow, PendingApprovalRow, PersistedSession } from '../../../db/worker/protocol'
 import { deserializeCompletedResults } from '../../../db/worker/protocol'

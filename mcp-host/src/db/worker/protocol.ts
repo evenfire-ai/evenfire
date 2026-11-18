@@ -32,7 +32,7 @@ export interface SessionRow {
    *  shape because a row built before the first write (or by a fixture) has no
    *  value; readers normalize `undefined` to the column default 0. */
   model_selection_revision?: number
-  /** Migration 016 — JSON array of `{ tool, userId }` denials. NULL if none. */
+  /** Migration 018 — JSON array of `{ tool, userId }` denials. NULL if none. */
   denied_tools?: string | null
   system_prompt_stable_hash: string | null
   parent_session_id: string | null
