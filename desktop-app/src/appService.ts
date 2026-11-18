@@ -33,7 +33,12 @@ import {
   type DesktopUploadTransport,
   formatGfsUploadLimit,
 } from './gfs/upload.js'
-import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
+import {
+  GfsClient,
+  type GfsResourceView,
+  type ResolvedGfsResource,
+  parseSubjectKey,
+} from './gfs/uriHandler.js'
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
@@ -883,6 +888,11 @@ export interface AppServiceOptions {
   onSandboxUiSessionInvalidated?: () => void
   onSessionCleared?: () => void
 }
+
+export type GfsNavigationResolution =
+  | { status: 'resolved'; resource: ResolvedGfsResource }
+  | { status: 'superseded' }
+  | { status: 'unavailable' }
 
 export class AppService {
   private readonly authClient = new AuthClient()
@@ -2810,6 +2820,38 @@ export class AppService {
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
   async resolveGfsUri(uri: string) {
     return this.gfsClient.resolveUri(uri, this.requireSessionToken())
+  }
+
+  /**
+   * Resolve for a user click that will route the UI. Unlike `resolveGfsUri`
+   * this never throws: the caller needs to tell "the session this click
+   * belonged to is gone" (drop silently) from "nothing to open" (tell the user).
+   *
+   * Authority is `(gfsAuthEpoch, me.id)`, not the token: transient team hops
+   * swap the token without changing GFS authority, which the server scopes to
+   * the user, so comparing tokens would drop legitimate clicks.
+   */
+  async resolveGfsUriForNavigation(uri: string): Promise<GfsNavigationResolution> {
+    const token = this.sessionToken
+    const userId = this.me?.id
+    const epoch = this.gfsAuthEpoch
+    if (!token || !userId || this.gfsDispatchBlocked) return { status: 'superseded' }
+    const stillCurrent = () =>
+      Boolean(this.sessionToken) && this.me?.id === userId && this.gfsAuthEpoch === epoch
+    let resource: ResolvedGfsResource
+    try {
+      resource = await this.gfsClient.resolveUri(uri, token)
+    } catch (error) {
+      if (!stillCurrent()) return { status: 'superseded' }
+      // The renderer shows one generic message for every failure cause.
+      console.warn(
+        '[AppService] GFS navigation resolve failed:',
+        error instanceof Error ? error.message : String(error)
+      )
+      return { status: 'unavailable' }
+    }
+    if (!stillCurrent()) return { status: 'superseded' }
+    return { status: 'resolved', resource }
   }
 
   /**
