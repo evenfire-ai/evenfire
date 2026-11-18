@@ -66,11 +66,11 @@ const assertDeepFrozen = value => {
   for (const child of Object.values(value)) assertDeepFrozen(child)
 }
 
-const assertRejects = (validator, value, code) =>
+const assertRejects = (validator, value, code, label) =>
   assert.throws(() => validator(value), error => {
-    assert.equal(error.code, code)
+    assert.equal(error.code, code, label)
     return true
-  })
+  }, label)
 
 const assertAccepts = (validator, value) => {
   const result = validator(value)
@@ -345,5 +345,80 @@ describe('Stage 1 execution principal', () => {
     ]) {
       assertRejects(validateStage1ExecutionPrincipal, value, 'invalid_execution_principal')
     }
+  })
+})
+
+// One rejection row per field: every key of a valid value, set to a value of the
+// wrong type, must be refused with the contract's code. Without these rows a
+// single field check can be deleted while every invariant test stays green.
+describe('per-field rejections', () => {
+  const NOT_OBJECTS = [null, [], 'fixture-value', 7]
+  const wrongTypeRows = (label, valid, code, codeByKey = {}) =>
+    Object.keys(valid).flatMap(key =>
+      [true, ''].map(bad => [`${label}.${key}=${JSON.stringify(bad)}`, { ...valid, [key]: bad }, codeByKey[key] ?? code])
+    )
+  const nestedRows = (label, valid, key, code) =>
+    wrongTypeRows(`${label}.${key}`, valid[key], code).map(([rowLabel, nested, rowCode]) => [
+      rowLabel,
+      { ...valid, [key]: nested },
+      rowCode,
+    ])
+  const checkRows = (validator, valid, rows) => {
+    assert.ok(rows.length > 0)
+    for (const [label, value, code] of rows) {
+      assertAccepts(validator, valid)
+      assertRejects(validator, value, code, label)
+    }
+  }
+
+  it('provider event receipt claims', () => {
+    const message = load('receipt.slack.message.json')
+    const rows = [
+      ...wrongTypeRows('slack.message', message, RECEIPT_ERROR),
+      ...wrongTypeRows('slack.action', load('receipt.slack.action.approve.json'), RECEIPT_ERROR),
+      ...wrongTypeRows('teams.message', load('receipt.teams.message.json'), RECEIPT_ERROR),
+      ...nestedRows('slack.action', load('receipt.slack.action.approve.json'), 'action', RECEIPT_ERROR),
+      ['iat=0 with a 600 s lifetime', { ...message, iat: 0, exp: 600 }, RECEIPT_ERROR],
+      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, RECEIPT_ERROR]),
+    ]
+    checkRows(validateProviderEventReceiptClaims, message, rows)
+  })
+
+  it('channel admission', () => {
+    const admitted = load('admission.admitted.json')
+    const refused = load('admission.refused.no_match.json')
+    const refusedClick = load('admission.refused.missing_channel_grant.json')
+    const rows = [
+      ...wrongTypeRows('admitted', admitted, ADMISSION_ERROR),
+      ...nestedRows('admitted', admitted, 'event', ADMISSION_ERROR),
+      ...wrongTypeRows('refused', refused, ADMISSION_ERROR),
+      ...nestedRows('refused', refused, 'event', ADMISSION_ERROR),
+      ...nestedRows('refusedClick', refusedClick, 'event', ADMISSION_ERROR),
+      ['refused with an extra key', { ...refused, memberId: admitted.memberId }, ADMISSION_ERROR],
+      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, ADMISSION_ERROR]),
+    ]
+    checkRows(validateChannelAdmission, admitted, rows)
+  })
+
+  it('origin route', () => {
+    const thread = load('origin.thread.json')
+    const rows = [
+      ...wrongTypeRows('thread', thread, ORIGIN_ERROR),
+      ...wrongTypeRows('quote', load('origin.quote.json'), ORIGIN_ERROR),
+      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, ORIGIN_ERROR]),
+    ]
+    checkRows(validateOriginRoute, thread, rows)
+  })
+
+  it('Stage 1 execution principal', () => {
+    const member = load('principal.member.json')
+    const code = 'invalid_execution_principal'
+    const rows = [
+      ...wrongTypeRows('member', member, code, { kind: 'unknown_principal_kind' }),
+      ['member.policyVersion=-1', { ...member, policyVersion: -1 }, code],
+      ['member.policyVersion=1.5', { ...member, policyVersion: 1.5 }, code],
+      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, code]),
+    ]
+    checkRows(validateStage1ExecutionPrincipal, member, rows)
   })
 })
