@@ -44,7 +44,7 @@ async function portReady(port) {
 }
 
 async function main() {
-  assert.equal(process.versions.node, '24.22.1')
+  assert.equal(process.versions.node, '24.22.3')
   fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 })
   const mcpVersion = execFileSync(process.execPath, ['/app/cli.js', '--version'], {
     encoding: 'utf8',
