@@ -51,14 +51,16 @@ interface Entry {
   heldForFirstSend: ApprovalMode | null
   persisted: boolean
   writing: boolean
-  /** Bumps when a write starts. A session read captured earlier must not paint over it. */
-  writeEpoch: number
+  /** Store-wide write sequence at the moment this chat's last write started. */
+  lastWriteSeq: number
   listeners: Set<() => void>
   view: HostApprovalModeView | null
 }
 
 const entries = new Map<string, Entry>()
 let scopeGeneration = 0
+/** Bumps on every mode write, for every chat. Reads capture this before they start. */
+let writeSeq = 0
 
 function keyFor(agentRef: string, chatId: string | null): string {
   return `${agentRef}::${chatId ?? ''}`
@@ -125,7 +127,7 @@ function getEntry(agentRef: string, chatId: string | null): Entry {
       heldForFirstSend: null,
       persisted: false,
       writing: false,
-      writeEpoch: entry?.scopeGeneration === scopeGeneration ? entry.writeEpoch : 0,
+      lastWriteSeq: 0,
       listeners: entry?.scopeGeneration === scopeGeneration ? entry.listeners : new Set(),
       view: null,
     }
@@ -182,9 +184,12 @@ export function snapshotFromSessionRead(
   }
 }
 
-/** Epoch to capture before a session read. Pass it back when the read lands. */
-export function hostApprovalModeEpoch(agentRef: string, chatId: string | null): number {
-  return getEntry(agentRef, chatId).writeEpoch
+/**
+ * Sequence to capture before a session or catalog read. The chat id is ignored:
+ * the counter is store-wide, so a catalog read is not tied to the blank chat.
+ */
+export function hostApprovalModeEpoch(_agentRef?: string, _chatId?: string | null): number {
+  return writeSeq
 }
 
 export function noteHostApprovalModeFromSession(
@@ -196,7 +201,7 @@ export function noteHostApprovalModeFromSession(
   if (!agentRef || !chatId) return
   const entry = getEntry(agentRef, chatId)
   if (entry.writing) return
-  if (readEpoch !== undefined && readEpoch !== entry.writeEpoch) return
+  if (readEpoch !== undefined && entry.lastWriteSeq > readEpoch) return
   applySnapshot(entry, snapshot)
   notify(entry)
 }
@@ -278,6 +283,8 @@ export async function selectHostApprovalMode(
 ): Promise<boolean> {
   if (!agentRef || !isMode(mode)) return false
   const entry = getEntry(agentRef, chatId)
+  writeSeq += 1
+  entry.lastWriteSeq = writeSeq
   if (!chatId) {
     entry.storedMode = mode
     entry.effectiveMode = mode
@@ -288,7 +295,6 @@ export async function selectHostApprovalMode(
   }
 
   entry.writing = true
-  entry.writeEpoch += 1
   notify(entry)
   try {
     const result = await transport.setApprovalMode(agentRef, chatId, mode)
@@ -324,5 +330,6 @@ export async function selectHostApprovalMode(
 
 export function resetHostApprovalModeStore(): void {
   scopeGeneration += 1
+  writeSeq = 0
   entries.clear()
 }

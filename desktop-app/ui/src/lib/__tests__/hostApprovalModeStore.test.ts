@@ -101,6 +101,28 @@ describe('hostApprovalModeStore', () => {
     expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
   })
 
+  it('a catalog read after a write still updates that chat', async () => {
+    const { client, setApprovalMode } = transport()
+    setApprovalMode.mockResolvedValue(snapshot('auto'))
+    await selectHostApprovalMode(client, AGENT, CHAT, 'auto')
+
+    const catalogSeq = hostApprovalModeEpoch(AGENT, null)
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('allow_all'), catalogSeq)
+
+    expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
+  })
+
+  it('a catalog read started before a write does not paint the old mode', async () => {
+    const { client, setApprovalMode } = transport()
+    const catalogSeq = hostApprovalModeEpoch(AGENT, null)
+    setApprovalMode.mockResolvedValue(snapshot('allow_all'))
+    await selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')
+
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'), catalogSeq)
+
+    expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
+  })
+
   it.each([400, 401])('a %s keeps the old label without a re-read', async status => {
     const { client, setApprovalMode, readSessionApproval } = transport()
     noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('auto'))

@@ -2642,6 +2642,13 @@ export function useAgentChatController({
             ...(reconcileFromTurn !== undefined ? { afterTurn: reconcileFromTurn } : {}),
           }
         }
+        const approvalReadSeq = hostApprovalModeEpoch(agentRef, chatId)
+        const noteOpenedChat = (opened: Parameters<typeof snapshotFromSessionRead>[0]) => {
+          const approval = snapshotFromSessionRead(opened)
+          if (approval) {
+            noteHostApprovalModeFromSession(agentRef, chatId, approval, approvalReadSeq)
+          }
+        }
         let response = await chatStore.loadSessionMessages(
           agentRef,
           agentRef,
@@ -2649,6 +2656,7 @@ export function useAgentChatController({
           requestedQuery
         )
         if (!stillRelevant()) return undefined
+        noteOpenedChat(response)
         if (requestedQuery.afterTurn === undefined || !response.hasMoreAfter) {
           if (requestedQuery.afterTurn !== undefined) {
             return {
@@ -2709,6 +2717,7 @@ export function useAgentChatController({
           })
           if (!stillRelevant()) return undefined
           const combinedTurns = mergeUniqueSessionTurns(turns, latest.turns)
+          noteOpenedChat(latest)
           return {
             ...latest,
             turns: combinedTurns,
