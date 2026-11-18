@@ -147,8 +147,10 @@ recovery_cycle_used_fresh_host_inventory() {
 # Every Host-watch recovery convergence completion counts 1, inside or outside a
 # cycle, and is never counted a second time. After the Recovered line of a
 # cycle, any other completion carrying that generation or a later one adds 1
-# for the cycle, at most once: later fallback, retry and periodic lifecycle
-# passes carry later generations and are not counted again.
+# for the cycle, at most once. Later channel passes of the cycle are not
+# counted again, whether they are retries (which resend the generation of the
+# pass they retry) or later lifecycle passes. A bound on this count therefore
+# limits only the Host-watch recovery passes.
 recovery_fleet_pass_count() {
   local logs=$1
   awk "${HCC_LIFECYCLE_GENERATION_AWK}"'

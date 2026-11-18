@@ -378,8 +378,9 @@ fleet_passes="$(recovery_fleet_pass_count "$final_logs")"
 # Each recovered snapshot requires one causally ordered successful pass;
 # recovery_fleet_pass_count counts it once per cycle, by the lifecycle generation
 # it applied, whatever reason the scheduler kept for it. A Host-watch recovery
-# pass may cover the same fresh CC+Host inventories and is counted on its own. At
-# most one already queued covering pass may also finish per cycle. The deterministic
+# pass may cover the same fresh CC+Host inventories and is counted on its own.
+# Because channel passes count at most once per cycle, the upper bound of 4
+# limits only the Host-watch recovery passes. The deterministic
 # max-concurrency=1 proof stays in k8sClient unit tests where overlapping passes
 # can be barrier-controlled.
 
