@@ -92,9 +92,34 @@ and tells the user.
 ## Rollback residue
 
 Session revocations and password epochs written by the new control-api are
-ignored by the old one. The release installs no revision functions.
+ignored by the old one. The release installs database triggers and their
+functions, and they stay after a rollback: `gfs_resource_changed_notify` on
+`gfs_resources` (from `0141`), `gfs_authz_changed_notify` on `gfs_grants`,
+`gfs_shares`, `gfs_desktop_operator_links`, `control_admin_users` and
+`team_members`, `gfs_authz_changed_update_notify` on `control_admin_users` and
+`team_members`, and `gfs_watch_session_update_notify` and
+`gfs_watch_session_delete_notify` on `users` (from `0142` to `0147`). Every
+matching write to those tables still sends a `pg_notify` on the
+`gfs_resource_changed`, `gfs_authz_changed` or `gfs_watch_session` channel.
+No write fails because of them: nothing in the old image listens on those
+three channels, and the functions only call `pg_notify`, with payloads bounded
+well below its 8000-byte limit. `pg_notify` makes the writer's commit fail only
+if the notification queue is full; that queue is a single one for the whole
+cluster (8 GB by default), and a notification leaves it as soon as every
+listening session has read past it, which the old image's listeners on other
+channels (`notification_queued`, `workflow_run_update`) keep doing. The one
+cost is that transactions which notify serialize at commit, because PostgreSQL
+takes a cluster-wide lock to append to the queue. On `users` and
+`team_members` that cost does not reach the ordinary sign-in: the `users`
+triggers fire only on a delete or when `lifecycle_state` or
+`lifecycle_version` changes, and the `team_members` ones on an insert, a delete
+or a change of `user_id` or `status`, so a sign-in that only refreshes
+`name`, `picture` and `updated_at` on `users` and re-asserts an already active
+membership does not notify. A sign-in that creates or reactivates a
+membership, and every write to `gfs_resources`, `gfs_grants`, `gfs_shares` and
+`gfs_desktop_operator_links`, does.
 
-It does leave state on `llm_allowed_models` that a rollback keeps: the six
+It also leaves state on `llm_allowed_models` that a rollback keeps: the six
 columns of `0139_llm_catalog_prune_columns` (`enabled_managed_by`,
 `auto_disabled_at`, `stale_since`, `stale_episode`, `deprecated_episode`,
 `attention_ack`) and the `llm_allowed_models_track_episodes` trigger of
@@ -158,7 +183,11 @@ before this release.
   [Databases that ran an earlier head of this change](#databases-that-ran-an-earlier-head-of-this-change)).
   The release adds `0137_user_access_foundation`,
   `0138_legacy_password_security_epoch_backfill`,
-  `0139_llm_catalog_prune_columns` and `0140_llm_catalog_prune_episodes`. A
+  `0139_llm_catalog_prune_columns`, `0140_llm_catalog_prune_episodes`,
+  `0141_gfs_resource_changed_notify`, `0142_gfs_authz_grants_notify`,
+  `0143_gfs_authz_shares_notify`, `0144_gfs_authz_operator_links_notify`,
+  `0145_gfs_authz_control_admins_notify`, `0146_gfs_authz_team_members_notify`
+  and `0147_gfs_watch_session_users_notify`. A
   database where an earlier head of the catalog prune applied both parts as a
   single `0139` migration (branch profiles or local databases only) records
   `0139_llm_catalog_prune_columns` under its legacy alias without running it,
@@ -167,14 +196,14 @@ before this release.
   Windows). The migration session sets `client_connection_check_interval`,
   which the server rejects on other platforms, so that a killed Job pod does
   not leave its backend holding the migration advisory lock.
-- For a database already at `0136`, every statement of `0137` and `0138`
+- For a database already at `0136`, every statement of `0137` through `0147`
   waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
   bounded at 15 s (`statement_timeout`); the online index builds have their own
   120 s bound (below). The whole Job is bounded at 300 s
   (`activeDeadlineSeconds`).
 - For a database at `0130` through `0135`, the missing versions through `0136`
   commit in one transaction under the 10 s lock and 15 s statement bounds, with
-  no fence, then `0137`, then `0138`.
+  no fence, then each of `0137` through `0147` in its own transaction.
 - An existing database below `0130` must already have `0126` to `0128`; the
   Job stops with an error otherwise. For such a database the 10 s lock bound
   does not hold before `0137`. The Job first sets the `0130` password-login
@@ -269,13 +298,55 @@ before this release.
   when a first password was set from an invitation, and the session from which
   a user changed their password in Profile UI. No other session is affected by
   the backfill.
+- `0141_gfs_resource_changed_notify` creates (or replaces) the function
+  `gfs_resource_changed_notify()` and the `AFTER INSERT OR UPDATE OR DELETE`
+  row trigger of the same name on the existing table `gfs_resources`, in one
+  bounded transaction. `CREATE OR REPLACE FUNCTION` and the `REVOKE` on it take
+  no table lock. `CREATE OR REPLACE TRIGGER` takes `SHARE ROW EXCLUSIVE` on
+  `gfs_resources` until `0141`'s transaction commits: inserts, updates and
+  deletes on `gfs_resources` (from control-api and the GFS controller) are
+  blocked for that time, plain reads are not. The wait for that lock is bounded
+  at 10 s (`lock_timeout`), with no retry inside the Job, so a transaction
+  that has written to `gfs_resources` and stays open longer fails that Job
+  attempt. While the migration waits, later writes to `gfs_resources` queue
+  behind it. The migration neither scans nor rewrites the table, so its duration
+  does not depend on its size.
+- `0142_gfs_authz_grants_notify` through `0147_gfs_watch_session_users_notify`
+  each run in their own bounded transaction (10 s `lock_timeout`, 15 s
+  `statement_timeout`) and install `AFTER ROW` triggers on one existing table
+  each. `0142` first creates (or replaces) the functions
+  `gfs_authz_subject_key()`, `gfs_authz_subject_notify()`,
+  `gfs_authz_user_notify()`, `gfs_authz_admin_notify()` and
+  `gfs_watch_session_notify()`; `CREATE OR REPLACE FUNCTION` and the `REVOKE`
+  on them take no table lock. Every `CREATE OR REPLACE TRIGGER` takes
+  `SHARE ROW EXCLUSIVE` on its table until that migration's transaction
+  commits: inserts, updates and deletes on the table are blocked for that time,
+  plain reads are not. The tables are `gfs_grants` (`0142`), `gfs_shares`
+  (`0143`), `gfs_desktop_operator_links` (`0144`), `control_admin_users`
+  (`0145`, two triggers), `team_members` (`0146`, two triggers) and `users`
+  (`0147`, two triggers). Each migration holds only its own table's lock, so no
+  two of these tables are blocked at once. While a migration waits for its
+  lock, later writes to that table queue behind it. None of them scans or
+  rewrites its table, so their duration does not depend on table size.
+- `0142` to `0145` wait at most 10 s for their lock, with no retry inside the
+  Job: a transaction that has written to `gfs_grants`, `gfs_shares`,
+  `gfs_desktop_operator_links` or `control_admin_users` and stays open longer
+  fails that Job attempt. `team_members` and `users` are written by every
+  sign-in, so `0146` and `0147` retry a lost lock wait (`lockRetries: 2`): after
+  a 10 s `lock_timeout` the transaction rolls back, holds no lock, waits 1 s
+  (then 2 s) and starts again, for at most three attempts. Each of the two can
+  thus block sign-ins for up to about 30 s in total, in three 10 s windows
+  spread over about 33 s (the 1 s and 2 s pauses hold no lock), before it
+  fails the Job attempt; a transaction that has written to `team_members` or
+  `users` and stays open longer than that fails it. Run the migration outside
+  sign-in peaks.
 - After the Job, `verify_db_migration_state` checks the grants of
   `workflow_recipes_runtime` against
   `deploy/scripts/workflow-recipes-runtime-access-profiles.tsv` (one row per
   relation; `dev` had 7) and
   `deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv` (6
   column rows; new in this release). A mismatch stops the deploy after `0137`
-  and `0138` have committed, while the old control-api keeps serving. Compare
+  through `0147` have committed, while the old control-api keeps serving. Compare
   the target database's grants with both files before step 1.
 - `deploy/scripts/run-control-api-db-migration.sh` requires `--timeout` (or
   `TIMEOUT`) to be a number with a unit (`s`, `m` or `h`) and at least `360s`;

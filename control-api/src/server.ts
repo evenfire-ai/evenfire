@@ -8,6 +8,7 @@ import {
   stopBudgetReservationSweepCron,
 } from './services/budgetReservationSweepCron.js'
 import { stopEntityChangeDispatcher } from './services/entityChangeService.js'
+import { startGfsWatchProcess, stopGfsWatchRegistry } from './services/gfsWatch/process.js'
 import {
   startPluginWorkloadSdkMaintenanceCron,
   stopPluginWorkloadSdkMaintenanceCron,
@@ -37,6 +38,7 @@ export class ControlApiServer {
     startUsageRetentionCron(config.usageRetentionIntervalMs)
     startBudgetReservationSweepCron(config.budgetReservationSweepIntervalMs)
     startPluginWorkloadSdkMaintenanceCron()
+    startGfsWatchProcess()
 
     await new Promise<void>((resolve, reject) => {
       const server = app.listen(this.port, resolve)
@@ -59,6 +61,8 @@ export class ControlApiServer {
     stopPluginWorkloadSdkMaintenanceCron()
     stopEntityChangeDispatcher()
     closeActiveEntityChangeStreams()
+    // Before server.close, which waits for every open connection, streams included.
+    stopGfsWatchRegistry()
     const server = this.httpServer
     this.httpServer = null
     if (!server) return

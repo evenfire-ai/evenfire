@@ -4,8 +4,10 @@ import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfigHandoffSelection,
-  EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
+  GfsWatchEvent,
+  GfsWatchSubscriptionRequest,
+  GfsWatchSubscriptionResult,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
@@ -428,38 +430,42 @@ const clerum = Object.freeze({
         status: string
       }>,
   },
-  entityChanges: {
-    subscribe: async (onEvent: (event: EntityChangeStreamEvent) => void) => {
-      let streamId = ''
-      const pending: unknown[] = []
+  gfsWatch: {
+    /**
+     * Registers this window with the GFS watch and sends its first list. The
+     * event listener is installed before the first request, so an event main
+     * emits while it is in flight (an access change during a reopen) still
+     * arrives. `sessionExpired` tells a window that mounts after the session
+     * already expired, before any event could reach it.
+     */
+    open: async (onEvent: (event: GfsWatchEvent) => void, initial: GfsWatchSubscriptionRequest) => {
       const listener = (_event: unknown, payload: unknown) => {
-        const parsed = payload as { streamId?: string; event?: EntityChangeStreamEvent }
-        if (!streamId) {
-          if (pending.length < 100) pending.push(payload)
-          return
-        }
-        if (parsed?.streamId === streamId && parsed.event) onEvent(parsed.event)
+        if (payload && typeof payload === 'object') onEvent(payload as GfsWatchEvent)
       }
-      ipcRenderer.on('entityChanges:streamEvent', listener)
+      ipcRenderer.on('gfsWatch:event', listener)
+      const setSubscriptions = async (
+        request: GfsWatchSubscriptionRequest
+      ): Promise<GfsWatchSubscriptionResult> => {
+        const result = (await ipcRenderer.invoke('gfsWatch:setSubscriptions', {
+          keys: request.keys,
+          userId: request.userId,
+        })) as Partial<GfsWatchSubscriptionResult> | null
+        return { sessionExpired: result?.sessionExpired === true }
+      }
+      let first: GfsWatchSubscriptionResult
       try {
-        const started = (await ipcRenderer.invoke('entityChanges:streamStart')) as {
-          streamId: string
-        }
-        streamId = String(started?.streamId || '').trim()
-        if (!streamId) throw new Error('Failed to start entity-change stream')
-        for (const item of pending) {
-          const parsed = item as { streamId?: string; event?: EntityChangeStreamEvent }
-          if (parsed?.streamId === streamId && parsed.event) onEvent(parsed.event)
-        }
-        pending.length = 0
+        first = await setSubscriptions(initial)
       } catch (error) {
-        ipcRenderer.removeListener('entityChanges:streamEvent', listener)
+        ipcRenderer.removeListener('gfsWatch:event', listener)
         throw error
       }
-
-      return async () => {
-        ipcRenderer.removeListener('entityChanges:streamEvent', listener)
-        await ipcRenderer.invoke('entityChanges:streamStop', { streamId })
+      return {
+        sessionExpired: first.sessionExpired,
+        setSubscriptions,
+        close: async () => {
+          ipcRenderer.removeListener('gfsWatch:event', listener)
+          await ipcRenderer.invoke('gfsWatch:stop')
+        },
       }
     },
   },
