@@ -83,6 +83,11 @@ interface PendingApprovalState {
   originalMessage: Message
   createdAt: Date
   actionToken: string
+  /**
+   * False when the Host card cannot store a lasting grant. Absent means the
+   * card may. Matches the wire: the field is sent only when it is false.
+   */
+  alwaysApproveAllowed?: false
   startResultPollingFallback?: () => void
   updateStatusAfterDecision?: (content: string) => Promise<void>
 }
@@ -194,24 +199,35 @@ function parseToolApprovalAction(content: string): {
   }
 }
 
+/** Absent on the wire means the card may store a grant. Only explicit false hides it. */
+function lastingGrantAllowed(approval: { alwaysApproveAllowed?: false } | undefined): boolean {
+  return approval?.alwaysApproveAllowed !== false
+}
+
+function lastingGrantState(approval: { alwaysApproveAllowed?: false } | undefined): {
+  alwaysApproveAllowed?: false
+} {
+  return approval?.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false } : {}
+}
+
 function toolApprovalMessageOptions(
   channelType: Message['channelType'],
   notification: string,
-  actionToken: string
+  actionToken: string,
+  lastingGrant: boolean
 ): SendMessageOptions | undefined {
   const approve = toolApprovalActionValue('approve', actionToken)
   const approveAlways = toolApprovalActionValue('approveAlways', actionToken)
   const deny = toolApprovalActionValue('deny', actionToken)
   if (channelType === 'telegram') {
-    return {
-      telegramInlineKeyboard: [
-        [
-          { text: 'Approve', callbackData: approve },
-          { text: 'Deny', callbackData: deny },
-        ],
-        [{ text: 'Always approve', callbackData: approveAlways }],
+    const rows = [
+      [
+        { text: 'Approve', callbackData: approve },
+        { text: 'Deny', callbackData: deny },
       ],
-    }
+    ]
+    if (lastingGrant) rows.push([{ text: 'Always approve', callbackData: approveAlways }])
+    return { telegramInlineKeyboard: rows }
   }
   if (channelType === 'slack') {
     return {
@@ -228,12 +244,16 @@ function toolApprovalMessageOptions(
               value: approve,
               style: 'primary',
             },
-            {
-              type: 'button',
-              action_id: 'tool_approval_always',
-              text: { type: 'plain_text', text: 'Always approve' },
-              value: approveAlways,
-            },
+            ...(lastingGrant
+              ? [
+                  {
+                    type: 'button' as const,
+                    action_id: 'tool_approval_always',
+                    text: { type: 'plain_text' as const, text: 'Always approve' },
+                    value: approveAlways,
+                  },
+                ]
+              : []),
             {
               type: 'button',
               action_id: 'tool_approval_deny',
@@ -250,7 +270,7 @@ function toolApprovalMessageOptions(
     return {
       teamsActions: [
         { title: 'Approve', value: approve, style: 'positive' },
-        { title: 'Always approve', value: approveAlways },
+        ...(lastingGrant ? [{ title: 'Always approve', value: approveAlways }] : []),
         { title: 'Deny', value: deny, style: 'destructive' },
       ],
     }
@@ -1558,12 +1578,18 @@ export class ChannelReader {
               originalMessage: msg,
               createdAt: new Date(),
               actionToken,
+              ...lastingGrantState(response.approval),
             })
             await this.sendReply(
               msg,
               notification,
               undefined,
-              toolApprovalMessageOptions(msg.channelType, notification, actionToken)
+              toolApprovalMessageOptions(
+                msg.channelType,
+                notification,
+                actionToken,
+                lastingGrantAllowed(response.approval)
+              )
             )
           } else if (response.success && response.response) {
             console.log('[Main] mcp-host response:')
@@ -1599,12 +1625,18 @@ export class ChannelReader {
             originalMessage: msg,
             createdAt: new Date(),
             actionToken,
+            ...lastingGrantState(response.approval),
           })
           await this.sendReply(
             msg,
             notification,
             undefined,
-            toolApprovalMessageOptions(msg.channelType, notification, actionToken)
+            toolApprovalMessageOptions(
+              msg.channelType,
+              notification,
+              actionToken,
+              lastingGrantAllowed(response.approval)
+            )
           )
         } else if (response.success && response.response) {
           console.log('[Main] mcp-host response:')
@@ -1866,12 +1898,18 @@ export class ChannelReader {
           originalMessage: msg,
           createdAt: new Date(),
           actionToken,
+          ...lastingGrantState(response.approval),
         })
         await this.sendReply(
           msg,
           notification,
           undefined,
-          toolApprovalMessageOptions(msg.channelType, notification, actionToken)
+          toolApprovalMessageOptions(
+            msg.channelType,
+            notification,
+            actionToken,
+            lastingGrantAllowed(response.approval)
+          )
         )
       } else if (response.success && response.response) {
         await this.sendReply(msg, response.response, response.attachments)
@@ -1947,6 +1985,7 @@ export class ChannelReader {
         requestId: string
         userId: string
         notification: string
+        alwaysApproveAllowed?: false
       }): Promise<void> => {
         const approvalKey = this.pendingApprovalKey(msg)
         const existing = this.pendingApprovals.get(approvalKey)
@@ -1969,6 +2008,7 @@ export class ChannelReader {
           originalMessage: msg,
           createdAt: new Date(),
           actionToken,
+          ...lastingGrantState(params),
           startResultPollingFallback,
           updateStatusAfterDecision: content => {
             acceptProgressUpdates = true
@@ -1978,7 +2018,12 @@ export class ChannelReader {
         await editStatus(
           params.notification,
           false,
-          toolApprovalMessageOptions(msg.channelType, params.notification, actionToken)
+          toolApprovalMessageOptions(
+            msg.channelType,
+            params.notification,
+            actionToken,
+            lastingGrantAllowed(params)
+          )
         )
       }
 
@@ -1993,6 +2038,7 @@ export class ChannelReader {
               requestId: result.approval.requestId,
               userId: result.approval.userId,
               notification: result.approval.notification,
+              ...lastingGrantState(result.approval),
             })
             return false
           }
@@ -2107,6 +2153,7 @@ export class ChannelReader {
               : msg.channelType === 'teams'
                 ? `Reply approve or deny to this message.`
                 : `Reply /approve or /deny to this message.`)
+          let grantState: { alwaysApproveAllowed?: false } = {}
           try {
             const result = await this.rpcClient.getTaskResult(taskId, msg)
             if (
@@ -2115,6 +2162,7 @@ export class ChannelReader {
               result.approval?.notification
             ) {
               notification = result.approval.notification
+              grantState = lastingGrantState(result.approval)
             }
           } catch (err) {
             console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
@@ -2123,6 +2171,7 @@ export class ChannelReader {
             requestId: suspended.requestId,
             userId: msg.sender,
             notification,
+            ...grantState,
           })
           // Release handleMessages's for loop. The stream stays open; the next
           // tool_start/tool_complete/suspended/terminal events keep firing.
@@ -2291,9 +2340,12 @@ export class ChannelReader {
     }
 
     this.pendingApprovals.delete(approvalKey)
-    const acknowledgement = alwaysApprove
-      ? 'Approved (always for this tool). Processing...'
-      : 'Approved. Processing...'
+    // The Host ignores a lasting grant on an exact-invocation card. Do not tell
+    // the user one was stored when this card was marked unable to store it.
+    const acknowledgement =
+      alwaysApprove && pending.alwaysApproveAllowed !== false
+        ? 'Approved (always for this tool). Processing...'
+        : 'Approved. Processing...'
     await pending.updateStatusAfterDecision?.(acknowledgement)
     await this.sendReply(msg, acknowledgement)
 
