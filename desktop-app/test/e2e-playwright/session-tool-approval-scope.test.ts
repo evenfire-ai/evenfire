@@ -54,7 +54,7 @@ const CARD_TIMEOUT = 180_000
 const RUN_MCP_STEP = process.env.E2E_SESSION_TOOL_APPROVAL_MCP === '1'
 
 type ApprovalCard = { label: string; preview: string }
-type Decision = 'approve' | 'deny'
+type Decision = 'approve' | 'deny' | 'command'
 type ExpectedCard = { label: RegExp; preview?: string; decision: Decision }
 type HostLogEvent = Record<string, unknown> & { msg?: string }
 type LedgerWindow = Window & { __staCards?: ApprovalCard[]; __staObserver?: MutationObserver }
@@ -218,7 +218,11 @@ async function runTurn(
     const stepper = suspendedCard(page, expected)
     await expect(stepper).toHaveCount(1, { timeout: CARD_TIMEOUT })
     const button = stepper.getByTestId(
-      expected.decision === 'approve' ? 'approval-approve-btn' : 'approval-deny-btn'
+      expected.decision === 'command'
+        ? 'approval-shell-command-btn'
+        : expected.decision === 'approve'
+          ? 'approval-approve-btn'
+          : 'approval-deny-btn'
     )
     await expect(button).toBeVisible()
     await humanClick(button, { beforeMs: [700, 1_200], afterMs: [700, 1_200] })
@@ -428,6 +432,49 @@ test.describe.serial('per-task tool approval scope', () => {
       const steps = await completedShellSteps(turn.response)
       expectShellStep(steps, markerE, 'T4')
       expect(turn.approvalLog).toEqual(['shell_exec', 'cron_manage'])
+    })
+  })
+
+  test('the picker stores auto and Allow this command answers the shell card', async ({
+    appPage,
+  }, testInfo) => {
+    const marker = markerFor(testInfo, 'CMD')
+
+    await test.step('end user opens a fresh chatllm thread and sets auto', async () => {
+      await enterChatllmChat(appPage)
+      await startFreshThread(appPage)
+      await selectChatModel(appPage, CHAT_MODEL)
+      await installCardLedger(appPage)
+      expect(await readCardLedger(appPage)).toEqual([])
+
+      await humanClick(appPage.getByTestId('approval-mode-picker'))
+      await humanClick(appPage.getByTestId('approval-mode-option-auto'))
+      await expect(appPage.getByTestId('approval-mode-label')).toHaveText('Auto-approve')
+      await expect(appPage.getByTestId('approval-mode-write-error')).toHaveCount(0)
+    })
+
+    await test.step('Allow this command runs that shell command', async () => {
+      const prompt = [
+        `Use the native shell_exec tool once to run exactly: ${shellCommand(marker)}`,
+        'Do not use any other tool, then reply with its output verbatim.',
+      ].join(' ')
+      const turn = await runTurn(
+        appPage,
+        testInfo,
+        'CMD',
+        prompt,
+        [
+          {
+            label: /^Shell requires approval$/,
+            preview: shellCommand(marker),
+            decision: 'command',
+          },
+        ],
+        [new RegExp(escapeRegExp(marker))]
+      )
+      const steps = await completedShellSteps(turn.response)
+      expectShellStep(steps, marker, 'CMD')
+      expect(turn.approvalLog).toEqual(['shell_exec'])
     })
   })
 
