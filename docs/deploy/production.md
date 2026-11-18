@@ -58,7 +58,7 @@ What the host-context-controller (HCC) creates for **each agent (Host)**:
 
 | Resource                                     | Namespace  | Default                                                                                 |
 | -------------------------------------------- | ---------- | --------------------------------------------------------------------------------------- |
-| `mcp-host` Deployment                        | `mcp-host` | 100m CPU / 128Mi requested, 500m / 512Mi limit (`CONTEXT_MAPPER_HOST_RESOURCES_*`)      |
+| `mcp-host` Deployment                        | `mcp-host` | 100m CPU / 128Mi requested, 500m / 2Gi limit (`CONTEXT_MAPPER_HOST_RESOURCES_*`)        |
 | Service                                      | `mcp-host` |                                                                                         |
 | Workspace PVC                                | `mcp-host` | RWO, 10Gi (`CONTEXT_MAPPER_HOST_WORKSPACE_SIZE`)                                        |
 | `channel-reader-<host>` Deployment + Service | `channels` | Always created. `replicas: 0` until a CommunicationChannel references the Host, then 1. |
@@ -299,6 +299,11 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    If you use the Global File System, follow
    [GFS permission-store credential lifecycle](gfs-permission-store.md)
    (`provision-gfs-db.sh`, `provision-gfs-runtime.sh`).
+   The instance-provisioning path in `provision-gfs-runtime.sh` requires `jq`.
+   When it applies the overlay's instances directory, it preserves the live
+   connector associations of `mcp-server/context1`; removing a connector from
+   that directory does not remove the association. Remove it through Control UI
+   or an explicit administrative update instead.
    `provision-gfs-runtime.sh` refuses a non-dev context unless it is listed in
    `ALLOWED_CONTEXTS` or you pass `--allow-prod`. `provision-gfs-db.sh` has no
    such guard: it runs against whatever `CONTEXT` you give it, so check that

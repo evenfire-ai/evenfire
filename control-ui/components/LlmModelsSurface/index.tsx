@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
@@ -20,6 +20,7 @@ import {
   getUnpricedModels,
   isLlmModelConfigMapDeferred,
   isSilentApiError,
+  updateLlmModel,
 } from '@lib/api'
 import { getProviderDisplayLabel } from '@lib/llm'
 import { buildUnpricedKeys } from '@lib/llmModelUnpriced'
@@ -41,9 +42,11 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [keepingDisabledId, setKeepingDisabledId] = useState<string | null>(null)
   // Bumped after each successful mutation so the attention banner re-fetches
   // and drops any item the operator just resolved (on demand, no polling).
   const [attentionRefreshKey, setAttentionRefreshKey] = useState(0)
+  const layoutRef = useRef<HTMLDivElement>(null)
 
   const unpricedKeys = useMemo(() => buildUnpricedKeys(unpriced), [unpriced])
 
@@ -136,6 +139,68 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
     if (forceRemove) await deleteWithImpactGate(model, label, true)
   }
 
+  // Pins a row the catalog sync turned off, so a later sync listing the model
+  // again leaves it off. The row is normally disabled already, so no impact gate
+  // runs; but the sync may have turned it back on since the list loaded, and
+  // then the PUT is a real disable that control-api gates with 409
+  // `model_in_use`, answered with the same impact confirm as a delete.
+  async function keepDisabledWithImpactGate(model: LlmAllowedModel, force: boolean) {
+    const label = `${getProviderDisplayLabel(model.provider)}/${model.model}`
+    setKeepingDisabledId(model.id)
+    setError('')
+    let impact: ReturnType<typeof getModelInUseImpact> = null
+    try {
+      await updateLlmModel(
+        model.id,
+        { enabled: false, pinEnabled: true },
+        force ? { force: true } : {}
+      )
+      await loadAll()
+      setAttentionRefreshKey(key => key + 1)
+      showToast(`${label} stays disabled; catalog syncs will not turn it back on.`, {
+        tone: 'success',
+      })
+      return
+    } catch (caught) {
+      if (isSilentApiError(caught)) return
+      if (isLlmModelConfigMapDeferred(caught)) {
+        await loadAll()
+        setAttentionRefreshKey(key => key + 1)
+        showToast(`${label} stays disabled. ${CONFIGMAP_DEFERRED_WARNING}`, { tone: 'info' })
+        return
+      }
+      impact = getModelInUseImpact(caught)
+      if (!impact) {
+        setError(caught instanceof Error ? caught.message : `Failed to keep ${label} disabled`)
+        return
+      }
+    } finally {
+      setKeepingDisabledId(null)
+    }
+
+    const forced = await confirm({
+      title: 'Model still in use',
+      message: `${label} was turned back on and is referenced again. Disabling it leaves these references pointing at a disabled model:`,
+      details: (
+        <ModelReferences
+          hostsAffected={impact.hostsAffected}
+          grantsAffected={impact.grantsAffected}
+        />
+      ),
+      confirmLabel: 'Disable anyway',
+      tone: 'danger',
+    })
+    if (forced) {
+      await keepDisabledWithImpactGate(model, true)
+      return
+    }
+    // The 409 proved the sync turned the row back on, so the loaded row (off,
+    // "Turned off by catalog sync") and the attention feed are stale even though
+    // nothing was written.
+    await loadAll()
+    setAttentionRefreshKey(key => key + 1)
+  }
+
   useEffect(() => {
     if (authState.isLoggedIn && !authState.isLoading) {
       void loadAll()
@@ -157,14 +222,18 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
   )
 
   return (
-    <div className="cu-llm-models-layout">
+    <div className="cu-llm-models-layout" ref={layoutRef} tabIndex={-1}>
       {error ? (
         <div className="cu-banner cu-banner--error" role="alert">
           {error}
         </div>
       ) : null}
       {activeTab === 'catalog' ? (
-        <CatalogAttentionBanner refreshSignal={attentionRefreshKey} models={models} />
+        <CatalogAttentionBanner
+          refreshSignal={attentionRefreshKey}
+          models={models}
+          returnFocusRef={layoutRef}
+        />
       ) : null}
       {activeTab === 'catalog' ? (
         <LlmModelTable
@@ -174,8 +243,10 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
           onCreate={() => router.push(CONTROL_ROUTES.llmModels.new)}
           onEdit={id => router.push(CONTROL_ROUTES.llmModels.edit(id))}
           onDelete={handleDelete}
+          onKeepDisabled={model => keepDisabledWithImpactGate(model, false)}
           onRefresh={loadAll}
           deletingId={deletingId}
+          keepingDisabledId={keepingDisabledId}
           refreshing={loading}
           loading={loading && models.length === 0}
         />

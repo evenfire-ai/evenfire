@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Button, EmptyState, StatusBanner } from '@components/Common'
+import { Button, EmptyState, PermissionStatusIndicator, StatusBanner } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
@@ -350,6 +350,10 @@ export function FilePreviewPage({
   // Remounting the body on a reload bump discards any stale bytes and re-runs the
   // fetch from scratch — the simplest correct "re-dispatch the fetch" (§3.B.3).
   const bodyKey = `${gfsUri}:${reloadToken}:${reloadVersion ?? 0}`
+  const permissionLabel = previewResourceActions.pendingPermissionLabel
+  const permissionProgress = (
+    <PermissionStatusIndicator active={permissionLabel !== null} label={permissionLabel ?? ''} />
+  )
 
   return (
     <section className="page">
@@ -364,10 +368,11 @@ export function FilePreviewPage({
       />
       <div className="da-gfs-preview-page">
         {previewResourceActions.dialogs}
-        {previewResourceActions.permissionNotices.map(notice => (
-          <div key={notice.id} role={notice.pending ? 'status' : 'alert'}>
-            <StatusBanner tone={notice.pending ? 'info' : 'error'} text={notice.message} />
-            {!notice.pending ? (
+        {previewResourceActions.permissionNotices
+          .filter(notice => !notice.pending)
+          .map(notice => (
+            <div key={notice.id} role="alert">
+              <StatusBanner tone="error" text={notice.message} />
               <Button
                 onClick={() =>
                   void Promise.resolve()
@@ -379,9 +384,8 @@ export function FilePreviewPage({
               >
                 Retry permission check
               </Button>
-            ) : null}
-          </div>
-        ))}
+            </div>
+          ))}
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <>
@@ -400,6 +404,7 @@ export function FilePreviewPage({
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
+                  permissionProgress={permissionProgress}
                   headingLevel={2}
                 />
               ) : null}
@@ -412,6 +417,7 @@ export function FilePreviewPage({
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
+                  permissionProgress={permissionProgress}
                   headingLevel={2}
                 />
               ) : null}
@@ -424,6 +430,7 @@ export function FilePreviewPage({
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
                   titleActions={fileActionsMenu}
+                  permissionProgress={permissionProgress}
                   headingLevel={2}
                 />
               ) : null}

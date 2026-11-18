@@ -120,6 +120,86 @@ describe('SqliteConversationStore — basic round-trip', () => {
       await handle.shutdown()
     }
   })
+  it('keeps which completed results the snapshot already answers through projection and a cold load', async () => {
+    // A resume tells an earlier batch's results from the current batch's by
+    // this mark, not by tool-call id: some drivers restart ids on every
+    // response (independent review round 3, A-1). A result with a GFS image
+    // is rebuilt by the projection, so it must keep the mark too.
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'read, then act twice', 'marked-task')
+      const source = {
+        kind: 'gfs' as const,
+        drive: 'main',
+        resourceId: 'b'.repeat(32),
+        gfsUri: `gfs://main/${'b'.repeat(32)}`,
+        version: 1,
+        name: 'neutral.png',
+      }
+      const approval: PendingApproval = {
+        request_id: 'marked-approval',
+        tool_name: 'shell_exec',
+        tool_call_id: 'call_0',
+        parameters: { command: 'two' },
+        description: 'pending action',
+        task_budget: {
+          elapsedActiveMs: 1,
+          iterationsUsed: 2,
+          durationMs: 10000,
+          maxIterations: 8,
+        },
+        context_snapshot: [
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'call_0', name: 'shell_exec', arguments: { command: 'two' } }],
+          },
+        ],
+        completed_results: [
+          {
+            name: 'clerum__gfs_read',
+            tool_call_id: 'call_0',
+            content: 'image prepared',
+            is_error: false,
+            answeredInSnapshot: true,
+            attachments: [
+              {
+                id: 'gfs-image',
+                kind: 'image',
+                mimeType: 'image/png',
+                encoding: 'base64',
+                dataBase64: 'R0ZTLUJZVEVT',
+                visualSource: source,
+              },
+            ],
+          },
+          {
+            name: 'shell_exec',
+            tool_call_id: 'call_1',
+            content: 'one',
+            is_error: false,
+            answeredInSnapshot: true,
+          },
+          { name: 'shell_exec', tool_call_id: 'call_1', content: 'current', is_error: false },
+        ],
+      }
+      await manager.suspendForApproval(conv, approval)
+      const marks = (results: PendingApproval['completed_results']) =>
+        results?.map(result => result.answeredInSnapshot ?? false)
+      expect(marks(conv.pending_approval?.completed_results)).toEqual([true, true, false])
+      const row = handle.worker.db
+        .prepare('SELECT * FROM pending_approvals WHERE request_id = ?')
+        .get(approval.request_id) as PendingApprovalRow
+      const restored = reconstructPendingApproval(row)
+      expect(marks(restored.completed_results)).toEqual([true, true, false])
+      // Witness: the GFS result really went through the projection.
+      expect(restored.completed_results![0].attachments).toBeUndefined()
+    } finally {
+      await handle.shutdown()
+    }
+  })
   it('create → suspend → load_active_session preserves state', async () => {
     const handle = await freshStore()
     try {
@@ -1111,16 +1191,21 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
         description: 'x',
         context_snapshot: [],
       })
-      await manager.deny(conv)
+      await manager.deny(conv, { userId: 'user-a' })
       await denyHandle.persistQueue.drainSessionKey(SESSION_KEY)
 
       expect(conv.state).toBe(ConversationState.Idle)
       expect(conv.activeTaskId).toBeUndefined() // RAM cleared
       const row = denyHandle.worker.db
-        .prepare('SELECT state, active_task_id FROM sessions WHERE id = ?')
-        .get(conv.id) as { state: string; active_task_id: string | null } | undefined
+        .prepare('SELECT state, active_task_id, denied_tools FROM sessions WHERE id = ?')
+        .get(conv.id) as
+        | { state: string; active_task_id: string | null; denied_tools: string | null }
+        | undefined
       expect(row?.state).toBe('idle')
       expect(row?.active_task_id).toBeNull() // durable column cleared
+      expect(JSON.parse(row?.denied_tools ?? '[]')).toEqual([
+        { tool: 'shell_exec', userId: 'user-a' },
+      ])
     } finally {
       await denyHandle.shutdown()
     }

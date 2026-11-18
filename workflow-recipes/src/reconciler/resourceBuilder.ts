@@ -411,7 +411,10 @@ export function ownerRef(recipe: WorkflowRecipeCRD): k8s.V1OwnerReference {
  */
 export type SecretAccess =
   | { state: 'accessible'; keys: ReadonlySet<string> } // shared or owner-match; keys actually present in the Secret
-  | { state: 'denied' } // exists but ownership-refused (foreign owner / unlabeled / conflicting labels)
+  // exists but ownership-refused (foreign owner / unlabeled / conflicting labels).
+  // `versions` (Issue #1349) lists `<namespace>/<resourceVersion>` of every denied
+  // read; it is absent when any denied read carried no resourceVersion.
+  | { state: 'denied'; versions?: string[] }
   | { state: 'missing' } // 404 — the Secret does not exist
   | { state: 'error' } // transient non-404 read failure; ownership unverified → never projected, reconciler requeues
 export type SecretKeysByName = ReadonlyMap<string, SecretAccess>
