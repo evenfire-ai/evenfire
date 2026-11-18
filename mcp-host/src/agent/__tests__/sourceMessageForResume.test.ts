@@ -21,8 +21,20 @@ const TEAMS_IDENTITY = {
     communicationChannelNamespace: 'ns-1',
     communicationChannelName: 'teams-main',
     providerBotId: 'bot-1',
+    providerBotUsername: 'evenfire_bot',
+    communicationChannelAlias: '0123456789abcdef',
+    'SENTINEL-666-extra': 'a target key /resolve does not read',
   },
 }
+// The providerTarget keys /resolve reads.
+const RESOLVE_TARGET_KEYS = [
+  'communicationChannelAlias',
+  'communicationChannelName',
+  'communicationChannelNamespace',
+  'hostRef',
+  'providerBotId',
+  'providerBotUsername',
+]
 
 function fileAttachment(): Attachment {
   return {
@@ -130,8 +142,12 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
     })
     expect(resumed?.fileReferenceResolutions).toHaveLength(1)
     const { providerEventId: _dropped, ...kept } = TEAMS_IDENTITY
-    expect(resumed?.providerIdentity).toEqual(kept)
+    const { 'SENTINEL-666-extra': _extra, ...resolveTarget } = TEAMS_IDENTITY.providerTarget
+    expect(resumed?.providerIdentity).toEqual({ ...kept, providerTarget: resolveTarget })
     expect(resumed?.providerIdentity).not.toHaveProperty('providerEventId')
+    expect(Object.keys(resumed?.providerIdentity?.providerTarget ?? {}).sort()).toEqual(
+      RESOLVE_TARGET_KEYS
+    )
     expect(Object.keys(resumed ?? {}).sort()).toEqual([
       'channelId',
       'channelType',
@@ -147,6 +163,29 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
       'timestamp',
     ])
     expect(JSON.stringify(resumed)).not.toContain('SENTINEL-666')
+  })
+
+  it('omits the providerTarget keys the channel did not send', () => {
+    const resumed = sourceMessageForResume({
+      ...sourceMessage([]),
+      providerIdentity: {
+        medium: 'slack',
+        providerUserId: 'U123',
+        providerWorkspaceId: 'T123',
+        providerChannelId: 'D123',
+        providerChannelType: 'im',
+        providerTarget: {
+          hostRef: 'host-1',
+          communicationChannelNamespace: 'ns-1',
+          communicationChannelName: 'slack-main',
+        },
+      },
+    })
+    expect(Object.keys(resumed?.providerIdentity?.providerTarget ?? {}).sort()).toEqual([
+      'communicationChannelName',
+      'communicationChannelNamespace',
+      'hostRef',
+    ])
   })
 
   it('omits providerIdentity when the message has none', () => {

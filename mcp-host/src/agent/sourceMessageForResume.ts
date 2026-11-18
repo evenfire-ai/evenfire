@@ -1,6 +1,10 @@
 import type { Attachment, ResumeFileAttachment, ResumeSourceMessage } from '../core/types'
 import type { IncomingMessage } from '../server'
 
+type ProviderTarget = NonNullable<
+  NonNullable<IncomingMessage['providerIdentity']>['providerTarget']
+>
+
 /**
  * #666 R4-M2 — what a cold restart needs from the suspended turn's message, and
  * nothing else. Each field is read after a restart:
@@ -18,6 +22,10 @@ import type { IncomingMessage } from '../server'
  *   `providerChannelId`, `providerChannelType`, `providerTarget`): a Continue
  *   after a restart re-resolves the linked user through `/resolve` with exactly
  *   these keys. `providerEventId` is not sent there, so it stays out.
+ *   `providerTarget` keeps only the providerTarget keys `/resolve` reads
+ *   (`hostRef`, `communicationChannelNamespace`, `communicationChannelName`,
+ *   `providerBotId`, `providerBotUsername`, `communicationChannelAlias`); the
+ *   Telegram channel gate there checks `providerBotUsername`.
  *
  * Everything else the channel delivered (the raw Slack, email or Telegram
  * payload in `metadata`, `traceContext`, the model piggyback, `providerEventId`)
@@ -54,11 +62,37 @@ export function sourceMessageForResume(
             providerWorkspaceId: identity.providerWorkspaceId,
             providerChannelId: identity.providerChannelId,
             providerChannelType: identity.providerChannelType,
-            providerTarget: identity.providerTarget,
+            ...(identity.providerTarget
+              ? { providerTarget: providerTargetForResume(identity.providerTarget) }
+              : {}),
           },
         }
       : {}),
   }
+}
+
+/**
+ * Copies the providerTarget keys `/resolve` reads, one by one, and omits any
+ * that are absent, so a key added to the channel's target later never reaches
+ * the durable row.
+ */
+function providerTargetForResume(target: ProviderTarget): ProviderTarget {
+  return {
+    ...(target.hostRef !== undefined ? { hostRef: target.hostRef } : {}),
+    ...(target.communicationChannelNamespace !== undefined
+      ? { communicationChannelNamespace: target.communicationChannelNamespace }
+      : {}),
+    ...(target.communicationChannelName !== undefined
+      ? { communicationChannelName: target.communicationChannelName }
+      : {}),
+    ...(target.providerBotId !== undefined ? { providerBotId: target.providerBotId } : {}),
+    ...(target.providerBotUsername !== undefined
+      ? { providerBotUsername: target.providerBotUsername }
+      : {}),
+    ...(target.communicationChannelAlias !== undefined
+      ? { communicationChannelAlias: target.communicationChannelAlias }
+      : {}),
+  } as ProviderTarget
 }
 
 function fileWithoutBytes(attachment: Attachment): ResumeFileAttachment {
