@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-app-links'
 import { buildGfsResourceDeepLink } from '../gfsDeepLinks.js'
 
@@ -31,6 +31,7 @@ const harness = vi.hoisted(() => {
       webContents: {
         id: 41,
         on: vi.fn(),
+        getURL: vi.fn(() => 'file:///app/ui-dist/index.html'),
         send: vi.fn(),
         setWindowOpenHandler: vi.fn(),
         loadFile: vi.fn().mockResolvedValue(undefined),
@@ -175,6 +176,40 @@ function ipcEvent(sender: unknown, url = 'file:///app/index.html'): MainEvent {
   return { senderFrame: { url }, sender }
 }
 
+type WillNavigate = (event: { preventDefault: () => void }, url: string) => void
+
+function willNavigateListener(window: Record<string, any> | undefined): WillNavigate {
+  const calls = (window?.webContents.on.mock.calls ?? []) as Array<[string, WillNavigate]>
+  const registered = calls.filter(([event]) => event === 'will-navigate')
+  if (registered.length !== 1) {
+    throw new Error(`main.ts registered ${registered.length} will-navigate listeners`)
+  }
+  return registered[0]![1]
+}
+
+function navigationIsBlocked(listener: WillNavigate, url: string): boolean {
+  const preventDefault = vi.fn()
+  listener({ preventDefault }, url)
+  return preventDefault.mock.calls.length > 0
+}
+
+async function importMainWithFreshHarness(): Promise<void> {
+  vi.resetModules()
+  harness.windows.length = 0
+  harness.appListeners.clear()
+  harness.onHandlers.clear()
+  harness.handleHandlers.clear()
+  harness.readyResolver = null
+  harness.registeredLogout = null
+  harness.sessionGeneration = 0
+  await import('../main.js')
+  harness.readyResolver?.()
+  await vi.waitFor(() => {
+    expect(harness.registeredLogout).toBeTypeOf('function')
+    expect(harness.windows).toHaveLength(1)
+  })
+}
+
 function registeredHandler<T extends (...args: never[]) => unknown>(
   handlers: Map<string, T>,
   channel: string
@@ -184,8 +219,16 @@ function registeredHandler<T extends (...args: never[]) => unknown>(
   return handler
 }
 
+const originalRendererUrl = process.env.EVENFIRE_RENDERER_URL
+
 describe('main.ts GFS navigation-generation composition', () => {
+  afterAll(() => {
+    if (originalRendererUrl === undefined) delete process.env.EVENFIRE_RENDERER_URL
+    else process.env.EVENFIRE_RENDERER_URL = originalRendererUrl
+  })
+
   beforeAll(async () => {
+    delete process.env.EVENFIRE_RENDERER_URL
     await import('../main.js')
     harness.readyResolver?.()
     await vi.waitFor(() => {
@@ -201,6 +244,18 @@ describe('main.ts GFS navigation-generation composition', () => {
         roundedCorners: process.platform !== 'linux',
       })
     )
+  })
+
+  it('blocks every renderer navigation of the packaged main window, even to its own URL', () => {
+    const mainWindow = harness.windows[0]
+    const listener = willNavigateListener(mainWindow)
+    const currentUrl = mainWindow?.webContents.getURL() as string
+    expect(mainWindow?.loadURL).not.toHaveBeenCalled()
+
+    // An `<a href="">` in chat navigates to exactly the current document URL.
+    expect(navigationIsBlocked(listener, currentUrl)).toBe(true)
+    expect(navigationIsBlocked(listener, 'file:///app/ui-dist/other.html')).toBe(true)
+    expect(navigationIsBlocked(listener, 'https://example.com/')).toBe(true)
   })
 
   it('returns null for denied sync IPC without changing the generation', () => {
@@ -531,6 +586,27 @@ describe('main.ts GFS navigation-generation composition', () => {
     } finally {
       process.argv = originalArgv
       harness.parseSandboxUiDeepLink.mockReturnValue(null)
+    }
+  })
+
+  it('lets the dev renderer reload only its exact current URL', async () => {
+    process.env.EVENFIRE_RENDERER_URL = '  http://127.0.0.1:5173  '
+    try {
+      await importMainWithFreshHarness()
+      const mainWindow = harness.windows[0]
+      await vi.waitFor(() =>
+        expect(mainWindow?.loadURL).toHaveBeenCalledWith('http://127.0.0.1:5173')
+      )
+      const currentUrl = 'http://127.0.0.1:5173/'
+      mainWindow?.webContents.getURL.mockReturnValue(currentUrl)
+      const listener = willNavigateListener(mainWindow)
+
+      expect(navigationIsBlocked(listener, currentUrl)).toBe(false)
+      expect(navigationIsBlocked(listener, 'http://127.0.0.1:5173/settings')).toBe(true)
+      expect(navigationIsBlocked(listener, 'http://127.0.0.1:5173/?tab=1')).toBe(true)
+      expect(navigationIsBlocked(listener, 'file:///app/ui-dist/index.html')).toBe(true)
+    } finally {
+      delete process.env.EVENFIRE_RENDERER_URL
     }
   })
 })
