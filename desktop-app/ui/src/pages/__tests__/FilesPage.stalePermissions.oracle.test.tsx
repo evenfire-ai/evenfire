@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { schedulerFor } from 'fast-check'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -272,7 +273,7 @@ describe('FilesPage stale permission action oracle', () => {
     })
     await waitFor(() => expect(reportPermissionReads).toBe(2))
     expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
-    expect(screen.getByText('Checking permissions for report.txt…')).toBeTruthy()
+    expect(screen.queryByText('Checking permissions for report.txt…')).toBeNull()
     expect(renameResource).not.toHaveBeenCalled()
 
     await act(async () => {
@@ -1525,3 +1526,105 @@ describe('FilesPage stale permission action oracle', () => {
     }
   })
 })
+
+it.each([true, false])(
+  'R87 Rename presentation: F→R→C with an observed pending commit=%s',
+  async observePending => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const row = childView('row-folder', 'Financial', 'directory', {
+      gfsUri: 'gfs://main/row-folder',
+      parentResourceId: 'folder-active',
+    })
+    const child = childView('child-folder', 'Quarterly', 'directory', {
+      gfsUri: 'gfs://main/child-folder',
+      parentResourceId: 'row-folder',
+    })
+    const rootPage = await listChildrenPage([row])
+    const rowPage = await listChildrenPage([child])
+    const childPage = await listChildrenPage([])
+    const renameResource = vi.fn()
+    const scheduler = schedulerFor([1])
+    const produce = appServiceAffordanceProducer(async id => {
+      if (id === child.resourceId && scheduler.report().length === 0) {
+        await scheduler.schedule(Promise.resolve())
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    const listChildren = vi.fn(async (id: string) => {
+      if (id === row.resourceId) return rowPage
+      if (id === child.resourceId) return childPage
+      return rootPage
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => listAccessiblePage([])),
+          resolve: vi.fn(async () => folder),
+          listChildren,
+          affordances: vi.fn((id: string) => produce(id)),
+          renameResource,
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      const breadcrumb = await screen.findByRole('navigation', { name: 'File location' })
+      const rowMenu = await screen.findByRole('button', { name: 'Options for Financial' })
+      fireEvent.click(rowMenu)
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }))
+      const rowEditor = await screen.findByRole('textbox', { name: 'New name' })
+      expect(rowEditor.closest('.da-gfs-list__identity')).toBeTruthy()
+      expect(within(breadcrumb).queryByRole('textbox')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Options for Reports' })).toBeTruthy()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Financial' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder' }))
+      await waitFor(() =>
+        expect(within(breadcrumb).getByRole('textbox', { name: 'New name' })).toBeTruthy()
+      )
+      fireEvent.click(await screen.findByRole('button', { name: 'Quarterly' }))
+      await waitFor(() => expect(scheduler.count()).toBe(1))
+      if (!observePending) await act(async () => scheduler.waitAll())
+      const currentMenu = await screen.findByRole('button', { name: 'Options for Quarterly' })
+      const ancestorEditor = within(breadcrumb).getByRole('textbox', { name: 'New name' })
+      expect((ancestorEditor as HTMLInputElement).value).toBe('Financial')
+      expect(
+        ancestorEditor.compareDocumentPosition(currentMenu) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
+      if (observePending) {
+        const progress = await screen.findByRole('status', {
+          name: 'Checking permissions for Quarterly',
+        })
+        const slot = progress.closest('.da-permission-status-slot')
+        expect(slot?.previousElementSibling?.contains(currentMenu)).toBe(true)
+        expect(breadcrumb.contains(progress)).toBe(false)
+        await act(async () => scheduler.waitAll())
+      }
+      await waitFor(() => expect(client.isFetching()).toBe(0))
+      fireEvent.keyDown(ancestorEditor, { key: 'Escape' })
+      expect(within(breadcrumb).queryByRole('textbox')).toBeNull()
+      fireEvent.click(currentMenu)
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }))
+      const currentEditor = await within(breadcrumb).findByRole('textbox', { name: 'New name' })
+      expect((currentEditor as HTMLInputElement).value).toBe('Quarterly')
+      expect(screen.queryByRole('button', { name: 'Options for Quarterly' })).toBeNull()
+      expect(breadcrumb.nextElementSibling?.matches('.da-permission-status-slot')).toBe(true)
+      expect(renameResource).not.toHaveBeenCalled()
+      expect(listChildren.mock.calls.map(([id]) => id)).toEqual([
+        'folder-active',
+        'row-folder',
+        'row-folder',
+        'child-folder',
+        'child-folder',
+      ])
+    } finally {
+      cleanup()
+      client.clear()
+      delete (window as { clerum?: unknown }).clerum
+    }
+  }
+)

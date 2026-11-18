@@ -1738,6 +1738,12 @@ export function useFilePreviewResourceActions({
     handlers,
     dialogs,
     permissionNotices,
+    pendingPermissionLabel:
+      affordancesQuery.isEnabled && affordancesQuery.isFetching
+        ? 'Checking file permissions'
+        : sourceParentAffordancesQuery.isEnabled && sourceParentAffordancesQuery.isFetching
+          ? 'Checking move permissions'
+          : null,
     canShare,
     canRename,
     canMove,
