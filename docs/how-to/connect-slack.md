@@ -52,14 +52,14 @@ For reference, the manifest the Control UI generates looks like this:
 
 ```yaml
 display_information:
-  name: "Evenfire"
+  name: 'Evenfire'
 features:
   app_home:
     home_tab_enabled: false
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
   bot_user:
-    display_name: "Evenfire"
+    display_name: 'Evenfire'
     always_online: false
 oauth_config:
   scopes:
@@ -91,8 +91,8 @@ logs.
 
 `app_home.messages_tab_enabled` matters more than it looks. Slack defaults it to
 **false**, and an app installed from a manifest that says nothing about
-`app_home` refuses direct messages with *"Sending messages to this app has been
-turned off."* That breaks [Confirm your Slack identity](#confirm-your-slack-identity),
+`app_home` refuses direct messages with _"Sending messages to this app has been
+turned off."_ That breaks [Confirm your Slack identity](#confirm-your-slack-identity),
 which asks you to DM the app. **If your app was created before this was added,
 switch it on by hand: Features → App Home → Show Tabs → Messages Tab, and tick
 "Allow users to send Slash commands and messages from the messages tab".**
@@ -280,7 +280,7 @@ Slack conversations are bound to a user rather than configured by hand. Each
 person does this once per conversation:
 
 1. In the Profile UI, open the Slack verification panel
-   (`/settings/social/slack`) and start verification. It issues a six-digit
+   (`/channels/slack`; legacy `/settings/social/slack` redirects here) and start verification. It issues a six-digit
    code.
 2. In Slack, send the code to the app:
 
