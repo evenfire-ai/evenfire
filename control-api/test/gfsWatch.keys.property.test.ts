@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import * as ts from 'typescript'
 import {
   DRIVE_NAME_RE,
   type GfsKey,
@@ -58,6 +61,28 @@ const driveArb = fc.oneof(
   // Drive names that are Object.prototype members and pass the drive rule.
   fc.constantFrom('constructor', 'hasownproperty', 'valueof', 'tostring', 'isprototypeof')
 )
+// gfsc keeps its GFS_DRIVE_NAME rule private and the packages share no module,
+// so the rule is read from gfsc's source.
+function gfscDrivePattern(): RegExp {
+  const path = fileURLToPath(new URL('../../gfs-controller/src/config.ts', import.meta.url))
+  const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue
+    if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue
+    for (const decl of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(decl.name) || decl.name.text !== 'DRIVE_NAME_PATTERN') continue
+      const init = decl.initializer
+      if (!init || init.kind !== ts.SyntaxKind.RegularExpressionLiteral) {
+        throw new Error(`${path}: DRIVE_NAME_PATTERN is no longer a regex literal`)
+      }
+      const text = init.getText(source)
+      const end = text.lastIndexOf('/')
+      return new RegExp(text.slice(1, end), text.slice(end + 1))
+    }
+  }
+  throw new Error(`${path}: top-level const DRIVE_NAME_PATTERN not found`)
+}
+
 const keyArb = (drive: fc.Arbitrary<string>) =>
   fc
     .tuple(fc.constantFrom('file', 'dir'), drive, rid32Arb)
@@ -201,9 +226,33 @@ describe('scalar normalizers', () => {
 })
 
 describe('canonical keys', () => {
-  it('pins the drive rule shared with gfsc and HCC', () => {
-    expect(DRIVE_NAME_RE.source).toBe('^[a-z0-9-]{1,63}$')
-    expect(DRIVE_NAME_RE.flags).toBe('')
+  it('uses the same drive rule as gfsc', () => {
+    const gfsc = gfscDrivePattern()
+    expect({ source: DRIVE_NAME_RE.source, flags: DRIVE_NAME_RE.flags }).toEqual({
+      source: gfsc.source,
+      flags: gfsc.flags,
+    })
+  })
+
+  it('accepts a drive in a key exactly when gfsc accepts it as GFS_DRIVE_NAME', () => {
+    const gfsc = gfscDrivePattern()
+    const nearDrive = fc
+      .array(fc.constantFrom(...'az09-_A/.'.split('')), { minLength: 0, maxLength: 66 })
+      .map(chars => chars.join(''))
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          driveArb,
+          nearDrive,
+          fc.constantFrom('', 'a'.repeat(62), 'a'.repeat(63), 'a'.repeat(64))
+        ),
+        rid32Arb,
+        (drive, rid) => {
+          expect(parseKey(`file:gfs://${drive}/${rid}`) !== null, drive).toBe(gfsc.test(drive))
+        }
+      ),
+      { numRuns: 2_000 }
+    )
   })
 
   it('decomposes every canonical key and keyKind/keyDrive/rid agree with it', () => {
