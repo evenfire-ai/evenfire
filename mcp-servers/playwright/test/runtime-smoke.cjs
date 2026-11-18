@@ -45,6 +45,14 @@ async function portReady(port) {
 
 async function main() {
   assert.equal(process.versions.node, '24.22.1')
+  const browserExecutable = process.env.PLAYWRIGHT_MCP_EXECUTABLE_PATH
+  assert.ok(browserExecutable, 'Missing pinned Chromium executable')
+  const versionOutput = execFileSync(browserExecutable, ['--version'], {
+    encoding: 'utf8',
+    timeout: 5_000,
+  })
+  const browserVersion = /\b\d+\.\d+\.\d+\.\d+\b/.exec(versionOutput)?.[0]
+  assert.equal(browserVersion, '157.0.8103.78')
   fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 })
   const mcpVersion = execFileSync(process.execPath, ['/app/cli.js', '--version'], {
     encoding: 'utf8',
@@ -125,8 +133,8 @@ async function main() {
     await call('browser_click', { element: 'Run check button', ref: button[1] })
     assert.match(text(await call('browser_snapshot')), /check completed/)
     const agent = text(await call('browser_evaluate', { function: '() => navigator.userAgent' }))
-    const browserVersion = /(?:HeadlessChrome|Chrome)\/[\d.]+/.exec(agent)
-    assert.ok(browserVersion, agent)
+    const launchedBrowser = /(HeadlessChrome|Chrome)\/(\d+)\./.exec(agent)
+    assert.equal(launchedBrowser?.[2], browserVersion.split('.')[0], agent)
     // This pinned MCP resolves relative filenames against /app. Use the
     // caller-owned test directory while keeping the application read-only.
     await call('browser_take_screenshot', { filename: `${outputDir}/runtime.png` })
@@ -137,7 +145,7 @@ async function main() {
         status: 'PASS',
         nodeVersion: process.versions.node,
         mcpVersion,
-        browserVersion: browserVersion[0],
+        browserVersion: `${launchedBrowser[1]}/${browserVersion}`,
         navigation: true,
         realClick: true,
         serverPings,

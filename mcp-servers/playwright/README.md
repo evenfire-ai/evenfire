@@ -2,7 +2,7 @@
 
 MCP server for browser automation, packaging the upstream Microsoft Playwright MCP image (`mcr.microsoft.com/playwright/mcp`, digest-pinned). Uses StreamableHTTP transport on port 8931.
 
-This is upstream-image packaging, not first-party source: the [`Dockerfile`](./Dockerfile) extends the pinned upstream image and pre-installs the Chromium browser (`playwright install chromium`). There is no `src/` in this directory, so the tool list is defined by the upstream image — per the CRD description, it provides browser automation tools for navigation, DOM interaction, code execution, and screenshot capture. See the upstream [Playwright MCP](https://github.com/microsoft/playwright-mcp) project for the current tool set.
+The [`Dockerfile`](./Dockerfile) extends the pinned upstream image and installs Chrome Headless Shell from Chrome for Testing. The upstream [Playwright MCP](https://github.com/microsoft/playwright-mcp) image supplies the tools for navigation, DOM interaction, code execution, and screenshots.
 
 ## Environment Variables / Secrets
 
@@ -58,10 +58,21 @@ The pinned official image declares Node 22.22.0. The latest official release
 arm64, below the current security floor.
 
 For the published image, the Dockerfile keeps the pinned upstream application and
-system dependencies, replaces Node with the official digest-pinned 24.22.1 glibc
-binary, and installs Chromium at build time using the bundled Playwright CLI.
+system dependencies and replaces Node with the official digest-pinned 24.22.1 glibc
+binary.
 This is temporary until a patched official Playwright image is available. The
 deployment manifest pins the published build by digest.
+
+## Chromium in new builds
+
+New builds select Chrome Headless Shell `157.0.8103.78` through the MCP executable
+setting. The Dockerfile verifies the official archive's SHA-256 for amd64 and
+arm64. The smoke test verifies the selected executable and starts a real session.
+[Chrome for Testing downloads](https://googlechromelabs.github.io/chrome-for-testing/157.0.8103.78.json) ·
+[CVE-2026-125350 fix](https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop_018223192.html?hl=fr)
+
+After the rebuilt image is published, update the deployment manifest and the
+cluster probe to its verified multi-architecture digest together.
 
 `test/runtime-smoke.cjs` runs inside the isolated Linux container. It starts the
 real MCP HTTP server and Chromium, navigates to a loopback fixture, clicks the
