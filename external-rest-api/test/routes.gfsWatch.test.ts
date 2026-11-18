@@ -691,6 +691,22 @@ describe('GFS watch through external-rest-api', () => {
     })
   })
 
+  describe('credentials', () => {
+    // No origin or cookie either, so the browser mutation guard lets the PUT
+    // through and the edge's own session check is the one that answers.
+    it('answers GET and PUT without credentials 401 at the edge, sending nothing to control-api', async () => {
+      const open = await call(watchUrl(), 'GET')
+      const put = await call(watchUrl(), 'PUT', { body: putBody })
+      for (const r of [open, put]) {
+        expect({ status: r.status, body: r.body }).toEqual({
+          status: 401,
+          body: { error: 'Unauthorized' },
+        })
+      }
+      expect(watchCalls()).toEqual([])
+    })
+  })
+
   describe('client leaving', () => {
     async function until(pred: () => boolean, ms: number): Promise<boolean> {
       const start = performance.now()
