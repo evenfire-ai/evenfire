@@ -68,9 +68,11 @@ describe('db.initDb', () => {
     expect(sqls.some(sql => sql.includes('DROP TABLE IF EXISTS workflow_run_outputs'))).toBe(false)
     expect(sqls).not.toContain('ROLLBACK')
     // The committed password-admission rollout fence, one dev batch through
-    // 0136_llm_catalog_dismissed_backfill (as in dev), then two PR1 versions.
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(4)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(4)
+    // 0136_llm_catalog_dismissed_backfill (as in dev), then one transaction per
+    // post-dev version.
+    const { PR1_MIGRATION_VERSIONS } = await import('../src/migrations/migrationRunner.js')
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)

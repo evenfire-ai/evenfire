@@ -58,7 +58,7 @@ What the host-context-controller (HCC) creates for **each agent (Host)**:
 
 | Resource                                     | Namespace  | Default                                                                                 |
 | -------------------------------------------- | ---------- | --------------------------------------------------------------------------------------- |
-| `mcp-host` Deployment                        | `mcp-host` | 100m CPU / 128Mi requested, 500m / 512Mi limit (`CONTEXT_MAPPER_HOST_RESOURCES_*`)      |
+| `mcp-host` Deployment                        | `mcp-host` | 100m CPU / 128Mi requested, 500m / 2Gi limit (`CONTEXT_MAPPER_HOST_RESOURCES_*`)        |
 | Service                                      | `mcp-host` |                                                                                         |
 | Workspace PVC                                | `mcp-host` | RWO, 10Gi (`CONTEXT_MAPPER_HOST_WORKSPACE_SIZE`)                                        |
 | `channel-reader-<host>` Deployment + Service | `channels` | Always created. `replicas: 0` until a CommunicationChannel references the Host, then 1. |
@@ -188,7 +188,10 @@ agent pod with `envFrom`, and `rpc-proxy` reads `rpc-proxy-config`. Neither is
 in base; without them those pods fail to start. Copy the minikube versions
 ([`mcp-host-config.yaml`](../../deploy/overlays/minikube/configmaps/mcp-host-config.yaml),
 [`rpc-proxy-config.yaml`](../../deploy/overlays/minikube/configmaps/rpc-proxy-config.yaml))
-and replace their values: the minikube `rpc-proxy-config` contains fixed
+and replace their values. In `mcp-host-config`, `HCC_AUTHORITY_MAX_STALENESS_MS`
+must satisfy the
+[mcp-host authority staleness floor](releases-and-upgrades.md#mcp-host-authority-staleness-floor)
+or every Host refuses to start. The minikube `rpc-proxy-config` contains fixed
 development secrets (`RPC_PROXY_DESKTOP_COOKIE_SECRET`,
 `RPC_PROXY_DESKTOP_API_TOKEN`, `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`) and
 localhost URLs. Many features are off in base and on in minikube; decide each
@@ -296,6 +299,11 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    If you use the Global File System, follow
    [GFS permission-store credential lifecycle](gfs-permission-store.md)
    (`provision-gfs-db.sh`, `provision-gfs-runtime.sh`).
+   The instance-provisioning path in `provision-gfs-runtime.sh` requires `jq`.
+   When it applies the overlay's instances directory, it preserves the live
+   connector associations of `mcp-server/context1`; removing a connector from
+   that directory does not remove the association. Remove it through Control UI
+   or an explicit administrative update instead.
    `provision-gfs-runtime.sh` refuses a non-dev context unless it is listed in
    `ALLOWED_CONTEXTS` or you pass `--allow-prod`. `provision-gfs-db.sh` has no
    such guard: it runs against whatever `CONTEXT` you give it, so check that

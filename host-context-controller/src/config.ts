@@ -2,7 +2,9 @@
  * Configuration settings loaded from environment variables.
  */
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
+import { NETPOL_PASS_OVERRUN_WARN_MS } from './constants'
 import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
+import { kubernetesQuantitiesEqual } from './kubernetesQuantity'
 import { ContextCRD, McpServerCRD } from './types'
 
 export const DEFAULT_EGRESS_PROXY_IMAGE = 'clerum/nginx-egress-proxy:0.1.0'
@@ -202,6 +204,22 @@ export interface Config {
   // convergence path. Watches keep their independent long-lived lifecycle.
   hostK8sRequestTimeoutMs: number
 
+  // Per-request deadline for finite Kubernetes calls made by the NetworkPolicy,
+  // McpServer runtime and binding reconcilers and by the watcher's shared
+  // McpServer/Context and Secret clients. Their work shares the keyed effect
+  // queues with the authoritative NetworkPolicy pass, so one request that never
+  // settles would hold that pass forever (#1338). Host work, including the Host
+  // convergence queued on the Context identity queue and the watcher's Host
+  // client, uses hostK8sRequestTimeoutMs instead. Watches keep their
+  // independent long-lived lifecycle.
+  k8sRequestTimeoutMs: number
+
+  // Hard bound for one NetworkPolicy convergence pass. A pass that exceeds it
+  // is logged with its phase and pending effect and the process exits so the
+  // container restarts; a pass that never settles otherwise blocks every later
+  // pass and keeps the provider inventory non-authoritative (#1338).
+  netPolPassHardLimitMs: number
+
   // Bounded cross-Host concurrency for a full/lifecycle Host fleet pass. Urgent
   // per-Host events (ADDED/MODIFIED/DELETED/wake) are admitted outside this
   // budget. Integer 1..8, default 2 (see parseHostFullReconcileConcurrency).
@@ -288,6 +306,22 @@ function getEnv(key: string, defaultValue?: string): string | undefined {
   return process.env[key] ?? defaultValue
 }
 
+/**
+ * A Host resource quantity is read on every reconcile. An empty or invalid
+ * value used to pass config load and throw only when a Host was reconciled.
+ */
+function requireQuantity(name: string, value: string): string {
+  try {
+    kubernetesQuantitiesEqual(value, value)
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Invalid Kubernetes quantity') {
+      throw new Error(`${name} must be a Kubernetes quantity, got '${value}'`)
+    }
+    throw error
+  }
+  return value
+}
+
 function getEnvInt(key: string, defaultValue: number): number {
   const value = process.env[key]
   if (!value) return defaultValue
@@ -364,15 +398,70 @@ export function parseHeartbeatPollMs(raw: string | undefined): number {
   return parsed
 }
 
+// Node clamps a larger setTimeout delay to 1 ms, which would fire a deadline
+// or a hard limit immediately instead of never.
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+// Unset or "" means "not configured". Anything else must be plain decimal
+// digits: Number() also reads '3e4', '0x7530', '+30000', '30000.0' and a value
+// with surrounding white space, which the range checks cannot see.
+function plainPositiveIntegerOrDefault(raw: string | undefined, defaultValue: number): number {
+  if (raw === undefined || raw === '') return defaultValue
+  return /^[1-9]\d*$/.test(raw) ? Number(raw) : Number.NaN
+}
+
 export function parseHostK8sRequestTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined) return 30_000
-  const parsed = Number(raw)
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+  const parsed = plainPositiveIntegerOrDefault(raw, 30_000)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
     throw new Error(
-      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer (milliseconds), got '${raw}'`
+      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds in plain digits, got '${raw}'`
     )
   }
   return parsed
+}
+
+export function parseK8sRequestTimeoutMs(raw: string | undefined): number {
+  const parsed = plainPositiveIntegerOrDefault(raw, 30_000)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `HCC_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds in plain digits, got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+export function parseNetPolPassHardLimitMs(raw: string | undefined): number {
+  const parsed = plainPositiveIntegerOrDefault(raw, 30 * 60_000)
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed <= NETPOL_PASS_OVERRUN_WARN_MS ||
+    parsed > MAX_TIMER_DELAY_MS
+  ) {
+    throw new Error(
+      `HCC_NETPOL_PASS_HARD_LIMIT_MS must be an integer number of milliseconds above the ${NETPOL_PASS_OVERRUN_WARN_MS}ms overrun warning and at most ${MAX_TIMER_DELAY_MS}, in plain digits, got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+/**
+ * A request timeout at or above the pass hard limit can never fail the pass
+ * before the hard limit exits the process, so this refuses it at startup. It
+ * does not guarantee the converse: a request that starts late in a pass can
+ * still be running when the hard limit fires. Both deadlines can hold the pass:
+ * Host convergence queued on a Context identity uses the Host deadline.
+ */
+export function assertRequestTimeoutsBelowPassHardLimit(
+  timeouts: { name: string; valueMs: number }[],
+  netPolPassHardLimitMs: number
+): void {
+  for (const { name, valueMs } of timeouts) {
+    if (valueMs >= netPolPassHardLimitMs) {
+      throw new Error(
+        `${name} (${valueMs}ms) must be below HCC_NETPOL_PASS_HARD_LIMIT_MS (${netPolPassHardLimitMs}ms): a request that runs to its deadline would otherwise hold the pass to the hard limit and exit the process instead of failing the pass`
+      )
+    }
+  }
 }
 
 /**
@@ -580,6 +669,19 @@ export function validateExternalEgressResyncInvariant(cfg: {
   }
 }
 
+const hostK8sRequestTimeoutMs = parseHostK8sRequestTimeoutMs(
+  getEnv('HCC_HOST_K8S_REQUEST_TIMEOUT_MS')
+)
+const k8sRequestTimeoutMs = parseK8sRequestTimeoutMs(getEnv('HCC_K8S_REQUEST_TIMEOUT_MS'))
+const netPolPassHardLimitMs = parseNetPolPassHardLimitMs(getEnv('HCC_NETPOL_PASS_HARD_LIMIT_MS'))
+assertRequestTimeoutsBelowPassHardLimit(
+  [
+    { name: 'HCC_K8S_REQUEST_TIMEOUT_MS', valueMs: k8sRequestTimeoutMs },
+    { name: 'HCC_HOST_K8S_REQUEST_TIMEOUT_MS', valueMs: hostK8sRequestTimeoutMs },
+  ],
+  netPolPassHardLimitMs
+)
+
 export const config: Config = {
   devMode,
 
@@ -722,12 +824,28 @@ export const config: Config = {
   hostWorkspacePath: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_PATH', '/workspace')!,
   hostResources: {
     requests: {
-      memory: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_MEMORY', '128Mi')!,
-      cpu: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU', '100m')!,
+      memory: requireQuantity(
+        'CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_MEMORY',
+        getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_MEMORY', '128Mi')!
+      ),
+      cpu: requireQuantity(
+        'CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU',
+        getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU', '100m')!
+      ),
     },
     limits: {
-      memory: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY', '512Mi')!,
-      cpu: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU', '500m')!,
+      // 2Gi leaves mcp-host's document reader room beside the Host's working
+      // set (documentRead/MEMORY_MODEL.md); at 512Mi every read was refused.
+      // v0.12.0 and v0.12.1 still default this to 512Mi. The request stays
+      // 128Mi, so the limit/request ratio is 16 rather than the old 4.
+      memory: requireQuantity(
+        'CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY',
+        getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY', '2Gi')!
+      ),
+      cpu: requireQuantity(
+        'CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU',
+        getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU', '500m')!
+      ),
     },
   },
 
@@ -736,12 +854,24 @@ export const config: Config = {
   desktopPort: getEnvInt('CONTEXT_MAPPER_DESKTOP_PORT', 3000),
   desktopResources: {
     requests: {
-      memory: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_MEMORY', '256Mi')!,
-      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_CPU', '250m')!,
+      memory: requireQuantity(
+        'CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_MEMORY',
+        getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_MEMORY', '256Mi')!
+      ),
+      cpu: requireQuantity(
+        'CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_CPU',
+        getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_CPU', '250m')!
+      ),
     },
     limits: {
-      memory: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY', '4Gi')!,
-      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU', '1')!,
+      memory: requireQuantity(
+        'CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY',
+        getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY', '4Gi')!
+      ),
+      cpu: requireQuantity(
+        'CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU',
+        getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU', '1')!
+      ),
     },
   },
 
@@ -837,7 +967,9 @@ export const config: Config = {
 
   // Every finite Kubernetes request that can hold Host convergence gets its
   // own deadline. Watch streams are intentionally excluded.
-  hostK8sRequestTimeoutMs: parseHostK8sRequestTimeoutMs(getEnv('HCC_HOST_K8S_REQUEST_TIMEOUT_MS')),
+  hostK8sRequestTimeoutMs,
+  k8sRequestTimeoutMs,
+  netPolPassHardLimitMs,
   hostFullReconcileConcurrency: parseHostFullReconcileConcurrency(
     getEnv('HCC_HOST_FULL_RECONCILE_CONCURRENCY')
   ),

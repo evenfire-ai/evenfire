@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import * as http from 'node:http'
 import {
-  HOST_K8S_REQUEST_TIMEOUT_CODE,
-  HostK8sRequestTimeoutError,
-  withHostK8sRequestDeadline,
-} from './hostK8sApiClient'
+  K8S_REQUEST_TIMEOUT_CODE,
+  K8sRequestTimeoutError,
+  withK8sRequestDeadline,
+} from './k8sRequestDeadline'
 
 const servers: http.Server[] = []
 
@@ -41,7 +41,7 @@ function clientFor(baseUrl: string, timeoutMs: number): k8s.CoreV1Api {
   const rawClient = new k8s.CoreV1Api(
     k8s.createConfiguration({ baseServer: new k8s.ServerConfiguration(baseUrl, {}) })
   )
-  return withHostK8sRequestDeadline(rawClient, timeoutMs)
+  return withK8sRequestDeadline(rawClient, timeoutMs)
 }
 
 function respond(res: http.ServerResponse, name: string): void {
@@ -64,7 +64,7 @@ afterEach(async () => {
   }
 })
 
-describe('withHostK8sRequestDeadline', () => {
+describe('withK8sRequestDeadline', () => {
   it('allows a normal request to complete before its deadline', async () => {
     const baseUrl = await startServer((_req, res) => respond(res, 'normal'))
     const namespace = await clientFor(baseUrl, 1_000).readNamespace({ name: 'normal' })
@@ -99,8 +99,8 @@ describe('withHostK8sRequestDeadline', () => {
 
     await requestSeen
     await expect(request).rejects.toMatchObject({
-      name: 'HostK8sRequestTimeoutError',
-      code: HOST_K8S_REQUEST_TIMEOUT_CODE,
+      name: 'K8sRequestTimeoutError',
+      code: K8S_REQUEST_TIMEOUT_CODE,
       timeoutMs: 80,
     })
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(50)
@@ -154,7 +154,7 @@ describe('withHostK8sRequestDeadline', () => {
       thrown = error
     }
     expect(thrown).toBeInstanceOf(Error)
-    expect(thrown).not.toBeInstanceOf(HostK8sRequestTimeoutError)
+    expect(thrown).not.toBeInstanceOf(K8sRequestTimeoutError)
   })
 
   it('keeps timeout classification when caller cancellation follows the deadline', async () => {
@@ -177,7 +177,7 @@ describe('withHostK8sRequestDeadline', () => {
     )
 
     await requestSeen
-    await expect(request).rejects.toBeInstanceOf(HostK8sRequestTimeoutError)
+    await expect(request).rejects.toBeInstanceOf(K8sRequestTimeoutError)
     caller.abort(new Error('shutdown'))
     await new Promise(resolve => setTimeout(resolve, 20))
   })
@@ -203,7 +203,7 @@ describe('withHostK8sRequestDeadline', () => {
         return transport.promise
       },
     }
-    const request = withHostK8sRequestDeadline(rawClient, 40).probe({})
+    const request = withK8sRequestDeadline(rawClient, 40).probe({})
     let settled = false
     void request.then(
       () => {
@@ -222,7 +222,7 @@ describe('withHostK8sRequestDeadline', () => {
     const transportError = new Error('transport acknowledged abort')
     transport.reject(transportError)
     await expect(request).rejects.toMatchObject({
-      name: 'HostK8sRequestTimeoutError',
+      name: 'K8sRequestTimeoutError',
       cause: transportError,
     })
   })
