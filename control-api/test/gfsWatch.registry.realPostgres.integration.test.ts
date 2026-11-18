@@ -23,7 +23,8 @@ import './realPostgres.requirement.ts'
 let createRegistryHarness!: Loaded['createRegistryHarness'],
   quoteIdent!: Loaded['quoteIdent'],
   restInvariantViolations!: Loaded['restInvariantViolations'],
-  sleep!: Loaded['sleep']
+  sleep!: Loaded['sleep'],
+  waitForListenerReady!: Loaded['waitForListenerReady']
 
 // Scenario tests of the GFS watch registry on the real stack described in the
 // harness. Every assertion is on frames the client sees or on the open's
@@ -40,7 +41,8 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
   const onUnhandled = (e: unknown) => unhandled.push(e)
 
   beforeAll(async () => {
-    ;({ createRegistryHarness, quoteIdent, restInvariantViolations, sleep } = await loadHelpers())
+    ;({ createRegistryHarness, quoteIdent, restInvariantViolations, sleep, waitForListenerReady } =
+      await loadHelpers())
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(registryTestDatabase)}`)
     h = await createRegistryHarness(adminUrl!)
@@ -1301,7 +1303,7 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     b.gates.read.releaseAll()
     // Reconnects after the backoff and opens again.
     b.clock.advance(1_200)
-    await until(() => b.registry.listenerReady())
+    expect(await waitForListenerReady(() => b.registry.listenerReady())).toBe(true)
     await ready(user, [h.key('file', f)])
   })
 
