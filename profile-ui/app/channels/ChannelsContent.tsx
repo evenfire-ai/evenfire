@@ -13,6 +13,7 @@ import { IconRefresh, IconSlack, IconTelegram } from '@components/icons'
 import { PROFILE_ROUTES } from '@constants/routes'
 import { isSilentApiError } from '@lib/api'
 import {
+  activeApprovalAccounts,
   disconnectWorkflowApprovalMedium,
   listWorkflowApprovalMediums,
 } from '@lib/approvalChannels'
@@ -82,8 +83,8 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
     try {
       await Promise.all([
         refreshApprovalTargets({ force: forceAccess }),
-        listWorkflowApprovalMediums({ includeDisabled: true }),
-      ]).then(([, nextAccounts]) => setAccounts(nextAccounts))
+        listWorkflowApprovalMediums(),
+      ]).then(([, nextAccounts]) => setAccounts(activeApprovalAccounts(nextAccounts)))
       setState('ready')
     } catch (err) {
       if (isSilentApiError(err)) return
@@ -99,7 +100,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
   const refreshApprovalAccounts = useCallback(async (): Promise<
     WorkflowApprovalMediumAccount[]
   > => {
-    const next = await listWorkflowApprovalMediums({ includeDisabled: true })
+    const next = activeApprovalAccounts(await listWorkflowApprovalMediums())
     setAccounts(next)
     return next
   }, [])
@@ -127,7 +128,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
     setError('')
     try {
       await disconnectWorkflowApprovalMedium(accountId)
-      setAccounts(await listWorkflowApprovalMediums({ includeDisabled: true }))
+      setAccounts(activeApprovalAccounts(await listWorkflowApprovalMediums()))
       showToast(
         isDisconnected
           ? `Disconnected ${providerLabel} verification record removed.`

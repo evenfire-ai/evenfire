@@ -1,13 +1,14 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ApprovalChannelTarget } from '@/app/types/approvalChannels'
 import producerOutput from '@/test/fixtures/telegram-channel-accounts.json'
 import { ChannelsContent } from '../../channels/ChannelsContent'
 
 const mocks = vi.hoisted(() => ({
   confirm: vi.fn(),
+  disconnect: vi.fn(),
   isSilentApiError: vi.fn(),
   listWorkflowApprovalMediums: vi.fn(),
   refreshApprovalTargets: vi.fn(),
@@ -63,7 +64,7 @@ vi.mock('@lib/api', () => ({
 
 vi.mock('@lib/approvalChannels', async importOriginal => ({
   ...(await importOriginal<typeof import('@lib/approvalChannels')>()),
-  disconnectWorkflowApprovalMedium: vi.fn(),
+  disconnectWorkflowApprovalMedium: mocks.disconnect,
   listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums,
 }))
 
@@ -96,15 +97,62 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('Social channel loading and targetless records', () => {
-  it('keeps disconnected records actionable without offering an unavailable Connect action', async () => {
-    profileAccess.targets = []
-    mocks.listWorkflowApprovalMediums.mockResolvedValue(producerOutput.disabled)
-    render(<ChannelsContent activeChannel="telegram" />)
-    expect(await screen.findByText('Disconnected')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^Connect / })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Actions for Telegram conversation' }))
-    expect(await screen.findByRole('menuitem', { name: 'Remove record' })).toBeInTheDocument()
-  })
+  it.each(['telegram', 'slack', 'teams'] as const)(
+    'hides disconnected %s records on load',
+    async medium => {
+      profileAccess.targets = []
+      mocks.listWorkflowApprovalMediums.mockResolvedValue(
+        producerOutput.disabled.map(account => ({ ...account, medium }))
+      )
+      render(<ChannelsContent activeChannel={medium} />)
+      expect(await screen.findByText('No social channels are set up yet.')).toBeInTheDocument()
+      expect(screen.queryByText('Disconnected')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /^Connect / })).not.toBeInTheDocument()
+    }
+  )
+
+  it.each(['telegram', 'slack', 'teams'] as const)(
+    'removes the %s account row after disconnect and refresh',
+    async medium => {
+      const availableTarget = { ...producerOutput.targets[0]!, medium }
+      profileAccess.targets = [availableTarget]
+      const account = {
+        ...producerOutput.disabled[0]!,
+        medium,
+        disabledAt: null,
+        displayName: 'Demo connection',
+        targets: [availableTarget],
+      }
+      const disconnected = {
+        ...account,
+        disabledAt: producerOutput.disabled[0]!.disabledAt,
+        targets: [],
+      }
+      mocks.listWorkflowApprovalMediums.mockResolvedValue([account])
+      mocks.confirm.mockResolvedValue(true)
+      mocks.disconnect.mockImplementation(async () => {
+        mocks.listWorkflowApprovalMediums.mockResolvedValue([disconnected])
+      })
+      render(<ChannelsContent activeChannel={medium} />)
+      expect(await screen.findByText('Demo connection')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Actions for Demo connection' }))
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete connection' }))
+      await waitFor(() => expect(screen.queryByText('Demo connection')).not.toBeInTheDocument())
+      expect(mocks.disconnect).toHaveBeenCalledWith(account.id)
+      expect(screen.queryByText('Disconnected')).not.toBeInTheDocument()
+      expect(screen.getAllByText('Not connected').length).toBeGreaterThan(0)
+      expect(screen.queryByRole('menuitem', { name: 'Delete connection' })).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh social channels' }))
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Refresh social channels' })).toBeEnabled()
+      )
+      expect(screen.queryByText('Demo connection')).not.toBeInTheDocument()
+      expect(screen.queryByText('Disconnected')).not.toBeInTheDocument()
+      expect(
+        mocks.listWorkflowApprovalMediums.mock.calls.every(args => !args[0]?.includeDisabled)
+      ).toBe(true)
+    }
+  )
 
   it.each([false, true])(
     'shows a failed load without empty panels (targets present: %s)',
