@@ -193,7 +193,7 @@ describeRealPostgres('gfs_resource_changed trigger against real writers', () => 
     expect(fn.rows[0]!.config).toEqual(['search_path=pg_catalog, public, pg_temp'])
     expect(fn.rows[0]!.public_execute).toBe(false)
     const migration = await pool.query(
-      `SELECT 1 FROM schema_migrations WHERE version = '0139_gfs_resource_changed_notify'`
+      `SELECT 1 FROM schema_migrations WHERE version = '0141_gfs_resource_changed_notify'`
     )
     expect(migration.rowCount).toBe(1)
 
