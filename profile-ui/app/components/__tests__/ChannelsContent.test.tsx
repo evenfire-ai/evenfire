@@ -179,7 +179,7 @@ describe('Social channels section header', () => {
 
     render(<ChannelsContent activeChannel="telegram" />)
 
-    expect(await screen.findByText('No social channels are set up yet.')).toBeInTheDocument()
+    expect(await screen.findByText('No Telegram channels are assigned to you.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Connect / })).not.toBeInTheDocument()
   })
 
@@ -189,6 +189,7 @@ describe('Social channels section header', () => {
     const view = render(<ChannelsContent activeChannel="telegram" />)
 
     const tabs = screen.getByRole('tablist', { name: 'Social networks' })
+    expect(within(tabs).getByRole('tab', { name: 'Teams' })).toBeInTheDocument()
     const telegramTab = within(tabs).getByRole('tab', { name: 'Telegram' })
     expect(telegramTab).toHaveAttribute('aria-selected', 'true')
     expect(telegramTab.querySelector('svg[viewBox="0 0 512 512"]')).not.toBeNull()

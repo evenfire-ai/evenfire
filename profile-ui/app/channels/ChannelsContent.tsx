@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import Image from 'next/image'
 import Link from 'next/link'
 import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
@@ -26,6 +27,7 @@ type LoadState = 'loading' | 'ready' | 'error'
 
 const SOCIAL_TAB_ICONS: Partial<Record<SocialChannelTabKey, ReactNode>> = {
   slack: <IconSlack width={14} height={14} />,
+  teams: <Image src="/brand/teams.svg" alt="" width={14} height={14} aria-hidden="true" />,
   telegram: <IconTelegram width={14} height={14} />,
 }
 
@@ -57,15 +59,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
     () => accounts.filter(account => account.medium === 'teams'),
     [accounts]
   )
-  const visibleSocialTabs = useMemo(
-    () =>
-      PROFILE_SOCIAL_CHANNEL_TABS.filter(
-        tab =>
-          targets.some(target => target.medium === tab.key) ||
-          accounts.some(account => account.medium === tab.key)
-      ),
-    [targets, accounts]
-  )
+  const visibleSocialTabs = PROFILE_SOCIAL_CHANNEL_TABS
   const currentChannel =
     visibleSocialTabs.find(tab => tab.key === activeChannel) || visibleSocialTabs[0] || null
   const currentTargets =

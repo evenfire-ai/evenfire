@@ -105,7 +105,9 @@ describe('Social channel loading and targetless records', () => {
         producerOutput.disabled.map(account => ({ ...account, medium }))
       )
       render(<ChannelsContent activeChannel={medium} />)
-      expect(await screen.findByText('No social channels are set up yet.')).toBeInTheDocument()
+      expect(
+        await screen.findByText(new RegExp('No .* channels are assigned to you\\.'))
+      ).toBeInTheDocument()
       expect(screen.queryByText('Disconnected')).not.toBeInTheDocument()
       expect(screen.queryByRole('button', { name: /^Connect / })).not.toBeInTheDocument()
     }
@@ -162,14 +164,28 @@ describe('Social channel loading and targetless records', () => {
       render(<ChannelsContent activeChannel="telegram" />)
       expect(await screen.findByText('Service unavailable')).toBeInTheDocument()
       expect(screen.queryByTestId('channel-panel')).not.toBeInTheDocument()
-      expect(screen.queryByText('No social channels are set up yet.')).not.toBeInTheDocument()
+      expect(screen.queryByText(/channels are assigned to you/)).not.toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Refresh social channels' })).toBeEnabled()
     }
   )
 
-  it('shows the empty message only after a successful empty load', async () => {
-    profileAccess.targets = []
-    render(<ChannelsContent activeChannel="telegram" />)
-    expect(await screen.findByText('No social channels are set up yet.')).toBeInTheDocument()
-  })
+  it.each(['telegram', 'slack', 'teams'] as const)(
+    'keeps all tabs and an empty %s table when none are assigned',
+    async medium => {
+      profileAccess.targets = []
+      render(<ChannelsContent activeChannel={medium} />)
+      expect(await screen.findByText(/channels are assigned to you/)).toBeInTheDocument()
+      for (const name of ['Telegram', 'Slack', 'Teams']) {
+        expect(screen.getByRole('tab', { name })).toBeInTheDocument()
+      }
+      const selected = screen.getByRole('tab', {
+        name: medium === 'teams' ? 'Teams' : medium === 'slack' ? 'Slack' : 'Telegram',
+      })
+      expect(selected).toHaveAttribute('aria-selected', 'true')
+      expect(selected).toHaveAttribute('href', `/channels/${medium}`)
+      expect(screen.getByRole('table')).toBeInTheDocument()
+      expect(screen.getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /^Connect / })).not.toBeInTheDocument()
+    }
+  )
 })

@@ -288,98 +288,97 @@ export function TelegramVerificationPanel({
     <div className="settings-social-channel-content">
       {error && !modalOpen ? <div className="message message--error">{error}</div> : null}
 
-      {rows.length === 0 ? (
-        <div className="message message--warning message--plain">
-          No {providerLabel} channels set up yet.
-        </div>
-      ) : (
-        <TableViewport>
-          <DataTable className="eft-table eft-table--wide">
-            <thead>
+      <TableViewport>
+        <DataTable className="eft-table eft-table--wide">
+          <thead>
+            <tr>
+              <TableHeaderCell label="Name" />
+              <TableHeaderCell label="Chat type" />
+              <TableHeaderCell label={medium === 'slack' ? 'App handle' : 'Bot handle'} />
+              <TableHeaderCell label="Status" />
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
               <tr>
-                <TableHeaderCell label="Name" />
-                <TableHeaderCell label="Chat type" />
-                <TableHeaderCell label={medium === 'slack' ? 'App handle' : 'Bot handle'} />
-                <TableHeaderCell label="Status" />
-                <th></th>
+                <td colSpan={5} className="muted">
+                  No {medium === 'teams' ? 'Teams' : providerLabel} channels are assigned to you.
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {rows.map(row => {
-                const name = row.account
-                  ? approvalAccountDisplayName(row.account)
-                  : targetDisplayName(row.target!)
-                const notConnected = row.status === 'Not connected'
-                const chatType = row.account
-                  ? approvalAccountConversationTypeLabel(row.account)
-                  : null
-                const bot = row.account
-                  ? approvalAccountBotLabel(row.account)
-                  : (providerBotHandle(row.target) ?? '—')
-                const rowDisabled = Boolean(row.account?.disabledAt)
-                const ariaName = `Actions for ${name}`
-                return (
-                  <tr key={row.key}>
-                    <td>{name}</td>
-                    <td>
-                      {notConnected ? (
-                        <span
-                          className={`cu-status-tag cu-status-tag--${statusTagKeys[row.status]}`}
-                        >
-                          Not connected
-                        </span>
-                      ) : (
-                        chatType
-                      )}
-                    </td>
-                    <td>{bot}</td>
-                    <td>
+            ) : null}
+            {rows.map(row => {
+              const name = row.account
+                ? approvalAccountDisplayName(row.account)
+                : targetDisplayName(row.target!)
+              const notConnected = row.status === 'Not connected'
+              const chatType = row.account
+                ? approvalAccountConversationTypeLabel(row.account)
+                : null
+              const bot = row.account
+                ? approvalAccountBotLabel(row.account)
+                : (providerBotHandle(row.target) ?? '—')
+              const rowDisabled = Boolean(row.account?.disabledAt)
+              const ariaName = `Actions for ${name}`
+              return (
+                <tr key={row.key}>
+                  <td>{name}</td>
+                  <td>
+                    {notConnected ? (
                       <span className={`cu-status-tag cu-status-tag--${statusTagKeys[row.status]}`}>
-                        {row.status}
+                        Not connected
                       </span>
-                    </td>
-                    <td className="eft-table__cell--actions">
-                      <RowActionMenu
-                        ariaLabel={ariaName}
-                        actions={
-                          row.account
-                            ? [
-                                ...(rowDisabled
-                                  ? []
-                                  : [
-                                      {
-                                        key: 'edit',
-                                        label: 'Edit display name',
-                                        disabled,
-                                        onSelect: () => openDisplayNameModal(row.account!),
-                                      },
-                                    ]),
-                                {
-                                  key: 'delete',
-                                  label: rowDisabled ? 'Remove record' : 'Delete connection',
-                                  danger: true,
-                                  disabled,
-                                  onSelect: () => onRemoveAccount(row.account!.id, rowDisabled),
-                                },
-                              ]
-                            : [
-                                {
-                                  key: 'connect',
-                                  label: 'Connect',
-                                  disabled,
-                                  onSelect: () => openConnectionModal(row.target!.id, true),
-                                },
-                              ]
-                        }
-                      />
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </DataTable>
-        </TableViewport>
-      )}
+                    ) : (
+                      chatType
+                    )}
+                  </td>
+                  <td>{bot}</td>
+                  <td>
+                    <span className={`cu-status-tag cu-status-tag--${statusTagKeys[row.status]}`}>
+                      {row.status}
+                    </span>
+                  </td>
+                  <td className="eft-table__cell--actions">
+                    <RowActionMenu
+                      ariaLabel={ariaName}
+                      actions={
+                        row.account
+                          ? [
+                              ...(rowDisabled
+                                ? []
+                                : [
+                                    {
+                                      key: 'edit',
+                                      label: 'Edit display name',
+                                      disabled,
+                                      onSelect: () => openDisplayNameModal(row.account!),
+                                    },
+                                  ]),
+                              {
+                                key: 'delete',
+                                label: rowDisabled ? 'Remove record' : 'Delete connection',
+                                danger: true,
+                                disabled,
+                                onSelect: () => onRemoveAccount(row.account!.id, rowDisabled),
+                              },
+                            ]
+                          : [
+                              {
+                                key: 'connect',
+                                label: 'Connect',
+                                disabled,
+                                onSelect: () => openConnectionModal(row.target!.id, true),
+                              },
+                            ]
+                      }
+                    />
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </DataTable>
+      </TableViewport>
 
       <DialogShell
         open={modalOpen}

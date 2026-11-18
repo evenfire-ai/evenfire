@@ -470,8 +470,8 @@ describe('TelegramVerificationPanel empty state', () => {
       </ToastProvider>
     )
 
-    expect(screen.getByText('No Slack channels set up yet.')).toBeInTheDocument()
-    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(screen.getByText('No Slack channels are assigned to you.')).toBeInTheDocument()
+    expect(screen.getByRole('table')).toBeInTheDocument()
   })
 
   it('lists connectable targets as Not connected rows instead of an empty state', () => {
@@ -507,6 +507,6 @@ describe('TelegramVerificationPanel empty state', () => {
     for (const cell of notConnectedCells) {
       expect(within(cell).getByText('Not connected')).toHaveClass('cu-status-tag--not-connected')
     }
-    expect(screen.queryByText('No Telegram channels set up yet.')).not.toBeInTheDocument()
+    expect(screen.queryByText('No Telegram channels are assigned to you.')).not.toBeInTheDocument()
   })
 })
