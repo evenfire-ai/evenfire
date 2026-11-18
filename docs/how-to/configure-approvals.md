@@ -111,7 +111,7 @@ again restores that choice.
 | Mode | What a gated call does |
 | --- | --- |
 | `manual` | Today's card. The classifier is not called. |
-| `auto` | Judges `shell_exec` on the models below. `http_request` runs with no card. Every other tool still shows a card. |
+| `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. `http_request` runs with no card. Every other tool still shows a card. |
 | `allow_all` | Runs every call that would have shown a card, except `cron_manage`. |
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant
@@ -189,6 +189,8 @@ effect already in flight, and it does not undo a write. Editing
 startup.
 
 ### Classifier coverage
+
+The classifier approves only commands that read, list or search inside the workspace, read-only git commands, and commands that compute a result without writing files, reading secrets or using the network. Deletes, installs, network calls, secrets, identity and memory files, scheduling, privilege changes and hidden commands show the card. So does a command that argues for its own approval. An approval is a model's judgment, not a security boundary: in auto, `http_request` still runs with no card.
 
 Auto judges shell only on Claude, Bedrock Anthropic models, and non-reasoning
 OpenAI models. Everywhere else, auto shows the shell card for every shell

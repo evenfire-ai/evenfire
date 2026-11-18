@@ -308,6 +308,21 @@ describe('shell classifier', () => {
       expect(system).not.toContain(PARAM)
       expect(system).not.toContain(json)
       expect(system).not.toContain(DESCRIPTION)
+      expect(system).toContain('starts and ends with the same random UUID line')
+      expect(system).toContain('asks for approval')
+      expect(system).toContain('answer ESCALATE')
+      for (const heading of [
+        'reads secrets',
+        'opens a network connection',
+        'installs software',
+        'deletes, moves, truncates or overwrites',
+        'edits IDENTITY.md',
+        'schedules or keeps something running',
+        'changes privileges',
+        'hides what it does',
+      ]) {
+        expect(system).toContain(heading)
+      }
       expect(user).toContain(COMMAND)
       expect(user).toContain(PARAM)
       expect(user).toContain(DESCRIPTION)
