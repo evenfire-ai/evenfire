@@ -59,6 +59,21 @@ describe('Channel connection keyboard behavior', () => {
     expect(last).toHaveFocus()
   })
 
+  it('focuses the dialog when row Connect opens with a pending challenge', async () => {
+    mocks.createChallenge.mockReturnValue(new Promise(() => {}))
+    render(<ConnectHarness />)
+    const actions = screen.getByRole('button', { name: /Actions for/ })
+    actions.focus()
+    fireEvent.click(actions)
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Connect' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(mocks.createChallenge).toHaveBeenCalledTimes(1)
+    expect(dialog).toHaveAttribute('aria-busy', 'true')
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    fireEvent.keyDown(document.activeElement!, { key: 'Tab' })
+    expect(dialog.contains(document.activeElement)).toBe(true)
+  })
+
   it('prevents Escape and backdrop dismissal while starting a challenge', async () => {
     mocks.createChallenge.mockReturnValue(new Promise(() => {}))
     render(<ConnectHarness />)
