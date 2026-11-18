@@ -125,6 +125,16 @@ else
   MISSING=$((MISSING + 1))
 fi
 
+# ── jq ─────────────────────────────────────────────────────────────────
+# Instance bootstrap uses jq to preserve the user-managed context1.
+if command -v jq >/dev/null 2>&1; then
+  ok "jq       available"
+else
+  err "jq       not found (required for Context bootstrap)"
+  hint "brew install jq" "sudo apt-get install -y jq"
+  MISSING=$((MISSING + 1))
+fi
+
 # ── ruby ───────────────────────────────────────────────────────────────
 # Renders the control-api DB migration overlay; ships with macOS.
 if command -v ruby >/dev/null 2>&1; then
@@ -225,7 +235,19 @@ echo
 . "$PROJECT_DIR/scripts/e2e/load-dotenv.sh"
 ENV_DIR="$(dotenv_canonical_dir "$PROJECT_DIR")"
 ENV_FILE="$ENV_DIR/.env"
-if [ ! -f "$ENV_FILE" ]; then
+if [ "${E2E_DISABLE_CANONICAL_DOTENV:-false}" = true ]; then
+  # Match the isolated test loader: never inspect the canonical .env and
+  # require the caller to provide its local test credential explicitly.
+  # shellcheck source=scripts/e2e/admin-credentials.sh
+  . "$PROJECT_DIR/scripts/e2e/admin-credentials.sh"
+  if e2e_resolve_admin_password "$PROJECT_DIR" >/dev/null; then
+    ok "isolated test environment: local admin credential set"
+  else
+    err "isolated test environment requires a local admin credential"
+    MISSING=$((MISSING + 1))
+  fi
+  warn "isolated test environment uses local test integration configuration"
+elif [ ! -f "$ENV_FILE" ]; then
   err ".env     not found at ${ENV_FILE} — setup aborts in Step 1"
   if [ "$ENV_DIR" != "$PROJECT_DIR" ]; then
     echo    "        This is a Git worktree; setup reads the primary checkout's .env,"

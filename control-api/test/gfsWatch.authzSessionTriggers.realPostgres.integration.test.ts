@@ -23,14 +23,14 @@ const SESSION = 'gfs_watch_session'
 const FENCE_CHANNEL = 'gfs_watch_test_fence'
 const RUNTIME_ROLE = 'control_api_runtime'
 const WATCH_TRIGGER_MIGRATIONS = [
-  '0140_gfs_authz_grants_notify',
-  '0141_gfs_authz_shares_notify',
-  '0142_gfs_authz_operator_links_notify',
-  '0143_gfs_authz_control_admins_notify',
-  '0144_gfs_authz_team_members_notify',
-  '0145_gfs_watch_session_users_notify',
+  '0142_gfs_authz_grants_notify',
+  '0143_gfs_authz_shares_notify',
+  '0144_gfs_authz_operator_links_notify',
+  '0145_gfs_authz_control_admins_notify',
+  '0146_gfs_authz_team_members_notify',
+  '0147_gfs_watch_session_users_notify',
 ] as const
-const USERS_MIGRATION = '0145_gfs_watch_session_users_notify'
+const USERS_MIGRATION = '0147_gfs_watch_session_users_notify'
 
 const TRIGGER_FUNCTIONS = [
   'gfs_authz_admin_notify',
@@ -749,7 +749,7 @@ describeRealPostgres('GFS watch authorization and session triggers against real 
     // Every migration after the resource trigger, so a single-transaction
     // version of them is exercised the same way.
     await pool.query(
-      `DELETE FROM schema_migrations WHERE version > '0139_gfs_resource_changed_notify'`
+      `DELETE FROM schema_migrations WHERE version > '0141_gfs_resource_changed_notify'`
     )
 
     // Hold the real login between its UPDATE users and its INSERT INTO

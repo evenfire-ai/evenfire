@@ -94,11 +94,11 @@ and tells the user.
 Session revocations and password epochs written by the new control-api are
 ignored by the old one. The release installs database triggers and their
 functions, and they stay after a rollback: `gfs_resource_changed_notify` on
-`gfs_resources` (from `0139`), `gfs_authz_changed_notify` on `gfs_grants`,
+`gfs_resources` (from `0141`), `gfs_authz_changed_notify` on `gfs_grants`,
 `gfs_shares`, `gfs_desktop_operator_links`, `control_admin_users` and
 `team_members`, `gfs_authz_changed_update_notify` on `control_admin_users` and
 `team_members`, and `gfs_watch_session_update_notify` and
-`gfs_watch_session_delete_notify` on `users` (from `0140` to `0145`). Every
+`gfs_watch_session_delete_notify` on `users` (from `0142` to `0147`). Every
 matching write to those tables still sends a `pg_notify` on the
 `gfs_resource_changed`, `gfs_authz_changed` or `gfs_watch_session` channel.
 No write fails because of them: nothing in the old image listens on those
@@ -119,6 +119,58 @@ membership does not notify. A sign-in that creates or reactivates a
 membership, and every write to `gfs_resources`, `gfs_grants`, `gfs_shares` and
 `gfs_desktop_operator_links`, does.
 
+It also leaves state on `llm_allowed_models` that a rollback keeps: the six
+columns of `0139_llm_catalog_prune_columns` (`enabled_managed_by`,
+`auto_disabled_at`, `stale_since`, `stale_episode`, `deprecated_episode`,
+`attention_ack`) and the `llm_allowed_models_track_episodes` trigger of
+`0140`. The old image tolerates them: it never names the columns, every one
+has a default or is nullable, and the trigger only maintains `stale_since` and
+the episode counters on the rows the old image writes. A model the new image
+pruned (disabled because the catalog dropped it and nobody used it) stays
+disabled under the old image, which has no re-enable: turn it on by hand if
+it returns to the catalog while the old image runs.
+
+The old image never moves `enabled_managed_by`, so an operator change it makes
+to a catalog-managed row leaves the row catalog-managed:
+
+- A model turned on under the old image after the new one pruned it (by hand,
+  or by old pods during the rollout) keeps `auto_disabled_at`, a state the new
+  image never produces. After rolling forward again the prune can turn it off
+  once more, and if the catalog lists it, its `stale` marker does not clear.
+- A discovered model that was off and never pruned (its provider's auto-enable
+  was off, or it was not eligible) and was turned on by hand under the old image
+  is still catalog-managed after rolling forward. Once it is stale for the grace
+  period and nobody uses it, the prune turns it off.
+- The same holds for a discovered model renamed under an image released before
+  renamed discovered models became manual (v0.12.x): the row keeps
+  `source = 'discovery'`. Under an image that has that rule, the rename makes
+  the row `manual`, and the prune never touches it.
+
+Before or right after rolling forward, re-pin each such model as the
+operator's choice (`PUT /admin/llm-models/:id` with `enabled: true` and
+`pinEnabled: true`). The query below finds them among the discovered rows,
+the only ones the prune acts on: the pruned ones by their `auto_disabled_at`,
+the others by an admin audit entry written after `0140` was applied (sync
+entries have no `detail`). It can also list a row
+whose `enabled` an admin of the new image resent unchanged; re-pinning that one
+only makes it the operator's.
+
+```sql
+SELECT t.id, t.provider, t.model
+  FROM llm_allowed_models t
+ WHERE t.enabled
+   AND t.source = 'discovery'
+   AND t.enabled_managed_by = 'catalog'
+   AND (t.auto_disabled_at IS NOT NULL
+        OR EXISTS (
+          SELECT 1 FROM llm_allowed_models_audit a
+           WHERE a.provider = t.provider AND a.model = t.model
+             AND a.detail ?| ARRAY['enabled', 'provider', 'model']
+             AND a.created_at >= (SELECT applied_at FROM schema_migrations
+                                   WHERE version = '0140_llm_catalog_prune_episodes')))
+ ORDER BY t.provider, t.model;
+```
+
 Logout revokes only the token it receives. A V1 token issued before a team
 switch stays valid until its own expiry (at most 7 days, 604800 s), as on `dev`. A new
 Desktop build against the old External REST removes a rejected stored token as
@@ -131,23 +183,27 @@ before this release.
   [Databases that ran an earlier head of this change](#databases-that-ran-an-earlier-head-of-this-change)).
   The release adds `0137_user_access_foundation`,
   `0138_legacy_password_security_epoch_backfill`,
-  `0139_gfs_resource_changed_notify`, `0140_gfs_authz_grants_notify`,
-  `0141_gfs_authz_shares_notify`, `0142_gfs_authz_operator_links_notify`,
-  `0143_gfs_authz_control_admins_notify`, `0144_gfs_authz_team_members_notify`
-  and `0145_gfs_watch_session_users_notify`.
+  `0139_llm_catalog_prune_columns`, `0140_llm_catalog_prune_episodes`,
+  `0141_gfs_resource_changed_notify`, `0142_gfs_authz_grants_notify`,
+  `0143_gfs_authz_shares_notify`, `0144_gfs_authz_operator_links_notify`,
+  `0145_gfs_authz_control_admins_notify`, `0146_gfs_authz_team_members_notify`
+  and `0147_gfs_watch_session_users_notify`. A
+  database where an earlier head of the catalog prune applied both parts as a
+  single `0139` migration (branch profiles or local databases only) records
+  `0139_llm_catalog_prune_columns` under its legacy alias without running it,
+  and then runs `0140`.
 - PostgreSQL 14 or later on Linux, or 15 or later on macOS, illumos or BSD (not
   Windows). The migration session sets `client_connection_check_interval`,
   which the server rejects on other platforms, so that a killed Job pod does
   not leave its backend holding the migration advisory lock.
-- For a database already at `0136`, every statement of `0137` through `0145`
+- For a database already at `0136`, every statement of `0137` through `0147`
   waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
   bounded at 15 s (`statement_timeout`); the online index builds have their own
   120 s bound (below). The whole Job is bounded at 300 s
   (`activeDeadlineSeconds`).
 - For a database at `0130` through `0135`, the missing versions through `0136`
   commit in one transaction under the 10 s lock and 15 s statement bounds, with
-  no fence, then `0137`, then `0138`, then `0139` through `0145` in order, each
-  in its own transaction.
+  no fence, then each of `0137` through `0147` in its own transaction.
 - An existing database below `0130` must already have `0126` to `0128`; the
   Job stops with an error otherwise. For such a database the 10 s lock bound
   does not hold before `0137`. The Job first sets the `0130` password-login
@@ -186,6 +242,51 @@ before this release.
   `ALTER TABLE` forms. It must finish within the 15 s statement timeout.
   Measured at about 6 µs per row on one laptop, it reaches that timeout near
   2.4 million users and then fails without a partial write.
+- `0139_llm_catalog_prune_columns` is the one statement of the release that
+  takes an `AccessExclusiveLock` on a table the old images keep using:
+  `llm_allowed_models`, for one `ALTER TABLE` that adds six columns. It is
+  catalog-only (constant defaults, so no table rewrite; the `CHECK` is added
+  `NOT VALID`, so no scan) and holds the lock for milliseconds, but while it
+  waits for it every new reader of the table queues behind it. That wait is
+  bounded by a `lock_timeout` of 2 s of its own, lower than the Job's 10 s: a
+  reader transaction that stays open longer makes the attempt fail whole
+  (nothing is applied) and the Job retries it within its `backoffLimit`. The
+  readers that can queue for up to 2 s per attempt are control-api's admin
+  model routes, the Host spec validation, the plugin-workload grant gate and
+  the allowlist ConfigMap publisher, and the old image's catalog sync.
+  mcp-host does not: it reads the published ConfigMap, not the table.
+  If a transaction keeps the table through every attempt (a reader for 0139,
+  or a catalog sync or admin write that outlasts the Job's 10 s for 0140),
+  the Job exhausts its `backoffLimit` with `55P03` and the deploy stops. The
+  migration that timed out is not applied; the ones before it stay committed.
+  Rerun the Job once that transaction ends.
+- `0140_llm_catalog_prune_episodes` never blocks a plain `SELECT` on
+  `llm_allowed_models`. It starts by taking `EXCLUSIVE` on the table and holds
+  it until it commits. Under that lock it validates the `CHECK`, backfills the
+  new columns, replaces the episode trigger with `CREATE OR REPLACE TRIGGER`
+  (it needs PostgreSQL 14, above) and creates `llm_catalog_prune_runs`.
+  - Who waits: every write (`INSERT`, `UPDATE`, `DELETE`) and every row-locking
+    read (`SELECT … FOR UPDATE` / `FOR SHARE`) waits for that whole transaction,
+    and while the migration waits to get the lock (up to the Job's 10 s) new
+    ones queue behind it too. Plain `SELECT`s never wait. In the old and new
+    control-api the only row-locking read of the table is the
+    `SELECT … FOR UPDATE` of `PUT /api/v1/admin/llm-models/:id` (the model
+    editor, the Discovery panel's enable and disable, and a rename), so that
+    route and every write (the catalog sync, model create and delete, the
+    subscription catalog rebuilds) pause for the migration; reads (the model
+    list, Host validation, the attention feed, the ConfigMap publisher) do not.
+  - Why the lock comes first: asked for after the backfill has locked rows, the
+    trigger's lock deadlocks with a write of the old image waiting on one of
+    those rows; and without it a write could turn a row stale before the trigger
+    exists, leaving it without `stale_since` or an episode.
+  - Why `EXCLUSIVE` and not `SHARE ROW EXCLUSIVE`, which would let row-locking
+    reads through: the old image's PUT locks its row with `FOR UPDATE` before its
+    `UPDATE`, and `SHARE ROW EXCLUSIVE` does not conflict with that first step,
+    so the migration would get the lock in the middle of the PUT and deadlock
+    with its `UPDATE`.
+  - Rows the old image inserts after the migration Job and until the rollout
+    completes keep `enabled_managed_by = 'operator'`: the catalog prune never
+    touches them, which is the safe side.
 - `0138` treats every V1 session issued at or before the second of a user's
   `password_set_at` as issued before that password event, and rejects it. The
   previous release kept existing sessions when a password was set or changed,
@@ -197,12 +298,12 @@ before this release.
   when a first password was set from an invitation, and the session from which
   a user changed their password in Profile UI. No other session is affected by
   the backfill.
-- `0139_gfs_resource_changed_notify` creates (or replaces) the function
+- `0141_gfs_resource_changed_notify` creates (or replaces) the function
   `gfs_resource_changed_notify()` and the `AFTER INSERT OR UPDATE OR DELETE`
   row trigger of the same name on the existing table `gfs_resources`, in one
   bounded transaction. `CREATE OR REPLACE FUNCTION` and the `REVOKE` on it take
   no table lock. `CREATE OR REPLACE TRIGGER` takes `SHARE ROW EXCLUSIVE` on
-  `gfs_resources` until `0139`'s transaction commits: inserts, updates and
+  `gfs_resources` until `0141`'s transaction commits: inserts, updates and
   deletes on `gfs_resources` (from control-api and the GFS controller) are
   blocked for that time, plain reads are not. The wait for that lock is bounded
   at 10 s (`lock_timeout`), with no retry inside the Job, so a transaction
@@ -210,28 +311,28 @@ before this release.
   attempt. While the migration waits, later writes to `gfs_resources` queue
   behind it. The migration neither scans nor rewrites the table, so its duration
   does not depend on its size.
-- `0140_gfs_authz_grants_notify` through `0145_gfs_watch_session_users_notify`
+- `0142_gfs_authz_grants_notify` through `0147_gfs_watch_session_users_notify`
   each run in their own bounded transaction (10 s `lock_timeout`, 15 s
   `statement_timeout`) and install `AFTER ROW` triggers on one existing table
-  each. `0140` first creates (or replaces) the functions
+  each. `0142` first creates (or replaces) the functions
   `gfs_authz_subject_key()`, `gfs_authz_subject_notify()`,
   `gfs_authz_user_notify()`, `gfs_authz_admin_notify()` and
   `gfs_watch_session_notify()`; `CREATE OR REPLACE FUNCTION` and the `REVOKE`
   on them take no table lock. Every `CREATE OR REPLACE TRIGGER` takes
   `SHARE ROW EXCLUSIVE` on its table until that migration's transaction
   commits: inserts, updates and deletes on the table are blocked for that time,
-  plain reads are not. The tables are `gfs_grants` (`0140`), `gfs_shares`
-  (`0141`), `gfs_desktop_operator_links` (`0142`), `control_admin_users`
-  (`0143`, two triggers), `team_members` (`0144`, two triggers) and `users`
-  (`0145`, two triggers). Each migration holds only its own table's lock, so no
+  plain reads are not. The tables are `gfs_grants` (`0142`), `gfs_shares`
+  (`0143`), `gfs_desktop_operator_links` (`0144`), `control_admin_users`
+  (`0145`, two triggers), `team_members` (`0146`, two triggers) and `users`
+  (`0147`, two triggers). Each migration holds only its own table's lock, so no
   two of these tables are blocked at once. While a migration waits for its
   lock, later writes to that table queue behind it. None of them scans or
   rewrites its table, so their duration does not depend on table size.
-- `0140` to `0143` wait at most 10 s for their lock, with no retry inside the
+- `0142` to `0145` wait at most 10 s for their lock, with no retry inside the
   Job: a transaction that has written to `gfs_grants`, `gfs_shares`,
   `gfs_desktop_operator_links` or `control_admin_users` and stays open longer
   fails that Job attempt. `team_members` and `users` are written by every
-  sign-in, so `0144` and `0145` retry a lost lock wait (`lockRetries: 2`): after
+  sign-in, so `0146` and `0147` retry a lost lock wait (`lockRetries: 2`): after
   a 10 s `lock_timeout` the transaction rolls back, holds no lock, waits 1 s
   (then 2 s) and starts again, for at most three attempts. Each of the two can
   thus block sign-ins for up to about 30 s in total, in three 10 s windows
@@ -245,7 +346,7 @@ before this release.
   relation; `dev` had 7) and
   `deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv` (6
   column rows; new in this release). A mismatch stops the deploy after `0137`
-  through `0145` have committed, while the old control-api keeps serving. Compare
+  through `0147` have committed, while the old control-api keeps serving. Compare
   the target database's grants with both files before step 1.
 - `deploy/scripts/run-control-api-db-migration.sh` requires `--timeout` (or
   `TIMEOUT`) to be a number with a unit (`s`, `m` or `h`) and at least `360s`;

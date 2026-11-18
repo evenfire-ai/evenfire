@@ -71,6 +71,11 @@ dotenv_canonical_dir() {
 
 dotenv_canonical_root() {
   local repo_root="${1:?repository root is required}" canonical_dir
+  # Isolated local test runs may provide their own credentials without passing
+  # unrelated values from the developer's canonical .env to the test stack.
+  if [[ "${E2E_DISABLE_CANONICAL_DOTENV:-false}" == true ]]; then
+    return 0
+  fi
   canonical_dir="$(dotenv_canonical_dir "${repo_root}")"
   if [[ -f "${canonical_dir}/.env" ]]; then
     printf '%s\n' "${canonical_dir}/.env"

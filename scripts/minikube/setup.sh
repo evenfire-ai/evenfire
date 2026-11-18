@@ -22,6 +22,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY_DIR="${PROJECT_DIR}/deploy/minikube"
+# shellcheck source=deploy/scripts/lib/bootstrap-instances.sh
+source "${PROJECT_DIR}/deploy/scripts/lib/bootstrap-instances.sh"
 
 # Load .env if present (API keys, provider config, channel credentials)
 if [ -f "${PROJECT_DIR}/.env" ]; then
@@ -208,7 +210,7 @@ ok "RPC Proxy deployed"
 
 # Apply all shared CRD instances first. Host is applied again below so env
 # overrides still win over the static instance manifest.
-$KC apply -f "${DEPLOY_DIR}/instances/"
+apply_bootstrap_instances "$CONTEXT" "${DEPLOY_DIR}/instances/"
 ok "Base CRD instances applied"
 
 # Override Host CRD model from .env if present

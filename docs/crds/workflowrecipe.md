@@ -546,6 +546,8 @@ historical bytes surface as `artifact_gone`.
 reported, and Control UI points users to `status.artifacts[]` for complete
 files. Prompt interpolation such as `{{merge:output}}` receives the same kind
 of bounded preview; full reports must move through `/output` artifacts instead.
+When the coordinator already shortened the output below WRC's limit,
+`outputPreviewMaxChars` is the length of the stored preview.
 
 ### 3.1.2 Step Approval Gates (`steps[].requiresApproval`)
 
@@ -3145,7 +3147,8 @@ CLI tools (e.g., `clerum status`) SHOULD display the visible state prominently w
 
 The complete `status` property set is: `phase`, `message`, `lastTransitionTime`,
 `workloads[]`, `workflowExecution`, `steps[]`, `artifacts[]`, `workloadInstances`,
-`resourceInstances`, `pluginWorkloadSdk`, `conditions[]`. There is no
+`resourceInstances`, `terminalRunTeardown`, `secretOwnershipRevocations`,
+`pluginWorkloadSdk`, `conditions[]`. There is no
 `status.activeProfile`, no `status.resources[]`, no `status.summary`, and no
 `status.preview`.
 
@@ -3203,7 +3206,7 @@ not from status.
 | `output`, `outputTruncated`, `outputLength`, `outputPreviewMaxChars` | Bounded output preview (see §3.1.1).                                                                                                                                                                                 |
 | `modelUsed`                                                 | Model the step ran with.                                                                                                                                                                                                   |
 | `approvalBindingSha256`                                     | Set only for steps with `requiresApproval` (§3.1.2): the SHA-256 of a one-time proof the coordinator generates for that approval gate.                                                                                     |
-| `toolsCalled[]`                                             | Tool calls made by the step: `serverName` and `toolName` (required), `args`, `result`, `durationMs`. WRC stores at most the first 50 calls. An `args` or `result` value longer than 1024 serialized characters, or larger than 2048 bytes once serialized as JSON (a string is measured without its quotes, a non-record `args` value as its `{value: …}` record), is replaced by `{truncated: true, preview: "<text>"}`. The preview is the first 1024 characters, cut further on a character boundary when they serialize to more than 2048 bytes (CJK text keeps about 682 characters). An existing preview within both limits is kept as is. An oversized tool result that reports an artifact WRC accepts is sent by the coordinator as `{success: true, artifact: {…}}` with only the artifact metadata, and stored that way unless the metadata itself serializes to more than 2048 bytes (for example a long CJK name or path); then it is stored as a preview, while `status.artifacts` still lists the artifact. |
+| `toolsCalled[]`                                             | Tool calls made by the step: `serverName` and `toolName` (required), `args`, `result`, `durationMs`. WRC stores at most the first 50 calls. An `args` or `result` value longer than 1024 serialized characters, or larger than 2048 bytes once serialized as JSON (a string is measured without its quotes, a non-record `args` value as its `{value: …}` record), is replaced by `{truncated: true, preview: "<text>"}`. The preview is the first 1024 characters, cut further on a character boundary when they serialize to more than 2048 bytes (CJK text keeps about 682 characters). An existing preview within both limits is kept as is. An oversized tool result that reports an artifact WRC accepts is sent by the coordinator as `{success: true, artifact: {…}}` with only the artifact metadata, and stored that way unless the metadata itself serializes to more than 2048 bytes (for example a long CJK name or path); then it is stored as a preview, while `status.artifacts` still lists the artifact. When a step report is still over 256 KiB after `error` and `failureReason` are cut, the coordinator removes `args` and `result` from the last calls backwards, as many as the report needs; a removed `result` that reports an artifact WRC accepts is replaced by the same `{success: true, artifact: {…}}`, and a call that this would not make smaller is sent unchanged. |
 | `toolsCalledTruncated`                                      | Boolean in the schema. WRC does not set it in this release, so a list capped at 50 is not flagged.                                                                                                                         |
 
 **`status.pluginWorkloadSdk`** (written by WRC when `spec.pluginWorkloadSdk` is
@@ -3221,6 +3224,19 @@ declared; control-api reads it to know which SDK families are active):
 A matching `conditions[]` entry records the reason (for example
 `FeatureFlagDisabled`, `ProviderUnavailable`, `BootstrapNotReady`,
 `PolicyNotConfigured`).
+
+**`status.terminalRunTeardown`** and **`status.secretOwnershipRevocations`**
+(written by WRC):
+
+| Field | Description |
+| --- | --- |
+| `terminalRunTeardown.completedAt` | Date-time. Set when the terminal compute teardown of a run-scoped recipe (label `clerum.io/workflow-run-id`) completed. While it is set, WRC does not repeat that teardown. WRC removes the whole `terminalRunTeardown` object before it deploys the run again. |
+| `terminalRunTeardown.noSecretBearingWorkloads` | Boolean, written only as `true`. The terminal pass of a run whose compute teardown is recorded, and that has a workload naming a Secret (`envSecret` or `imagePullSecrets`), sets it when every such workload has been deleted, by the terminal teardown or by the Secret-denial teardown (a denied StatefulSet is kept, so it prevents the fact), and no Secret-ownership requeue or revocation record is pending. The periodic Secret-ownership recheck skips a recorded terminal run child that carries it and is not latched by a transient error; Secret key-set or ownership changes still reach the child through the Secret watcher. WRC adds it with a JSON Patch that the API server applies only while the stored `completedAt` is the one the pass holds. |
+| `secretOwnershipRevocations` | Map of workload id to a `sha256:<hex>` digest of the denied Secrets (name, namespace and `resourceVersion`) the workload was torn down for. WRC does not repeat the teardown while the denial has the stored digest. An entry is removed before WRC renders that workload, or delegates it to an McpServer, in a pass that did not deny it. A denied StatefulSet is kept: while its entry stands WRC still applies spec changes to it, without the denied refs, through its normal update, and does not delete its Pods again. |
+
+The status schema is closed. On a cluster whose installed CRD predates these two
+fields the API server prunes them; WRC then logs an error naming the CRD and
+requeues instead of treating the record as stored.
 
 ### 12.3 Printer Columns
 
