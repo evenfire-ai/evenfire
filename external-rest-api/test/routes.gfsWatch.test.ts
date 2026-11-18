@@ -646,6 +646,27 @@ describe('GFS watch through external-rest-api', () => {
       expect(redirectTargetHits).toBe(0)
     })
 
+    it('GET: a non-JSON error page at a status the contract relays is 503 watch_reopen, never relayed', async () => {
+      // The stream client wraps a non-JSON body as {error: <raw text>} instead of
+      // raising the synthetic 502 PUT gets, so on GET only the missing
+      // x-watch-error keeps a funnel page from reaching the client as a verdict.
+      const html = { 'content-type': 'text/html' }
+      const pages: Array<[string, RawUpstream]> = [
+        ['400 HTML page', { status: 400, headers: html, body: '<html>Bad Request</html>' }],
+        ['401 HTML page', { status: 401, headers: html, body: '<html>Unauthorized</html>' }],
+        ['403 HTML page', { status: 403, headers: html, body: '<html>Forbidden</html>' }],
+        ['502 HTML page', { status: 502, headers: html, body: '<html>Bad Gateway</html>' }],
+        ['503 HTML page', { status: 503, headers: html, body: '<html>Unavailable</html>' }],
+      ]
+      for (const [name, raw] of pages) {
+        scenario.raw = raw
+        const r = await call(watchUrl(), 'GET', { headers: bearer() })
+        expect(watchError(r), name).toEqual(reopen)
+        expect(r.headers['retry-after'], name).toBe('2')
+      }
+      expect(watchCalls()).toHaveLength(pages.length)
+    })
+
     it('answers 503 watch_reopen when control-api cannot be reached', async () => {
       const unreachable = await listen(() => {})
       const address = urlOf(unreachable)
@@ -775,6 +796,33 @@ describe('GFS watch through external-rest-api', () => {
       expect(sent!.method).toBe('PUT')
       expect(sent!.headers['x-forwarded-for']).toBe('203.0.113.8')
       expect(sent!.headers['x-request-id']).toBe(r.headers['x-request-id'])
+    })
+
+    it('relays the 400 bad_request control-api answers for a command over 64 keys', async () => {
+      // Relayed, the client resets the poisoned command; turned into a reopen, it
+      // would resend it on a slow loop.
+      const keys = Array.from(
+        { length: 65 },
+        (_, i) => `file:gfs://drive-a/${i.toString(16).padStart(32, '0')}`
+      )
+      const body = { ...putBody, keys }
+      const direct = await call(`${urlOf(upstream)}/external/gfs/watch`, 'PUT', {
+        headers: { 'x-user-session-token': 'test-token-u1' },
+        body,
+        record: false,
+      })
+      expect(watchError(direct)).toEqual({
+        status: 400,
+        header: 'bad_request',
+        body: { error: 'bad_request' },
+      })
+
+      resetIngress()
+      upstreamRequests.length = 0
+      const viaEdge = await call(watchUrl(), 'PUT', { headers: bearer(), body })
+      expect(watchError(viaEdge)).toEqual(watchError(direct))
+      expect(viaEdge.headers['retry-after']).toBeUndefined()
+      expect(watchCalls()).toHaveLength(1)
     })
 
     it('passes the browser mutation guard with a Bearer token even from a foreign origin', async () => {
