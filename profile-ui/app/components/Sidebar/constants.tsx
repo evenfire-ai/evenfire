@@ -1,21 +1,14 @@
 import { PROFILE_ROUTES } from '@constants/routes'
-import {
-  IconApprovalChannels,
-  IconConnectedAccounts,
-  IconHome,
-  IconMembers,
-  IconSettings,
-} from './icons'
+import { IconConnectedAccounts, IconMembers, IconSettings, IconSocialChannels } from './icons'
 import type { ProfileRouteKey, ProfileSidebarItem } from './types'
 
 export const PROFILE_SIDEBAR_ITEMS: Record<ProfileRouteKey, ProfileSidebarItem> = {
-  home: { label: 'Home', href: PROFILE_ROUTES.home, icon: <IconHome /> },
-  members: { label: 'Members', href: PROFILE_ROUTES.members.root, icon: <IconMembers /> },
-  approvalChannels: {
-    label: 'Approval Channels',
-    href: PROFILE_ROUTES.approvalChannels,
-    icon: <IconApprovalChannels />,
+  socialChannels: {
+    label: 'Social channels',
+    href: PROFILE_ROUTES.channels.root,
+    icon: <IconSocialChannels />,
   },
+  members: { label: 'Members', href: PROFILE_ROUTES.members.root, icon: <IconMembers /> },
   connectedAccounts: {
     label: 'Connected Accounts',
     href: PROFILE_ROUTES.connectedAccounts,

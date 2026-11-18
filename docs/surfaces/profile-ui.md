@@ -14,7 +14,7 @@ Surfaces](README.md) for how the three consoles divide the platform.
 1. **An invite is created** — either by an admin in the [Control
    UI](control-ui.md) (through `control-api`), or by an authenticated
    Profile UI member at `/members/invite`, which posts to `external-rest-api
-   POST /api/v1/members/invite`.
+POST /api/v1/members/invite`.
 2. **The invitation email reaches the invitee** — sent by evenfire's shared
    registration hub in [hosted
    mode](../how-to/member-invitations-self-hosted.md), or by your own
@@ -27,7 +27,7 @@ Surfaces](README.md) for how the three consoles divide the platform.
    before landing on the route below.
 3. **The invited person opens `/invitations/[token]`** — no Profile UI login
    required. The page loads the invitation preview from `external-rest-api
-   GET /api/v1/invitations/token/:token` before it renders.
+GET /api/v1/invitations/token/:token` before it renders.
 4. **They accept it**, then **set a password** on the same screen: the
    invitation token, email, invitation id, and new password all go to
    `external-rest-api POST /api/v1/invitations/password`. Acceptance issues the
@@ -35,7 +35,7 @@ Surfaces](README.md) for how the three consoles divide the platform.
    session, clears the cookie and answers with `reauthenticationRequired: true`.
    Profile UI then shows a password-updated screen with no session and a link to
    the ordinary login. Password reset (`POST
-   /api/v1/invitations/password-reset`) follows the same post-password
+/api/v1/invitations/password-reset`) follows the same post-password
    contract.
 5. **The person signs in with the new password** and lands on the profile home.
    Profile UI offers a Download Evenfire link — not an automatic handoff. The
@@ -61,13 +61,18 @@ for what breaks without it.
 
 ## Routes
 
-- `/` — password login when signed out, profile home once signed in.
-- `/settings` → `/settings/profile`, plus `/settings/social` and
-  `/settings/social/[network]` for channel linking.
+- `/` — password login when signed out; signed-in users redirect to `/channels`,
+  then `/channels/telegram`.
+- `/channels/[network]` — Social channels and provider connect/verification
+  for Telegram, Slack, and Teams.
+- `/settings` → `/settings/profile`; `/settings/approval-channels` — preferred
+  approval-channel settings.
 - `/members`, `/members/[userId]`, and `/members/invite` — team membership
   management.
-- `/approval-channels` and `/connected-accounts` — notification and
-  linked-account preferences.
+- `/connected-accounts` — linked-account preferences.
+- Legacy `/settings/social` → `/channels`, `/settings/social/[network]` →
+  `/channels/[network]`, and `/approval-channels` → `/settings/approval-channels`
+  remain compatibility redirects for existing bookmarks and delivered links.
 - `/invitations/[token]` and `/forgot-password` — reachable without a
   session.
 - `/desktop-setup` — the Desktop App handoff, above.

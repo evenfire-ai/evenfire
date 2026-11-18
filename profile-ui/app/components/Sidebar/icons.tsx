@@ -1,6 +1,6 @@
 import React from 'react'
 
-export function IconHome() {
+export function IconSocialChannels() {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -13,9 +13,11 @@ export function IconHome() {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path d="m3 10 9-7 9 7" />
-      <path d="M5 10v10h14V10" />
-      <path d="M9 20v-6h6v6" />
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <path d="m8.59 13.51 6.83 3.98" />
+      <path d="m15.41 6.51-6.82 3.98" />
     </svg>
   )
 }
@@ -55,25 +57,6 @@ export function IconSettings() {
     >
       <path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z" />
       <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.36a1.7 1.7 0 0 0-1 .15 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 3.64 15a1.7 1.7 0 0 0-1.55-1H2a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8 4.64a1.7 1.7 0 0 0 1-.15A1.7 1.7 0 0 0 10 2.94V2a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.36 8c.1.33.15.66.15 1a1.7 1.7 0 0 0 1.55 1H22a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1Z" />
-    </svg>
-  )
-}
-
-export function IconApprovalChannels() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
-      <path d="m9 12 2 2 4-4" />
     </svg>
   )
 }
