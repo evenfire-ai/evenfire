@@ -106,7 +106,7 @@ describe('HostContextLogger', () => {
       text: 'plain',
       nothing: null,
       list: [new Error('in array')],
-      token: 'token-value',
+      token: 'fake-token-value',
       loop,
     })
 
