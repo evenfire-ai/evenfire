@@ -13,6 +13,12 @@ export const PERSONAL_CONNECTOR_CONVERSATION_TYPES = {
 
 export type PrincipalDenial = 'unverified' | 'not_direct_message'
 
+/** One-line channel copy shown when personal connectors are withheld. */
+export const PRINCIPAL_DENIAL_COPY: Record<PrincipalDenial, string> = {
+  unverified: "I couldn't verify your account just now; try again in a moment",
+  not_direct_message: 'Personal connectors work in a direct message with me.',
+}
+
 type PersonalMedium = keyof typeof PERSONAL_CONNECTOR_CONVERSATION_TYPES
 
 function isPersonalMedium(channelType: string): channelType is PersonalMedium {

@@ -277,4 +277,10 @@ export interface ToolCallResult {
   connectRequired?: {
     mcpServerName: string
   }
+  /**
+   * Set only when a per-user oauth tool was called without a user identity
+   * (fail-closed branch in `manager.callTool`). Lets the registry adapter swap
+   * the raw error for channel copy chosen by the caller.
+   */
+  principalRequired?: true
 }

@@ -196,6 +196,62 @@ describe('McpToolRegistryAdapter', () => {
     expect(output.metadata).toBeUndefined()
   })
 
+  describe('principal denial copy', () => {
+    const noIdentityError =
+      'Authentication required: monday-server needs a per-user connection, but no user identity was provided'
+    const makeManager = (principalRequired: boolean) =>
+      ({
+        getAllTools: () => [
+          {
+            name: 'monday-server__list_boards',
+            description: 'List boards',
+            inputSchema: { type: 'object' },
+            serverName: 'monday-server',
+          },
+        ],
+        callTool: vi.fn(async () => ({
+          toolName: 'monday-server__list_boards',
+          result: { error: noIdentityError },
+          isError: true,
+          ...(principalRequired ? { principalRequired: true } : {}),
+        })),
+      }) as any
+
+    it.each([
+      ['unverified', "I couldn't verify your account just now; try again in a moment"],
+      ['not_direct_message', 'Personal connectors work in a direct message with me.'],
+    ] as const)('replaces the no-identity rejection with the %s copy', async (denial, copy) => {
+      const mockManager = makeManager(true)
+      const registry = new McpToolRegistryAdapter(mockManager, undefined, {
+        principalDenial: denial,
+      })
+      const output = await registry.get('monday-server__list_boards')!.execute({})
+      expect(output.content).toBe(copy)
+      expect(output.is_error).toBe(true)
+      expect(output.metadata).toBeUndefined()
+      expect(mockManager.callTool).toHaveBeenCalledWith(
+        'monday-server__list_boards',
+        {},
+        expect.objectContaining({ userId: undefined })
+      )
+    })
+
+    it('keeps the raw manager error when no denial was given (desktop path)', async () => {
+      const output = await new McpToolRegistryAdapter(makeManager(true))
+        .get('monday-server__list_boards')!
+        .execute({})
+      expect(output.content).toContain('needs a per-user connection')
+    })
+
+    it('does not touch a principalRequired-free error even with a denial set', async () => {
+      const registry = new McpToolRegistryAdapter(makeManager(false), undefined, {
+        principalDenial: 'unverified',
+      })
+      const output = await registry.get('monday-server__list_boards')!.execute({})
+      expect(output.content).toContain('needs a per-user connection')
+    })
+  })
+
   // ─── Principal binding (PR #319 C2/H1) ──────────────────────────────────────
   //
   // The userId the adapter forwards to `manager.callTool` (which becomes the

@@ -1640,6 +1640,7 @@ export class McpManager {
             error: `Authentication required: ${serverName} needs a per-user connection, but no user identity was provided`,
           },
           isError: true,
+          principalRequired: true,
         }
       }
       key = this.userKey(serverName, userId)

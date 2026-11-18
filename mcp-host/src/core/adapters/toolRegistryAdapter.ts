@@ -1,3 +1,4 @@
+import { PRINCIPAL_DENIAL_COPY, type PrincipalDenial } from '../../agent/connectorPrincipal'
 import { serverNameOf } from '../../capabilities/toolCatalogTools'
 import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
@@ -98,7 +99,8 @@ class McpToolAdapter implements Tool {
      */
     private readonly serverName: string,
     private readonly userId: string | undefined,
-    private readonly strictValidation: boolean
+    private readonly strictValidation: boolean,
+    private readonly principalDenial?: PrincipalDenial
   ) {}
 
   name() {
@@ -247,6 +249,13 @@ class McpToolAdapter implements Tool {
         ...(context?.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
         ...(context?.signal ? { signal: context.signal } : {}),
       })
+      if (result.principalRequired && this.principalDenial) {
+        return {
+          content: PRINCIPAL_DENIAL_COPY[this.principalDenial],
+          duration_ms: Date.now() - startTime,
+          is_error: true,
+        }
+      }
       const { textParts, attachments } = extractMcpContent(result.result, this.fullName)
 
       let content: string
@@ -305,7 +314,7 @@ export class McpToolRegistryAdapter implements ToolRegistry {
     private readonly userId?: string,
     // Codex bridge dispatch promises local, bounded schema validation. Other
     // providers retain their existing MCP server-side validation contract.
-    private readonly options: { strictValidation?: boolean } = {}
+    private readonly options: { strictValidation?: boolean; principalDenial?: PrincipalDenial } = {}
   ) {
     this.refresh()
   }
@@ -351,7 +360,8 @@ export class McpToolRegistryAdapter implements ToolRegistry {
           this.mcpManager,
           serverNameOf(mcpTool),
           this.userId,
-          this.options.strictValidation === true
+          this.options.strictValidation === true,
+          this.options.principalDenial
         )
       )
     }
