@@ -7,18 +7,10 @@ import {
 import type { McpHostDecisionResult } from '../src/mcpHostClient.js'
 
 const T_STALE = 'This workflow approval is no longer pending.'
-const tBusy = (seconds: number) => `The assistant is busy. Try again in ${seconds} seconds.`
 const tGen = (decision: 'approve' | 'deny') =>
   `I could not ${decision} this workflow approval. Try again in a moment.`
 const tDeny = (medium: 'slack' | 'teams') =>
   `You are not allowed to decide this workflow approval from this ${medium === 'teams' ? 'Teams' : 'Slack'} conversation.`
-
-const limited = (seconds: number): McpHostDecisionResult => ({
-  ok: false,
-  status: 429,
-  error: 'runtime_service_admission_limited',
-  retryAfterSeconds: seconds,
-})
 
 const STALE_RESULTS: McpHostDecisionResult[] = [
   { ok: false, status: 409, error: 'approval_not_pending' },
@@ -35,6 +27,15 @@ const OTHER_FAILURES: McpHostDecisionResult[] = [
   { ok: false, status: 429, error: 'runtime_service_admission_limited' },
   { ok: false, status: 400, error: 'invalid_reader_decision_command' },
 ]
+
+// The refusal an older MCP Host sent, in the shape the reader once read it:
+// status 429, its error code and the Host's wait. It is a generic failure now.
+const olderHostAdmissionRefusal = {
+  ok: false,
+  status: 429,
+  error: 'runtime_service_admission_limited',
+  retryAfterSeconds: 7,
+}
 
 const DENIALS: McpHostDecisionResult[] = [
   { ok: false, status: 403, error: 'cross_bot_mismatch' },
@@ -72,9 +73,9 @@ const rows: Row[] = [
     }),
   },
   {
-    row: 'refused by the Host admission limit',
-    input: { decision: 'approve', result: limited(7) },
-    expected: () => notice(tBusy(7)),
+    row: 'an older Host admission refusal (429 with a wait) is a generic failure',
+    input: { decision: 'approve', result: olderHostAdmissionRefusal },
+    expected: () => notice(tGen('approve')),
   },
   ...STALE_RESULTS.map(result => ({
     row: `no longer pending ${result.status} ${result.error}`,
@@ -104,7 +105,7 @@ describe('planDecisionFeedback', () => {
   }
 
   it('rewrites the approval message only for a recorded decision or a stale approval', () => {
-    const notShared = [...OTHER_FAILURES, ...DENIALS, limited(9)]
+    const notShared = [...OTHER_FAILURES, ...DENIALS]
     let notices = 0
     let shared = 0
     for (const medium of ['slack', 'teams'] as const) {

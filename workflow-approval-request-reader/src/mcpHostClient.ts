@@ -1,21 +1,17 @@
 import type { ReaderConfig } from './config.js'
 import { canApprove, resolveCommunicationChannelRef } from './controlApiClient.js'
 import type { ReaderDecisionCommand, ReaderEnrollmentCommand } from './decisionHandler.js'
-import { HOST_ADMISSION_LIMITED_ERROR } from './hostAdmission.js'
 import { fetchWithTimeout, timeoutErrorName } from './httpTimeout.js'
 import { readerLogger } from './logger.js'
 import { targetForProviderHostRef, targetsForDecision } from './mcpHostTargets.js'
 
 const log = readerLogger.child({ module: 'mcp-host-client' })
-const HOST_ADMISSION_RETRY_AFTER_MAX_SECONDS = 60
 
 export type McpHostDecisionResult = {
   ok: boolean
   status?: number
   duplicate?: boolean
   error?: string
-  /** Set only for the Host's admission refusal (429): its wait, 1 to 60 s. */
-  retryAfterSeconds?: number
 }
 
 export type McpHostEnrollmentResult = {
@@ -23,33 +19,6 @@ export type McpHostEnrollmentResult = {
   status?: number
   error?: string
   account?: unknown
-  /** Set only for the Host's admission refusal (429): its wait, 1 to 60 s. */
-  retryAfterSeconds?: number
-}
-
-/**
- * The Host's wait when it refused the request with its direct-service
- * admission limit: status 429, body error `runtime_service_admission_limited`,
- * and a `Retry-After` header that is an integer from 1 to 60 equal to the
- * body's `retryAfterSeconds`. Any other answer yields undefined. Same check
- * as channel-reader's directServiceAdmissionRetryAfter.
- */
-function hostAdmissionRefusalRetryAfter(
-  response: Response,
-  body: { error?: unknown; retryAfterSeconds?: unknown }
-): number | undefined {
-  if (response.status !== 429 || body.error !== HOST_ADMISSION_LIMITED_ERROR) return undefined
-  const header = response.headers.get('retry-after')
-  if (!header || !/^(?:0|[1-9]\d{0,2})$/.test(header)) return undefined
-  const seconds = Number(header)
-  if (
-    !Number.isSafeInteger(seconds) ||
-    seconds < 1 ||
-    seconds > HOST_ADMISSION_RETRY_AFTER_MAX_SECONDS
-  ) {
-    return undefined
-  }
-  return body.retryAfterSeconds === seconds ? seconds : undefined
 }
 
 function providerIdentity(command: ReaderDecisionCommand): Record<string, unknown> {
@@ -180,25 +149,6 @@ export async function submitMcpHostDecision(
       success?: boolean
       duplicate?: boolean
       error?: string
-      retryAfterSeconds?: unknown
-    }
-    const retryAfterSeconds = hostAdmissionRefusalRetryAfter(response, body)
-    if (retryAfterSeconds !== undefined) {
-      log.warn('mcp-host admission limit refused the decision', {
-        medium: command.medium,
-        approvalRequestId,
-        providerEventId: command.providerEventId,
-        mcpHostRef: target.hostRef,
-        retryAfterSeconds,
-      })
-      lastFailure = {
-        ok: false,
-        status: 429,
-        error: HOST_ADMISSION_LIMITED_ERROR,
-        retryAfterSeconds,
-      }
-      if (routed.explicit) return lastFailure
-      continue
     }
     if (!response.ok || body.success === false) {
       lastFailure = {
@@ -265,15 +215,6 @@ export async function submitMcpHostEnrollment(
   }
 
   const body = (await response.json().catch(() => ({}))) as McpHostEnrollmentResult
-  const retryAfterSeconds = hostAdmissionRefusalRetryAfter(response, body)
-  if (retryAfterSeconds !== undefined) {
-    log.warn('mcp-host admission limit refused the enrollment', {
-      medium: command.medium,
-      mcpHostRef: target.hostRef,
-      retryAfterSeconds,
-    })
-    return { ok: false, status: 429, error: HOST_ADMISSION_LIMITED_ERROR, retryAfterSeconds }
-  }
   if (!response.ok || body.ok === false) {
     return {
       ok: false,

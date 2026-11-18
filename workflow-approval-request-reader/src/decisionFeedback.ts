@@ -1,4 +1,3 @@
-import { hostAdmissionRetryAfter } from './hostAdmission.js'
 import type { McpHostDecisionResult } from './mcpHostClient.js'
 
 /**
@@ -29,10 +28,6 @@ export function decisionRecordedText(decision: 'approve' | 'deny'): string {
   return `${decision === 'deny' ? 'Denied' : 'Approved'}. Workflow approval recorded.`
 }
 
-export function assistantBusyText(retryAfterSeconds: number): string {
-  return `The assistant is busy. Try again in ${retryAfterSeconds} seconds.`
-}
-
 /**
  * A stale answer is keyed by the error code, whatever the status: the Host
  * relays control-api's refusal as 409, and the can-approve consult answers 403.
@@ -50,8 +45,6 @@ function decisionFailureText(
     const conversation = medium === 'teams' ? 'Teams' : 'Slack'
     return `You are not allowed to decide this workflow approval from this ${conversation} conversation.`
   }
-  const retryAfterSeconds = hostAdmissionRetryAfter(result)
-  if (retryAfterSeconds !== undefined) return assistantBusyText(retryAfterSeconds)
   return `I could not ${decision} this workflow approval. Try again in a moment.`
 }
 

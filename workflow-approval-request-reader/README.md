@@ -53,9 +53,8 @@ submitted in the background, once. The original message is updated when the
 decision is recorded, or when the click finds the approval no longer pending.
 Any other result is sent as a separate message, placed per the channel's
 reply-in-threads setting (Slack and Teams), through control-api's target proxy
-endpoints, and the original message keeps its buttons. When the MCP Host
-refuses the decision with its admission limit (`429`), that message gives the
-Host's wait; the reader does not send the decision again.
+endpoints, and the original message keeps its buttons. A decision is submitted
+once; the reader does not send it again.
 
 ## Configuration
 
