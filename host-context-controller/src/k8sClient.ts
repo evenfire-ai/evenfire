@@ -2961,8 +2961,10 @@ export class McpServerWatcher implements McpServerProvider {
    * routed at the next authority gain, whose recovery decision then requests a
    * full convergence; an ADDED is held apart and replayed after that recovery
    * decision, so it cannot change it. A queued job that an authority change
-   * drops dispatches an ADDED again for its own server only
-   * (`redispatchSecretAddition`), never for the whole Secret.
+   * drops dispatches an ADDED again (`redispatchSecretAddition`): for its own
+   * server only while the inventory is authoritative, otherwise held for the
+   * Secret and replayed, after the recovery decision, to every server that
+   * references it.
    */
   async reconcileByEnvSecret(
     secretName: string,
@@ -3012,8 +3014,10 @@ export class McpServerWatcher implements McpServerProvider {
   /**
    * Dispatch a dropped ADDED again for the one server whose job dropped it.
    * Every other server the event selected has its own queued job, which
-   * re-dispatches itself if it is dropped too, so the Secret is not fanned out
-   * again. The job re-checks that the server still references the Secret.
+   * re-dispatches itself if it is dropped too. The job re-checks that the
+   * server still references the Secret. While the inventory is not
+   * authoritative the ADDED is held for the Secret instead, and its replay
+   * after the recovery decision selects every server that references it.
    */
   private async redispatchSecretAddition(
     serverName: string,
@@ -3048,8 +3052,9 @@ export class McpServerWatcher implements McpServerProvider {
       if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) {
         // A MODIFIED or DELETED recorded its evidence at the event; the
         // recovery that restores authority sees it and requests a full
-        // convergence. An ADDED recorded nothing and is dispatched again, for
-        // this server only.
+        // convergence. An ADDED recorded nothing and is dispatched again: for
+        // this server only once authority holds, or held for the Secret and
+        // replayed to every server that references it while it does not.
         hccLogger.warn(
           '[K8s] Secret-triggered reconcile dropped: McpServer inventory authority changed',
           { event: 'secret-reconcile-dropped', serverName: server.name, eventType }
