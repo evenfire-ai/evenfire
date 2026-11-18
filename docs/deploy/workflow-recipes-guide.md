@@ -928,6 +928,10 @@ kubectl -n sandbox-recipes get networkpolicies
 
 **Full setup**:
 
+The deploy targets require a branch-owned Minikube profile and its mutation
+lease. Set `MINIKUBE_PROFILE` to the verified branch profile before running
+the commands below.
+
 ```bash
 make minikube-gen-keys          # Generate RSA-4096 keys (WRC signing + JWT)
 make minikube-apply-secrets     # Apply secrets + configmaps

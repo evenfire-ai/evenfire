@@ -56,7 +56,7 @@ describe('llmCatalogSyncFakeDb · strict recognition', () => {
       db
         .pool('t')
         .query(
-          `UPDATE llm_allowed_models SET source = $1 WHERE id = $2 RETURNING id, provider, model, vendor, display_name, context_window_tokens, enabled, source, discovered_at, last_seen_at, stale, image_input, created_at, updated_at`,
+          `UPDATE llm_allowed_models SET source = $1 WHERE id = $2 RETURNING id, provider, model, vendor, display_name, context_window_tokens, enabled, source, discovered_at, last_seen_at, stale, auto_disabled_at, image_input, created_at, updated_at`,
           ['manual', id]
         )
     ).rejects.toThrow(/unrecognized SET item/)
