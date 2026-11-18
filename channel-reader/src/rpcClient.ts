@@ -62,6 +62,11 @@ export interface MessageResponse {
     requestId: string
     userId: string
     notification: string
+    /**
+     * Present and false when this card cannot store a lasting grant. Absent
+     * means the card may. The Host is the authority; channel buttons follow it.
+     */
+    alwaysApproveAllowed?: false
   }
 }
 

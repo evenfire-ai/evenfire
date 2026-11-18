@@ -836,11 +836,20 @@ export async function handleApprovalRoute(
       }
     }
 
+    // Persistent consent must be an explicit boolean: a truthy string such as
+    // "false" must never turn into an exact-name allowlist entry. A denial
+    // ignores the field, so it is never rejected over it.
+    const alwaysApprove = approved ? (parsed.alwaysApprove ?? false) : false
+    if (typeof alwaysApprove !== 'boolean') {
+      badRequest(res, 'alwaysApprove must be a boolean')
+      return
+    }
+
     const decision: ApprovalDecision = {
       userId,
       requestId: validatedRequestId,
       approved,
-      alwaysApprove: approved ? (parsed.alwaysApprove as boolean) || false : false,
+      alwaysApprove: approved && alwaysApprove,
       channelType,
       channelId,
     }
