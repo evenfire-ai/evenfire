@@ -47,6 +47,9 @@ import {
   resolveScopedStatefulSetResourceName,
   resolveScopedWorkloadResourceName,
   resolveWorkloadRuntimeResourceName,
+  uiIngressPolicyName,
+  workloadEgressPolicyName,
+  workloadIngressPolicyName,
 } from './resourceBuilder'
 import { deniedSecretRevocationDigest } from './secretOwnership'
 import {
@@ -57,6 +60,28 @@ import {
 } from './workflowRecipeReconciler'
 
 // ─── Mock K8s client ────────────────────────────────────────────────
+
+/**
+ * Issue #1529 — the objects the list doubles answer with, by
+ * `<namespace>/<kind>`. A list answers with them without applying its label
+ * selector, so the reconciler's own per-object check decides. Emptied before
+ * every test.
+ */
+const listedObjects = new Map<string, Array<Record<string, unknown>>>()
+
+function seedListedObjects(
+  namespace: string,
+  kind: string,
+  objects: Array<Record<string, unknown>>
+): void {
+  listedObjects.set(`${namespace}/${kind}`, objects)
+}
+
+function listAnswer(kind: string) {
+  return async ({ namespace }: { namespace: string }) => ({
+    items: structuredClone(listedObjects.get(`${namespace}/${kind}`) ?? []),
+  })
+}
 
 const mockAppsApi = {
   createNamespacedDeployment: vi.fn().mockResolvedValue({}),
@@ -72,6 +97,9 @@ const mockAppsApi = {
   readNamespacedDaemonSet: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
   replaceNamespacedDaemonSet: vi.fn().mockResolvedValue({}),
   deleteNamespacedDaemonSet: vi.fn().mockResolvedValue({}),
+  listNamespacedDeployment: vi.fn().mockResolvedValue({ items: [] }),
+  listNamespacedStatefulSet: vi.fn().mockResolvedValue({ items: [] }),
+  listNamespacedDaemonSet: vi.fn().mockResolvedValue({ items: [] }),
 }
 
 const mockBatchApi = {
@@ -83,6 +111,8 @@ const mockBatchApi = {
   readNamespacedJob: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
   replaceNamespacedJob: vi.fn().mockResolvedValue({}),
   deleteNamespacedJob: vi.fn().mockResolvedValue({}),
+  listNamespacedCronJob: vi.fn().mockResolvedValue({ items: [] }),
+  listNamespacedJob: vi.fn().mockResolvedValue({ items: [] }),
 }
 
 const mockCoreApi = {
@@ -93,6 +123,7 @@ const mockCoreApi = {
   replaceNamespacedService: vi.fn().mockResolvedValue({}),
   deleteNamespacedService: vi.fn().mockResolvedValue({}),
   deleteCollectionNamespacedService: vi.fn().mockResolvedValue({}),
+  listNamespacedService: vi.fn().mockResolvedValue({ items: [] }),
   createNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
   readNamespacedPersistentVolumeClaim: vi.fn().mockRejectedValue({ code: 404 }),
   deleteNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
@@ -118,8 +149,8 @@ async function echoPatchedStatus({
 
 /**
  * Status merge of the CR-store fakes: top-level keys replace, as before; the
- * issue #1349 run records merge by key as a JSON merge patch does, and a null
- * (top-level or per key) deletes.
+ * issue #1349 run records and the workload name ledger (issue #1529) merge by
+ * key as a JSON merge patch does, and a null (top-level or per key) deletes.
  */
 function mergeStatusPatch(
   previous: WorkflowRecipeCRD['status'],
@@ -127,7 +158,11 @@ function mergeStatusPatch(
 ): WorkflowRecipeCRD['status'] {
   const previousStatus = (previous ?? {}) as Record<string, unknown>
   const nextStatus: Record<string, unknown> = { ...previousStatus, ...patch }
-  for (const recordKey of ['terminalRunTeardown', 'secretOwnershipRevocations']) {
+  for (const recordKey of [
+    'terminalRunTeardown',
+    'secretOwnershipRevocations',
+    'workloadInstances',
+  ]) {
     const patched = patch?.[recordKey]
     if (patched === undefined || patched === null) continue
     const merged: Record<string, unknown> = {
@@ -849,6 +884,20 @@ describe('WorkflowRecipeReconciler', () => {
     mockNetworkingApi.deleteNamespacedNetworkPolicy.mockResolvedValue({})
     mockNetworkingApi.listNamespacedNetworkPolicy.mockReset()
     mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+    // Issue #1529 — the lists of the removed-workload prune answer from
+    // `listedObjects`; no test starts with a seeded object.
+    listedObjects.clear()
+    mockAppsApi.listNamespacedDeployment.mockReset().mockImplementation(listAnswer('Deployment'))
+    mockAppsApi.listNamespacedStatefulSet.mockReset().mockImplementation(listAnswer('StatefulSet'))
+    mockAppsApi.listNamespacedDaemonSet.mockReset().mockImplementation(listAnswer('DaemonSet'))
+    mockBatchApi.listNamespacedCronJob.mockReset().mockImplementation(listAnswer('CronJob'))
+    mockBatchApi.listNamespacedJob.mockReset().mockImplementation(listAnswer('Job'))
+    mockCoreApi.listNamespacedService.mockReset().mockImplementation(listAnswer('Service'))
+    mockCustomApi.listNamespacedCustomObject
+      .mockReset()
+      .mockImplementation(async (args: { namespace: string; plural?: string }) =>
+        args.plural === 'mcpservers' ? listAnswer('McpServer')(args) : { items: [] }
+      )
     const kc = new k8s.KubeConfig()
     reconciler = new WorkflowRecipeReconciler(kc, undefined, {
       verifyWorkflowRunProvenance: mockVerifyWorkflowRunProvenance,
@@ -15115,6 +15164,689 @@ describe('WorkflowRecipeReconciler', () => {
         db: dbDenialDigest(),
       })
       expect(deploymentDeletes('db')).toBe(0)
+    })
+
+    // ─── Issue #1529 — objects of a workload removed from the spec ───────────
+
+    const PRUNE_SELECTOR = 'clerum.io/managed-by=workflow-recipes,clerum.io/recipe=test-recipe'
+    const WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet', 'CronJob', 'Job', 'Service']
+    /** The (namespace, kind) pairs a pruning pass lists, sorted. */
+    const PRUNE_LIST_PAIRS = [
+      ...WORKLOAD_KINDS.flatMap(kind => [`sandbox-recipes/${kind}`, `mcp-server/${kind}`]),
+      'mcp-server/McpServer',
+      'sandbox-ui/Deployment',
+      'sandbox-ui/Service',
+    ].sort()
+
+    /**
+     * The list calls of the prune as `<namespace>/<kind>`, sorted. Each carries
+     * the recipe's selector. No other step of a pass lists these kinds.
+     */
+    function pruneLists(): string[] {
+      type ListArg = { namespace: string; labelSelector?: string; plural?: string }
+      const byKind: Array<[string, ReturnType<typeof vi.fn>]> = [
+        ['Deployment', mockAppsApi.listNamespacedDeployment],
+        ['StatefulSet', mockAppsApi.listNamespacedStatefulSet],
+        ['DaemonSet', mockAppsApi.listNamespacedDaemonSet],
+        ['CronJob', mockBatchApi.listNamespacedCronJob],
+        ['Job', mockBatchApi.listNamespacedJob],
+        ['Service', mockCoreApi.listNamespacedService],
+      ]
+      const calls: Array<[string, ListArg]> = byKind.flatMap(([kind, mock]) =>
+        mock.mock.calls.map(([arg]) => [kind, arg as ListArg] as [string, ListArg])
+      )
+      for (const [arg] of mockCustomApi.listNamespacedCustomObject.mock.calls) {
+        if ((arg as ListArg).plural === 'mcpservers') calls.push(['McpServer', arg as ListArg])
+      }
+      for (const [, arg] of calls) expect(arg.labelSelector).toBe(PRUNE_SELECTOR)
+      return calls.map(([kind, arg]) => `${arg.namespace}/${kind}`).sort()
+    }
+
+    /**
+     * Delete requests of the pass for the kinds a workload renders, as
+     * `<kind>:<namespace>/<name>`. NetworkPolicies are left out: other steps of
+     * every pass delete policies too (T-1529-NP checks the per-workload ones).
+     */
+    function objectDeletes(): string[] {
+      type DeleteArg = { namespace: string; name: string; plural?: string }
+      const byKind: Array<[string, ReturnType<typeof vi.fn>]> = [
+        ['Deployment', mockAppsApi.deleteNamespacedDeployment],
+        ['StatefulSet', mockAppsApi.deleteNamespacedStatefulSet],
+        ['DaemonSet', mockAppsApi.deleteNamespacedDaemonSet],
+        ['CronJob', mockBatchApi.deleteNamespacedCronJob],
+        ['Job', mockBatchApi.deleteNamespacedJob],
+        ['Service', mockCoreApi.deleteNamespacedService],
+        ['CustomObject', mockCustomApi.deleteNamespacedCustomObject],
+      ]
+      return byKind.flatMap(([kind, mock]) =>
+        mock.mock.calls.map(([arg]) => {
+          const { namespace, name, plural } = arg as DeleteArg
+          return `${plural === 'mcpservers' ? 'McpServer' : kind}:${namespace}/${name}`
+        })
+      )
+    }
+
+    /** Status patch bodies that remove keys of the workload name ledger. */
+    function ledgerRemovals(): Array<Record<string, unknown>> {
+      return mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls
+        .map(([arg]) => arg.body)
+        .filter(
+          (body): body is Record<string, unknown> =>
+            !Array.isArray(body) &&
+            Object.values((body?.status?.workloadInstances ?? {}) as Record<string, unknown>).some(
+              value => value === null
+            )
+        )
+    }
+
+    /** An object as WRC renders it for `workloadId`, as a list answers with it. */
+    function listedObject(
+      kind: string,
+      name: string,
+      workloadId: string | undefined,
+      options: {
+        namespace?: string
+        labels?: Record<string, string | undefined>
+        ownerUid?: string | null
+        spec?: Record<string, unknown>
+      } = {}
+    ): Record<string, unknown> {
+      const labels: Record<string, string> = {}
+      for (const [key, value] of Object.entries({
+        'clerum.io/managed-by': 'workflow-recipes',
+        'clerum.io/recipe': 'test-recipe',
+        'clerum.io/workload': workloadId,
+        ...options.labels,
+      })) {
+        if (value !== undefined) labels[key] = value
+      }
+      return {
+        kind,
+        metadata: {
+          name,
+          namespace: options.namespace ?? 'sandbox-recipes',
+          labels,
+          ...(options.ownerUid === null
+            ? {}
+            : {
+                ownerReferences: [
+                  {
+                    apiVersion: 'clerum.io/v1alpha1',
+                    kind: 'WorkflowRecipe',
+                    name: 'test-recipe',
+                    uid: options.ownerUid ?? 'uid-123',
+                    controller: true,
+                  },
+                ],
+              }),
+        },
+        ...(options.spec ? { spec: options.spec } : {}),
+      }
+    }
+
+    const instanceName = (id: string) => `test-recipe-${id}-0001`
+    const ledger = (ids: string[]) => Object.fromEntries(ids.map(id => [id, instanceName(id)]))
+    const plainDeployment = (id: string): WorkloadDef =>
+      ({ id, type: 'deployment', image: `${id}:test`, port: 8080 }) as WorkloadDef
+
+    function prunePassRecipe(
+      path: 'non-workflow' | 'workflow',
+      workloads: WorkloadDef[],
+      ledgerIds: string[]
+    ): WorkflowRecipeCRD {
+      return path === 'workflow'
+        ? runChild(workloads, { phase: 'candidate', workloadInstances: ledger(ledgerIds) })
+        : makeRecipe({
+            spec: { workloads },
+            status: {
+              phase: 'approved',
+              workloadInstances: ledger(ledgerIds),
+            } as unknown as WorkflowRecipeCRD['status'],
+          })
+    }
+
+    /** Seeds, in sandbox-recipes, the Deployment and the Service of each id. */
+    function seedDeploymentsAndServices(ids: string[]): void {
+      seedListedObjects(
+        'sandbox-recipes',
+        'Deployment',
+        ids.map(id => listedObject('Deployment', instanceName(id), id))
+      )
+      seedListedObjects(
+        'sandbox-recipes',
+        'Service',
+        ids.map(id => listedObject('Service', instanceName(id), id))
+      )
+    }
+
+    /** Reads of the Deployment of `workloadId`, as the render makes them. */
+    const deploymentReadsOf = (workloadId: string) =>
+      mockAppsApi.readNamespacedDeployment.mock.calls.filter(
+        ([arg]) => arg.name === instanceName(workloadId)
+      ).length
+
+    for (const path of ['non-workflow', 'workflow'] as const) {
+      it(`T-1529-1 the ${path} deploy pass deletes the Deployment and the Service of a workload removed from the spec and clears its ledger key`, async () => {
+        if (path === 'workflow') stubInner()
+        const store = installRecipeStore(
+          prunePassRecipe(path, [plainDeployment('api')], ['api', 'old'])
+        )
+        seedDeploymentsAndServices(['api', 'old'])
+        const passObject = store.current()
+
+        await reconciler.reconcile(passObject)
+
+        // Witness: every (namespace, kind) pair was listed once, and the
+        // answers held the objects of `api` too.
+        expect(pruneLists()).toEqual(PRUNE_LIST_PAIRS)
+        expect(objectDeletes()).toEqual([
+          `Deployment:sandbox-recipes/${instanceName('old')}`,
+          `Service:sandbox-recipes/${instanceName('old')}`,
+        ])
+        expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+        expect(passObject.status?.workloadInstances).toEqual(ledger(['api']))
+        expect(ledgerRemovals()).toEqual([{ status: { workloadInstances: { old: null } } }])
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-1529-6 the ${path} deploy pass after a prune lists nothing and deletes nothing`, async () => {
+        if (path === 'workflow') stubInner()
+        const store = installRecipeStore(
+          prunePassRecipe(path, [plainDeployment('api')], ['api', 'old'])
+        )
+        seedDeploymentsAndServices(['api', 'old'])
+        await reconciler.reconcile(store.current())
+        expect(objectDeletes()).toHaveLength(2)
+        vi.clearAllMocks()
+        const getsBefore = recipeGets()
+        const apiReadsBefore = deploymentReadsOf('api')
+
+        await reconciler.reconcile(store.current())
+
+        expect(pruneLists()).toEqual([])
+        expect(objectDeletes()).toEqual([])
+        expect(ledgerRemovals()).toEqual([])
+        // Witnesses: the second pass made its single deploy-pass read and
+        // reached the render of `api`.
+        expect(recipeGets() - getsBefore).toBe(3)
+        expect(deploymentReadsOf('api') - apiReadsBefore).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-1529-GEN the ${path} deploy pass on an older generation lists and deletes nothing`, async () => {
+        if (path === 'workflow') stubInner()
+        const stored = prunePassRecipe(
+          path,
+          [plainDeployment('api'), plainDeployment('late')],
+          ['api', 'late']
+        )
+        stored.metadata.generation = 2
+        const store = installRecipeStore(stored)
+        seedDeploymentsAndServices(['api', 'late'])
+        const passObject = store.current()
+        passObject.metadata.generation = 1
+        passObject.spec.workloads = [plainDeployment('api')]
+        const getsBefore = recipeGets()
+
+        await reconciler.reconcile(passObject)
+
+        expect(pruneLists()).toEqual([])
+        expect(objectDeletes()).toEqual([])
+        expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'late']))
+        // Witnesses: the single read happened and `api` was rendered.
+        expect(recipeGets() - getsBefore).toBe(3)
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-1529-FAIL the ${path} deploy pass revokes a denied workload, then requeues before rendering when a delete of a removed object fails`, async () => {
+        const inner = path === 'workflow' ? stubInner() : undefined
+        classifySecrets({ 'qa-creds': '7' })
+        const store = installRecipeStore(
+          prunePassRecipe(
+            path,
+            [plainDeployment('api'), deniedDeployment('qa', 'qa-creds')],
+            ['api', 'qa', 'old']
+          )
+        )
+        seedDeploymentsAndServices(['old'])
+        let failOldDelete = true
+        mockAppsApi.deleteNamespacedDeployment.mockImplementation(
+          async ({ name }: { name: string }) => {
+            if (failOldDelete && name === instanceName('old')) throw { code: 403 }
+            return {}
+          }
+        )
+
+        const result = await reconciler.reconcile(store.current())
+
+        // Witness for the negatives: both deletes of the removed objects were sent.
+        expect(objectDeletes()).toEqual(
+          expect.arrayContaining([
+            `Deployment:sandbox-recipes/${instanceName('old')}`,
+            `Service:sandbox-recipes/${instanceName('old')}`,
+          ])
+        )
+        // The revocation round ran before the prune.
+        expect(deploymentDeletes('qa')).toBe(1)
+        expect(store.current().status?.secretOwnershipRevocations?.qa).toMatch(
+          /^sha256:[0-9a-f]{64}$/
+        )
+        expect(deploymentRenders('api')).toBe(0)
+        expect(ledgerRemovals()).toEqual([])
+        expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'qa', 'old']))
+        expect(result.phase).toBe('degraded')
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(result.message).toMatch(/^Objects of workload\(s\) old removed from WorkflowRecipe/)
+        if (inner) expect(inner.reconcile).not.toHaveBeenCalled()
+
+        // Pass 2 on the stored object: the delete succeeds.
+        failOldDelete = false
+        await reconciler.reconcile(store.current())
+
+        expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'qa']))
+        expect(deploymentDeletes('qa')).toBe(1)
+        expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+      })
+
+      it(`T-ORD-1 the ${path} deploy pass clears, revokes, prunes and clears the ledger key, in that order, before it renders`, async () => {
+        if (path === 'workflow') stubInner()
+        classifySecrets({ 'db-creds': '7' }, { 'own-creds': '9' })
+        // `db`'s entry is the digest of its denial at version 6; the pass object
+        // carries it too, so the round sees a new Secret version.
+        const previousDbDigest = deniedSecretRevocationDigest(
+          ['db-creds'],
+          new Map([['db-creds', { state: 'denied', versions: ['sandbox-recipes/6'] }]])
+        )
+        const store = installRecipeStore(
+          withRevocations(
+            prunePassRecipe(
+              path,
+              [deniedDeployment('api', 'own-creds'), deniedDeployment('db', 'db-creds')],
+              ['api', 'db', 'old']
+            ),
+            { api: STORED_DIGEST, db: previousDbDigest }
+          )
+        )
+        seedListedObjects('sandbox-recipes', 'Deployment', [
+          listedObject('Deployment', instanceName('old'), 'old'),
+        ])
+
+        await reconciler.reconcile(store.current())
+
+        // (a)
+        const stored = store.current().status
+        expect(stored?.secretOwnershipRevocations?.db).toMatch(/^sha256:[0-9a-f]{64}$/)
+        expect(stored?.secretOwnershipRevocations?.db).not.toBe(previousDbDigest)
+        expect(stored?.secretOwnershipRevocations).not.toHaveProperty('api')
+        expect(stored?.workloadInstances).toEqual(ledger(['api', 'db']))
+
+        // (b) The call order, from the mocks' invocation order.
+        type StatusBody = {
+          status?: {
+            secretOwnershipRevocations?: Record<string, unknown>
+            workloadInstances?: Record<string, unknown>
+          }
+        }
+        const statusCalls = mockCustomApi.patchNamespacedCustomObjectStatus.mock
+        const orderOfStatus = (matches: (body: StatusBody) => boolean) => {
+          const index = statusCalls.calls.findIndex(([arg]) => matches(arg.body ?? {}))
+          expect(index).toBeGreaterThanOrEqual(0)
+          return statusCalls.invocationCallOrder[index]
+        }
+        const orderOfDelete = (name: string) => {
+          const index = mockAppsApi.deleteNamespacedDeployment.mock.calls.findIndex(
+            ([arg]) => arg.name === name
+          )
+          expect(index).toBeGreaterThanOrEqual(0)
+          return mockAppsApi.deleteNamespacedDeployment.mock.invocationCallOrder[index]
+        }
+        const clear = orderOfStatus(body => body.status?.secretOwnershipRevocations?.api === null)
+        expect(revocationRemovals()).toEqual([{ api: null }])
+        const clearBody = statusCalls.calls.find(
+          ([arg]) => arg.body?.status?.secretOwnershipRevocations?.api === null
+        )![0].body
+        expect(clearBody).toEqual({ status: { secretOwnershipRevocations: { api: null } } })
+        const dbDelete = orderOfDelete(instanceName('db'))
+        const dbRecord = orderOfStatus(body =>
+          /^sha256:/.test(String(body.status?.secretOwnershipRevocations?.db ?? ''))
+        )
+        const oldDelete = orderOfDelete(instanceName('old'))
+        const ledgerPatch = orderOfStatus(body => body.status?.workloadInstances?.old === null)
+        const firstApiWrite = Math.min(
+          ...[
+            mockAppsApi.createNamespacedDeployment,
+            mockAppsApi.replaceNamespacedDeployment,
+          ].flatMap(mock =>
+            mock.mock.calls
+              .map(([arg], index) =>
+                arg.body?.metadata?.labels?.['clerum.io/workload'] === 'api'
+                  ? mock.mock.invocationCallOrder[index]
+                  : undefined
+              )
+              .filter((order): order is number => order !== undefined)
+          )
+        )
+        expect([clear, dbDelete, dbRecord, oldDelete, ledgerPatch, firstApiWrite]).toEqual(
+          [clear, dbDelete, dbRecord, oldDelete, ledgerPatch, firstApiWrite].sort((a, b) => a - b)
+        )
+        expect(Number.isFinite(firstApiWrite)).toBe(true)
+      })
+    }
+
+    it('T-1529-2 a non-workflow pass deletes every kind of object of removed workloads in its own namespace and keeps the claims', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe(
+          'non-workflow',
+          [plainDeployment('api')],
+          ['api', 'db', 'cron', 'batch', 'agent', 'mcp', 'ui']
+        )
+      )
+      seedListedObjects('sandbox-recipes', 'StatefulSet', [
+        listedObject('StatefulSet', instanceName('db'), 'db', { ownerUid: null }),
+      ])
+      seedListedObjects('sandbox-recipes', 'Service', [
+        listedObject('Service', 'db-custom-headless', 'db', { ownerUid: null }),
+      ])
+      seedListedObjects('sandbox-recipes', 'CronJob', [
+        listedObject('CronJob', instanceName('cron'), 'cron'),
+      ])
+      seedListedObjects('sandbox-recipes', 'Job', [
+        listedObject('Job', instanceName('batch'), 'batch'),
+      ])
+      seedListedObjects('sandbox-recipes', 'DaemonSet', [
+        listedObject('DaemonSet', instanceName('agent'), 'agent'),
+      ])
+      seedListedObjects('mcp-server', 'Deployment', [
+        listedObject('Deployment', instanceName('mcp'), 'mcp', {
+          namespace: 'mcp-server',
+          ownerUid: null,
+        }),
+      ])
+      seedListedObjects('mcp-server', 'McpServer', [
+        listedObject('McpServer', 'test-recipe-mcp', 'mcp', {
+          namespace: 'mcp-server',
+          ownerUid: null,
+        }),
+      ])
+      seedListedObjects('mcp-server', 'Service', [
+        listedObject('Service', 'test-recipe-mcp', 'mcp', {
+          namespace: 'mcp-server',
+          ownerUid: null,
+        }),
+      ])
+      seedListedObjects('sandbox-ui', 'Deployment', [
+        listedObject('Deployment', instanceName('ui'), 'ui', {
+          namespace: 'sandbox-ui',
+          ownerUid: null,
+        }),
+      ])
+      seedListedObjects('sandbox-ui', 'Service', [
+        listedObject('Service', instanceName('ui'), 'ui', {
+          namespace: 'sandbox-ui',
+          ownerUid: null,
+        }),
+      ])
+
+      await reconciler.reconcile(store.current())
+
+      expect(objectDeletes().sort()).toEqual(
+        [
+          `StatefulSet:sandbox-recipes/${instanceName('db')}`,
+          'Service:sandbox-recipes/db-custom-headless',
+          `CronJob:sandbox-recipes/${instanceName('cron')}`,
+          `Job:sandbox-recipes/${instanceName('batch')}`,
+          `DaemonSet:sandbox-recipes/${instanceName('agent')}`,
+          `Deployment:mcp-server/${instanceName('mcp')}`,
+          'McpServer:mcp-server/test-recipe-mcp',
+          'Service:mcp-server/test-recipe-mcp',
+          `Deployment:sandbox-ui/${instanceName('ui')}`,
+          `Service:sandbox-ui/${instanceName('ui')}`,
+        ].sort()
+      )
+      expect(mockBatchApi.deleteNamespacedCronJob).toHaveBeenCalledWith(
+        expect.objectContaining({ propagationPolicy: 'Background' })
+      )
+      expect(mockBatchApi.deleteNamespacedJob).toHaveBeenCalledWith(
+        expect.objectContaining({ propagationPolicy: 'Background' })
+      )
+      // Witness for the claims: the StatefulSet itself was deleted.
+      expect(mockAppsApi.deleteNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+      expect(mockCoreApi.deleteNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+      // Witness for the next negative: the ten deletes above went out by name.
+      // The prune sends no collection delete.
+      expect(mockCoreApi.deleteCollectionNamespacedService).not.toHaveBeenCalled()
+      expect(mockCoreApi.deleteCollectionNamespacedPod).not.toHaveBeenCalled()
+      expect(mockCustomApi.deleteCollectionNamespacedCustomObject).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.deleteCollectionNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+    })
+
+    it('T-1529-3 a non-workflow pass deletes only the objects of a removed workload of this recipe incarnation', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+      seedListedObjects('sandbox-recipes', 'Deployment', [
+        listedObject('Deployment', 'a-other-recipe', 'old', {
+          labels: { 'clerum.io/recipe': 'other-recipe' },
+        }),
+        listedObject('Deployment', 'b-other-incarnation', 'old', { ownerUid: 'uid-previous' }),
+        listedObject('Deployment', 'c-hcc', 'old', {
+          labels: { 'clerum.io/managed-by': 'host-context-controller' },
+        }),
+        listedObject('Deployment', 'd-no-workload-label', undefined),
+        listedObject('Deployment', 'e-rendered-workload', 'api'),
+        listedObject('Deployment', instanceName('old'), 'old'),
+      ])
+      const warnLog = captureLogger('warn')
+
+      await reconciler.reconcile(store.current())
+      warnLog.mockRestore()
+
+      // Witness: the one removed object of the same answer was deleted.
+      expect(objectDeletes()).toEqual([`Deployment:sandbox-recipes/${instanceName('old')}`])
+      expect(warnLog).toHaveBeenCalledWith(
+        expect.stringContaining('another WorkflowRecipe'),
+        expect.objectContaining({ value2: 'b-other-incarnation' })
+      )
+    })
+
+    it('T-1529-4 a non-workflow pass with nothing left to delete clears the ledger key with one patch', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+
+      await reconciler.reconcile(store.current())
+
+      // Witness: the lists were called.
+      expect(pruneLists()).toEqual(PRUNE_LIST_PAIRS)
+      expect(objectDeletes()).toEqual([])
+      expect(ledgerRemovals()).toEqual([{ status: { workloadInstances: { old: null } } }])
+      expect(revocationPatches()).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+    })
+
+    it('T-1529-LIST-FAIL a non-workflow pass whose list of a removed kind fails requeues and keeps the ledger key', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+      seedDeploymentsAndServices(['old'])
+      mockCoreApi.listNamespacedService.mockImplementation(
+        async ({ namespace }: { namespace: string }) => {
+          if (namespace === 'sandbox-recipes') throw { code: 500 }
+          return { items: [] }
+        }
+      )
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness for the negatives: the prune ran and deleted what it could list.
+      expect(objectDeletes()).toEqual([`Deployment:sandbox-recipes/${instanceName('old')}`])
+      expect(ledgerRemovals()).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'old']))
+      expect(deploymentRenders('api')).toBe(0)
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.message).toMatch(/^Objects of workload\(s\) old removed from WorkflowRecipe/)
+    })
+
+    it('T-1529-5 a non-workflow pass whose ledger equals the rendered ids lists nothing', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api'])
+      )
+      const getsBefore = recipeGets()
+
+      await reconciler.reconcile(store.current())
+
+      expect(pruneLists()).toEqual([])
+      expect(objectDeletes()).toEqual([])
+      expect(ledgerRemovals()).toEqual([])
+      // Witnesses: the single read happened and `api` was rendered.
+      expect(recipeGets() - getsBefore).toBe(3)
+      expect(deploymentRenders('api')).toBeGreaterThanOrEqual(1)
+    })
+
+    it('T-1529-NP a non-workflow pass deletes the per-workload NetworkPolicies of a removed workload with their preconditions', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+      const policyNamesOf = (id: string) => [
+        workloadEgressPolicyName('test-recipe', id),
+        workloadIngressPolicyName('test-recipe', id),
+        uiIngressPolicyName('test-recipe', id),
+      ]
+      const policyNames = policyNamesOf('old')
+      // `api`'s policies exist too. The render of `api` later in the pass may
+      // delete them (it contracts the policies of a workload without bindings);
+      // the prune, which runs before the ledger patch, must not.
+      const keptPolicyNames = policyNamesOf('api')
+      const fallback = mockNetworkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        async (arg: { name: string; namespace: string }) =>
+          policyNames.includes(arg.name) || keptPolicyNames.includes(arg.name)
+            ? {
+                metadata: {
+                  name: arg.name,
+                  namespace: arg.namespace,
+                  uid: `uid-${arg.name}`,
+                  resourceVersion: '5',
+                  labels: {
+                    'clerum.io/managed-by': 'workflow-recipes',
+                    'clerum.io/recipe': 'test-recipe',
+                    'clerum.io/workload': policyNames.includes(arg.name) ? 'old' : 'api',
+                  },
+                },
+                spec: { podSelector: {}, policyTypes: ['Egress'] },
+              }
+            : fallback(arg)
+      )
+
+      await reconciler.reconcile(store.current())
+
+      const deleteMock = mockNetworkingApi.deleteNamespacedNetworkPolicy.mock
+      const policyDeletes = deleteMock.calls.map(([arg]) => arg as { name: string })
+      expect(policyDeletes.filter(arg => policyNames.includes(arg.name))).toEqual(
+        policyNames.map(name => ({
+          name,
+          namespace: 'sandbox-recipes',
+          body: { preconditions: { uid: `uid-${name}`, resourceVersion: '5' } },
+        }))
+      )
+      const statusCalls = mockCustomApi.patchNamespacedCustomObjectStatus.mock
+      const ledgerPatchIndex = statusCalls.calls.findIndex(
+        ([arg]) => arg.body?.status?.workloadInstances?.old === null
+      )
+      expect(ledgerPatchIndex).toBeGreaterThanOrEqual(0)
+      const ledgerPatch = statusCalls.invocationCallOrder[ledgerPatchIndex]
+      const deletedBeforeLedgerPatch = policyDeletes
+        .filter((_, index) => deleteMock.invocationCallOrder[index] < ledgerPatch)
+        .map(arg => arg.name)
+      // Witness: the prune's deletes of `old`'s policies precede the ledger patch.
+      expect(deletedBeforeLedgerPatch).toEqual(expect.arrayContaining(policyNames))
+      // The prune deleted no policy of `api`.
+      expect(deletedBeforeLedgerPatch.filter(name => keptPolicyNames.includes(name))).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+    })
+
+    it('T-1529-INC a non-workflow pass deletes the objects of a deployed workload that includeWhen now excludes', async () => {
+      const recipe = prunePassRecipe(
+        'non-workflow',
+        [
+          plainDeployment('api'),
+          { ...plainDeployment('opt'), includeWhen: '{{inputs.optEnabled}}' } as WorkloadDef,
+        ],
+        ['api', 'opt']
+      )
+      recipe.spec.inputs = { optEnabled: false }
+      const store = installRecipeStore(recipe)
+      seedDeploymentsAndServices(['api', 'opt'])
+
+      await reconciler.reconcile(store.current())
+
+      expect(objectDeletes()).toEqual([
+        `Deployment:sandbox-recipes/${instanceName('opt')}`,
+        `Service:sandbox-recipes/${instanceName('opt')}`,
+      ])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
+    })
+
+    it('T-1529-RET a non-workflow pass does not delete a removed StatefulSet whose claims would be deleted with it, and requeues', async () => {
+      const store = installRecipeStore(
+        prunePassRecipe('non-workflow', [plainDeployment('api')], ['api', 'db', 'old'])
+      )
+      seedListedObjects('sandbox-recipes', 'StatefulSet', [
+        listedObject('StatefulSet', instanceName('db'), 'db', {
+          spec: { persistentVolumeClaimRetentionPolicy: { whenDeleted: 'Delete' } },
+        }),
+      ])
+      seedListedObjects('sandbox-recipes', 'Deployment', [
+        listedObject('Deployment', instanceName('old'), 'old'),
+      ])
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness: the other removed object of the same pass was deleted.
+      expect(objectDeletes()).toEqual([`Deployment:sandbox-recipes/${instanceName('old')}`])
+      expect(mockAppsApi.deleteNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.message).toContain(`StatefulSet "${instanceName('db')}"`)
+      expect(result.message).toContain('whenDeleted: Delete')
+      expect(ledgerRemovals()).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'db', 'old']))
+    })
+
+    it('T-1529-LEDGER-FAIL a workflow pass whose ledger patch fails requeues, keeps the key, and the next pass clears it', async () => {
+      const inner = stubInner()
+      const store = installRecipeStore(
+        prunePassRecipe('workflow', [plainDeployment('api')], ['api', 'old'])
+      )
+      seedDeploymentsAndServices(['old'])
+      const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+      let failLedgerPatch = true
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async (arg, ...rest) => {
+        if (failLedgerPatch && arg.body?.status?.workloadInstances?.old === null) {
+          throw { code: 503 }
+        }
+        return storePatch(arg, ...rest)
+      })
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness: the prune deleted both objects, then the ledger patch was sent.
+      expect(objectDeletes()).toHaveLength(2)
+      expect(ledgerRemovals()).toHaveLength(1)
+      expect(result.phase).toBe('degraded')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(inner.reconcile).not.toHaveBeenCalled()
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api', 'old']))
+
+      failLedgerPatch = false
+      vi.clearAllMocks()
+      listedObjects.clear()
+      await reconciler.reconcile(store.current())
+
+      expect(pruneLists()).toEqual(PRUNE_LIST_PAIRS)
+      expect(objectDeletes()).toEqual([])
+      expect(store.current().status?.workloadInstances).toEqual(ledger(['api']))
     })
   })
 

@@ -684,6 +684,28 @@ workloads:
     # PVCs do NOT have ownerReferences (data retention on recipe deletion)
 ```
 
+**Removing a workload.** When a workload leaves `spec.workloads`, or a
+steps-less recipe's `includeWhen` excludes a workload that was deployed, the
+next deploy pass on the stored generation deletes the objects WRC created for
+it: the workload object, its Services (including a headless Service with a
+custom `serviceName`), its McpServer and transport Service, and its
+`wl-egress-*`, `wl-ingress-*` and `ui-ingress-*` NetworkPolicies. It then
+removes the workload's key from `status.workloadInstances`. The pass finds the
+workloads to delete from that map, and the objects by the labels
+`clerum.io/managed-by=workflow-recipes`, `clerum.io/recipe` and
+`clerum.io/workload`; an object whose WorkflowRecipe ownerReference names
+another uid is left to the garbage collector. PersistentVolumeClaims of a
+StatefulSet's claim templates are kept, so a workload added back under the
+same id mounts them again. A StatefulSet whose
+`persistentVolumeClaimRetentionPolicy.whenDeleted` is `Delete` is not deleted:
+the recipe stays `degraded` and requeues, naming it, until an operator changes
+the policy or deletes it. Any other failed delete also requeues before the
+pass delegates or renders anything. A steps-based recipe prunes only on passes
+that reach its workload deployment (first deploy, `deploying` requeues,
+recovery, the Plugin Workload SDK fall-throughs); a steady recipe does not.
+No pass prunes a recipe whose last workload was removed, or a steps-less
+recipe whose `includeWhen` conditions exclude every workload.
+
 ### 3.3 Resource Schema
 
 Each entry in `resources[]`. The schema carries Kubernetes-shaped fields (`storageClass`, `accessMode`, `size`, `data`) with their usual meaning — see the [Kubernetes documentation](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) — plus the Clerum-specific `generateKeys`. There is **no** `stringData` field; it is pruned.
@@ -863,7 +885,10 @@ the offending workload, tears down any prior instance, and marks the recipe
 `NotReady` with an `EnvSecretOwnershipDenied` condition naming the Secret and the
 label to add. The credential is never injected into the workload's runtime.
 On every deploy pass, every denied workload is revoked before any workload is
-delegated or rendered, and a failed revocation does not stop the others.
+delegated or rendered, and a failed revocation does not stop the others. Right
+after the revocation, and still before any delegation or render, the pass
+deletes the objects of workloads removed from the spec (§3.2, "Removing a
+workload").
 
 A denied StatefulSet is kept (its PVCs hold data) and re-rendered without the
 denied refs. When its immutable fields differ from the desired ones, the
@@ -3194,7 +3219,9 @@ status:
 
   artifacts: []
 
-  # Maps of recipe id -> materialized Kubernetes object name
+  # Maps of recipe id -> materialized Kubernetes object name. A workloadInstances
+  # key is removed after the objects of a workload the recipe no longer renders
+  # were deleted (§3.2, "Removing a workload").
   workloadInstances:
     mcp-server: knowledge-base-mcp-server
   resourceInstances:

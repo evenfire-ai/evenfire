@@ -114,6 +114,7 @@ import {
   DelegationDeps,
   cleanupDelegation,
   delegateTransportWorkloads,
+  deleteRemovedWorkloadMcpServers,
   deleteTransportDelegation,
   externalEgressMcpServerNames,
   mcpServerName,
@@ -849,6 +850,45 @@ function workloadIdsNoLongerRendered(
       id => !rendered.has(id)
     ),
   }
+}
+
+/**
+ * Issue #1529 — whether the prune may delete `object`, listed with the
+ * recipe's selector. The labels are checked again here, not left to the
+ * selector: WRC created the object (`managed-by`), for this recipe, for one of
+ * the removed workloads. An object whose WorkflowRecipe ownerReference names
+ * another uid belongs to another incarnation of this recipe; it is not
+ * deleted, and the garbage collector removes it with its owner.
+ */
+function isPrunableObjectOf(
+  recipe: WorkflowRecipeCRD,
+  removedIds: ReadonlySet<string>,
+  object: k8s.KubernetesObject
+): boolean {
+  // An object with no labels fails every label test below.
+  const labels = object.metadata?.labels ?? {}
+  if (labels['clerum.io/managed-by'] !== 'workflow-recipes') return false
+  if (labels['clerum.io/recipe'] !== recipe.metadata.name) return false
+  const workloadId = labels['clerum.io/workload']
+  if (workloadId === undefined || !removedIds.has(workloadId)) return false
+  // No ownerReferences: no WorkflowRecipe owner that could name another uid
+  // (objects outside the recipe's namespace never carry one).
+  const ownedByAnotherRecipe = (object.metadata?.ownerReferences ?? []).some(
+    reference => reference.kind === 'WorkflowRecipe' && reference.uid !== recipe.metadata.uid
+  )
+  if (ownedByAnotherRecipe) {
+    createLogger('wrc', recipe.metadata.name).warn(
+      'Not deleting an object of a removed workload that another WorkflowRecipe owns; ' +
+        'the garbage collector removes it',
+      {
+        name: recipe.metadata.name,
+        value2: object.metadata?.name,
+        value3: object.metadata?.namespace,
+      }
+    )
+    return false
+  }
+  return true
 }
 
 function throwNetworkPolicyMutationError(error: unknown, name: string, namespace: string): never {
@@ -3328,6 +3368,17 @@ export class WorkflowRecipeReconciler {
       // workload's teardown failed. A record that was not stored requeues the pass.
       const secretRevocationRecordPending = !revocationRound.revocationRecordStored
 
+      // Issue #1529 — delete the objects of the workloads the pass no longer
+      // renders (removed from the spec, or excluded by includeWhen), then remove
+      // their keys from the workload name ledger. Runs after the revocation
+      // round, so a prune that keeps failing never delays a revocation. The two
+      // touch disjoint workloads: the round only denied ids still in the spec.
+      // A failure requeues before anything is delegated or rendered.
+      if (noLongerRendered) {
+        await this.pruneRemovedWorkloadObjects(recipe, noLongerRendered.instances)
+        await this.clearRemovedWorkloadInstanceKeys(recipe, noLongerRendered.instances)
+      }
+
       // Step 7b: Pre-deploy McpServer CRDs for network isolation (Option C handshake)
       // Creates McpServer CRDs with clerum.io/pre-deploy annotation BEFORE workload
       // resources, so HCC can apply NetworkPolicies proactively. This closes the
@@ -4229,10 +4280,14 @@ export class WorkflowRecipeReconciler {
   // workflow recipe. Steps in the workflow connect to these MCP servers by URL,
   // so they must exist before the coordinator executes. Non-fatal: errors are
   // logged but do not abort workflow execution — the coordinator will surface
-  // a "Failed to connect" error if a server is unreachable. Two exceptions end
-  // the pass: a StatefulSet that fails to render, and a denied workload whose
-  // revocation fails. Every denied workload is revoked first, before MCP
-  // pre-deploy, and a failed revocation does not stop the others.
+  // a "Failed to connect" error if a server is unreachable. The steps that
+  // throw instead end the pass; among them a StatefulSet that fails to render,
+  // a denied workload whose revocation fails, and (issue #1529) an object of a
+  // removed workload that could not be deleted or its ledger key that could
+  // not be removed. Order: Secret revocation clear, revocation of every denied
+  // workload (a failed revocation does not stop the others), deletion of the
+  // objects of workloads removed from the spec and of their ledger keys, then
+  // MCP pre-deploy and render.
 
   private async deployWorkflowWorkloads(
     recipe: WorkflowRecipeCRD,
@@ -4337,6 +4392,15 @@ export class WorkflowRecipeReconciler {
     // caller keeps this pass's result and requeues, and the next pass repeats
     // the revocation round.
     const secretRevocationRecordPending = !revocationRound.revocationRecordStored
+
+    // Issue #1529 — delete the objects of the workloads removed from the spec,
+    // then remove their keys from the workload name ledger. Runs after the
+    // revocation round (disjoint workloads: the round only denied ids still in
+    // the spec). A failure requeues before anything is delegated or rendered.
+    if (noLongerRendered) {
+      await this.pruneRemovedWorkloadObjects(recipe, noLongerRendered.instances)
+      await this.clearRemovedWorkloadInstanceKeys(recipe, noLongerRendered.instances)
+    }
 
     // Pre-deploy McpServer CRDs for network isolation.
     // MCP batch targets `this.config.namespace` (= mcp-server), not the
@@ -4935,6 +4999,233 @@ export class WorkflowRecipeReconciler {
     }
     const inMemory = recipe.status?.secretOwnershipRevocations
     if (inMemory) for (const id of [...rendered, ...removed]) delete inMemory[id]
+  }
+
+  /**
+   * Issue #1529 — delete the objects of the workloads in `removedIds`: ids the
+   * stored `status.workloadInstances` names and the pass, on the stored
+   * generation, does not render (`noLongerRendered.instances`, see
+   * {@link workloadIdsNoLongerRendered}). Returns at once, with no API call,
+   * when the list is empty.
+   *
+   * Lists, with `clerum.io/managed-by=workflow-recipes,clerum.io/recipe=<name>`,
+   * the kinds WRC can create in each of its namespaces: Deployment, StatefulSet,
+   * DaemonSet, CronJob, Job and Service in the sandbox and MCP namespaces,
+   * McpServer in the MCP namespace, Deployment and Service in the UI namespace.
+   * Each listed object is checked by {@link isPrunableObjectOf}. Deletes, in
+   * this order: McpServers, workload objects (through `deleteWorkload`, so Job
+   * and CronJob keep the `Background` propagation), Services, then the three
+   * per-workload NetworkPolicies of each removed id through the existing
+   * helpers, which refuse to delete a policy WRC does not own for this recipe.
+   *
+   * PersistentVolumeClaims are never deleted. A StatefulSet whose live
+   * `persistentVolumeClaimRetentionPolicy.whenDeleted` is `Delete` would take
+   * its claims with it, so it is not deleted, and the pass requeues naming it
+   * until an operator changes the policy or deletes the object.
+   *
+   * Every list and delete is attempted; a 404 counts as deleted. Any other
+   * error, or a StatefulSet kept for its claims, throws one
+   * `RetryableReconcileError` after the loop, so the pass requeues before it
+   * delegates or renders anything and the caller does not clear the ledger
+   * keys.
+   */
+  private async pruneRemovedWorkloadObjects(
+    recipe: WorkflowRecipeCRD,
+    removedIds: readonly string[]
+  ): Promise<void> {
+    if (removedIds.length === 0) return
+    const recipeName = recipe.metadata.name
+    const removed = new Set(removedIds)
+    const isPrunable = (object: k8s.KubernetesObject) => isPrunableObjectOf(recipe, removed, object)
+    const labelSelector = `clerum.io/managed-by=workflow-recipes,clerum.io/recipe=${recipeName}`
+    const errors: unknown[] = []
+    const retained: string[] = []
+    // Every step runs even when an earlier one failed. No error is dropped:
+    // each one is logged here and collected, and the first one is thrown after
+    // the loop as the cause of the RetryableReconcileError below.
+    const attempt = async (step: () => Promise<void>): Promise<void> => {
+      try {
+        await step()
+      } catch (error) {
+        createLogger('wrc', recipeName).error('A step of the removed-workload prune failed', {
+          name: recipeName,
+          err: error,
+        })
+        errors.push(error)
+      }
+    }
+
+    // 1. McpServers (HCC removes the Deployment it manages for each).
+    await attempt(() =>
+      deleteRemovedWorkloadMcpServers(
+        this.delegationDeps,
+        recipe,
+        removed,
+        this.config.namespace,
+        isPrunable
+      )
+    )
+
+    // 2. List the workload kinds and Services in each namespace WRC writes them to.
+    type ObjectList = { items?: k8s.KubernetesObject[] }
+    const workloadNamespaces = new Set([this.config.sandboxNamespace, this.config.namespace])
+    const uiNamespaces = new Set([...workloadNamespaces, this.config.sandboxUiNamespace])
+    const listers: Array<{
+      kind: 'deployment' | 'statefulset' | 'daemonset' | 'cronjob' | 'job' | 'service'
+      namespaces: ReadonlySet<string>
+      list: (namespace: string) => Promise<ObjectList>
+    }> = [
+      {
+        kind: 'deployment',
+        namespaces: uiNamespaces,
+        list: namespace => this.appsApi.listNamespacedDeployment({ namespace, labelSelector }),
+      },
+      {
+        kind: 'statefulset',
+        namespaces: workloadNamespaces,
+        list: namespace => this.appsApi.listNamespacedStatefulSet({ namespace, labelSelector }),
+      },
+      {
+        kind: 'daemonset',
+        namespaces: workloadNamespaces,
+        list: namespace => this.appsApi.listNamespacedDaemonSet({ namespace, labelSelector }),
+      },
+      {
+        kind: 'cronjob',
+        namespaces: workloadNamespaces,
+        list: namespace => this.batchApi.listNamespacedCronJob({ namespace, labelSelector }),
+      },
+      {
+        kind: 'job',
+        namespaces: workloadNamespaces,
+        list: namespace => this.batchApi.listNamespacedJob({ namespace, labelSelector }),
+      },
+      {
+        kind: 'service',
+        namespaces: uiNamespaces,
+        list: namespace => this.coreApi.listNamespacedService({ namespace, labelSelector }),
+      },
+    ]
+    const prunable: Array<{
+      kind: (typeof listers)[number]['kind']
+      name: string
+      namespace: string
+      object: k8s.KubernetesObject
+    }> = []
+    for (const lister of listers) {
+      for (const namespace of lister.namespaces) {
+        await attempt(async () => {
+          const list = await lister.list(namespace)
+          // A list response without `items` holds no object.
+          for (const object of list.items ?? []) {
+            const name = object.metadata?.name
+            if (name && isPrunable(object))
+              prunable.push({ kind: lister.kind, name, namespace, object })
+          }
+        })
+      }
+    }
+
+    // 3. Workload objects, then Services.
+    for (const { kind, name, namespace, object } of prunable) {
+      if (kind === 'service') continue
+      if (
+        kind === 'statefulset' &&
+        (object as k8s.V1StatefulSet).spec?.persistentVolumeClaimRetentionPolicy?.whenDeleted ===
+          'Delete'
+      ) {
+        retained.push(
+          `StatefulSet "${name}" in ${namespace} has persistentVolumeClaimRetentionPolicy.whenDeleted: ` +
+            'Delete; deleting it would delete its PersistentVolumeClaims'
+        )
+        continue
+      }
+      await attempt(() => this.deleteWorkload(kind, name, namespace, { throwOnError: true }))
+    }
+    for (const { kind, name, namespace } of prunable) {
+      if (kind !== 'service') continue
+      await attempt(() =>
+        this.deleteOrThrow(
+          () => this.coreApi.deleteNamespacedService({ name, namespace }),
+          `Service "${name}"`
+        )
+      )
+    }
+
+    // 4. The per-workload NetworkPolicies, which exist only in the sandbox namespace.
+    const policyNamespace = this.config.sandboxNamespace
+    for (const id of removedIds) {
+      await attempt(() => this.deleteWorkloadEgressIfExists(recipeName, id, policyNamespace))
+      await attempt(() => this.deleteWorkloadIngressIfExists(recipeName, id, policyNamespace))
+      await attempt(() => this.deleteUiIngressIfExists(recipeName, id, policyNamespace))
+    }
+
+    if (errors.length === 0 && retained.length === 0) {
+      createLogger('wrc', recipeName).info('Deleted the objects of removed workloads', {
+        name: recipeName,
+        value2: removedIds.join(', '),
+      })
+      return
+    }
+    if (retained.length > 0) {
+      createLogger('wrc', recipeName).error('Kept a StatefulSet of a removed workload', {
+        name: recipeName,
+        value2: retained.join('; '),
+      })
+    }
+    throw new RetryableReconcileError(
+      `Objects of workload(s) ${removedIds.join(', ')} removed from WorkflowRecipe ` +
+        `"${recipeName}" could not be deleted` +
+        (retained.length > 0 ? ` (${retained.join('; ')})` : '') +
+        ' — requeuing before delegating or rendering workloads',
+      errors.length > 0 ? { cause: errors[0] } : undefined
+    )
+  }
+
+  /**
+   * Issue #1529 — remove the keys of `removedIds` from the stored
+   * `status.workloadInstances` (merge patch, `null` per key), then from the
+   * in-memory map, so a later whole-map write from this object
+   * (`assignWorkloadInstances` when it names a new id) does not add them back.
+   * Called only after {@link pruneRemovedWorkloadObjects} returned: a key
+   * stays while an object of its workload may still exist, and the next pass
+   * prunes again. A failed patch requeues the pass before anything is
+   * delegated or rendered; the deleted objects stay deleted and the next pass
+   * lists, finds nothing and sends the patch again.
+   */
+  private async clearRemovedWorkloadInstanceKeys(
+    recipe: WorkflowRecipeCRD,
+    removedIds: readonly string[]
+  ): Promise<void> {
+    if (removedIds.length === 0) return
+    try {
+      await this.customApi.patchNamespacedCustomObjectStatus(
+        {
+          group: CRD_GROUP,
+          version: CRD_VERSION,
+          namespace: recipe.metadata.namespace,
+          plural: WORKFLOWRECIPE_PLURAL,
+          name: recipe.metadata.name,
+          body: {
+            status: { workloadInstances: Object.fromEntries(removedIds.map(id => [id, null])) },
+          },
+        },
+        { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+      )
+    } catch (error) {
+      throw new RetryableReconcileError(
+        `Workload names of removed workload(s) ${removedIds.join(', ')} of WorkflowRecipe ` +
+          `"${recipe.metadata.name}" could not be removed from status.workloadInstances — ` +
+          'requeuing before delegating or rendering workloads',
+        { cause: error }
+      )
+    }
+    createLogger('wrc', recipe.metadata.name).info('Removed workload names of removed workloads', {
+      name: recipe.metadata.name,
+      value2: removedIds.join(', '),
+    })
+    const inMemory = recipe.status?.workloadInstances
+    if (inMemory) for (const id of removedIds) delete inMemory[id]
   }
 
   /**

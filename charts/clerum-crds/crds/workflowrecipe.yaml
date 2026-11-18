@@ -2200,6 +2200,8 @@ spec:
                   description: >-
                     Mapping of workload ID to K8s resource name (UUID-based).
                     Assigned on first deploy, persisted for lifecycle consistency.
+                    A key is removed after the objects of a workload the recipe
+                    no longer renders were deleted.
                     Example: { "web-search": "my-recipe-a1b2c3d4" }
                 resourceInstances:
                   type: object
