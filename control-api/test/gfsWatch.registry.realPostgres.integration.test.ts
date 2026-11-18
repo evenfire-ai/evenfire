@@ -226,6 +226,32 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     )
   })
 
+  it('delivers a file created under a watched directory to the directory key', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const dir = await h.tree.add('directory')
+    const { socket } = await ready(user, [h.key('dir', dir)])
+    await h.tree.add('file', dir)
+    await h.barrier()
+    b.clock.advance(250)
+    await b.settle()
+    expect(socket.framesOf('changed').map(f => f.keys)).toEqual([[h.key('dir', dir)]])
+  })
+
+  it('delivers a file moved into a watched directory to the directory key, not to its old one', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const from = await h.tree.add('directory')
+    const into = await h.tree.add('directory')
+    const f = await h.tree.add('file', from)
+    const { socket } = await ready(user, [h.key('dir', into)])
+    await h.tree.move(f, into)
+    await h.barrier()
+    b.clock.advance(250)
+    await b.settle()
+    expect(socket.framesOf('changed').map(f2 => f2.keys)).toEqual([[h.key('dir', into)]])
+  })
+
   it('defers a key whose ancestor moves while the open runs its ancestry query (T-SB8, T-SB18)', async () => {
     b = await h.build()
     const user = await h.createUser()
