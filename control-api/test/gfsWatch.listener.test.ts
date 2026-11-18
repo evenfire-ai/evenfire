@@ -405,6 +405,35 @@ describe('T-SB33 events of a superseded client', () => {
     }
     expect(t.resetWindows).not.toHaveBeenCalled()
   })
+
+  it('a reconnect in progress is neither pinged nor torn down by echo checks that see the last echo long gone', async () => {
+    const t = setup({ autoConnect: false })
+    t.listener.startGfsWatchRegistry()
+    t.clients[0]!.connectResult!.resolve()
+    await flushMicrotasks()
+    expect(t.listener.state.listenerReady).toBe(true)
+    t.clients[0]!.echo = false
+    // No echo since 0 s: the check at 25 s declares the loss, and the
+    // reconnection starts c2 at 26 s, still connecting.
+    await t.clock.advanceAsync(26_000)
+    expect(t.resetWindows).toHaveBeenCalledTimes(1)
+    const c2 = t.clients[1]!
+    expect(t.listener.state.listenerClient).toBe(c2)
+    expect(t.listener.state.listenerReady).toBe(false)
+    // The checks at 30 s and 35 s see more than 20 s without an echo, but
+    // the attempt in progress is not theirs to judge: tConnect bounds it.
+    await t.clock.advanceAsync(9_000)
+    expect(t.resetWindows).toHaveBeenCalledTimes(1)
+    expect(t.listener.state.listenerClient).toBe(c2)
+    expect(c2.ended).toBe(0)
+    // Nor pinged at 30 s: an echo of a ping sent before the LISTEN would
+    // prove nothing about it.
+    expect(c2.queries).toEqual([])
+    c2.connectResult!.resolve()
+    await flushMicrotasks()
+    expect(t.listener.state.listenerReady).toBe(true)
+    expect(t.clients).toHaveLength(2)
+  })
 })
 
 describe('stopGfsWatchRegistry', () => {
