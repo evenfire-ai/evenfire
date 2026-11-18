@@ -16,9 +16,9 @@ import {
 } from '../src/gfs/externalGfsRead.js'
 
 // Error envelopes are serialized by gfsc's own `toResponse`, the function its
-// server uses for every failure. The 403 with `reason: 'principal_denied'`
-// is the envelope gfsc produces for that GfsError; gfsc does not raise it on
-// a principal denial yet.
+// server uses for every failure. gfsc raises the 403 with
+// `reason: 'principal_denied'` when it denies the token's principal itself
+// (for example a stale auth generation), as opposed to a resource-level 403.
 
 const RID = '0123456789abcdef0123456789abcdef'
 const REQUEST_ID = '6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b'
@@ -162,7 +162,7 @@ describe('readGfsc', () => {
   })
 
   it('flags principalDenied only for a 403 that carries that reason', async () => {
-    expect(await readWith(new GfsError('forbidden', 'principal', 'principal_denied'))).toEqual({
+    expect(await readWith(GfsError.forbidden('principal', 'principal_denied'))).toEqual({
       status: 403,
       principalDenied: true,
       responded: true,
