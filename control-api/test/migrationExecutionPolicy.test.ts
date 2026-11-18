@@ -46,10 +46,12 @@ const FRESH_TABLE_INDEXES = Object.freeze([
 const USER_ACCESS_FOUNDATION_VERSION = '0137_user_access_foundation'
 
 describe('D34 migration execution policy', () => {
-  it('classifies the runner migrations that follow the dev batch', () => {
+  it('classifies the post-dev migrations that follow the dev batch', () => {
     expect(PR1_MIGRATION_VERSIONS).toEqual([
       '0137_user_access_foundation',
       '0138_legacy_password_security_epoch_backfill',
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
       '0139_gfs_resource_changed_notify',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
@@ -544,6 +546,8 @@ describe('PR1 earlier-head guard', () => {
     // 0138 is recorded through its alias; the versions after it apply normally.
     expect(recorded).toEqual([
       '0138_legacy_password_security_epoch_backfill',
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
       '0139_gfs_resource_changed_notify',
     ])
   })

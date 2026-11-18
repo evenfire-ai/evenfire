@@ -45,9 +45,13 @@
  * may over-report a same-named model under a different provider (added operator
  * friction, never silent breakage), which is the fail-safe trade-off.
  *
- * ONE module, TWO callers (regla D4): the `?force` gate on PUT/DELETE
- * (`routes/admin/llmModels.ts`) and, later, `GET /admin/attention` (Fase 5).
- * Neither reconstructs the impact — both call `computeModelImpact`.
+ * The only enumeration of these references. Called directly by the `?force`
+ * gate on PUT/DELETE (`gatedReduce` in `routes/admin/llmModels.ts`), and through
+ * `computeModelConsumers` (`llmModelConsumers.ts`, which adds the implicit Host
+ * offers on top) by the attention feed (`GET /admin/attention`,
+ * `llmAttention.ts`) and the catalog prune (`llmCatalogPrune.ts`). None of them
+ * reconstructs the impact, so the gate, the feed and the prune cannot disagree
+ * on who uses a model.
  */
 import type { DbClient } from '../db.js'
 import {

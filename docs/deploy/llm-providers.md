@@ -139,7 +139,47 @@ unusable and is flagged in the wizard.
 **Discovery review.** `/llm-models` (Catalog) and `/llm-models/discovery`
 (Discovery Review) are two tabs of the same screen. Models that disappear from
 the latest live catalog stay in Catalog with a **Stale** marker and a
-per-provider stale count.
+per-provider stale count. Only a live, plausible run marks a model stale, and
+any live run that lists the model again clears the marker (on a model the
+prune turned off, only the re-enable clears it); a `vendored` run leaves it as
+it is.
+
+**Pruning stale models nobody uses.** After each live, plausible run commits,
+the sync disables the models that have been stale for longer than
+`LLM_CATALOG_PRUNE_STALE_GRACE_MS` (default 7 days, counted from when the model
+first went stale; at least 1 hour, at most 10 years) and that nobody uses: no Host names them
+(`spec.model`, `allowedModels`, fallbacks), no grant names them
+(`allowed_models` or a prompt target), no WorkflowRecipe names them, and no Host
+without a model subset of the same provider offers them. It only touches rows
+the sync itself enabled (catalog-managed). A row becomes operator-managed, and
+the sync never prunes or re-enables it again, when an operator changes its
+`enabled`, renames it, or sends `enabled` together with `"pinEnabled": true`
+(`PUT /admin/llm-models/:id`). With the pin the PUT applies the `enabled` it
+sends, whether or not it differs from the current value, and fixes the row to
+the operator; `pinEnabled` without `enabled` is rejected. At most `LLM_CATALOG_PRUNE_MAX_PER_RUN` models (default 50, 1–1000) are
+disabled per run; the rest wait for the next run. The cap is per run, not
+per interval. Scheduled and boot runs never overlap each other, but manual
+syncs (`POST /admin/llm-models/discovery/sync`) are not serialized: each one
+that overlaps another manual sync or a scheduled or boot run, on any replica,
+can disable up to the cap, never a model another run already disabled. This matters most one grace
+period after the upgrade that adds the prune, when every model already stale at
+the upgrade reaches the grace at once; avoid manual syncs around then if you
+want the per-run pace. Each disabled model is audited as
+`auto_disable` (actor `system:catalog-sync`). Each prune of a run that could
+decide (live and plausible) appends a row to `llm_catalog_prune_runs`; a run
+that could not decide only counts in
+`clerum_llm_catalog_prune_runs_total{outcome="skipped"}`. A failed Kubernetes LIST stops the prune for that
+run, keeping what it already disabled
+(`clerum_llm_catalog_prune_runs_total{outcome="aborted"}`). A run whose row
+cannot be written to `llm_catalog_prune_runs` is still counted there, and also
+in `clerum_llm_catalog_prune_run_record_failures_total`. When a later live
+run lists a pruned model again, it is enabled again (audited `auto_enable`)
+under the same rules as a new model: provider policy ON, eligible, not
+removed, within the per-run caps, which it shares with the new models it
+inserts enabled. The sync response counts them apart from inserted models:
+`reEnabled`, and `reEnableDeferredByCap` for those a full cap left for a later
+run (totals at the top level, and per provider in `providerCounts`). If the
+policy is OFF or the model is no longer eligible, it stays disabled for good.
 
 **Auto-enable on insert.** A models.dev catalog sync inserts the models it has
 not seen before, except two kinds it leaves for a later run: those over the
@@ -155,8 +195,8 @@ cannot decide (see "Offline installations"). Whether an inserted row starts
   each one (`PUT /admin/llm-providers/:provider/catalog-policy` with
   `{"auto_enable": true|false}`), and reset it with `{"auto_enable": null}`, after
   which the provider follows its code default again. The policy only
-  decides for models inserted **after** the change; it never enables or disables
-  an existing row.
+  decides for models inserted **after** the change, and for pruned models the
+  catalog lists again; it never enables or disables any other existing row.
 - **Eligibility.** The catalog must list text output and `tool_call: true`, the
   model must carry no `status` at all (`deprecated`, `alpha`, `beta`, or any
   value models.dev introduces later), and the id must be one the runtime can

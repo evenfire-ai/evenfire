@@ -4,7 +4,9 @@
 import * as k8s from '@kubernetes/client-node'
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import {
+  MAX_REPORTED_OUTPUT_ARTIFACTS,
   MAX_STATUS_TOOL_CALLS,
+  extractOutputArtifactsForStatus,
   normalizeArtifactForStatus,
   normalizeToolArgsForStatus,
   normalizeToolResultForStatus,
@@ -29,13 +31,12 @@ import {
   buildMcpHostUrl as buildWorkflowMcpHostUrl,
 } from './resourceNames'
 import { drainSignals } from './signalStore'
-import { buildStatusOutputPreview } from './statusOutputPreview'
+import { buildStatusOutputPreview, outputCutByCoordinator } from './statusOutputPreview'
 import { StepPhase, WorkflowPhase, isTerminalStepPhase, isTerminalWorkflowPhase } from './types'
 import { type AuthenticatedRequest, CONTROL_API_ISSUER } from './workflowAuth'
 import { workflowStatusMessage } from './workflowStatusMessage'
 
 const log = createLogger('wrc', 'restEndpoints')
-const MAX_CUSTOM_ARTIFACTS_PER_STEP = 20
 const ARTIFACT_READER_NOT_FOUND_RETRY_DELAYS_MS = [250, 750, 1500, 3000, 5000, 8000]
 const MODEL_INJECTION_REQUEST_SCOPE = 'model_injection_request'
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
@@ -158,7 +159,22 @@ function extractArtifactsFromStepStatus(body: StepStatusUpdate): ArtifactStatus[
     if (parsed) artifacts.push(parsed)
   }
 
-  artifacts.push(...extractCustomArtifacts(body.output))
+  if (!outputCutByCoordinator(body.output, body)) {
+    artifacts.push(...extractOutputArtifactsForStatus(body.output))
+    return artifacts
+  }
+
+  // The coordinator cut the output, so `output` is a prefix that may parse to
+  // artifacts the whole output does not declare. The coordinator sends the
+  // artifacts the whole output declared; they are handled like the ones WRC
+  // extracts from an uncut output.
+  if (Array.isArray(body.outputArtifacts)) {
+    for (const item of body.outputArtifacts.slice(0, MAX_REPORTED_OUTPUT_ARTIFACTS)) {
+      if (!isRecord(item)) continue
+      const artifact = normalizeArtifactForStatus(item)
+      if (artifact) artifacts.push(artifact)
+    }
+  }
   return artifacts
 }
 
@@ -167,38 +183,6 @@ function parseUnknownArtifactResult(result: unknown): ArtifactStatus | null {
     const parsed = typeof result === 'object' ? result : JSON.parse(String(result ?? '{}'))
     if (!isRecord(parsed) || parsed.success !== true || !isRecord(parsed.artifact)) return null
     return normalizeArtifactForStatus(parsed.artifact)
-  } catch {
-    return null
-  }
-}
-
-function extractCustomArtifacts(output: unknown): ArtifactStatus[] {
-  const parsedOutput = parseOutputRecord(output)
-  if (!parsedOutput) return []
-
-  const artifacts: ArtifactStatus[] = []
-  if (isRecord(parsedOutput.artifact)) {
-    const artifact = normalizeArtifactForStatus(parsedOutput.artifact)
-    if (artifact) artifacts.push(artifact)
-  }
-
-  if (Array.isArray(parsedOutput.artifacts)) {
-    for (const item of parsedOutput.artifacts.slice(0, MAX_CUSTOM_ARTIFACTS_PER_STEP)) {
-      if (!isRecord(item)) continue
-      const artifact = normalizeArtifactForStatus(item)
-      if (artifact) artifacts.push(artifact)
-    }
-  }
-
-  return artifacts
-}
-
-function parseOutputRecord(output: unknown): Record<string, unknown> | null {
-  if (isRecord(output)) return output
-  if (typeof output !== 'string') return null
-  try {
-    const parsed = JSON.parse(output)
-    return isRecord(parsed) ? parsed : null
   } catch {
     return null
   }
@@ -438,6 +422,9 @@ interface StepStatusUpdate {
   stepId: string
   phase: StepPhase
   output?: unknown
+  outputLength?: unknown
+  outputTruncated?: unknown
+  outputArtifacts?: unknown
   error?: string
   failureReason?: string
   executor?: 'agentic' | 'snippet' | 'custom'
@@ -826,7 +813,10 @@ export function createWorkflowEndpointHandlers(
         }
         const outputPreview =
           body.output != null
-            ? buildStatusOutputPreview(body.output, statusOutputPreviewMaxChars)
+            ? buildStatusOutputPreview(body.output, statusOutputPreviewMaxChars, {
+                outputLength: body.outputLength,
+                outputTruncated: body.outputTruncated,
+              })
             : undefined
         if (
           body.approvalBindingSha256 !== undefined &&
