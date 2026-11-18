@@ -53,6 +53,7 @@ describe('getUserReachableAgents', () => {
     ]) {
       expect(sql).toContain(token)
     }
+    expect(sql.match(/lifecycle_state = 'active'/g)).toHaveLength(2)
     expect(sql).not.toContain('$2')
   })
 

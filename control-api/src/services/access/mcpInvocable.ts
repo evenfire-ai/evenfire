@@ -271,11 +271,11 @@ export async function allowedMcpServerNamesForContexts(
  *
  * A Context is reached directly (`getUserContexts`, active users) or through
  * an agent the user reaches, directly or through any active team membership
- * (`getUserReachableAgents`, the broker's `hostAccessForUser` rule), whose Host
- * the agent directory shows via its `spec.contextRef`. Consent follows the
- * broker's Host-entry rule (`hostAccessForUser`), a superset of what the flat
- * `/mcp-servers` catalog and the per-agent connectors panel offer, so anything
- * either offers the user can be connected. `team_contexts` is not counted. A
+ * (`getUserReachableAgents`), whose Host the agent directory shows via its
+ * `spec.contextRef`. The agent set is the broker's Host-entry rule
+ * (`hostAccessForUser`); consent also honours legacy `user_contexts`, which the
+ * broker does not, and counts only Hosts the agent directory shows.
+ * `team_contexts` is not counted. A
  * non-canonical `userId` reaches no agents; the direct read is unchanged.
  *
  * Agents are read only when the direct Contexts do not enable the server, so

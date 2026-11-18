@@ -18,7 +18,7 @@
  * the token endpoint are the only external edges. The consenting user is a real row whose
  * Context and agent access is written by the production writers (`seedActiveMember`), so
  * the per-user gate's readers run against real tables: a retired user, or one whose
- * access only comes through a team, is refused.
+ * only team access is `team_contexts`, is refused; a team's agents (`team_agents`) count.
  *
  *   CONTROL_API_REAL_PG_ADMIN_URL=postgres://<user>:<pass>@<host>:5432 npm test -- \
  *     test/oauth.perServerCallback.realPostgres.integration.test.ts
@@ -462,14 +462,25 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
     expect(res.body).toEqual({ error: 'context_membership_denied' })
   })
 
-  it('per-user gate: access only through a team (team_contexts, team_agents) is refused', async () => {
+  it('per-user gate: a user reaching the Context only through a team agent (team_agents) mints', async () => {
     await installAtlassian('atlassian')
     await seedAgentHost(gateway, 'host-c', CONTEXT)
     const teamOnly = await seedActiveMember(db, {})
     const operator = await seedControlAdmin(db)
     const team = await createTeamForUser(teamOnly, `team-${teamOnly}`)
-    await setTeamContexts(team.id, [CONTEXT], operator)
     await setTeamAgents(team.id, ['host-c'], operator)
+
+    const res = await mintRequest('atlassian', teamOnly)
+    expect(res.status).toBe(200)
+    expect(res.body.authorizeUrl).toEqual(expect.any(String))
+  })
+
+  it('per-user gate: access only through team_contexts is refused', async () => {
+    await installAtlassian('atlassian')
+    const teamOnly = await seedActiveMember(db, {})
+    const operator = await seedControlAdmin(db)
+    const team = await createTeamForUser(teamOnly, `team-${teamOnly}`)
+    await setTeamContexts(team.id, [CONTEXT], operator)
 
     const res = await mintRequest('atlassian', teamOnly)
     expect(res.status).toBe(403)

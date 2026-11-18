@@ -221,7 +221,7 @@ describeRealPostgres('user-scope consent via team agents (real Postgres)', () =>
   })
 
   it('a retired user with live team rows is denied, not a 500', async () => {
-    const { user } = await teamOnlyUser()
+    const { user, teamId } = await teamOnlyUser()
     await retireDesktopUser(
       { kind: 'control_admin', controlAdminId: operator },
       user,
@@ -230,6 +230,13 @@ describeRealPostgres('user-scope consent via team agents (real Postgres)', () =>
       null,
       { retainWithoutLinkHistory: true }
     )
+    const teamRows = await db.query(
+      `SELECT tm.team_id, ta.agent_name FROM team_members tm
+         JOIN team_agents ta ON ta.team_id = tm.team_id
+        WHERE tm.user_id = $1`,
+      [user]
+    )
+    expect(teamRows.rows).toEqual([{ team_id: teamId, agent_name: 'h1' }])
     const res = await mint(user)
     expect(res.status, res.text).toBe(403)
     expect(res.body).toEqual({ error: 'context_membership_denied' })
