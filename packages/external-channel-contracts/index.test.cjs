@@ -400,6 +400,11 @@ describe('channel admission', () => {
     assert.equal(assertAccepts(validateStage1ExecutionPrincipal, { ...member, policyVersion: 0 }).policyVersion, 0)
   })
 
+  it('accepts the workspace audience mode', () => {
+    const value = assertAccepts(validateChannelAdmission, { ...admitted, audienceMode: 'workspace' })
+    assert.equal(value.audienceMode, 'workspace')
+  })
+
   it('accepts a refusal of a click with its action event', () => {
     const value = assertAccepts(validateChannelAdmission, load('admission.refused.missing_channel_grant.json'))
     assert.equal(value.event.eventKind, 'action')
