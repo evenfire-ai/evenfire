@@ -101,9 +101,23 @@ functions, and they stay after a rollback: `gfs_resource_changed_notify` on
 `gfs_watch_session_delete_notify` on `users` (from `0140` to `0145`). Every
 matching write to those tables still sends a `pg_notify` on the
 `gfs_resource_changed`, `gfs_authz_changed` or `gfs_watch_session` channel.
-The old image does not listen on those channels and the functions only notify,
-with payloads bounded well below the 8000-byte `pg_notify` limit, so no write
-fails because of them.
+No write fails because of them: nothing in the old image listens on those
+three channels, and the functions only call `pg_notify`, with payloads bounded
+well below its 8000-byte limit. `pg_notify` makes the writer's commit fail only
+if the notification queue is full; that queue is a single one for the whole
+cluster (8 GB by default), and a notification leaves it as soon as every
+listening session has read past it, which the old image's listeners on other
+channels (`notification_queued`, `workflow_run_update`) keep doing. The one
+cost is that transactions which notify serialize at commit, because PostgreSQL
+takes a cluster-wide lock to append to the queue. On `users` and
+`team_members` that cost does not reach the ordinary sign-in: the `users`
+triggers fire only on a delete or when `lifecycle_state` or
+`lifecycle_version` changes, and the `team_members` ones on an insert, a delete
+or a change of `user_id` or `status`, so a sign-in that only refreshes
+`name`, `picture` and `updated_at` on `users` and re-asserts an already active
+membership does not notify. A sign-in that creates or reactivates a
+membership, and every write to `gfs_resources`, `gfs_grants`, `gfs_shares` and
+`gfs_desktop_operator_links`, does.
 
 Logout revokes only the token it receives. A V1 token issued before a team
 switch stays valid until its own expiry (at most 7 days, 604800 s), as on `dev`. A new
