@@ -320,6 +320,11 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    If you use the Global File System, follow
    [GFS permission-store credential lifecycle](gfs-permission-store.md)
    (`provision-gfs-db.sh`, `provision-gfs-runtime.sh`).
+   The instance-provisioning path in `provision-gfs-runtime.sh` requires `jq`.
+   When it applies the overlay's instances directory, it preserves the live
+   connector associations of `mcp-server/context1`; removing a connector from
+   that directory does not remove the association. Remove it through Control UI
+   or an explicit administrative update instead.
    `provision-gfs-runtime.sh` refuses a non-dev context unless it is listed in
    `ALLOWED_CONTEXTS` or you pass `--allow-prod`. `provision-gfs-db.sh` has no
    such guard: it runs against whatever `CONTEXT` you give it, so check that

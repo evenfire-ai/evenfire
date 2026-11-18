@@ -83,11 +83,6 @@ esac
 exit 0
 STUB
 
-  cat > "$tmp/python3" <<'STUB'
-#!/usr/bin/env bash
-exit 0
-STUB
-
   cat > "$tmp/minikube" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -162,7 +157,7 @@ touch "$STATE_DIR/started"
 exit 0
 STUB
 
-  chmod +x "$tmp/docker" "$tmp/python3" "$tmp/minikube" "$tmp/kubectl" "$tmp/start.sh"
+  chmod +x "$tmp/docker" "$tmp/minikube" "$tmp/kubectl" "$tmp/start.sh"
   mkdir -p "$tmp/state"
 
   if PATH="$tmp:$PATH" \
@@ -211,11 +206,6 @@ case "${1:-} ${2:-}" in
     ;;
   "info ") ;;
 esac
-exit 0
-STUB
-
-  cat > "$tmp/python3" <<'STUB'
-#!/usr/bin/env bash
 exit 0
 STUB
 
@@ -268,7 +258,7 @@ printf 'start-helper %s\n' "$*" >>"$LOG_FILE"
 exit 0
 STUB
 
-  chmod +x "$tmp/docker" "$tmp/python3" "$tmp/minikube" "$tmp/kubectl" "$tmp/start.sh"
+  chmod +x "$tmp/docker" "$tmp/minikube" "$tmp/kubectl" "$tmp/start.sh"
 
   if PATH="$tmp:$PATH" \
      TEST_LOG_FILE="$log_file" \
