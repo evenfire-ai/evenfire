@@ -40,7 +40,7 @@ beforeAll(async () => {
 const OFFERED = { channelCommandOffered: true, desktopCommandOffered: false }
 const NOTIFICATION =
   'Tool `shell_exec` requires approval. Parameters: {"command":"pwd"}. Reply /approve or /deny to this message.'
-const TOKEN = 'abcdefghijklmnop'
+const unknownActionCode = 'abcdefghijklmnop'
 
 function callbackValues(options: SendMessageOptions | undefined): string[] {
   const values: string[] = []
@@ -205,7 +205,7 @@ describe('shell card approval handler', () => {
       sleep: async () => undefined,
     })
 
-    await reader.handleMessages([slackMessage(`tool:q:${TOKEN}`)])
+    await reader.handleMessages([slackMessage(`tool:q:${unknownActionCode}`)])
 
     expect(rpc.sendDenial).not.toHaveBeenCalled()
     expect(rpc.sendApproval).not.toHaveBeenCalled()
