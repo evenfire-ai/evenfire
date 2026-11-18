@@ -91,6 +91,24 @@ const PAUSE_TOKEN_ROWS = [
   ['a trailing newline', 'fixture-pause-01\n', false],
   ['a valid 16-character run, then a slash', 'fixture-pause-01/x', false],
 ]
+// channelRef values that are not <namespace>/<name>, refused by both validators.
+const CHANNEL_REF_REFUSED = [
+  'fixture-slack-channel',
+  'agents/fixture/extra',
+  'agents/fixture slack',
+  '/fixture-slack-channel',
+  'agents/',
+  ['agents/fixture-slack-channel'],
+]
+const assertChannelRefGrammar = (validator, valid, code) => {
+  const accepted = assertAccepts(validator, valid)
+  const parts = accepted.channelRef.split('/')
+  assert.equal(parts.length, 2)
+  assert.ok(parts.every(part => part.length > 0))
+  for (const channelRef of CHANNEL_REF_REFUSED) {
+    assertRejects(validator, { ...valid, channelRef }, code, 'channelRef', JSON.stringify(channelRef))
+  }
+}
 const assertPauseTokenBoundaries = () => {
   const length = label => PAUSE_TOKEN_ROWS.find(([rowLabel]) => rowLabel === label)[1].length
   assert.deepEqual(
@@ -230,6 +248,10 @@ describe('provider event receipt claims', () => {
 
   it('accepts an action receipt whose clicked value is not a pause action', () => {
     assert.equal(assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.action.other.json')).action, null)
+  })
+
+  it('refuses a channelRef that is not <namespace>/<name>', () => {
+    assertChannelRefGrammar(validateProviderEventReceiptClaims, message, RECEIPT_ERROR)
   })
 
   it('pins the pause token grammar on action receipts', () => {
@@ -386,6 +408,10 @@ describe('origin route', () => {
       assertRejects(validateOriginRoute, value, ORIGIN_ERROR, field)
     })
   }
+
+  it('refuses a channelRef that is not <namespace>/<name>', () => {
+    assertChannelRefGrammar(validateOriginRoute, thread, ORIGIN_ERROR)
+  })
 })
 
 describe('Stage 1 execution principal', () => {
