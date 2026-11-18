@@ -1,4 +1,5 @@
 import { type GfsPreviewResource, gfsResourceOpenTarget } from './gfsPreview'
+import { urlScheme } from './urlScheme'
 
 type GfsNavigationResolution = Awaited<ReturnType<Window['clerum']['gfs']['resolveForNavigation']>>
 
@@ -16,11 +17,6 @@ export type ChatLinkActivation = (href: string) => Promise<void>
 
 export const CHAT_GFS_LINK_UNAVAILABLE_MESSAGE = 'Could not open this EvenDrive location'
 
-function linkScheme(href: string): string | null {
-  const match = /^([a-z][a-z0-9+.-]*):/i.exec(href)
-  return match ? match[1]!.toLowerCase() : null
-}
-
 /**
  * Routes a chat link the renderer already canonicalised. Never rejects: the
  * caller fires it from a click handler and has nothing to do with a failure.
@@ -31,7 +27,7 @@ function linkScheme(href: string): string | null {
  */
 export function createChatLinkActivation(deps: ChatLinkActivationDeps): ChatLinkActivation {
   return async href => {
-    const scheme = linkScheme(href)
+    const scheme = urlScheme(href)
     if (scheme === 'gfs') {
       const sequence = deps.beginUserNavigationIntent()
       let resolution: GfsNavigationResolution

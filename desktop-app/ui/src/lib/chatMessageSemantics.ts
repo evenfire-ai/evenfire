@@ -9,6 +9,7 @@ import { externalUrlToOpen } from '../../../src/externalUrl'
 import type { AgentChatMessage } from '../uiTypes'
 import { parseChatMessageDisplay } from './chatMessageAttachments'
 import { looksLikeJson } from './format'
+import { urlScheme } from './urlScheme'
 
 type SemanticText = Text & { searchFragmentId?: string }
 
@@ -52,7 +53,6 @@ const FLOW_BOUNDARIES = new Set([
   'th',
 ])
 const URL_PROPERTIES = new Set(['href', 'src'])
-const URL_SCHEME = /^([a-z][a-z0-9+.-]*):/i
 
 /**
  * The only link targets a chat message may carry, in the exact form the click
@@ -62,7 +62,7 @@ const URL_SCHEME = /^([a-z][a-z0-9+.-]*):/i
  */
 export function canonicalChatLinkHref(raw: unknown): string | null {
   if (typeof raw !== 'string') return null
-  const scheme = URL_SCHEME.exec(raw)?.[1]?.toLowerCase()
+  const scheme = urlScheme(raw)
   if (scheme === 'http' || scheme === 'https') {
     try {
       const url = new URL(raw)
