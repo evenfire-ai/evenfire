@@ -110,7 +110,8 @@ once after an in-run sync, before Health/Playwright (`PortForwards=` evidence).
 and Ready deployments is a host `npm ci` gap in the named directory — not
 GFS, not a new profile, not `REAL_PG_SUITE_FAILED`. Cluster Ready ≠ host
 runner. `run_if_changed` dirs: `packages/workflow-runtime-core`,
-`packages/network-policy-core` (`node --test`), `control-api`,
+`packages/network-policy-core` (`node --test`),
+`packages/external-channel-contracts` (`node --test`), `control-api`,
 `external-rest-api`, `rpc-proxy`, `mcp-host`, `host-context-controller`,
 `workflow-recipes`, `packages/workflow-sdk`,
 `workflow-approval-request-reader`, `control-ui`, `desktop-app` (Node 24 +

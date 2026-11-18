@@ -1,0 +1,22 @@
+{
+  "ver": 1,
+  "medium": "teams",
+  "channelRef": "agents/fixture-teams-channel",
+  "hostRef": "fixture-host",
+  "providerScopeId": "00000000-0000-4000-8000-00000000f001",
+  "providerOrgId": null,
+  "providerAccountId": "00000000-0000-4000-8000-00000000f002",
+  "deliveryAlias": "29:fixture-teams-from-id",
+  "senderScopeId": null,
+  "conversationId": "19:fixture-teams-conversation@thread.v2",
+  "conversationKind": "group",
+  "threadRootId": null,
+  "messageId": "1763460300000",
+  "eventId": "fixture-teams-message",
+  "eventKind": "message",
+  "action": null,
+  "attestedBy": "approval-reader",
+  "jti": "fixture-jti-teams-message",
+  "iat": 1763460000,
+  "exp": 1763460600
+}

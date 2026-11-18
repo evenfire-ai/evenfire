@@ -1,0 +1,25 @@
+{
+  "ver": 1,
+  "medium": "slack",
+  "channelRef": "agents/fixture-slack-channel",
+  "hostRef": "fixture-host",
+  "providerScopeId": "T0FIXTURE01",
+  "providerOrgId": null,
+  "providerAccountId": "U0FIXTURE01",
+  "deliveryAlias": null,
+  "senderScopeId": "T0FIXTURE01",
+  "conversationId": "C0FIXTURE01",
+  "conversationKind": null,
+  "threadRootId": "1763460000.000100",
+  "messageId": "1763460100.000204",
+  "eventId": "fixture-slack-action-4",
+  "eventKind": "action",
+  "action": {
+    "decision": "connect",
+    "token": "fixture-pause-request-0004"
+  },
+  "attestedBy": "control-api",
+  "jti": "fixture-jti-slack-action-connect",
+  "iat": 1763460000,
+  "exp": 1763460600
+}

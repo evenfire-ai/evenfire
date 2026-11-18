@@ -264,7 +264,8 @@ or partial-selection failure. Run the local Node/package/Docker preflight
 before expensive T0 work. That preflight (`packages=2`) only checks host
 `vitest`+`pg` in `control-api` and `gfs-controller`. `pre-gate-sync` later
 runs host `npm test` in each changed package (`packages/workflow-runtime-core`,
-`packages/network-policy-core`, `control-api`, `external-rest-api`,
+`packages/network-policy-core`, `packages/external-channel-contracts`,
+`control-api`, `external-rest-api`,
 `rpc-proxy`, `mcp-host`, `host-context-controller`, `workflow-recipes`,
 `packages/workflow-sdk`, `workflow-approval-request-reader`, `control-ui`,
 and `desktop-app`; `gfs-controller` is not on that list, and the

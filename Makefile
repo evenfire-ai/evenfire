@@ -86,7 +86,8 @@ TEST_SERVICES := \
 	packages/codex-catalog-projection \
 	packages/llm-provider-attempt-contract \
 	packages/llm-providers \
-	packages/grok-provider-attempt-contract
+	packages/grok-provider-attempt-contract \
+	packages/external-channel-contracts
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra

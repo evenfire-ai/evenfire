@@ -1,0 +1,18 @@
+{
+  "outcome": "refused",
+  "reason": "missing_channel_grant",
+  "notice": "private",
+  "event": {
+    "providerAccountId": "U0FIXTURE01",
+    "deliveryAlias": null,
+    "conversationId": "C0FIXTURE01",
+    "conversationKind": null,
+    "threadRootId": "1763460000.000100",
+    "messageId": "1763460100.000201",
+    "eventKind": "action",
+    "action": {
+      "decision": "approve",
+      "token": "fixture-pause-request-0001"
+    }
+  }
+}

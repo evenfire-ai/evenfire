@@ -104,6 +104,7 @@ directory (`scripts/minikube/pre-gate-sync.sh`):
 
 - `packages/workflow-runtime-core` (`npm test && npm run build`)
 - `packages/network-policy-core` (`node --test`, not vitest)
+- `packages/external-channel-contracts` (`node --test`, not vitest)
 - `control-api`
 - `external-rest-api`
 - `rpc-proxy`
