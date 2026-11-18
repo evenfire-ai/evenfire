@@ -477,9 +477,12 @@ jobs:
       # `tsc --noEmit` resolves no project (like mcp-servers). Their declarations
       # are kept aligned with runtime by "runtime exports stay aligned" node:tests.
       # llm-provider-attempt-contract, grok-provider-attempt-contract,
-      # llm-providers, codex-catalog-projection, and external-channel-contracts are the same shape:
+      # llm-providers, and codex-catalog-projection are the same shape:
       # hand-authored .cjs + .d.ts, no tsconfig; node --test keeps the
       # types aligned with the runtime.
+      # external-channel-contracts is that shape too. Its node --test compares the
+      # exported names of index.cjs with those declared in index.d.ts; this job does
+      # not compile the declared types.
       # llm-providers is that shape too (index.cjs + imageInput.cjs + index.d.ts,
       # no tsconfig and no typescript dependency), so `npx tsc` there would fetch
       # the unrelated `tsc` package from the registry instead of typechecking.
