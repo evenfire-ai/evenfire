@@ -201,7 +201,7 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
               sections={[{ title: 'Social channels', rows: 4 }]}
               showHead={false}
             />
-          ) : hasSocialAccess && currentChannel ? (
+          ) : state === 'ready' && hasSocialAccess && currentChannel ? (
             <>
               {currentChannel.key === 'telegram' ? (
                 <TelegramVerificationPanel

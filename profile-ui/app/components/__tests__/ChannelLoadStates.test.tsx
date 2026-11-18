@@ -106,14 +106,18 @@ describe('Social channel loading and targetless records', () => {
     expect(await screen.findByRole('menuitem', { name: 'Remove record' })).toBeInTheDocument()
   })
 
-  it('shows a failed load without claiming the account has no channels', async () => {
-    profileAccess.targets = []
-    mocks.listWorkflowApprovalMediums.mockRejectedValue(new Error('Service unavailable'))
-    render(<ChannelsContent activeChannel="telegram" />)
-    expect(await screen.findByText('Service unavailable')).toBeInTheDocument()
-    expect(screen.queryByText('No social channels are set up yet.')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Refresh social channels' })).toBeEnabled()
-  })
+  it.each([false, true])(
+    'shows a failed load without empty panels (targets present: %s)',
+    async hasTargets => {
+      profileAccess.targets = hasTargets ? producerOutput.targets : []
+      mocks.listWorkflowApprovalMediums.mockRejectedValue(new Error('Service unavailable'))
+      render(<ChannelsContent activeChannel="telegram" />)
+      expect(await screen.findByText('Service unavailable')).toBeInTheDocument()
+      expect(screen.queryByTestId('channel-panel')).not.toBeInTheDocument()
+      expect(screen.queryByText('No social channels are set up yet.')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Refresh social channels' })).toBeEnabled()
+    }
+  )
 
   it('shows the empty message only after a successful empty load', async () => {
     profileAccess.targets = []
