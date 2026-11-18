@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runToolUseLoop } from '../../core/orchestration/toolUseLoop'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { MessageQueue } from '../../queue/messageQueue'
@@ -66,7 +66,8 @@ function createTestTask(content: string, sender: string): Task {
 
 function setupAgent() {
   const queue = new MessageQueue()
-  const agent = new AgentStateMachine(queue, new TaskLifecycle(), {
+  const lifecycle = new TaskLifecycle()
+  const agent = new AgentStateMachine(queue, lifecycle, {
     autoStart: false,
     taskDelay: 0,
     approvalTimeout: 5000,
@@ -91,7 +92,7 @@ function setupAgent() {
     bootstrapUserCatalog: vi.fn(async () => skipSummary),
   } as any)
   agent.start()
-  return agent
+  return { agent, lifecycle }
 }
 
 describe('approval binding stays on the channel sender', () => {
@@ -114,8 +115,18 @@ describe('approval binding stays on the channel sender', () => {
         context_snapshot: [],
       },
     } as any)
-    agent = setupAgent()
+    const setup = setupAgent()
+    agent = setup.agent
     task = createTestTask('run it', SENDER)
+    // Registered like a queued task, so the shutdown drain in stop() can
+    // cancel a turn still waiting for approval.
+    setup.lifecycle.register(task)
+  })
+
+  afterEach(async () => {
+    // Clears the approval timer and awaits the resume an approve starts, so
+    // neither outlives the test.
+    await agent.stop()
   })
 
   it('the approval notification and snapshot carry the sender, not the resolved user', async () => {
