@@ -675,6 +675,13 @@ export class TaskExecutor {
       if (savedApproval) this.restoreAttachmentReadLedger(savedApproval)
       mergeCollectedAttachments(this.completedAttachments, savedApproval?.attachments ?? [])
       collectToolAttachments(savedApproval?.completed_results ?? [], this.completedAttachments)
+      if (savedApproval?.reason === 'connect_required') {
+        // The user may have linked, relinked or revoked while the prompt waited:
+        // drop the cached caller context and registry so the principal is
+        // resolved afresh on this Continue.
+        this.workflowCallerContextOverride = undefined
+        this.toolRegistryPromise = null
+      }
       this.executionBudget.start(this.abortController)
       const approvalBeforeResolution = this.conversation.pending_approval
       if (this.legacyApprovalBudget && approvalBeforeResolution) {
