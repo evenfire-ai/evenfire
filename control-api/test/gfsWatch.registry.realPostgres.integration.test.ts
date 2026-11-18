@@ -23,7 +23,8 @@ import './realPostgres.requirement.ts'
 let createRegistryHarness!: Loaded['createRegistryHarness'],
   quoteIdent!: Loaded['quoteIdent'],
   restInvariantViolations!: Loaded['restInvariantViolations'],
-  sleep!: Loaded['sleep']
+  sleep!: Loaded['sleep'],
+  waitForListenerReady!: Loaded['waitForListenerReady']
 
 // Scenario tests of the GFS watch registry on the real stack described in the
 // harness. Every assertion is on frames the client sees or on the open's
@@ -40,7 +41,8 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
   const onUnhandled = (e: unknown) => unhandled.push(e)
 
   beforeAll(async () => {
-    ;({ createRegistryHarness, quoteIdent, restInvariantViolations, sleep } = await loadHelpers())
+    ;({ createRegistryHarness, quoteIdent, restInvariantViolations, sleep, waitForListenerReady } =
+      await loadHelpers())
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(registryTestDatabase)}`)
     h = await createRegistryHarness(adminUrl!)
@@ -224,6 +226,32 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(new Set(socket.last('changed')!.keys as string[])).toEqual(
       new Set([h.key('file', f), h.key('dir', dir)])
     )
+  })
+
+  it('delivers a file created under a watched directory to the directory key', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const dir = await h.tree.add('directory')
+    const { socket } = await ready(user, [h.key('dir', dir)])
+    await h.tree.add('file', dir)
+    await h.barrier()
+    b.clock.advance(250)
+    await b.settle()
+    expect(socket.framesOf('changed').map(f => f.keys)).toEqual([[h.key('dir', dir)]])
+  })
+
+  it('delivers a file moved into a watched directory to the directory key, not to its old one', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const from = await h.tree.add('directory')
+    const into = await h.tree.add('directory')
+    const f = await h.tree.add('file', from)
+    const { socket } = await ready(user, [h.key('dir', into)])
+    await h.tree.move(f, into)
+    await h.barrier()
+    b.clock.advance(250)
+    await b.settle()
+    expect(socket.framesOf('changed').map(f2 => f2.keys)).toEqual([[h.key('dir', into)]])
   })
 
   it('defers a key whose ancestor moves while the open runs its ancestry query (T-SB8, T-SB18)', async () => {
@@ -434,6 +462,57 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(restInvariantViolations(b, [conn])).toEqual([])
   })
 
+  async function metricBy(
+    metric: { get(): Promise<{ values: { labels: Record<string, unknown>; value: number }[] }> },
+    label: string
+  ): Promise<Record<string, number>> {
+    const out: Record<string, number> = {}
+    for (const v of (await metric.get()).values)
+      out[String(v.labels[label])] = (out[String(v.labels[label])] ?? 0) + v.value
+    return out
+  }
+
+  it('counts dropped commands by reason, frames by type, admitted streams and disconnects', async () => {
+    b = await h.build()
+    const m = h.modules.metrics
+    const user = await h.createUser()
+    const other = await h.createUser()
+    const f = await h.tree.add('file')
+    const snapshot = async () => ({
+      dropped: await metricBy(m.gfsWatchCmdDroppedTotal, 'reason'),
+      frames: await metricBy(m.gfsWatchFramesSentTotal, 'frame_type'),
+      active: await metricBy(m.gfsWatchConnectionsActive, 'principal_kind'),
+      disconnects: await metricBy(m.gfsWatchDisconnectsTotal, 'reason'),
+    })
+    const s0 = await snapshot()
+    const { socket, conn } = await ready(user, [h.key('file', f)])
+    const s1 = await snapshot()
+    expect(countDelta(s0.frames, s1.frames)).toEqual({ ready: 1 })
+    expect(countDelta(s0.active, s1.active)).toEqual({ user: 1 })
+    await put(conn, [], 1, { u: other.userId, g: conn.binding.authGeneration })
+    await put(conn, [], 1, { u: conn.binding.userId, g: conn.binding.authGeneration + 1 })
+    await put(conn, [], 2 ** 53 - 1)
+    await b.settle()
+    const s2 = await snapshot()
+    expect(countDelta(s1.dropped, s2.dropped)).toEqual({ binding_mismatch: 2, seq_jump: 1 })
+    expect(countDelta(s1.frames, s2.frames)).toEqual({})
+    await put(conn, [h.key('file', f)], 1)
+    await b.settle()
+    await h.tree.rename(f)
+    await h.barrier()
+    b.clock.advance(250)
+    await b.settle()
+    expect(socket.framesOf('changed')).toHaveLength(1)
+    const s3 = await snapshot()
+    expect(countDelta(s2.frames, s3.frames)).toEqual({ subscriptions: 1, changed: 1 })
+    expect(countDelta(s2.dropped, s3.dropped)).toEqual({})
+    socket.emitGone()
+    await b.settle()
+    const s4 = await snapshot()
+    expect(countDelta(s3.active, s4.active)).toEqual({ user: -1 })
+    expect(countDelta(s3.disconnects, s4.disconnects)).toEqual({ client_gone: 1 })
+  })
+
   it('applies a command built from another token of the same binding (T-SB112)', async () => {
     b = await h.build()
     const user = await h.createUser()
@@ -590,6 +669,102 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     h.releaseHanging()
     await b.settle()
     expect(countDelta(before, await deferredBy())).toEqual({ auth_deadline: 2 })
+  })
+
+  it('counts a key over the authorization budget under auth_budget', async () => {
+    b = await h.build({ authBudget: new ProcessMemoryRateLimiter(1) })
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    const before = await deferredBy()
+    const { socket } = await ready(user, [h.key('file', f), h.key('file', g)])
+    expect(socket.last('ready')!.deferred).toHaveLength(1)
+    expect(countDelta(before, await deferredBy())).toEqual({ auth_budget: 1 })
+  })
+
+  it('counts the keys of a failed ancestry query under ancestry_failed', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    b.gates.cte.mode = 'fail'
+    b.gates.cte.failWith = () => new Error('Connection terminated unexpectedly')
+    const before = await deferredBy()
+    const { socket } = await ready(user, [h.key('file', f), h.key('file', g)])
+    expect(socket.last('ready')!.deferred).toHaveLength(2)
+    expect(countDelta(before, await deferredBy())).toEqual({ ancestry_failed: 2 })
+  })
+
+  it('counts the keys of a drive whose read token cannot be minted under mint_failed', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    b.gates.mint.mode = 'fail'
+    b.gates.mint.failWith = () => new Error('Connection terminated unexpectedly')
+    const before = await deferredBy()
+    const { socket } = await ready(user, [h.key('file', f)])
+    expect(socket.last('ready')).toMatchObject({ accepted: [], deferred: [h.key('file', f)] })
+    expect(countDelta(before, await deferredBy())).toEqual({ mint_failed: 1 })
+  })
+
+  it('counts a key the ancestry query did not know under no_chain', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const id = randomUUID()
+    b.gates.read.mode = 'hold'
+    const before = await deferredBy()
+    const o = b.open(user, [h.key('file', id)])
+    await until(() => b.gates.read.held.length === 1)
+    await h.writer.query(
+      `INSERT INTO gfs_resources (resource_id, drive, parent_resource_id, name, kind) VALUES ($1, 'main', $2, $3, 'file')`,
+      [id, h.tree.root, `late-${id}`]
+    )
+    b.gates.read.mode = 'pass'
+    b.gates.read.releaseAll()
+    expect(await o.outcome).toEqual({ kind: 'stream' })
+    expect(o.socket.last('ready')).toMatchObject({ deferred: [h.key('file', id)] })
+    expect(countDelta(before, await deferredBy())).toEqual({ no_chain: 1 })
+  })
+
+  it('counts a key whose ancestor moved during the op under suspect', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const p = await h.tree.add('directory')
+    const q = await h.tree.add('directory')
+    const f = await h.tree.add('file', p)
+    b.gates.cte.mode = 'hold'
+    const before = await deferredBy()
+    const o = b.open(user, [h.key('file', f)])
+    await until(() => b.gates.cte.held.length === 1)
+    await h.tree.move(p, q)
+    await h.barrier()
+    b.gates.cte.mode = 'pass'
+    b.gates.cte.releaseAll()
+    expect(await o.outcome).toEqual({ kind: 'stream' })
+    expect(o.socket.last('ready')).toMatchObject({ deferred: [h.key('file', f)] })
+    expect(countDelta(before, await deferredBy())).toEqual({ suspect: 1 })
+  })
+
+  it('counts the keys whose reads never started when the request aborts under totality', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const files = await Promise.all(Array.from({ length: 6 }, () => h.tree.add('file')))
+    const watch = new AbortController()
+    b.gates.read.mode = 'hold'
+    const before = await deferredBy()
+    const o = b.open(
+      user,
+      files.map(f => h.key('file', f)),
+      { watchSignal: watch.signal }
+    )
+    await until(() => b.gates.read.held.length === 4)
+    // Four reads are parked and see the abort; the other two thunks, behind
+    // the per-op parallelism of 4, start already aborted and decide nothing.
+    watch.abort()
+    await o.outcome
+    await b.settle()
+    expect(o.socket.last('ready')!.deferred).toHaveLength(6)
+    expect(countDelta(before, await deferredBy())).toEqual({ gfsc_transient: 4, totality: 2 })
   })
 
   it('ends the op at T_auth while the mint waits, and reads nothing after a close during the mint (T-SB107)', async () => {
@@ -1128,7 +1303,7 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     b.gates.read.releaseAll()
     // Reconnects after the backoff and opens again.
     b.clock.advance(1_200)
-    await until(() => b.registry.listenerReady())
+    expect(await waitForListenerReady(() => b.registry.listenerReady())).toBe(true)
     await ready(user, [h.key('file', f)])
   })
 
@@ -1266,6 +1441,31 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(await b.open(carol, []).outcome).toEqual(full)
     first.socket.emitGone()
     await ready(carol, [])
+  })
+
+  it('admits exactly the per-user cap out of cap + 1 opens issued in the same tick', async () => {
+    b = await h.build({ maxConnectionsPerPrincipal: 3 })
+    const user = await h.createUser()
+    const burst = await b.openBurst(user, 4)
+    const outcomes = await Promise.all(burst.map(o => o.outcome))
+    expect(outcomes.filter(o => o.kind === 'stream')).toHaveLength(3)
+    expect(outcomes.filter(o => o.kind !== 'stream')).toEqual([
+      { kind: 'reply', status: 429, code: 'admission_full', retryAfterSec: 5 },
+    ])
+  })
+
+  it('admits exactly the process cap out of cap + 1 opens of different users in the same tick', async () => {
+    b = await h.build({ maxConnections: 2 })
+    const users = await Promise.all([h.createUser(), h.createUser(), h.createUser()])
+    const authentications = await Promise.all(users.map(u => u.authenticate()))
+    const burst = users.map((u, i) =>
+      b.openBurst({ ...u, authenticate: async () => authentications[i]! }, 1)
+    )
+    const outcomes = await Promise.all((await Promise.all(burst)).flat().map(o => o.outcome))
+    expect(outcomes.filter(o => o.kind === 'stream')).toHaveLength(2)
+    expect(outcomes.filter(o => o.kind !== 'stream')).toEqual([
+      { kind: 'reply', status: 429, code: 'admission_full', retryAfterSec: 5 },
+    ])
   })
 
   it('caps reads in flight per process and leaves no permit or waiter behind (T-SB83, I42)', async () => {
