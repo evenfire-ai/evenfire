@@ -82,11 +82,11 @@ describe('ChannelReader provider event idempotency', () => {
     expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
 
-  it('does not retry Telegram on an authorization error without canonical admission proof', async () => {
+  it('drops a Telegram event refused with an authorization error and ignores its redelivery', async () => {
     const rpc = rpcClient()
     rpc.authorizeProviderMessage = vi
       .fn()
-      .mockResolvedValueOnce({ authorized: false, reason: 'error', retryAfterSeconds: 2 })
+      .mockResolvedValueOnce({ authorized: false, reason: 'error' })
     const reader = new ChannelReader({
       rpcClient: rpc,
       notificationDeliveryClient: null,
@@ -100,38 +100,6 @@ describe('ChannelReader provider event idempotency', () => {
 
     expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
     expect(rpc.sendMessage).not.toHaveBeenCalled()
-  })
-
-  it('keeps non-Telegram provider events retryable after direct admission rejects them', async () => {
-    vi.useFakeTimers()
-    const rpc = rpcClient()
-    rpc.sendMessage = vi
-      .fn()
-      .mockResolvedValueOnce({
-        success: false,
-        error: {
-          code: 'RUNTIME_SERVICE_ADMISSION_LIMITED',
-          message: 'temporarily limited',
-          retryable: true,
-          provider: 'mcp-host',
-          retryAfterSeconds: 5,
-        },
-      })
-      .mockResolvedValueOnce(completedResponse)
-    const reader = new ChannelReader({
-      rpcClient: rpc,
-      notificationDeliveryClient: null,
-      adapters: new Map(),
-    })
-    const message = telegramMessage({ channelType: 'slack', providerIdentity: undefined })
-
-    await reader.handleMessages([message, message])
-    expect(rpc.sendMessage).toHaveBeenCalledOnce()
-
-    await vi.advanceTimersByTimeAsync(5_000)
-    await reader.handleMessages([message])
-
-    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
   })
 
   it('records denied provider events so duplicate redelivery does not reauthorize', async () => {
@@ -1425,9 +1393,9 @@ describe('profileSocialChannelUrl', () => {
   })
 })
 
-// A13 B-9 (owner decision A16 X3): after the Host accepted the async POST, a
-// failed status message must not lead to a second submission on Telegram;
-// Slack and Teams keep their synchronous fallback.
+// After the Host accepted the async POST, a failed status message falls back to
+// one synchronous re-submit on every channel, as on dev (owner decision of
+// 2026-11-18, which overturns A16 X3).
 describe('ChannelReader progress-flow failure after an accepted POST', () => {
   function rejectingAdapter(channelType: 'telegram' | 'slack'): {
     adapter: ChannelAdapter
@@ -1458,7 +1426,7 @@ describe('ChannelReader progress-flow failure after an accepted POST', () => {
     return rpc
   }
 
-  it('does not re-submit a Telegram message when the status message fails', async () => {
+  it('falls back to one synchronous re-submit for Telegram', async () => {
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const rpc = acceptingRpc()
     const { adapter, statusSend } = rejectingAdapter('telegram')
@@ -1470,14 +1438,15 @@ describe('ChannelReader progress-flow failure after an accepted POST', () => {
 
     await reader.handleMessages([telegramMessage()])
 
-    // Liveness witness: the progress flow ran and its status send was rejected.
+    // The progress flow ran and its status send was rejected.
     expect(statusSend).toHaveBeenCalledOnce()
     await expect(statusSend.mock.results[0]?.value).rejects.toThrow('status message failed')
-    expect(rpc.sendMessage).toHaveBeenCalledOnce()
-    expect(vi.mocked(rpc.sendMessage).mock.calls[0]?.[1]).toMatchObject({ async: true })
     expect(
-      errorLog.mock.calls.some(([line]) => String(line).includes('Telegram does not re-submit'))
+      errorLog.mock.calls.some(([line]) => String(line).includes('Progress flow failed'))
     ).toBe(true)
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(rpc.sendMessage).mock.calls[0]?.[1]).toMatchObject({ async: true })
+    expect(vi.mocked(rpc.sendMessage).mock.calls[1]?.[1]).not.toMatchObject({ async: true })
     errorLog.mockRestore()
   })
 
