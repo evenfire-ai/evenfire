@@ -10,6 +10,8 @@ import { resolve } from 'node:path'
 type SchemaNode = {
   type?: string
   format?: string
+  description?: string
+  required?: string[]
   properties?: Record<string, SchemaNode>
   additionalProperties?: SchemaNode
 }
@@ -48,6 +50,12 @@ describe('WorkflowRecipe CRD status records (issue #1349)', () => {
     expect(record?.properties?.noSecretBearingWorkloads).toEqual(
       expect.objectContaining({ type: 'boolean' })
     )
+    // The API server rejects the record without its completion time: the
+    // readers need completedAt whenever the object is present.
+    expect(record?.required).toEqual(['completedAt'])
+    const completedAtDescription = record?.properties?.completedAt?.description
+    expect(typeof completedAtDescription).toBe('string')
+    expect(completedAtDescription?.trim()).not.toBe('')
   })
 
   it('declares the Secret ownership revocation record as a string map', () => {
