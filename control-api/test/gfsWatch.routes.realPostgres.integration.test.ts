@@ -289,6 +289,30 @@ describeRealPostgres('GFS watch routes on real Postgres', () => {
     r.close()
   })
 
+  // The registry runs on a virtual clock here, so no heartbeat or drain timer
+  // can close the connection: only the response's own close event frees it.
+  it('frees the admitted connection as client_gone as soon as the client drops the stream', async () => {
+    const url = await mount()
+    const user = await h.createUser()
+    const gone = async () =>
+      (await h.modules.metrics.gfsWatchDisconnectsTotal.get()).values.find(
+        v => v.labels.reason === 'client_gone'
+      )?.value ?? 0
+    const before = await gone()
+    const { r, connId } = await openReady(url, user)
+    expect(b!.registry.state.byConnId.has(connId)).toBe(true)
+
+    r.close()
+    for (let i = 0; i < 200 && b!.registry.state.byConnId.size > 0; i += 1) {
+      await new Promise(x => setTimeout(x, 5))
+    }
+    expect(b!.registry.state.byConnId.size).toBe(0)
+    expect((await gone()) - before).toBe(1)
+    // The slot is free: the same user is admitted again.
+    const again = await openReady(url, user)
+    again.r.close()
+  })
+
   it('accepts 64 keys in the query string', async () => {
     const url = await mount()
     const user = await h.createUser()
