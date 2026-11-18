@@ -315,6 +315,9 @@ describe('action authority checkpoint and cache isolation', () => {
     const firstRequest = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))
     expect(firstRequest.hostMessageAdmission).toEqual(sendContext)
     expect(initialReceipt).toMatch(/^eyJ/)
+    // The responses are replayed from the hook, so nothing downstream ties the
+    // receipt production reports to the one Control API issued; assert it here.
+    expect(initialReceipt).toBe(initialResponse.hostMessageAdmissionReceipt)
     expect(initial).not.toHaveProperty('hostMessageAdmission')
     expect(initial.checkpoint).not.toHaveProperty('hostMessageAdmissionReceipt')
     expect(initial.trustedEdgeContext).not.toHaveProperty('hostMessageAdmissionReceipt')
@@ -333,6 +336,11 @@ describe('action authority checkpoint and cache isolation', () => {
     })
     const retryRequest = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))
     expect(retryRequest.hostMessageAdmission).toEqual(retryContext)
+    // The retry checkpoint was produced in the hook with the receipt Control API
+    // issued first; the retry request must carry that same receipt.
+    expect(retryRequest.hostMessageAdmission.receipt).toBe(
+      initialResponse.hostMessageAdmissionReceipt
+    )
     expect(retryReceipt).toBe(initialReceipt)
     expect(rechecked).not.toHaveProperty('hostMessageAdmission')
     expect(rechecked.checkpoint).not.toHaveProperty('hostMessageAdmissionReceipt')
