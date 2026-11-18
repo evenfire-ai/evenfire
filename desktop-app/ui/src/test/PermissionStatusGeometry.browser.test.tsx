@@ -167,16 +167,21 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
           errorMessages,
         }) => {
           const holdOnLoad = new URLSearchParams(window.location.search).get('holdOnLoad')
-          const modes: Record<string, 'success' | 'pending' | 'error'> = holdOnLoad
-            ? { [holdOnLoad]: 'pending' }
-            : {}
+          const fixtureResourceIds = new Set(Object.keys(successfulAffordances))
+          const modes = new Map<string, 'success' | 'pending' | 'error'>()
+          if (holdOnLoad !== null && fixtureResourceIds.has(holdOnLoad)) {
+            modes.set(holdOnLoad, 'pending')
+          }
+          const requireFixtureResource = (id: string) => {
+            if (!fixtureResourceIds.has(id)) throw new Error(`Unknown permission fixture: ${id}`)
+          }
           const pending = new Map<
             string,
             { resolve: (value: unknown) => void; reject: (error: Error) => void }
           >()
           const pass = <T,>(value: T): T => structuredClone(value)
           const respond = (id: string, success: unknown) => {
-            const mode = modes[id] ?? 'success'
+            const mode = modes.get(id) ?? 'success'
             if (mode === 'pending') {
               return new Promise((resolve, reject) => pending.set(id, { resolve, reject }))
             }
@@ -185,13 +190,15 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
           }
           window.__permissionStatusFixtures = {
             setPermissionMode: (id: string, mode: 'success' | 'pending' | 'error') => {
-              modes[id] = mode
+              requireFixtureResource(id)
+              modes.set(id, mode)
             },
             settlePermission: (id: string, result: 'success' | 'error') => {
+              requireFixtureResource(id)
               const request = pending.get(id)
               if (!request) throw new Error(`No pending permission request for ${id}`)
               pending.delete(id)
-              modes[id] = result
+              modes.set(id, result)
               if (result === 'success') request.resolve(pass(successfulAffordances[id]))
               else request.reject(new Error(errorMessages[id]))
             },
@@ -215,7 +222,7 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
                 throw new Error(`Unexpected folder: ${id}`)
               },
               affordances: async (id: string) => {
-                if (!successfulAffordances[id]) throw new Error(`Unexpected authority: ${id}`)
+                requireFixtureResource(id)
                 return respond(id, successfulAffordances[id])
               },
               downloadPreview: async () => ({
@@ -244,6 +251,55 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
       })
 
       const url = `http://127.0.0.1:${address.port}/permission-status-geometry.html`
+      const prototypeKeys = await page.evaluate(() => Object.getOwnPropertyNames(Object.prototype))
+      for (const unknown of ['unknown-fixture', '__proto__', 'constructor', 'prototype']) {
+        const params = new URLSearchParams({ holdOnLoad: unknown, gfsUri: folder.gfsUri })
+        await page.goto(`${url}?${params}`)
+        await page.getByRole('button', { name: 'report.txt', exact: true }).waitFor()
+        expect(await page.evaluate(() => Object.getOwnPropertyNames(Object.prototype))).toEqual(
+          prototypeKeys
+        )
+        const result = await page.evaluate(async id => {
+          const prototypeBefore = Object.getOwnPropertyDescriptors(Object.prototype)
+          let rejected = false
+          try {
+            window.__permissionStatusFixtures!.setPermissionMode(id, 'pending')
+          } catch {
+            rejected = true
+          }
+          const ready = await window.clerum.gfs.affordances('folder-active', 'main')
+          const prototypeAfter = Object.getOwnPropertyDescriptors(Object.prototype)
+          const keys = Reflect.ownKeys(prototypeBefore)
+          return {
+            rejected,
+            ready: ready.held.includes('read'),
+            prototypeUnchanged:
+              Reflect.ownKeys(prototypeAfter).length === keys.length &&
+              keys.every(key => {
+                const before = Reflect.get(prototypeBefore, key)
+                const after = Reflect.get(prototypeAfter, key)
+                return (
+                  after &&
+                  before.value === after.value &&
+                  before.get === after.get &&
+                  before.set === after.set &&
+                  before.writable === after.writable &&
+                  before.enumerable === after.enumerable &&
+                  before.configurable === after.configurable
+                )
+              }),
+          }
+        }, unknown)
+        expect(result, `rejects unknown fixture mode ID ${unknown}`).toEqual({
+          rejected: true,
+          ready: true,
+          prototypeUnchanged: true,
+        })
+        expect(
+          await page.getByRole('status', { name: 'Checking permissions for Reports' }).count()
+        ).toBe(0)
+      }
+
       await page.goto(`${url}?holdOnLoad=folder-active&gfsUri=${encodeURIComponent(folder.gfsUri)}`)
       await page.getByRole('button', { name: 'report.txt', exact: true }).waitFor()
       const coldFolderProgress = page
