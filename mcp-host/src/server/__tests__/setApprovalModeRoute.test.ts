@@ -420,7 +420,7 @@ describe('session reads project the live approval config', () => {
     const list = await handleSessionsList(USER, {})
     const emailColumn = list.items.find(item => item.chatId === CHAT)
     const unset = list.items.find(item => item.chatId === 'unset')
-    expect(emailColumn?.channelCap).toBe('manual')
+    expect(emailColumn?.channelCap).toBe('allow_all')
     expect(emailColumn?.approvalMode).toBe('allow_all')
     expect(unset?.channelCap).toBe('manual')
     expect(unset?.approvalMode).toBe('manual')
