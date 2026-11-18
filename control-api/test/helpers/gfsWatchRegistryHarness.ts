@@ -10,6 +10,7 @@ import { loadVerificationKey } from '../../../gfs-controller/src/auth/keys.js'
 import { verifyGfsToken } from '../../../gfs-controller/src/auth/verify.js'
 import { PgResourceStore } from '../../../gfs-controller/src/db/resourceStore.js'
 import type { GfsKey, Rid32, Uuid } from '../../src/services/gfsWatch/keys.js'
+import { LISTENER_CLIENT_OPTIONS } from '../../src/services/gfsWatch/listener.js'
 import type {
   GfsWatchRegistry,
   GfsWatchRegistryDeps,
@@ -54,6 +55,22 @@ let evCounter = 0
 export const nextEv = () => ++evCounter
 
 export const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+/**
+ * Real milliseconds a LISTEN attempt may take before the listener itself
+ * gives up on it. The registry clock is virtual and stands still while a test
+ * waits, so the listener's own connect deadline never fires here: only pg's
+ * connect and query timeouts, which run on wall time, bound the attempt.
+ */
+export const LISTEN_ATTEMPT_REAL_MS =
+  LISTENER_CLIENT_OPTIONS.connectionTimeoutMillis + LISTENER_CLIENT_OPTIONS.query_timeout + 1_000
+
+/** Waits, on wall time, as long as one LISTEN attempt may legitimately take. */
+export async function waitForListenerReady(ready: () => boolean): Promise<boolean> {
+  const start = Date.now()
+  while (!ready() && Date.now() - start < LISTEN_ATTEMPT_REAL_MS) await sleep(5)
+  return ready()
+}
 
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
@@ -605,8 +622,9 @@ export async function createRegistryHarness(adminUrl: string) {
       },
     }
     built.push(b)
-    for (let i = 0; i < 500 && !registry.listenerReady(); i += 1) await sleep(5)
-    if (!registry.listenerReady()) throw new Error('listener did not become ready')
+    if (!(await waitForListenerReady(() => registry.listenerReady()))) {
+      throw new Error('listener did not become ready')
+    }
     return b
   }
 

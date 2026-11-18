@@ -25,7 +25,8 @@ let flushMicrotasks!: Loaded['flushMicrotasks'],
   nextEv!: Loaded['nextEv'],
   quoteIdent!: Loaded['quoteIdent'],
   restInvariantViolations!: Loaded['restInvariantViolations'],
-  sleep!: Loaded['sleep']
+  sleep!: Loaded['sleep'],
+  waitForListenerReady!: Loaded['waitForListenerReady']
 
 // Model-based test of the GFS watch registry (§2–§3) on the real stack: real
 // Postgres with the dedicated LISTEN and the real resource trigger, real
@@ -112,6 +113,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       quoteIdent,
       restInvariantViolations,
       sleep,
+      waitForListenerReady,
     } = await loadHelpers())
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(registryTestDatabase)}`)
@@ -430,7 +432,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       )
       for (let i = 0; i < 400 && real.b.registry.listenerReady(); i += 1) await sleep(5)
       real.b.clock.advance(1_200)
-      for (let i = 0; i < 1_000 && !real.b.registry.listenerReady(); i += 1) await sleep(5)
+      await waitForListenerReady(() => real.b.registry.listenerReady())
     }
     toString = () => 'ListenerLost'
   }
