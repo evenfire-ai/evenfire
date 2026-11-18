@@ -1,8 +1,10 @@
 import { type Mock, inject, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
+import { resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { ChatStore } from '../../../../../../src/chatStore'
 import type {
+  ChatAuthorityScope,
   ChatDeleteFence,
   ChatIndex,
   ChatMessage,
@@ -44,6 +46,7 @@ interface ChatMock {
   getBindingGeneration: Fn
   captureDeleteFence: Fn
   delete: Fn
+  deletionStatus: Fn
   loadMessages: Fn
   appendMessages: Fn
   upsertMessages: Fn
@@ -88,6 +91,8 @@ export interface MockClerum {
   readIndex: (agentRef: string) => Promise<ChatIndex>
   /** Persist selection through the same producer used by chat:setLastActive. */
   persistLastActive: (agentRef: string, chatId: string) => Promise<void>
+  /** Mirror the main-process ChatStore authority binding when the test App switches teams. */
+  setChatStoreAuthorityScope: (scope: ChatAuthorityScope) => void
   /**
    * The real store's replaceMessages. The bridge's own `chat.replaceMessages`
    * is a no-op; a test that needs a reconcile's write points it here.
@@ -129,6 +134,12 @@ export function installMockClerum(): MockClerum {
       store.setAuthorityScope(fence.authorityScope)
       return store.deleteChat(agentRef, chatId, fence.authorityScope)
     }),
+    deletionStatus: vi.fn(
+      (agentRef: string, chatId: string, authorityScope: ChatAuthorityScope) => {
+        store.setAuthorityScope(authorityScope)
+        return store.getChatDeletionStatus(agentRef, chatId, authorityScope)
+      }
+    ),
     loadMessages: vi.fn((agentRef: string, chatId: string, limit?: number, offset?: number) =>
       store.loadMessages(agentRef, chatId, limit, offset)
     ),
@@ -188,6 +199,12 @@ export function installMockClerum(): MockClerum {
   const clerum = {
     chat,
     rpc,
+    gfs: {
+      resolve: vi.fn(async (uri: string) => {
+        const resourceId = uri.split('/').filter(Boolean).at(-1) ?? ''
+        return resolvedFile(resourceId, resourceId, { gfsUri: uri })
+      }),
+    },
     emitTaskProgress(taskId: string, event: unknown) {
       const handler = progressHandlers.get(taskId)
       if (!handler) throw new Error(`No task-progress handler registered for taskId="${taskId}"`)
@@ -205,6 +222,7 @@ export function installMockClerum(): MockClerum {
     readIndex: (agentRef: string) => store.getIndex(agentRef),
     persistLastActive: (agentRef: string, chatId: string) =>
       store.setLastActiveChatId(agentRef, chatId),
+    setChatStoreAuthorityScope: (scope: ChatAuthorityScope) => store.setAuthorityScope(scope),
     replaceStoredMessages: (
       agentRef: string,
       chatId: string,

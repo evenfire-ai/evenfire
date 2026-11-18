@@ -25,7 +25,8 @@ export function useComposerDraft(
   const composerState = useContext(ChatComposerStateContext)
   const destinationTabId =
     workspaceTabId === undefined ? (composerState?.workspaceChatTabId ?? null) : workspaceTabId
-  const draftScope = JSON.stringify([chatId, agentRef ?? null, destinationTabId])
+  const authorityScope = composerState?.authorityScope ?? ''
+  const draftScope = JSON.stringify([authorityScope, chatId, agentRef ?? null, destinationTabId])
   const [transientDraft, setTransientDraft] = useState<{ scope: string; value: string } | null>(
     null
   )
@@ -38,7 +39,7 @@ export function useComposerDraft(
     }
     if (!agentRef) return
     claimPendingResourceComposerPrefill(destinationTabId, agentRef)
-  }, [agentRef, chatId, destinationTabId])
+  }, [agentRef, authorityScope, chatId, destinationTabId])
   const subscribe = useCallback(
     (listener: () => void) => subscribeComposerDraft(chatId, listener, agentRef, destinationTabId),
     [agentRef, chatId, destinationTabId]
@@ -48,7 +49,7 @@ export function useComposerDraft(
     [agentRef, chatId, destinationTabId]
   )
   const draft = useSyncExternalStore(subscribe, () =>
-    getComposerDraft(chatId, agentRef, destinationTabId)
+    getComposerDraft(chatId, agentRef, destinationTabId, authorityScope)
   )
   const ownerConflictTabId = useSyncExternalStore(subscribe, getOwnerConflict, getOwnerConflict)
   const setDraft = useCallback(

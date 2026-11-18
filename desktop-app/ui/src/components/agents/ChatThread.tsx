@@ -38,7 +38,7 @@ import {
   getChatMessageAttachmentTypeLabel,
   parseChatMessageDisplay,
 } from '../../lib/chatMessageAttachments'
-import { getComposerDraft, setComposerDraft } from '../../lib/composerDraftStore'
+import { getComposerDraft, setComposerDraftForDestination } from '../../lib/composerDraftStore'
 import { buildComposerResendDraft, findNearestPrecedingUserMessage } from '../../lib/composerResend'
 import {
   extractHtmlVisualization,
@@ -285,6 +285,7 @@ export function ChatThread({
     composerReferenceAttachments,
     requestComposerFocus,
     workspaceChatTabId,
+    authorityScope,
   } = useChatComposerStateContext()
   const {
     activeMessages,
@@ -540,7 +541,12 @@ export function ChatThread({
     (source: Pick<RenderableChatMessage, 'content' | 'attachments'>) => {
       if (!activeChatId) return
       if (
-        getComposerDraft(activeChatId, undefined, workspaceChatTabId) ||
+        getComposerDraft(
+          activeChatId,
+          selectedAgent ?? undefined,
+          workspaceChatTabId,
+          authorityScope
+        ) ||
         composerImageAttachments.length ||
         composerReferenceAttachments.length
       ) {
@@ -548,7 +554,17 @@ export function ChatThread({
         return
       }
       const draft = buildComposerResendDraft(source)
-      if (!setComposerDraft(activeChatId, draft.content, undefined, workspaceChatTabId)) {
+      if (
+        !setComposerDraftForDestination(
+          {
+            authorityScope,
+            agentRef: selectedAgent ?? undefined,
+            chatId: activeChatId,
+            workspaceChatTabId,
+          },
+          draft.content
+        )
+      ) {
         pushToast(
           'This composer no longer owns the draft. Select its chat tab and try again.',
           'error'
@@ -572,6 +588,7 @@ export function ChatThread({
     },
     [
       activeChatId,
+      authorityScope,
       composerImageAttachments,
       composerReferenceAttachments,
       workspaceChatTabId,
@@ -1094,7 +1111,9 @@ export function ChatThread({
                           block
                           className="agent-dedicated-session-title-btn"
                           color="transparent"
-                          onClick={() => onSelectChat(chat.id)}
+                          onClick={() =>
+                            onSelectChat(chat.id, { activationOrigin: 'chat-thread-session' })
+                          }
                           size="sm"
                           title={chat.title}
                           variant="text"

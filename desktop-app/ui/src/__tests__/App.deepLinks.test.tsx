@@ -58,6 +58,7 @@ import {
   childView,
   gfsRouteFailureMessage,
   heldAffordances,
+  resolveResource,
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
@@ -454,8 +455,23 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     const targetTeamId = String(target.teamId || '').trim()
     if (!targetTeamId || targetTeamId === liveTeamId) return false
     liveTeamId = targetTeamId
+    controller.currentTeamId = targetTeamId
     return true
   })
+  const openFilesSection = vi.fn(
+    (
+      path: string | null = null,
+      _options: Parameters<AppController['openFilesSection']>[1] = {},
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) beginNavigationIntent()
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) =>
+        openFilesTab(state, { id: nextWorkspaceTabId(), path })
+      )
+      return controller.workspaceTabs.activeTabId
+    }
+  )
   const beginGfsResourceNavigation = vi.fn(
     (
       id: number,
@@ -608,6 +624,10 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
+    get authorityScope() {
+      return `${controller.runtimeConfigState?.envKey ?? ''}:${controller.isAuthenticated}:${controller.authenticatedPrincipalIdentity ?? ''}:${controller.currentTeamId ?? ''}:${controller.sessionGeneration ?? ''}`
+    },
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     availableTeamIds: ['team-a', 'team-b'],
     teamDirectoryHydrated: true,
@@ -679,6 +699,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     showRuntimeConfigSelector: false,
     runtimeConfigMissing: false,
     authTransitioning: false,
+    openFilesSection,
     handleEnsureTeamContext: ensureTeamContext,
     getCurrentTeamId: vi.fn(() => liveTeamId),
     isHostAccessBlocked: vi.fn(() => false),
@@ -915,6 +936,10 @@ describe('App deep-link orchestration', () => {
           }),
         },
         gfs: {
+          resolve: vi.fn(async (uri: string) => {
+            const resourceId = uri.split('/').filter(Boolean).at(-1) ?? ''
+            return resolvedFile(resourceId, resourceId, { gfsUri: uri })
+          }),
           getUserNavigationGeneration: vi.fn(() => mainNavigationGeneration.current()),
           advanceUserNavigationGeneration: vi.fn(() => mainNavigationGeneration.advance()),
           acknowledgeDeepLink: (id: number, authority?: DeepLinkAcknowledgmentAuthority) =>
@@ -3760,6 +3785,12 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalled())
 
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const resource = resolvedFile('0123456789abcdef0123456789abcdef', 'Shared document.md', {
+      gfsUri: uri,
+    })
+    window.clerum.gfs.resolve = vi.fn(
+      requestedUri => resolveResource(resource) as ReturnType<typeof window.clerum.gfs.resolve>
+    )
     const link = produceGfsResourceDeepLink(uri)
     act(() => emitGfsDeepLink?.(link))
 
@@ -4747,7 +4778,9 @@ describe('App deep-link orchestration', () => {
       navigationIntentSequence: 1,
     })
     expect(currentController.getCurrentTeamId()).toBe('team-b')
-    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
+    // The team switch refreshes the authenticated catalog, then the accepted
+    // link performs its own target-authorization lookup.
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 2)
     await waitForAppOpen(2)
     expect(main.openCall(1)).toMatchObject({
       recipeNs: 'ns',

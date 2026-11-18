@@ -7,12 +7,30 @@
 
 type Listener = () => void
 
+export interface AutomaticComposerDraftOrigin {
+  authorityScope: string
+  agentRef: string
+  chatId: string
+  workspaceChatTabId: string
+}
+
+export interface ComposerDraftDestination {
+  authorityScope: string
+  agentRef: string
+  chatId: string
+  workspaceChatTabId: string
+}
+
 type ResourcePrefill = { requestId: number; revision: number; uri: string }
 type TabDraft = { key: string; value: string; requestId?: number }
 
 /** Legacy no-chat key retained for callers that do not yet provide an agent. */
 const NO_CHAT_DRAFT_KEY = '__no_chat__'
 const drafts = new Map<string, string>()
+// Provenance lives beside the existing shared byte owner. It is present only
+// for bytes inserted by persisted-chat autofill; ordinary historical/user text
+// remains unmarked.
+const automaticDraftOrigins = new Map<string, AutomaticComposerDraftOrigin>()
 let revision = 0
 const revisions = new Map<string, number>()
 const listenersByKey = new Map<string, Set<Listener>>()
@@ -38,7 +56,8 @@ function emit(key: string): void {
 }
 
 function setDraftByKey(key: string, value: string): boolean {
-  if ((drafts.get(key) ?? '') === value) return false
+  const clearedAutomaticOrigin = automaticDraftOrigins.delete(key)
+  if ((drafts.get(key) ?? '') === value && !clearedAutomaticOrigin) return false
   revisions.set(key, ++revision)
   if (value) drafts.set(key, value)
   else drafts.delete(key)
@@ -109,9 +128,22 @@ export function getComposerDraftOwnerConflict(
 export function getComposerDraftRevision(
   chatId: string | null,
   agentRef?: string,
-  workspaceTabId?: string | null
+  workspaceTabId?: string | null,
+  authorityScope?: string
 ): number {
   const key = keyFor(chatId, agentRef)
+  const automaticOrigin = automaticDraftOrigins.get(key)
+  if (
+    automaticOrigin &&
+    !isAutomaticOriginVisible(automaticOrigin, {
+      authorityScope,
+      agentRef: agentRef ?? '',
+      chatId: chatId ?? '',
+      workspaceChatTabId: workspaceTabId ?? '',
+    })
+  ) {
+    return 0
+  }
   if (chatId === null && workspaceTabId) {
     const tabDraft = getTabDraft(workspaceTabId, key)
     if (tabDraft) return tabRevisions.get(workspaceTabId)?.get(key) ?? 0
@@ -125,7 +157,8 @@ export function getComposerDraftRevision(
 export function getComposerDraft(
   chatId: string | null,
   agentRef?: string,
-  workspaceTabId?: string | null
+  workspaceTabId?: string | null,
+  authorityScope?: string
 ): string {
   const key = keyFor(chatId, agentRef)
   if (workspaceTabId) {
@@ -135,7 +168,58 @@ export function getComposerDraft(
     if (pending && chatId === null) return pending.uri
   }
   if (workspaceTabId && chatId === null) return ''
+  const automaticOrigin = automaticDraftOrigins.get(key)
+  if (
+    automaticOrigin &&
+    !isAutomaticOriginVisible(automaticOrigin, {
+      authorityScope,
+      agentRef: agentRef ?? '',
+      chatId: chatId ?? '',
+      workspaceChatTabId: workspaceTabId ?? '',
+    })
+  ) {
+    return ''
+  }
   return drafts.get(key) ?? ''
+}
+
+function isAutomaticOriginVisible(
+  origin: AutomaticComposerDraftOrigin,
+  destination: Partial<ComposerDraftDestination>
+): boolean {
+  return Boolean(
+    destination.authorityScope &&
+    destination.authorityScope === origin.authorityScope &&
+    destination.agentRef === origin.agentRef &&
+    destination.chatId === origin.chatId &&
+    destination.workspaceChatTabId === origin.workspaceChatTabId
+  )
+}
+
+/** Write feature-owned bytes with their exact destination provenance. */
+export function setAutomaticComposerDraft(
+  destination: ComposerDraftDestination,
+  value: string
+): boolean {
+  const { authorityScope, agentRef, chatId, workspaceChatTabId } = destination
+  if (!authorityScope || !agentRef || !chatId || !workspaceChatTabId || !value) return false
+  if (getComposerDraft(chatId, agentRef, workspaceChatTabId, authorityScope) !== '') return false
+
+  const key = keyFor(chatId, agentRef)
+  const origin = automaticDraftOrigins.get(key)
+  const nextOrigin = { ...destination }
+  const sameOrigin =
+    origin?.authorityScope === nextOrigin.authorityScope &&
+    origin.agentRef === nextOrigin.agentRef &&
+    origin.chatId === nextOrigin.chatId &&
+    origin.workspaceChatTabId === nextOrigin.workspaceChatTabId
+  if ((drafts.get(key) ?? '') === value && sameOrigin) return false
+
+  drafts.set(key, value)
+  automaticDraftOrigins.set(key, nextOrigin)
+  revisions.set(key, ++revision)
+  emit(key)
+  return true
 }
 
 /** Reserve a canonical resource prefill for one exact blank workspace tab. */
@@ -209,17 +293,79 @@ export function setComposerDraft(
   return true
 }
 
+/** Write a programmatic recovery/resend only when its destination owns auto bytes. */
+export function setComposerDraftForDestination(
+  destination: {
+    chatId: string | null
+    agentRef?: string
+    workspaceChatTabId?: string | null
+    authorityScope?: string
+  },
+  value: string
+): boolean {
+  const { chatId, agentRef, workspaceChatTabId, authorityScope } = destination
+  if (chatId) {
+    const automaticOrigin = automaticDraftOrigins.get(keyFor(chatId, agentRef))
+    if (
+      automaticOrigin &&
+      !isAutomaticOriginVisible(automaticOrigin, {
+        authorityScope,
+        agentRef: agentRef ?? '',
+        chatId,
+        workspaceChatTabId: workspaceChatTabId ?? '',
+      })
+    ) {
+      return false
+    }
+  }
+  return setComposerDraft(chatId, value, agentRef, workspaceChatTabId)
+}
+
 export function clearComposerDraft(
   chatId: string | null,
   agentRef?: string,
-  workspaceTabId?: string | null
+  workspaceTabId?: string | null,
+  authorityScope?: string
 ): boolean {
   const key = keyFor(chatId, agentRef)
+  const automaticOrigin = automaticDraftOrigins.get(key)
+  if (
+    automaticOrigin &&
+    !isAutomaticOriginVisible(automaticOrigin, {
+      authorityScope,
+      agentRef: agentRef ?? '',
+      chatId: chatId ?? '',
+      workspaceChatTabId: workspaceTabId ?? '',
+    })
+  ) {
+    return false
+  }
   if (chatId === null && workspaceTabId) {
     const tabDraft = getTabDraft(workspaceTabId, key)
     if (tabDraft) setTabDraft(workspaceTabId, key, '')
     removePendingResourcePrefill(workspaceTabId)
     return true
+  }
+  return setDraftByKey(key, '') || !drafts.has(key)
+}
+
+/** Clear a deleted chat's draft without removing automatic bytes owned by another scope. */
+export function clearDeletedChatComposerDraft(
+  chatId: string,
+  agentRef: string,
+  authorityScope: string
+): boolean {
+  if (!chatId || !agentRef) return false
+  const key = keyFor(chatId, agentRef)
+  const automaticOrigin = automaticDraftOrigins.get(key)
+  if (
+    automaticOrigin &&
+    (!authorityScope ||
+      automaticOrigin.authorityScope !== authorityScope ||
+      automaticOrigin.agentRef !== agentRef ||
+      automaticOrigin.chatId !== chatId)
+  ) {
+    return false
   }
   return setDraftByKey(key, '') || !drafts.has(key)
 }
@@ -239,6 +385,7 @@ export function releaseComposerDraftForWorkspaceTab(workspaceTabId: string): voi
 
 /** Drop drafts and pending resource requests on logout or principal/team change. */
 export function clearAllComposerDrafts(): void {
+  automaticDraftOrigins.clear()
   const changedKeys = new Set(drafts.keys())
   const changedTabs = new Set([...pendingResourcePrefillsByTab.keys(), ...tabDrafts.keys()])
   for (const key of drafts.keys()) revisions.set(key, ++revision)
@@ -289,6 +436,7 @@ export function subscribeComposerDraft(
 /** Test helper: wipe all drafts and listeners. */
 export function resetComposerDraftStore(): void {
   drafts.clear()
+  automaticDraftOrigins.clear()
   revisions.clear()
   listenersByKey.clear()
   pendingResourcePrefillsByTab.clear()

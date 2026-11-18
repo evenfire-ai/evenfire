@@ -8,6 +8,16 @@ export type GfsDriveResource = GfsBrowserChild & {
   coversDescendants?: boolean
 }
 
+export type FilesPageResolvedLocation = {
+  resourceId: string
+  gfsUri: string
+  kind: 'file' | 'directory'
+  authorityScope: string
+  sessionGeneration: number | null
+  resolvedViaUri: boolean
+  isCurrent: () => boolean
+}
+
 export interface FilesPageProps {
   /** App-level toast dispatcher for success feedback (desktop-app/ui rule). */
   pushToast?: (message: string, tone: Tone, options?: { durationMs?: number }) => void
@@ -28,7 +38,11 @@ export interface FilesPageProps {
   /** Live owner/session/intent fence for this queued request. */
   isPendingGfsDeepLinkCurrent?: () => boolean
   /** App-owned intent ordering for explicit navigation within this Files tab. */
-  onExplicitNavigationIntent?: () => void
+  onExplicitNavigationIntent?: () => number | void
+  /** Current App intent captured by programmatic Files-page seeds. */
+  navigationIntentSequence?: number
+  /** Validates a captured App intent after asynchronous resource resolution. */
+  isNavigationIntentCurrent?: (sequence: number) => boolean
   onPendingGfsDeepLinkOutcome?: (
     id: number,
     outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
@@ -40,7 +54,11 @@ export interface FilesPageProps {
    * changes, including back to the virtual root (`null`, `null`). The opaque
    * `gfsUri` carries no name, hence the second argument.
    */
-  onLocationChange?: (gfsUri: string | null, name: string | null) => void
+  onLocationChange?: (
+    gfsUri: string | null,
+    name: string | null,
+    resolvedLocation?: FilesPageResolvedLocation | null
+  ) => void
   /** Monotonic signal from the app-level entity stream for live path reconciliation. */
   remoteGfsChangeEpoch?: number
   /**
@@ -49,7 +67,7 @@ export interface FilesPageProps {
    * the file kind and hands the descriptor up to the tab store through this
    * callback. Absent ⇒ no preview surface is available (the file downloads).
    */
-  onOpenPreview?: (preview: GfsPreviewResource) => void | boolean
+  onOpenPreview?: (preview: GfsPreviewResource, navigationIntentSequence?: number) => void | boolean
   /** Guarded preview completion for the queued resource-link request. */
   onOpenPendingGfsPreview?: (
     id: number,

@@ -251,28 +251,42 @@ function makeController(): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
-  const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
-    controller.beginUserNavigationIntent()
-    clearAppsPicker()
-    setWorkspaceTabs((state: WorkspaceState) =>
-      openPreviewTab(state, {
-        id: nextWorkspaceTabId(),
-        title: preview.name,
-        gfsUri: preview.gfsUri,
-        fileKind: preview.kind,
-        byteLength: preview.bytes,
-        ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
-        ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
-      })
-    )
-  })
-  const openFilesSection = vi.fn((path: string | null = null) => {
-    controller.beginUserNavigationIntent()
-    clearAppsPicker()
-    setWorkspaceTabs((state: WorkspaceState) =>
-      openFilesTab(state, { id: nextWorkspaceTabId(), path })
-    )
-  })
+  const openPreviewSection = vi.fn(
+    (
+      preview: GfsPreviewResource,
+      _options: Parameters<AppController['openPreviewSection']>[1] = {},
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) controller.beginUserNavigationIntent()
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) =>
+        openPreviewTab(state, {
+          id: nextWorkspaceTabId(),
+          title: preview.name,
+          gfsUri: preview.gfsUri,
+          fileKind: preview.kind,
+          byteLength: preview.bytes,
+          ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
+          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+        })
+      )
+      return controller.workspaceTabs.activeTabId
+    }
+  )
+  const openFilesSection = vi.fn(
+    (
+      path: string | null = null,
+      _options: Parameters<AppController['openFilesSection']>[1] = {},
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) controller.beginUserNavigationIntent()
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) =>
+        openFilesTab(state, { id: nextWorkspaceTabId(), path })
+      )
+      return controller.workspaceTabs.activeTabId
+    }
+  )
   const showAppsPicker = vi.fn(() => {
     controller.beginUserNavigationIntent()
     if (controller.appsPickerActive) return
@@ -287,6 +301,10 @@ function makeController(): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
+    get authorityScope() {
+      return `${controller.runtimeConfigState?.envKey ?? ''}:${controller.isAuthenticated}:${controller.authenticatedPrincipalIdentity ?? ''}:${controller.currentTeamId ?? ''}:${controller.sessionGeneration ?? ''}`
+    },
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',
@@ -442,6 +460,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
   let shortcutCommandCb: ((commandId: string, source: string) => void) | null
   let sandboxUi: ReturnType<typeof makeSandboxUiBridge>
   let main: SandboxUiMainFake
+  let resolvedResources: Map<string, ReturnType<typeof resolvedFile>>
   // A `flushSync` from inside a render or effect does not flush: React only
   // warns about it. The seam depends on flushing, so the warning fails the test.
   let flushSyncErrors: string[]
@@ -459,6 +478,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     machineHarness.events = []
     machineHarness.afterDispatch = null
     openGfsResourceCb = null
+    resolvedResources = new Map()
     consentRequestedCb = null
     consentCancelledCb = null
     shortcutCommandCb = null
@@ -497,10 +517,29 @@ describe('App wires gestures and main events to the embed ownership machine', ()
           }),
         },
         app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        gfs: {
+          resolve: vi.fn(async (uri: string) => {
+            const resourceId = uri.split('/').filter(Boolean).at(-1) ?? ''
+            return (
+              resolvedResources.get(uri) ?? resolvedFile(resourceId, resourceId, { gfsUri: uri })
+            )
+          }),
+        },
         sandboxUi,
         pluginSdk: {
           onOpenGfsResource: vi.fn((cb: (resource: OpenGfsPayload) => void) => {
-            openGfsResourceCb = cb
+            openGfsResourceCb = resource => {
+              const resourceId = resource.gfsUri.split('/').filter(Boolean).at(-1) ?? ''
+              resolvedResources.set(
+                resource.gfsUri,
+                resolvedFile(resourceId, resource.name, {
+                  gfsUri: resource.gfsUri,
+                  bytes: resource.bytes ?? 0,
+                  version: resource.version ?? 1,
+                })
+              )
+              cb(resource)
+            }
             return vi.fn()
           }),
           onConsentRequested: vi.fn((cb: (request: PluginConsentRequest) => void) => {

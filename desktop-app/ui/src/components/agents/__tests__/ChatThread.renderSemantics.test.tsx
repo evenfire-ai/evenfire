@@ -28,6 +28,7 @@ const actionsValue = {
 }
 const runtimeValue = { cancelTask: vi.fn() }
 let messages: AgentChatMessage[] = []
+let activeChatId: string | null = 'chat-1'
 
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => navigationValue,
@@ -55,7 +56,7 @@ vi.mock('@contexts/ChatThreadStateContext', () => ({
     hasOlderMessages: false,
     olderMessagesLoading: false,
     handleLoadOlderMessages: vi.fn(),
-    activeChatId: 'chat-1',
+    activeChatId,
     activityByMessageId: {},
     progressByMessageId: {},
     localSearchQuery: '',
@@ -73,12 +74,33 @@ vi.mock('@components/MessageArtifactActions', () => ({ MessageArtifactActions: (
 afterEach(() => {
   cleanup()
   messages = []
+  activeChatId = 'chat-1'
+  chatListValue.chatList = []
   vi.clearAllMocks()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
 
 describe('ChatThread semantic renderer compatibility', () => {
+  it('marks a direct persisted-session row click as an explicit activation', () => {
+    activeChatId = null
+    chatListValue.chatList = [
+      {
+        id: 'chat-2',
+        title: 'Target conversation',
+        updatedAt: new Date(1).toISOString(),
+      },
+    ] as never[]
+
+    render(<ChatThread />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Target conversation' }))
+
+    expect(actionsValue.handleSelectChat).toHaveBeenCalledWith('chat-2', {
+      activationOrigin: 'chat-thread-session',
+    })
+  })
+
   it('keeps the compact error preview when local search is closed', () => {
     const content = 'x'.repeat(220)
     messages = [

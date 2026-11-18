@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentChatActionsProvider } from '@contexts/AgentChatActionsContext'
 import type { AgentChatActionsContextValue } from '@contexts/AgentChatActionsContext'
+import { AuthContext } from '@contexts/AuthContext'
 import { ChatComposerStateProvider } from '@contexts/ChatComposerStateContext'
 import type { ChatComposerStateContextValue } from '@contexts/ChatComposerStateContext'
 import { McpRuntimeProvider } from '@contexts/McpRuntimeContext'
@@ -76,15 +77,17 @@ function controllerComposerElement(
 
   return (
     <QueryClientProvider client={app.queryClient}>
-      <NavigationContext.Provider value={navigationValue}>
-        <AgentChatActionsProvider value={actionValue}>
-          <ChatComposerStateProvider value={emptyComposerState}>
-            <McpRuntimeProvider value={runtimeValue}>
-              <ComposerPanel inline />
-            </McpRuntimeProvider>
-          </ChatComposerStateProvider>
-        </AgentChatActionsProvider>
-      </NavigationContext.Provider>
+      <AuthContext.Provider value={view}>
+        <NavigationContext.Provider value={navigationValue}>
+          <AgentChatActionsProvider value={actionValue}>
+            <ChatComposerStateProvider value={emptyComposerState}>
+              <McpRuntimeProvider value={runtimeValue}>
+                <ComposerPanel inline />
+              </McpRuntimeProvider>
+            </ChatComposerStateProvider>
+          </AgentChatActionsProvider>
+        </NavigationContext.Provider>
+      </AuthContext.Provider>
     </QueryClientProvider>
   )
 }

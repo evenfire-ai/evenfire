@@ -538,6 +538,7 @@ export function SidebarNav({
                                         chatId: session.id,
                                         isRemote: session.remote === true,
                                         title: session.title,
+                                        activationOrigin: 'sidebar-session',
                                       })
                                       closeCompactMenu()
                                       setSessionMenuId(null)

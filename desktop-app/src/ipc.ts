@@ -2000,6 +2000,23 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   )
 
   ipcMain.handle(
+    'chat:deletionStatus',
+    async (event, payload: { agentRef: string; chatId: string; authorityScope?: unknown }) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      const authorityScope = sanitizeChatAuthorityScope(payload?.authorityScope)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      const authority = service.getChatDeletionFenceAuthority()
+      if (!sameChatAuthorityScope(authorityScope, authority.authorityScope)) {
+        throw new Error('Chat deletion status authority changed')
+      }
+      const store = requireChatStoreForBindingGeneration(getChatStoreBindingGeneration())
+      return store.getChatDeletionStatus(agentRef, chatId, authorityScope)
+    }
+  )
+
+  ipcMain.handle(
     'chat:loadMessages',
     async (
       event,

@@ -12,7 +12,10 @@ type AppVm = ReturnType<typeof useAppController>
  * never re-renders action-only consumers (e.g. FleetBoard) — even when an
  * underlying handler's closure deps (chatList, attachments, error flags) change.
  */
-export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValue {
+export function useAgentChatActionsValue(
+  vm: AppVm,
+  handleSelectChatOverride?: AppVm['handleSelectChat']
+): AgentChatActionsContextValue {
   const chatEndRef = vm.chatEndRef
   const scrollChatToBottom = useStableCallback(vm.scrollChatToBottom)
   // The controller owns phase-specific, current feedback. UI events observe
@@ -33,7 +36,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       await vm.handleDeleteChatForAgent(...args).catch(() => undefined)
     }
   )
-  const handleSelectChat = useStableCallback(vm.handleSelectChat)
+  const handleSelectChat = useStableCallback(handleSelectChatOverride ?? vm.handleSelectChat)
   const clearComposerSendError = useStableCallback(vm.clearComposerSendError)
   const handleAddComposerImageAttachments = useStableCallback(vm.handleAddComposerImageAttachments)
   const handleUpdateComposerImageAttachment = useStableCallback(

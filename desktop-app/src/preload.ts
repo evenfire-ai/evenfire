@@ -758,6 +758,11 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('chat:captureDeleteFence', { expectedAuthorityScope }),
     delete: (agentRef: string, chatId: string, fence: import('./types.js').ChatDeleteFence) =>
       ipcRenderer.invoke('chat:delete', { version: 3, agentRef, chatId, fence }),
+    deletionStatus: (
+      agentRef: string,
+      chatId: string,
+      authorityScope: import('./types.js').ChatAuthorityScope
+    ) => ipcRenderer.invoke('chat:deletionStatus', { agentRef, chatId, authorityScope }),
     loadMessages: (agentRef: string, chatId: string, limit?: number, offset?: number) =>
       ipcRenderer.invoke('chat:loadMessages', { agentRef, chatId, limit, offset }),
     appendMessages: (agentRef: string, chatId: string, messages: unknown[]) =>

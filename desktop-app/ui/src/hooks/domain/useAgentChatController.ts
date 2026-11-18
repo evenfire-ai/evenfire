@@ -23,9 +23,11 @@ import { truncateTitle } from '@lib/chatTitle'
 import {
   clearAllComposerDrafts,
   clearComposerDraft,
+  clearDeletedChatComposerDraft,
   getComposerDraft,
   getComposerDraftRevision,
   setComposerDraft,
+  setComposerDraftForDestination,
 } from '@lib/composerDraftStore'
 import {
   composerFileBase64Bytes,
@@ -39,6 +41,7 @@ import {
   mapComposerAttachmentsToHostRequest,
 } from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import { clearLatestGfsConversationContext } from '@lib/gfsConversationPrefill'
 import {
   confirmHostModelSelectionFromSend,
   dropIgnoredHostModelIntent,
@@ -424,6 +427,8 @@ interface UseAgentChatControllerParams {
    * same value AppService's `getChatDeletionFenceAuthority` uses.
    */
   chatAuthorityTeamId: string
+  composerAuthorityScope?: string
+  onConfirmedChatDeletion?: (agentRef: string, chatId: string) => void
 }
 
 export function useAgentChatController({
@@ -449,6 +454,8 @@ export function useAgentChatController({
   getHostAuthorityEpoch,
   hostAuthorityRevision,
   chatAuthorityTeamId,
+  composerAuthorityScope,
+  onConfirmedChatDeletion,
 }: UseAgentChatControllerParams) {
   const chatStore = useChatStore()
   const userScopeKey = currentUserId ?? 'unknown-user'
@@ -702,6 +709,7 @@ export function useAgentChatController({
     const scope = `${isAuthenticated}:${authenticatedScope}`
     if (lastRetentionScope.current === scope) return
     lastRetentionScope.current = scope
+    clearLatestGfsConversationContext()
     // The memo key already carries the scope; this frees the previous scope's entries.
     transcriptMemoRef.current?.clear()
     sendScopeGeneration.current += 1
@@ -1219,6 +1227,7 @@ export function useAgentChatController({
   const resetChat = useCallback(() => {
     beginSelectionIntent()
     clearAllComposerDrafts()
+    clearLatestGfsConversationContext()
     setActivityByAgentMessage({})
     setProgressByAgentMessage({})
     resetComposerAttachments()
@@ -1598,6 +1607,11 @@ export function useAgentChatController({
     captureChatDeleteFence,
     handleDeleteChat,
     handleDeleteChatForAgent,
+    isChatDeletionPending,
+    pendingDeleteRevision,
+    resolvePendingDeletionStatus,
+    resolveCrossScopeDeletionStatus,
+    ensureDeletionStatusCheck,
   } = chatListCtl
   useEffect(() => {
     chatListHostRef.current = {
@@ -1608,7 +1622,9 @@ export function useAgentChatController({
       clearActiveChat,
       scrollChatToBottom,
       dispatchSession,
-      clearComposerDraft,
+      clearDeletedChatDraft: (chatId, agentRef) =>
+        clearDeletedChatComposerDraft(chatId, agentRef, composerAuthorityScope ?? ''),
+      onConfirmedChatDeletion: (agentRef, chatId) => onConfirmedChatDeletion?.(agentRef, chatId),
       getActiveChatId: () => activeChatVisibilityRef.current.activeChatId,
       getChatSwitchInFlight: () => {
         const view = activeChatVisibilityRef.current
@@ -3342,9 +3358,22 @@ export function useAgentChatController({
       chatId: string | null,
       agentRef: string | undefined,
       workspaceTabId: string | null | undefined,
+      authorityScope: string | undefined,
       payload: Pick<FailedAgentSend, 'content' | 'attachments' | 'files' | 'references'>
-    ): void => {
-      if (payload.content) setComposerDraft(chatId, payload.content, agentRef, workspaceTabId)
+    ): boolean => {
+      if (
+        !setComposerDraftForDestination(
+          {
+            authorityScope,
+            agentRef,
+            chatId,
+            workspaceChatTabId: workspaceTabId,
+          },
+          payload.content
+        )
+      ) {
+        return false
+      }
       if (payload.attachments.length) {
         handleAddComposerImageAttachments(
           payload.attachments.map(attachment => ({
@@ -3355,6 +3384,7 @@ export function useAgentChatController({
       }
       if (payload.files.length) handleRestoreComposerFiles(payload.files)
       if (payload.references.length) handleAddComposerReferenceAttachments(payload.references)
+      return true
     },
     [
       handleAddComposerImageAttachments,
@@ -3379,7 +3409,8 @@ export function useAgentChatController({
       const originalDraftRevision = getComposerDraftRevision(
         originalDraftChat,
         originalDraftAgent ?? undefined,
-        originWorkspaceTabId
+        originWorkspaceTabId,
+        composerAuthorityScope
       )
       const originalAttachmentRevision = composerAttachmentRevisionRef.current
       const trimmedContent = content.trim()
@@ -3720,12 +3751,18 @@ export function useAgentChatController({
         getComposerDraftRevision(
           originalDraftChat,
           originalDraftAgent ?? undefined,
-          originWorkspaceTabId
+          originWorkspaceTabId,
+          composerAuthorityScope
         ) === originalDraftRevision
       const shouldResetAttachments =
         canConsumeComposer && composerAttachmentRevisionRef.current === originalAttachmentRevision
       if (shouldClearOriginDraft) {
-        clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined, originWorkspaceTabId)
+        clearComposerDraft(
+          originalDraftChat,
+          originalDraftAgent ?? undefined,
+          originWorkspaceTabId,
+          composerAuthorityScope
+        )
       }
       if (shouldResetAttachments) resetComposerAttachments()
       // The composer's attachments still belong to this send while their
@@ -3758,7 +3795,8 @@ export function useAgentChatController({
           payload.files.length > 0 ||
           payload.references.length > 0
         const draftIsFree =
-          !payload.content || !getComposerDraft(sendChatId, sendAgent, originWorkspaceTabId)
+          !payload.content ||
+          !getComposerDraft(sendChatId, sendAgent, originWorkspaceTabId, composerAuthorityScope)
         const attachmentsCanReturn =
           !hasAttachments ||
           (attachmentsUsable &&
@@ -3766,9 +3804,18 @@ export function useAgentChatController({
             composerAttachmentRevisionRef.current === attachmentRevisionAfterClear &&
             sendChatIsVisible())
         if (draftIsFree && attachmentsCanReturn) {
-          restoreComposerPayload(sendChatId, sendAgent, originWorkspaceTabId, payload)
-          releaseRetainedSend(sendAgent, sendChatId, userMessageId)
-          return
+          if (
+            restoreComposerPayload(
+              sendChatId,
+              sendAgent,
+              originWorkspaceTabId,
+              composerAuthorityScope,
+              payload
+            )
+          ) {
+            releaseRetainedSend(sendAgent, sendChatId, userMessageId)
+            return
+          }
         }
         failRetainedSend(sendAgent, sendChatId, userMessageId, 'post_failed', detail, kind)
       }
@@ -4421,7 +4468,12 @@ export function useAgentChatController({
         return
       }
       if (
-        getComposerDraft(activeChatId, selectedAgent ?? undefined, workspaceTabId) ||
+        getComposerDraft(
+          activeChatId,
+          selectedAgent ?? undefined,
+          workspaceTabId,
+          composerAuthorityScope
+        ) ||
         composerImageAttachments.length ||
         composerFileAttachments.length ||
         composerReferenceAttachments.length
@@ -4429,17 +4481,27 @@ export function useAgentChatController({
         pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
         return
       }
-      restoreComposerPayload(
-        activeChatId,
-        selectedAgent ?? undefined,
-        workspaceTabId,
-        visibleFailure
-      )
+      if (
+        !restoreComposerPayload(
+          activeChatId,
+          selectedAgent ?? undefined,
+          workspaceTabId,
+          composerAuthorityScope,
+          visibleFailure
+        )
+      ) {
+        pushToast(
+          'This composer no longer owns the draft. Select its chat tab and try again.',
+          'error'
+        )
+        return
+      }
       handleDiscardFailedAgentSend()
     },
     [
       visibleFailure,
       activeChatId,
+      composerAuthorityScope,
       composerImageAttachments,
       composerFileAttachments,
       composerReferenceAttachments,
@@ -4764,6 +4826,11 @@ export function useAgentChatController({
     captureChatDeleteFence,
     handleDeleteChat,
     handleDeleteChatForAgent,
+    isChatDeletionPending,
+    pendingDeleteRevision,
+    resolvePendingDeletionStatus,
+    resolveCrossScopeDeletionStatus,
+    ensureDeletionStatusCheck,
     handleSelectChat,
     handleLoadOlderMessages,
     loadMoreChatSessions,

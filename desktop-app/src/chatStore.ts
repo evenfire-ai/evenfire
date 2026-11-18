@@ -7,6 +7,8 @@ import type {
   ChatAuthorityScope,
   ChatDeleteResult,
   ChatDeleteTombstone,
+  ChatDeletionResolution,
+  ChatDeletionStatus,
   ChatFile,
   ChatIndex,
   ChatMessage,
@@ -659,7 +661,8 @@ export class ChatStore {
   private async writeJsonAtomic(
     filePath: string,
     value: unknown,
-    indentation?: number
+    indentation?: number,
+    beforeRename?: () => void
   ): Promise<void> {
     const tmp = `${filePath}.tmp`
     try {
@@ -667,6 +670,9 @@ export class ChatStore {
       if (serialized === undefined) throw new TypeError('Unable to serialize JSON value')
       await fs.writeFile(tmp, serialized, { mode: 0o600 })
       await this.syncFile(tmp)
+      beforeRename?.()
+      // The synchronous pre-rename guard above and this invocation form the
+      // ordering point against setAuthorityScope; never insert an await here.
       await fs.rename(tmp, filePath)
       await this.syncRenamedEntry(tmp, filePath)
     } catch (err) {
@@ -1710,7 +1716,12 @@ export class ChatStore {
     }
   }
 
-  private async saveIndex(agentRef: string, index: ChatIndex): Promise<void> {
+  private async saveIndex(
+    agentRef: string,
+    index: ChatIndex,
+    beforeIndexRename?: () => void,
+    rollbackTombstones?: Pick<ChatIndex, 'deletedChatTombstones' | 'pendingChatCleanup'>
+  ): Promise<void> {
     if (index.version !== INDEX_VERSION) {
       throw new Error(`Refusing to overwrite unsupported chat index version ${index.version}`)
     }
@@ -1723,7 +1734,31 @@ export class ChatStore {
     // Visibility atomicity alone does not make the catalog durable across power loss.
     const target = this.indexPath(agentRef)
     await this.saveTombstoneSidecar(agentRef, normalized)
-    await this.writeJsonAtomic(target, normalized, 2)
+    let indexRenameInvoked = false
+    try {
+      await this.writeJsonAtomic(target, normalized, 2, () => {
+        beforeIndexRename?.()
+        indexRenameInvoked = true
+      })
+    } catch (error) {
+      // A sidecar tombstone is only committed with the index rename. If the
+      // write or final scope guard fails first, restore the prior durable
+      // tombstone snapshot before the status reader can report no-commit.
+      if (rollbackTombstones && !indexRenameInvoked) {
+        try {
+          await this.writeTombstoneSidecar(agentRef, {
+            ...normalized,
+            ...rollbackTombstones,
+          })
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            'Unable to restore tombstones after an uncommitted chat index save'
+          )
+        }
+      }
+      throw error
+    }
   }
 
   /**
@@ -1745,8 +1780,52 @@ export class ChatStore {
     const nothingToProtect =
       sidecar.deletedChatTombstones.length === 0 && sidecar.pendingChatCleanup.length === 0
     if (known === serialized || (known === undefined && nothingToProtect)) return
+    await this.writeTombstoneSidecar(agentRef, index)
+  }
+
+  private async writeTombstoneSidecar(agentRef: string, index: ChatIndex): Promise<void> {
+    const sidecar: TombstoneSidecar = {
+      version: TOMBSTONE_SIDECAR_VERSION,
+      deletedChatTombstones: index.deletedChatTombstones ?? [],
+      pendingChatCleanup: index.pendingChatCleanup ?? [],
+    }
+    const serialized = JSON.stringify(sidecar)
     await this.writeJsonAtomic(this.tombstoneSidecarPath(agentRef), sidecar)
     this.tombstoneSidecarSerialized.set(agentRef, serialized)
+  }
+
+  /**
+   * A readable index is authoritative over a sidecar left ahead by a failed
+   * pre-commit save. Repair the sidecar before reporting status so later index
+   * recovery cannot resurrect a deletion that was reported as not committed.
+   */
+  private async reconcileTombstoneSidecar(agentRef: string, index: ChatIndex): Promise<void> {
+    const sidecar: TombstoneSidecar = {
+      version: TOMBSTONE_SIDECAR_VERSION,
+      deletedChatTombstones: index.deletedChatTombstones ?? [],
+      pendingChatCleanup: index.pendingChatCleanup ?? [],
+    }
+    const serialized = JSON.stringify(sidecar)
+    let persisted: string | null = null
+    try {
+      persisted = await fs.readFile(this.tombstoneSidecarPath(agentRef), 'utf-8')
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
+    }
+
+    if (persisted === serialized) {
+      this.tombstoneSidecarSerialized.set(agentRef, serialized)
+      return
+    }
+    if (
+      persisted === null &&
+      sidecar.deletedChatTombstones.length === 0 &&
+      sidecar.pendingChatCleanup.length === 0
+    ) {
+      this.tombstoneSidecarSerialized.set(agentRef, serialized)
+      return
+    }
+    await this.writeTombstoneSidecar(agentRef, index)
   }
 
   async listChats(agentRef: string): Promise<ChatMetadata[]> {
@@ -1826,6 +1905,10 @@ export class ChatStore {
       await this.serializeIndex(agentRef, async () => {
         this.requireAuthorityScope(scope)
         const index = await this.getIndex(agentRef)
+        const rollbackTombstones = {
+          deletedChatTombstones: [...(index.deletedChatTombstones ?? [])],
+          pendingChatCleanup: [...(index.pendingChatCleanup ?? [])],
+        }
         index.chats = index.chats.filter(c => c.id !== chatId)
         index.deletedChatTombstones = index.deletedChatTombstones ?? []
         if (
@@ -1846,7 +1929,12 @@ export class ChatStore {
           index.pendingChatCleanup.push(tombstone)
         }
         if (index.lastActiveChatId === chatId) index.lastActiveChatId = null
-        await this.saveIndex(agentRef, index)
+        await this.saveIndex(
+          agentRef,
+          index,
+          () => this.requireAuthorityScope(scope),
+          rollbackTombstones
+        )
       })
       const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
       this.cleanedSnapshotSiblingKeys.delete(cacheKey)
@@ -1856,6 +1944,80 @@ export class ChatStore {
 
     const cleaned = await this.finishPendingDeleteCleanup(agentRef, tombstone)
     return { cleanupPending: !cleaned }
+  }
+
+  /**
+   * Read deletion status on the same per-chat and per-agent queues as delete.
+   * A failure to read a valid authoritative index is unknown, never evidence
+   * that a delete did not commit.
+   */
+  async getChatDeletionStatus(
+    agentRef: string,
+    chatId: string,
+    authorityScope: ChatAuthorityScope
+  ): Promise<ChatDeletionResolution> {
+    try {
+      this.requireAuthorityScope(authorityScope)
+      const observation = await this.serializeChat(agentRef, chatId, async () => {
+        this.requireAuthorityScope(authorityScope)
+        return await this.serializeIndex(agentRef, async () => {
+          this.requireAuthorityScope(authorityScope)
+          // Status must be based on the durable commit record itself. getIndex
+          // intentionally recovers tombstones from the sidecar when the index
+          // is missing or corrupt; during an interrupted pre-commit delete that
+          // sidecar can still be ahead of the index, so recovery is ambiguous.
+          let rawIndex: string
+          try {
+            rawIndex = await fs.readFile(this.indexPath(agentRef), 'utf-8')
+          } catch (error) {
+            if (!isNotFoundError(error)) throw error
+            try {
+              await fs.access(this.tombstoneSidecarPath(agentRef))
+              return { status: 'unknown' as const, cleanup: null }
+            } catch (sidecarError) {
+              if (!isNotFoundError(sidecarError)) throw sidecarError
+              return { status: 'not-deleted' as const, cleanup: null }
+            }
+          }
+          const { index, droppedTombstoneEntries } = parseChatIndex(rawIndex)
+          if (droppedTombstoneEntries > 0) {
+            throw new Error('Cannot resolve deletion status from malformed tombstone entries')
+          }
+          this.requireAuthorityScope(authorityScope)
+          const deleted = this.isDeletedInScope(index, chatId)
+          if (deleted) {
+            // A visible rename is not a durable deletion until the index
+            // directory entry is synced. Retry that boundary before status
+            // lets the renderer terminalize the target after a prior sync
+            // error; a repeated failure remains unknown and keeps it gated.
+            await this.syncDirectory(dirname(this.indexPath(agentRef)))
+          }
+          await this.reconcileTombstoneSidecar(agentRef, index)
+          this.requireAuthorityScope(authorityScope)
+          const cleanup = deleted
+            ? ((index.pendingChatCleanup ?? []).find(
+                tombstone =>
+                  tombstone.chatId === chatId &&
+                  sameChatDeletionIdentity(tombstone.authorityScope, authorityScope)
+              ) ?? null)
+            : null
+          return { status: deleted ? ('deleted' as const) : ('not-deleted' as const), cleanup }
+        })
+      })
+      if (observation.status !== 'deleted' || !observation.cleanup) {
+        return { status: observation.status, cleanupPending: false }
+      }
+
+      // The delete caller may have rejected before reaching its ordinary
+      // cleanup step. Once the serialized status read confirms the durable
+      // tombstone, retry that exact queued cleanup before reporting the result.
+      const cleaned = await this.serializeChat(agentRef, chatId, () =>
+        this.finishPendingDeleteCleanup(agentRef, observation.cleanup!)
+      )
+      return { status: 'deleted', cleanupPending: !cleaned }
+    } catch {
+      return { status: 'unknown', cleanupPending: false }
+    }
   }
 
   /**
