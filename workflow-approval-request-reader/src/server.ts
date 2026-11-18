@@ -460,7 +460,6 @@ function logDecisionSubmissionFailure(
     providerEventId: command.providerEventId,
     status: result.status,
     error: result.error,
-    retryAfterSeconds: result.retryAfterSeconds,
   })
 }
 
@@ -880,8 +879,7 @@ export function createServer(cfg = config): http.Server {
               }
             : {}),
         })
-        const { status, retryAfterSeconds, ...body } = result
-        if (retryAfterSeconds !== undefined) res.setHeader('Retry-After', String(retryAfterSeconds))
+        const { status, ...body } = result
         writeJson(res, result.ok ? 200 : (status ?? 409), body)
         return
       }
@@ -1004,9 +1002,7 @@ export function createServer(cfg = config): http.Server {
 
       stage = 'mcp_host'
       const result = await submitMcpHostDecision(cfg, routedCommand)
-      // Synchronous callers get the Host's wait as `Retry-After`.
-      const { status, retryAfterSeconds, ...body } = result
-      if (retryAfterSeconds !== undefined) res.setHeader('Retry-After', String(retryAfterSeconds))
+      const { status, ...body } = result
       writeJson(res, result.ok ? 200 : (status ?? 409), body)
     } catch (err) {
       if (err instanceof RequestBodyError) {

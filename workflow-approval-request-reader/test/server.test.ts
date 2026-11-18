@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type http from 'node:http'
+import { createServer as createHttpServer } from 'node:http'
 import { AddressInfo } from 'node:net'
 import type { ReaderConfig } from '../src/config.js'
 
@@ -26,6 +27,7 @@ vi.mock('../src/controlApiClient.js', () => ({
     appId: 'teams-app-1',
     appName: 'evenfire',
   }),
+  resolveCommunicationChannelRef: vi.fn(),
   sendSlackTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
   sendTeamsTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
   updateSlackTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
@@ -53,6 +55,7 @@ let createServer: (cfg: ReaderConfig) => http.Server
 let handoffSlackMessageToChannelReader: ReturnType<typeof vi.fn>
 let handoffTeamsMessageToChannelReader: ReturnType<typeof vi.fn>
 let handoffTeamsFileConsentToChannelReader: ReturnType<typeof vi.fn>
+let resolveCommunicationChannelRef: ReturnType<typeof vi.fn>
 let resolveTeamsTarget: ReturnType<typeof vi.fn>
 let sendSlackTargetMessage: ReturnType<typeof vi.fn>
 let sendTeamsTargetMessage: ReturnType<typeof vi.fn>
@@ -133,6 +136,7 @@ describe('workflow approval request reader server', () => {
       handoffTeamsMessageToChannelReader,
     } = await import('../src/channelReaderClient.js'))
     ;({
+      resolveCommunicationChannelRef,
       resolveTeamsTarget,
       sendSlackTargetMessage,
       sendTeamsTargetMessage,
@@ -1408,14 +1412,7 @@ describe('workflow approval request reader server', () => {
     })
   })
 
-  describe('Slack and Teams decision feedback and the Host admission limit', () => {
-    const admissionLimited = (retryAfterSeconds: number) => ({
-      ok: false,
-      status: 429,
-      error: 'runtime_service_admission_limited',
-      retryAfterSeconds,
-    })
-
+  describe('Slack and Teams decision feedback', () => {
     const SLACK_APPROVAL_TS = '1710000000.000001'
 
     function slackAction(options: {
@@ -1475,22 +1472,18 @@ describe('workflow approval request reader server', () => {
       )
     }
 
-    function teamsAction(
-      eventId: string,
-      options: { decision?: 'approve' | 'deny'; user?: string } = {}
-    ): string {
-      const decision = options.decision ?? 'approve'
+    function teamsAction(eventId: string): string {
       return JSON.stringify({
         type: 'message',
         id: eventId,
-        text: decision === 'deny' ? 'Deny' : 'Approve',
+        text: 'Approve',
         value: {
           action:
-            `${decision}:${APPROVAL_ID}:sandbox-recipes/research-summary-workflow:` +
+            `approve:${APPROVAL_ID}:sandbox-recipes/research-summary-workflow:` +
             '0123456789abcdef',
         },
         serviceUrl: 'https://smba.trafficmanager.net/amer/',
-        from: { id: options.user ?? 'teams-user-1' },
+        from: { id: 'teams-user-1' },
         conversation: {
           id: '19:channel-1@thread.tacv2;messageid=root-post-1',
           conversationType: 'channel',
@@ -1558,43 +1551,7 @@ describe('workflow approval request reader server', () => {
       )
     }
 
-    const tBusy = (seconds: number) => `The assistant is busy. Try again in ${seconds} seconds.`
-
-    /** The decisions the reader submitted to the Host, in order. */
-    function submittedDecisions(): Array<{ providerUserId: string; decision: string }> {
-      return vi.mocked(submitMcpHostDecision).mock.calls.map(call => {
-        const command = call[1] as { providerUserId: string; decision: string }
-        return { providerUserId: command.providerUserId, decision: command.decision }
-      })
-    }
-
-    const media = [
-      { medium: 'slack' as const, user: 'U123', otherUser: 'U999' },
-      { medium: 'teams' as const, user: 'teams-user-1', otherUser: 'teams-user-2' },
-    ]
-
-    async function click(
-      medium: 'slack' | 'teams',
-      eventId: string,
-      options: { decision?: 'approve' | 'deny'; user?: string } = {}
-    ): Promise<{ status: number; body: unknown }> {
-      return medium === 'slack'
-        ? postSlack(slackAction({ eventId, ...options }))
-        : postTeams(teamsAction(eventId, options))
-    }
-
-    /** The notices sent for a click; Slack notices mention the user. */
-    function noticeTexts(medium: 'slack' | 'teams'): string[] {
-      return medium === 'slack' ? threadTexts() : teamsSendTexts()
-    }
-
-    function noticeFor(medium: 'slack' | 'teams', user: string, text: string): string {
-      return medium === 'slack' ? `<@${user}> ${text}` : text
-    }
-
-    function approvalMessageTexts(medium: 'slack' | 'teams'): string[] {
-      return medium === 'slack' ? slackUpdateTexts() : teamsUpdateTexts()
-    }
+    const media = [{ medium: 'slack' as const }, { medium: 'teams' as const }]
 
     beforeEach(() => {
       // Each scenario queues its own Host answers; none leaks into the next.
@@ -1615,144 +1572,6 @@ describe('workflow approval request reader server', () => {
       await settle()
       expect(submitMcpHostDecision).toHaveBeenCalledOnce()
     })
-
-    it.each(media)(
-      'reports the Host wait in one notice and does not send the decision again ($medium)',
-      async ({ medium, user }) => {
-        vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
-
-        const response = await click(medium, `${medium}-limited`)
-        await settle()
-
-        expect(response).toEqual({ status: 200, body: { ok: true } })
-        // Witness: the decision path ran and the Host was asked once.
-        expect(submittedDecisions()).toEqual([{ providerUserId: user, decision: 'approve' }])
-        expect(noticeTexts(medium)).toEqual([noticeFor(medium, user, tBusy(7))])
-        expect(approvalMessageTexts(medium)).toEqual([])
-
-        await vi.advanceTimersByTimeAsync(120_000)
-        await settle()
-        expect(submitMcpHostDecision).toHaveBeenCalledOnce()
-        expect(noticeTexts(medium)).toEqual([noticeFor(medium, user, tBusy(7))])
-        expect(approvalMessageTexts(medium)).toEqual([])
-      }
-    )
-
-    it.each(media)(
-      'submits a repeated click and reports each refusal with its own wait ($medium)',
-      async ({ medium, user }) => {
-        vi.mocked(submitMcpHostDecision)
-          .mockResolvedValueOnce(admissionLimited(7))
-          .mockResolvedValueOnce(admissionLimited(9))
-
-        await click(medium, `${medium}-repeated-1`)
-        await settle()
-        const response = await click(medium, `${medium}-repeated-2`)
-        await settle()
-
-        expect(response).toEqual({ status: 200, body: { ok: true } })
-        expect(submittedDecisions()).toEqual([
-          { providerUserId: user, decision: 'approve' },
-          { providerUserId: user, decision: 'approve' },
-        ])
-        expect(noticeTexts(medium)).toEqual([
-          noticeFor(medium, user, tBusy(7)),
-          noticeFor(medium, user, tBusy(9)),
-        ])
-        expect(approvalMessageTexts(medium)).toEqual([])
-
-        await vi.advanceTimersByTimeAsync(120_000)
-        await settle()
-        expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
-      }
-    )
-
-    it.each(media)(
-      'submits the other decision of the same user after a refusal; the Host answer decides ($medium)',
-      async ({ medium, user }) => {
-        vi.mocked(submitMcpHostDecision)
-          .mockResolvedValueOnce(admissionLimited(7))
-          .mockResolvedValueOnce({ ok: true })
-
-        await click(medium, `${medium}-first-approve`)
-        await settle()
-        await click(medium, `${medium}-then-deny`, { decision: 'deny' })
-        await settle()
-
-        expect(submittedDecisions()).toEqual([
-          { providerUserId: user, decision: 'approve' },
-          { providerUserId: user, decision: 'deny' },
-        ])
-        expect(noticeTexts(medium)).toEqual([noticeFor(medium, user, tBusy(7))])
-        expect(approvalMessageTexts(medium)).toEqual(['Denied. Workflow approval recorded.'])
-
-        await vi.advanceTimersByTimeAsync(120_000)
-        await settle()
-        expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
-        expect(approvalMessageTexts(medium)).toEqual(['Denied. Workflow approval recorded.'])
-      }
-    )
-
-    it.each(media)(
-      'submits another user click after a refusal and reports each result to its user ($medium)',
-      async ({ medium, user, otherUser }) => {
-        vi.mocked(submitMcpHostDecision)
-          .mockResolvedValueOnce(admissionLimited(7))
-          .mockResolvedValueOnce({ ok: false, status: 409, error: 'approval_requester_mismatch' })
-
-        await click(medium, `${medium}-first-user`)
-        await settle()
-        await click(medium, `${medium}-other-user`, { user: otherUser, decision: 'deny' })
-        await settle()
-
-        expect(submittedDecisions()).toEqual([
-          { providerUserId: user, decision: 'approve' },
-          { providerUserId: otherUser, decision: 'deny' },
-        ])
-        expect(noticeTexts(medium)).toEqual([
-          noticeFor(medium, user, tBusy(7)),
-          noticeFor(
-            medium,
-            otherUser,
-            'I could not deny this workflow approval. Try again in a moment.'
-          ),
-        ])
-        expect(approvalMessageTexts(medium)).toEqual([])
-
-        await vi.advanceTimersByTimeAsync(120_000)
-        await settle()
-        expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
-      }
-    )
-
-    it.each(media)(
-      'reports both refusals when two clicks are refused before either is answered ($medium)',
-      async ({ medium, user }) => {
-        const pending: Array<(value: unknown) => void> = []
-        vi.mocked(submitMcpHostDecision)
-          .mockImplementationOnce(() => new Promise(resolve => pending.push(resolve)) as never)
-          .mockImplementationOnce(() => new Promise(resolve => pending.push(resolve)) as never)
-
-        await click(medium, `${medium}-race-approve`)
-        await click(medium, `${medium}-race-deny`, { decision: 'deny' })
-        await settle()
-        expect(pending).toHaveLength(2)
-        pending[0]?.(admissionLimited(7))
-        await settle()
-        pending[1]?.(admissionLimited(9))
-        await settle()
-
-        expect(noticeTexts(medium)).toEqual([
-          noticeFor(medium, user, tBusy(7)),
-          noticeFor(medium, user, tBusy(9)),
-        ])
-        expect(approvalMessageTexts(medium)).toEqual([])
-
-        await vi.advanceTimersByTimeAsync(120_000)
-        await settle()
-        expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
-      }
-    )
 
     it.each([
       { medium: 'slack' as const, eventId: 'slack-first-403-stale' },
@@ -1788,13 +1607,19 @@ describe('workflow approval request reader server', () => {
         status: 404,
         error: 'not_found',
       })
-      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
+      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        error: 'mcp_host_decision_failed_500',
+      })
 
       const response = await postTeams(teamsAction('teams-send-refused'))
       await settle()
 
       expect(response).toEqual({ status: 200, body: { ok: true } })
-      expect(teamsSendTexts()).toEqual([tBusy(7)])
+      expect(teamsSendTexts()).toEqual([
+        'I could not approve this workflow approval. Try again in a moment.',
+      ])
       expect(teamsUpdateTexts()).toEqual([])
       const warnings = consoleWarn.mock.calls.map(call => JSON.parse(String(call[0])))
       expect(warnings).toContainEqual(
@@ -1849,20 +1674,6 @@ describe('workflow approval request reader server', () => {
       ]
 
       it.each(placements)(
-        'places the Host wait notice with the setting $name',
-        async ({ name, replyInThreads, threadTs, expected }) => {
-          slackTargetReplies(replyInThreads)
-          vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
-
-          await postSlack(slackAction({ eventId: `slack-placement-wait-${name}`, threadTs }))
-          await settle()
-
-          expect(threadTexts()).toEqual([`<@U123> ${tBusy(7)}`])
-          expect(slackSendThreads()).toEqual([expected])
-        }
-      )
-
-      it.each(placements)(
         'places the failure notice with the setting $name',
         async ({ name, replyInThreads, threadTs, expected }) => {
           slackTargetReplies(replyInThreads)
@@ -1887,7 +1698,11 @@ describe('workflow approval request reader server', () => {
       'sends no message for a refused decision without feedback context ($medium)',
       async ({ medium }) => {
         const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-        vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
+        vi.mocked(submitMcpHostDecision).mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          error: 'mcp_host_decision_failed_500',
+        })
 
         if (medium === 'slack') {
           await postSlack(slackAction({ eventId: 'slack-no-feedback', feedback: false }))
@@ -1916,9 +1731,8 @@ describe('workflow approval request reader server', () => {
           expect.objectContaining({
             msg: 'provider decision submission failed after acknowledgement',
             medium,
-            status: 429,
-            error: 'runtime_service_admission_limited',
-            retryAfterSeconds: 7,
+            status: 500,
+            error: 'mcp_host_decision_failed_500',
           })
         )
         expect(sendSlackTargetMessage).not.toHaveBeenCalled()
@@ -1928,94 +1742,131 @@ describe('workflow approval request reader server', () => {
       }
     )
 
-    it('answers a synchronous decision with 429 and Retry-After and does not retry it', async () => {
-      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
-      const server = createServer({ ...baseConfig, telegramWebhookSecret: 'telegram-secret' })
-      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-      const { port } = server.address() as AddressInfo
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/webhooks/telegram`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-telegram-bot-api-secret-token': 'telegram-secret',
-          },
-          body: JSON.stringify({
-            callback_query: {
-              id: 'tg-limited',
-              data: `approve:${APPROVAL_ID}`,
-              from: { id: 123 },
-              message: { chat: { id: 456 } },
-            },
-          }),
-        })
+    describe('synchronous answers to an older Host admission refusal', () => {
+      const HOST_REF = 'sandbox-recipes/figure-d-recipe'
 
-        expect(response.status).toBe(429)
-        expect(response.headers.get('retry-after')).toBe('7')
-        expect(await response.json()).toEqual({
-          ok: false,
-          error: 'runtime_service_admission_limited',
+      /**
+       * A Host stub that answers every request with the admission refusal an
+       * older MCP Host sent: status 429, its error code, and a wait in the body
+       * and in Retry-After. The real client reads it; the reader relays it as
+       * a generic failure.
+       */
+      async function startRefusingHost(): Promise<{
+        baseUrl: string
+        requests: string[]
+        close: () => Promise<void>
+      }> {
+        const requests: string[] = []
+        const host = createHttpServer((req, res) => {
+          requests.push(`${req.method} ${req.url}`)
+          req.resume()
+          req.on('end', () => {
+            res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '7' })
+            res.end(
+              JSON.stringify({ error: 'runtime_service_admission_limited', retryAfterSeconds: 7 })
+            )
+          })
         })
-      } finally {
-        await new Promise<void>(resolve => server.close(() => resolve()))
+        await new Promise<void>(resolve => host.listen(0, '127.0.0.1', resolve))
+        const { port } = host.address() as AddressInfo
+        return {
+          baseUrl: `http://127.0.0.1:${port}`,
+          requests,
+          close: () => new Promise<void>(resolve => host.close(() => resolve())),
+        }
       }
-      await vi.advanceTimersByTimeAsync(60_000)
-      await settle()
-      expect(submitMcpHostDecision).toHaveBeenCalledOnce()
-    })
 
-    it('answers a synchronous enrollment with 429 and Retry-After and does not retry it', async () => {
-      vi.mocked(submitMcpHostEnrollment).mockResolvedValueOnce(admissionLimited(9))
-      const server = createServer({ ...baseConfig, telegramWebhookSecret: 'telegram-secret' })
-      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-      const { port } = server.address() as AddressInfo
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/webhooks/telegram`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-telegram-bot-api-secret-token': 'telegram-secret',
-          },
-          body: JSON.stringify({
-            message: {
-              text: '/start nonce_1234567890123456',
-              from: { id: 123 },
-              chat: { id: 456 },
+      async function postTelegram(cfg: ReaderConfig, payload: unknown): Promise<Response> {
+        const server = createServer({ ...cfg, telegramWebhookSecret: 'telegram-secret' })
+        await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+        const { port } = server.address() as AddressInfo
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/webhooks/telegram`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-telegram-bot-api-secret-token': 'telegram-secret',
             },
-          }),
-        })
-
-        expect(response.status).toBe(429)
-        expect(response.headers.get('retry-after')).toBe('9')
-        expect(await response.json()).toEqual({
-          ok: false,
-          error: 'runtime_service_admission_limited',
-        })
-      } finally {
-        await new Promise<void>(resolve => server.close(() => resolve()))
+            body: JSON.stringify(payload),
+          })
+          await response.clone().arrayBuffer()
+          return response
+        } finally {
+          await new Promise<void>(resolve => server.close(() => resolve()))
+        }
       }
-      expect(submitMcpHostEnrollment).toHaveBeenCalledOnce()
-      await vi.advanceTimersByTimeAsync(60_000)
-      await settle()
-      expect(submitMcpHostEnrollment).toHaveBeenCalledOnce()
-    })
 
-    it('reports a 429 without a usable wait with the generic text and no retry', async () => {
-      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce({
-        ok: false,
-        status: 429,
-        error: 'runtime_service_admission_limited',
+      async function actualMcpHostClient() {
+        return vi.importActual<typeof import('../src/mcpHostClient.js')>('../src/mcpHostClient.js')
+      }
+
+      it('relays a synchronous decision refused with 429 without Retry-After', async () => {
+        const host = await startRefusingHost()
+        const actual = await actualMcpHostClient()
+        vi.mocked(submitMcpHostDecision).mockImplementationOnce(actual.submitMcpHostDecision)
+        try {
+          const response = await postTelegram(
+            { ...baseConfig, mcpHostTargets: [{ hostRef: HOST_REF, baseUrl: host.baseUrl }] },
+            {
+              callback_query: {
+                id: 'tg-host-429',
+                data: `approve:${APPROVAL_ID}:${HOST_REF}`,
+                from: { id: 123 },
+                message: { chat: { id: 456 } },
+              },
+            }
+          )
+
+          expect(response.status).toBe(429)
+          expect(response.headers.get('retry-after')).toBeNull()
+          expect(await response.json()).toEqual({
+            ok: false,
+            error: 'runtime_service_admission_limited',
+          })
+        } finally {
+          await host.close()
+        }
+        // Witness: the reader asked the Host stub exactly once.
+        expect(host.requests).toEqual(['POST /v1/runtime/workflow-approvals/decide'])
       })
 
-      await postSlack(slackAction({ eventId: 'slack-malformed' }))
-      await settle()
+      it('relays a synchronous enrollment refused with 429 without Retry-After', async () => {
+        const host = await startRefusingHost()
+        const actual = await actualMcpHostClient()
+        vi.mocked(submitMcpHostEnrollment).mockImplementationOnce(actual.submitMcpHostEnrollment)
+        // The Telegram enrollment carries no channel ref; the client asks
+        // control-api for it before it calls the Host.
+        vi.mocked(resolveCommunicationChannelRef).mockResolvedValueOnce({
+          ok: true,
+          communicationChannelRef: 'channels/telegram-bot',
+        })
+        try {
+          const response = await postTelegram(
+            { ...baseConfig, mcpHostRef: HOST_REF, mcpHostBaseUrl: host.baseUrl },
+            {
+              message: {
+                text: '/start nonce_1234567890123456',
+                from: { id: 123 },
+                chat: { id: 456 },
+              },
+            }
+          )
 
-      expect(threadTexts()).toEqual([
-        '<@U123> I could not approve this workflow approval. Try again in a moment.',
-      ])
-      await vi.advanceTimersByTimeAsync(60_000)
-      await settle()
-      expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+          expect(response.status).toBe(429)
+          expect(response.headers.get('retry-after')).toBeNull()
+          expect(await response.json()).toEqual({
+            ok: false,
+            error: 'runtime_service_admission_limited',
+          })
+        } finally {
+          await host.close()
+        }
+        // Witness: the reader asked the Host stub exactly once.
+        expect(resolveCommunicationChannelRef).toHaveBeenCalledOnce()
+        expect(host.requests).toEqual([
+          'POST /v1/runtime/workflow-approval-mediums/link-sessions/confirm',
+        ])
+      })
     })
   })
 })

@@ -135,7 +135,7 @@ describe('sendTeamsTargetMessage', () => {
     threadConversationId: '19:channel-1@thread.tacv2;messageid=root-post-1',
     replyToId: 'root-post-1',
     serviceUrl: 'https://smba.trafficmanager.net/amer/',
-    text: 'The assistant is busy. Try again in 9 seconds.',
+    text: 'I could not approve this workflow approval. Try again in a moment.',
   }
 
   it('posts the message to the control-api Teams send route with the service headers', async () => {
