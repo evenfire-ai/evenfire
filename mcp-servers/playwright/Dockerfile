@@ -9,14 +9,14 @@ ADD --chmod=0644 --checksum=sha256:912fbf877e53de34d7b3cca5104f3b95607d41bd35412
 
 FROM chromium-${TARGETARCH} AS chromium-archive
 
-FROM node:24.22.1-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS node-runtime
+FROM node:24.22.3-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS node-runtime
 
 FROM mcr.microsoft.com/playwright/mcp@sha256:a9d607e571d70954acc36de7a45e7f424a94cebdfba973b1f404435108c60f3f
 # The pinned MCP image bundles Node 22.22.0. Keep its browser dependencies
 # and application, but run them with the patched official glibc Node binary.
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-ENV NODE_VERSION=24.22.1
-RUN node -e "if (process.versions.node !== '24.22.1') throw new Error('Unexpected Node runtime')"
+ENV NODE_VERSION=24.22.3
+RUN node -e "if (process.versions.node !== '24.22.3') throw new Error('Unexpected Node runtime')"
 
 ENV PLAYWRIGHT_MCP_EXECUTABLE_PATH=/home/node/chrome-headless-shell/chrome-headless-shell
 RUN --mount=type=bind,from=chromium-archive,source=/chrome-headless-shell.zip,target=/tmp/chrome-headless-shell.zip \

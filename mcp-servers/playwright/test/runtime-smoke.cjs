@@ -44,7 +44,7 @@ async function portReady(port) {
 }
 
 async function main() {
-  assert.equal(process.versions.node, '24.22.1')
+  assert.equal(process.versions.node, '24.22.3')
   const browserExecutable = process.env.PLAYWRIGHT_MCP_EXECUTABLE_PATH
   assert.ok(browserExecutable, 'Missing pinned Chromium executable')
   const versionOutput = execFileSync(browserExecutable, ['--version'], {
