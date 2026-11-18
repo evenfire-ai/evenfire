@@ -52,7 +52,7 @@ describe('D34 migration execution policy', () => {
       '0138_legacy_password_security_epoch_backfill',
       '0139_llm_catalog_prune_columns',
       '0140_llm_catalog_prune_episodes',
-      '0139_gfs_resource_changed_notify',
+      '0141_gfs_resource_changed_notify',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -103,12 +103,12 @@ describe('D34 migration execution policy', () => {
   })
 
   it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
-    // PR1 occupies slots 0137-0139, after dev's 0136, and no shared
-    // environment holds a receipt for any of them. 0137 creates the
-    // user-session tables (sessions, security epochs, the v1 revocation ledger)
-    // and their runtime grants; the indexes it needs on pre-existing tables are
-    // built online by PR1_ONLINE_INDEX_PLAN. 0138 backfills the security epochs
-    // from historical password events. 0139 installs the only function and
+    // PR1 occupies slots 0137, 0138 and 0141, after dev's 0136 (0139 and 0140
+    // are dev's catalog prune), and no shared environment holds a receipt for
+    // any of them. 0137 creates the user-session tables (sessions, security
+    // epochs, the v1 revocation ledger) and their runtime grants; the indexes
+    // it needs on pre-existing tables are built online by PR1_ONLINE_INDEX_PLAN.
+    // 0138 backfills the security epochs from historical password events. 0141 installs the only function and
     // trigger of PR1: gfs_resource_changed_notify(), an AFTER ROW trigger on
     // gfs_resources that sends one pg_notify per written row.
     const files = [
@@ -125,7 +125,7 @@ describe('D34 migration execution policy', () => {
       const bytes = await readFile(new URL(`../${path}`, import.meta.url))
       expect(createHash('sha256').update(bytes).digest('hex'), path).toBe(expected)
     }
-    // 0139's SQL interpolates the channel name from notifySchemas.ts. That file
+    // 0141's SQL interpolates the channel name from notifySchemas.ts. That file
     // is pinned by this one value, not by its hash, because it also carries
     // runtime payload parsers that later changes extend.
     expect(GFS_RESOURCE_CHANGED_CHANNEL).toBe('gfs_resource_changed')
@@ -548,7 +548,7 @@ describe('PR1 earlier-head guard', () => {
       '0138_legacy_password_security_epoch_backfill',
       '0139_llm_catalog_prune_columns',
       '0140_llm_catalog_prune_episodes',
-      '0139_gfs_resource_changed_notify',
+      '0141_gfs_resource_changed_notify',
     ])
   })
 })

@@ -85,9 +85,9 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     ).toEqual([
       '0139_llm_catalog_prune_columns',
       '0140_llm_catalog_prune_episodes',
-      '0139_gfs_resource_changed_notify',
+      '0141_gfs_resource_changed_notify',
     ])
-    expect(versions.at(-1)).toBe('0139_gfs_resource_changed_notify')
+    expect(versions.at(-1)).toBe('0141_gfs_resource_changed_notify')
   })
 
   it('keeps legacy aliases unique and distinct from current versions', async () => {

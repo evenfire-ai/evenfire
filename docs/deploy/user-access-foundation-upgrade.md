@@ -93,7 +93,8 @@ and tells the user.
 
 Session revocations and password epochs written by the new control-api are
 ignored by the old one. On `gfs_resources` the release installs one trigger
-and its function (`gfs_resource_changed_notify`, from `0139`), and they stay after a rollback: every write to `gfs_resources` still sends one
+and its function (`gfs_resource_changed_notify`, from `0141`), and they stay
+after a rollback: every write to `gfs_resources` still sends one
 `pg_notify` on the `gfs_resource_changed` channel. No write fails because of
 it: nothing in the old image listens on that channel, and the function only
 calls `pg_notify`, whose payload stays under 140 bytes. It makes the writer's
@@ -169,7 +170,7 @@ before this release.
   The release adds `0137_user_access_foundation`,
   `0138_legacy_password_security_epoch_backfill`,
   `0139_llm_catalog_prune_columns`, `0140_llm_catalog_prune_episodes` and
-  `0139_gfs_resource_changed_notify`. A
+  `0141_gfs_resource_changed_notify`. A
   database where an earlier head of the catalog prune applied both parts as a
   single `0139` migration (branch profiles or local databases only) records
   `0139_llm_catalog_prune_columns` under its legacy alias without running it,
@@ -178,14 +179,14 @@ before this release.
   Windows). The migration session sets `client_connection_check_interval`,
   which the server rejects on other platforms, so that a killed Job pod does
   not leave its backend holding the migration advisory lock.
-- For a database already at `0136`, every statement of `0137`, `0138` and
-  `0139` waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
+- For a database already at `0136`, every statement of `0137` through
+  `0141` waits at most 10 s for a lock (`lock_timeout`), and ordinary statements are
   bounded at 15 s (`statement_timeout`); the online index builds have their own
   120 s bound (below). The whole Job is bounded at 300 s
   (`activeDeadlineSeconds`).
 - For a database at `0130` through `0135`, the missing versions through `0136`
   commit in one transaction under the 10 s lock and 15 s statement bounds, with
-  no fence, then `0137`, then `0138`, then `0139`.
+  no fence, then each of `0137` through `0141` in its own transaction.
 - An existing database below `0130` must already have `0126` to `0128`; the
   Job stops with an error otherwise. For such a database the 10 s lock bound
   does not hold before `0137`. The Job first sets the `0130` password-login
@@ -280,12 +281,12 @@ before this release.
   when a first password was set from an invitation, and the session from which
   a user changed their password in Profile UI. No other session is affected by
   the backfill.
-- `0139_gfs_resource_changed_notify` creates (or replaces) the function
+- `0141_gfs_resource_changed_notify` creates (or replaces) the function
   `gfs_resource_changed_notify()` and the `AFTER INSERT OR UPDATE OR DELETE`
   row trigger of the same name on the existing table `gfs_resources`, in one
   bounded transaction. `CREATE OR REPLACE FUNCTION` and the `REVOKE` on it take
   no table lock. `CREATE OR REPLACE TRIGGER` takes `SHARE ROW EXCLUSIVE` on
-  `gfs_resources` until `0139`'s transaction commits: inserts, updates and
+  `gfs_resources` until `0141`'s transaction commits: inserts, updates and
   deletes on `gfs_resources` (from control-api and the GFS controller) are
   blocked for that time, plain reads are not. The wait for that lock is bounded
   at 10 s (`lock_timeout`), with no retry inside the Job, so a transaction
@@ -298,8 +299,8 @@ before this release.
   `deploy/scripts/workflow-recipes-runtime-access-profiles.tsv` (one row per
   relation; `dev` had 7) and
   `deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv` (6
-  column rows; new in this release). A mismatch stops the deploy after `0137`,
-  `0138` and `0139` have committed, while the old control-api keeps serving. Compare
+  column rows; new in this release). A mismatch stops the deploy after `0137`
+  through `0141` have committed, while the old control-api keeps serving. Compare
   the target database's grants with both files before step 1.
 - `deploy/scripts/run-control-api-db-migration.sh` requires `--timeout` (or
   `TIMEOUT`) to be a number with a unit (`s`, `m` or `h`) and at least `360s`;

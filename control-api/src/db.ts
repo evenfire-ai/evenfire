@@ -6440,7 +6440,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyLlmCatalogPruneStateSchema,
   },
   {
-    version: '0139_gfs_resource_changed_notify',
+    version: '0141_gfs_resource_changed_notify',
     apply: applyGfsResourceChangedSchema,
   },
 ]

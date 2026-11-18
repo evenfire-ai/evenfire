@@ -7,7 +7,7 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0138_legacy_password_security_epoch_backfill',
   '0139_llm_catalog_prune_columns',
   '0140_llm_catalog_prune_episodes',
-  '0139_gfs_resource_changed_notify',
+  '0141_gfs_resource_changed_notify',
 ] as const)
 
 // The one bound between initDb's single dev batch and this runner: every migration
