@@ -56,9 +56,10 @@ const URL_PROPERTIES = new Set(['href', 'src'])
 
 /**
  * The only link targets a chat message may carry, in the exact form the click
- * handler hands on. Anything else (relative paths, `#` fragments such as GFM
- * footnotes, `href=""`) would navigate the app's own document and reload it,
- * dropping every open tab, so it is rendered as plain text instead.
+ * handler hands on. Anything else is rendered as plain text instead: relative
+ * paths and `href=""` would navigate the app's own document and reload it,
+ * dropping every open tab, and `#` fragments (such as GFM footnotes) would
+ * scroll the whole app shell rather than the message.
  */
 export function canonicalChatLinkHref(raw: unknown): string | null {
   if (typeof raw !== 'string') return null
