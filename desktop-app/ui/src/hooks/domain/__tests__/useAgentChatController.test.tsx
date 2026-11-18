@@ -17,6 +17,7 @@ import { classifyBytes } from '@clerum/gfs-interaction-policy'
 import { base64Length, composerNonImageShareBytes } from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import { readHostApprovalMode, resetHostApprovalModeStore } from '@lib/hostApprovalModeStore'
 import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { HostModelsResult } from '../../../../../src/types'
 import type {
@@ -143,6 +144,32 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(clerum.chat.replaceMessages).not.toHaveBeenCalled()
       expect(result.current.chatMessages).toHaveLength(3)
       expect(result.current.activeChatId).toBe('chat-1')
+    })
+
+    it('paints the approval label from the opened session', async () => {
+      resetHostApprovalModeStore()
+      clerum.chat.loadMessages.mockResolvedValue([])
+      clerum.rpc.loadSessionMessages.mockResolvedValue({
+        agent: 'agent-x',
+        chatId: 'chat-1',
+        state: 'idle',
+        turns: [],
+        approvalMode: 'allow_all',
+        modeCeiling: 'allow_all',
+        channelCap: 'allow_all',
+        effectiveApprovalMode: 'allow_all',
+        shellClassifierAvailable: true,
+      })
+      const { result } = renderController()
+      await settleMount()
+
+      await act(async () => {
+        await result.current.switchToChat('agent-x', 'chat-1')
+      })
+
+      expect(readHostApprovalMode('agent-x', 'chat-1').effectiveMode).toBe('allow_all')
+      expect(readHostApprovalMode('agent-x', 'chat-1').label).toBe('Allow all')
+      resetHostApprovalModeStore()
     })
 
     it('preserves cached history when the same chat is reopened during setLastActive', async () => {
