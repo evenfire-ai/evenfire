@@ -37,7 +37,6 @@ export interface TaskError {
   message: string
   retryable: boolean
   provider: string
-  retryAfterSeconds?: number
 }
 
 /**
@@ -144,38 +143,6 @@ export interface ChannelReaderRuntimeSource {
   sender: string
 }
 
-const RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX = 60
-const DIRECT_SERVICE_ADMISSION_ERROR = 'runtime_service_admission_limited'
-const TELEGRAM_RUNTIME_MESSAGE_POST_TIMEOUT_MS = 15_000
-
-function runtimeAdmissionRetryAfterFromHeader(response: Response): number | undefined {
-  const value = response.headers.get('retry-after')
-  if (!value || !/^(?:0|[1-9]\d{0,2})$/.test(value)) return undefined
-  const seconds = Number(value)
-  return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 60 ? seconds : undefined
-}
-
-async function directServiceAdmissionRetryAfter(response: Response): Promise<number | undefined> {
-  const header = response.headers.get('retry-after')
-  if (!header || !/^(?:0|[1-9]\d{0,2})$/.test(header)) return undefined
-  const headerSeconds = Number(header)
-  if (
-    !Number.isSafeInteger(headerSeconds) ||
-    headerSeconds < 1 ||
-    headerSeconds > RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX
-  ) {
-    return undefined
-  }
-
-  const body = (await response.json().catch(() => null)) as {
-    error?: unknown
-    retryAfterSeconds?: unknown
-  } | null
-  return body?.error === DIRECT_SERVICE_ADMISSION_ERROR && body.retryAfterSeconds === headerSeconds
-    ? headerSeconds
-    : undefined
-}
-
 /**
  * RPC Client for communicating with mcp-host.
  */
@@ -232,32 +199,9 @@ export class RPCClient {
       const query = options?.async ? '?async=true' : ''
       const response = await fetch(`${this.baseUrl}/v1/runtime/messages${query}`, {
         method: 'POST',
-        ...(message.channelType === 'telegram'
-          ? { signal: AbortSignal.timeout(TELEGRAM_RUNTIME_MESSAGE_POST_TIMEOUT_MS) }
-          : {}),
         headers: this.runtimeHeaders(message),
         body: JSON.stringify(payload),
       })
-
-      if (response.status === 429) {
-        const isTelegram = message.channelType === 'telegram'
-        const retryAfterSeconds = isTelegram
-          ? await directServiceAdmissionRetryAfter(response)
-          : runtimeAdmissionRetryAfterFromHeader(response)
-        if (isTelegram && retryAfterSeconds === undefined) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-        }
-        return {
-          success: false,
-          error: {
-            code: 'RUNTIME_SERVICE_ADMISSION_LIMITED',
-            message: 'MCP Host service admission temporarily limited this request',
-            retryable: true,
-            provider: 'mcp-host',
-            ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
-          },
-        }
-      }
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
@@ -292,12 +236,9 @@ export class RPCClient {
     }
   }
 
-  async authorizeProviderMessage(identity: ProviderIdentity): Promise<{
-    authorized: boolean
-    reason?: 'unresolved' | 'error'
-    retryAfterSeconds?: number
-    directServiceAdmissionLimited?: boolean
-  }> {
+  async authorizeProviderMessage(
+    identity: ProviderIdentity
+  ): Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }> {
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/provider-messages/authorize`, {
         method: 'POST',
@@ -309,41 +250,7 @@ export class RPCClient {
         }),
         body: JSON.stringify({ providerIdentity: identity }),
       })
-      if (!response.ok) {
-        if (response.status === 429) {
-          const isTelegram = identity.medium === 'telegram'
-          const retryAfterSeconds = isTelegram
-            ? await directServiceAdmissionRetryAfter(response)
-            : runtimeAdmissionRetryAfterFromHeader(response)
-          return {
-            authorized: false,
-            reason: 'error',
-            ...(retryAfterSeconds === undefined
-              ? {}
-              : {
-                  retryAfterSeconds,
-                  ...(isTelegram ? { directServiceAdmissionLimited: true } : {}),
-                }),
-          }
-        }
-        if (response.status >= 500) {
-          const retryAfter = response.headers.get('retry-after')
-          const parsedRetryAfter =
-            retryAfter && /^(?:0|[1-9]\d{0,2})$/.test(retryAfter) ? Number(retryAfter) : NaN
-          const retryAfterSeconds =
-            Number.isSafeInteger(parsedRetryAfter) &&
-            parsedRetryAfter >= 1 &&
-            parsedRetryAfter <= 60
-              ? parsedRetryAfter
-              : undefined
-          return {
-            authorized: false,
-            reason: 'error',
-            ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
-          }
-        }
-        return { authorized: false }
-      }
+      if (!response.ok) return { authorized: false }
       const body = (await response.json()) as { authorized?: unknown; reason?: unknown }
       if (body.authorized === true) return { authorized: true }
       return body.reason === 'unresolved' || body.reason === 'error'
@@ -354,7 +261,7 @@ export class RPCClient {
         '[RPC] Provider message authorization failed closed:',
         error instanceof Error ? error.message : error
       )
-      return { authorized: false, reason: 'error' }
+      return { authorized: false }
     }
   }
 

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RPCClient } from '../src/rpcClient.js'
 import type { Message } from '../src/types.js'
 
@@ -37,12 +37,11 @@ function mockOkResponse(body: object) {
   })
 }
 
-function mockErrorResponse(status: number, error?: string, headers: Record<string, string> = {}) {
+function mockErrorResponse(status: number, error?: string) {
   return Promise.resolve({
     ok: false,
     status,
     statusText: `Error ${status}`,
-    headers: new Headers(headers),
     json: () => Promise.resolve(error ? { error } : {}),
   })
 }
@@ -66,10 +65,6 @@ function expectChannelReaderEdgeHeaders(headers: Record<string, string>, source?
 beforeEach(() => {
   mockFetch.mockReset()
   mockCfg.hostRef = 'test-host'
-})
-
-afterEach(() => {
-  vi.useRealTimers()
 })
 
 describe('RPCClient - sendMessage()', () => {
@@ -174,6 +169,30 @@ describe('RPCClient - sendMessage()', () => {
 
     expect(result.success).toBe(false)
     expect(result.error?.message).toContain('ECONNREFUSED')
+  })
+
+  it('a 429 answer is a generic failure', async () => {
+    mockFetch.mockReturnValueOnce(
+      Promise.resolve({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({ 'retry-after': '7' }),
+        json: () =>
+          Promise.resolve({ error: 'runtime_service_admission_limited', retryAfterSeconds: 7 }),
+      })
+    )
+
+    const client = new RPCClient('http://mcp-host:8080')
+    const result = await client.sendMessage(makeMessage())
+
+    expect(mockFetch).toHaveBeenCalledOnce()
+    expect(mockFetch.mock.calls[0]?.[0]).toBe('http://mcp-host:8080/v1/runtime/messages')
+    expect(result.success).toBe(false)
+    expect(result.error?.code).toBe('LLM_API_CALL_FAILED')
+    expect(result.error?.message).toBe('HTTP 429: Too Many Requests')
+    expect(result.error).not.toHaveProperty('retryAfterSeconds')
+    expect(result.error?.code).not.toBe('RUNTIME_SERVICE_ADMISSION_LIMITED')
   })
 })
 
