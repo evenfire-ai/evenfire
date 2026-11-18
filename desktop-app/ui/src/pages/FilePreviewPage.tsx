@@ -1,11 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { EmptyState, PermissionErrorDialog, PermissionStatusIndicator } from '@components/Common'
-import {
-  installPermissionErrorTracking,
-  requestPermissionErrorRecovery,
-  usePermissionErrorAcknowledgementSnapshot,
-} from '@components/Common/permissionErrorAcknowledgement'
+import { Button, EmptyState, PermissionStatusIndicator, StatusBanner } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
@@ -79,8 +74,6 @@ export function FilePreviewPage({
   titlebarLeadingTarget,
 }: FilePreviewPageProps) {
   const queryClient = useQueryClient()
-  installPermissionErrorTracking(queryClient)
-  usePermissionErrorAcknowledgementSnapshot()
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
   const [denied, setDenied] = useState<string | null>(null)
@@ -290,36 +283,7 @@ export function FilePreviewPage({
   const fileActionsMenu = (
     <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={menuResourceName} />
   )
-  const permissionPresentationAvailable =
-    !denied && !unavailable && !accessRevoked && !ctrl.authorityPending
-  const visiblePermissionErrors = permissionPresentationAvailable
-    ? previewResourceActions.permissionNotices.filter(error => !error.pending)
-    : []
-  const acknowledgedPreviewErrors = permissionPresentationAvailable
-    ? previewResourceActions.acknowledgedPermissionNotices.filter(error => !error.pending)
-    : []
-  const previewRecoveryCue =
-    acknowledgedPreviewErrors.length > 0 ? (
-      <button
-        aria-haspopup="dialog"
-        aria-label="Permission check failed; open recovery options"
-        className="da-permission-error-recovery-cue"
-        onClick={() => acknowledgedPreviewErrors.forEach(requestPermissionErrorRecovery)}
-        title="Permission check failed; open recovery options"
-        type="button"
-      >
-        !
-      </button>
-    ) : null
-  const permissionProgressLabel = !permissionPresentationAvailable
-    ? ''
-    : previewResourceActions.permissionProgress.length > 1
-      ? 'Checking file and move permissions'
-      : previewResourceActions.permissionProgress[0] === 'file permissions'
-        ? 'Checking file permissions'
-        : previewResourceActions.permissionProgress.length > 0
-          ? 'Checking move permissions'
-          : ''
+
   const revalidateAccess = useCallback(async () => {
     if (denied || accessRevoked || !isGfsSessionGeneration(ctrl.sessionGeneration)) return
     const capturedScope = ctrl.sessionScope
@@ -386,6 +350,10 @@ export function FilePreviewPage({
   // Remounting the body on a reload bump discards any stale bytes and re-runs the
   // fetch from scratch — the simplest correct "re-dispatch the fetch" (§3.B.3).
   const bodyKey = `${gfsUri}:${reloadToken}:${reloadVersion ?? 0}`
+  const permissionLabel = previewResourceActions.pendingPermissionLabel
+  const permissionProgress = (
+    <PermissionStatusIndicator active={permissionLabel !== null} label={permissionLabel ?? ''} />
+  )
 
   return (
     <section className="page">
@@ -400,17 +368,24 @@ export function FilePreviewPage({
       />
       <div className="da-gfs-preview-page">
         {previewResourceActions.dialogs}
-        <PermissionErrorDialog
-          errors={visiblePermissionErrors}
-          suspended={previewResourceActions.actionDialogOpen}
-          progress={
-            visiblePermissionErrors.length > 0 && permissionProgressLabel
-              ? [permissionProgressLabel]
-              : []
-          }
-          onDismiss={() => undefined}
-          title="Could not verify permissions"
-        />
+        {previewResourceActions.permissionNotices
+          .filter(notice => !notice.pending)
+          .map(notice => (
+            <div key={notice.id} role="alert">
+              <StatusBanner tone="error" text={notice.message} />
+              <Button
+                onClick={() =>
+                  void Promise.resolve()
+                    .then(notice.retry)
+                    .catch(() => undefined)
+                }
+                size="sm"
+                variant="outline"
+              >
+                Retry permission check
+              </Button>
+            </div>
+          ))}
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <>
@@ -427,19 +402,9 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
-                  permissionProgress={
-                    <PermissionStatusIndicator
-                      active={Boolean(permissionProgressLabel)}
-                      announce={
-                        visiblePermissionErrors.length === 0 ||
-                        previewResourceActions.actionDialogOpen
-                      }
-                      label={permissionProgressLabel}
-                      children={previewRecoveryCue}
-                    />
-                  }
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
+                  permissionProgress={permissionProgress}
                   headingLevel={2}
                 />
               ) : null}
@@ -450,19 +415,9 @@ export function FilePreviewPage({
                   fileName={fileName}
                   gfsUri={gfsUri}
                   onDownloadError={handleDownloadError}
-                  permissionProgress={
-                    <PermissionStatusIndicator
-                      active={Boolean(permissionProgressLabel)}
-                      announce={
-                        visiblePermissionErrors.length === 0 ||
-                        previewResourceActions.actionDialogOpen
-                      }
-                      label={permissionProgressLabel}
-                      children={previewRecoveryCue}
-                    />
-                  }
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
+                  permissionProgress={permissionProgress}
                   headingLevel={2}
                 />
               ) : null}
@@ -474,18 +429,8 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
-                  permissionProgress={
-                    <PermissionStatusIndicator
-                      active={Boolean(permissionProgressLabel)}
-                      announce={
-                        visiblePermissionErrors.length === 0 ||
-                        previewResourceActions.actionDialogOpen
-                      }
-                      label={permissionProgressLabel}
-                      children={previewRecoveryCue}
-                    />
-                  }
                   titleActions={fileActionsMenu}
+                  permissionProgress={permissionProgress}
                   headingLevel={2}
                 />
               ) : null}

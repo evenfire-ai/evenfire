@@ -26,16 +26,9 @@ export { MenuItem } from './MenuItem'
 export type { MenuItemProps } from './MenuItem'
 export { NavItem } from './NavItem'
 export type { NavItemProps } from './NavItem'
+export { PermissionStatusIndicator } from './PermissionStatusIndicator'
 export { Pill } from './Pill'
 export type { PillProps } from './Pill'
-export { PermissionErrorDialog } from './PermissionErrorDialog'
-export type {
-  PermissionErrorDialogProps,
-  PermissionErrorItem,
-  PermissionRetryFailureDisposition,
-} from './PermissionErrorDialog/types'
-export { PermissionStatusIndicator } from './PermissionStatusIndicator'
-export type { PermissionStatusIndicatorProps } from './PermissionStatusIndicator/types'
 export { ReferenceTag } from './ReferenceTag'
 export type { ReferenceTagKind, ReferenceTagProps } from './ReferenceTag'
 export { SelectInput } from './SelectInput'

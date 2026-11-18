@@ -1,5 +1,4 @@
 import { QueryClient } from '@tanstack/react-query'
-import { installPermissionErrorTracking } from '@components/Common/permissionErrorAcknowledgement'
 
 /**
  * Production query defaults. Exported so tests can exercise GFS behavior
@@ -20,5 +19,3 @@ export const desktopQueryDefaults = {
 export const desktopQueryClient = new QueryClient({
   defaultOptions: desktopQueryDefaults,
 })
-
-installPermissionErrorTracking(desktopQueryClient)

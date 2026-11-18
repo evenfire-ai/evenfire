@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createRoot } from 'react-dom/client'
+import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { FilePreviewPage } from '@pages/FilePreviewPage'
 import { FilesPage } from '@pages/FilesPage'
@@ -12,19 +13,13 @@ type PermissionMode = 'success' | 'pending' | 'error'
 type GeometryHarness = {
   filesClient: QueryClient
   previewClient: QueryClient
-  setSurface: (surface: 'files' | 'preview') => void
   setPermissionMode: (resourceId: string, mode: PermissionMode) => void
   startAffordanceRefetch: (surface: 'files' | 'preview', resourceId: string) => boolean
-  startAccessibleRefetch: () => boolean
-  setAccessibleMode: (mode: PermissionMode) => void
   settlePermission: (resourceId: string, result: 'success' | 'error') => void
-  settleAccessible: (result: 'success' | 'error') => void
 }
 type PermissionStatusFixtures = {
   setPermissionMode: (resourceId: string, mode: PermissionMode) => void
   settlePermission: (resourceId: string, result: 'success' | 'error') => void
-  settleAccessible: (result: 'success' | 'error') => void
-  setAccessibleMode: (mode: PermissionMode) => void
 }
 
 declare global {
@@ -50,8 +45,9 @@ const authValue = {
 } as unknown as AuthContextValue
 
 function PermissionStatusGeometryHarness() {
-  const [surface, setSurfaceState] = useState<'files' | 'preview'>('files')
+  useWindowFocusBridge()
   const query = new URLSearchParams(window.location.search)
+  const surface = query.get('surface') === 'preview' ? 'preview' : 'files'
   const pendingGfsUri = query.get('gfsUri')
   const pendingFileDeepLink =
     query.get('deepLink') === '1' && pendingGfsUri ? { id: 1, uri: pendingGfsUri } : null
@@ -82,7 +78,6 @@ function PermissionStatusGeometryHarness() {
     window.__permissionStatusGeometry = {
       filesClient,
       previewClient,
-      setSurface: setSurfaceState,
       setPermissionMode: geometry.setPermissionMode,
       startAffordanceRefetch: (page, resourceId) => {
         const client = page === 'files' ? filesClient : previewClient
@@ -97,18 +92,7 @@ function PermissionStatusGeometryHarness() {
         void client.refetchQueries({ exact: true, queryKey: query.queryKey })
         return true
       },
-      startAccessibleRefetch: () => {
-        const query = filesClient
-          .getQueryCache()
-          .findAll()
-          .find(candidate => candidate.queryKey.includes('accessible'))
-        if (!query) return false
-        void filesClient.refetchQueries({ exact: true, queryKey: query.queryKey })
-        return true
-      },
-      setAccessibleMode: geometry.setAccessibleMode,
       settlePermission: geometry.settlePermission,
-      settleAccessible: geometry.settleAccessible,
     }
     return () => {
       delete window.__permissionStatusGeometry

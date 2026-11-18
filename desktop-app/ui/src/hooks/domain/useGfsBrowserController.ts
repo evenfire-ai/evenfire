@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import type { Query } from '@tanstack/react-query'
@@ -92,9 +92,6 @@ interface GfsAccessibleResource extends GfsBrowserChild {
 }
 
 type GfsAccessibleWirePage = Awaited<ReturnType<typeof window.clerum.gfs.listAccessible>>
-type GfsChildrenPage = Awaited<ReturnType<typeof window.clerum.gfs.listChildren>> & {
-  __filesFullListing?: true
-}
 
 function normalizeAccessibleResource(
   item: GfsAccessibleWirePage['items'][number]
@@ -170,11 +167,6 @@ export interface GfsBrowserAffordances {
 export interface GfsRowPermissionStatus {
   status: 'checking' | 'stale' | 'error' | 'ready'
   message: string | null
-  errorUpdateCount?: number
-  isEnabled?: boolean
-  isFetching?: boolean
-  isSessionAuthorityFailure?: boolean
-  queryIdentity?: Query
 }
 
 export interface GfsBrowserControllerOptions {
@@ -408,12 +400,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     accessState === 'active'
   const setAccessState = useCallback(
     (next: GfsAccessState) => {
+      if (!ownsPublishedAuthority()) return
       queryClient.setQueryData(
         desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous', sessionGeneration),
         next
       )
     },
-    [queryClient, sessionScope, sessionGeneration]
+    [queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority]
   )
 
   // The open location is CLIENT state, not server state: it records which
@@ -549,28 +542,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     currentIsDirectory &&
     accessState === 'active'
 
-  const childrenQueryKey = desktopQueryKeys.gfsChildren(
-    sessionScope ?? 'anonymous',
-    current?.resourceId ?? '',
-    DRIVE,
-    sessionGeneration
-  )
   const childrenQuery = useInfiniteQuery({
-    queryKey: childrenQueryKey,
-    queryFn: async ({ pageParam, client, queryKey }) => {
-      const query = client.getQueryCache().find({ queryKey, exact: true })
-      const fetchMeta = query?.state.fetchMeta as
-        | { fetchMore?: { direction?: 'forward' | 'backward' } }
-        | null
-        | undefined
-      const isFetchMore = Boolean(fetchMeta?.fetchMore)
-      const page = await window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam)
-      if (!query || isFetchMore) return page as GfsChildrenPage
-      return {
-        ...page,
-        __filesFullListing: true,
-      } satisfies GfsChildrenPage
-    },
+    queryKey: desktopQueryKeys.gfsChildren(
+      sessionScope ?? 'anonymous',
+      current?.resourceId ?? '',
+      DRIVE,
+      sessionGeneration
+    ),
+    queryFn: ({ pageParam }) =>
+      window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam),
     enabled: childrenQueryEnabled,
     // Folder contents change out-of-band: agents with host grants, other
     // sessions, and operator writes never pass through this client. Revisit
@@ -753,7 +733,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         hasGfsSessionGeneration(query.queryKey, sessionGeneration) &&
         query.queryKey[3] !== 'affordances',
     })
-  }, [queryClient, sessionScope, sessionGeneration])
+  }, [queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority])
   /**
    * Fail closed on a session/authorization failure: cached GFS metadata can
    * never outlive the access that produced it. Clears navigation and removes
@@ -762,6 +742,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
    * observers until an explicit retry re-enters through the server.
    */
   const clearGfsState = useCallback(() => {
+    if (!ownsPublishedAuthority()) return
     setCrumbs([])
     setOpenError(null)
     queryClient.removeQueries({
@@ -770,7 +751,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         query.queryKey[2] === sessionScope &&
         hasGfsSessionGeneration(query.queryKey, sessionGeneration),
     })
-  }, [queryClient, sessionScope, sessionGeneration])
+  }, [queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority])
   const clearInaccessibleGfsLocation = useCallback(() => {
     const resourceId = currentCrumbRef.current?.resourceId
     pendingDeniedLocationRef.current =
@@ -860,40 +841,31 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // rejection (401 / typed lifecycle code) revokes the session even when the
   // caller would only have toasted. Policy verdicts (403/412) stay local.
   const failClosedOnMutationError = useCallback(
-    (
-      error: unknown,
-      _variables?: unknown,
-      origin?: { scope: string | null; generation: number | null }
-    ) => {
-      handleAuthorityFailure(toMessage(error), 'operation', origin?.scope, origin?.generation)
+    (error: unknown) => {
+      handleAuthorityFailure(toMessage(error), 'operation')
     },
     [handleAuthorityFailure]
   )
-  const captureMutationAuthority = () => ({ scope: sessionScope, generation: sessionGeneration })
   const revokeGrantMutation = useMutation({
     mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
     onSuccess: refreshGrants,
-    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const revokeShareMutation = useMutation({
     mutationFn: (shareId: string) => window.clerum.gfs.revokeShare(shareId),
     onSuccess: refreshShares,
-    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const createFolderMutation = useMutation({
     mutationFn: (input: { parentResourceId: string; name: string }) =>
       window.clerum.gfs.createFolder(input.parentResourceId, input.name, DRIVE),
     onSuccess: refreshGfs,
-    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const createFileMutation = useMutation({
     mutationFn: (input: { parentResourceId: string; name: string; encodedData: string }) =>
       window.clerum.gfs.createFile(input.parentResourceId, input.name, input.encodedData, DRIVE),
     onSuccess: refreshGfs,
-    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const createFileFromPathMutation = useMutation({
@@ -905,7 +877,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         DRIVE
       ),
     onSuccess: refreshGfs,
-    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const replaceFileMutation = useMutation({
@@ -921,7 +892,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       )
       await refreshGfs()
     },
-    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const replaceFileFromPathMutation = useMutation({
@@ -939,7 +909,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       await refreshGfs()
     },
-    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const renameResourceMutation = useMutation({
@@ -955,7 +924,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       )
       await refreshGfs()
     },
-    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const deleteResourceMutation = useMutation({
@@ -965,7 +933,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       setCrumbs(prev => prev.filter(crumb => crumb.resourceId !== input.resourceId))
       await refreshGfs()
     },
-    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
 
@@ -984,44 +951,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // stay behind `authorityPending` regardless, so the rows arrive without
   // per-row actions until discovery lands.
   const childrenFetchedThisEpoch = childrenQuery.dataUpdatedAt >= authorityEpochRef.current
-  const permissionBindingFolderId = currentIsDirectory ? (current?.resourceId ?? null) : null
-  const permissionBindingSnapshotsRef = useRef(new WeakMap<Query, string[]>())
-  const childPages = childrenQuery.data?.pages ?? []
-  const childrenQueryIdentity = queryClient.getQueryCache().find({
-    queryKey: childrenQueryKey,
-    exact: true,
-  })
-  const pagesHaveFullListingProvenance =
-    childPages.length > 0 && childPages.every(page => page.__filesFullListing === true)
-  const childCursorChainComplete = Boolean(
-    permissionBindingFolderId &&
-    childPages.length > 0 &&
-    childPages[childPages.length - 1]?.nextCursor === null &&
-    childrenQueryIdentity &&
-    childrenQuery.data?.pageParams.length === childPages.length &&
-    pagesHaveFullListingProvenance
-  )
-  useLayoutEffect(() => {
-    if (!childCursorChainComplete) return
-    if (childrenQueryIdentity) {
-      permissionBindingSnapshotsRef.current.set(
-        childrenQueryIdentity,
-        childPages.flatMap(page => page.items.map(item => item.resourceId))
-      )
-    }
-  }, [childCursorChainComplete, childPages, childrenQueryIdentity])
-  const permissionBindingChildResourceIds = permissionBindingFolderId
-    ? childCursorChainComplete
-      ? childPages.flatMap(page => page.items.map(item => item.resourceId))
-      : [
-          ...new Set([
-            ...(childrenQueryIdentity
-              ? (permissionBindingSnapshotsRef.current.get(childrenQueryIdentity) ?? [])
-              : []),
-            ...childPages.flatMap(page => page.items.map(item => item.resourceId)),
-          ]),
-        ]
-    : []
   const items = useMemo<GfsBrowserChild[]>(
     () =>
       accessState === 'revoked' || (authorityPending && !childrenFetchedThisEpoch)
@@ -1120,9 +1049,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         rateLimited: boolean
         retryAfterSeconds: number | null
         isFetching: boolean
-        errorUpdateCount: number
-        isSessionAuthorityFailure: boolean
-        queryIdentity?: Query
       }
     > = {}
     if (authorityPending || accessState === 'revoked') return byId
@@ -1136,21 +1062,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         rateLimited: rawError ? isRateLimited(rawError) : false,
         retryAfterSeconds: rawError ? parseRetryAfterSeconds(rawError) : null,
         isFetching: Boolean(query?.isFetching),
-        errorUpdateCount: query?.errorUpdateCount ?? 0,
-        isSessionAuthorityFailure: Boolean(
-          rawError && isGfsSessionAuthorityFailure(rawError, 'operation')
-        ),
-        queryIdentity: query
-          ? queryClient.getQueryCache().find({
-              queryKey: desktopQueryKeys.gfsAffordances(
-                sessionScope ?? 'anonymous',
-                resourceId,
-                DRIVE,
-                sessionGeneration
-              ),
-              exact: true,
-            })
-          : undefined,
       }
     })
     return byId
@@ -1243,87 +1154,32 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             error?: unknown
             isError?: boolean
             isFetching?: boolean
-            isEnabled?: boolean
             isStale?: boolean
-            errorUpdateCount?: number
           }
-        | undefined,
-      resourceId: string
+        | undefined
     ) => {
-      const queryIdentity = queryClient.getQueryCache().find({
-        queryKey: desktopQueryKeys.gfsAffordances(
-          sessionScope ?? 'anonymous',
-          resourceId,
-          DRIVE,
-          sessionGeneration
-        ),
-        exact: true,
-      })
-      if (query?.isFetching)
-        return {
-          status: 'checking',
-          message: null,
-          errorUpdateCount: query.errorUpdateCount ?? 0,
-          isEnabled: query.isEnabled ?? false,
-          isFetching: query.isFetching ?? false,
-          isSessionAuthorityFailure: isGfsSessionAuthorityFailure(
-            query.error instanceof Error ? query.error.message : String(query.error ?? ''),
-            'operation'
-          ),
-          queryIdentity,
-        } as const
+      if (query?.isFetching) return { status: 'checking', message: null } as const
       if (query?.isError) {
         return {
           status: 'error',
           message: toPresentedMessage(query.error),
-          errorUpdateCount: query.errorUpdateCount ?? 0,
-          isEnabled: query.isEnabled ?? false,
-          isFetching: query.isFetching ?? false,
-          isSessionAuthorityFailure: isGfsSessionAuthorityFailure(
-            query.error instanceof Error ? query.error.message : String(query.error ?? ''),
-            'operation'
-          ),
-          queryIdentity,
         } as const
       }
-      if (!query?.data)
-        return {
-          status: 'checking',
-          message: null,
-          errorUpdateCount: query?.errorUpdateCount ?? 0,
-          isEnabled: query?.isEnabled ?? false,
-          isFetching: query?.isFetching ?? false,
-          queryIdentity,
-        } as const
-      if (query.isStale)
-        return {
-          status: 'stale',
-          message: null,
-          errorUpdateCount: query.errorUpdateCount ?? 0,
-          isEnabled: query.isEnabled ?? false,
-          isFetching: query.isFetching ?? false,
-          queryIdentity,
-        } as const
-      return {
-        status: 'ready',
-        message: null,
-        errorUpdateCount: query.errorUpdateCount ?? 0,
-        isEnabled: query.isEnabled ?? false,
-        isFetching: query.isFetching ?? false,
-        queryIdentity,
-      } as const
+      if (!query?.data) return { status: 'checking', message: null } as const
+      if (query.isStale) return { status: 'stale', message: null } as const
+      return { status: 'ready', message: null } as const
     }
     items.forEach((item, index) => {
       byResourceId[item.resourceId] =
         authorityPending || accessState === 'revoked'
-          ? { status: 'checking', message: null, isEnabled: false, isFetching: false }
-          : queryStatus(rowAffordancesQueries[index], item.resourceId)
+          ? { status: 'checking', message: null }
+          : queryStatus(rowAffordancesQueries[index])
     })
     accessibleResources.forEach(resource => {
       byResourceId[resource.resourceId] =
         authorityPending || accessState === 'revoked'
-          ? { status: 'checking', message: null, isEnabled: false, isFetching: false }
-          : queryStatus(accessibleQuery, resource.resourceId)
+          ? { status: 'checking', message: null }
+          : queryStatus(accessibleQuery)
     })
     return byResourceId
   }, [
@@ -1963,9 +1819,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     handleAuthorityFailure,
     accessibleResources,
     items,
-    permissionBindingFolderId,
-    permissionBindingChildResourceIds,
-    permissionBindingComplete: childCursorChainComplete,
     affordances:
       authorityPending || accessState === 'revoked'
         ? null
@@ -1974,12 +1827,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     affordancesHttpStatus: affordancesQuery.error
       ? parseHttpStatus(toMessage(affordancesQuery.error))
       : null,
-    affordancesSessionAuthorityFailure: affordancesQuery.error
-      ? isGfsSessionAuthorityFailure(toMessage(affordancesQuery.error), 'operation')
-      : false,
     loadingAffordances: affordancesQuery.isFetching,
-    affordancesEnabled: affordancesQuery.isEnabled,
-    affordancesErrorUpdateCount: affordancesQuery.errorUpdateCount,
     rowAffordancesByResourceId,
     rowPermissionStatusByResourceId,
     moveSourceParentAffordancesById,
@@ -1995,8 +1843,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       rowAffordancesQuery.isStale
         ? null
         : ((rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
-    rowAffordancesEnabled: rowAffordancesQuery.isEnabled,
-    rowAffordancesFetching: rowAffordancesQuery.isFetching,
     rowAffordancesError: rowAffordancesQuery.error
       ? toPresentedMessage(rowAffordancesQuery.error)
       : null,

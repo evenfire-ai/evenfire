@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { PermissionErrorDialog } from '@components/Common'
 import { buildGfsResourceActions } from '@lib/gfsResourceActions'
 import { GfsResourceMenu } from './index'
 
@@ -149,32 +148,6 @@ describe('GfsResourceMenu', () => {
     fireEvent.click(share)
     expect(screen.queryByRole('menu', { name: 'Share options for report.txt' })).toBeNull()
     expect(share.getAttribute('aria-expanded')).toBe('false')
-  })
-
-  it('dismisses a stacked permission dialog without closing the open resource menu', () => {
-    const onDismiss = vi.fn()
-    const actions = buildGfsResourceActions({
-      kind: 'file',
-      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
-      handlers: { share: vi.fn(), 'copy-link': vi.fn(), 'copy-route': vi.fn() },
-      canShare: true,
-    })
-    render(
-      <>
-        <GfsResourceMenu actions={actions} resourceName="report.txt" />
-        <PermissionErrorDialog
-          errors={[{ id: 'query-stacked-escape', message: 'Permission check failed.' }]}
-          onDismiss={onDismiss}
-        />
-      </>
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
-    expect(screen.getByRole('menu', { name: 'Actions for report.txt' })).toBeTruthy()
-    fireEvent.keyDown(screen.getByRole('button', { name: 'Close' }), { key: 'Escape' })
-
-    expect(onDismiss).toHaveBeenCalledWith(['query-stacked-escape'])
-    expect(screen.getByRole('menu', { name: 'Actions for report.txt' })).toBeTruthy()
   })
 
   it('dispatches replacement selection and the selected file through the shared action', () => {

@@ -68,7 +68,7 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
     const uiRoot = path.join(desktopRoot, 'ui')
     const vite = await createServer({
       configFile: path.join(uiRoot, 'vite.config.ts'),
-      server: { host: '127.0.0.1', port: 5183, strictPort: true },
+      server: { host: '127.0.0.1', port: 0, strictPort: false },
     })
     let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
     try {
@@ -114,7 +114,12 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
       ])
       const childrenPage = await listChildrenPage([
         childView('child-report', 'report.txt', 'file', { parentResourceId: 'folder-active' }),
+        childView('child-folder', 'Financial', 'directory', { parentResourceId: 'folder-active' }),
       ])
+      const nestedPage = await listChildrenPage([
+        childView('nested-folder', 'Quarterly', 'directory', { parentResourceId: 'child-folder' }),
+      ])
+      const emptyPage = await listChildrenPage([])
       const produceAffordance = appServiceAffordanceProducer(async () =>
         heldPermissionResponse(['read', 'write', 'delete', 'manage_acl', 'share'])
       )
@@ -123,6 +128,8 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
         'folder-active',
         'source-parent',
         'child-report',
+        'child-folder',
+        'nested-folder',
         'preview-file',
         'preview-parent',
         currentFileId,
@@ -154,18 +161,19 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
           currentFile,
           rootPage,
           childrenPage,
+          nestedPage,
+          emptyPage,
           successfulAffordances,
           errorMessages,
         }) => {
-          const modes: Record<string, 'success' | 'pending' | 'error'> = {}
+          const holdOnLoad = new URLSearchParams(window.location.search).get('holdOnLoad')
+          const modes: Record<string, 'success' | 'pending' | 'error'> = holdOnLoad
+            ? { [holdOnLoad]: 'pending' }
+            : {}
           const pending = new Map<
             string,
             { resolve: (value: unknown) => void; reject: (error: Error) => void }
           >()
-          let accessibleMode: 'success' | 'pending' | 'error' = 'success'
-          let accessiblePending:
-            | { resolve: (value: unknown) => void; reject: (error: Error) => void }
-            | undefined
           const pass = <T,>(value: T): T => structuredClone(value)
           const respond = (id: string, success: unknown) => {
             const mode = modes[id] ?? 'success'
@@ -179,9 +187,6 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
             setPermissionMode: (id: string, mode: 'success' | 'pending' | 'error') => {
               modes[id] = mode
             },
-            setAccessibleMode: (mode: 'success' | 'pending' | 'error') => {
-              accessibleMode = mode
-            },
             settlePermission: (id: string, result: 'success' | 'error') => {
               const request = pending.get(id)
               if (!request) throw new Error(`No pending permission request for ${id}`)
@@ -190,27 +195,11 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
               if (result === 'success') request.resolve(pass(successfulAffordances[id]))
               else request.reject(new Error(errorMessages[id]))
             },
-            settleAccessible: (result: 'success' | 'error') => {
-              if (!accessiblePending) throw new Error('No pending accessible-list request')
-              const request = accessiblePending
-              accessiblePending = undefined
-              accessibleMode = result
-              if (result === 'success') request.resolve(pass(rootPage))
-              else request.reject(new Error('accessible-list fixture failure'))
-            },
           }
           window.clerum = {
             auth: { getSessionGeneration: async () => 0 },
             gfs: {
-              listAccessible: async () => {
-                if (accessibleMode === 'pending') {
-                  return new Promise((resolve, reject) => {
-                    accessiblePending = { resolve, reject }
-                  })
-                }
-                if (accessibleMode === 'error') throw new Error('accessible-list fixture failure')
-                return pass(rootPage)
-              },
+              listAccessible: async () => pass(rootPage),
               resolve: async (uri: string) => {
                 if (uri === folder.gfsUri) return pass(folder)
                 if (uri === sourceParent.gfsUri) return pass(sourceParent)
@@ -220,8 +209,10 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
                 throw new Error(`Unexpected fixture resolve: ${uri}`)
               },
               listChildren: async (id: string) => {
-                if (id !== 'folder-active') throw new Error(`Unexpected folder: ${id}`)
-                return pass(childrenPage)
+                if (id === 'folder-active') return pass(childrenPage)
+                if (id === 'child-folder') return pass(nestedPage)
+                if (id === 'nested-folder') return pass(emptyPage)
+                throw new Error(`Unexpected folder: ${id}`)
               },
               affordances: async (id: string) => {
                 if (!successfulAffordances[id]) throw new Error(`Unexpected authority: ${id}`)
@@ -242,6 +233,8 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
           currentFile,
           rootPage,
           childrenPage,
+          nestedPage,
+          emptyPage,
           successfulAffordances,
           errorMessages,
         }
@@ -250,228 +243,274 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
         waitUntil: 'domcontentloaded',
       })
 
-      await page.getByRole('button', { name: 'Reports', exact: true }).waitFor()
-      await page.getByRole('button', { name: 'Shared notes.txt', exact: true }).waitFor()
-      const rootRows = page.locator('.da-gfs-drive__grid .da-grid__row')
-      expect(await rootRows.count()).toBe(2)
-      expect(
-        await page.locator('.da-gfs-drive__grid .da-permission-status-indicator').count()
-      ).toBe(0)
-      for (const width of [1280, 390]) {
-        await page.setViewportSize({ width, height: 900 })
-        const rootBefore = await rootRows.evaluateAll(rows =>
-          rows.map(row => {
-            const rect = row.getBoundingClientRect()
-            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-          })
-        )
-        const started = await page.evaluate(() => {
-          window.__permissionStatusGeometry?.setAccessibleMode('pending')
-          return window.__permissionStatusGeometry?.startAccessibleRefetch()
-        })
-        expect(started).toBe(true)
-        await page.waitForFunction(
-          () =>
-            [
-              ...(window.__permissionStatusGeometry?.filesClient.getQueryCache().getAll() ?? []),
-            ].some(
-              query =>
-                query.queryKey.includes('accessible') && query.state.fetchStatus === 'fetching'
-            ),
-          undefined,
-          { timeout: 5000 }
-        )
-        expect(
-          await page.locator('.da-gfs-drive__grid .da-permission-status-indicator').count()
-        ).toBe(0)
-        expect(
-          await rootRows.evaluateAll(rows =>
-            rows.map(row => {
-              const rect = row.getBoundingClientRect()
-              return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-            })
-          )
-        ).toEqual(rootBefore)
-        await page.evaluate(() => window.__permissionStatusGeometry?.settleAccessible('success'))
-      }
-      await page.evaluate(() => {
-        window.__permissionStatusGeometry?.setAccessibleMode('error')
-        window.__permissionStatusGeometry?.startAccessibleRefetch()
-      })
-      await page.getByText('accessible-list fixture failure').waitFor()
-      expect(await page.getByRole('alertdialog').count()).toBe(0)
-      expect(
-        await page.locator('.da-gfs-drive__grid .da-permission-status-indicator').count()
-      ).toBe(0)
-
-      await page.goto(
-        `http://127.0.0.1:${address.port}/permission-status-geometry.html?gfsUri=${encodeURIComponent('gfs://main/folder-active')}`
-      )
+      const url = `http://127.0.0.1:${address.port}/permission-status-geometry.html`
+      await page.goto(`${url}?holdOnLoad=folder-active&gfsUri=${encodeURIComponent(folder.gfsUri)}`)
       await page.getByRole('button', { name: 'report.txt', exact: true }).waitFor()
-      const breadcrumbOrder = await page.locator('.da-gfs-drive__title-row').evaluate(row => {
-        const children = Array.from(row.children)
-        const menu = children.findIndex(child =>
-          child.querySelector('.da-gfs-resource-menu__trigger')
-        )
-        const spinner = children.findIndex(child => child.matches('.da-permission-status-slot'))
-        return { menu, spinner }
-      })
-      expect(breadcrumbOrder.menu).toBeGreaterThanOrEqual(0)
-      expect(breadcrumbOrder.spinner).toBeGreaterThan(breadcrumbOrder.menu)
-      const fileSelectors = [
-        '.da-gfs-drive__title-row',
-        '.da-gfs-drive__breadcrumbs',
-        '.da-gfs-drive__title-row > .da-permission-status-slot',
-        '.da-gfs-resource-menu__trigger',
-        '.da-gfs-drive__grid .da-grid__row',
-        '.da-gfs-drive__grid .da-gfs-list__identity',
-        '.da-gfs-drive__grid .da-gfs-list__actions',
-      ]
-      const measureFiles = () => page.evaluate(measureRects, fileSelectors)
-      for (const width of [1280, 390]) {
-        await page.setViewportSize({ width, height: 900 })
-        await assertReservedSlot(page, '.da-gfs-drive__title-row > .da-permission-status-slot')
-        const rowStatusSlotCount = await page
-          .locator('.da-gfs-drive__grid .da-gfs-list__name > .da-permission-status-slot')
-          .count()
-        const folderBefore = await measureFiles()
-        await page.evaluate(() => {
-          window.__permissionStatusGeometry?.setPermissionMode('folder-active', 'pending')
-          window.__permissionStatusGeometry?.startAffordanceRefetch('files', 'folder-active')
-        })
-        await page.getByRole('status', { name: 'Checking permissions for Reports' }).waitFor()
-        assertStable(folderBefore, await measureFiles(), `Files current folder ${width}px`)
-        await page.evaluate(() =>
-          window.__permissionStatusGeometry?.settlePermission('folder-active', 'success')
-        )
-        await page.waitForFunction(
-          () => !document.querySelector('.da-gfs-drive__title-row .da-permission-status-indicator')
-        )
-        assertStable(folderBefore, await measureFiles(), `Files current folder settled ${width}px`)
-
-        const folderOptions = page.getByRole('button', { name: 'Options for Reports' })
-        await folderOptions.focus()
-        const folderBeforeError = await measureFiles()
-        await page.evaluate(() => {
-          window.__permissionStatusGeometry?.setPermissionMode('folder-active', 'error')
-          window.__permissionStatusGeometry?.startAffordanceRefetch('files', 'folder-active')
-        })
-        const folderDialog = page.getByRole('alertdialog', {
-          name: 'Could not verify EvenDrive permissions',
-        })
-        await folderDialog.waitFor()
-        expect(await page.getByRole('alertdialog').count()).toBe(1)
-        expect(await folderDialog.getAttribute('aria-modal')).toBe('true')
-        const folderDialogRect = await folderDialog.boundingBox()
-        expect(folderDialogRect).toBeTruthy()
-        expect(
-          Math.abs(folderDialogRect!.x + folderDialogRect!.width / 2 - width / 2)
-        ).toBeLessThanOrEqual(1)
-        expect(
-          Math.abs(folderDialogRect!.y + folderDialogRect!.height / 2 - 450)
-        ).toBeLessThanOrEqual(1)
-        assertStable(
-          folderBeforeError,
-          await measureFiles(),
-          `Files folder error overlay ${width}px`
-        )
-        expect(
-          await page
-            .getByRole('button', { name: 'Close' })
-            .evaluate(button => button === document.activeElement)
-        ).toBe(true)
-        await page.keyboard.press('Escape')
-        await folderDialog.waitFor({ state: 'detached' })
-        expect(
-          await page.evaluate(() =>
-            (document.activeElement as HTMLElement | null)?.getAttribute('aria-label')
-          )
-        ).toBe('Options for Reports')
-        assertStable(
-          folderBeforeError,
-          await measureFiles(),
-          `Files folder error dismissed ${width}px`
-        )
-
-        const rowBefore = await measureFiles()
-        await page.evaluate(() => {
-          window.__permissionStatusGeometry?.setPermissionMode('child-report', 'pending')
-          window.__permissionStatusGeometry?.startAffordanceRefetch('files', 'child-report')
-        })
-        await page.waitForFunction(
-          () =>
-            window.__permissionStatusGeometry?.filesClient
-              .getQueryCache()
-              .getAll()
-              .some(
-                query =>
-                  query.queryKey.includes('child-report') && query.state.fetchStatus === 'fetching'
-              ),
-          undefined,
-          { timeout: 5000 }
-        )
-        const activeRowIndicatorCount = await page
-          .locator('.da-gfs-drive__grid .da-gfs-list__name .da-permission-status-indicator')
-          .count()
-        expect({ rowStatusSlotCount, activeRowIndicatorCount }).toEqual({
-          rowStatusSlotCount: 0,
-          activeRowIndicatorCount: 0,
-        })
-        assertStable(rowBefore, await measureFiles(), `Files child row ${width}px`)
-        await page.evaluate(() =>
-          window.__permissionStatusGeometry?.settlePermission('child-report', 'success')
-        )
-        await page.waitForFunction(
-          () => !document.querySelector('.da-gfs-drive__grid .da-permission-status-indicator')
-        )
-        expect(
-          await page
-            .locator('.da-gfs-drive__grid .da-gfs-list__name > .da-permission-status-slot')
-            .count()
-        ).toBe(0)
-        assertStable(rowBefore, await measureFiles(), `Files child row settled ${width}px`)
-      }
-
-      const rowOptions = page.getByRole('button', { name: 'Options for report.txt' })
-      await rowOptions.focus()
-      await rowOptions.press('Enter')
-      await page.getByRole('menu', { name: 'Actions for report.txt' }).waitFor()
-      const rowBeforeError = await measureFiles()
-      await page.evaluate(() => {
-        window.__permissionStatusGeometry?.setPermissionMode('child-report', 'error')
-        window.__permissionStatusGeometry?.startAffordanceRefetch('files', 'child-report')
-      })
-      const filesDialog = page.getByRole('alertdialog', {
-        name: 'Could not verify EvenDrive permissions',
-      })
-      await filesDialog.waitFor()
-      expect(await page.getByRole('alertdialog').count()).toBe(1)
+      const coldFolderProgress = page
+        .locator('.da-gfs-drive__title-row .da-permission-status-slot')
+        .getByRole('status')
+      await coldFolderProgress.waitFor()
       expect(
-        await page.locator('.da-gfs-drive__grid .da-permission-status-indicator').count()
+        await coldFolderProgress.getAttribute('aria-label'),
+        'permission operation label'
+      ).toBe('Checking permissions for Reports')
+      expect(
+        await page.getByText('Checking permissions for Reports…', { exact: true }).count(),
+        'duplicate inline permission progress'
       ).toBe(0)
-      expect(await page.locator('.da-gfs-drive__grid .da-permission-status-slot').count()).toBe(0)
-      expect(await filesDialog.getAttribute('aria-modal')).toBe('true')
-      const filesDialogRect = await filesDialog.boundingBox()
-      expect(filesDialogRect).toBeTruthy()
-      expect(Math.abs(filesDialogRect!.x + filesDialogRect!.width / 2 - 195)).toBeLessThanOrEqual(1)
-      expect(Math.abs(filesDialogRect!.y + filesDialogRect!.height / 2 - 450)).toBeLessThanOrEqual(
-        1
+      await page.evaluate(() =>
+        window.__permissionStatusGeometry?.settlePermission('folder-active', 'success')
       )
-      assertStable(rowBeforeError, await measureFiles(), 'Files row error overlay')
-      await page.keyboard.press('Shift+Tab')
-      expect(
-        await page.evaluate(() => document.activeElement?.closest('[role="alertdialog"]') !== null)
-      ).toBe(true)
-      await page.keyboard.press('Escape')
-      await filesDialog.waitFor({ state: 'detached' })
-      await page.getByRole('button', { name: 'Options for report.txt' }).waitFor()
-      expect(
-        await page.evaluate(() =>
-          (document.activeElement as HTMLElement | null)?.getAttribute('aria-label')
-        )
-      ).toBe('Options for report.txt')
-      assertStable(rowBeforeError, await measureFiles(), 'Files row error dismissed')
-
+      await coldFolderProgress.waitFor({ state: 'detached' })
+      for (const [surface, resource, title, row, label] of [
+        [
+          'files',
+          'folder-active',
+          'Reports',
+          '.da-gfs-drive__title-row',
+          'Checking permissions for Reports',
+        ],
+        [
+          'preview',
+          'preview-file',
+          'diagram.png',
+          '.da-gfs-preview-title-row',
+          'Checking file permissions',
+        ],
+      ] as const) {
+        if (surface === 'preview') {
+          await page.goto(`${url}?surface=preview&holdOnLoad=preview-file`)
+          const coldPreviewProgress = page
+            .locator('.da-gfs-preview-title-row .da-permission-status-slot')
+            .getByRole('status')
+          await coldPreviewProgress.waitFor()
+          expect(
+            await coldPreviewProgress.getAttribute('aria-label'),
+            'permission operation label'
+          ).toBe('Checking file permissions')
+          expect(await page.getByText('Checking file permissions…', { exact: true }).count()).toBe(
+            0
+          )
+          await page.evaluate(() =>
+            window.__permissionStatusGeometry?.settlePermission('preview-file', 'success')
+          )
+          await coldPreviewProgress.waitFor({ state: 'detached' })
+        }
+        const menu = page.getByRole('button', { name: `Options for ${title}` })
+        await menu.waitFor()
+        const slotSelector = `${row} > .da-permission-status-slot`
+        const slot = page.locator(slotSelector)
+        const progress = page.getByRole('status', { name: label })
+        const selectors = [
+          row,
+          slotSelector,
+          `${row} .da-gfs-resource-menu__trigger`,
+          surface === 'files'
+            ? '.da-gfs-drive__breadcrumb[aria-current="page"]'
+            : '.da-gfs-preview-title',
+          surface === 'files' ? '.da-gfs-drive__header' : '.da-gfs-image-preview-dialog__body',
+          surface === 'files' ? '.da-gfs-drive__grid' : '.da-gfs-preview-content',
+          ...(surface === 'files'
+            ? [
+                '.da-gfs-drive__grid .da-grid__body .da-grid__row:nth-child(1)',
+                '.da-gfs-drive__grid .da-grid__body .da-grid__row:nth-child(2)',
+              ]
+            : []),
+        ]
+        const start = async (id: string) => {
+          expect(
+            await page.evaluate(
+              ({ surface, id }) => {
+                window.__permissionStatusGeometry?.setPermissionMode(id, 'pending')
+                return window.__permissionStatusGeometry?.startAffordanceRefetch(surface, id)
+              },
+              { surface, id }
+            )
+          ).toBe(true)
+          await page.waitForFunction(
+            ({ surface, id }) =>
+              (surface === 'files'
+                ? window.__permissionStatusGeometry?.filesClient
+                : window.__permissionStatusGeometry?.previewClient
+              )
+                ?.getQueryCache()
+                .getAll()
+                .some(
+                  query => query.queryKey.includes(id) && query.state.fetchStatus === 'fetching'
+                ),
+            { surface, id }
+          )
+        }
+        const settle = (id: string, result: 'success' | 'error' = 'success') =>
+          page.evaluate(
+            ({ id, result }) => window.__permissionStatusGeometry?.settlePermission(id, result),
+            { id, result }
+          )
+        for (const width of [1280, 390]) {
+          await page.setViewportSize({ width, height: 900 })
+          await assertReservedSlot(page, slotSelector)
+          await progress.waitFor({ state: 'detached' })
+          await menu.focus()
+          const before = await page.evaluate(measureRects, selectors)
+          expect(Object.keys(before)).toHaveLength(selectors.length)
+          const liveRegions = page.locator(
+            '[role="status"], [aria-live="polite"], [aria-live="assertive"]'
+          )
+          const baselineRegions = await liveRegions.count()
+          await start(resource)
+          await slot.getByRole('status').waitFor()
+          expect(
+            await slot.getByRole('status').getAttribute('aria-label'),
+            'permission operation label'
+          ).toBe(label)
+          expect(await slot.getByRole('status').textContent()).toBe(label)
+          const inlinePending =
+            surface === 'files' ? 'Checking permissions for Reports…' : 'Checking file permissions…'
+          expect(
+            await page.getByText(inlinePending, { exact: true }).count(),
+            'duplicate inline permission progress'
+          ).toBe(0)
+          expect(
+            await page
+              .getByRole('status', { name: /Checking .*permissions|Checking permissions/ })
+              .count()
+          ).toBe(1)
+          expect(await liveRegions.count(), 'single added permission live region').toBe(
+            baselineRegions + 1
+          )
+          expect(
+            await slot.evaluate(el => !!el.previousElementSibling?.matches('.da-gfs-resource-menu'))
+          ).toBe(true)
+          const bounds = await progress.boundingBox()
+          expect(bounds).not.toBeNull()
+          await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2)
+          expect(await slot.getAttribute('title'), 'native indicator tooltip on slot').toBeNull()
+          expect(await slot.locator('[title]').count(), 'native indicator tooltip').toBe(0)
+          expect(
+            await slot.locator('[role="tooltip"], .da-permission-status-tooltip').count(),
+            'custom indicator tooltip'
+          ).toBe(0)
+          expect(await slot.getAttribute('tabindex'), 'indicator tab stop on slot').toBeNull()
+          expect(await slot.locator('[tabindex]').count(), 'indicator tab stop').toBe(0)
+          await page.keyboard.press('Tab')
+          expect(await slot.evaluate(element => element.contains(document.activeElement))).toBe(
+            false
+          )
+          await menu.focus()
+          expect(await menu.evaluate(el => el === document.activeElement)).toBe(true)
+          assertStable(
+            before,
+            await page.evaluate(measureRects, selectors),
+            `${surface} active ${width}px`
+          )
+          await page.emulateMedia({ reducedMotion: 'reduce' })
+          const spinner = progress.locator('.da-permission-status-spinner')
+          expect(
+            await spinner.evaluate(el => getComputedStyle(el).animationName),
+            'reduced motion disables the spinner'
+          ).toBe('none')
+          await page.emulateMedia({ reducedMotion: 'no-preference' })
+          expect(await spinner.evaluate(el => getComputedStyle(el).animationName)).toBe(
+            'da-permission-status-spin'
+          )
+          await settle(resource)
+          await progress.waitFor({ state: 'detached' })
+          expect(await slot.evaluate(el => el.childNodes.length), 'empty inactive indicator').toBe(
+            0
+          )
+          expect(await slot.getAttribute('title'), 'inactive slot tooltip').toBeNull()
+          expect(await slot.getAttribute('tabindex'), 'inactive slot tab stop').toBeNull()
+          expect(await liveRegions.count()).toBe(baselineRegions)
+          expect(await menu.evaluate(el => el === document.activeElement)).toBe(true)
+          assertStable(
+            before,
+            await page.evaluate(measureRects, selectors),
+            `${surface} settled ${width}px`
+          )
+          if (surface === 'files') {
+            await start('child-report')
+            expect(
+              await page.locator('.da-gfs-drive__grid .da-permission-status-slot').count()
+            ).toBe(0)
+            expect(
+              await page.getByText('Checking permissions for report.txt…', { exact: true }).count(),
+              'row pending notice'
+            ).toBe(0)
+            assertStable(
+              before,
+              await page.evaluate(measureRects, selectors),
+              `row pending ${width}px`
+            )
+            await settle('child-report', 'error')
+            const rowError = page.getByText(/Could not verify permissions for report\.txt:/)
+            await rowError.waitFor()
+            await start('child-report')
+            await rowError.waitFor({ state: 'detached' })
+            expect(
+              await page.getByText('Checking permissions for report.txt…', { exact: true }).count()
+            ).toBe(0)
+            assertStable(
+              before,
+              await page.evaluate(measureRects, selectors),
+              `row error refetch ${width}px`
+            )
+            await settle('child-report', width === 390 ? 'success' : 'error')
+            if (width === 1280) {
+              await rowError.waitFor()
+              await start('child-report')
+              await settle('child-report')
+              await rowError.waitFor({ state: 'detached' })
+            }
+          } else {
+            await start('preview-parent')
+            const parentProgress = page.getByRole('status', { name: 'Checking move permissions' })
+            await parentProgress.waitFor()
+            expect(
+              await page.getByText('Checking move permissions…', { exact: true }).count()
+            ).toBe(0)
+            assertStable(
+              before,
+              await page.evaluate(measureRects, selectors),
+              `parent pending ${width}px`
+            )
+            await settle('preview-parent')
+            await parentProgress.waitFor({ state: 'detached' })
+            if (width === 390) {
+              await page.clock.setFixedTime(new Date(Date.now() + 16_000))
+              await page.evaluate(id => {
+                window.__permissionStatusGeometry?.setPermissionMode(id, 'pending')
+                window.__permissionStatusGeometry?.setPermissionMode('preview-parent', 'pending')
+                window.dispatchEvent(new Event('blur'))
+                window.dispatchEvent(new Event('focus'))
+              }, resource)
+              await page.waitForFunction(
+                id =>
+                  window.__permissionStatusGeometry?.previewClient
+                    .getQueryCache()
+                    .getAll()
+                    .filter(
+                      query =>
+                        query.queryKey.includes('affordances') &&
+                        (query.queryKey.includes(id) ||
+                          query.queryKey.includes('preview-parent')) &&
+                        query.state.fetchStatus === 'fetching'
+                    ).length === 2,
+                resource
+              )
+              await progress.waitFor()
+              expect(await parentProgress.count()).toBe(0)
+              await settle(resource, 'error')
+              await parentProgress.waitFor()
+              const retry = page.getByRole('button', { name: 'Retry permission check' })
+              await retry.waitFor()
+              expect(await page.getByText(/Could not verify file permissions:/).count()).toBe(1)
+              await settle('preview-parent')
+              await parentProgress.waitFor({ state: 'detached' })
+              expect(await retry.count()).toBe(1)
+            }
+          }
+        }
+      }
       await page.goto(
         `http://127.0.0.1:${address.port}/permission-status-geometry.html?deepLink=1&gfsUri=${encodeURIComponent(currentFile.gfsUri)}`
       )
@@ -495,6 +534,7 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
         )
       const currentSelectors = [
         '.da-gfs-current-file__title-row',
+        '.da-gfs-current-file__title-row h3',
         '.da-gfs-current-file__title-row > .da-permission-status-slot',
         '.da-gfs-current-file__title-row .da-gfs-resource-menu__trigger',
       ]
@@ -529,102 +569,75 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
         expect(await currentOrder()).toEqual(['filename', 'menu', 'spinner'])
         assertStable(before, await measureCurrent(), `Files current file settled ${width}px`)
       }
-
-      await page.evaluate(() => window.__permissionStatusGeometry?.setSurface('preview'))
-      await page.getByRole('heading', { name: 'diagram.png' }).waitFor()
-      const previewOptions = page.getByRole('button', { name: 'Options for diagram.png' })
-      const previewSelectors = [
-        '.da-gfs-preview-title-row',
-        '.da-gfs-preview-title-row > .da-permission-status-slot',
-        '.da-gfs-preview-title',
-        '.da-gfs-resource-menu__trigger',
-        '.da-gfs-image-preview-dialog__body',
-      ]
-      const measurePreview = () => page.evaluate(measureRects, previewSelectors)
-      const previewOrder = await page.locator('.da-gfs-preview-title-row').evaluate(row =>
-        Array.from(row.children).map(child => {
-          if (child.matches('.da-gfs-preview-title')) return 'filename'
-          if (child.querySelector('.da-gfs-resource-menu__trigger')) return 'menu'
-          if (child.matches('.da-permission-status-slot')) return 'spinner'
-          return 'other'
-        })
-      )
-      expect(previewOrder).toEqual(['filename', 'menu', 'spinner'])
-      for (const width of [1280, 390]) {
-        await page.setViewportSize({ width, height: 900 })
-        await assertReservedSlot(page, '.da-gfs-preview-title-row > .da-permission-status-slot')
-        const before = await measurePreview()
-        await page.evaluate(() => {
-          window.__permissionStatusGeometry?.setPermissionMode('preview-file', 'pending')
-          window.__permissionStatusGeometry?.setPermissionMode('preview-parent', 'pending')
-          window.__permissionStatusGeometry?.startAffordanceRefetch('preview', 'preview-file')
-          window.__permissionStatusGeometry?.startAffordanceRefetch('preview', 'preview-parent')
-        })
-        await page.getByRole('status', { name: 'Checking file and move permissions' }).waitFor()
-        assertStable(before, await measurePreview(), `Preview dual query ${width}px`)
-        await page.evaluate(() =>
-          window.__permissionStatusGeometry?.settlePermission('preview-file', 'success')
-        )
-        await page.getByRole('status', { name: 'Checking move permissions' }).waitFor()
-        assertStable(before, await measurePreview(), `Preview partial settle ${width}px`)
-        await page.evaluate(() =>
-          window.__permissionStatusGeometry?.settlePermission('preview-parent', 'success')
-        )
-        await page.waitForFunction(
-          () => !document.querySelector('.da-gfs-preview-title-row .da-permission-status-indicator')
-        )
-        assertStable(before, await measurePreview(), `Preview settled ${width}px`)
-
-        await previewOptions.focus()
-        const beforeError = await measurePreview()
-        await page.evaluate(() => {
-          window.__permissionStatusGeometry?.setPermissionMode('preview-file', 'error')
-          window.__permissionStatusGeometry?.startAffordanceRefetch('preview', 'preview-file')
-        })
-        const previewDialog = page.getByRole('alertdialog', {
-          name: 'Could not verify permissions',
-        })
-        await previewDialog.waitFor()
-        expect(await page.getByRole('alertdialog').count()).toBe(1)
-        const previewDialogRect = await previewDialog.boundingBox()
-        expect(previewDialogRect).toBeTruthy()
-        expect(
-          Math.abs(previewDialogRect!.x + previewDialogRect!.width / 2 - width / 2)
-        ).toBeLessThanOrEqual(1)
-        expect(
-          Math.abs(previewDialogRect!.y + previewDialogRect!.height / 2 - 450)
-        ).toBeLessThanOrEqual(1)
-        assertStable(beforeError, await measurePreview(), `Preview error overlay ${width}px`)
-        await page.keyboard.press('Tab')
-        expect(
+      await page.goto(`${url}?gfsUri=${encodeURIComponent(folder.gfsUri)}`)
+      const rootOptions = page.getByRole('button', { name: 'Options for Reports' })
+      const crumbEditor = page
+        .getByRole('navigation', { name: 'File location' })
+        .getByRole('textbox', { name: 'New name' })
+      const titleSlot = '.da-gfs-drive__title-row > .da-permission-status-slot'
+      const assertRenameGeometry = async (id: string, title: string) => {
+        const anchorSelectors = [
+          '.da-gfs-drive__breadcrumbs input',
+          '.da-gfs-drive__header',
+          '.da-gfs-drive__title-row',
+          titleSlot,
+          ...(id === 'nested-folder'
+            ? [
+                '.da-gfs-drive__breadcrumbs [aria-current="page"]',
+                '.da-gfs-drive__title-row .da-gfs-resource-menu__trigger',
+              ]
+            : []),
+        ]
+        await crumbEditor.waitFor()
+        for (const width of [1280, 390]) {
+          await page.setViewportSize({ width, height: 900 })
+          await crumbEditor.focus()
+          const before = await page.evaluate(measureRects, anchorSelectors)
+          expect(Object.keys(before)).toHaveLength(anchorSelectors.length)
+          await page.evaluate(id => {
+            window.__permissionStatusGeometry?.setPermissionMode(id, 'pending')
+            window.__permissionStatusGeometry?.startAffordanceRefetch('files', id)
+          }, id)
+          const status = page.getByRole('status', { name: `Checking permissions for ${title}` })
+          await status.waitFor()
+          expect(await page.locator(titleSlot).getByRole('status').count()).toBe(1)
+          expect(await crumbEditor.evaluate(el => el === document.activeElement)).toBe(true)
+          assertStable(
+            before,
+            await page.evaluate(measureRects, anchorSelectors),
+            `Rename ${title} ${width}px`
+          )
           await page.evaluate(
-            () => document.activeElement?.closest('[role="alertdialog"]') !== null
+            id => window.__permissionStatusGeometry?.settlePermission(id, 'success'),
+            id
           )
-        ).toBe(true)
-        expect(
-          await page
-            .getByRole('button', { name: 'Retry permission check' })
-            .evaluate(button => button === document.activeElement)
-        ).toBe(true)
-        await page.keyboard.press('Shift+Tab')
-        expect(
-          await page
-            .getByRole('button', { name: 'Close' })
-            .evaluate(button => button === document.activeElement)
-        ).toBe(true)
-        await page.keyboard.press('Escape')
-        await previewDialog.waitFor({ state: 'detached' })
-        expect(
-          await page.evaluate(() =>
-            (document.activeElement as HTMLElement | null)?.getAttribute('aria-label')
+          await status.waitFor({ state: 'detached' })
+          expect(await crumbEditor.evaluate(el => el === document.activeElement)).toBe(true)
+          assertStable(
+            before,
+            await page.evaluate(measureRects, anchorSelectors),
+            `Rename settled ${title} ${width}px`
           )
-        ).toBe('Options for diagram.png')
-        assertStable(beforeError, await measurePreview(), `Preview error dismissed ${width}px`)
-        await page.evaluate(() =>
-          window.__permissionStatusGeometry?.setPermissionMode('preview-file', 'success')
-        )
+        }
       }
-      console.log('PASS: Chromium geometry stable within 1 CSS px at 1280px and 390px')
+      await rootOptions.press('Enter')
+      await page.getByRole('menuitem', { name: 'Rename' }).press('Enter')
+      await assertRenameGeometry('folder-active', 'Reports')
+      await crumbEditor.press('Escape')
+      const rowOptions = page.getByRole('button', { name: 'Options for Financial' })
+      await rowOptions.press('Enter')
+      await page.getByRole('menuitem', { name: 'Rename' }).press('Enter')
+      await page.getByRole('textbox', { name: 'New name' }).waitFor()
+      await rowOptions.press('Enter')
+      await page.getByRole('menuitem', { name: 'Open folder' }).press('Enter')
+      await page.getByRole('button', { name: 'Quarterly', exact: true }).press('Enter')
+      await page.getByRole('button', { name: 'Options for Quarterly' }).waitFor()
+      expect(
+        await page
+          .locator(titleSlot)
+          .evaluate(el => !!el.previousElementSibling?.matches('.da-gfs-resource-menu'))
+      ).toBe(true)
+      await assertRenameGeometry('nested-folder', 'Quarterly')
     } finally {
       await browser?.close()
       await vite.close()
