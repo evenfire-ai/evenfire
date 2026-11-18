@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { LlmAllowedModel } from '../../lib/api'
+import { llmModelWireRow } from '../../test/fixtures/llmModelRows'
 import { LlmModelTable } from '../LlmModelTable'
 
 const baseModel: LlmAllowedModel = {
@@ -15,6 +16,7 @@ const baseModel: LlmAllowedModel = {
   stale: false,
   discovered_at: null,
   last_seen_at: null,
+  auto_disabled_at: null,
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
 }
@@ -27,8 +29,10 @@ function renderTable(items: LlmAllowedModel[], unpricedKeys = new Set<string>())
       onCreate={vi.fn()}
       onEdit={vi.fn()}
       onDelete={vi.fn().mockResolvedValue(undefined)}
+      onKeepDisabled={vi.fn().mockResolvedValue(undefined)}
       onRefresh={vi.fn()}
       deletingId={null}
+      keepingDisabledId={null}
       refreshing={false}
       loading={false}
     />
@@ -696,5 +700,130 @@ describe('LlmModelTable sorting', () => {
     // the previous direction — so the operator gets the most useful ordering.
     fireEvent.click(screen.getByRole('button', { name: 'Sort by Context window descending' }))
     expect(expandedRowOrder()).toEqual(['bravo', 'alpha'])
+  })
+})
+
+describe('LlmModelTable rows the catalog sync turned off', () => {
+  const pruned: LlmAllowedModel = {
+    ...baseModel,
+    id: 'pruned',
+    model: 'claude-old',
+    enabled: false,
+    source: 'discovery',
+    stale: true,
+    auto_disabled_at: '2026-11-01T00:00:00.000Z',
+  }
+
+  function renderWith(onKeepDisabled = vi.fn().mockResolvedValue(undefined)) {
+    render(
+      <LlmModelTable
+        items={[pruned, baseModel]}
+        unpricedKeys={new Set()}
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        onKeepDisabled={onKeepDisabled}
+        onRefresh={vi.fn()}
+        deletingId={null}
+        keepingDisabledId={null}
+        refreshing={false}
+        loading={false}
+      />
+    )
+    expandAnthropicModels()
+    return onKeepDisabled
+  }
+
+  it('marks the row and dates the marker', () => {
+    renderWith()
+    const marker = screen.getByText('Turned off by catalog sync')
+    expect(marker.closest('tr')).toHaveTextContent('claude-old')
+    expect(marker).toHaveAttribute(
+      'title',
+      expect.stringContaining(new Date(pruned.auto_disabled_at!).toLocaleString())
+    )
+    expect(screen.getAllByText('Turned off by catalog sync')).toHaveLength(1)
+  })
+
+  it('offers Keep disabled only on that row', () => {
+    const onKeepDisabled = renderWith()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for model claude/claude-old' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Keep disabled' }))
+    expect(onKeepDisabled).toHaveBeenCalledWith(expect.objectContaining({ id: 'pruned' }))
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for model claude/claude-sonnet-4-6' })
+    )
+    // Exactly one menu is open, the second row's; otherwise the absence below proves nothing.
+    expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Keep disabled' })).not.toBeInTheDocument()
+  })
+
+  // An older control-api turns rows back on without clearing the prune stamp.
+  // That row is on: it must read as Enabled only, with nothing to keep disabled.
+  it('treats an enabled row that still carries the prune stamp as plainly enabled', () => {
+    const reEnabled = { ...llmModelWireRow(true), auto_disabled_at: '2026-11-01T00:00:00.000Z' }
+    renderTable([reEnabled])
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI models' }))
+
+    const row = screen.getByText(reEnabled.model).closest('tr')
+    expect(row).toHaveTextContent('Enabled')
+    expect(screen.queryByText('Turned off by catalog sync')).not.toBeInTheDocument()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: `Actions for model openai/${reEnabled.model}` })
+    )
+    expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Keep disabled' })).not.toBeInTheDocument()
+  })
+})
+
+describe('LlmModelTable family rows the catalog sync turned off', () => {
+  function renderFamily(apiKeyPruned: boolean) {
+    const wire = llmModelWireRow(true)
+    const apiKeyRow: LlmAllowedModel = apiKeyPruned
+      ? { ...wire, id: 'oa-key', enabled: false, auto_disabled_at: '2026-11-01T00:00:00.000Z' }
+      : { ...wire, id: 'oa-key' }
+    // Same model through the subscription broker, so the table merges both rows into one line.
+    const subscriptionRow: LlmAllowedModel = {
+      ...wire,
+      id: 'oa-sub',
+      provider: 'codex-subscription',
+    }
+    const onKeepDisabled = vi.fn().mockResolvedValue(undefined)
+    render(
+      <LlmModelTable
+        items={[apiKeyRow, subscriptionRow]}
+        unpricedKeys={new Set()}
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        onKeepDisabled={onKeepDisabled}
+        onRefresh={vi.fn()}
+        deletingId={null}
+        keepingDisabledId={null}
+        refreshing={false}
+        loading={false}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI models' }))
+    fireEvent.click(screen.getByRole('button', { name: `Actions for model openai/${wire.model}` }))
+    return onKeepDisabled
+  }
+
+  it('keeps the API-key row disabled, never the subscription row beside it', () => {
+    const onKeepDisabled = renderFamily(true)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Keep API key disabled' }))
+    expect(onKeepDisabled).toHaveBeenCalledTimes(1)
+    expect(onKeepDisabled).toHaveBeenCalledWith(expect.objectContaining({ id: 'oa-key' }))
+  })
+
+  it('offers no Keep API key disabled when the API-key row was not turned off', () => {
+    renderFamily(false)
+    // The family menu is open; otherwise the absence below proves nothing.
+    expect(screen.getByRole('menuitem', { name: 'Edit API key' })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('menuitem', { name: 'Keep API key disabled' })
+    ).not.toBeInTheDocument()
   })
 })

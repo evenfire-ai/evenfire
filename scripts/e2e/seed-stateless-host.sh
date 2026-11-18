@@ -82,7 +82,7 @@ ok "Context '$CONTEXT' is in the non-prod allowlist"
 # ─── Step 1: Clone the source Host CR with the stateless lifecycle ────
 log "Cloning Host '${SOURCE_HOST}' → '${STATELESS_HOST}' (ns=${HOST_NS})"
 SRC_JSON="$($KC get host "$SOURCE_HOST" -n "$HOST_NS" -o json 2>/dev/null)" \
-  || die "source Host '${SOURCE_HOST}' not found in ${HOST_NS} — deploy CRD instances first (make minikube-deploy-instances)"
+  || die "source Host '${SOURCE_HOST}' not found in ${HOST_NS} — initialize the target's CRD instances first; for an initialized branch-owned Minikube profile, use MINIKUBE_PROFILE=<profile> make minikube-deploy-instances"
 
 # The suspend/wake gate needs a deterministic approval-required native tool
 # so it can park a turn in AwaitingApproval without mutating the shared chatllm seed.

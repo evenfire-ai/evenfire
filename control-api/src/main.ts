@@ -18,6 +18,7 @@ import {
   startEntityChangeDispatcher,
   stopEntityChangeDispatcher,
 } from './services/entityChangeService.js'
+import { catalogPruneFromGateway } from './services/llmCatalogPrune.js'
 import { syncDiscoveredModels } from './services/llmCatalogSync.js'
 import {
   startLlmCatalogBootSync,
@@ -209,13 +210,18 @@ async function main(): Promise<void> {
   // LLM_CATALOG_SYNC_CRON_ENABLED (code default off, on in the base deploy) it
   // is the cron's first tick; otherwise it runs alone unless
   // LLM_CATALOG_BOOT_SYNC_ENABLED=false. A boot sync that could not decide or
-  // failed keeps probing models.dev with backoff. The sync never changes
-  // `enabled` on an existing row. It needs the gateway's ConfigMap writer:
-  // every run publishes the allowlist when it differs from Postgres.
+  // failed keeps probing models.dev with backoff. Of the existing rows, the
+  // sync only changes `enabled` on catalog-managed ones: the prune disables
+  // stale models nobody uses, and a pruned model the catalog lists again is
+  // re-enabled. It needs the gateway's ConfigMap writer (every run publishes
+  // the allowlist when it differs from Postgres) and its Host / recipe LISTs
+  // (the prune's consumers).
+  const catalogPrune = catalogPruneFromGateway(gateway)
   const catalogSyncDeps = {
     sync: (catalog?: ModelsDevCatalogResult) =>
       syncDiscoveredModels({
         materializer: gateway.llmAllowedModelsConfigMap(),
+        prune: catalogPrune,
         ...(catalog ? { loadCatalog: async () => catalog } : {}),
       }),
   }

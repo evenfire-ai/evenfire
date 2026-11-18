@@ -3,7 +3,9 @@ import type { SecretAccess } from './resourceBuilder'
 import {
   OWNER_RECIPE_LABEL_KEY,
   SHARED_LABEL_KEY,
+  classifySecretAccess,
   combineSecretAccess,
+  deniedSecretRevocationDigest,
   isSecretAccessibleByRecipe,
   parseSecretOwnership,
 } from './secretOwnership'
@@ -109,5 +111,92 @@ describe('combineSecretAccess (Issue #637 cross-namespace)', () => {
       const b: SecretAccess = pair[1] === 'accessible' ? accessible('k') : { state: pair[1] }
       expect(combineSecretAccess(a, b).state).toBe(combineSecretAccess(b, a).state)
     }
+  })
+})
+
+describe('denied Secret versions (issue #1349)', () => {
+  const foreign = { [OWNER_RECIPE_LABEL_KEY]: 'other-recipe' }
+  const classify = (metadata: { labels?: Record<string, string>; resourceVersion?: string }) =>
+    classifySecretAccess(
+      async () => ({ metadata, data: { token: 'eA==' } }),
+      () => undefined,
+      'creds',
+      'sandbox',
+      'my-recipe'
+    )
+
+  it('classifySecretAccess returns the denied read as <namespace>/<resourceVersion>', async () => {
+    expect(await classify({ labels: foreign, resourceVersion: '42' })).toEqual({
+      state: 'denied',
+      versions: ['sandbox/42'],
+    })
+  })
+
+  it('classifySecretAccess returns an unversioned denial when the read has no resourceVersion', async () => {
+    expect(await classify({ labels: foreign })).toEqual({ state: 'denied' })
+  })
+
+  it('classifySecretAccess carries no version on an accessible read', async () => {
+    const access = await classify({
+      labels: { [OWNER_RECIPE_LABEL_KEY]: 'my-recipe' },
+      resourceVersion: '42',
+    })
+    expect(access.state).toBe('accessible')
+    expect(access).not.toHaveProperty('versions')
+  })
+
+  it('combineSecretAccess keeps the versions of both denied reads', () => {
+    expect(
+      combineSecretAccess(
+        { state: 'denied', versions: ['sandbox/1'] },
+        { state: 'denied', versions: ['mcp-server/2'] }
+      )
+    ).toEqual({ state: 'denied', versions: ['sandbox/1', 'mcp-server/2'] })
+  })
+
+  it('combineSecretAccess makes the denial unversioned when one denied read has no version', () => {
+    expect(
+      combineSecretAccess({ state: 'denied', versions: ['sandbox/1'] }, { state: 'denied' })
+    ).toEqual({ state: 'denied' })
+    expect(
+      combineSecretAccess({ state: 'denied' }, { state: 'denied', versions: ['sandbox/1'] })
+    ).toEqual({ state: 'denied' })
+  })
+
+  it('deniedSecretRevocationDigest is a sha256 over the denied refs, independent of ref and version order', () => {
+    const keys = new Map<string, SecretAccess>([
+      ['a', { state: 'denied', versions: ['sandbox/1', 'mcp-server/2'] }],
+      ['b', { state: 'denied', versions: ['sandbox/3'] }],
+      ['ok', { state: 'accessible', keys: new Set(['k']) }],
+    ])
+    const reordered = new Map<string, SecretAccess>([
+      ['b', { state: 'denied', versions: ['sandbox/3'] }],
+      ['a', { state: 'denied', versions: ['mcp-server/2', 'sandbox/1'] }],
+    ])
+    const digest = deniedSecretRevocationDigest(['a', 'b', 'ok', 'a'], keys)
+    expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/)
+    expect(deniedSecretRevocationDigest(['b', 'a'], reordered)).toBe(digest)
+  })
+
+  it('deniedSecretRevocationDigest changes when a denied Secret version changes', () => {
+    const before = new Map<string, SecretAccess>([
+      ['a', { state: 'denied', versions: ['sandbox/1'] }],
+    ])
+    const after = new Map<string, SecretAccess>([
+      ['a', { state: 'denied', versions: ['sandbox/2'] }],
+    ])
+    expect(deniedSecretRevocationDigest(['a'], after)).not.toBe(
+      deniedSecretRevocationDigest(['a'], before)
+    )
+  })
+
+  it('deniedSecretRevocationDigest is undefined when a denied ref has no version or nothing is denied', () => {
+    const unversioned = new Map<string, SecretAccess>([
+      ['a', { state: 'denied', versions: ['sandbox/1'] }],
+      ['b', { state: 'denied' }],
+    ])
+    expect(deniedSecretRevocationDigest(['a', 'b'], unversioned)).toBeUndefined()
+    const none = new Map<string, SecretAccess>([['ok', { state: 'accessible', keys: new Set() }]])
+    expect(deniedSecretRevocationDigest(['ok', 'missing-ref'], none)).toBeUndefined()
   })
 })
