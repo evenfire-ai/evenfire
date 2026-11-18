@@ -81,6 +81,9 @@ import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import { copyGfsDeepLink, copyGfsResourceId } from '@lib/gfsResourceClipboard'
+import { gfsRowActionAvailability } from '@lib/gfsRowActionAvailability'
+import type { GfsRowActionAvailability } from '@lib/gfsRowActionAvailability.types'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
@@ -1576,33 +1579,10 @@ export function FilesPage({
     }
   }
 
-  const handleCopyLink = async (uri: string) => {
-    try {
-      const result = await window.clerum.gfs.copyDeepLink?.(uri)
-      if (!result?.url) throw new Error('Shareable EvenDrive links are unavailable in this version')
-      pushToast?.('Shareable EvenDrive link copied', 'success')
-    } catch (clipboardError) {
-      pushToast?.(
-        clipboardError instanceof Error
-          ? clipboardError.message
-          : 'Could not copy the EvenDrive link',
-        'error'
-      )
-    }
-  }
+  const handleCopyLink = (uri: string) => copyGfsDeepLink(uri, pushToast)
 
-  const handleCopyRoute = async (uri: string, kind: GfsDriveResource['kind']) => {
-    const resourceType = kind === 'directory' ? 'folder' : 'file'
-    const resourceTypeTitle = kind === 'directory' ? 'Folder' : 'File'
-    try {
-      await navigator.clipboard.writeText(uri)
-      pushToast?.(`${resourceTypeTitle} ID copied`, 'success')
-    } catch (clipboardError) {
-      const message =
-        clipboardError instanceof Error ? clipboardError.message : 'clipboard is unavailable'
-      pushToast?.(`Could not copy the ${resourceType} ID: ${message}`, 'error')
-    }
-  }
+  const handleCopyRoute = (uri: string, kind: GfsDriveResource['kind']) =>
+    copyGfsResourceId(uri, kind, pushToast)
 
   const handleRefreshCurrent = async () => {
     if (!current || refreshingCurrent) return
@@ -2512,49 +2492,26 @@ export function FilesPage({
     )
   }
 
-  /** Delete gate for list rows. Shared-with-me rows carry their permission
-   * bits directly; child rows use their own server-computed affordances. */
-  const rowCanDelete = (resource: GfsDriveResource): boolean => {
-    if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'delete')
-    return Boolean(resource.permissions?.includes('delete'))
-  }
-
-  /** Rename needs `write` on the resource itself. */
-  const rowCanRename = (resource: GfsDriveResource): boolean => {
-    if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'write')
-    return Boolean(resource.permissions?.includes('write'))
-  }
-
-  /** Child folder operations use the server-derived write bit for that row. */
-  const rowCanWrite = (resource: GfsDriveResource): boolean => {
-    if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'write')
-    return Boolean(resource.permissions?.includes('write'))
-  }
-
-  /** Manage gate: the ACL modal needs `manage_acl` (view-ACL = manage-ACL
-   *  server-side). A read-only row must not offer a Manage entry that would
-   *  only 403 on open. */
-  const rowCanManage = (resource: GfsDriveResource): boolean => {
-    if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'manage_acl')
-    return Boolean(resource.permissions?.includes('manage_acl'))
-  }
-
-  /** Move uses the exact server-authorized old parent, not the row's own bits or virtual root. */
-  const rowCanMove = (resource: GfsDriveResource): boolean => {
+  /** Row action gates. Shared-with-me rows carry their permission bits
+   * directly; child rows use their own server-computed affordances. Move is
+   * judged on the exact server-authorized old parent. */
+  const rowActionAvailability = (resource: GfsDriveResource) => {
     const sourceParentId = resource.parentResourceId
-    if (!sourceParentId || accessRevoked) return false
-    const sourceParent =
-      sourceParentId === current?.resourceId
-        ? ctrl.affordances
-        : ctrl.moveSourceParentAffordancesById?.[sourceParentId]
-    if (
-      sourceParentId === current?.resourceId &&
-      ctrl.affordancesError &&
-      ctrl.affordancesHttpStatus !== 429
-    ) {
-      return false
-    }
-    return hasGfsMoveSourcePermissions(sourceParent?.held)
+    const parentIsCurrent = sourceParentId === current?.resourceId
+    const parentAffordances =
+      !sourceParentId ||
+      accessRevoked ||
+      (parentIsCurrent && ctrl.affordancesError && ctrl.affordancesHttpStatus !== 429)
+        ? null
+        : parentIsCurrent
+          ? ctrl.affordances
+          : ctrl.moveSourceParentAffordancesById?.[sourceParentId]
+    return gfsRowActionAvailability({
+      resource,
+      listing: currentIsFolder ? 'folder' : 'roots',
+      rowAffordances: rowAffordancesFor(resource),
+      parentAffordances,
+    })
   }
 
   /** Move commits bubble their failure back to the dialog (in-place banner);
@@ -3129,16 +3086,19 @@ export function FilesPage({
     void handleDownload(resource.gfsUri, resource.name)
   }
 
-  const resourceMenuActionsFor = (resource: GfsDriveResource) => {
+  const resourceMenuActionsFor = (
+    resource: GfsDriveResource,
+    availability: GfsRowActionAvailability
+  ) => {
     const isDirectory = resource.kind === 'directory'
     const canPreview =
       !isDirectory && resource.readable !== false && isGfsPreviewFile(resource.name)
     const canDownload = !isDirectory && resource.readable !== false
     const canDownloadZip = isDirectory && resource.readable !== false
-    const canRename = rowCanRename(resource)
-    const canWrite = isDirectory && rowCanWrite(resource)
-    const canManage = rowCanManage(resource)
-    const canDelete = rowCanDelete(resource)
+    const canRename = availability.canRename
+    const canWrite = isDirectory && availability.canWrite
+    const canManage = availability.canManage
+    const canDelete = availability.canDelete
     return getGfsMenuActions(
       buildGfsResourceActions({
         kind: resource.kind,
@@ -3166,7 +3126,7 @@ export function FilesPage({
         },
         canOpenFolder: isDirectory,
         canRename,
-        canMove: rowCanMove(resource),
+        canMove: availability.canMove,
         canCreateFolder: canWrite,
         canUpload: canWrite,
         canShare: canManage,
@@ -3572,6 +3532,7 @@ export function FilesPage({
               <div className="da-grid__body">
                 {visibleResources.map(resource => {
                   const resourceName = resource.name || resource.drive
+                  const availability = rowActionAvailability(resource)
                   const permissionNotice = rowPermissionNoticeFor(resource.resourceId, resourceName)
                   const isDragging =
                     draggingResourceId === resource.resourceId ||
@@ -3696,7 +3657,7 @@ export function FilesPage({
                         {formatSharedFileSize(resource.bytes)}
                       </span>
                       <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
-                        {rowCanManage(resource) ? (
+                        {availability.canManage ? (
                           <IconButton
                             label={`Share ${resource.name || resource.drive}`}
                             onClick={() => openManage(resource)}
@@ -3717,7 +3678,7 @@ export function FilesPage({
                             <IconDownload width={16} height={16} />
                           </IconButton>
                         ) : null}
-                        {rowCanRename(resource) ? (
+                        {availability.canRename ? (
                           <IconButton
                             label={`Rename ${resource.name || resource.drive}`}
                             onClick={() => openRenameTarget(resource)}
@@ -3729,7 +3690,7 @@ export function FilesPage({
                         ) : null}
                         {resource.kind === 'directory' ? (
                           <GfsResourceMenu
-                            actions={resourceMenuActionsFor(resource)}
+                            actions={resourceMenuActionsFor(resource, availability)}
                             resourceName={resource.name}
                             onOpenChange={open => {
                               ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
@@ -3740,7 +3701,7 @@ export function FilesPage({
                           />
                         ) : (
                           <GfsResourceMenu
-                            actions={resourceMenuActionsFor(resource)}
+                            actions={resourceMenuActionsFor(resource, availability)}
                             resourceName={resource.name}
                             onOpenChange={open => {
                               ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
