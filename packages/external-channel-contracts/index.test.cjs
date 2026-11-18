@@ -34,7 +34,8 @@ const RECEIPT_ERROR = 'invalid_provider_event_receipt'
 const ADMISSION_ERROR = 'invalid_channel_admission'
 const ORIGIN_ERROR = 'invalid_origin_route'
 
-// Every fixture file, its validator and its expected verdict. A fixture added
+// Every fixture file, its validator and its expected verdict (for an invalid
+// fixture, the error code and the field its message names). A fixture added
 // to the directory without a row here fails the coverage test below.
 const VALID = 'valid'
 const FIXTURE_CASES = {
@@ -46,18 +47,18 @@ const FIXTURE_CASES = {
   'receipt.slack.action.other.json': [validateProviderEventReceiptClaims, VALID],
   'receipt.teams.message.json': [validateProviderEventReceiptClaims, VALID],
   'receipt.teams.action.json': [validateProviderEventReceiptClaims, VALID],
-  'receipt.invalid.message-with-action.json': [validateProviderEventReceiptClaims, RECEIPT_ERROR],
+  'receipt.invalid.message-with-action.json': [validateProviderEventReceiptClaims, RECEIPT_ERROR, 'action'],
   'admission.admitted.json': [validateChannelAdmission, VALID],
   ...Object.fromEntries(
     ADMISSION_REFUSAL_REASONS.map(reason => [`admission.refused.${reason}.json`, [validateChannelAdmission, VALID]])
   ),
-  'admission.invalid.refused-without-event.json': [validateChannelAdmission, ADMISSION_ERROR],
+  'admission.invalid.refused-without-event.json': [validateChannelAdmission, ADMISSION_ERROR, 'event'],
   'origin.thread.json': [validateOriginRoute, VALID],
   'origin.conversation.json': [validateOriginRoute, VALID],
   'origin.quote.json': [validateOriginRoute, VALID],
-  'origin.invalid.unknown-reply-style.json': [validateOriginRoute, ORIGIN_ERROR],
+  'origin.invalid.unknown-reply-style.json': [validateOriginRoute, ORIGIN_ERROR, 'replyStyle'],
   'principal.member.json': [validateStage1ExecutionPrincipal, VALID],
-  'principal.bot.json': [validateStage1ExecutionPrincipal, 'stage1_bot_principal'],
+  'principal.bot.json': [validateStage1ExecutionPrincipal, 'stage1_bot_principal', 'kind'],
 }
 
 const assertDeepFrozen = value => {
@@ -66,9 +67,12 @@ const assertDeepFrozen = value => {
   for (const child of Object.values(value)) assertDeepFrozen(child)
 }
 
-const assertRejects = (validator, value, code, label) =>
+// The message names the field and never the value. `field` is required: a call
+// that omits it compares against "<code>: undefined" and fails.
+const assertRejects = (validator, value, code, field, label) =>
   assert.throws(() => validator(value), error => {
     assert.equal(error.code, code, label)
+    assert.equal(error.message, `${code}: ${field}`, label)
     return true
   }, label)
 
@@ -131,16 +135,16 @@ describe('fixtures', () => {
   // 0-U1: per validator, its invalid fixtures are rejected with the fixed code
   // and its valid fixtures, checked in the same test, are accepted.
   const byValidator = new Map()
-  for (const [name, [validator, expected]] of Object.entries(FIXTURE_CASES)) {
+  for (const [name, [validator, expected, field]] of Object.entries(FIXTURE_CASES)) {
     if (!byValidator.has(validator)) byValidator.set(validator, [])
-    byValidator.get(validator).push([name, expected])
+    byValidator.get(validator).push([name, expected, field])
   }
   for (const [validator, cases] of byValidator) {
     it(`0-U1 ${validator.name} rejects its invalid fixtures and accepts its valid ones`, () => {
       const valid = cases.filter(([, expected]) => expected === VALID)
       const invalid = cases.filter(([, expected]) => expected !== VALID)
       assert.ok(valid.length > 0 && invalid.length > 0)
-      for (const [name, code] of invalid) assertRejects(validator, load(name), code)
+      for (const [name, code, field] of invalid) assertRejects(validator, load(name), code, field, name)
       for (const [name] of valid) assertAccepts(validator, load(name))
     })
   }
@@ -163,7 +167,7 @@ describe('fixtures', () => {
   })
 
   it('refusal fixtures carry the notice the admission steps assign to their reason', () => {
-    // stage1-plan-r9.md:538
+    // The validator accepts any notice with any reason (index.cjs checks the two vocabularies independently); this table pins the notice each fixture carries, not a rule the validator enforces.
     const notice = {
       receipt_invalid: 'none', not_eligible_bot: 'none',
       lookup_permission_missing: 'origin_generic', eligibility_unavailable: 'origin_generic',
@@ -198,41 +202,46 @@ describe('provider event receipt claims', () => {
 
   it('0-U3 rejects a message receipt that carries an action', () => {
     assertAccepts(validateProviderEventReceiptClaims, message)
-    assertRejects(validateProviderEventReceiptClaims, load('receipt.invalid.message-with-action.json'), RECEIPT_ERROR)
+    assertRejects(validateProviderEventReceiptClaims, load('receipt.invalid.message-with-action.json'), RECEIPT_ERROR, 'action')
   })
 
   it('accepts an action receipt whose clicked value is not a pause action', () => {
     assert.equal(assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.action.other.json')).action, null)
   })
 
+  // Each row: the refused value and the field the error message names.
   const rejected = {
-    'an unknown key': { ...message, teamId: 'T0FIXTURE01' },
-    'a missing key': (({ hostRef, ...rest }) => rest)(message),
-    'another version': { ...message, ver: 2 },
-    'an unknown medium': { ...message, medium: 'discord' },
-    'a channelRef without a namespace': { ...message, channelRef: 'fixture-slack-channel' },
-    'a lifetime other than 600 seconds': { ...message, exp: message.iat + 601 },
-    'a fractional issue time': { ...message, iat: message.iat + 0.5, exp: message.exp + 0.5 },
-    'a message without a conversation kind': { ...message, conversationKind: null },
-    'an unknown conversation kind': { ...message, conversationKind: 'broadcast' },
-    'an action with a conversation kind': { ...action, conversationKind: 'channel' },
-    'an action with an unknown decision': { ...action, action: { decision: 'escalate', token: action.action.token } },
-    'an action with a short token': { ...action, action: { decision: 'approve', token: 'fixture-short' } },
-    'an action with an extra key': { ...action, action: { ...action.action, requestId: 'fixture-request' } },
-    'a Slack receipt with a delivery alias': { ...message, deliveryAlias: '29:fixture-teams-from-id' },
-    'a Teams receipt with an organization id': { ...teams, providerOrgId: 'E0FIXTURE01' },
-    'a Teams conversation id that keeps its message id': {
-      ...teams, conversationId: `${teams.conversationId};messageid=1763460300000`,
-    },
-    'an unknown attesting component': { ...message, attestedBy: 'channel-reader' },
-    'an empty jti': { ...message, jti: '' },
-    'an array': [message],
-    'null': null,
+    'an unknown key': [{ ...message, teamId: 'T0FIXTURE01' }, 'keys'],
+    'a missing key': [(({ hostRef, ...rest }) => rest)(message), 'keys'],
+    'another version': [{ ...message, ver: 2 }, 'ver'],
+    'an unknown medium': [{ ...message, medium: 'discord' }, 'medium'],
+    'a channelRef without a namespace': [{ ...message, channelRef: 'fixture-slack-channel' }, 'channelRef'],
+    'a lifetime other than 600 seconds': [{ ...message, exp: message.iat + 601 }, 'exp'],
+    'a fractional issue time': [{ ...message, iat: message.iat + 0.5, exp: message.exp + 0.5 }, 'iat'],
+    'a message without a conversation kind': [{ ...message, conversationKind: null }, 'conversationKind'],
+    'an unknown conversation kind': [{ ...message, conversationKind: 'broadcast' }, 'conversationKind'],
+    'an action with a conversation kind': [{ ...action, conversationKind: 'channel' }, 'conversationKind'],
+    'an action with an unknown decision': [
+      { ...action, action: { decision: 'escalate', token: action.action.token } }, 'action',
+    ],
+    'an action with a short token': [{ ...action, action: { decision: 'approve', token: 'fixture-short' } }, 'action'],
+    'an action with an extra key': [
+      { ...action, action: { ...action.action, requestId: 'fixture-request' } }, 'action',
+    ],
+    'a Slack receipt with a delivery alias': [{ ...message, deliveryAlias: '29:fixture-teams-from-id' }, 'deliveryAlias'],
+    'a Teams receipt with an organization id': [{ ...teams, providerOrgId: 'E0FIXTURE01' }, 'providerOrgId'],
+    'a Teams conversation id that keeps its message id': [
+      { ...teams, conversationId: `${teams.conversationId};messageid=1763460300000` }, 'conversationId',
+    ],
+    'an unknown attesting component': [{ ...message, attestedBy: 'channel-reader' }, 'attestedBy'],
+    'an empty jti': [{ ...message, jti: '' }, 'jti'],
+    'an array': [[message], 'keys'],
+    'null': [null, 'keys'],
   }
-  for (const [label, value] of Object.entries(rejected)) {
+  for (const [label, [value, field]] of Object.entries(rejected)) {
     it(`rejects ${label}`, () => {
       assertAccepts(validateProviderEventReceiptClaims, message)
-      assertRejects(validateProviderEventReceiptClaims, value, RECEIPT_ERROR)
+      assertRejects(validateProviderEventReceiptClaims, value, RECEIPT_ERROR, field)
     })
   }
 })
@@ -274,26 +283,30 @@ describe('parsePauseActionValue', () => {
 describe('channel admission', () => {
   const admitted = load('admission.admitted.json')
   const refused = load('admission.refused.no_match.json')
+  // Each row: the refused value and the field the error message names.
   const rejected = {
-    'an admitted answer with an extra key': { ...admitted, teamId: 'fixture-team' },
-    'an admitted answer without a member': (({ memberId, ...rest }) => rest)(admitted),
-    'an admitted answer in open mode': { ...admitted, audienceMode: 'open' },
-    'an admitted answer without an event': { ...admitted, event: null },
-    'a fractional policy version': { ...admitted, policyVersion: 1.5 },
-    'a negative policy version': { ...admitted, policyVersion: -1 },
-    'an event with an extra key': { ...admitted, event: { ...admitted.event, hostRef: 'fixture-host' } },
-    'an event message that carries an action': {
-      ...admitted, event: { ...admitted.event, action: { decision: 'deny', token: 'fixture-pause-request-0001' } },
-    },
-    'an unknown refusal reason': { ...refused, reason: 'rate_limited' },
-    'an unknown notice': { ...refused, notice: 'public' },
-    'a receipt_invalid refusal with an event': { ...load('admission.refused.receipt_invalid.json'), event: admitted.event },
-    'an unknown outcome': { ...refused, outcome: 'deferred' },
+    'an admitted answer with an extra key': [{ ...admitted, teamId: 'fixture-team' }, 'keys'],
+    'an admitted answer without a member': [(({ memberId, ...rest }) => rest)(admitted), 'keys'],
+    'an admitted answer in open mode': [{ ...admitted, audienceMode: 'open' }, 'audienceMode'],
+    'an admitted answer without an event': [{ ...admitted, event: null }, 'event'],
+    'a fractional policy version': [{ ...admitted, policyVersion: 1.5 }, 'policyVersion'],
+    'a negative policy version': [{ ...admitted, policyVersion: -1 }, 'policyVersion'],
+    'an event with an extra key': [{ ...admitted, event: { ...admitted.event, hostRef: 'fixture-host' } }, 'event'],
+    'an event message that carries an action': [
+      { ...admitted, event: { ...admitted.event, action: { decision: 'deny', token: 'fixture-pause-request-0001' } } },
+      'event.action',
+    ],
+    'an unknown refusal reason': [{ ...refused, reason: 'rate_limited' }, 'reason'],
+    'an unknown notice': [{ ...refused, notice: 'public' }, 'notice'],
+    'a receipt_invalid refusal with an event': [
+      { ...load('admission.refused.receipt_invalid.json'), event: admitted.event }, 'event',
+    ],
+    'an unknown outcome': [{ ...refused, outcome: 'deferred' }, 'outcome'],
   }
-  for (const [label, value] of Object.entries(rejected)) {
+  for (const [label, [value, field]] of Object.entries(rejected)) {
     it(`rejects ${label}`, () => {
       assertAccepts(validateChannelAdmission, admitted)
-      assertRejects(validateChannelAdmission, value, ADMISSION_ERROR)
+      assertRejects(validateChannelAdmission, value, ADMISSION_ERROR, field)
     })
   }
 
@@ -312,16 +325,17 @@ describe('channel admission', () => {
 
 describe('origin route', () => {
   const thread = load('origin.thread.json')
+  // Each row: the refused value and the field the error message names.
   const rejected = {
-    'an extra key': { ...thread, teamId: 'fixture-team' },
-    'a missing conversation kind': { ...thread, conversationKind: null },
-    'an unknown medium': { ...thread, medium: 'email' },
-    'a non-string quoted message id': { ...load('origin.quote.json'), quotedMessageId: 7 },
+    'an extra key': [{ ...thread, teamId: 'fixture-team' }, 'keys'],
+    'a missing conversation kind': [{ ...thread, conversationKind: null }, 'conversationKind'],
+    'an unknown medium': [{ ...thread, medium: 'email' }, 'medium'],
+    'a non-string quoted message id': [{ ...load('origin.quote.json'), quotedMessageId: 7 }, 'quotedMessageId'],
   }
-  for (const [label, value] of Object.entries(rejected)) {
+  for (const [label, [value, field]] of Object.entries(rejected)) {
     it(`rejects ${label}`, () => {
       assertAccepts(validateOriginRoute, thread)
-      assertRejects(validateOriginRoute, value, ORIGIN_ERROR)
+      assertRejects(validateOriginRoute, value, ORIGIN_ERROR, field)
     })
   }
 })
@@ -330,20 +344,20 @@ describe('Stage 1 execution principal', () => {
   it('0-U4 accepts a member, refuses a bot and an unknown kind', () => {
     const member = assertAccepts(validateStage1ExecutionPrincipal, load('principal.member.json'))
     assert.equal(member.memberId, '00000000-0000-4000-8000-00000000a001')
-    assertRejects(validateStage1ExecutionPrincipal, load('principal.bot.json'), 'stage1_bot_principal')
-    assertRejects(validateStage1ExecutionPrincipal, { kind: 'guest' }, 'unknown_principal_kind')
+    assertRejects(validateStage1ExecutionPrincipal, load('principal.bot.json'), 'stage1_bot_principal', 'kind')
+    assertRejects(validateStage1ExecutionPrincipal, { kind: 'guest' }, 'unknown_principal_kind', 'kind')
   })
 
   it('rejects a malformed member', () => {
     const member = load('principal.member.json')
     assertAccepts(validateStage1ExecutionPrincipal, member)
-    for (const value of [
-      { ...member, teamId: 'fixture-team' },
-      (({ identityId, ...rest }) => rest)(member),
-      { ...member, conversationKind: null },
-      null,
+    for (const [value, field] of [
+      [{ ...member, teamId: 'fixture-team' }, 'keys'],
+      [(({ identityId, ...rest }) => rest)(member), 'keys'],
+      [{ ...member, conversationKind: null }, 'conversationKind'],
+      [null, 'value'],
     ]) {
-      assertRejects(validateStage1ExecutionPrincipal, value, 'invalid_execution_principal')
+      assertRejects(validateStage1ExecutionPrincipal, value, 'invalid_execution_principal', field)
     }
   })
 })
@@ -353,21 +367,26 @@ describe('Stage 1 execution principal', () => {
 // single field check can be deleted while every invariant test stays green.
 describe('per-field rejections', () => {
   const NOT_OBJECTS = [null, [], 'fixture-value', 7]
+  // Each row is [label, value, code, field]: a wrong-type row names its own key.
   const wrongTypeRows = (label, valid, code, codeByKey = {}) =>
     Object.keys(valid).flatMap(key =>
-      [true, ''].map(bad => [`${label}.${key}=${JSON.stringify(bad)}`, { ...valid, [key]: bad }, codeByKey[key] ?? code])
+      [true, ''].map(bad => [
+        `${label}.${key}=${JSON.stringify(bad)}`, { ...valid, [key]: bad }, codeByKey[key] ?? code, key,
+      ])
     )
-  const nestedRows = (label, valid, key, code) =>
-    wrongTypeRows(`${label}.${key}`, valid[key], code).map(([rowLabel, nested, rowCode]) => [
+  // fieldOf maps the nested key to the field the message names.
+  const nestedRows = (label, valid, key, code, fieldOf) =>
+    wrongTypeRows(`${label}.${key}`, valid[key], code).map(([rowLabel, nested, rowCode, childKey]) => [
       rowLabel,
       { ...valid, [key]: nested },
       rowCode,
+      fieldOf(childKey),
     ])
   const checkRows = (validator, valid, rows) => {
     assert.ok(rows.length > 0)
-    for (const [label, value, code] of rows) {
+    for (const [label, value, code, field] of rows) {
       assertAccepts(validator, valid)
-      assertRejects(validator, value, code, label)
+      assertRejects(validator, value, code, field, label)
     }
   }
 
@@ -377,9 +396,9 @@ describe('per-field rejections', () => {
       ...wrongTypeRows('slack.message', message, RECEIPT_ERROR),
       ...wrongTypeRows('slack.action', load('receipt.slack.action.approve.json'), RECEIPT_ERROR),
       ...wrongTypeRows('teams.message', load('receipt.teams.message.json'), RECEIPT_ERROR),
-      ...nestedRows('slack.action', load('receipt.slack.action.approve.json'), 'action', RECEIPT_ERROR),
-      ['iat=0 with a 600 s lifetime', { ...message, iat: 0, exp: 600 }, RECEIPT_ERROR],
-      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, RECEIPT_ERROR]),
+      ...nestedRows('slack.action', load('receipt.slack.action.approve.json'), 'action', RECEIPT_ERROR, () => 'action'),
+      ['iat=0 with a 600 s lifetime', { ...message, iat: 0, exp: 600 }, RECEIPT_ERROR, 'iat'],
+      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, RECEIPT_ERROR, 'keys']),
     ]
     checkRows(validateProviderEventReceiptClaims, message, rows)
   })
@@ -388,14 +407,15 @@ describe('per-field rejections', () => {
     const admitted = load('admission.admitted.json')
     const refused = load('admission.refused.no_match.json')
     const refusedClick = load('admission.refused.missing_channel_grant.json')
+    const eventField = key => `event.${key}`
     const rows = [
       ...wrongTypeRows('admitted', admitted, ADMISSION_ERROR),
-      ...nestedRows('admitted', admitted, 'event', ADMISSION_ERROR),
+      ...nestedRows('admitted', admitted, 'event', ADMISSION_ERROR, eventField),
       ...wrongTypeRows('refused', refused, ADMISSION_ERROR),
-      ...nestedRows('refused', refused, 'event', ADMISSION_ERROR),
-      ...nestedRows('refusedClick', refusedClick, 'event', ADMISSION_ERROR),
-      ['refused with an extra key', { ...refused, memberId: admitted.memberId }, ADMISSION_ERROR],
-      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, ADMISSION_ERROR]),
+      ...nestedRows('refused', refused, 'event', ADMISSION_ERROR, eventField),
+      ...nestedRows('refusedClick', refusedClick, 'event', ADMISSION_ERROR, eventField),
+      ['refused with an extra key', { ...refused, memberId: admitted.memberId }, ADMISSION_ERROR, 'keys'],
+      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, ADMISSION_ERROR, 'value']),
     ]
     checkRows(validateChannelAdmission, admitted, rows)
   })
@@ -405,7 +425,7 @@ describe('per-field rejections', () => {
     const rows = [
       ...wrongTypeRows('thread', thread, ORIGIN_ERROR),
       ...wrongTypeRows('quote', load('origin.quote.json'), ORIGIN_ERROR),
-      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, ORIGIN_ERROR]),
+      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, ORIGIN_ERROR, 'keys']),
     ]
     checkRows(validateOriginRoute, thread, rows)
   })
@@ -415,9 +435,9 @@ describe('per-field rejections', () => {
     const code = 'invalid_execution_principal'
     const rows = [
       ...wrongTypeRows('member', member, code, { kind: 'unknown_principal_kind' }),
-      ['member.policyVersion=-1', { ...member, policyVersion: -1 }, code],
-      ['member.policyVersion=1.5', { ...member, policyVersion: 1.5 }, code],
-      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, code]),
+      ['member.policyVersion=-1', { ...member, policyVersion: -1 }, code, 'policyVersion'],
+      ['member.policyVersion=1.5', { ...member, policyVersion: 1.5 }, code, 'policyVersion'],
+      ...NOT_OBJECTS.map(value => [`value=${JSON.stringify(value)}`, value, code, 'value']),
     ]
     checkRows(validateStage1ExecutionPrincipal, member, rows)
   })
