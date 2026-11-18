@@ -107,6 +107,54 @@ export function approvalAccountStatusLabel(account: WorkflowApprovalMediumAccoun
   return account.disabledAt ? 'Disconnected' : 'Verified'
 }
 
+export type ChannelTableRowStatus = 'Verified' | 'Disconnected' | 'Not connected'
+
+export type ChannelTableRow = {
+  key: string
+  target: ApprovalChannelTarget | null
+  account: WorkflowApprovalMediumAccount | null
+  status: ChannelTableRowStatus
+}
+
+// One row per target and one actionable representation per account. Additional
+// linked accounts get their own rows. Disabled records have no target references
+// in the producer response: Disconnected describes records, not target history.
+export function channelTableRows(
+  targets: ApprovalChannelTarget[],
+  accounts: WorkflowApprovalMediumAccount[]
+): ChannelTableRow[] {
+  const representedAccounts = new Set<string>()
+  const rows: ChannelTableRow[] = targets.map(target => {
+    const linked = accounts.filter(account =>
+      (account.targets || []).some(item => item.id === target.id)
+    )
+    const active =
+      linked.find(account => !account.disabledAt && !representedAccounts.has(account.id)) ?? null
+    const key = `target:${target.id}`
+    if (active) {
+      representedAccounts.add(active.id)
+      return { key, target, account: active, status: 'Verified' }
+    }
+    if (linked.some(account => !account.disabledAt)) {
+      return { key, target, account: null, status: 'Verified' }
+    }
+    return { key, target, account: null, status: 'Not connected' }
+  })
+  for (const account of accounts) {
+    if (representedAccounts.has(account.id)) {
+      continue
+    }
+    representedAccounts.add(account.id)
+    rows.push({
+      key: `account:${account.id}`,
+      target: null,
+      account,
+      status: account.disabledAt ? 'Disconnected' : 'Verified',
+    })
+  }
+  return rows
+}
+
 export function approvalAccountAssociationLabel(account: WorkflowApprovalMediumAccount): string {
   if (account.disabledAt) return 'Disconnected verification record'
   return (account.targets || []).length > 0
