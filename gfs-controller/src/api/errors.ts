@@ -1,3 +1,5 @@
+import type { CeilingDenyReason } from "../authz/tokenCeiling";
+
 /**
  * gfsc error-code table. The CODE is the spec's contract (clients key off it);
  * the HTTP status is the transport mapping. The spec pins these numbers
@@ -65,6 +67,11 @@ export const HTTP_STATUS: Record<GfsErrorCode, number> = {
  * expired published artifact reference. */
 export type GoneReason = "resource_deleted" | "artifact_expired";
 
+/** Reason discriminator for a `forbidden` (403). `principal_denied` means the
+ * caller cannot use GFS at all; a ceiling reason means the token does not cover
+ * the operation. Without a reason, only the requested operation is denied. */
+export type ForbiddenReason = CeilingDenyReason | "principal_denied";
+
 export class GfsError extends Error {
   readonly code: GfsErrorCode;
   readonly reason?: string;
@@ -93,5 +100,9 @@ export class GfsError extends Error {
 
   static gone(message: string, reason: GoneReason): GfsError {
     return new GfsError("gone", message, reason);
+  }
+
+  static forbidden(message: string, reason: ForbiddenReason): GfsError {
+    return new GfsError("forbidden", message, reason);
   }
 }
