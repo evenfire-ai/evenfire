@@ -669,6 +669,102 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(countDelta(before, await deferredBy())).toEqual({ auth_deadline: 2 })
   })
 
+  it('counts a key over the authorization budget under auth_budget', async () => {
+    b = await h.build({ authBudget: new ProcessMemoryRateLimiter(1) })
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    const before = await deferredBy()
+    const { socket } = await ready(user, [h.key('file', f), h.key('file', g)])
+    expect(socket.last('ready')!.deferred).toHaveLength(1)
+    expect(countDelta(before, await deferredBy())).toEqual({ auth_budget: 1 })
+  })
+
+  it('counts the keys of a failed ancestry query under ancestry_failed', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    b.gates.cte.mode = 'fail'
+    b.gates.cte.failWith = () => new Error('Connection terminated unexpectedly')
+    const before = await deferredBy()
+    const { socket } = await ready(user, [h.key('file', f), h.key('file', g)])
+    expect(socket.last('ready')!.deferred).toHaveLength(2)
+    expect(countDelta(before, await deferredBy())).toEqual({ ancestry_failed: 2 })
+  })
+
+  it('counts the keys of a drive whose read token cannot be minted under mint_failed', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    b.gates.mint.mode = 'fail'
+    b.gates.mint.failWith = () => new Error('Connection terminated unexpectedly')
+    const before = await deferredBy()
+    const { socket } = await ready(user, [h.key('file', f)])
+    expect(socket.last('ready')).toMatchObject({ accepted: [], deferred: [h.key('file', f)] })
+    expect(countDelta(before, await deferredBy())).toEqual({ mint_failed: 1 })
+  })
+
+  it('counts a key the ancestry query did not know under no_chain', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const id = randomUUID()
+    b.gates.read.mode = 'hold'
+    const before = await deferredBy()
+    const o = b.open(user, [h.key('file', id)])
+    await until(() => b.gates.read.held.length === 1)
+    await h.writer.query(
+      `INSERT INTO gfs_resources (resource_id, drive, parent_resource_id, name, kind) VALUES ($1, 'main', $2, $3, 'file')`,
+      [id, h.tree.root, `late-${id}`]
+    )
+    b.gates.read.mode = 'pass'
+    b.gates.read.releaseAll()
+    expect(await o.outcome).toEqual({ kind: 'stream' })
+    expect(o.socket.last('ready')).toMatchObject({ deferred: [h.key('file', id)] })
+    expect(countDelta(before, await deferredBy())).toEqual({ no_chain: 1 })
+  })
+
+  it('counts a key whose ancestor moved during the op under suspect', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const p = await h.tree.add('directory')
+    const q = await h.tree.add('directory')
+    const f = await h.tree.add('file', p)
+    b.gates.cte.mode = 'hold'
+    const before = await deferredBy()
+    const o = b.open(user, [h.key('file', f)])
+    await until(() => b.gates.cte.held.length === 1)
+    await h.tree.move(p, q)
+    await h.barrier()
+    b.gates.cte.mode = 'pass'
+    b.gates.cte.releaseAll()
+    expect(await o.outcome).toEqual({ kind: 'stream' })
+    expect(o.socket.last('ready')).toMatchObject({ deferred: [h.key('file', f)] })
+    expect(countDelta(before, await deferredBy())).toEqual({ suspect: 1 })
+  })
+
+  it('counts the keys whose reads never started when the request aborts under totality', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const files = await Promise.all(Array.from({ length: 6 }, () => h.tree.add('file')))
+    const watch = new AbortController()
+    b.gates.read.mode = 'hold'
+    const before = await deferredBy()
+    const o = b.open(
+      user,
+      files.map(f => h.key('file', f)),
+      { watchSignal: watch.signal }
+    )
+    await until(() => b.gates.read.held.length === 4)
+    // Four reads are parked and see the abort; the other two thunks, behind
+    // the per-op parallelism of 4, start already aborted and decide nothing.
+    watch.abort()
+    await o.outcome
+    await b.settle()
+    expect(o.socket.last('ready')!.deferred).toHaveLength(6)
+    expect(countDelta(before, await deferredBy())).toEqual({ gfsc_transient: 4, totality: 2 })
+  })
+
   it('ends the op at T_auth while the mint waits, and reads nothing after a close during the mint (T-SB107)', async () => {
     b = await h.build()
     const user = await h.createUser()
