@@ -54,6 +54,7 @@ const gateOptions: Array<
   { statelessLifecycle?: boolean; cronManageGateOnly?: boolean } | undefined
 > = []
 let approvalControllerConstructs = 0
+const approvalOptions: Array<{ honorDenials?: boolean } | undefined> = []
 
 vi.mock('../../core/extensions/mcpApprovalGateController', async importOriginal => {
   const actual =
@@ -76,6 +77,7 @@ vi.mock('../../core/extensions/approvalController', async importOriginal => {
     ApprovalController: class extends actual.ApprovalController {
       constructor(...args: ConstructorParameters<typeof actual.ApprovalController>) {
         approvalControllerConstructs++
+        approvalOptions.push(args[2])
         super(...args)
       }
     },
@@ -128,6 +130,7 @@ describe('taskExecutor wiring — cron×stateless cronManageGateOnly (FIX 1)', (
     process.env.CLERUM_STATELESS_ALLOW_CRON_MANAGE = 'true'
     gateOptions.length = 0
     approvalControllerConstructs = 0
+    approvalOptions.length = 0
 
     lifecycle = new TaskLifecycle()
     queue = new MessageQueue()
@@ -187,6 +190,9 @@ describe('taskExecutor wiring — cron×stateless cronManageGateOnly (FIX 1)', (
     // ApprovalController wraps it so the suspension routes through the approval
     // flow (no auto-grant in an autonomous run = containment).
     expect(approvalControllerConstructs).toBeGreaterThan(0)
+    // #529: an autonomous cron run on a stateless host ignores chat denials.
+    expect(approvalOptions.length).toBeGreaterThan(0)
+    expect(approvalOptions.every(o => o?.honorDenials === false)).toBe(true)
   })
 
   it('interactive channel task keeps the FULL gate (cronManageGateOnly false)', async () => {
@@ -199,6 +205,9 @@ describe('taskExecutor wiring — cron×stateless cronManageGateOnly (FIX 1)', (
     expect(gateOptions.length).toBeGreaterThan(0)
     expect(gateOptions.every(o => o?.cronManageGateOnly !== true)).toBe(true)
     expect(approvalControllerConstructs).toBeGreaterThan(0)
+    // An interactive task honors the chat's denials.
+    expect(approvalOptions.length).toBeGreaterThan(0)
+    expect(approvalOptions.every(o => o?.honorDenials !== false)).toBe(true)
   })
 
   it('default-forbid interactive tasks still advertise cron_manage to the loop', async () => {
