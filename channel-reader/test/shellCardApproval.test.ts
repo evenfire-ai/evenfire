@@ -40,7 +40,7 @@ beforeAll(async () => {
 const OFFERED = { channelCommandOffered: true, desktopCommandOffered: false }
 const NOTIFICATION =
   'Tool `shell_exec` requires approval. Parameters: {"command":"pwd"}. Reply /approve or /deny to this message.'
-const unknownActionCode = 'abcdefghijklmnop'
+const unknownActionCode = 'fake-test-token1'
 
 function callbackValues(options: SendMessageOptions | undefined): string[] {
   const values: string[] = []
