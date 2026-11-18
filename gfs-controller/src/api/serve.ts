@@ -556,8 +556,7 @@ export class GfsServingHandler {
       !sessionCeiling.allowed &&
       (claims.pathBindings.length === 0 || sessionCeiling.reason === 'scope_not_in_token')
     ) {
-      throw new GfsError(
-        'forbidden',
+      throw GfsError.forbidden(
         `token does not authorize ${sessionPermission}`,
         sessionCeiling.reason
       )
@@ -809,7 +808,7 @@ export class GfsServingHandler {
       )
     } catch (err) {
       if (err instanceof GfsSubjectResolutionDeniedError) {
-        throw new GfsError('forbidden', 'principal is not authorized for GFS')
+        throw GfsError.forbidden('principal is not authorized for GFS', 'principal_denied')
       }
       throw new GfsError(
         'not_mounted',
@@ -843,7 +842,7 @@ export class GfsServingHandler {
       resourcePath,
     })
     if (!ceiling.allowed) {
-      throw new GfsError('forbidden', `token does not authorize ${op}`, ceiling.reason)
+      throw GfsError.forbidden(`token does not authorize ${op}`, ceiling.reason)
     }
 
     const decision = await this.deps.authorize(ctx, rid, op)
@@ -865,8 +864,7 @@ export class GfsServingHandler {
       resourcePath: null,
     })
     if (!ceiling.allowed) {
-      throw new GfsError(
-        'forbidden',
+      throw GfsError.forbidden(
         'read scope is required for accessible-resource discovery',
         ceiling.reason
       )
