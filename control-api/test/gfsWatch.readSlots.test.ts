@@ -269,6 +269,21 @@ describe('T-SB85 an aborted acquire ends its path', () => {
     expect(slots.waiters).toBe(0)
   })
 
+  it('serves queued waiters in arrival order', async () => {
+    const slots = createReadSlots(createVirtualWatchClock().now)
+    const live = new AbortController().signal
+    for (let i = 0; i < READ_SLOTS_PERMITS; i += 1) await slots.acquire(live)
+    const served: string[] = []
+    const queued = ['A', 'B', 'C'].map(name => slots.acquire(live).then(() => served.push(name)))
+    expect(slots.waiters).toBe(3)
+    for (let i = 0; i < 3; i += 1) {
+      slots.release(true)
+      await flushMicrotasks()
+    }
+    await Promise.all(queued)
+    expect(served).toEqual(['A', 'B', 'C'])
+  })
+
   it('an op of 64 keys aborted before its thunks start reads nothing', async () => {
     const clock = createVirtualWatchClock()
     const slots = createReadSlots(clock.now)
