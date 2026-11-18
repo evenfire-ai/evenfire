@@ -280,7 +280,7 @@ Slack conversations are bound to a user rather than configured by hand. Each
 person does this once per conversation:
 
 1. In the Profile UI, open the Slack verification panel
-   (`/settings/social/slack`) and start verification. It issues a six-digit
+   (`/channels/slack`; legacy `/settings/social/slack` redirects here) and start verification. It issues a six-digit
    code.
 2. In Slack, send the code to the app:
 
