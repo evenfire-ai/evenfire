@@ -794,10 +794,48 @@ describe('GFS watch through external-rest-api', () => {
       expect(new Set(buckets.slice(10))).toEqual(new Set(['watch-ip']))
       expect(watchCalls()).toHaveLength(240)
 
+      // One user's spent budget must not stall the live updates of the others
+      // behind the same edge.
+      const otherUserPut = await call(watchUrl(), 'PUT', {
+        headers: { ...bearer('test-token-u2'), 'x-forwarded-for': '198.51.100.21' },
+        body: putBody,
+      })
+      expect({ status: otherUserPut.status, body: otherUserPut.body }).toEqual({
+        status: 202,
+        body: { seq: 1 },
+      })
+      expect(watchCalls()).toHaveLength(241)
+
       const otherUserRead = await call(`${urlOf(era)}/api/v1/me/gfs/roots`, 'GET', {
         headers: { ...bearer('test-token-u2'), 'x-forwarded-for': '198.51.100.20' },
       })
       expect(otherUserRead.status).not.toBe(429)
+    })
+
+    it('charges a user’s opens to the same buckets, the user one first and then the per-IP one', async () => {
+      const statuses: number[] = []
+      const buckets: unknown[] = []
+      for (let i = 0; i < 260; i += 1) {
+        const r = await call(watchUrl(), 'GET', {
+          headers: { ...bearer(), 'x-forwarded-for': '203.0.113.11' },
+        })
+        r.close()
+        statuses.push(r.status)
+        if (r.status === 429) buckets.push((r.body as { rateLimitBucket: string }).rateLimitBucket)
+      }
+      expect(statuses.filter(s => s === 200)).toHaveLength(240)
+      expect(statuses[240]).toBe(429)
+      expect(buckets.slice(0, 10)).toEqual(Array(10).fill('watch-user'))
+      expect(new Set(buckets.slice(10))).toEqual(new Set(['watch-ip']))
+      expect(watchCalls()).toHaveLength(240)
+
+      const otherUserOpen = await call(watchUrl(), 'GET', {
+        headers: { ...bearer('test-token-u2'), 'x-forwarded-for': '198.51.100.22' },
+      })
+      otherUserOpen.close()
+      expect(otherUserOpen.status).toBe(200)
+      expect(JSON.parse(otherUserOpen.firstLine!)).toEqual({ type: 'ready', schemaVersion: 1 })
+      expect(watchCalls()).toHaveLength(241)
     })
   })
 })
