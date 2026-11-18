@@ -14,9 +14,13 @@ import type { IncomingMessage } from '../server'
  * - file attachments (metadata) and `fileReferenceResolutions`: the version pins
  *   and attachment lines. Image attachments are dropped (their content lives in
  *   the frozen snapshot) and inline bytes (dataBase64) never persist.
+ * - `providerIdentity` (`medium`, `providerUserId`, `providerWorkspaceId`,
+ *   `providerChannelId`, `providerChannelType`, `providerTarget`): a Continue
+ *   after a restart re-resolves the linked user through `/resolve` with exactly
+ *   these keys. `providerEventId` is not sent there, so it stays out.
  *
  * Everything else the channel delivered (the raw Slack, email or Telegram
- * payload in `metadata`, `providerIdentity`, `traceContext`, the model piggyback)
+ * payload in `metadata`, `traceContext`, the model piggyback, `providerEventId`)
  * is not persisted: an allowlist keeps a field added to the message later out of
  * the durable row until a restart actually needs it.
  */
@@ -26,6 +30,7 @@ export function sourceMessageForResume(
   if (!message) return undefined
   const files = message.attachments?.filter(attachment => attachment.kind === 'file') ?? []
   const teamId = message.metadata?.teamId
+  const identity = message.providerIdentity
   return {
     content: message.content,
     channelType: message.channelType,
@@ -40,6 +45,18 @@ export function sourceMessageForResume(
     ...(files.length ? { attachments: files.map(fileWithoutBytes) } : {}),
     ...(message.fileReferenceResolutions
       ? { fileReferenceResolutions: message.fileReferenceResolutions }
+      : {}),
+    ...(identity
+      ? {
+          providerIdentity: {
+            medium: identity.medium,
+            providerUserId: identity.providerUserId,
+            providerWorkspaceId: identity.providerWorkspaceId,
+            providerChannelId: identity.providerChannelId,
+            providerChannelType: identity.providerChannelType,
+            providerTarget: identity.providerTarget,
+          },
+        }
       : {}),
   }
 }

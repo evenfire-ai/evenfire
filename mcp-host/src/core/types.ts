@@ -8,7 +8,7 @@
  */
 import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { LlmProviderId } from '@clerum/llm-providers'
-import type { IncomingMessage as HostIncomingMessage } from '../server/types'
+import type { IncomingMessage as HostIncomingMessage, ProviderIdentity } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
 import type { AttachmentReadLedgerSnapshot } from './attachments/attachmentReadBudget'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
@@ -217,6 +217,19 @@ export type ResumeSourceMessage = Pick<
   /** Only the team scope survives; the channel's raw payload is not persisted. */
   metadata?: { teamId: string }
   attachments?: ResumeFileAttachment[]
+  /**
+   * The channel identity a Continue after a restart re-resolves the linked user
+   * with. `providerEventId` is deliberately absent: `/resolve` does not send it.
+   */
+  providerIdentity?: Pick<
+    ProviderIdentity,
+    | 'medium'
+    | 'providerUserId'
+    | 'providerWorkspaceId'
+    | 'providerChannelId'
+    | 'providerChannelType'
+    | 'providerTarget'
+  >
 }
 
 // ─── Completion Types ───────────────────────────────────────

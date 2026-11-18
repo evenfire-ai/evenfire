@@ -9,6 +9,20 @@ import { sourceMessageForResume } from '../sourceMessageForResume'
 
 const FILE_BYTES = Buffer.from('SENTINEL-666-file-bytes')
 const IMAGE_BYTES = Buffer.from('SENTINEL-666-image-bytes')
+const TEAMS_IDENTITY = {
+  medium: 'teams',
+  providerUserId: 'teams-user-1',
+  providerWorkspaceId: 'tenant-1',
+  providerChannelId: 'a:personal-chat-1',
+  providerChannelType: 'personal',
+  providerEventId: 'SENTINEL-666-event',
+  providerTarget: {
+    hostRef: 'host-1',
+    communicationChannelNamespace: 'ns-1',
+    communicationChannelName: 'teams-main',
+    providerBotId: 'bot-1',
+  },
+}
 
 function fileAttachment(): Attachment {
   return {
@@ -89,13 +103,13 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
     expect(resumed?.messageId).toBe('message-1')
   })
 
-  it('persists only the fields a restart reads, not the raw channel payload', () => {
+  it('keeps the identity a restart re-resolves with and drops the raw payload', () => {
     const message = {
       ...sourceMessage([]),
       threadId: 'thread-1',
       imageModel: { provider: 'openai', model: 'gpt-image' },
       metadata: { teamId: 'team-1', slackBotToken: 'SENTINEL-666-raw-metadata' },
-      providerIdentity: { provider: 'SENTINEL-666-identity' },
+      providerIdentity: TEAMS_IDENTITY,
       traceContext: { traceparent: 'SENTINEL-666-trace' },
       model: { provider: 'SENTINEL-666-model', model: 'm' },
       modelSelectionRevision: 7,
@@ -115,6 +129,9 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
       metadata: { teamId: 'team-1' },
     })
     expect(resumed?.fileReferenceResolutions).toHaveLength(1)
+    const { providerEventId: _dropped, ...kept } = TEAMS_IDENTITY
+    expect(resumed?.providerIdentity).toEqual(kept)
+    expect(resumed?.providerIdentity).not.toHaveProperty('providerEventId')
     expect(Object.keys(resumed ?? {}).sort()).toEqual([
       'channelId',
       'channelType',
@@ -124,11 +141,17 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
       'imageModel',
       'messageId',
       'metadata',
+      'providerIdentity',
       'sender',
       'threadId',
       'timestamp',
     ])
     expect(JSON.stringify(resumed)).not.toContain('SENTINEL-666')
+  })
+
+  it('omits providerIdentity when the message has none', () => {
+    const resumed = sourceMessageForResume(sourceMessage([]))
+    expect(resumed).not.toHaveProperty('providerIdentity')
   })
 
   it('drops metadata that carries no team scope', () => {
