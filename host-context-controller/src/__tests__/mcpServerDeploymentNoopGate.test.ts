@@ -266,7 +266,7 @@ describe('McpServer ensureDeployment no-op gate', () => {
 
     expect(container).toBeDefined()
     expect(container?.image).toBe(
-      'ghcr.io/evenfire-ai/playwright-server@sha256:fc603bbc05d216ca9394940463e5e216d0a48732c24555fb9b67d20775fccf73'
+      'ghcr.io/evenfire-ai/playwright-server@sha256:2e5ef0183d6dda21e0797ef32f1cbba2e07e38ec93b67bd3675079c5729ffa74'
     )
     expect(container?.command).toEqual(['node'])
     expect(container?.args).toEqual(manifest.spec.args)
