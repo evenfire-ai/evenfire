@@ -6,7 +6,7 @@ import test from 'node:test'
 const require = createRequire(import.meta.url)
 const { runSmoke } = require('./playwright-mcp-cluster-runtime.cjs')
 
-function fakeSdk({ missing, failing, unchanged, invalidPng } = {}) {
+function fakeSdk({ missing, failing, unchanged, invalidPng, browser = 'HeadlessChrome/157.0.0.0' } = {}) {
   const calls = []
   let screenshotPath
   let closed = false
@@ -52,7 +52,7 @@ function fakeSdk({ missing, failing, unchanged, invalidPng } = {}) {
             ? 'check completed'
             : 'waiting\nbutton "Run check" [ref=e1]'
           : name === 'browser_evaluate'
-            ? 'HeadlessChrome/146.0.0.0'
+            ? browser
             : ''
       return { content: [{ type: 'text', text: value }] }
     }
@@ -79,10 +79,10 @@ function fakeSdk({ missing, failing, unchanged, invalidPng } = {}) {
 
 test('checks navigation, click and PNG in order and removes its temporary screenshot', async () => {
   const fake = fakeSdk()
-  const result = await runSmoke(fake.sdk, '24.22.1')
+  const result = await runSmoke(fake.sdk, '24.22.3')
   assert.equal(result.status, 'PASS')
   assert.equal(result.realClick, true)
-  assert.equal(result.browserVersion, 'HeadlessChrome/146.0.0.0')
+  assert.equal(result.browserVersion, 'HeadlessChrome/157.0.0.0')
   assert.match(result.screenshotSha256, /^[a-f0-9]{64}$/)
   assert.deepEqual(fake.calls, [
     'browser_navigate',
@@ -98,25 +98,32 @@ test('checks navigation, click and PNG in order and removes its temporary screen
 
 test('rejects the wrong Node version or a missing tool', async () => {
   const fake = fakeSdk({ missing: 'browser_click' })
-  await assert.rejects(runSmoke(fake.sdk, '22.0.0'), /Unexpected Node version/)
-  await assert.rejects(runSmoke(fake.sdk, '24.22.1'), /Missing browser_click/)
+  await assert.rejects(runSmoke(fake.sdk, '24.22.1'), /Unexpected Node version/)
+  await assert.rejects(runSmoke(fake.sdk, '24.22.3'), /Missing browser_click/)
   assert.deepEqual(fake.calls, [])
   assert.equal(fake.closed, true)
 })
 
 test('fails when a tool errors or the click does not change the snapshot', async () => {
   const failing = fakeSdk({ failing: 'browser_navigate' })
-  await assert.rejects(runSmoke(failing.sdk, '24.22.1'), /browser_navigate failed/)
+  await assert.rejects(runSmoke(failing.sdk, '24.22.3'), /browser_navigate failed/)
   assert.equal(failing.closed, true)
   const unchanged = fakeSdk({ unchanged: true })
-  await assert.rejects(runSmoke(unchanged.sdk, '24.22.1'))
+  await assert.rejects(runSmoke(unchanged.sdk, '24.22.3'))
   assert.equal(unchanged.calls.includes('browser_take_screenshot'), false)
   assert.equal(unchanged.closed, true)
 })
 
 test('rejects an invalid PNG and still removes the screenshot', async () => {
   const fake = fakeSdk({ invalidPng: true })
-  await assert.rejects(runSmoke(fake.sdk, '24.22.1'))
+  await assert.rejects(runSmoke(fake.sdk, '24.22.3'))
   assert.equal(fake.closed, true)
   assert.equal(existsSync(fake.screenshotPath), false)
+})
+
+test('rejects the old Chromium in a live tool response', async () => {
+  const fake = fakeSdk({ browser: 'HeadlessChrome/146.0.0.0' })
+  await assert.rejects(runSmoke(fake.sdk, '24.22.3'), /Expected Chromium 157/)
+  assert.equal(fake.calls.includes('browser_take_screenshot'), false)
+  assert.equal(fake.closed, true)
 })

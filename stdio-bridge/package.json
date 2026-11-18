@@ -1,10 +1,10 @@
 {
   "name": "clerum-stdio-bridge",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "stdio-to-StreamableHTTP bridge sidecar for MCP servers",
   "main": "dist/main.js",
   "engines": {
-    "node": ">=24.22.1"
+    "node": ">=24.22.3"
   },
   "scripts": {
     "build": "tsc",

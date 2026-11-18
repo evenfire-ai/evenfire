@@ -49,7 +49,7 @@ Ready before E2E results are interpreted.
 - **kubectl** (`brew install kubectl`)
 - **jq** (`brew install jq`)
 - **python3** (for JWT key sync)
-- **Node.js** 24.22.1 or later (Node 24 is required for Desktop and the validation harness)
+- **Node.js** 24.22.3 or later (Node 24 is required for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration overlay)
 - `.env` file at project root with LLM API keys (optional — uses placeholders if missing)
 

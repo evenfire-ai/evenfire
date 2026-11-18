@@ -1,10 +1,10 @@
 {
   "name": "workload-recipes-controller",
-  "version": "0.1.533",
+  "version": "0.1.534",
   "description": "Workload Recipes Controller (WRC) - WorkloadRecipe lifecycle management and MCP server interface",
   "main": "dist/main.js",
   "engines": {
-    "node": ">=24.22.1"
+    "node": ">=24.22.3"
   },
   "scripts": {
     "build": "tsc -b",
