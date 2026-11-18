@@ -41,8 +41,18 @@ export interface FilesPageProps {
    * `gfsUri` carries no name, hence the second argument.
    */
   onLocationChange?: (gfsUri: string | null, name: string | null) => void
-  /** Monotonic signal from the app-level entity stream for live path reconciliation. */
-  remoteGfsChangeEpoch?: number
+  /**
+   * Hands the owner a background re-resolve of the current folder (a folder
+   * that became unavailable clears the location). Returns the unregister.
+   */
+  registerLocationRefresh?: (refresh: () => Promise<unknown>) => () => void
+  /**
+   * The resolved current location and whether it is a file or a folder, so the
+   * owner watches it under the right kind; `null` at the root or on unmount.
+   */
+  onResolvedLocationChange?: (
+    location: { gfsUri: string; kind: 'file' | 'directory' } | null
+  ) => void
   /**
    * Open (or focus) a preview tab for a previewable file (spec 18 §3.B.4). The
    * files browser no longer renders a preview modal: `openFilePreview` resolves

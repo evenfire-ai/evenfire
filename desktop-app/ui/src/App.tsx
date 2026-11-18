@@ -38,6 +38,7 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
+import { useGfsWatchSubscription } from '@hooks/domain/useGfsWatchSubscription'
 import type { WorkspaceNavigationSnapshot } from '@hooks/domain/useNavigationController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
@@ -57,18 +58,24 @@ import type { Launch, LaunchId, LaunchOutcome } from '@lib/embedOwnership.types'
 import { createEmbedOwnershipMachine } from '@lib/embedOwnershipMachine'
 import type { EmbedRefreshErrorEvent } from '@lib/embedOwnershipMachine.types'
 import { embedFailureMessage, embedViewState } from '@lib/embedOwnershipView'
-import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import {
   authoritativeGfsStatus,
   expireGfsPreviewTabs,
   markPluginGfsPreviewUnavailable,
-  shouldRevalidateGfsQuery,
 } from '@lib/gfsEntityChangeState'
 import { gfsResourceOpenTarget, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
 import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
+import { buildGfsWatchKeys, gfsWatchKey, parseGfsWatchKey } from '@lib/gfsWatchKeys'
+import {
+  purgeGfsSessionCache,
+  refetchGfsAccess,
+  refetchGfsRoots,
+  refetchWatchedFolder,
+} from '@lib/gfsWatchReaction'
+import { type KeyedSingleFlight, createKeyedSingleFlight } from '@lib/keyedSingleFlight'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   canProcessSandboxUiDeepLinks,
@@ -335,12 +342,10 @@ function DesktopUpdateRequiredDialog({
 export function App() {
   const vm = useAppController()
   const queryClient = desktopQueryClient
-  const entityChangeRegistry = React.useMemo(() => new EntityChangeRegistry(), [])
   // Electron never fires `visibilitychange` on OS-window switching; bridge
   // DOM focus/blur so focus-aware query revalidation actually runs.
   useWindowFocusBridge()
   const [themeMode, setThemeMode] = React.useState<ThemeMode>(getInitialThemeMode)
-  const [remoteGfsChangeEpoch, setRemoteGfsChangeEpoch] = React.useState(0)
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
@@ -1543,87 +1548,18 @@ export function App() {
     [queryClient, setWorkspaceTabs, previewSessionScope, previewSessionGeneration]
   )
 
-  React.useEffect(() => {
-    if (!vm.isAuthenticated) return
-    const entityChangeBridge = window.clerum?.entityChanges
-    if (typeof entityChangeBridge?.subscribe !== 'function') return
-    let active = true
-    let stopSubscription: (() => Promise<void>) | null = null
-    let gfsRevalidationInFlight = false
-    let gfsRevalidationPending = false
-    let gfsHardRecoveryPending = false
-    const gfsQueryFilter = {
-      queryKey: desktopQueryKeys.gfsRoot,
-      predicate: (query: { queryKey: readonly unknown[] }) =>
-        query.queryKey[2] === previewSessionScope &&
-        hasGfsSessionGeneration(query.queryKey, previewSessionGeneration) &&
-        shouldRevalidateGfsQuery(query.queryKey),
-    }
-    const revalidateGfs = (hardRecovery = false) => {
-      if (!active) return
-      if (gfsRevalidationInFlight) {
-        gfsRevalidationPending = true
-        gfsHardRecoveryPending ||= hardRecovery
-        return
-      }
-      gfsRevalidationInFlight = true
-      const queryFilter = hardRecovery
-        ? {
-            queryKey: desktopQueryKeys.gfsRoot,
-            predicate: (query: { queryKey: readonly unknown[] }) =>
-              query.queryKey[2] === previewSessionScope &&
-              hasGfsSessionGeneration(query.queryKey, previewSessionGeneration),
-          }
-        : gfsQueryFilter
-      const foregroundReadWasActive = queryClient.isFetching(queryFilter) > 0
-      setRemoteGfsChangeEpoch(epoch => epoch + 1)
-      void queryClient
-        .invalidateQueries({ ...queryFilter, refetchType: 'active' }, { cancelRefetch: false })
-        .then(async () => {
-          if (!active) return
-          const resources = new Set(
-            workspaceTabsRef.current.tabs
-              .filter(tab => tab.kind === 'preview' && tab.preview)
-              .map(tab => tab.preview!.gfsUri)
-          )
-          const pluginPreview = pluginGfsPreviewRef.current
-          if (pluginPreview) resources.add(pluginPreview.gfsUri)
-          await Promise.all(Array.from(resources, uri => refreshOpenPreview(uri)))
-        })
-        .finally(() => {
-          gfsRevalidationInFlight = false
-          if (!active) return
-          if (gfsRevalidationPending || foregroundReadWasActive) {
-            const nextIsHardRecovery =
-              gfsHardRecoveryPending || (hardRecovery && foregroundReadWasActive)
-            gfsRevalidationPending = false
-            gfsHardRecoveryPending = false
-            revalidateGfs(nextIsHardRecovery)
-          }
-        })
-    }
-    const unsubscribeGfs = entityChangeRegistry.subscribe(['gfs', 'authorization'], event => {
-      // Scope invalidations are soft convergence hints, not proof that cached
-      // data is no longer authorized. Keep visible/paginated rows while active
-      // queries refetch; only an authoritative 403/404 purges a preview.
-      // TanStack's default refetch cancels an active request. Serialize these
-      // soft passes and retain one trailing pass so a second frame cannot abort
-      // a foreground navigation/page chain or lose a mutation during that read.
-      // Resync also refreshes cached permission affordances; inactive caches stay
-      // invalidated and re-read when they are next mounted.
-      revalidateGfs(event.type === 'resync_required')
-    })
-    void entityChangeBridge
-      .subscribe(event => entityChangeRegistry.dispatch(event))
-      .then(stop => {
-        if (active) stopSubscription = stop
-        else void stop()
-      })
-      .catch(() => undefined)
-    return () => {
-      active = false
-      unsubscribeGfs()
-      if (stopSubscription) void stopSubscription()
+  // Main empties every window's watch list and the preview retries belong to
+  // the previous authority on any of these transitions.
+  const gfsWatchSessionKey = JSON.stringify([
+    vm.isAuthenticated,
+    vm.authenticatedPrincipalIdentity,
+    vm.currentTeamId,
+    vm.runtimeConfigState?.envKey ?? null,
+    previewSessionScope,
+    previewSessionGeneration,
+  ])
+  React.useEffect(
+    () => () => {
       for (const timer of previewRetryTimersRef.current.values()) {
         window.clearTimeout(timer)
       }
@@ -1635,18 +1571,145 @@ export function App() {
       }
       previewRetryTimersRef.current.clear()
       previewRetryAttemptRef.current.clear()
+    },
+    [gfsWatchSessionKey]
+  )
+
+  const [sidebarWatchedFolderUris, setSidebarWatchedFolderUris] = React.useState<string[]>([])
+  const activeWatchedPreviewUri =
+    vm.navItem === DESKTOP_ROUTES.preview && vm.activeWorkspaceTab?.kind === 'preview'
+      ? (vm.activeWorkspaceTab.preview?.gfsUri ?? null)
+      : null
+  const [filesResolvedLocation, setFilesResolvedLocation] = React.useState<{
+    gfsUri: string
+    kind: 'file' | 'directory'
+  } | null>(null)
+  // The Files location is watched under the kind it resolved to: a file
+  // subscribed as a folder is refused by the server and wastes a slot.
+  const activeFilesLocation =
+    vm.navItem === DESKTOP_ROUTES.files &&
+    filesResolvedLocation &&
+    filesResolvedLocation.gfsUri === activeFilesTab?.files?.path
+      ? filesResolvedLocation
+      : null
+  const activeFilesLocationKind = activeFilesLocation?.kind === 'file' ? 'file' : 'dir'
+  const activeFilesLocationUri = activeFilesLocation?.gfsUri ?? null
+  const gfsWatchKeys = React.useMemo(
+    () =>
+      buildGfsWatchKeys([
+        { kind: 'file', uri: activeWatchedPreviewUri },
+        { kind: 'file', uri: pluginGfsPreview?.gfsUri },
+        { kind: activeFilesLocationKind, uri: activeFilesLocationUri },
+        ...sidebarWatchedFolderUris.map(uri => ({ kind: 'dir' as const, uri })),
+      ]),
+    [
+      activeFilesLocationKind,
+      activeFilesLocationUri,
+      activeWatchedPreviewUri,
+      pluginGfsPreview?.gfsUri,
+      sidebarWatchedFolderUris,
+    ]
+  )
+  const activeFilesLocationKeyRef = React.useRef<string | null>(null)
+  activeFilesLocationKeyRef.current = gfsWatchKey(activeFilesLocationKind, activeFilesLocationUri)
+
+  const filesLocationRefreshRef = React.useRef<(() => Promise<unknown>) | null>(null)
+  const registerFilesLocationRefresh = React.useCallback((refresh: () => Promise<unknown>) => {
+    filesLocationRefreshRef.current = refresh
+    return () => {
+      if (filesLocationRefreshRef.current === refresh) filesLocationRefreshRef.current = null
     }
-  }, [
-    entityChangeRegistry,
-    queryClient,
-    refreshOpenPreview,
-    previewSessionScope,
-    previewSessionGeneration,
-    vm.authenticatedPrincipalIdentity,
-    vm.currentTeamId,
-    vm.isAuthenticated,
-    vm.runtimeConfigState?.envKey,
-  ])
+  }, [])
+  const refreshOpenPreviewRef = React.useRef(refreshOpenPreview)
+  refreshOpenPreviewRef.current = refreshOpenPreview
+  // Created in the effect, not in render: StrictMode runs the cleanup once
+  // before the real mount, and a disposed instance would drop every reaction.
+  const gfsWatchReactionsRef = React.useRef<KeyedSingleFlight | null>(null)
+  React.useEffect(() => {
+    const reactions = createKeyedSingleFlight()
+    gfsWatchReactionsRef.current = reactions
+    return () => {
+      reactions.dispose()
+      if (gfsWatchReactionsRef.current === reactions) gfsWatchReactionsRef.current = null
+    }
+  }, [])
+
+  // A watched key changed, was re-covered after a reopen, or was refused:
+  // re-read it through the same authoritative paths a user refresh takes.
+  const reactToGfsWatchKey = React.useCallback(
+    (key: string) => {
+      const parts = parseGfsWatchKey(key)
+      if (!parts) return
+      gfsWatchReactionsRef.current?.run(key, async () => {
+        if (parts.kind === 'file') {
+          const uris = new Set(
+            workspaceTabsRef.current.tabs.flatMap(tab =>
+              tab.kind === 'preview' &&
+              tab.preview &&
+              gfsWatchKey('file', tab.preview.gfsUri) === key
+                ? [tab.preview.gfsUri]
+                : []
+            )
+          )
+          const overlay = pluginGfsPreviewRef.current
+          if (overlay && gfsWatchKey('file', overlay.gfsUri) === key) uris.add(overlay.gfsUri)
+          await Promise.all(Array.from(uris, uri => refreshOpenPreviewRef.current(uri)))
+          if (activeFilesLocationKeyRef.current === key) await filesLocationRefreshRef.current?.()
+          return
+        }
+        await refetchWatchedFolder(
+          queryClient,
+          livePreviewAuthorityRef.current,
+          parts.drive,
+          parts.rid
+        )
+        if (activeFilesLocationKeyRef.current === key) await filesLocationRefreshRef.current?.()
+      })
+    },
+    [queryClient]
+  )
+
+  const purgeGfsSession = React.useCallback(() => {
+    for (const timer of previewRetryTimersRef.current.values()) window.clearTimeout(timer)
+    for (const uri of previewRefreshGenerationRef.current.keys()) {
+      previewRefreshGenerationRef.current.set(
+        uri,
+        (previewRefreshGenerationRef.current.get(uri) ?? 0) + 1
+      )
+    }
+    previewRetryTimersRef.current.clear()
+    previewRetryAttemptRef.current.clear()
+    setWorkspaceTabs(expireGfsPreviewTabs)
+    setPluginGfsPreview(current => markPluginGfsPreviewUnavailable(current, current?.gfsUri ?? ''))
+    purgeGfsSessionCache(queryClient, livePreviewAuthorityRef.current)
+  }, [queryClient, setWorkspaceTabs])
+
+  useGfsWatchSubscription({
+    keys: gfsWatchKeys,
+    userId: vm.isAuthenticated ? (vm.me?.id ?? null) : null,
+    sessionKey: gfsWatchSessionKey,
+    onEvent: event => {
+      switch (event.type) {
+        case 'changed':
+        case 'resync':
+        case 'rejected':
+          for (const key of event.keys) reactToGfsWatchKey(key)
+          return
+        case 'accessChanged':
+          // Roots and open sharing dialogs re-read. Watched keys are not
+          // re-resolved here: main follows every ready with a `resync` of all
+          // of them, and resolving twice would double the reads.
+          void refetchGfsAccess(queryClient, livePreviewAuthorityRef.current)
+          return
+        case 'accessChangedRoots':
+          void refetchGfsRoots(queryClient, livePreviewAuthorityRef.current)
+          return
+        case 'sessionExpired':
+          purgeGfsSession()
+          return
+      }
+    },
+  })
 
   // Preview tab render seam (spec 18 §3.B.1). Only the ACTIVE preview tab mounts
   // a FilePreviewPage, keyed by that tab's id so switching preview tabs remounts
@@ -4496,6 +4559,7 @@ export function App() {
                                   onSelect={handleSidebarNavSelect}
                                   onOpenFilesSection={vm.openFilesSection}
                                   onOpenPreviewSection={vm.openPreviewSection}
+                                  onVisibleExpandedFoldersChange={setSidebarWatchedFolderUris}
                                   pushToast={vm.pushToast}
                                   toggleRequestId={sidebarToggleRequestId}
                                 />
@@ -4678,7 +4742,8 @@ export function App() {
                                         isPendingGfsDeepLinkCurrent={isActiveGfsDeepLinkCurrent}
                                         onExplicitNavigationIntent={vm.beginUserNavigationIntent}
                                         onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
-                                        remoteGfsChangeEpoch={remoteGfsChangeEpoch}
+                                        registerLocationRefresh={registerFilesLocationRefresh}
+                                        onResolvedLocationChange={setFilesResolvedLocation}
                                         onLocationChange={handleActiveFilesLocationChange}
                                         onOpenPreview={vm.openPreviewSection}
                                         onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
@@ -4841,11 +4906,12 @@ export function App() {
                               ) : null}
                               {pluginGfsPreview ? (
                                 <GfsImagePreview
-                                  key={`${pluginGfsPreview.gfsUri}:${pluginGfsPreview.reloadVersion}`}
+                                  key={pluginGfsPreview.gfsUri}
                                   byteLength={pluginGfsPreview.bytes}
                                   fileName={pluginGfsPreview.name}
                                   gfsUri={pluginGfsPreview.gfsUri}
                                   mimeType={pluginGfsPreview.mimeType}
+                                  reloadVersion={pluginGfsPreview.reloadVersion}
                                   unavailable={pluginGfsPreview.unavailable}
                                   onClose={closePluginGfsPreview}
                                 />

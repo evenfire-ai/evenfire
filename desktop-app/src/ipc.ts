@@ -22,6 +22,7 @@ import {
 import { externalUrlToOpen } from './externalUrl.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import type { GfsWatchClient, GfsWatchOwner } from './gfs/watchClient.js'
 import {
   abortZipJob,
   appendZipEntry,
@@ -42,7 +43,6 @@ import {
   type ChatDeleteFence,
   type DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfig,
-  EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
   HostActivityStreamEvent,
   HostMessageAttachment,
@@ -420,6 +420,85 @@ export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): v
   }
 }
 
+/**
+ * Electron throws while a frame is being disposed (e.g. inside
+ * `render-process-gone`), so every read of a frame token goes through here.
+ */
+function frameTokenOf(webContents: Electron.WebContents): string | null {
+  try {
+    const token = webContents.mainFrame.frameToken
+    return typeof token === 'string' ? token : null
+  } catch {
+    return null
+  }
+}
+
+function senderFrameTokenOf(event: IpcMainInvokeEvent): string | null {
+  try {
+    const token = event.senderFrame?.frameToken
+    return typeof token === 'string' ? token : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The GFS watch IPC. The owner is the sending `webContents`, never a value of
+ * the payload; the document inside it is identified by Electron's main-frame
+ * token, which changes on every navigation, so a late IPC of a previous
+ * document or one from a subframe is dropped by the client.
+ */
+export function registerGfsWatchIpcHandlers(client: GfsWatchClient): void {
+  const lifecycleInstalled = new Set<number>()
+
+  const ownerOf = (webContents: Electron.WebContents): GfsWatchOwner => ({
+    id: webContents.id,
+    isDestroyed: () => webContents.isDestroyed(),
+    mainFrameToken: () => frameTokenOf(webContents),
+    send: event => webContents.send('gfsWatch:event', event),
+  })
+
+  // Installed once per webContents and removed only when it is destroyed: the
+  // owner outlives navigations, so removing them on the first navigation would
+  // leave a dead owner holding its keys after the window closes.
+  const installLifecycle = (webContents: Electron.WebContents) => {
+    const id = webContents.id
+    if (lifecycleInstalled.has(id)) return
+    lifecycleInstalled.add(id)
+    // `did-navigate` fires only for a committed main-frame navigation, which is
+    // exactly when the document (and its frame token) is replaced.
+    const onNavigated = () => client.ownerNavigated(id, frameTokenOf(webContents))
+    const onProcessGone = () => client.ownerProcessGone(id)
+    const onDestroyed = () => {
+      lifecycleInstalled.delete(id)
+      webContents.removeListener('did-navigate', onNavigated)
+      webContents.removeListener('render-process-gone', onProcessGone)
+      client.ownerDestroyed(id)
+    }
+    webContents.on('did-navigate', onNavigated)
+    webContents.on('render-process-gone', onProcessGone)
+    webContents.once('destroyed', onDestroyed)
+  }
+
+  ipcMain.handle('gfsWatch:setSubscriptions', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    const webContents = event.sender
+    const result = client.setSubscriptions(
+      ownerOf(webContents),
+      payload && typeof payload === 'object' ? payload : null,
+      senderFrameTokenOf(event)
+    )
+    if (client.hasOwner(webContents.id)) installLifecycle(webContents)
+    return { sessionExpired: result.sessionExpired === true }
+  })
+
+  ipcMain.handle('gfsWatch:stop', event => {
+    assertTrustedSender(event)
+    client.stopOwner(ownerOf(event.sender), senderFrameTokenOf(event))
+    return { ok: true }
+  })
+}
+
 /** Register the trusted renderer's read-only snapshot of the native GFS inbox. */
 export function registerGfsDeepLinkListHandler(queue: {
   list(): GfsResourceDeepLinkEnvelope[]
@@ -472,8 +551,8 @@ function sanitizeDesktopNotificationActions(
 
 export function registerIpcHandlers(service: AppService, logout: () => Promise<number>): void {
   const streamOwnerCleanupRegistered = new Set<number>()
-  const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
+  registerGfsWatchIpcHandlers(service.gfsWatch)
 
   // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
   // R1-M1): the renderer attaches a requestId to an invoke and fires
@@ -1265,57 +1344,6 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     }
 
     return { streamId }
-  })
-
-  ipcMain.handle('entityChanges:streamStart', async event => {
-    assertTrustedSender(event)
-    const streamId = randomUUID()
-    const ownerId = event.sender.id
-    service.startEntityChangeStream(streamId, ownerId, (streamEvent: EntityChangeStreamEvent) => {
-      try {
-        event.sender.send('entityChanges:streamEvent', { streamId, event: streamEvent })
-      } catch {
-        /* sender destroyed */
-      }
-    })
-    if (!entityChangeOwnerCleanupRegistered.has(ownerId)) {
-      entityChangeOwnerCleanupRegistered.add(ownerId)
-      let cleanedUp = false
-      const cleanup = () => {
-        if (cleanedUp) return
-        cleanedUp = true
-        service.stopEntityChangeStreamsForOwner(ownerId)
-        entityChangeOwnerCleanupRegistered.delete(ownerId)
-        event.sender.removeListener('did-navigate', onMainFrameNavigation)
-        event.sender.removeListener('render-process-gone', onRendererProcessGone)
-        event.sender.removeListener('destroyed', cleanup)
-      }
-      const onMainFrameNavigation = (
-        _navigationEvent: Electron.Event,
-        _navigationUrl: string,
-        _httpResponseCode: number,
-        _httpStatusText: string
-      ) => {
-        cleanup()
-      }
-      const onRendererProcessGone = (_event: Electron.Event) => cleanup()
-      // `did-navigate` is emitted after a committed main-frame navigation.
-      // `did-start-navigation` also fires for cancelled and in-place changes,
-      // which do not replace this renderer's stream owner.
-      event.sender.on('did-navigate', onMainFrameNavigation)
-      event.sender.on('render-process-gone', onRendererProcessGone)
-      event.sender.once('destroyed', cleanup)
-    }
-    return { streamId }
-  })
-
-  ipcMain.handle('entityChanges:streamStop', async (event, payload: { streamId: string }) => {
-    assertTrustedSender(event)
-    const streamId = sanitizeString(payload?.streamId)
-    if (!streamId) return { ok: true }
-    const stopped = service.stopEntityChangeStream(streamId, event.sender.id)
-    if (!stopped) throw new Error('Forbidden: cannot stop entity-change subscription')
-    return { ok: true }
   })
 
   ipcMain.handle('notifications:streamStop', async (event, payload: { streamId: string }) => {

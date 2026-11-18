@@ -13,26 +13,16 @@ import {
   readEntityChangeCheckpoint,
   subscribeEntityChangeFeedWake,
 } from '../services/entityChangeService.js'
+import { setStreamHeaders } from './streamHeaders.js'
 
 const logger = rootLogger.child({ module: 'entity-change-stream' })
 const MAX_BUFFERED_BYTES = 64 * 1024
 const BACKPRESSURE_TIMEOUT_MS = 5000
 const AUTHORIZATION_RECHECK_MS = 15_000
 const ZERO_CURSOR = '00000000-0000-0000-0000-000000000000'
-
-type AuthorizationObservation =
-  | boolean
-  | { status: 'current' | 'denied' | 'unavailable'; error?: unknown }
-
-function authorizationStatus(
-  observation: AuthorizationObservation
-): 'current' | 'denied' | 'unavailable' {
-  return typeof observation === 'boolean'
-    ? observation
-      ? 'current'
-      : 'denied'
-    : observation.status
-}
+// The only principal left on this stream; kept as a label so existing
+// operator series and dashboard filters stay valid.
+const PRINCIPAL_KIND = 'operator'
 
 type EntityChangeStreamMessage =
   | {
@@ -68,30 +58,23 @@ export function parseRequestedEntityChangeCursor(req: Request): string | null | 
   return isEntityChangeCursor(raw) ? raw : false
 }
 
-function setStreamHeaders(res: Response): void {
-  res.status(200)
-  res.setHeader('content-type', 'application/x-ndjson; charset=utf-8')
-  res.setHeader('cache-control', 'no-cache, no-transform')
-  res.setHeader('connection', 'keep-alive')
-  res.setHeader('x-accel-buffering', 'no')
-  res.flushHeaders?.()
-}
-
+/**
+ * The operator entity-change stream. `isAuthorized` resolves false when the
+ * session is no longer current and rejects when that cannot be decided.
+ */
 export function streamEntityChanges(
   req: Request,
   res: Response,
   initialCursor: string | null,
-  isAuthorized: () => Promise<AuthorizationObservation>,
-  principalKind: 'user' | 'operator',
-  principalId: string = principalKind
+  isAuthorized: () => Promise<boolean>,
+  principalId: string
 ): void {
   void (async () => {
     let closed = false
     let closing = false
     let polling = false
     let metricsActive = false
-    let cursor = principalKind === 'user' ? ZERO_CURSOR : initialCursor
-    let userInitialResyncPending = principalKind === 'user'
+    let cursor = initialCursor
     let lastAuthorizationCheck = 0
     let authorizationRetryAfter = 0
     let lastHeartbeat = Date.now()
@@ -119,10 +102,10 @@ export function streamEntityChanges(
       }
       if (metricsActive) {
         metricsActive = false
-        entityChangeStreamConnectionsActive.dec({ principal_kind: principalKind })
+        entityChangeStreamConnectionsActive.dec({ principal_kind: PRINCIPAL_KIND })
         if (!closing) {
           entityChangeStreamDisconnectsTotal.inc({
-            principal_kind: principalKind,
+            principal_kind: PRINCIPAL_KIND,
             reason: 'client_disconnect',
           })
         }
@@ -139,7 +122,7 @@ export function streamEntityChanges(
       if (res.writableLength + Buffer.byteLength(frame) > MAX_BUFFERED_BYTES) return false
       if (res.write(frame)) {
         entityChangeStreamFramesSentTotal.inc({
-          principal_kind: principalKind,
+          principal_kind: PRINCIPAL_KIND,
           frame_type: message.type,
         })
         return true
@@ -162,7 +145,7 @@ export function streamEntityChanges(
       })
       if (drained) {
         entityChangeStreamFramesSentTotal.inc({
-          principal_kind: principalKind,
+          principal_kind: PRINCIPAL_KIND,
           frame_type: message.type,
         })
       }
@@ -171,11 +154,11 @@ export function streamEntityChanges(
 
     const closeForFailure = async (
       reason: 'max_lifetime' | 'session_expired' | 'server_shutdown' | 'slow_consumer',
-      currentCursor = cursor || '00000000-0000-0000-0000-000000000000'
+      currentCursor = cursor || ZERO_CURSOR
     ) => {
       if (closed || closing) return
       closing = true
-      entityChangeStreamDisconnectsTotal.inc({ principal_kind: principalKind, reason })
+      entityChangeStreamDisconnectsTotal.inc({ principal_kind: PRINCIPAL_KIND, reason })
       await write({ schemaVersion: 1, type: 'stream.closing', cursor: currentCursor, reason })
       res.end()
       cleanup()
@@ -186,57 +169,12 @@ export function streamEntityChanges(
       if (closed || closing || polling) return
       polling = true
       try {
-        if (principalKind === 'user') {
-          // The durable feed's global cursor and checkpoint scopes reveal when
-          // resources outside this user's visibility changed. User sessions
-          // therefore use a fixed-cadence, generic invalidation and always
-          // refetch current authorized state; their frames never depend on
-          // global feed contents, retention, or hidden mutations.
-          const authorization = await isAuthorized()
-          const authorizationState = authorizationStatus(authorization)
-          if (authorizationState === 'unavailable') return
-          if (authorizationState === 'denied') {
-            await closeForFailure('session_expired', ZERO_CURSOR)
-            return
-          }
-          const type = userInitialResyncPending ? 'resync_required' : 'scope.invalidated'
-          const sent = await write({
-            schemaVersion: 1,
-            type,
-            cursor: ZERO_CURSOR,
-            scopes: ['gfs', 'authorization'],
-          })
-          if (!sent) {
-            await closeForFailure('slow_consumer', ZERO_CURSOR)
-            return
-          }
-          // A generic invalidation is not protected payload, but verify again
-          // after any drain wait before letting this poll complete.
-          const afterObservation = await isAuthorized()
-          const afterWrite = authorizationStatus(afterObservation)
-          if (afterWrite === 'unavailable') return
-          if (afterWrite === 'denied') {
-            await closeForFailure('session_expired', ZERO_CURSOR)
-            return
-          }
-          userInitialResyncPending = false
-          if (type === 'resync_required') {
-            entityChangeStreamResyncRequiredTotal.inc({ principal_kind: principalKind })
-          }
-          return
-        }
         const checkpoint = await readEntityChangeCheckpoint(cursor)
         const hasChange = checkpoint.resyncRequired || checkpoint.scopes.length > 0
         if (hasChange || Date.now() - lastAuthorizationCheck >= AUTHORIZATION_RECHECK_MS) {
           if (Date.now() < authorizationRetryAfter) return
           try {
-            const authorization = await isAuthorized()
-            const authorizationState = authorizationStatus(authorization)
-            if (authorizationState === 'unavailable') {
-              const error = typeof authorization === 'boolean' ? undefined : authorization.error
-              throw error ?? new Error('session authority unavailable')
-            }
-            if (authorizationState === 'denied') {
+            if (!(await isAuthorized())) {
               await closeForFailure('session_expired', checkpoint.cursor)
               return
             }
@@ -254,7 +192,7 @@ export function streamEntityChanges(
           }
         }
         if (checkpoint.resyncRequired) {
-          entityChangeStreamResyncRequiredTotal.inc({ principal_kind: principalKind })
+          entityChangeStreamResyncRequiredTotal.inc({ principal_kind: PRINCIPAL_KIND })
           if (
             !(await write({
               schemaVersion: 1,
@@ -298,7 +236,7 @@ export function streamEntityChanges(
         }
       } catch (err) {
         logger.warn(
-          { event: 'entity_change_stream_poll_failed', principalKind, err },
+          { event: 'entity_change_stream_poll_failed', principalKind: PRINCIPAL_KIND, err },
           'entity change stream poll failed; polling will retry'
         )
       } finally {
@@ -307,15 +245,8 @@ export function streamEntityChanges(
     }
 
     try {
-      const initialObservation = await isAuthorized()
-      const initialAuthorization = authorizationStatus(initialObservation)
-      if (initialAuthorization === 'unavailable') {
-        // Rethrow so the catch below answers dev's fixed 500 body; the head 503
-        // is not in the approved typed-503 scope.
-        const error = typeof initialObservation === 'boolean' ? undefined : initialObservation.error
-        throw error ?? new Error('session authority unavailable')
-      }
-      if (initialAuthorization === 'denied') {
+      // A rejection lands in the catch below, which answers the fixed 500 body.
+      if (!(await isAuthorized())) {
         res.status(401).end()
         cleanup()
         return
@@ -336,30 +267,21 @@ export function streamEntityChanges(
       admittedPrincipal = principalId
       lastAuthorizationCheck = Date.now()
       setStreamHeaders(res)
-      if (principalKind === 'operator') {
-        unsubscribeFeedWake = subscribeEntityChangeFeedWake(() => void poll())
-      }
+      unsubscribeFeedWake = subscribeEntityChangeFeedWake(() => void poll())
       activeEntityChangeStreams.add(shutdown)
-      entityChangeStreamConnectionsActive.inc({ principal_kind: principalKind })
+      entityChangeStreamConnectionsActive.inc({ principal_kind: PRINCIPAL_KIND })
       metricsActive = true
       await poll()
       if (closed) return
-      pollTimer = setInterval(
-        () => void poll(),
-        principalKind === 'user'
-          ? config.entityChangeUserVisibilityRefreshMs
-          : config.entityChangeStreamPollMs
-      )
-      if (principalKind === 'operator') {
-        heartbeatTimer = setInterval(() => void poll(), config.entityChangeStreamHeartbeatMs)
-      }
+      pollTimer = setInterval(() => void poll(), config.entityChangeStreamPollMs)
+      heartbeatTimer = setInterval(() => void poll(), config.entityChangeStreamHeartbeatMs)
       lifetimeTimer = setTimeout(
         () => void closeForFailure('max_lifetime'),
         config.entityChangeStreamMaxLifetimeMs
       )
     } catch (err) {
       logger.error(
-        { event: 'entity_change_stream_start_failed', principalKind, err },
+        { event: 'entity_change_stream_start_failed', principalKind: PRINCIPAL_KIND, err },
         'stream setup failed'
       )
       if (!res.headersSent) res.status(500).json({ error: 'Entity change stream unavailable' })

@@ -11,7 +11,7 @@
  */
 import { config } from './config'
 import { HeartbeatPoller } from './heartbeatPoller'
-import { SecretInformer } from './informers/secretInformer'
+import { type McpServerInformers, startMcpServerInformers } from './informers/mcpServerInformers'
 import {
   McpServerProvider,
   McpServerWatcher,
@@ -37,9 +37,7 @@ import {
 
 let provider: McpServerProvider | null = null
 let server: ContextMapperServer | null = null
-let secretInformer: SecretInformer | null = null
-let channelSecretInformer: SecretInformer | null = null
-let llmHooksSecretInformer: SecretInformer | null = null
+let informers: McpServerInformers | null = null
 let lifecycleTracker: StatelessLifecycleTracker | null = null
 let heartbeatPoller: HeartbeatPoller | null = null
 let isShuttingDown = false
@@ -56,9 +54,7 @@ async function shutdown(signal: string): Promise<void> {
 
   hccLogger.info('[Main] Received signal, shutting down', { signal })
 
-  secretInformer?.stop()
-  channelSecretInformer?.stop()
-  llmHooksSecretInformer?.stop()
+  informers?.stop()
   heartbeatPoller?.stop()
   lifecycleTracker?.stop()
   await provider?.stop()
@@ -221,75 +217,11 @@ async function main(): Promise<void> {
   hccLogger.info('[Main] Provider started', { mcpServers: provider.getAllServers().length })
   server.setReady(true)
 
-  // Start SecretInformer (production only) — reacts to Secret lifecycle events
-  // so McpServers referencing a missing Secret reconcile once the Secret
-  // appears (or disappears).
+  // Informers (production only): the managed Deployment informer and the
+  // Secret informers on the McpServer, channels and llm-hooks namespaces.
   if (!config.devMode && provider instanceof McpServerWatcher) {
     const kc = getKubeConfig()
-    if (kc) {
-      secretInformer = new SecretInformer(kc, config.namespace, provider.handleSecretEvent)
-      try {
-        const running = await secretInformer.start()
-        if (running) {
-          hccLogger.info(`[Main] SecretInformer started on namespace ${config.namespace}`)
-        } else {
-          hccLogger.warn(
-            `[Main] SecretInformer degraded on namespace ${config.namespace}; reconnect will continue in background`
-          )
-        }
-      } catch (err) {
-        hccLogger.error('[Main] SecretInformer failed to start', { err })
-      }
-    }
-  }
-
-  // Second SecretInformer: per-host channel-reader credentials Secrets in
-  // the channels namespace. Events drive rolling restarts of channel-reader
-  // pods via the credentials-revision annotation.
-  //
-  // reconcileChannelReaderRevision is self-contained (does not throw), so
-  // the .catch here is defensive — it catches any unexpected runtime error
-  // in the SecretInformer's own callback path.
-  if (!config.devMode && watcher) {
-    const kc = getKubeConfig()
-    if (kc) {
-      channelSecretInformer = new SecretInformer(kc, config.channelsNamespace, evt => {
-        watcher.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
-          hccLogger.error('[Main] reconcileChannelReaderRevision failed', { err })
-        })
-      })
-      try {
-        await channelSecretInformer.start()
-        hccLogger.info(
-          `[Main] channels SecretInformer started on namespace ${config.channelsNamespace}`
-        )
-      } catch (err) {
-        hccLogger.error('[Main] channels SecretInformer failed to start', { err })
-      }
-    }
-  }
-
-  // Third SecretInformer: hook credential Secrets in the llm-hooks namespace.
-  // A rotation re-stamps the credentials-revision and rolls the hook pod
-  // (§8.2, mirroring the McpServer envSecret informer above).
-  if (!config.devMode && provider instanceof McpServerWatcher) {
-    const kc = getKubeConfig()
-    if (kc) {
-      const watcher = provider
-      llmHooksSecretInformer = new SecretInformer(kc, config.llmHooksNamespace, evt => {
-        watcher.reconcileLlmHookByEnvSecret(evt.name, evt.namespace).catch(err => {
-          hccLogger.error('[Main] reconcileLlmHookByEnvSecret failed', { err })
-        })
-      })
-      try {
-        await llmHooksSecretInformer.start()
-        hccLogger.info(
-          `[Main] llm-hooks SecretInformer started on namespace ${config.llmHooksNamespace}`
-        )
-      } catch (err) {
-        hccLogger.error('[Main] llm-hooks SecretInformer failed to start', { err })
-      }
-    }
+    if (kc) informers = await startMcpServerInformers(kc, provider)
   }
 
   hccLogger.info('[Main] Host Context Controller running. Press Ctrl+C to exit.')

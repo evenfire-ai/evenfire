@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { StatusBanner } from '@components/Common'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
+import { GFS_PREVIEW_UPDATE_FAILED_MESSAGE } from '@constants/gfsPreview'
+import { useInPlaceObjectUrl } from '@hooks/useInPlaceObjectUrl'
 import { estimateBase64DecodedLength } from '@lib/base64Size'
-import { describeGfsReadError } from '@lib/gfsGrantErrors'
+import { describeGfsReadError, isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import { copyImageBlobToClipboard } from '@lib/imageClipboard'
 import type { GfsImagePreviewBodyProps } from './types'
@@ -16,6 +18,7 @@ import type { GfsImagePreviewBodyProps } from './types'
  */
 export function GfsImagePreviewBody({
   byteLength,
+  contentVersion,
   fileName,
   gfsUri,
   dataBase64,
@@ -30,10 +33,17 @@ export function GfsImagePreviewBody({
 }: GfsImagePreviewBodyProps) {
   const generatedTitleId = useId()
   const headingId = titleId ?? generatedTitleId
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  const [sourceBlob, setSourceBlob] = useState<Blob | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [updateError, setUpdateError] = useState<string | null>(null)
   const mountedRef = useRef(true)
+  const source = gfsUri ?? dataBase64 ?? null
+  const {
+    url: previewUrl,
+    blob: sourceBlob,
+    publish,
+    discard,
+    hasContentFor,
+  } = useInPlaceObjectUrl(source)
   const onDownloadErrorRef = useRef(onDownloadError)
   const HeadingTag = `h${headingLevel}` as const
 
@@ -43,7 +53,6 @@ export function GfsImagePreviewBody({
 
   useEffect(() => {
     let active = true
-    let objectUrl: string | null = null
 
     const loadPreview = async () => {
       try {
@@ -76,10 +85,10 @@ export function GfsImagePreviewBody({
           assertGfsImagePreviewSize(bytes.byteLength)
         }
         if (!active) return
-        const blob = new Blob([bytes], { type: mimeType })
-        setSourceBlob(blob)
-        objectUrl = URL.createObjectURL(blob)
-        setPreviewUrl(objectUrl)
+        // Non-null by the source guard above.
+        publish(source!, new Blob([bytes], { type: mimeType }))
+        setPreviewError(null)
+        setUpdateError(null)
       } catch (error) {
         if (!active) return
         onDownloadErrorRef.current?.(error)
@@ -91,20 +100,29 @@ export function GfsImagePreviewBody({
         // limit the same words the Files page uses; the size guards above and
         // the download ceiling keep theirs, because it passes every other
         // verdict through untouched.
-        setPreviewError(
+        const message =
           error instanceof Error
             ? describeGfsReadError(error).message
             : 'Could not load the image preview'
-        )
+        const rawMessage = error instanceof Error ? error.message : String(error)
+        // A rejected session fails closed even mid-reload: bytes fetched under it
+        // must not stay on screen. A per-resource 403/404 instead keeps the
+        // version already shown — losing access to this one file is decided by
+        // the authoritative resolve, which remounts this body.
+        if (isGfsSessionAuthorityFailure(rawMessage, 'operation')) {
+          discard()
+          setUpdateError(null)
+          setPreviewError(message)
+        } else if (hasContentFor(source)) setUpdateError(message)
+        else setPreviewError(message)
       }
     }
 
     void loadPreview()
     return () => {
       active = false
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, gfsUri, dataBase64, mimeType])
+  }, [byteLength, contentVersion, gfsUri, dataBase64, mimeType, discard, hasContentFor, publish])
 
   useEffect(() => {
     mountedRef.current = true
@@ -142,6 +160,14 @@ export function GfsImagePreviewBody({
       </header>
       <div className="da-gfs-image-preview-dialog__body">
         {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
+        {updateError && previewUrl && !previewError ? (
+          <div role="status">
+            <StatusBanner
+              tone="warn"
+              text={`${GFS_PREVIEW_UPDATE_FAILED_MESSAGE} ${updateError}`}
+            />
+          </div>
+        ) : null}
         {!previewError && !previewUrl ? (
           <div className="da-gfs-image-preview-dialog__loading" role="status">
             Loading image preview…
