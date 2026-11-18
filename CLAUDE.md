@@ -73,14 +73,144 @@ DSNs, private URLs, or raw request/response bodies.
 
 ## Desktop Electron runtime
 
-A skipped Electron `postinstall` leaves the runtime undownloaded while `npm ci`
-still exits successfully, so the failure surfaces later as a test error that
-looks like a product bug. No `package.json` field prevents this; the guard is
-`npm run verify:electron`, which fails when `require('electron')` does not
-resolve to an executable. Desktop validation must use Node 24, run `npm ci`
-without `--ignore-scripts`, and pass that check before any test/build result is
-counted. If the check reports `Electron failed to install correctly`, switch to
-Node 24, repair the generated dependency directory, and rerun the install.
-Never bypass the postinstall with `ELECTRON_SKIP_BINARY_DOWNLOAD`, use an
-unverified override, or treat the resulting test failure as a product
-regression.
+Electron 42 and later download the runtime when the package is first resolved,
+not during `postinstall`. `npm ci` can therefore succeed before the runtime is
+materialized. `npm run verify:electron` resolves Electron and materializes the
+runtime in an unbounded setup phase; `npm run verify:electron -- --check-only`
+checks that an earlier setup phase already materialized it without triggering a
+download. Desktop validation must use Node 24, which is the CI and runtime
+contract. Do not install `desktop-app` with `--ignore-scripts`, and do not count a
+Desktop test/build result until these checks succeed from `desktop-app`:
+
+```bash
+node --version  # must report v24.x
+npm run verify:electron
+```
+
+If runtime resolution fails, the dependency install or download is incomplete,
+not a product failure. Stop the gate, switch to Node 24, remove only the
+generated `desktop-app/node_modules/electron` directory, rerun `npm ci`, then
+run `npm run verify:electron` without `--check-only` in an unbounded setup phase
+and rerun the checks. Do not set
+`ELECTRON_SKIP_BINARY_DOWNLOAD`, point
+`ELECTRON_OVERRIDE_DIST_PATH` at an unverified binary, or report green evidence
+from a missing runtime. A verified local cache may be used only when its
+version and checksum are recorded in the run evidence.
+
+## Before every push
+
+Agent-authored PRs between 2026-09-19 and 2026-11-18 failed the same CI gates
+and drew the same review findings again and again. The checks below catch
+those repeats locally, without a cluster. Run them before every push,
+including the push after a merge of `dev`.
+
+### 1. Cheap CI gates
+
+CI runs these on the PR merge result, so run them on a head that contains
+`origin/dev`:
+
+```bash
+git fetch origin dev
+git merge-base --is-ancestor origin/dev HEAD || echo "merge origin/dev first (merge, never rebase)"
+```
+
+Then:
+
+```bash
+bash scripts/tests/test-minikube-t2-public-boundary.sh
+git ls-files -s '*.sh' | awk '$1 != "100755" {print $4}'
+node scripts/release/validate-release-version-bumps.mjs --previous origin/dev --all-services
+bash scripts/ci/check-no-infra-identifiers.sh
+(cd control-api && node ../scripts/ci/password-recovery-suite-contract.mjs verify)
+```
+
+- `PUBLIC_BOUNDARY_REJECTED` (40 agent PRs, e.g. #766, #806, #932, #1111,
+  #1231): the diff adds a credential assignment, a loopback or private URL
+  with a port, a PostgreSQL URL, a bearer token or a private key, almost
+  always in a test fixture. A credential assignment passes only when its
+  value is built at runtime (contains `$`) or names itself as synthetic
+  (contains `fixture`, `placeholder`, `fake`, `example`, `dummy` or
+  `test-token`). Build loopback, private and PostgreSQL URLs at runtime from
+  config instead of writing them as literals. Never widen the scanner's
+  patterns or exemptions.
+- The `awk` line prints a path (12 agent PRs, e.g. #739, #1111, #1243, #1336):
+  run `git update-index --chmod=+x <path>`.
+- `code changed but <pkg>/package.json stayed at <version>` (11 agent PRs,
+  e.g. #796, #932, #1231, #1450): bump that package above the version on
+  `dev`.
+- `PostgreSQL suite census differs from exact manifest` (12 agent PRs, e.g.
+  #1193, #1231, #1285, #1498): every `control-api/test/**/*realPostgres*.test.ts`
+  added, renamed or removed is listed in
+  `tests/contracts/password-recovery-suites.json` in the same commit.
+- Run each added or changed shell script and shell test under `/bin/bash`
+  (3.2) and under bash 5 (#1305: a check failed only under `/bin/bash`; #1336: `mapfile: command
+  not found`).
+
+### 2. Text the change made false
+
+The most repeated review finding (64 agent PRs, e.g. #702, #806, #1231, #1453,
+#1498) is a comment, doc, test title or PR body that still describes the code
+before the change. When a commit removes or renames a file, symbol, flag, env
+var, error code or test, or changes behaviour that text describes:
+
+```bash
+git diff --name-status origin/dev...HEAD
+git grep -n '<each removed or renamed name>'
+```
+
+Fix every hit in code comments, `*.md`, `docs/`, `.d.ts` files, test titles
+and the PR body in the same push. Head SHAs, commit counts and test counts in
+the PR body describe the head being pushed (`git log --oneline
+origin/dev..HEAD`) or name the head they refer to. When code is removed, also
+delete the helpers that only it called (`git grep -n '<helper>'`; orphans in
+12 agent PRs, e.g. #702, #726, #1451).
+
+### 3. Every caller of the thing you fixed
+
+A fix to a guard, validation, limit, error mapping or shared helper that
+reaches one call site while a sibling keeps the defect was found in 30 agent
+PRs (e.g. #701, #726, #1483, #1510). Before committing such a fix, run
+`git grep -n '<function, route or constant>'` and list each caller in the
+commit body as "fixed" or "not affected: <reason>".
+
+### 4. Fixing review findings
+
+Fix commits pushed between review rounds broke behaviour the round had not
+flagged in 26 agent PRs (e.g. #796, #806, #1305, #1454). Fix one finding per
+commit and name the finding in the subject. Before the push:
+
+```bash
+git diff <reviewed-head> HEAD -- '*.test.*' '*.spec.*' 'scripts/tests/test-*.sh' | grep -E '^-.*(expect|assert)'
+```
+
+Each removed or rewritten assertion maps to a finding; restore any other.
+Then run the test files of the reviewed head against the new code.
+
+### 5. A new test must fail without the fix
+
+Tests that pass with or without the change they claim to prove were found in
+65 agent PRs (e.g. #697, #726, #1499, #1502). For every test that proves a fix:
+
+```bash
+git status --porcelain   # must be empty: commit the fix and the test first
+git checkout origin/dev -- <production files the fix changes>
+<run the new test>   # it must FAIL
+git checkout HEAD -- <production files the fix changes>
+```
+
+A production file the fix adds does not exist on `origin/dev`: delete it for
+the run instead, and restore it with the same last command. A test that still
+passes proves nothing; fix the test. A negative assertion
+(`not.toHaveBeenCalled`, "nothing was written") needs a positive assertion in
+the same test that the code path ran. A fixture that stands for another
+component's payload is copied from that component's real output or its own
+fixtures, not written by hand.
+
+### 6. Errors stay visible
+
+Swallowed errors and silent fallbacks were flagged in 17 agent PRs (e.g.
+#806, #1453, #1500). The flagged shapes were `.catch(() => ({}))`, a failed
+read that builds a default value, and a parser that returns a default on
+invalid input. Before pushing, read every `catch`, `.catch(` and default value
+your diff adds: each one rethrows, logs through the service logger, or has a
+comment saying why dropping the error is correct.
