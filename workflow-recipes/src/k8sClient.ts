@@ -160,6 +160,17 @@ export function shouldPatchRecipeStatus(
     return true
   }
 
+  // issue #1518: a StatefulSetImmutableDrift condition can appear, change or
+  // clear while phase, message and workload statuses stay equal. `undefined`
+  // does not trigger a patch; a patch made for another reason still removes the
+  // condition (`mergeOwnedConditions`). lastTransitionTime is not compared
+  // because every pass stamps a new one.
+  if (
+    result.workloadConditions !== undefined &&
+    statefulSetDriftConditionsChanged(recipe.status?.conditions, result.workloadConditions)
+  )
+    return true
+
   // Parent workflow recipes may remain active while stale execution status is
   // cleared. That still needs one status patch even though phase is unchanged.
   if (result.clearWorkflowExecution && recipe.status?.workflowExecution) return true
@@ -416,6 +427,24 @@ function ownedConditionsChanged(
 
 function sameConditionSignal(a: StatusCondition, b: StatusCondition): boolean {
   return a.status === b.status && a.reason === b.reason && a.message === b.message
+}
+
+const STATEFUL_SET_DRIFT_CONDITION_TYPE = 'StatefulSetImmutableDrift'
+
+// One condition per drifted StatefulSet, so the ordered lists are compared
+// instead of one condition per type (`ownedConditionsChanged`).
+function statefulSetDriftConditionsChanged(
+  existing: StatusCondition[] | undefined,
+  fresh: StatusCondition[]
+): boolean {
+  const existingDrift = (existing ?? []).filter(
+    condition => condition.type === STATEFUL_SET_DRIFT_CONDITION_TYPE
+  )
+  const freshDrift = fresh.filter(condition => condition.type === STATEFUL_SET_DRIFT_CONDITION_TYPE)
+  if (existingDrift.length !== freshDrift.length) return true
+  return freshDrift.some(
+    (condition, index) => !sameConditionSignal(existingDrift[index], condition)
+  )
 }
 
 export function runtimeCredentialRefreshIntervalMs(config: {

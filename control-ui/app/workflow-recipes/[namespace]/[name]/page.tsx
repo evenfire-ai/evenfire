@@ -47,6 +47,7 @@ import type {
   WorkflowRecipeStatus,
   WorkflowRunSummary,
 } from '@lib/api'
+import { type RecipeCondition, conditionTone } from '@lib/workflowRecipeConditionTone'
 import {
   RECIPE_STATUS_LOADING_REASON,
   getRecipeRunDisabledReason,
@@ -138,14 +139,6 @@ type WorkloadStatusEntry = {
   message?: string
 }
 
-type RecipeCondition = {
-  type?: string
-  status?: string
-  reason?: string
-  message?: string
-  lastTransitionTime?: string
-}
-
 function extractWorkloads(status: Record<string, unknown> | null): WorkloadStatusEntry[] {
   const wls = (status?.workloads as unknown) ?? []
   if (!Array.isArray(wls)) return []
@@ -177,18 +170,6 @@ function extractConditions(status: Record<string, unknown> | null): RecipeCondit
   const cs = (status?.conditions as unknown) ?? []
   if (!Array.isArray(cs)) return []
   return cs as RecipeCondition[]
-}
-
-function conditionTone(cond: RecipeCondition): 'ok' | 'warn' | 'error' | 'info' {
-  // Convention: "<Thing>Missing/Failed/Invalid"-style condition types are
-  // problem conditions — status:True is bad. Dormant is informational.
-  const t = String(cond.type ?? '')
-  const s = String(cond.status ?? '')
-  if (t === 'WebhookDormant') return s === 'True' ? 'info' : 'ok'
-  const isProblem =
-    /Missing$|Failed$|Invalid$|NotReady$/.test(t) || /Failure|Failed|Invalid|Missing/.test(t)
-  if (isProblem) return s === 'True' ? 'error' : 'ok'
-  return s === 'True' ? 'ok' : 'warn'
 }
 
 function podTone(pod: RecipePod): 'ok' | 'warn' | 'error' {
