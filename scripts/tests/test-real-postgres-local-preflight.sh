@@ -19,9 +19,9 @@ done
 
 printf '%s\n' '#!/usr/bin/env bash' \
   'if [[ "${1:-}" == -p ]]; then printf "%s\n" "${FAKE_NODE_MAJOR:-24}"; exit 0; fi' \
-  'if [[ "${1:-}" == --version ]]; then printf "v%s\n" "${FAKE_NODE_VERSION:-24.22.1}"; exit 0; fi' \
+  'if [[ "${1:-}" == --version ]]; then printf "v%s\n" "${FAKE_NODE_VERSION:-24.22.3}"; exit 0; fi' \
   'if [[ "${1:-}" == */check-node-version.cjs ]]; then' \
-  '  exec "$REAL_NODE" --input-type=module -e '\''const {assertNodeVersion}=await import(process.argv[1]); assertNodeVersion(process.env.FAKE_NODE_VERSION || "24.22.1", {major:24})'\'' "$1"' \
+  '  exec "$REAL_NODE" --input-type=module -e '\''const {assertNodeVersion}=await import(process.argv[1]); assertNodeVersion(process.env.FAKE_NODE_VERSION || "24.22.3", {major:24})'\'' "$1"' \
   'fi' \
   'if [[ "${1:-}" == -e ]]; then exit 0; fi' \
   'exec "$REAL_NODE" "$@"' >"$fake_bin/node"

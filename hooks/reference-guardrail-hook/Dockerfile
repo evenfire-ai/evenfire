@@ -1,5 +1,5 @@
 # Reference guardrail hook — real `/v1` LLM-lane hook for E2E testing.
-FROM node:24.22.1-alpine
+FROM node:24.22.3-alpine
 WORKDIR /app
 COPY server.js ./
 ENV PORT=8080
