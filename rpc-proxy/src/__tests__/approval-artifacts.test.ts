@@ -305,6 +305,29 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve', () => {
     const parsed = JSON.parse(capturedBody!)
     expect(parsed.requestId).toBe('req-99')
   })
+
+  // mcp-host compares the exact key set of a V2 task.manage target, which always
+  // binds taskId: the upstream body must carry the caller's taskId.
+  it('forwards taskId in the exact upstream body', async () => {
+    let capturedBody: string | undefined
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = init.body as string
+      return mockFetchResponse(200, JSON.stringify({ ok: true }))
+    })
+
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/approvals/approve')
+      .set('authorization', 'Bearer token')
+      .send({ taskId: 'task-1', toolCallId: 'tc-1' })
+      .expect(200)
+
+    expect(JSON.parse(capturedBody!)).toEqual({
+      userId: VALID_CLAIMS.sub,
+      taskId: 'task-1',
+      requestId: 'tc-1',
+      alwaysApprove: false,
+    })
+  })
 })
 
 describe('POST /rpc/hosts/:hostRef/approvals/deny', () => {
@@ -325,6 +348,27 @@ describe('POST /rpc/hosts/:hostRef/approvals/deny', () => {
     const parsed = JSON.parse(capturedBody!)
     expect(parsed.requestId).toBe('tc-deny-7')
     expect(parsed).not.toHaveProperty('toolCallId')
+  })
+
+  // Same exact-key-set contract as approve, without alwaysApprove.
+  it('forwards taskId in the exact upstream body', async () => {
+    let capturedBody: string | undefined
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = init.body as string
+      return mockFetchResponse(200, JSON.stringify({ ok: true }))
+    })
+
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/approvals/deny')
+      .set('authorization', 'Bearer token')
+      .send({ taskId: 'task-1', toolCallId: 'tc-1' })
+      .expect(200)
+
+    expect(JSON.parse(capturedBody!)).toEqual({
+      userId: VALID_CLAIMS.sub,
+      taskId: 'task-1',
+      requestId: 'tc-1',
+    })
   })
 
   it('sets userId to auth.sub', async () => {
