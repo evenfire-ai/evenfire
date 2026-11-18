@@ -29,6 +29,7 @@ import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { PRINCIPAL_DENIAL_COPY } from '../connectorPrincipal'
+import { sourceMessageForResume } from '../sourceMessageForResume'
 import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
 
 vi.mock('../../config', () => ({
@@ -3061,6 +3062,7 @@ describe('connector principal (T2)', () => {
     attachTeamsProviderIdentity(task, 'personal')
     const { output } = runToolThroughLoop('calendar__do')
     await new TaskExecutor(task, deps).run()
+    expect(manager.bootstrapUserCatalog).toHaveBeenCalledTimes(1)
     expect(manager.bootstrapUserCatalog).toHaveBeenCalledWith(CONNECTOR_USER_ID, expect.anything())
     expect(manager.callTool).toHaveBeenCalledWith(
       'calendar__do',
@@ -3092,6 +3094,7 @@ describe('connector principal (T2)', () => {
     task.sourceMessage!.channelType = 'rpc'
     const { output } = runToolThroughLoop('calendar__do')
     await new TaskExecutor(task, deps).run()
+    expect(manager.bootstrapUserCatalog).toHaveBeenCalledTimes(1)
     expect(manager.bootstrapUserCatalog).toHaveBeenCalledWith(CONNECTOR_USER_ID, expect.anything())
     expect(manager.callTool).toHaveBeenCalledWith(
       'calendar__do',
@@ -3204,21 +3207,26 @@ describe('connector principal across approval Continue', () => {
   })
 
   describe('restart', () => {
+    const RESTART_PROVIDER_TARGET = {
+      hostRef: 'chatllm',
+      communicationChannelNamespace: 'channels',
+      communicationChannelName: 'teams-main',
+    }
+
     async function restartWith(withIdentity: boolean) {
       const manager = connectorManager()
       const deps = createDeps({ mcpManager: manager as any })
       const task = createTask('read my mail', 'teams-user-1')
       attachTeamsProviderIdentity(task, 'personal')
-      const identity = task.sourceMessage!.providerIdentity
-      const resumeRow = {
-        sender: 'teams-user-1',
-        content: 'read my mail',
-        channelType: 'teams',
-        channelId: 'teams-conversation',
-      }
+      task.sourceMessage!.providerIdentity!.providerTarget = RESTART_PROVIDER_TARGET
+      // The row a suspended turn actually persists, not a hand-built subset.
+      const { providerIdentity, ...rowWithoutIdentity } = sourceMessageForResume(
+        task.sourceMessage
+      )!
+      expect(providerIdentity).not.toHaveProperty('providerEventId')
       task.sourceMessage = (withIdentity
-        ? { ...resumeRow, providerIdentity: identity }
-        : resumeRow) as unknown as Task['sourceMessage']
+        ? { ...rowWithoutIdentity, providerIdentity }
+        : rowWithoutIdentity) as unknown as Task['sourceMessage']
       deps.taskLifecycle.register(task)
       const sessionKey = 'teams-user-1:teams:teams-conversation'
       const connectApproval = {
@@ -3246,13 +3254,16 @@ describe('connector principal across approval Continue', () => {
       const { executor, manager } = await restartWith(true)
       await executor.resumeAfterApproval(false)
       expect(resolveProviderWorkflowCallerContext).toHaveBeenCalledTimes(1)
-      expect(vi.mocked(resolveProviderWorkflowCallerContext).mock.calls[0][0]).toMatchObject({
+      const resolvedWith = vi.mocked(resolveProviderWorkflowCallerContext).mock.calls[0][0]
+      expect(resolvedWith).toMatchObject({
         providerIdentity: {
           medium: 'teams',
           providerUserId: 'teams-user-1',
           providerChannelType: 'personal',
+          providerTarget: RESTART_PROVIDER_TARGET,
         },
       })
+      expect(resolvedWith?.providerIdentity).not.toHaveProperty('providerEventId')
       expect(manager.bootstrapUserCatalog).toHaveBeenCalledWith(
         CONNECTOR_USER_ID,
         expect.anything()
@@ -3311,9 +3322,15 @@ describe.each(['teams', 'slack', 'telegram'] as const)(
       const options = manager.callTool.mock.calls[0][2]
       if (type === ALLOWED_CONVERSATION_TYPE[medium]) {
         expect(options.userId).toBe(CONNECTOR_USER_ID)
+        expect(manager.bootstrapUserCatalog).toHaveBeenCalledTimes(1)
+        expect(manager.bootstrapUserCatalog).toHaveBeenCalledWith(
+          CONNECTOR_USER_ID,
+          expect.anything()
+        )
         expect(output().is_error).toBeFalsy()
       } else {
         expect(options.userId).toBeUndefined()
+        expect(manager.bootstrapUserCatalog).not.toHaveBeenCalled()
         expect(output().content).toBe(PRINCIPAL_DENIAL_COPY.not_direct_message)
         expect(output().content).not.toContain('no user identity was provided')
       }
