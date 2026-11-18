@@ -121,7 +121,6 @@ describe('multi-approval flow (issue #296 bonus regression)', () => {
     stream.fireSuspended({
       taskId: 'task-multi-1',
       requestId: 'approval-multi-A',
-      toolName: 'tool-a',
       displayName: 'Tool A',
       reason: 'approval_required',
     })
@@ -152,7 +151,6 @@ describe('multi-approval flow (issue #296 bonus regression)', () => {
     stream.fireSuspended({
       taskId: 'task-multi-1',
       requestId: 'approval-multi-B',
-      toolName: 'tool-b',
       displayName: 'Tool B',
       reason: 'approval_required',
     })

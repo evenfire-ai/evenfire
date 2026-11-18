@@ -106,7 +106,12 @@ function openResolvedArtifactFile(outputDir: string, filename: string): OpenedAr
   let fd: number
 
   try {
-    fd = fs.openSync(candidate.candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+    // Non-blocking, so a FIFO planted under an artifact name opens at once and
+    // is then refused as not a regular file instead of stalling the caller.
+    fd = fs.openSync(
+      candidate.candidate,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+    )
   } catch (err) {
     throw artifactFsError(err)
   }

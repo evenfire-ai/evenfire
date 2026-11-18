@@ -49,9 +49,11 @@ function harness(
     stat: vi.fn(),
     resolve: vi.fn(),
   }
-  const tool = buildGfsReadTools(client, { referencedFiles }).find(
-    t => t.name === 'clerum__gfs_read'
-  )!
+  const tool = buildGfsReadTools(client, {
+    writeTools: { editText: true, saveBySourcePath: true },
+    keptFilesDelete: false,
+    referencedFiles,
+  }).find(t => t.name === 'clerum__gfs_read')!
   const contentRequests = () =>
     request.mock.calls.filter(([path]) => path.includes('/content?')).length
   return { client, referencedFiles, tool, read, request, contentRequests }
@@ -153,7 +155,11 @@ describe('live-resource descriptions (#666)', () => {
       stat: vi.fn(),
       resolve: vi.fn(),
     }
-    const tools = buildGfsReadTools(client, { referencedFiles: new Map() })
+    const tools = buildGfsReadTools(client, {
+      writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
+      referencedFiles: new Map(),
+    })
     const note =
       'Reports the live resource; a file referenced in the current message is read at its listed version, or at its current_version once the reference is stale.'
     for (const name of ['clerum__gfs_list', 'clerum__gfs_stat', 'clerum__gfs_resolve']) {
@@ -263,9 +269,11 @@ describe('clerum__gfs_read pinned by a file reference of the message (#666)', ()
       version: 4,
       bytes: SENTINEL.length,
     } as Awaited<ReturnType<GfscReadClient['stat']>>)
-    const stat = buildGfsReadTools(client, { referencedFiles }).find(
-      t => t.name === 'clerum__gfs_stat'
-    )!
+    const stat = buildGfsReadTools(client, {
+      writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
+      referencedFiles,
+    }).find(t => t.name === 'clerum__gfs_stat')!
 
     const statResult = await stat.execute({ drive: 'main', resourceId: FILE_ID }, '')
     expect(client.stat).toHaveBeenCalledTimes(1)

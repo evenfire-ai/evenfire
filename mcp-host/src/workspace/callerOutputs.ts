@@ -1,12 +1,13 @@
 /**
- * Where a chat caller's generated files live: a reserved directory inside the
- * caller's own verified root (`<host>/users/<key>/.clerum-outputs`), the root
- * file_read and file_write use, but out of reach of those tools. Generation,
- * attachment, listing and download all resolve it, so through them one user
- * never reaches another's files, not even by guessing a name. A directory that
- * cannot be verified is never replaced by a shared one. shell_exec is not
- * confined: an approved command runs as the Host and can read any caller's
- * folder.
+ * Where the files the Host keeps for a chat caller live: a reserved directory
+ * inside the caller's own verified root (`<host>/users/<key>/.clerum-outputs`),
+ * the root file_read and file_write use, but out of reach of those tools. It
+ * holds the generated files, their save records (`.save-ledger/`) and the
+ * caller's kept chat attachments (`.uploads/`). Generation, attachment,
+ * listing and download all resolve it, so through them one user never reaches
+ * another's files, not even by guessing a name. A directory that cannot be
+ * verified is never replaced by a shared one. shell_exec is not confined: an
+ * approved command runs as the Host and can read any caller's folder.
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -14,6 +15,8 @@ import { verifyManagedCallerRootPath } from './callerRootBinding'
 import { deriveUserKeyFromSource } from './userKey'
 
 export const CALLER_OUTPUTS_DIR = '.clerum-outputs'
+/** The subfolder of CALLER_OUTPUTS_DIR that holds the caller's kept chat attachments. */
+export const KEPT_UPLOADS_DIR = '.uploads'
 
 export type CallerOutputDir = { dir: string } | { failureCode: string }
 export type CallerOutputLookup = CallerOutputDir | { missing: true }
@@ -38,32 +41,41 @@ function failureCode(err: unknown): string {
  * The outputs directory under `callerRoot`, re-verified on every call: the
  * caller root must still be the managed `<host>/users/<key>`, and the
  * directory a real one, not a link. With `create`, a missing directory is made
- * (owner only); without it, a missing one is reported as such.
+ * (owner only); without it, a missing one is reported as such. With
+ * `subfolder`, that folder inside it is resolved by the same rules and
+ * returned instead.
  */
 export function resolveCallerOutputDir(
   callerRoot: string,
-  opts: { create: boolean }
+  opts: { create: boolean; subfolder?: typeof KEPT_UPLOADS_DIR }
 ): CallerOutputLookup {
   try {
     const root = verifyManagedCallerRootPath(callerRoot)
     if (!root) return { failureCode: 'EEXIST' }
     const dir = path.join(root, CALLER_OUTPUTS_DIR)
-    let info: fs.Stats
-    try {
-      info = fs.lstatSync(dir)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
-      if (!opts.create) return { missing: true }
-      fs.mkdirSync(dir, { mode: 0o700 })
-      info = fs.lstatSync(dir)
-    }
-    if (!info.isDirectory() || info.isSymbolicLink() || fs.realpathSync(dir) !== dir) {
-      return { failureCode: 'EEXIST' }
-    }
-    return { dir }
+    const verified = verifiedDir(dir, opts.create)
+    if (!('dir' in verified) || opts.subfolder === undefined) return verified
+    return verifiedDir(path.join(dir, opts.subfolder), opts.create)
   } catch (err) {
     return { failureCode: failureCode(err) }
   }
+}
+
+/** `dir` when it is a real directory at its own real path; made owner-only when missing and `create`. */
+function verifiedDir(dir: string, create: boolean): CallerOutputLookup {
+  let info: fs.Stats
+  try {
+    info = fs.lstatSync(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    if (!create) return { missing: true }
+    fs.mkdirSync(dir, { mode: 0o700 })
+    info = fs.lstatSync(dir)
+  }
+  if (!info.isDirectory() || info.isSymbolicLink() || fs.realpathSync(dir) !== dir) {
+    return { failureCode: 'EEXIST' }
+  }
+  return { dir }
 }
 
 /**

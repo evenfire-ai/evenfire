@@ -33,6 +33,12 @@ export interface ProviderDecisionIdentity extends ProviderIdentity {
 }
 
 export interface IncomingMessage {
+  /**
+   * Set by admission when the message's attachments could not be kept on the
+   * Host for a later save: why, and for a space refusal the bytes short.
+   * Never persisted, so a resumed task does not carry it.
+   */
+  keepRefusal?: { code: string; neededBytes?: number }
   content: string
   channelType: 'telegram' | 'email' | 'slack' | 'teams' | 'rpc'
   channelId: string

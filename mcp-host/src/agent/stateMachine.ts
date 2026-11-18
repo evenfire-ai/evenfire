@@ -18,7 +18,7 @@ import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
 import { LlmErrorCode } from '../core/errors'
 // Phase 6 imports
-import type { ApprovalConfig } from '../core/extensions/approvalTypes'
+import { type ApprovalConfig, approvalInChannel } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { STATELESS_CRON_APPROVAL_PROMPT } from '../core/extensions/mcpApprovalGateController'
 import type { GuardrailsConfig } from '../core/guardrails/config'
@@ -46,6 +46,12 @@ import type { PromptCache } from '../llm/promptCache'
 import { resolveContextWindow } from '../llm/registryCore'
 import { logger } from '../logger'
 import { McpManager } from '../mcp'
+import {
+  KEPT_FILES_DELETE_APPROVAL_TOOL,
+  keptFilesDeleteInstruction,
+  keptFilesDeleteNotification,
+  keptFilesDeleteRedactor,
+} from '../progress/approvalInputPreview'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
 import type { TaskError } from '../queue/types'
@@ -1627,8 +1633,7 @@ export class AgentStateMachine extends EventEmitter {
         : 'none'
 
     // Check if the user's channel can approve
-    const canApproveViaChannel =
-      this.approvalConfig && this.approvalConfig.defaultPolicy !== 'cli_only'
+    const canApproveViaChannel = approvalInChannel(this.approvalConfig)
 
     if (workflowName && canApproveViaChannel) {
       return [
@@ -1644,6 +1649,35 @@ export class AgentStateMachine extends EventEmitter {
         `Approval needed to run workflow ${workflowName}.`,
         'Please approve through the configured approval channel.',
       ].join(' ')
+    }
+
+    if (approval.tool_name === KEPT_FILES_DELETE_APPROVAL_TOOL) {
+      // The user approves a permanent delete by the files it lists: the
+      // Desktop card text (one line per file with kind, whole name, size and
+      // date, redacted and escaped, cut at APPROVAL_INPUT_PREVIEW_BYTES with a
+      // line that says so), followed by the instruction. The delete's
+      // validateParams refused the call before this point when the card does
+      // not fit one message of the channel; if the inputs changed since, the
+      // card is still sent whole and the mismatch is logged.
+      const card = keptFilesDeleteNotification(
+        approval.parameters,
+        keptFilesDeleteRedactor(this.secretEntriesProvider),
+        keptFilesDeleteInstruction({
+          approveInChannel: canApproveViaChannel,
+          channelType,
+          requestId: approval.request_id,
+        }),
+        channelType
+      )
+      if (card) {
+        if (!card.fits) {
+          logger.error(
+            { requestId: approval.request_id, channelType, size: card.size, max: card.max },
+            'Kept-files delete card is over the one-message limit of its channel; the card is sent whole'
+          )
+        }
+        return card.text
+      }
     }
 
     if (approval.description === STATELESS_CRON_APPROVAL_PROMPT) {

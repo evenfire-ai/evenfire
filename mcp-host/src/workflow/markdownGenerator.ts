@@ -8,7 +8,7 @@ import {
   replacedBytes,
   writeArtifact,
 } from './artifactOutput'
-import type { InternalToolResult } from './types'
+import type { InternalToolExecutionOptions, InternalToolResult } from './types'
 
 /** The file text, or an error saying what content must be; never a stringified array or object. */
 function markdownContent(value: unknown): string | { error: string } {
@@ -31,7 +31,8 @@ function markdownContent(value: unknown): string | { error: string } {
 
 export async function runGenerateMarkdown(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  options?: InternalToolExecutionOptions
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'md', 'output')
@@ -40,7 +41,12 @@ export async function runGenerateMarkdown(
 
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
-    enforceQuota(outputDir, Buffer.byteLength(content, 'utf-8'), replacedBytes(target))
+    enforceQuota(
+      outputDir,
+      Buffer.byteLength(content, 'utf-8'),
+      replacedBytes(target),
+      options?.keptRoomBytes
+    )
     writeArtifact(target, content)
 
     return artifactResult(target, 'md')

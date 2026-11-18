@@ -1114,7 +1114,13 @@ export class WorkflowService {
         const scopedGfsTools = [
           // A workflow step has no incoming message, so no file reference pins a version.
           ...(gfsScopes.has('gfs.read')
-            ? buildGfsReadTools(gfsClient, { referencedFiles: new Map() })
+            ? buildGfsReadTools(gfsClient, {
+                referencedFiles: new Map(),
+                // No download runs in a workflow step (no store), so no
+                // result names a write tool.
+                writeTools: { editText: false, saveBySourcePath: false },
+                keptFilesDelete: false,
+              })
             : []),
           ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
         ].filter(tool => requestedGfsToolNames.has(tool.name))

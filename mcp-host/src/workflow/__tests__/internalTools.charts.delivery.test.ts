@@ -269,14 +269,14 @@ describe('chart size limits', () => {
   })
 
   it('charges the quota for the PNG written, not for the canvas it was drawn on', async () => {
-    const prev = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-    process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1'
+    const prev = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+    process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1'
     try {
       const result = await chart().execute({ ...yearly, width: 1600, height: 900 }, outputDir)
       expect(result.success).toBe(true)
     } finally {
-      if (prev === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-      else process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = prev
+      if (prev === undefined) delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      else process.env.CLERUM_GENERATED_FILES_QUOTA_MB = prev
     }
   })
 

@@ -5,7 +5,6 @@ import type { ProgressStep } from './types'
 export interface SuspendedEventData {
   taskId: string
   requestId: string
-  toolName: string
   displayName: string
   reason?: string
 }

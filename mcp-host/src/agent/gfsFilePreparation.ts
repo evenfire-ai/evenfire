@@ -11,7 +11,10 @@ import type {
 import type { ToolOutput } from '../core/types'
 import { normalizeRid } from '../internalTools/gfsContentRead'
 import { GFS_FILE_LIMITS } from '../internalTools/gfsFilePolicy'
-import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../internalTools/gfsReadTypes'
+import {
+  type GfsGuidanceWriteTools,
+  gfsLocalProcessingGuidance,
+} from '../internalTools/gfsReadTypes'
 import { gfsStoreSpaceGuidance } from '../internalTools/gfsSpaceGuidance'
 import type { FileReferenceResolution } from './fileReferenceResolver'
 import type { TaskExecutionBudget } from './taskExecutionBudget'
@@ -33,7 +36,7 @@ export function hasLargeAvailableGfsReferences(
   )
 }
 
-function failureCode(content: string): GfsPreparationFailure {
+function failureCode(content: string, keptFilesDelete: boolean): GfsPreparationFailure {
   // Read only the producer's fixed public error envelope; never forward its text.
   if (Buffer.byteLength(content, 'utf8') > GFS_FILE_LIMITS.errorBytes) return 'download_failed'
   const http = /^Error: GFS read failed \(gfsc (\d{3}): [a-z_]+(?:, retry after \d+s)?\)$/.exec(
@@ -55,7 +58,8 @@ function failureCode(content: string): GfsPreparationFailure {
   )
   if (space) {
     const code = space[1] as 'disk_full' | 'host_quota_exceeded'
-    if (content.slice(space[0].length) !== gfsStoreSpaceGuidance(code)) return 'download_failed'
+    if (content.slice(space[0].length) !== gfsStoreSpaceGuidance(code, { keptFilesDelete }))
+      return 'download_failed'
     return code === 'disk_full' ? 'disk_full' : 'quota_exceeded'
   }
   const fixed = /^Error: GFS (?:download(?: store)?|read) failed \(([a-z_]+)\)$/.exec(content)?.[1]
@@ -81,7 +85,8 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function checkedPreparation(
   output: ToolOutput,
-  reference: FileReferenceV1
+  reference: FileReferenceV1,
+  writeTools: GfsGuidanceWriteTools
 ): PreparedGfsFile | undefined {
   if (
     reference.source.kind !== 'gfs' ||
@@ -152,7 +157,7 @@ function checkedPreparation(
     boundedOutputOnly: true,
     wholeFileToContextAllowed: false,
     // Publish our trusted instructions, never instruction text from a tool result.
-    processingInstructions: GFS_LOCAL_PROCESSING_GUIDANCE,
+    processingInstructions: gfsLocalProcessingGuidance(writeTools),
   }
   return {
     referenceId: reference.id,
@@ -190,6 +195,13 @@ export async function prepareGfsFiles(
   if (resolutions.length > FILE_REFERENCE_MAX_COUNT)
     throw new Error('Too many GFS file references to prepare')
   const prepared: PreparedGfsFile[] = []
+  // The receipts name the write tools of the registry the download runs in.
+  const writeTools: GfsGuidanceWriteTools = {
+    editText: context.config.toolRegistry.get('clerum__gfs_edit_text') !== null,
+    saveBySourcePath: context.config.toolRegistry.get('clerum__gfs_write') !== null,
+  }
+  // The download's storage-full refusal names the delete only where it exists.
+  const keptFilesDelete = context.config.toolRegistry.get('clerum__kept_files_delete') !== null
   for (const { availability, reference, surfaces } of resolutions) {
     if (
       availability !== 'available' ||
@@ -245,8 +257,8 @@ export async function prepareGfsFiles(
       context.budget.assertTime()
       prepared.push(
         output.is_error
-          ? unavailable(failureCode(output.content))
-          : (checkedPreparation(output, reference) ?? unavailable('invalid_response'))
+          ? unavailable(failureCode(output.content, keptFilesDelete))
+          : (checkedPreparation(output, reference, writeTools) ?? unavailable('invalid_response'))
       )
     } catch {
       context.config.abortSignal?.throwIfAborted()

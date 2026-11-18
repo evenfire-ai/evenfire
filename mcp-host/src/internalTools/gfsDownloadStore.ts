@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
+import { constants, lstatSync, unlinkSync } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { logger } from '../logger'
 import type { GfsImageSource } from '../visualInput/policy'
+import { CALLER_OUTPUTS_DIR, KEPT_UPLOADS_DIR } from '../workspace/callerOutputs'
 import {
   GFS_DOWNLOADS_TRASH_PREFIX,
   RETIRED_GFS_DOWNLOAD_STORE_PREFIX,
@@ -19,6 +20,7 @@ import {
   openPrivateStoreObject,
   verifyPrivateStoreDirectory,
 } from './gfsStorePrivateFiles'
+import { SAVE_LEDGER_DIR, ledgerRecordFileName } from './keptFiles'
 
 const GFS_DOWNLOAD_STORE_LOG_COMPONENT = 'GfsDownloadStore'
 
@@ -88,8 +90,19 @@ export type GfsDownloadStoreErrorCode =
   | 'workspace_unavailable'
 
 export class GfsDownloadStoreError extends Error {
-  constructor(readonly code: GfsDownloadStoreErrorCode) {
+  /**
+   * For a refused keep (reserveKept) only: the bytes short, the largest
+   * shortfall of the failed checks. Absent on every other refusal.
+   */
+  declare readonly neededBytes?: number
+
+  constructor(
+    readonly code: GfsDownloadStoreErrorCode,
+    neededBytes?: number
+  ) {
     super(`GFS download store failed (${code})`)
+    if (neededBytes !== undefined)
+      Object.defineProperty(this, 'neededBytes', { value: neededBytes, enumerable: true })
     this.name = 'GfsDownloadStoreError'
   }
 }
@@ -181,6 +194,55 @@ interface VolumeSpace {
   bsize: bigint
   blocks: bigint
   bavail: bigint
+}
+
+/** The largest kept record read back. */
+const KEPT_RECORD_MAX_BYTES = 64 * 1024
+
+/**
+ * The `createdAt` of a kept file's record, read the way meta.json is (no link
+ * followed, non-blocking, bounded), with the record's own identity for its
+ * removal; undefined when there is no readable record.
+ */
+async function readKeptRecord(
+  recordPath: string
+): Promise<{ createdAtMs: number; info: import('node:fs').Stats } | undefined> {
+  let handle: import('node:fs/promises').FileHandle
+  try {
+    handle = await fs.open(
+      recordPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    )
+  } catch {
+    return undefined
+  }
+  try {
+    const info = await handle.stat()
+    if (!info.isFile() || info.size > KEPT_RECORD_MAX_BYTES) return undefined
+    const parsed: unknown = JSON.parse(await handle.readFile('utf8'))
+    const createdAt = (parsed as { createdAt?: unknown } | null)?.createdAt
+    const createdAtMs = typeof createdAt === 'string' ? Date.parse(createdAt) : Number.NaN
+    return Number.isFinite(createdAtMs) ? { createdAtMs, info } : undefined
+  } catch {
+    return undefined
+  } finally {
+    await handle.close().catch(() => undefined)
+  }
+}
+
+/**
+ * Removes `file` only if it is still the file judged (same `dev` and `ino`),
+ * in one synchronous block, so a file written in its place meanwhile stays.
+ */
+function removeIfSame(file: string, judged: { dev: number; ino: number }): boolean {
+  try {
+    const now = lstatSync(file)
+    if (now.dev !== judged.dev || now.ino !== judged.ino || !now.isFile()) return false
+    unlinkSync(file)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -600,6 +662,20 @@ export class GfsDownloadStore {
   private readonly active = new Map<string, ActiveTransfer>()
   /** Duplicates the last sweep could not remove, by directory; see sweep(). */
   private held = new Map<string, HeldCopy>()
+  /**
+   * Bytes of every regular file left in each caller's kept folder
+   * (`users/<key>/.clerum-outputs`: its top level, `.save-ledger/` and the
+   * kept chat attachments in `.uploads/`), by
+   * caller key, recounted from disk by every sweep. They count in the budget;
+   * they are never evicted.
+   */
+  private kept = new Map<string, number>()
+  /** Keeps admitted by reserveKept whose files are being written. */
+  private readonly keptReservations = new Map<
+    number,
+    { callerIdentity: string; sizeBytes: number }
+  >()
+  private nextKeptReservation = 0
   private readonly activeByCaller = new Map<string, number>()
   /** Keyed by `pinKey(callerIdentity, ownerId)`: callers never share or see a pin. */
   private readonly pins = new Map<string, Set<string>>()
@@ -1413,7 +1489,252 @@ export class GfsDownloadStore {
     for (const transfer of this.active.values()) counted.add(transfer.directory)
     for (const directory of held.keys()) if (counted.has(directory)) held.delete(directory)
     this.held = held
+    await this.sweepKept(now)
     return totals
+  }
+
+  /**
+   * Expires and recounts the kept folder of every caller:
+   * `users/<key>/.clerum-outputs`, its top level (generated files),
+   * `.save-ledger/` (their records) and `.uploads/` (kept chat attachments,
+   * `<id>.bin` with its record `<id>.json`). No other folder of the caller root is
+   * read: the Host expires only files it created. Every regular file there
+   * expires at the later of its readable record's `createdAt` and its own
+   * `mtime`, each counted as now when ahead of now, plus the retention; a file
+   * with no readable record (a record itself, a temporary file, a leftover)
+   * ages by its own `mtime`. An expired file is removed with its record.
+   * Only regular files are judged. A folder that is not a real directory is
+   * not entered; a missing one is silent; any other failure is reported and
+   * the sweep goes on, the caller keeping its previous count.
+   */
+  private async sweepKept(now: number): Promise<void> {
+    const counted = new Map<string, number>()
+    const usersRoot = path.join(this.hostRoot, USERS_DIRECTORY)
+    let users: import('node:fs').Dirent[]
+    try {
+      if (!(await fs.lstat(usersRoot)).isDirectory()) {
+        this.kept = counted
+        return
+      }
+      users = await fs.readdir(usersRoot, { withFileTypes: true })
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') this.reportKeptSweepFailure(error)
+      this.kept = counted
+      return
+    }
+    let removed = 0
+    for (const user of users) {
+      if (!user.isDirectory()) continue
+      const outputs = path.join(usersRoot, user.name, CALLER_OUTPUTS_DIR)
+      const tally = { bytes: 0, removed: 0 }
+      try {
+        if (await this.isRealDirectory(outputs)) {
+          const ledger = path.join(outputs, SAVE_LEDGER_DIR)
+          const ledgerReal = await this.isRealDirectory(ledger)
+          await this.sweepKeptPlace(outputs, now, tally, name =>
+            ledgerReal ? path.join(ledger, ledgerRecordFileName(name)) : undefined
+          )
+          if (ledgerReal) await this.sweepKeptPlace(ledger, now, tally, () => undefined)
+          // Kept attachments: `<id>.bin` with its record `<id>.json`.
+          const uploads = path.join(outputs, KEPT_UPLOADS_DIR)
+          if (await this.isRealDirectory(uploads))
+            await this.sweepKeptPlace(uploads, now, tally, name => {
+              const id = /^([0-9a-f]{12})\.bin$/.exec(name)?.[1]
+              return id === undefined ? undefined : path.join(uploads, `${id}.json`)
+            })
+        }
+      } catch (error) {
+        this.reportKeptSweepFailure(error)
+        tally.bytes = Math.max(tally.bytes, this.kept.get(user.name) ?? 0)
+      }
+      removed += tally.removed
+      if (tally.bytes > 0) counted.set(user.name, tally.bytes)
+    }
+    this.kept = counted
+    if (removed > 0)
+      logger.info(
+        { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, removedKeptFiles: removed },
+        'GFS download store removed expired kept files'
+      )
+  }
+
+  /** True for a directory that is not a link; false when missing or anything else. */
+  private async isRealDirectory(target: string): Promise<boolean> {
+    try {
+      return (await fs.lstat(target)).isDirectory()
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') return false
+      throw error
+    }
+  }
+
+  /**
+   * Judges every regular file directly in `place`: expired ones are removed
+   * with their record (`recordOf` names it), the rest add to `tally.bytes`.
+   */
+  private async sweepKeptPlace(
+    place: string,
+    now: number,
+    tally: { bytes: number; removed: number },
+    recordOf: (name: string) => string | undefined
+  ): Promise<void> {
+    for (const entry of await fs.readdir(place, { withFileTypes: true })) {
+      if (!entry.isFile()) continue
+      const file = path.join(place, entry.name)
+      let info: import('node:fs').Stats
+      try {
+        info = await fs.lstat(file)
+      } catch (error) {
+        if (errorCode(error) === 'ENOENT') continue
+        throw error
+      }
+      if (!info.isFile()) continue
+      const recordPath = recordOf(entry.name)
+      const record = recordPath === undefined ? undefined : await readKeptRecord(recordPath)
+      const fileTime = Math.min(info.mtimeMs, now)
+      const recordTime = record === undefined ? undefined : Math.min(record.createdAtMs, now)
+      const expiresAt =
+        (recordTime === undefined ? fileTime : Math.max(fileTime, recordTime)) +
+        GFS_FILE_LIMITS.retentionMs
+      if (expiresAt > now) {
+        tally.bytes += info.size
+        continue
+      }
+      if (removeIfSame(file, info)) tally.removed += 1
+      else {
+        tally.bytes += info.size
+        continue
+      }
+      if (record !== undefined && recordPath !== undefined && removeIfSame(recordPath, record.info))
+        tally.removed += 1
+    }
+  }
+
+  private reportKeptSweepFailure(error: unknown): void {
+    recordGfsDownloadExpiry('sweep_failed')
+    logger.warn(
+      { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error) },
+      'GFS download store could not read a kept-files folder; the next sweep retries it'
+    )
+  }
+
+  /**
+   * What the kept bounds leave: the bytes one caller's kept files may still
+   * grow by (half the budget) and every caller's (three quarters), negative
+   * when already over. Keeps and generations apply this one formula.
+   */
+  private keptBoundsLeft(budget: bigint, callerIdentity: string): { caller: bigint; host: bigint } {
+    return {
+      caller: budget / 2n - this.keptUsage(callerIdentity),
+      host: (budget * 3n) / 4n - this.keptUsage(),
+    }
+  }
+
+  /**
+   * The bytes one caller's generated files may add before the kept bounds
+   * refuse: the smaller of what the two bounds leave, negative when already
+   * over. It first removes every expired copy and kept file on the Host (one
+   * sweep), then reads the volume; a volume that cannot be measured is read
+   * once more before `volume_unmeasurable` is thrown. Not initialized:
+   * `workspace_unavailable`; closed or closing: `download_busy`. Nothing is
+   * reserved: the generator writes after this returns (see enforceQuota).
+   */
+  async keptRoom(input: { callerIdentity: string }): Promise<number> {
+    if (typeof input.callerIdentity !== 'string' || input.callerIdentity.length === 0)
+      throw new GfsDownloadStoreError('caller_mismatch')
+    return this.serialize(async () => {
+      this.assertAdmitting()
+      await this.sweep(Date.now())
+      let volume: VolumeSpace
+      try {
+        volume = await this.measureVolume()
+      } catch (error) {
+        if (!(error instanceof GfsDownloadStoreError) || error.code !== 'volume_unmeasurable')
+          throw error
+        volume = await this.measureVolume()
+      }
+      const left = this.keptBoundsLeft(retainedBudget(volume), input.callerIdentity)
+      return Number(left.caller < left.host ? left.caller : left.host)
+    })
+  }
+
+  /** Kept bytes on disk plus live keep reservations, of one caller or of every caller. */
+  private keptUsage(callerIdentity?: string): bigint {
+    let bytes = 0n
+    for (const [caller, size] of this.kept)
+      if (callerIdentity === undefined || caller === callerIdentity) bytes += BigInt(size)
+    for (const reservation of this.keptReservations.values())
+      if (callerIdentity === undefined || reservation.callerIdentity === callerIdentity)
+        bytes += BigInt(reservation.sizeBytes)
+    return bytes
+  }
+
+  /**
+   * Admits a keep of `sizeBytes` for one caller, with the steps of a download
+   * admission: a sweep, one statfs, an eviction plan; `disk_full` when the
+   * free-space need cannot be covered; the keep bounds (the caller's kept
+   * bytes at most half the budget, every caller's at most three quarters,
+   * generated files, records and kept attachments included) and the budget refuse with
+   * `host_quota_exceeded`. Download copies are evicted for it; kept files
+   * never are. A refusal carries `neededBytes`. On success the bytes stay
+   * reserved until the returned release is called: the caller writes its
+   * files outside the store's section and then releases, and the next sweep
+   * counts them from disk. No directory or file is created here.
+   */
+  async reserveKept(input: { callerIdentity: string; sizeBytes: number }): Promise<() => void> {
+    if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 0)
+      throw new RangeError('A kept size must be a non-negative safe integer')
+    if (typeof input.callerIdentity !== 'string' || input.callerIdentity.length === 0)
+      throw new GfsDownloadStoreError('caller_mismatch')
+    return this.serialize(async () => {
+      this.assertAdmitting()
+      await this.sweep(Date.now())
+      const volume = await this.measureVolume()
+      const budget = retainedBudget(volume)
+      const size = BigInt(input.sizeBytes)
+      const plan = this.planEviction(volume, input.sizeBytes)
+      if (!plan.physicalCovered) {
+        let freeable = 0n
+        for (const id of plan.ids)
+          freeable += blockBytes(volume, this.entries.get(id)?.sizeBytes ?? 0)
+        recordGfsDownloadQuota('host', 'free_space')
+        throw new GfsDownloadStoreError(
+          'disk_full',
+          Number(this.physicalDeficit(volume, input.sizeBytes) - freeable)
+        )
+      }
+      const left = this.keptBoundsLeft(budget, input.callerIdentity)
+      const callerShort = size - left.caller
+      const hostShort = size - left.host
+      if (callerShort > 0n || hostShort > 0n) {
+        recordGfsDownloadQuota(callerShort > 0n ? 'caller' : 'host', 'storage_bytes')
+        throw new GfsDownloadStoreError(
+          'host_quota_exceeded',
+          Number(callerShort > hostShort ? callerShort : hostShort)
+        )
+      }
+      if (plan.budgetCovered) await this.evict(plan.ids)
+      if (this.overBudget(input.sizeBytes, budget)) {
+        recordGfsDownloadQuota('host', 'storage_bytes')
+        throw new GfsDownloadStoreError(
+          'host_quota_exceeded',
+          Number(this.usageBytes() + size - budget)
+        )
+      }
+      const deficit = this.physicalDeficit(await this.measureVolume(), input.sizeBytes)
+      if (deficit > 0n) {
+        recordGfsDownloadQuota('host', 'free_space')
+        throw new GfsDownloadStoreError('disk_full', Number(deficit))
+      }
+      const key = this.nextKeptReservation++
+      this.keptReservations.set(key, {
+        callerIdentity: input.callerIdentity,
+        sizeBytes: input.sizeBytes,
+      })
+      return () => {
+        this.keptReservations.delete(key)
+      }
+    })
   }
 
   /**
@@ -1844,6 +2165,10 @@ export class GfsDownloadStore {
     // Use the full outstanding reservation of every active transfer rather
     // than crediting sparse, shared or concurrently written allocation.
     for (const transfer of this.active.values()) required += blockBytes(space, transfer.sizeBytes)
+    // A keep's files are not on disk yet; kept files already written are
+    // already missing from the free space statfs reports.
+    for (const reservation of this.keptReservations.values())
+      required += blockBytes(space, reservation.sizeBytes)
     const available = space.bavail * space.bsize
     return required > available ? required - available : 0n
   }
@@ -1921,14 +2246,14 @@ export class GfsDownloadStore {
     }
   }
 
-  /** Retained bytes: indexed copies, active reservations and held duplicates. */
+  /** Retained bytes: indexed copies, active reservations, held duplicates and kept files with their reservations. */
   private usageBytes(excluded: ReadonlySet<string> = new Set()): bigint {
     let bytes = 0n
     for (const entry of this.entries.values())
       if (!excluded.has(entry.id)) bytes += BigInt(entry.sizeBytes)
     for (const transfer of this.active.values()) bytes += BigInt(transfer.sizeBytes)
     for (const copy of this.held.values()) bytes += BigInt(copy.sizeBytes)
-    return bytes
+    return bytes + this.keptUsage()
   }
 
   /** The only retained-storage limit: Host bytes against the volume budget. */

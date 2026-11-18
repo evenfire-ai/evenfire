@@ -130,6 +130,7 @@ describe('image sends and the session model selection', () => {
       applySessionModelSelection: applySelection,
       dispatch,
       fileReferenceGfs: () => ({ status: 'unsupported' }),
+      keepAttachments: async () => undefined,
       logger: { info: vi.fn(), warn: vi.fn() },
     })
   })

@@ -8,7 +8,7 @@ import {
   replacedBytes,
   writeArtifact,
 } from './artifactOutput'
-import type { InternalToolResult } from './types'
+import type { InternalToolExecutionOptions, InternalToolResult } from './types'
 
 /** Largest box an image placed in a sheet is fitted into, in pixels. */
 const XLSX_MAX_IMAGE_WIDTH = 640
@@ -16,7 +16,8 @@ const XLSX_MAX_IMAGE_HEIGHT = 400
 
 export async function runGenerateXlsx(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  options?: InternalToolExecutionOptions
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'xlsx', 'output')
@@ -34,7 +35,7 @@ export async function runGenerateXlsx(
     // The workbook is already in memory, so a quota breach leaves no partial file.
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
-    enforceQuota(outputDir, built.buffer.byteLength, replacedBytes(target))
+    enforceQuota(outputDir, built.buffer.byteLength, replacedBytes(target), options?.keptRoomBytes)
     writeArtifact(target, built.buffer)
     return {
       ...artifactResult(target, 'xlsx', {

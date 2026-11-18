@@ -1133,7 +1133,7 @@
   },
   {
     "suite": "turnContext.test.ts",
-    "fullName": "prepared GFS receipts tells the model the download cache is full and that the user can only finish or cancel their own tasks, with no offer to delete copies"
+    "fullName": "prepared GFS receipts tells the model the storage is full, that kept files leave after the retention time, and offers no delete the turn does not have"
   },
   {
     "suite": "turnContext.test.ts",

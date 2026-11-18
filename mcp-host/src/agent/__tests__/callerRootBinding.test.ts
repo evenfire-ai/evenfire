@@ -152,6 +152,7 @@ describe('degraded GFS caller-root binding', () => {
         applySessionModelSelection: vi.fn(),
         dispatch,
         fileReferenceGfs: () => ({ status: 'unsupported' }),
+        keepAttachments: async () => undefined,
         gfsSurfaceRuntimeCapability: message => {
           const binding = resolveCallerRootBinding(runtime.workspaceProvider, message)
           bindingRoots.push(binding.root)

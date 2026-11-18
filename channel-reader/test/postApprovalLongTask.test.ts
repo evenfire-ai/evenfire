@@ -122,7 +122,6 @@ describe('post-approval long-running task (Bug A regression — issue #296)', ()
     stream.fireSuspended({
       taskId: 'task-long-1',
       requestId: 'approval-long-1',
-      toolName: 'mcp-x__execute',
       displayName: 'Mcp-x · execute',
       reason: 'approval_required',
     })

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import JSZip from 'jszip'
 import {
   OFFICE_PACKAGE_LIMITS,
+  isOoxmlPackage,
   officePackageHasText,
   officePackageTexts,
 } from '../../artifacts/officePackageText'
@@ -262,5 +263,26 @@ describe('officePackageTexts', () => {
     const texts = officePackageTexts(xlsx)
     expect(texts).toEqual(expect.arrayContaining(['Revenue', needle]))
     expect(officePackageTexts(Buffer.from('not a package'))).toBeNull()
+  })
+})
+
+describe('isOoxmlPackage', () => {
+  it('recognises a zip whose directory lists [Content_Types].xml', async () => {
+    const docx = await pack({
+      '[Content_Types].xml': '<Types/>',
+      'word/document.xml': '<w:document/>',
+    })
+    expect(isOoxmlPackage(docx)).toBe(true)
+  })
+
+  it('does not take a plain zip, text, a truncated package or too many entries for one', async () => {
+    const parts = { '[Content_Types].xml': '<Types/>', 'a.xml': '<a/>', 'b.xml': '<b/>' }
+    const docx = await pack(parts)
+    expect(isOoxmlPackage(docx)).toBe(true)
+    expect(isOoxmlPackage(await pack({ 'notes.txt': 'plain zip' }))).toBe(false)
+    expect(isOoxmlPackage(Buffer.from('[Content_Types].xml in plain text'))).toBe(false)
+    expect(isOoxmlPackage(Buffer.alloc(0))).toBe(false)
+    expect(isOoxmlPackage(docx.subarray(0, docx.length - 30))).toBe(false)
+    expect(isOoxmlPackage(docx, { ...OFFICE_PACKAGE_LIMITS, maxEntries: 2 })).toBe(false)
   })
 })

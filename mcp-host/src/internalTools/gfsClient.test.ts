@@ -256,6 +256,30 @@ describe('gfs runtime gfsc client', () => {
     expect(Buffer.from(body.contentBase64, 'base64').equals(png)).toBe(true)
   })
 
+  it('replaces a file with bytes unchanged as contentBase64 on the conditional write route', async () => {
+    const fetchFn = vi.fn(async (_input: string, _init?: RequestInit) =>
+      jsonResponse({ ok: true, data: { version: 5 } })
+    )
+    const client = createGfscClient(
+      { get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined), fetch: fetchFn },
+      clientOptions
+    )
+    const docx = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x10, 0x80])
+    const contentBase64 = docx.toString('base64')
+    await client.writeBytes({ drive: 'main', resourceId: 'rid/1', contentBase64, ifMatch: 4 })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(
+      'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/rid%2F1/content?drive=main'
+    )
+    const init = fetchFn.mock.calls[0]?.[1]
+    expect(init?.method).toBe('PUT')
+    expect(init?.headers).toMatchObject({ authorization: 'Bearer gfs-access' })
+    const body = JSON.parse(String(init?.body))
+    expect(body).toEqual({ contentBase64, ifMatch: 4 })
+    expect(body).not.toHaveProperty('content')
+    expect(Buffer.from(body.contentBase64, 'base64').equals(docx)).toBe(true)
+  })
+
   it('fails loud when the mounted runtime token file is empty', async () => {
     const client = createGfscClient(
       {
@@ -1115,6 +1139,14 @@ describe('gfsc client retry: cancellation, deadline, scope and jitter', () => {
         'write',
         (client, call) =>
           client.write({ drive: 'main', resourceId: 'rid', content: 'x', ifMatch: 1 }, call),
+      ],
+      [
+        'writeBytes',
+        (client, call) =>
+          client.writeBytes(
+            { drive: 'main', resourceId: 'rid', contentBase64: 'eA==', ifMatch: 1 },
+            call
+          ),
       ],
       [
         'createFile',

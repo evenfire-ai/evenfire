@@ -108,7 +108,9 @@ describe('generated documents are private to their caller', () => {
       undefined,
       undefined,
       undefined,
-      callerRoot
+      callerRoot === undefined
+        ? undefined
+        : { root: callerRoot, room: async () => Number.MAX_SAFE_INTEGER }
     )
   }
 
@@ -140,7 +142,8 @@ describe('generated documents are private to their caller', () => {
 
     const lookup = resolveRpcCallerOutputDir(hostBase, 'user-a')
     expect(lookup).toEqual({ dir: outputsOf(a) })
-    expect(fs.readdirSync(outputsOf(a)).sort()).toEqual(['later.md', 'report.md'])
+    // The save records sit in their own folder next to the files.
+    expect(fs.readdirSync(outputsOf(a)).sort()).toEqual(['.save-ledger', 'later.md', 'report.md'])
     expect(path.basename(a)).toBe(deriveUserKeyFromSource({ sender: 'user-a', channelType: 'rpc' }))
   })
 
@@ -257,6 +260,78 @@ describe('generated documents are private to their caller', () => {
     }
   )
 
+  describe('quota of generated files', () => {
+    const MB = 1024 * 1024
+    let previous: string | undefined
+    beforeEach(() => {
+      previous = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+    })
+    afterEach(() => {
+      if (previous === undefined) delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      else process.env.CLERUM_GENERATED_FILES_QUOTA_MB = previous
+    })
+
+    it("allows 500 MB in a chat caller's folder by default, and not one byte more", () => {
+      const out = outputsOf(rootOf('user-a'))
+      fs.mkdirSync(out, { recursive: true, mode: 0o700 })
+      expect(() => enforceQuota(out, 500 * MB)).not.toThrow()
+      expect(() => enforceQuota(out, 500 * MB + 1)).toThrow(/Output quota exceeded/)
+    })
+
+    it('keeps 50 MB by default in a folder that is not a chat caller folder', () => {
+      const workflowRun = fs.mkdtempSync(path.join(hostBase, 'run-'))
+      expect(() => enforceQuota(workflowRun, 50 * MB)).not.toThrow()
+      expect(() => enforceQuota(workflowRun, 50 * MB + 1)).toThrow(/Output quota exceeded/)
+    })
+
+    it("applies a set value to a chat caller's folder", () => {
+      const out = outputsOf(rootOf('user-a'))
+      fs.mkdirSync(out, { recursive: true, mode: 0o700 })
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1'
+      expect(() => enforceQuota(out, MB)).not.toThrow()
+      expect(() => enforceQuota(out, MB + 1)).toThrow(/Output quota exceeded/)
+    })
+
+    it('falls back to the 500 MB caller default on an invalid value, and says so', () => {
+      const out = outputsOf(rootOf('user-a'))
+      fs.mkdirSync(out, { recursive: true, mode: 0o700 })
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '2GB'
+      const warn = vi.spyOn(logger, 'warn')
+      try {
+        expect(() => enforceQuota(out, 500 * MB)).not.toThrow()
+        expect(() => enforceQuota(out, 500 * MB + 1)).toThrow(/Output quota exceeded/)
+        const reports = warn.mock.calls.filter(([, message]) =>
+          String(message).includes('is not a whole number of megabytes')
+        )
+        expect(reports).toHaveLength(1)
+        expect(reports[0]![0]).toMatchObject({ defaultMB: 500 })
+      } finally {
+        warn.mockRestore()
+      }
+    })
+  })
+
+  it("does not count a caller's kept attachments against the generation quota", () => {
+    const a = rootOf('user-a')
+    const out = outputsOf(a)
+    fs.mkdirSync(path.join(out, '.uploads'), { recursive: true, mode: 0o700 })
+    const MB = 1024 * 1024
+    const previous = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+    process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '2'
+    try {
+      fs.writeFileSync(path.join(out, '.uploads', 'aaaaaaaaaaaa.bin'), Buffer.alloc(1.5 * MB))
+      // 1.5 MB of attachments plus a 1 MB file: under 2 MB with the attachments left out.
+      expect(() => enforceQuota(out, MB)).not.toThrow()
+      // Witness: the same bytes at the folder's top level count.
+      fs.renameSync(path.join(out, '.uploads', 'aaaaaaaaaaaa.bin'), path.join(out, 'big.md'))
+      expect(() => enforceQuota(out, MB)).toThrow(/Output quota exceeded/)
+    } finally {
+      if (previous === undefined) delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      else process.env.CLERUM_GENERATED_FILES_QUOTA_MB = previous
+    }
+  })
+
   it('keeps the free space of the Host volume, and removes nothing to make room', async () => {
     const a = rootOf('user-a')
     await markdown(a, 'kept.md', '# kept\n')
@@ -265,7 +340,8 @@ describe('generated documents are private to their caller', () => {
     const result = await markdown(a, 'report.md', '# too much\n')
     expect(result.is_error).toBe(true)
     expect(result.content).toMatch(/Not enough free space/)
-    expect(fs.readdirSync(outputsOf(a))).toEqual(['kept.md'])
+    // Nothing was removed to make room: the earlier file and its record stay.
+    expect(fs.readdirSync(outputsOf(a)).sort()).toEqual(['.save-ledger', 'kept.md'])
   })
 
   it('keeps only the minimum free space on the root disk in development', async () => {

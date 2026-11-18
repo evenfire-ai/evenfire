@@ -15,6 +15,7 @@ import path from 'node:path'
 import { TaskExecutor, type TaskExecutorDeps } from '../../../agent/taskExecutor'
 import { BRIDGE_TOOL_NAMES } from '../../../capabilities/toolCatalogTools'
 import { config as appConfig } from '../../../config'
+import { GfsDownloadStore } from '../../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../../lifecycle/taskLifecycle'
 import { PromptCache } from '../../../llm/promptCache'
 import type { SingleTurnProvider } from '../../../llm/types'
@@ -51,6 +52,13 @@ vi.mock('fs', async original => {
       return { ...reading, blocks: reading.bavail, bfree: reading.bavail }
     },
   }
+})
+
+// The download store's volume reads as sized to its free space, likewise.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof import('node:fs/promises')>()
+  const { freeSpaceSizedStatfs } = await import('../../../__tests__/fixtures/gfsStoreTestKit')
+  return { ...actual, statfs: freeSpaceSizedStatfs(actual.statfs) }
 })
 
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
@@ -96,6 +104,7 @@ const PPTX_ARGS = {
 }
 
 const managers: McpManager[] = []
+const stores: GfsDownloadStore[] = []
 const recordCatalog = (count: number, server: 'alpha' | 'beta'): RemoteTool[] =>
   Array.from({ length: count }, (_, index) => ({
     name: `record__read_${String(index).padStart(3, '0')}`,
@@ -186,6 +195,7 @@ beforeEach(() => {
 afterEach(async () => {
   vi.restoreAllMocks()
   await Promise.all(managers.splice(0).map(manager => manager.close()))
+  for (const store of stores.splice(0)) await store.close()
   remote.catalogs.clear()
   remote.calls.mockClear()
   Object.assign(appConfig, savedConfig)
@@ -294,10 +304,16 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
         snapshotDailyLogs: vi.fn(async () => 'daily snapshot'),
       }
     : undefined
+  // As at Host startup: an initialized download store, which every chat
+  // generation reads its kept-files room from.
+  const store = new GfsDownloadStore(outputDir)
+  stores.push(store)
+  await store.initialize()
   const deps: TaskExecutorDeps = {
     conversationManager: new ConversationManager(),
     llmProvider: provider,
     mcpManager: manager,
+    gfsDownloadStore: store,
     workspaceService: workspaceService as unknown as TaskExecutorDeps['workspaceService'],
     promptCache: scenario.promptCache ? new PromptCache() : undefined,
     modelName: 'gpt-5.6-luna',

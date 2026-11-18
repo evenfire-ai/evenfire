@@ -77,7 +77,7 @@ describe('chat internal-tool arguments are checked before the tool runs', () => 
       undefined,
       undefined,
       undefined,
-      root
+      { root: root, room: async () => Number.MAX_SAFE_INTEGER }
     )
     return registry.get(name)!.execute(args)
   }
@@ -136,7 +136,10 @@ describe('chat internal-tool arguments are checked before the tool runs', () => 
       branding: null,
     })
     expect(result.is_error, result.content).toBe(false)
-    expect(fs.readdirSync(path.join(root, CALLER_OUTPUTS_DIR))).toEqual(['ok.xlsx'])
+    expect(fs.readdirSync(path.join(root, CALLER_OUTPUTS_DIR)).sort()).toEqual([
+      '.save-ledger',
+      'ok.xlsx',
+    ])
     expect(result.attachments).toHaveLength(1)
     expect(result.attachments![0]).toMatchObject({ sourceTool: 'clerum__generate_xlsx' })
     expect(

@@ -134,12 +134,22 @@ function warnSkip(
   )
 }
 
+function skip(
+  reason: string,
+  sourceTool: string,
+  artifact: ArtifactMetadata,
+  failure?: { stage: string; errorName?: string; errorCode?: string }
+): { skipped: string } {
+  warnSkip(reason, sourceTool, artifact, failure)
+  return { skipped: reason }
+}
+
 /**
  * Whether `content` holds an entry: its exact text, or, for an entry that is a
  * number, that number as any locale writes it ("4111 1111 1111 1111",
  * "3.141.592.653").
  */
-function textContainsRedactableSecretEntry(
+export function textContainsRedactableSecretEntry(
   content: string,
   entries: ArtifactSecretEntry[]
 ): boolean {
@@ -231,34 +241,35 @@ export function isInternalGeneratedArtifactAttachment(attachment: Attachment): b
   return attachment.mimeType.split(';', 1)[0]?.toLowerCase() === expectedMime
 }
 
+/**
+ * What the attachment check decided for one generated file: the attachment it
+ * delivers, or the reason it withheld the file (the reason it logs).
+ */
+export type GeneratedArtifactAttachmentResult = { attachment: Attachment } | { skipped: string }
+
 export function buildGeneratedArtifactAttachment(
   params: BuildGeneratedArtifactAttachmentParams
-): Attachment | null {
+): GeneratedArtifactAttachmentResult {
   const expectedFormat = expectedInternalGeneratedArtifactFormat(params.sourceTool)
   if (!expectedFormat) {
-    warnSkip('source_tool_not_allowed', params.sourceTool, params.artifact)
-    return null
+    return skip('source_tool_not_allowed', params.sourceTool, params.artifact)
   }
 
   if (params.artifact.format !== expectedFormat) {
-    warnSkip('format_does_not_match_source_tool', params.sourceTool, params.artifact)
-    return null
+    return skip('format_does_not_match_source_tool', params.sourceTool, params.artifact)
   }
 
   if (!isSafeArtifactFilename(params.artifact.name)) {
-    warnSkip('unsafe_filename', params.sourceTool, params.artifact)
-    return null
+    return skip('unsafe_filename', params.sourceTool, params.artifact)
   }
 
   if (extension(params.artifact.name) !== expectedFormat) {
-    warnSkip('extension_does_not_match_format', params.sourceTool, params.artifact)
-    return null
+    return skip('extension_does_not_match_format', params.sourceTool, params.artifact)
   }
 
   const mimeType = expectedInternalGeneratedArtifactMime(expectedFormat)
   if (!mimeType) {
-    warnSkip('mime_not_allowed', params.sourceTool, params.artifact)
-    return null
+    return skip('mime_not_allowed', params.sourceTool, params.artifact)
   }
 
   let opened
@@ -273,25 +284,21 @@ export function buildGeneratedArtifactAttachment(
       params.writtenSha256 !== undefined &&
       createHash('sha256').update(fileBuffer).digest('hex') !== params.writtenSha256
     ) {
-      warnSkip('artifact_replaced_before_delivery', params.sourceTool, params.artifact)
-      return null
+      return skip('artifact_replaced_before_delivery', params.sourceTool, params.artifact)
     }
     const secretEntries = params.secretEntriesProvider?.() ?? []
     if (shownTextHoldsSecretEntry(params.shownText, secretEntries)) {
-      warnSkip('binary_redaction_unavailable', params.sourceTool, params.artifact)
-      return null
+      return skip('binary_redaction_unavailable', params.sourceTool, params.artifact)
     }
     if (isBinaryArtifactFormat(expectedFormat)) {
       // Binary artifacts are not redacted byte-by-byte here, so one that may
       // hold a secret is withheld: when the source payload that produced it
       // holds one, and, for an Office package, when the text it delivers does.
       if (secretEntries.length > 0 && params.sourcePayload === undefined) {
-        warnSkip('binary_source_payload_unavailable', params.sourceTool, params.artifact)
-        return null
+        return skip('binary_source_payload_unavailable', params.sourceTool, params.artifact)
       }
       if (sourcePayloadContainsRedactableSecretEntry(params.sourcePayload, secretEntries)) {
-        warnSkip('binary_redaction_unavailable', params.sourceTool, params.artifact)
-        return null
+        return skip('binary_redaction_unavailable', params.sourceTool, params.artifact)
       }
       // A generator can write a value in a form the payload never spelled, as
       // a sheet stores the text "3,141,592,653" as the number 3141592653, so
@@ -316,12 +323,11 @@ export function buildGeneratedArtifactAttachment(
             : null
         )
         if (found !== false) {
-          warnSkip(
+          return skip(
             found ? 'binary_redaction_unavailable' : 'office_package_unreadable',
             params.sourceTool,
             params.artifact
           )
-          return null
         }
       }
     }
@@ -334,8 +340,7 @@ export function buildGeneratedArtifactAttachment(
         entry => !text.includes(entry.value)
       )
       if (split.length > 0) {
-        warnSkip('text_redaction_unavailable', params.sourceTool, params.artifact)
-        return null
+        return skip('text_redaction_unavailable', params.sourceTool, params.artifact)
       }
     }
     stage = 'redact'
@@ -350,15 +355,13 @@ export function buildGeneratedArtifactAttachment(
         textContainsRedactableSecretEntry(text, secretEntries)
       )
     ) {
-      warnSkip('text_redaction_unavailable', params.sourceTool, params.artifact)
-      return null
+      return skip('text_redaction_unavailable', params.sourceTool, params.artifact)
     }
     if (redacted.buffer.byteLength > params.maxBytes) {
-      warnSkip('redacted_artifact_too_large', params.sourceTool, params.artifact)
-      return null
+      return skip('redacted_artifact_too_large', params.sourceTool, params.artifact)
     }
 
-    return {
+    const attachment: Attachment = {
       id: safeAttachmentId(params.sourceTool, params.artifact.name),
       kind: 'file',
       mimeType,
@@ -373,17 +376,17 @@ export function buildGeneratedArtifactAttachment(
       redactionState: redacted.redactionState,
       producer: INTERNAL_GENERATED_ARTIFACT_PRODUCER,
     }
+    return { attachment }
   } catch (err) {
     const reason =
       err instanceof ArtifactPathError ? `artifact_path_error_${err.status}` : 'artifact_read_error'
     // The name and code say what failed; the message may hold a path, so it is left out.
     const code = (err as NodeJS.ErrnoException | ArtifactPathError | undefined)?.code
-    warnSkip(reason, params.sourceTool, params.artifact, {
+    return skip(reason, params.sourceTool, params.artifact, {
       stage,
       errorName: err instanceof Error ? err.name : typeof err,
       ...(typeof code === 'string' ? { errorCode: code } : {}),
     })
-    return null
   } finally {
     if (opened) closeFd(opened.fd)
   }

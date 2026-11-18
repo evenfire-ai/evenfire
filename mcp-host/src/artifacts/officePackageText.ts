@@ -90,6 +90,20 @@ export function officePackageHasText(
 }
 
 /**
+ * Whether the bytes are an Office Open XML package: a plain zip whose central
+ * directory reads within `limits` and lists `[Content_Types].xml`. Only the
+ * directory is read; no part is inflated.
+ */
+export function isOoxmlPackage(
+  buffer: Buffer,
+  limits: OfficePackageLimits = OFFICE_PACKAGE_LIMITS
+): boolean {
+  if (buffer.length < 22) return false
+  const entries = centralDirectory(buffer, limits.maxEntries)
+  return entries?.some(entry => entry.name === '[Content_Types].xml') ?? false
+}
+
+/**
  * Every text the scan above reads in the package, numbers as stored: per XML
  * part, its text nodes run together, and each attribute value. Null when the
  * package cannot be read within the limits.

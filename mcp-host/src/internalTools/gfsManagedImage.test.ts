@@ -12,7 +12,7 @@ import {
   GfsDownloadStoreError,
   type GfsDownloadStoreErrorCode,
 } from './gfsDownloadStore'
-import { GFS_CACHE_FULL_GUIDANCE, GFS_DISK_FULL_GUIDANCE } from './gfsSpaceGuidance'
+import { GFS_DISK_FULL_GUIDANCE, GFS_STORE_FULL_GUIDANCE } from './gfsSpaceGuidance'
 
 const MIB = 1024 * 1024
 const target = { drive: 'main', resourceId: 'a'.repeat(32) }
@@ -134,6 +134,8 @@ function scenario(
     evidence: 'fixture-catalog',
   }))
   const tool = buildGfsReadTools(client, {
+    writeTools: { editText: true, saveBySourcePath: true },
+    keptFilesDelete: false,
     referencedFiles: new Map(),
     downloadStore: store as unknown as GfsDownloadStore,
     callerIdentity: 'caller-a',
@@ -362,7 +364,7 @@ describe('GFS download store errors at the tool boundary', () => {
     code === 'disk_full'
       ? `GFS download store failed (disk_full)\n${GFS_DISK_FULL_GUIDANCE}`
       : code === 'host_quota_exceeded'
-        ? `GFS download store failed (host_quota_exceeded)\n${GFS_CACHE_FULL_GUIDANCE}`
+        ? `GFS download store failed (host_quota_exceeded)\n${GFS_STORE_FULL_GUIDANCE}`
         : `GFS download store failed (${code})`
 
   it.each(codes)('surfaces store code %s to the model', async code => {

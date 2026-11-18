@@ -8,8 +8,8 @@
  *   - **collective** (root = `<workspacePath>`): agent identity
  *     (`IDENTITY/SOUL/AGENTS/USER.md`), collective `MEMORY.md`, `memories/`.
  *   - **user** (root = `<workspacePath>/users/<userKey>`): everything else the
- *     agent writes on behalf of a human — `daily/`, spillover, output, private
- *     memory.
+ *     agent writes on behalf of a human — `daily/` and private memory. Spillover
+ *     is not per user: it sits at `<workspacePath>/spillover/`.
  *
  * Routing is by path class ({@link isCollectivePath}). Because the per-user
  * instance is rooted at the user's subtree, a path naming another user
@@ -65,8 +65,7 @@ function normalizeRel(relativePath: string): string {
 
 /**
  * True if a relative path addresses collective (Pod-shared) state. Everything
- * else (daily, spillover, output, arbitrary paths, and any `users/...` path)
- * is per-user.
+ * else (daily, arbitrary paths, and any `users/...` path) is per-user.
  */
 export function isCollectivePath(relativePath: string): boolean {
   const n = normalizeRel(relativePath)

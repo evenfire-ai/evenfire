@@ -1,0 +1,1322 @@
+// Deleting the files the Host keeps for a user, only after the user approves
+// the call on a card that shows every file's name, size and date, and the no-room offer that
+// proposes them when a message's attachments could not be kept.
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+import { AgentStateMachine } from '../agent/stateMachine'
+import { keptFilesDeleteAsks, liveApprovalTools } from '../agent/taskExecutor'
+import { ApprovalController } from '../core/extensions/approvalController'
+import { UnifiedApprovalGateController } from '../core/extensions/mcpApprovalGateController'
+import {
+  DELETE_OFFER_CAPPED_INSTRUCTION,
+  buildTurnContextBlock,
+} from '../core/orchestration/turnContext'
+import { BasicSafety } from '../core/safety/safety'
+import { MAKE_ROOM_SENTENCE, NativeToolRegistry } from '../core/tools/nativeToolRegistry'
+import { type Conversation, ConversationState, type PendingApproval } from '../core/types'
+import {
+  APPROVAL_INPUT_PREVIEW_BYTES,
+  KEPT_FILES_DELETE_APPROVAL_TOOL,
+  projectApprovalInputPreview,
+} from '../progress/approvalInputPreview'
+import type { InternalToolDefinition } from '../workflow/types'
+import { CALLER_OUTPUTS_DIR, KEPT_UPLOADS_DIR } from '../workspace/callerOutputs'
+import { resolveCallerRootBinding } from '../workspace/callerRootBinding'
+import { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
+import {
+  ATTACH_AGAIN_SENTENCE,
+  type GfscWriteClient,
+  KEPT_FILES_DELETE_TOOL,
+  buildGfsWriteTools,
+  buildKeptFilesDeleteTool,
+  buildKeptFilesListTool,
+} from './gfs'
+import {
+  SAVE_LEDGER_DIR,
+  buildKeepOffer,
+  keepMessageAttachments,
+  keptFileNotFound,
+  ledgerRecordFileName,
+  listKeptFiles,
+} from './keptFiles'
+
+vi.mock('fs', async original => {
+  const actual = await original<typeof import('fs')>()
+  return {
+    ...actual,
+    statfsSync: (target: string, options: { bigint: true }) => {
+      const reading = actual.statfsSync(target, options)
+      return { ...reading, blocks: reading.bavail, bfree: reading.bavail }
+    },
+  }
+})
+
+const ACCESS_ENV = `MCP_HOST_GFS_${String.fromCharCode(84, 79, 75, 69, 78)}`
+const previousAccess = process.env[ACCESS_ENV]
+const HOUR = 3_600_000
+
+let hostBase: string
+let provider: ScopedWorkspaceProvider
+
+function setScopes(scopes: string[]): void {
+  const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')
+  process.env[ACCESS_ENV] =
+    `${header}.${Buffer.from(JSON.stringify({ scopes })).toString('base64url')}.sig`
+}
+
+beforeEach(() => {
+  hostBase = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-kept-delete-')))
+  provider = new ScopedWorkspaceProvider(hostBase)
+  setScopes(['gfs.read', 'gfs.write'])
+})
+
+afterEach(() => {
+  if (previousAccess === undefined) delete process.env[ACCESS_ENV]
+  else process.env[ACCESS_ENV] = previousAccess
+  fs.rmSync(hostBase, { recursive: true, force: true })
+})
+
+function rootOf(userId: string): string {
+  const binding = resolveCallerRootBinding(provider, { sender: userId, channelType: 'rpc' })
+  if (!binding.root) throw new Error(`no caller root: ${binding.failureCode}`)
+  return binding.root
+}
+
+function outputsOf(root: string): string {
+  return path.join(root, CALLER_OUTPUTS_DIR)
+}
+
+/** A generated file with its record, as the adapter leaves them, `ageMs` old. */
+function generated(
+  root: string,
+  name: string,
+  bytes: number,
+  ageMs = HOUR
+): { id: string; file: string; record: string } {
+  const out = outputsOf(root)
+  fs.mkdirSync(path.join(out, SAVE_LEDGER_DIR), { recursive: true, mode: 0o700 })
+  const at = new Date(Date.now() - ageMs)
+  const file = path.join(out, name)
+  fs.writeFileSync(file, Buffer.alloc(bytes, 0x61))
+  fs.utimesSync(file, at, at)
+  const id = Math.random().toString(16).slice(2, 14).padEnd(12, '0')
+  const record = path.join(out, SAVE_LEDGER_DIR, ledgerRecordFileName(name))
+  fs.writeFileSync(
+    record,
+    JSON.stringify({
+      id,
+      name,
+      format: 'md',
+      outcome: 'delivered',
+      createdAt: at.toISOString(),
+      deliveredSha256: '0'.repeat(64),
+    })
+  )
+  return { id, file, record }
+}
+
+/** A delete measured for a task with no channel budget. */
+const NO_BUDGET_CARD = { channelType: undefined, approveInChannel: true, secretEntries: () => [] }
+
+/**
+ * Deletes as the model does after a listing: each file's createdAt and
+ * sizeBytes, when a test does not give them, are the listed ones for its id
+ * (or placeholders for an id the listing does not have).
+ */
+async function del(
+  root: string | undefined,
+  files: Array<{ kind: string; id: string; name: string; createdAt?: string; sizeBytes?: number }>,
+  keepRefused = false
+) {
+  const listed = root ? listKeptFiles(root) : []
+  const complete = files.map(file => {
+    const entry = listed.find(item => item.id === file.id)
+    return {
+      ...file,
+      createdAt: file.createdAt ?? entry?.createdAt ?? '2026-01-01T00:00:00.000Z',
+      sizeBytes: file.sizeBytes ?? entry?.sizeBytes ?? 0,
+    }
+  })
+  return buildKeptFilesDeleteTool(root, { keepRefused, card: NO_BUDGET_CARD }).execute(
+    { files: complete },
+    ''
+  )
+}
+
+function payload(result: { success: boolean; content?: string; error?: string }) {
+  expect(result.success, result.error).toBe(true)
+  return JSON.parse(result.content!) as {
+    files: Array<{ result: string; id: string }>
+    freedBytes: number
+    note?: string
+  }
+}
+
+function registryFor(root: string, deleteConfirmed: boolean): NativeToolRegistry {
+  return new NativeToolRegistry(
+    {
+      workspacePath: hostBase,
+      shellTimeout: 5000,
+      toolTimeout: 60000,
+      toolProgressInterval: 30000,
+      httpAllowlist: [],
+      envAllowlist: ['PATH'],
+      memoryMaxSize: 1048576,
+    },
+    'conv-delete',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    null,
+    { maxBytes: 52_428_800 },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { root: root, room: async () => Number.MAX_SAFE_INTEGER },
+    deleteConfirmed ? { approveInChannel: true, secretEntries: () => [] } : undefined
+  )
+}
+
+describe('clerum__kept_files_delete', () => {
+  it('removes a generated file and its record; a later save answers not found', async () => {
+    const root = rootOf('user-a')
+    const kept = generated(root, 'old.md', 100)
+    const result = payload(await del(root, [{ kind: 'generated', id: kept.id, name: 'old.md' }]))
+    expect(result.files.map(file => file.result)).toEqual(['deleted'])
+    expect(result.freedBytes).toBeGreaterThanOrEqual(100)
+    expect([fs.existsSync(kept.file), fs.existsSync(kept.record)]).toEqual([false, false])
+    expect(result).not.toHaveProperty('note')
+    const client = {
+      createFileFromBytes: vi.fn(),
+      writeBytes: vi.fn(),
+    } as unknown as GfscWriteClient
+    const save = await new Map<string, InternalToolDefinition>(
+      buildGfsWriteTools(client, {
+        callerRoot: root,
+        callerWorkspacePath: root,
+        secretEntries: () => [],
+      }).map(t => [t.name, t])
+    )
+      .get('clerum__gfs_create_file')!
+      .execute(
+        {
+          drive: 'm',
+          parentResourceId: 'f',
+          name: 'old.md',
+          generatedFile: 'old.md',
+          generatedFileId: kept.id,
+        },
+        ''
+      )
+    expect(save.error).toBe(keptFileNotFound().error)
+  })
+
+  it('deletes nothing when a name does not match its id', async () => {
+    const root = rootOf('user-a')
+    const a = generated(root, 'a.md', 10)
+    const b = generated(root, 'b.md', 10)
+    const refused = await del(root, [
+      { kind: 'generated', id: a.id, name: 'a.md' },
+      { kind: 'generated', id: b.id, name: 'not-b.md' },
+    ])
+    expect(refused.error).toMatch(/^kept_file_mismatch: /)
+    expect([fs.existsSync(a.file), fs.existsSync(b.file)]).toEqual([true, true])
+    payload(await del(root, [{ kind: 'generated', id: b.id, name: 'b.md' }]))
+    expect(fs.existsSync(b.file)).toBe(false)
+  })
+
+  it("answers not found for another caller's id and leaves that file", async () => {
+    const a = rootOf('user-a')
+    const b = rootOf('user-b')
+    const kept = generated(a, 'a-only.md', 10)
+    const asB = payload(await del(b, [{ kind: 'generated', id: kept.id, name: 'a-only.md' }]))
+    expect(asB.files.map(file => file.result)).toEqual(['not_found'])
+    expect(asB.freedBytes).toBe(0)
+    expect([fs.existsSync(kept.file), fs.existsSync(kept.record)]).toEqual([true, true])
+    // Witness: its owner deletes it.
+    payload(await del(a, [{ kind: 'generated', id: kept.id, name: 'a-only.md' }]))
+    expect(fs.existsSync(kept.file)).toBe(false)
+  })
+
+  it('answers not found for an id gone or regenerated since the listing, and deletes the rest', async () => {
+    const root = rootOf('user-a')
+    const gone = generated(root, 'gone.md', 10)
+    const regenerating = generated(root, 'busy.md', 10)
+    const other = generated(root, 'other.md', 10)
+    fs.rmSync(gone.file)
+    // A regeneration in progress: the file is newer than its record.
+    fs.writeFileSync(regenerating.file, 'new bytes')
+    const result = payload(
+      await del(root, [
+        { kind: 'generated', id: gone.id, name: 'gone.md' },
+        { kind: 'generated', id: regenerating.id, name: 'busy.md' },
+        { kind: 'generated', id: other.id, name: 'other.md' },
+      ])
+    )
+    expect(result.files.map(file => file.result)).toEqual(['not_found', 'not_found', 'deleted'])
+    expect(fs.readFileSync(regenerating.file, 'utf8')).toBe('new bytes')
+    expect(fs.existsSync(other.file)).toBe(false)
+  })
+
+  it('deletes a file past the first 100 the listing shows', async () => {
+    const root = rootOf('user-a')
+    const files = Array.from({ length: 101 }, (_, n) =>
+      generated(root, `f-${String(n).padStart(3, '0')}.md`, 1, (200 - n) * 60_000)
+    )
+    const listed = JSON.parse((await buildKeptFilesListTool(root).execute({}, '')).content!) as {
+      files: Array<{ name: string }>
+    }
+    expect(listed.files.map(file => file.name)).not.toContain('f-100.md')
+    const newest = files[100]!
+    payload(await del(root, [{ kind: 'generated', id: newest.id, name: 'f-100.md' }]))
+    expect([fs.existsSync(newest.file), fs.existsSync(newest.record)]).toEqual([false, false])
+    expect(buildKeepOffer(root, 1, Date.now()).deletable[0]!.name).toBe('f-000.md')
+  })
+
+  it('deletes nothing when a creation date or a size differs from the listing', async () => {
+    const root = rootOf('user-a')
+    const first = generated(root, 'first.md', 10)
+    const second = generated(root, 'second.md', 20)
+    const listed = listKeptFiles(root)
+    const value = (id: string) => listed.find(entry => entry.id === id)!
+    const asListed = (kept: { id: string }, name: string) => ({
+      kind: 'generated',
+      id: kept.id,
+      name,
+      createdAt: value(kept.id).createdAt,
+      sizeBytes: value(kept.id).sizeBytes,
+    })
+    for (const wrong of [
+      { ...asListed(second, 'second.md'), createdAt: '2026-01-01T00:00:00.000Z' },
+      { ...asListed(second, 'second.md'), sizeBytes: 21 },
+    ]) {
+      const refused = await del(root, [asListed(first, 'first.md'), wrong])
+      expect(refused.error).toBe(
+        'kept_file_mismatch: a name, size or creation date does not match its id; nothing was deleted. Call clerum__kept_files_list and use its values'
+      )
+      expect([fs.existsSync(first.file), fs.existsSync(second.file)]).toEqual([true, true])
+    }
+    // Witness: the listed values delete both.
+    const result = payload(
+      await del(root, [asListed(first, 'first.md'), asListed(second, 'second.md')])
+    )
+    expect(result.files.map(file => file.result)).toEqual(['deleted', 'deleted'])
+  })
+
+  it('answers not found for a generated file changed in place after the listing, and deletes the other', async () => {
+    const root = rootOf('user-a')
+    const changed = generated(root, 'changed.md', 10)
+    const other = generated(root, 'other.md', 10)
+    const listed = listKeptFiles(root)
+    const values = (id: string) => {
+      const entry = listed.find(item => item.id === id)!
+      return { createdAt: entry.createdAt, sizeBytes: entry.sizeBytes }
+    }
+    // Rewritten in place: same record and id, a newer time and another size.
+    fs.writeFileSync(changed.file, 'rewritten with more bytes')
+    const result = payload(
+      await del(root, [
+        { kind: 'generated', id: changed.id, name: 'changed.md', ...values(changed.id) },
+        { kind: 'generated', id: other.id, name: 'other.md', ...values(other.id) },
+      ])
+    )
+    expect(result.files.map(file => file.result)).toEqual(['not_found', 'deleted'])
+    expect(fs.existsSync(changed.file)).toBe(true)
+  })
+
+  it('refuses a call without the creation date and size before touching any file', async () => {
+    const root = rootOf('user-a')
+    const kept = generated(root, 'a.md', 10)
+    const result = await buildKeptFilesDeleteTool(root, {
+      keepRefused: false,
+      card: NO_BUDGET_CARD,
+    }).execute({ files: [{ kind: 'generated', id: kept.id, name: 'a.md' }] }, '')
+    expect(result.error).toBe(
+      'files must be 1 to 20 entries of kind, id, name, createdAt and sizeBytes from clerum__kept_files_list'
+    )
+    expect(fs.existsSync(kept.file)).toBe(true)
+  })
+
+  it('cannot delete a file with no record', async () => {
+    const root = rootOf('user-a')
+    fs.mkdirSync(outputsOf(root), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(path.join(outputsOf(root), 'dashboard.html'), '<html/>')
+    const result = payload(
+      await del(root, [{ kind: 'generated', id: '0123456789ab', name: 'dashboard.html' }])
+    )
+    expect(result.files.map(file => file.result)).toEqual(['not_found'])
+    expect(fs.existsSync(path.join(outputsOf(root), 'dashboard.html'))).toBe(true)
+  })
+
+  it('in the turn whose keep was refused, frees the room, keeps nothing and asks to attach again', async () => {
+    const root = rootOf('user-a')
+    const old = generated(root, 'old.md', 1000)
+    const result = payload(
+      await del(root, [{ kind: 'generated', id: old.id, name: 'old.md' }], true)
+    )
+    expect(result.freedBytes).toBeGreaterThanOrEqual(1000)
+    expect(result.note).toBe(ATTACH_AGAIN_SENTENCE)
+    expect(fs.existsSync(path.join(outputsOf(root), KEPT_UPLOADS_DIR))).toBe(false)
+    expect(listKeptFiles(root)).toEqual([])
+    // Witness: the same attachment sent again is kept.
+    expect(
+      await keepMessageAttachments({
+        attachments: [
+          {
+            id: 'f',
+            kind: 'file',
+            mimeType: 'text/plain',
+            encoding: 'base64',
+            dataBase64: Buffer.from('again').toString('base64'),
+            filename: 'again.txt',
+          } as never,
+        ],
+        callerRoot: root,
+        store: { reserveKept: async () => () => undefined },
+      })
+    ).toBeUndefined()
+    const bin = fs
+      .readdirSync(path.join(outputsOf(root), KEPT_UPLOADS_DIR))
+      .find(name => name.endsWith('.bin'))!
+    expect(fs.readFileSync(path.join(outputsOf(root), KEPT_UPLOADS_DIR, bin), 'utf8')).toBe('again')
+  })
+
+  it('refuses ids and kinds that are not from the listing before touching any file', async () => {
+    const root = rootOf('user-a')
+    const kept = generated(root, 'a.md', 10)
+    for (const files of [
+      [{ kind: 'generated', id: '../a.md', name: 'a.md' }],
+      [{ kind: 'download', id: kept.id, name: 'a.md' }],
+      [],
+    ]) {
+      const result = await del(root, files)
+      expect(result.success, JSON.stringify(files)).toBe(false)
+    }
+    expect(fs.existsSync(kept.file)).toBe(true)
+  })
+})
+
+describe('the no-room offer', () => {
+  const at = new Date('2026-11-01T00:00:00Z')
+
+  it('names the oldest files that cover the bytes short', () => {
+    const block = buildTurnContextBlock({
+      date: at,
+      channel: { type: 'rpc', sender: null },
+      keepRefusal: {
+        code: 'host_quota_exceeded',
+        offer: {
+          neededBytes: 150,
+          deletable: [
+            {
+              kind: 'generated',
+              id: 'aaaaaaaaaaaa',
+              name: 'old.md',
+              sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
+              ageHours: 9,
+            },
+            {
+              kind: 'upload',
+              id: 'bbbbbbbbbbbb',
+              name: 'mid.pdf',
+              sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
+              ageHours: 5,
+            },
+            {
+              kind: 'generated',
+              id: 'cccccccccccc',
+              name: 'new.md',
+              sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
+              ageHours: 1,
+            },
+          ],
+        },
+      },
+    })
+    expect(block).toContain(
+      'attachments_not_kept: code=host_quota_exceeded needed_bytes=150 your_deletable_bytes=300'
+    )
+    expect(block).toContain(
+      'deletable_file: kind=generated id=aaaaaaaaaaaa name="old.md" bytes=100 created_at=2026-10-31T00:00:00.000Z age_hours=9'
+    )
+    expect(block).toContain('deletable_file: kind=upload id=bbbbbbbbbbbb')
+    expect(block).not.toContain('cccccccccccc')
+    expect(block).toContain('clerum__kept_files_delete')
+    // Witness: a kept message has none of these lines.
+    const kept = buildTurnContextBlock({ date: at, channel: { type: 'rpc', sender: null } })
+    expect(kept).not.toContain('deletable_file')
+  })
+
+  it('says the user cannot free enough when their own files are not enough', () => {
+    const block = buildTurnContextBlock({
+      date: at,
+      channel: { type: 'rpc', sender: null },
+      keepRefusal: {
+        code: 'host_quota_exceeded',
+        offer: {
+          neededBytes: 500,
+          deletable: [
+            {
+              kind: 'generated',
+              id: 'aaaaaaaaaaaa',
+              name: 'old.md',
+              sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
+              ageHours: 9,
+            },
+          ],
+        },
+      },
+    })
+    expect(block).toContain('needed_bytes=500')
+    expect(block).toContain('user_cannot_free_enough')
+    expect(block).not.toContain('deletable_file')
+    expect(block).toContain('by other users of this agent')
+  })
+
+  it('names at most ten files and points to the listing for more', () => {
+    const block = buildTurnContextBlock({
+      date: at,
+      channel: { type: 'rpc', sender: null },
+      keepRefusal: {
+        code: 'host_quota_exceeded',
+        offer: {
+          neededBytes: 1500,
+          deletable: Array.from({ length: 15 }, (_, n) => ({
+            kind: 'generated' as const,
+            id: String(n).padStart(12, 'a'),
+            name: `f${n}.md`,
+            sizeBytes: 100,
+            createdAt: '2026-10-31T00:00:00.000Z',
+            ageHours: 20 - n,
+          })),
+        },
+      },
+    })
+    expect(block.match(/deletable_file:/g)).toHaveLength(10)
+    expect(block).toContain('more_deletable_files: call clerum__kept_files_list')
+    expect(block).toContain(DELETE_OFFER_CAPPED_INSTRUCTION)
+    expect(block).not.toContain('which free needed_bytes')
+  })
+
+  it('says the named files free only part of the bytes when the offer is capped', () => {
+    const offer = (count: number, neededBytes: number) =>
+      buildTurnContextBlock({
+        date: at,
+        channel: { type: 'rpc', sender: null },
+        keepRefusal: {
+          code: 'host_quota_exceeded',
+          offer: {
+            neededBytes,
+            deletable: Array.from({ length: count }, (_, n) => ({
+              kind: 'generated' as const,
+              id: String(n).padStart(12, 'b'),
+              name: `g${n}.md`,
+              sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
+              ageHours: 30 - n,
+            })),
+          },
+        },
+      })
+    const capped = offer(12, 1100)
+    expect(capped).toContain('more_deletable_files: call clerum__kept_files_list')
+    expect(capped).toContain(DELETE_OFFER_CAPPED_INSTRUCTION)
+    expect(capped).toContain('free only part of needed_bytes')
+    expect(capped).not.toContain('which free needed_bytes')
+    expect(capped).toContain('ask the user to attach the files again')
+    // Witness: an offer whose files cover the need keeps the previous instruction.
+    const covered = offer(3, 250)
+    expect(covered).toContain(
+      'Propose to the user the deletable_file entries above, which free needed_bytes, oldest first. Call clerum__kept_files_delete only with the files the user agrees to delete: its approval card is the confirmation. Afterwards ask the user to attach the files again; that message keeps them.'
+    )
+    expect(covered).not.toContain('more_deletable_files')
+    expect(covered).not.toContain(DELETE_OFFER_CAPPED_INSTRUCTION)
+  })
+
+  it("offers only the caller's own files with an id, not a dashboard and not another user's", () => {
+    const a = rootOf('user-a')
+    const b = rootOf('user-b')
+    generated(b, 'b-older.md', 10, 50 * HOUR)
+    const own = generated(a, 'a.md', 10, 2 * HOUR)
+    fs.writeFileSync(path.join(outputsOf(a), 'dash.html'), Buffer.alloc(500))
+    const offer = buildKeepOffer(a, 5, Date.now())
+    expect(offer.deletable.map(file => file.id)).toEqual([own.id])
+    expect(offer.deletable[0]!.ageHours).toBe(2)
+  })
+})
+
+describe('registration and approval of the delete', () => {
+  const names = (registry: NativeToolRegistry) => registry.listDefinitions().map(d => d.name)
+
+  it('exists only with the listing, where every call will ask the user', () => {
+    const root = rootOf('user-a')
+    expect(names(registryFor(root, true))).toContain(KEPT_FILES_DELETE_TOOL)
+    expect(names(registryFor(root, false))).not.toContain(KEPT_FILES_DELETE_TOOL)
+    setScopes(['gfs.read'])
+    const readOnly = names(registryFor(root, true))
+    expect(readOnly).not.toContain(KEPT_FILES_DELETE_TOOL)
+    expect(readOnly).toContain('clerum__gfs_read')
+  })
+
+  it('asks only for a channel task with approval on and no override turning it off', () => {
+    const asks = (
+      approvalEnabled: boolean,
+      taskSource: string,
+      approvalTools?: Record<string, boolean>
+    ) => keptFilesDeleteAsks({ approvalEnabled, taskSource, approvalTools })
+    expect(asks(true, 'channel')).toBe(true)
+    expect(asks(false, 'channel')).toBe(false)
+    expect(asks(true, 'cron')).toBe(false)
+    expect(asks(true, 'internal')).toBe(false)
+    expect(asks(true, 'channel', { [KEPT_FILES_DELETE_TOOL]: false })).toBe(false)
+    expect(liveApprovalTools(false, true)).toEqual(new Set([KEPT_FILES_DELETE_TOOL]))
+    expect(liveApprovalTools(true, true)).toEqual(
+      new Set(['clerum__gfs_download', KEPT_FILES_DELETE_TOOL])
+    )
+    expect(liveApprovalTools(false, false)).toBeUndefined()
+  })
+
+  it('suspends every call for the user, even with approve-all and an always grant', () => {
+    const root = rootOf('user-a')
+    const registry = registryFor(root, true)
+    expect(registry.get(KEPT_FILES_DELETE_TOOL)!.requiresApproval()).toBe(true)
+    const conversation: Conversation = {
+      id: 'conv',
+      user_id: 'user-a',
+      state: ConversationState.Processing,
+      turns: [],
+      auto_approved_tools: new Set(['*', KEPT_FILES_DELETE_TOOL]),
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+    const gate = new UnifiedApprovalGateController(
+      registry,
+      { defaultPolicy: 'channel_users', channels: {}, tools: {} },
+      registry
+    )
+    const controller = new ApprovalController(
+      conversation,
+      gate,
+      liveApprovalTools(false, true),
+      gate
+    )
+    const args = { files: [{ kind: 'generated', id: 'aaaaaaaaaaaa', name: 'a.md' }] }
+    const decision = controller.beforeTool(KEPT_FILES_DELETE_TOOL, args) as {
+      type: string
+      approval: PendingApproval
+    }
+    expect(decision.type).toBe('suspend')
+    expect(decision.approval.authorization_scope).toBe('exact_invocation')
+    // Witness: another tool proceeds under the same approve-all.
+    expect(controller.beforeTool('json_transform', {})).toBe('proceed')
+  })
+
+  it('appends how to make room to a generator space refusal only where the delete exists', async () => {
+    const root = rootOf('user-a')
+    const quota = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+    process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1'
+    try {
+      fs.mkdirSync(outputsOf(root), { recursive: true, mode: 0o700 })
+      fs.writeFileSync(path.join(outputsOf(root), 'big.bin'), Buffer.alloc(2 * 1024 * 1024))
+      const withDelete = await registryFor(root, true)
+        .get('clerum__generate_markdown')!
+        .execute({ filename: 'x.md', content: '# x' })
+      expect(withDelete.content).toMatch(/^Error: Output quota exceeded/)
+      expect(withDelete.content).toContain(MAKE_ROOM_SENTENCE)
+      const without = await registryFor(root, false)
+        .get('clerum__generate_markdown')!
+        .execute({ filename: 'x.md', content: '# x' })
+      expect(without.content).toMatch(/^Error: Output quota exceeded/)
+      expect(without.content).not.toContain('clerum__kept_files_delete')
+    } finally {
+      if (quota === undefined) delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      else process.env.CLERUM_GENERATED_FILES_QUOTA_MB = quota
+    }
+  })
+})
+
+describe('the delete approval names every file', () => {
+  const SECRET = 'synthetic-delete-name-secret'
+  // A plain protected value whose card escape (`\u{2028}`) is none of the
+  // forms the channel redactor matches (JSON leaves U+2028 as it is).
+  const LINE_SECRET = 'card\u2028line-protected-value'
+  const redact = (text: string) =>
+    text.split(SECRET).join('[REDACTED:P]').split(LINE_SECRET).join('[REDACTED:L]')
+  const VALUES = ' — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC'
+  const SLACK_TRAILER = 'Use the approval controls to continue or cancel.'
+  const REPLY_TRAILER = 'Reply /approve or /deny to this message.'
+  const CLI_TRAILER = 'Request ID: r. Please approve via CLI: POST /v1/runtime/approvals/approve'
+  type CardFile = { kind: string; name: string; createdAt?: string; sizeBytes?: number }
+  const withValues = (files: CardFile[]) =>
+    files.map((file, n) => ({
+      createdAt: '2026-11-10T09:12:45.123Z',
+      sizeBytes: 1_234_567,
+      ...file,
+      id: String(n).padStart(12, '0'),
+    }))
+
+  function preview(files: CardFile[]) {
+    return projectApprovalInputPreview(
+      KEPT_FILES_DELETE_APPROVAL_TOOL,
+      { files: withValues(files) },
+      redact
+    )!
+  }
+
+  function notification(
+    files: CardFile[],
+    channelType = 'slack',
+    defaultPolicy = 'channel_users',
+    entries = [
+      { name: 'P', value: SECRET },
+      { name: 'L', value: LINE_SECRET },
+    ]
+  ): string {
+    const proto = AgentStateMachine.prototype as unknown as {
+      buildApprovalNotification(a: PendingApproval, u: string, c?: string): string
+    }
+    return proto.buildApprovalNotification.call(
+      {
+        approvalConfig: { defaultPolicy, channels: {}, tools: {} },
+        secretEntriesProvider: () => entries,
+      },
+      {
+        request_id: 'r',
+        tool_name: KEPT_FILES_DELETE_APPROVAL_TOOL,
+        parameters: { files: withValues(files) },
+        description: 'delete',
+        tool_call_id: 'c',
+        context_snapshot: [],
+      },
+      'user-1',
+      channelType
+    )
+  }
+
+  /** The card in Desktop and in a Slack channel. */
+  function both(files: CardFile[]): string[] {
+    return [preview(files).text, notification(files)]
+  }
+
+  function fileLines(text: string): string[] {
+    return text.split('\n').filter(line => line.startsWith('upload: '))
+  }
+
+  /**
+   * The name an `upload` line quotes, decoded by the inverse of the card
+   * escape (`\\`, `\"`, `\u{HEX}`). Throws on an unknown escape, on a name
+   * that is never closed, and on any text after it but the file's values.
+   */
+  function quotedName(line: string): string {
+    const prefix = 'upload: "'
+    if (!line.startsWith(prefix)) throw new Error(`not a file line: ${line}`)
+    let name = ''
+    let at = prefix.length
+    while (at < line.length) {
+      const character = line[at]!
+      if (character === '"') {
+        const rest = line.slice(at + 1)
+        if (rest !== VALUES) throw new Error(`unexpected text after the name: ${rest}`)
+        return name
+      }
+      if (character !== '\\') {
+        name += character
+        at += 1
+        continue
+      }
+      const next = line[at + 1]
+      if (next === '\\' || next === '"') {
+        name += next
+        at += 2
+        continue
+      }
+      const hex = /^u\{([0-9A-F]+)\}/.exec(line.slice(at + 1))
+      if (!hex) throw new Error(`unknown escape: ${line.slice(at, at + 10)}`)
+      name += String.fromCodePoint(Number.parseInt(hex[1]!, 16))
+      at += 1 + hex[0].length
+    }
+    throw new Error(`the name is never closed: ${line}`)
+  }
+
+  it('lists twenty names of 60 characters in full, in Desktop and in a channel', () => {
+    const files = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'generated',
+      name: `${'n'.repeat(55)}-${String(n).padStart(2, '0')}.md`,
+    }))
+    const desktop = preview(files).text.split('\n')
+    expect(desktop[0]).toBe('Delete these files permanently:')
+    expect(desktop.filter(line => line.startsWith('generated: '))).toHaveLength(20)
+    expect(desktop).toContain('Total files: 20')
+    expect(desktop.join('\n')).not.toContain('…')
+    const channel = notification(files).split('\n')
+    expect(channel[0]).toBe('Delete these files permanently:')
+    expect(channel.filter(line => line.startsWith('generated: '))).toHaveLength(20)
+    // Witness: another tool's approval keeps the generic text with parameters cut at 200.
+    const generic = (
+      AgentStateMachine.prototype as unknown as {
+        buildApprovalNotification(a: PendingApproval, u: string, c?: string): string
+      }
+    ).buildApprovalNotification.call(
+      { approvalConfig: { defaultPolicy: 'channel_users', channels: {}, tools: {} } },
+      {
+        request_id: 'r',
+        tool_name: 'other_tool',
+        parameters: { files },
+        description: 'x',
+        tool_call_id: 'c',
+        context_snapshot: [],
+      },
+      'user-1',
+      'slack'
+    )
+    expect(generic).toMatch(/^Tool `other_tool` requires approval\. Parameters: /)
+  })
+
+  it('shows twenty long names whole, on twenty distinct lines', () => {
+    const files = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `${'x'.repeat(250)}${String(n).padStart(5, '0')}`,
+    }))
+    for (const lines of [preview(files).text.split('\n'), notification(files).split('\n')]) {
+      const named = lines.filter(line => line.startsWith('upload: '))
+      expect(named).toHaveLength(20)
+      expect(new Set(named).size).toBe(20)
+      named.forEach((line, n) => expect(line).toContain(`"${files[n]!.name}"`))
+      expect(lines.join('\n')).not.toContain('…')
+      expect(lines).toContain('Total files: 20')
+    }
+    expect(preview(files).truncated).toBe(false)
+  })
+
+  it('tells apart files with the same name by size and creation date', () => {
+    const twins = [
+      { kind: 'upload', name: 'contract.pdf', createdAt: '2026-11-01T08:00:00.000Z' },
+      { kind: 'upload', name: 'contract.pdf', createdAt: '2026-11-09T17:30:05.000Z' },
+    ]
+    const lines = preview(twins)
+      .text.split('\n')
+      .filter(line => line.startsWith('upload: '))
+    expect(lines).toEqual([
+      'upload: "contract.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-01 08:00:00 UTC',
+      'upload: "contract.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-09 17:30:05 UTC',
+    ])
+    // Two names equal for 79 characters are both shown whole.
+    const stem = 'Board minutes of the quarterly review with the finance and legal teams, draft '
+    const pair = preview([
+      { kind: 'generated', name: `${stem}v1.docx` },
+      { kind: 'generated', name: `${stem}v2.docx` },
+    ]).text
+    expect(pair).toContain(`"${stem}v1.docx"`)
+    expect(pair).toContain(`"${stem}v2.docx"`)
+    const long = 'n'.repeat(251) + '.pdf'
+    expect(preview([{ kind: 'upload', name: long }]).text).toContain(`"${long}"`)
+    // Two redacted names differ by their sizes.
+    const redacted = preview([
+      { kind: 'generated', name: `a-${SECRET}.md`, sizeBytes: 10 },
+      { kind: 'generated', name: `a-${SECRET}.md`, sizeBytes: 20 },
+    ]).text.split('\n')
+    expect(redacted[1]).not.toBe(redacted[2])
+    expect(redacted.join('\n')).not.toContain(SECRET)
+  })
+
+  it('shows control and format characters of a name as escapes, on one line', () => {
+    const name = `in\u202Evoice\u200B\nnext\u001b[31m.pdf`
+    for (const text of [
+      preview([{ kind: 'upload', name }]).text,
+      notification([{ kind: 'upload', name }]),
+    ]) {
+      const line = text.split('\n').find(entry => entry.startsWith('upload: '))!
+      expect(line).toBe(
+        'upload: "in\\u{202E}voice\\u{200B}\\u{A}next\\u{1B}[31m.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC'
+      )
+      for (const raw of ['\u202E', '\u200B', '\u001b']) expect(text).not.toContain(raw)
+    }
+  })
+
+  it('shows no id on the card', () => {
+    const files = [
+      { kind: 'generated', name: 'a.md' },
+      { kind: 'upload', name: 'b.pdf' },
+    ]
+    const ids = withValues(files).map(file => file.id)
+    const text = preview(files).text
+    // Witness: the ids are in the parameters the card is built from.
+    expect(ids).toEqual(['000000000000', '000000000001'])
+    for (const id of ids) expect(text).not.toContain(id)
+    for (const id of ids) expect(notification(files)).not.toContain(id)
+  })
+
+  it('shows invalid for a size or a date that is not one', () => {
+    const text = preview([
+      { kind: 'upload', name: 'x.pdf', createdAt: 'yesterday', sizeBytes: -1 },
+    ]).text
+    expect(text).toContain('upload: "x.pdf" — invalid, created invalid')
+  })
+
+  it('redacts a protected value in a name in both', () => {
+    const files = [{ kind: 'generated', name: `report-${SECRET}.md` }]
+    expect(preview(files).text).not.toContain(SECRET)
+    expect(preview(files).text).toContain('[REDACTED:P]')
+    expect(notification(files)).not.toContain(SECRET)
+    // Witness: a name without it is shown as written.
+    expect(preview([{ kind: 'generated', name: 'report.md' }]).text).toContain(
+      'generated: "report.md"'
+    )
+  })
+
+  it('escapes a quote in a name, so the name cannot forge a size and a date after it', () => {
+    const name = 'x.pdf" — 1 B (1 bytes), created 2020-01-01 00:00:00 UTC; "y.pdf'
+    for (const text of both([{ kind: 'upload', name }])) {
+      expect(fileLines(text)).toEqual([
+        `upload: "x.pdf\\" — 1 B (1 bytes), created 2020-01-01 00:00:00 UTC; \\"y.pdf"${VALUES}`,
+      ])
+    }
+  })
+
+  it('renders each name one way, so an escape never reads as literal text', () => {
+    const names = ['a\\', 'a\\"', 'a\\u{A}text', 'a\ntext', 'a"b']
+    for (const text of both(names.map(name => ({ kind: 'upload', name })))) {
+      const lines = fileLines(text)
+      expect(lines.map(quotedName)).toEqual(names)
+      expect(new Set(lines).size).toBe(names.length)
+    }
+  })
+
+  it('shows a line or paragraph separator in a name as its escape', () => {
+    for (const text of both([{ kind: 'upload', name: 'a\u2028b\u2029c' }])) {
+      expect(fileLines(text)).toEqual([`upload: "a\\u{2028}b\\u{2029}c"${VALUES}`])
+      expect(text).not.toContain('\u2028')
+      expect(text).not.toContain('\u2029')
+    }
+  })
+
+  it('shows default-ignorable and format characters of a name as escapes', () => {
+    const cases = [
+      ['\u3164x', '\\u{3164}x'],
+      ['❤\uFE0F.md', '❤\\u{FE0F}.md'],
+      ['\u0600x', '\\u{600}x'],
+    ] as const
+    for (const text of both(cases.map(([name]) => ({ kind: 'upload', name })))) {
+      expect(fileLines(text)).toEqual(cases.map(([, shown]) => `upload: "${shown}"${VALUES}`))
+    }
+  })
+
+  it('shows a lone surrogate in a name as its escape, so the card is well-formed text', () => {
+    for (const text of both([{ kind: 'upload', name: 'x\uD800y' }])) {
+      expect(fileLines(text)).toEqual([`upload: "x\\u{D800}y"${VALUES}`])
+      expect(text.isWellFormed()).toBe(true)
+    }
+  })
+
+  it('redacts a protected value in a name before escaping it, in both', () => {
+    const files = [{ kind: 'upload', name: `a-${LINE_SECRET}.md` }]
+    for (const text of both(files)) {
+      expect(fileLines(text)).toEqual([`upload: "a-[REDACTED:L].md"${VALUES}`])
+      expect(text).not.toContain(LINE_SECRET)
+      expect(text).not.toContain('card\\u{2028}line-protected-value')
+    }
+    expect(preview(files).truncated).toBe(true)
+  })
+
+  it('shows a kind as one escaped value on its own line', () => {
+    const files = [
+      { kind: 'upload\nx\u2028', name: 'a.md' },
+      { kind: 'generated', name: 'b.md' },
+    ]
+    const shown = `upload\\u{A}x\\u{2028}: "a.md"${VALUES}`
+    const desktop = preview(files).text.split('\n')
+    expect(desktop).toHaveLength(files.length + 2)
+    expect(desktop[1]).toBe(shown)
+    const channel = notification(files).split('\n')
+    expect(channel).toHaveLength(files.length + 3)
+    expect(channel[1]).toBe(shown)
+  })
+
+  it('redacts a protected value in a kind and marks the Desktop preview as changed', () => {
+    const files = [{ kind: SECRET, name: 'a.md' }]
+    const desktop = preview(files)
+    expect(desktop.text.split('\n')[1]).toBe(`[REDACTED:P]: "a.md"${VALUES}`)
+    expect(desktop.text).not.toContain(SECRET)
+    expect(desktop.truncated).toBe(true)
+    const channel = notification(files)
+    expect(channel.split('\n')[1]).toBe(`[REDACTED:P]: "a.md"${VALUES}`)
+    expect(channel).not.toContain(SECRET)
+    // Witness: the same file under a plain kind is not marked.
+    expect(preview([{ kind: 'upload', name: 'a.md' }]).truncated).toBe(false)
+  })
+
+  it('marks a card cut at the Desktop bound and keeps its trailer whole', () => {
+    const files = Array.from({ length: 300 }, () => ({ kind: 'upload', name: 'x'.repeat(255) }))
+    const desktop = preview(files)
+    expect(desktop.truncated).toBe(true)
+    expect(Buffer.byteLength(desktop.text, 'utf8')).toBeLessThanOrEqual(
+      APPROVAL_INPUT_PREVIEW_BYTES
+    )
+    // Witness: the cut card still opens with the fixed line and lists files.
+    expect(desktop.text.split('\n')[0]).toBe('Delete these files permanently:')
+    expect(fileLines(desktop.text).length).toBeGreaterThan(0)
+    const marker = 'The list above is cut: it is too long to show whole. Total files: 300.'
+    for (const [channelType, policy, trailer] of [
+      ['rpc', 'channel_users', REPLY_TRAILER],
+      ['email', 'cli_only', CLI_TRAILER],
+      ['slack', 'channel_users', SLACK_TRAILER],
+      ['slack', 'cli_only', CLI_TRAILER],
+    ] as const) {
+      const channel = notification(files, channelType, policy)
+      expect(channel).toBe(`${desktop.text}\n${marker}\n${trailer}`)
+      // The marker, like the instruction, is outside the bound: the card
+      // without both stays within it.
+      const card = channel.slice(0, -(marker.length + 1 + trailer.length + 1))
+      expect(Buffer.byteLength(card, 'utf8')).toBeLessThanOrEqual(APPROVAL_INPUT_PREVIEW_BYTES)
+    }
+  })
+
+  it('marks a schema-valid card that redaction pushed past the bound', () => {
+    const value = 'q7Zx'
+    const entry = { name: 'A_VERY_LONG_OPERATOR_SECRET_ENTRY_NAME_FOR_THE_PROBE_0001', value }
+    const safety = new BasicSafety(() => [entry])
+    const files = Array.from({ length: 20 }, (_, n) => ({
+      kind: n % 2 ? 'upload' : 'generated',
+      name: `${value.repeat(63)}abc`,
+    }))
+    const desktop = projectApprovalInputPreview(
+      KEPT_FILES_DELETE_APPROVAL_TOOL,
+      { files: withValues(files) },
+      text => safety.sanitizeOutput(KEPT_FILES_DELETE_APPROVAL_TOOL, text).content
+    )!
+    // Witness: redaction grew the card past the bound and cut its total.
+    expect(desktop.truncated).toBe(true)
+    expect(Buffer.byteLength(desktop.text, 'utf8')).toBe(APPROVAL_INPUT_PREVIEW_BYTES)
+    expect(desktop.text.endsWith('Total files: 20')).toBe(false)
+    for (const channelType of ['email', 'telegram']) {
+      const lines = notification(files, channelType, 'channel_users', [entry]).split('\n')
+      expect(lines.slice(-2)).toEqual([
+        'The list above is cut: it is too long to show whole. Total files: 20.',
+        REPLY_TRAILER,
+      ])
+      expect(lines.slice(0, -2).join('\n')).toBe(desktop.text)
+    }
+  })
+
+  it('adds no line to a card under the bound, whatever the trailer', () => {
+    const files = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `${'x'.repeat(250)}${String(n).padStart(5, '0')}`,
+    }))
+    const desktop = preview(files)
+    expect(desktop.truncated).toBe(false)
+    for (const [channelType, policy, trailer] of [
+      ['rpc', 'channel_users', REPLY_TRAILER],
+      ['email', 'channel_users', REPLY_TRAILER],
+      ['email', 'cli_only', CLI_TRAILER],
+      ['slack', 'channel_users', SLACK_TRAILER],
+      ['telegram', 'channel_users', REPLY_TRAILER],
+      ['slack', 'cli_only', CLI_TRAILER],
+    ] as const) {
+      const lines = notification(files, channelType, policy).split('\n')
+      expect(lines).toHaveLength(23)
+      expect(lines.slice(0, 22).join('\n')).toBe(desktop.text)
+      expect(lines[21]).toBe('Total files: 20')
+      expect(lines[22]).toBe(trailer)
+    }
+  })
+
+  it('keeps every line of the widest unredacted schema-valid Desktop card under 2,400 characters', () => {
+    // The widest schema-valid name: each character escapes to `\u{E0001}`.
+    // The bound is per line; whether a channel's card fits one message is
+    // tested in `progress/__tests__/keptFilesDeleteChannelCard.test.ts` and in
+    // the delete's validateParams tests below (H8).
+    const files = Array.from({ length: 20 }, () => ({
+      kind: 'generated',
+      name: '\u{E0001}'.repeat(255),
+      sizeBytes: Number.MAX_SAFE_INTEGER,
+    }))
+    const desktop = preview(files)
+    // Witness: the card is whole and lists every file.
+    expect(desktop.truncated).toBe(false)
+    expect(desktop.text.split('\n').filter(line => line.startsWith('generated: '))).toHaveLength(20)
+    const longest = Math.max(...desktop.text.split('\n').map(line => line.length))
+    expect(longest).toBeLessThanOrEqual(2_400)
+  })
+})
+
+describe('the delete refuses a call whose approval card does not fit one channel message', () => {
+  // Channel limits and counting rules are written out here, as channel-reader
+  // sends the text, not imported from production.
+  const RULES = {
+    telegram: { max: 4096, size: (text: string) => text.length },
+    slack: {
+      max: 3000,
+      size: (text: string) =>
+        text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').length,
+    },
+    teams: {
+      max: 12_000,
+      size: (text: string) => Buffer.byteLength(JSON.stringify(text), 'utf8'),
+    },
+  } as const
+  type Budgeted = keyof typeof RULES
+  const REPLY = 'Reply /approve or /deny to this message.'
+  const CONTROLS = 'Use the approval controls to continue or cancel.'
+  const CLI =
+    'Request ID: 00000000-0000-0000-0000-000000000000. Please approve via CLI: POST /v1/runtime/approvals/approve'
+  const VALUES = ' — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC'
+  const MANY = (files: number, leading: number) =>
+    `kept_files_card_too_long: the approval card for these ${files} files does not fit one message of this channel; nothing was deleted. Leading files of the list that fit one card: ${leading}. Call clerum__kept_files_delete again with only those, then again for the rest; the user approves each call.`
+  const SINGLE =
+    'kept_files_card_too_long: the approval card for the first file of the list does not fit one message of this channel even alone; nothing was deleted. That file cannot be deleted from this channel: tell the user. The other files can be requested without it.'
+  const SECRET_ENTRY = { name: 'P', value: 'Qz7vXk9pWm3tLr8J' }
+  /** A short protected value whose marker is 68 characters: redaction lengthens it. */
+  const GROWING_ENTRY = {
+    name: 'A_VERY_LONG_OPERATOR_SECRET_ENTRY_NAME_FOR_THE_PROBE_0001',
+    value: 'q7Zx',
+  }
+  const ALL_CHANNELS = ['telegram', 'slack', 'teams', 'email', 'rpc', undefined] as const
+
+  type CardFile = { kind: string; name: string; createdAt?: string; sizeBytes?: number }
+  type Entry = { name: string; value: string }
+
+  const withValues = (files: CardFile[]) =>
+    files.map((file, n) => ({
+      createdAt: '2026-11-10T09:12:45.123Z',
+      sizeBytes: 1_234_567,
+      ...file,
+      id: String(n).padStart(12, '0'),
+    }))
+
+  /** The delete's validateParams, as the registry builds it for one task. */
+  function refusal(
+    files: CardFile[],
+    channelType: string | undefined,
+    options: { approveInChannel?: boolean; entries?: Entry[] } = {}
+  ): string | undefined {
+    const tool = buildKeptFilesDeleteTool(undefined, {
+      keepRefused: false,
+      card: {
+        channelType,
+        approveInChannel: options.approveInChannel ?? true,
+        secretEntries: () => options.entries ?? [],
+      },
+    })
+    return tool.validateParams!({ files: withValues(files) })
+  }
+
+  /** A card of ASCII names (no escape, no `& < >`), rendered by the written-out rule. */
+  function asciiCard(files: CardFile[], instruction: string): string {
+    return [
+      'Delete these files permanently:',
+      ...files.map(file => `${file.kind}: "${file.name}"${VALUES}`),
+      `Total files: ${files.length}`,
+      instruction,
+    ].join('\n')
+  }
+
+  /** The largest count below the whole list whose leading files fit, by the written-out rule. */
+  function leadingFit(files: CardFile[], channel: Budgeted, instruction: string): number {
+    let count = files.length - 1
+    while (
+      count > 0 &&
+      RULES[channel].size(asciiCard(files.slice(0, count), instruction)) > RULES[channel].max
+    ) {
+      count -= 1
+    }
+    return count
+  }
+
+  const longNames = (): CardFile[] =>
+    Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `${'x'.repeat(250)}${String(n).padStart(5, '0')}`,
+    }))
+  const small: CardFile[] = [
+    { kind: 'generated', name: 'report.md' },
+    { kind: 'upload', name: 'contract.pdf' },
+  ]
+
+  it('H1 admits a list that fits on every channel value, and refuses one that does not', () => {
+    for (const channel of ALL_CHANNELS) {
+      for (const approveInChannel of [true, false]) {
+        expect(refusal(small, channel, { approveInChannel })).toBeUndefined()
+      }
+    }
+    // Positive control: the same hook refuses a list whose card does not fit.
+    const files = longNames()
+    expect(refusal(files, 'slack')).toBe(MANY(20, leadingFit(files, 'slack', CONTROLS)))
+  })
+
+  it('H2 gives the largest count of leading files that fit, on Slack and Telegram, and admits Teams', () => {
+    const files = longNames()
+    for (const [channel, instruction] of [
+      ['slack', CONTROLS],
+      ['telegram', REPLY],
+    ] as const) {
+      const leading = leadingFit(files, channel, instruction)
+      expect(leading).toBeGreaterThan(0)
+      expect(leading).toBeLessThan(20)
+      // Witness: the rule measures the whole card over the limit.
+      expect(RULES[channel].size(asciiCard(files, instruction))).toBeGreaterThan(RULES[channel].max)
+      expect(refusal(files, channel)).toBe(MANY(20, leading))
+      // Maximal on both sides: the leading files fit, one more does not.
+      expect(refusal(files.slice(0, leading), channel)).toBeUndefined()
+      expect(refusal(files.slice(0, leading + 1), channel)).toBe(MANY(leading + 1, leading))
+    }
+    expect(RULES.teams.size(asciiCard(files, REPLY))).toBeLessThanOrEqual(RULES.teams.max)
+    expect(refusal(files, 'teams')).toBeUndefined()
+  })
+
+  it('H2b counts the leading files of the list, in its order', () => {
+    const long: CardFile = { kind: 'upload', name: 'l'.repeat(255) }
+    const shorts: CardFile[] = Array.from({ length: 19 }, (_, n) => ({
+      kind: 'upload',
+      name: `${'s'.repeat(72)}${String(n).padStart(2, '0')}`,
+    }))
+    const longFirst = [long, ...shorts]
+    const longLast = [...shorts, long]
+    // Witness: neither whole list fits, and all 19 short files fit together.
+    expect(RULES.slack.size(asciiCard(longFirst, CONTROLS))).toBeGreaterThan(3000)
+    expect(RULES.slack.size(asciiCard(shorts, CONTROLS))).toBeLessThanOrEqual(3000)
+    const first = leadingFit(longFirst, 'slack', CONTROLS)
+    const last = leadingFit(longLast, 'slack', CONTROLS)
+    expect(last).toBe(19)
+    expect(first).toBeLessThan(19)
+    expect(first).toBeGreaterThan(1)
+    expect(refusal(longFirst, 'slack')).toBe(MANY(20, first))
+    expect(refusal(longLast, 'slack')).toBe(MANY(20, last))
+  })
+
+  it('H2c counts a Telegram card in UTF-16 units, not in characters', () => {
+    // An emoji is shown as written and takes two UTF-16 units.
+    const files: CardFile[] = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `${'\u{1F4C4}'.repeat(80)}${String(n).padStart(2, '0')}`,
+    }))
+    const card = asciiCard(files, REPLY)
+    // Witness: the card is over the limit in UTF-16 units and under it in characters.
+    expect(RULES.telegram.size(card)).toBeGreaterThan(RULES.telegram.max)
+    expect([...card].length).toBeLessThanOrEqual(RULES.telegram.max)
+    const leading = leadingFit(files, 'telegram', REPLY)
+    expect(leading).toBeGreaterThan(0)
+    expect(leading).toBeLessThan(20)
+    expect(refusal(files, 'telegram')).toBe(MANY(20, leading))
+    expect(refusal(files.slice(0, leading), 'telegram')).toBeUndefined()
+  })
+
+  it('H3 refuses a first file that redaction lengthened past the limit, and only then', () => {
+    const grown: CardFile = { kind: 'upload', name: `${GROWING_ENTRY.value.repeat(63)}abc` }
+    for (const channel of ['telegram', 'slack'] as const) {
+      expect(refusal([grown], channel, { entries: [GROWING_ENTRY] })).toBe(SINGLE)
+      // Witness that redaction ran: without the entry the same file fits.
+      expect(refusal([grown], channel, { entries: [] })).toBeUndefined()
+      expect(refusal([grown, ...small], channel, { entries: [GROWING_ENTRY] })).toBe(SINGLE)
+    }
+  })
+
+  it('H4 names no file and no protected value in the refusal', () => {
+    const files: CardFile[] = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `${SECRET_ENTRY.value}${'y'.repeat(237)}${String(n).padStart(2, '0')}`,
+    }))
+    const redacted = files.map(file => ({
+      ...file,
+      name: file.name.replace(SECRET_ENTRY.value, `[REDACTED:${SECRET_ENTRY.name}]`),
+    }))
+    const text = refusal(files, 'slack', { entries: [SECRET_ENTRY] })
+    expect(text).toBe(MANY(20, leadingFit(redacted, 'slack', CONTROLS)))
+    expect(text).not.toContain(SECRET_ENTRY.value)
+    expect(text).not.toContain('yyyy')
+    expect(text).not.toContain('REDACTED')
+  })
+
+  it('H5 sets no message limit on rpc, email or no channel type', () => {
+    const lists: Array<[CardFile[], Entry[]]> = [
+      [longNames(), []],
+      [
+        Array.from({ length: 20 }, () => ({
+          kind: 'upload',
+          name: `${GROWING_ENTRY.value.repeat(63)}abc`,
+        })),
+        [GROWING_ENTRY],
+      ],
+    ]
+    // Witness: redaction pushed the second list past the 64 KiB bound.
+    const safety = new BasicSafety(() => [GROWING_ENTRY])
+    expect(
+      projectApprovalInputPreview(
+        KEPT_FILES_DELETE_APPROVAL_TOOL,
+        { files: withValues(lists[1]![0]) },
+        text => safety.sanitizeOutput(KEPT_FILES_DELETE_APPROVAL_TOOL, text).content
+      )!.truncated
+    ).toBe(true)
+    for (const [files, entries] of lists) {
+      for (const channel of ['rpc', 'email', undefined]) {
+        for (const approveInChannel of [true, false]) {
+          expect(refusal(files, channel, { entries, approveInChannel })).toBeUndefined()
+        }
+      }
+      // Witness: the same list is refused on Slack.
+      expect(refusal(files, 'slack', { entries })).toMatch(/^kept_files_card_too_long: /)
+    }
+  })
+
+  it('H6 measures the CLI instruction when the channel cannot approve', () => {
+    // 20 files whose controls card is 40 characters under the Slack limit,
+    // so the CLI card, with its request id, is 20 over it.
+    const files = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `-${String(n).padStart(2, '0')}`,
+    }))
+    let deficit = 3000 - 40 - RULES.slack.size(asciiCard(files, CONTROLS))
+    for (const file of files) {
+      const grow = Math.min(deficit, 255 - file.name.length)
+      file.name = `${'n'.repeat(grow)}${file.name}`
+      deficit -= grow
+    }
+    expect(RULES.slack.size(asciiCard(files, CONTROLS))).toBe(2960)
+    expect(RULES.slack.size(asciiCard(files, CLI))).toBe(3020)
+    expect(refusal(files, 'slack', { approveInChannel: true })).toBeUndefined()
+    expect(refusal(files, 'slack', { approveInChannel: false })).toBe(
+      MANY(20, leadingFit(files, 'slack', CLI))
+    )
+  })
+
+  it('H7 admits two entries with the same name, size and second', () => {
+    const twins: CardFile[] = [
+      { kind: 'upload', name: 'same.pdf', createdAt: '2026-11-10T09:12:45.123Z' },
+      { kind: 'upload', name: 'same.pdf', createdAt: '2026-11-10T09:12:45.987Z' },
+    ]
+    // Witness: the card shows them on two identical lines.
+    const lines = projectApprovalInputPreview(
+      KEPT_FILES_DELETE_APPROVAL_TOOL,
+      { files: withValues(twins) },
+      text => text
+    )!.text.split('\n')
+    expect(lines[1]).toBe(`upload: "same.pdf"${VALUES}`)
+    expect(lines[2]).toBe(lines[1])
+    for (const channel of ALL_CHANNELS) expect(refusal(twins, channel)).toBeUndefined()
+    // Positive control: the same hook refuses a list whose card does not fit.
+    expect(refusal(longNames(), 'telegram')).toBe(
+      MANY(20, leadingFit(longNames(), 'telegram', REPLY))
+    )
+  })
+
+  it('H8 admits the widest schema-valid file alone on every budgeted channel and instruction', () => {
+    const widest: CardFile[] = [
+      { kind: 'generated', name: '\u{E0001}'.repeat(255), sizeBytes: Number.MAX_SAFE_INTEGER },
+    ]
+    for (const channel of ['telegram', 'slack', 'teams'] as const) {
+      for (const approveInChannel of [true, false]) {
+        expect(refusal(widest, channel, { approveInChannel })).toBeUndefined()
+      }
+    }
+  })
+})

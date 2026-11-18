@@ -30,7 +30,7 @@ export async function fromModule<M>(
 export function prepared(tool: InternalToolDefinition): InternalToolDefinition {
   return {
     ...tool,
-    execute: async (args, outputDir) => {
+    execute: async (args, outputDir, options) => {
       let clean: Record<string, unknown>
       let release: () => void
       try {
@@ -48,7 +48,7 @@ export function prepared(tool: InternalToolDefinition): InternalToolDefinition {
       const undeclared = unknownArguments(tool.parameters, clean)
       let outcome: InternalToolResult
       try {
-        outcome = await tool.execute(clean, outputDir)
+        outcome = await tool.execute(clean, outputDir, options)
       } finally {
         release()
       }

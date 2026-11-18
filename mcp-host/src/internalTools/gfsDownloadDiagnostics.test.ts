@@ -25,6 +25,8 @@ function harness() {
     resolve: vi.fn(),
   } satisfies GfscReadClient
   const tool = buildGfsReadTools(client, {
+    writeTools: { editText: true, saveBySourcePath: true },
+    keptFilesDelete: false,
     referencedFiles: new Map(),
     // The injected download never touches this uninitialized store or these paths.
     downloadStore: new GfsDownloadStore('/unit-only-host-workspace'),

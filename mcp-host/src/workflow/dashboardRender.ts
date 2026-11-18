@@ -28,7 +28,7 @@ import { DASHBOARD_TEMPLATES, type DashData, ignoredDashboardFields } from './da
 import { DASHBOARD_THEMES, type ThemeName } from './dashboardThemes'
 import { DASHBOARD_TEMPLATE_NAMES, type DashboardTemplateName } from './dashboardVocabulary'
 import { choose } from './ownEntry'
-import { type InternalToolResult } from './types'
+import type { InternalToolExecutionOptions, InternalToolResult } from './types'
 
 export {
   BLOCK_TYPES,
@@ -116,7 +116,8 @@ function renderDashboard(opts: DashboardRenderOptions): { html: string; ctx: Das
 
 export async function runGenerateDashboard(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  options?: InternalToolExecutionOptions
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'html', 'dashboard')
@@ -194,7 +195,12 @@ export async function runGenerateDashboard(
 
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
-    enforceQuota(outputDir, Buffer.byteLength(html, 'utf-8'), replacedBytes(target))
+    enforceQuota(
+      outputDir,
+      Buffer.byteLength(html, 'utf-8'),
+      replacedBytes(target),
+      options?.keptRoomBytes
+    )
     writeArtifact(target, html)
 
     return { ...artifactResult(target, 'html', { warnings }), aliasedArguments: ctx.aliased }

@@ -67,8 +67,9 @@ import {
   resolveGuardrailHookDescriptors,
   withResolvedHookDescriptors,
 } from './guardrailHookResolver'
-import { createGfscClient, inspectGfsToolScopes } from './internalTools/gfsClient'
+import { createGfscClient, getGfsToolScopes, inspectGfsToolScopes } from './internalTools/gfsClient'
 import { GfsDownloadStore } from './internalTools/gfsDownloadStore'
+import { keepIncomingAttachments } from './internalTools/keptFiles'
 import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
@@ -2107,6 +2108,31 @@ const fileReferenceGfsGate = createFileReferenceGfsGate({
   logger,
 })
 
+/**
+ * The admission's keep of a message's attachments. They are kept for a later
+ * save only where a GFS write tool could save them; elsewhere nothing is kept
+ * and nothing is said. Each input is read at call time, because the Host sets
+ * the workspace provider and the store during bootstrap.
+ */
+export function admissionKeepAttachments(deps: {
+  gfsWriteScope: () => boolean
+  workspaceProvider: () => ScopedWorkspaceProvider | null
+  store: () => GfsDownloadStore | null
+}): (message: IncomingMessage) => Promise<IncomingMessage['keepRefusal']> {
+  return message => {
+    const canWriteGfs = deps.gfsWriteScope()
+    return keepIncomingAttachments({
+      message,
+      canWriteGfs,
+      callerRoot:
+        canWriteGfs && message.sender
+          ? resolveCallerRootBinding(deps.workspaceProvider(), message).root
+          : undefined,
+      store: deps.store(),
+    })
+  }
+}
+
 const prepareIncomingMessage = createIncomingAdmission({
   limits: {
     maxCount: INCOMING_ATTACHMENT_MAX_COUNT,
@@ -2123,6 +2149,11 @@ const prepareIncomingMessage = createIncomingAdmission({
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
   fileReferenceGfs: fileReferenceGfsGate,
+  keepAttachments: admissionKeepAttachments({
+    gfsWriteScope: () => getGfsToolScopes(fileReferenceGfsEnv)?.has('gfs.write') === true,
+    workspaceProvider: () => gfsWorkspaceProvider,
+    store: () => gfsDownloadStore,
+  }),
   gfsSurfaceRuntimeCapability: message => {
     const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
     if (callerRootBinding.failureCode) {

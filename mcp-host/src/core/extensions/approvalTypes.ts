@@ -52,6 +52,18 @@ export interface ApprovalConfig {
   tools?: Record<string, boolean>
 }
 
+/**
+ * Whether an approval notification tells the channel's users to approve in
+ * the channel: an approval config exists and its policy is not `cli_only`.
+ * Otherwise the notification gives the request id for the CLI endpoint.
+ * It checks neither the channel's `enabled` flag nor the designated
+ * approvers; `ApprovalResolver.canUserApprove` decides whether a given user
+ * may approve.
+ */
+export function approvalInChannel(config: ApprovalConfig | undefined): boolean {
+  return config !== undefined && config.defaultPolicy !== 'cli_only'
+}
+
 // ─── Approval Decision ─────────────────────────────────────
 
 /**

@@ -47,12 +47,12 @@ without discarding the path, checksum, version or retained original.
 
 ## Effective limits
 
-| Environment variable                       |    Default |     Ceiling | Meaning                                                            |
-| ------------------------------------------ | ---------: | ----------: | ------------------------------------------------------------------ |
-| `MCP_HOST_GFS_MAX_FILE_BYTES`              | `16777216` | `209715200` | Largest GFS source admitted by MCP Host.                           |
-| `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT`    |       `70` |       `100` | Retained download budget, as a percentage of the workspace volume. |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY` |        `1` |         `2` | Simultaneous active transfers per caller.                          |
-| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`          |      `168` |      `8760` | Retention period for a completed copy.                             |
+| Environment variable                       |    Default |     Ceiling | Meaning                                                                                                                     |
+| ------------------------------------------ | ---------: | ----------: | --------------------------------------------------------------------------------------------------------------------------- |
+| `MCP_HOST_GFS_MAX_FILE_BYTES`              | `16777216` | `209715200` | Largest GFS source admitted by MCP Host.                                                                                    |
+| `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT`    |       `70` |       `100` | Retained download budget, as a percentage of the workspace volume; it also counts the files the Host keeps for each caller. |
+| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY` |        `1` |         `2` | Simultaneous active transfers per caller.                                                                                   |
+| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`          |      `168` |      `8760` | Retention period for a completed copy and for each kept file.                                                               |
 
 All values are parsed as positive decimal byte/percent/count/hour integers. Empty, zero, fractional, negative, exponent, padded, partial, non-integer, and above-ceiling values fail startup; the storage percent therefore accepts 1 to 100.
 
@@ -345,7 +345,12 @@ affected.
 
 The store has one retained-storage limit: Host bytes. Usage is the sum of
 complete copies, the reservations of active transfers and the duplicates a
-sweep could not remove, in every caller's directory. The budget is
+sweep could not remove, in every caller's directory, plus the files the Host
+keeps for each caller in `users/<key>/.clerum-outputs` (generated files, their
+save records, and chat attachments kept in `.uploads/` for a later save). Kept
+files are never evicted: each leaves once the
+retention period has passed since the later of its record's time and its own
+modification time. The budget is
 `floor(volume bytes × MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT / 100)`, where the
 volume bytes are `blocks × bsize` from the same `statfs` of the Host root that
 the free-space check reads at each admission, so a resized volume counts from
@@ -445,8 +450,8 @@ transfers at once, and a caller at most its configured concurrency; beyond that
 admission returns `download_busy`.
 
 If `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT` is lowered or the volume shrinks,
-existing copies remain charged and new admissions evict or are refused until
-usage falls below the new budget.
+existing copies and kept files remain charged and new admissions evict copies
+or are refused until usage falls below the new budget.
 Lowering `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS` or `MCP_HOST_GFS_MAX_FILE_BYTES` is
 different: a `meta.json` is validated against the limits in force, so after the
 restart every copy whose size or retention exceeds the new value is incomplete
@@ -462,6 +467,116 @@ included. It never touches a directory that is an active transfer of this proces
 and it never replaces a published copy: another directory carrying the same ID
 is removed. A `.gfs-downloads` that is a symlink or not a directory is removed
 by the sweep without following it and recreated on the next admission.
+
+The same sweep walks each caller's kept folder, `users/*/.clerum-outputs`: its
+top level (generated files), `.save-ledger/` (their save records) and
+`.uploads/` (kept chat attachments, `<id>.bin` with its record `<id>.json`),
+and no other folder of the caller. A keep of a message's attachments is
+refused when one caller's kept bytes would pass half the budget or every
+caller's three quarters.
+
+A chat generation is checked against the same two bounds. Before the generator
+runs, the Host removes everything past the retention period (one sweep) and
+reads the room the bounds leave; a file larger than the room is refused before
+anything is written, so an earlier file of that name stays. Where the turn has
+`clerum__kept_files_delete`, the refusal offers the user's own kept files,
+oldest first, to delete after approval; otherwise it says why it cannot make
+room. The user approves the delete on a card that lists each file with its
+kind, whole name, size and creation date. The delete's arguments are checked
+against its schema before the approval, so a call its schema refuses (more
+than 20 files, a name over 255 characters) shows no card. Desktop shows the
+card, with a note when redaction changed a kind or a name; a card that
+redaction lengthens past 64 KiB is also cut there. In
+Telegram, Slack and Teams the card is one message: Telegram 4096 characters,
+Slack 3000 characters once `&`, `<` and `>` are escaped, and Teams 12,000
+bytes of the JSON-encoded text, each measured on the whole card including its
+instruction line. The Host shortens nothing. A call whose card does not fit is
+refused before the user is asked: the model is told how many of the first
+files of its list fit one card, asks for those and then for the rest, and the
+user approves each card. The Host measures again when the approved call runs
+and refuses it if the card would no longer fit. A file whose own line does not
+fit one message, which needs a name that redaction lengthened, cannot be
+deleted from that channel; it is removed when it expires after the retention
+period. Two kept attachments with the same name, size and creation second
+appear as two identical lines, in Desktop and in channels (the identical-lines
+issue); the delete still checks each file by its id. If the configured secrets
+change between the Host's check and the card, the card is sent whole even when
+it is over the limit and the Host logs an error; the check that runs with the
+approved call then refuses it unless the change was undone. A change of the
+approval policy to `cli_only` while the task runs can lengthen the instruction
+line past the limit in the same way; the later check does not see that change.
+channel-reader sends every tool approval once and does not measure or split
+it: as an edit of the status message, or as one reply when the Host answers
+synchronously. On Telegram a synchronous reply over 4096 characters is split by
+the adapter into several messages, with the buttons on the first; an edited
+card over 4096 characters is cut to 4093 and "...". A very long workflow name
+reaches either, and so does a delete card admitted before the configured
+secrets or the approval policy changed (above). channel-reader registers an approval before the channel
+confirms that the card was shown. If the edit or the send fails, the error is
+only logged: the approval stays registered and is not denied, no card or
+button is shown, and a typed `/approve` from the same user still approves it.
+This holds for every tool approval and is unchanged by this feature (the
+delivery-confirmation issue). When channel-reader cannot read the card from the Host, it shows no
+buttons, denies the request at the Host and tells the user. If the Host does not accept
+the denial, the user is told that the request is still waiting on the Host and
+that an operator must deny it. On the progress stream, nothing is sent for a
+task that has already ended; if the task ends while the denial is on its way,
+no message follows it, unless the Host accepted the denial and the task ended
+because of it; the user is then told the request could not be shown; and when the Host holds no
+stored approval for the request and rejects the denial, that is only logged.
+A press on a card whose approval was decided, replaced or dropped after 10
+minutes is answered with 'No pending approval found'; so is a press after the
+task ended, when the card was shown on the progress stream. An approval shown
+as a synchronous reply stays registered until it is decided or 10 minutes
+pass. Where
+the card has no channel limit (the email and RPC replies), a card cut at 64 KiB
+says so before the instruction and gives the total.
+While the download store is closed or not initialized, no file is
+generated. When the volume cannot be measured, the Host reads it once more and
+then generates without this check (the folder quota and the free-space floor
+still apply); the next sweep counts the file. The check is soft: generations
+that run at the same moment, in two conversations of one caller or for several
+callers, can together pass the bound by their combined size until the next
+sweep counts them. Each generation result says after how many hours
+the Host deletes the file. A regular file there expires once the retention
+period has passed since the later of its record's `createdAt` and its own
+modification time, each taken as now when it is in the future; a file with no
+readable record (a record itself, a temporary file) ages by its modification
+time. An expired file is removed together with its record, only if it is still
+the file the sweep judged. A kept folder that is a symlink is not entered and
+is never removed; the count of removed kept files is logged as
+`removedKeptFiles`. Generated files that existed before this sweep, and are
+older than the retention period, are removed by the first sweep.
+
+A save from the Host volume (`generatedFile`, `sourcePath`, `uploadedFileId`)
+scans the bytes before they are sent and refuses a file in which it finds a
+protected value of this Host in clear. Every file up to the GFS file limit
+(`MCP_HOST_GFS_MAX_FILE_BYTES`), whatever its format, is searched for the UTF-8
+bytes of each value of at least four characters. A file with no zero byte and
+no PDF, ZIP, GIF, RIFF media or gzip signature is also read as text, to find a
+value written in Latin-1, a value split by markup or a number written with
+separators: as UTF-8 when its bytes are valid UTF-8, with or without control
+characters such as ANSI colours or form feeds, and otherwise as Latin-1, one
+character per byte. Office packages are read part by part. Text above 4 MiB is
+read in overlapping windows of 256 Ki characters, with other tasks running
+between windows; there a split value is found when its extent, markup included,
+is at most 64 Ki characters. The result says `scanned` only for UTF-8 text or
+an Office package in which nothing was found. Every other file in which nothing
+was found (a PDF, an image, an archive, text in UTF-16 or a legacy encoding, a
+file with a zero byte), a file above the GFS file limit other than an Office
+package, and a file whose scan fails, are saved with `secretScan: not_scanned`.
+The model is told to tell the user when the file came from a workspace path, a
+kept attachment or a generated file saved by name, and that a generated file
+saved with its Save id needs no such notice. The scan does not find: a value written in
+UTF-16; a value in a legacy encoding whose bytes are neither its UTF-8 nor its
+Latin-1 spelling (a euro sign in Windows-1252, Shift_JIS); a split value or a
+separated number in a file with a zero byte or one of those signatures; a
+non-ASCII value written in UTF-8 and split by markup in a file that is not
+valid UTF-8; and a value in compressed data other than the text parts of an
+Office package. A generated file with no save record (a dashboard, a file
+generated before records existed, a file whose record is missing) is saved by
+name and goes through the same scan; files the previous version withheld have
+no record and follow this rule until they expire.
 
 An admission replaces a caller's `.gfs-downloads`, deleting every copy in it
 (pinned ones included), only when the check answers about the directory itself:
@@ -616,10 +731,13 @@ user what happened and what they can do:
   what the user no longer needs with a `shell_exec` command the user approves.
   It never lists, reads or deletes another user's directory or anything
   outside the workspace.
-- `host_quota_exceeded`: the Host's cache of downloaded files is full. Space
-  frees as tasks finish and downloaded copies expire. The model tells the user,
-  who can finish or cancel their own running tasks to free space sooner and
-  then try again. It never acts on another user's tasks or files. The text
+- `host_quota_exceeded`: the Host's storage for downloaded and kept files is
+  full. Space frees as running tasks finish, as downloaded copies expire and as
+  kept files reach the retention period. The model tells the user, who can
+  finish or cancel their own running tasks to free space sooner and then try
+  again; where the turn has `clerum__kept_files_delete`, the text also says the
+  user can list their kept files and delete the ones they confirm. It never
+  acts on another user's tasks or files. The text
   offers no deletion of downloaded copies, because that cannot admit the
   download: the budget refusal comes when evicting every copy no running task
   protects would still not make room (the store then evicts nothing), or when a

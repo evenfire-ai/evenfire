@@ -3,6 +3,11 @@ import * as fs from 'fs'
 import type { AddressInfo } from 'net'
 import * as os from 'os'
 import * as path from 'path'
+import {
+  SAVE_LEDGER_DIR,
+  ledgerRecordFileName,
+  writeSaveLedgerRecord,
+} from '../internalTools/keptFiles'
 import type { RPCServer } from '../server'
 import { MAX_ARTIFACT_BYTES } from '../workflow/artifactPaths'
 import { CALLER_OUTPUTS_DIR, resolveRpcCallerOutputDir } from '../workspace/callerOutputs'
@@ -142,6 +147,59 @@ describe('RPCServer runtime artifact routes', () => {
         { headers: rpcEdgeHeaders }
       )
       expect(partial.status).toBe(404)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('neither lists nor serves a kept attachment', async () => {
+    outputDir = makeOutputDir()
+    fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
+    fs.mkdirSync(path.join(outputDir, '.uploads'), { mode: 0o700 })
+    fs.writeFileSync(path.join(outputDir, '.uploads', 'abcdefabcdef.bin'), 'attached')
+    const { server, baseUrl } = await startServer(outputDir)
+
+    try {
+      const res = await fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: rpcEdgeHeaders })
+      const body = (await res.json()) as { artifacts: Array<{ name: string }> }
+      expect(body.artifacts.map(artifact => artifact.name)).toEqual(['report.md'])
+      for (const name of ['.uploads', '.uploads%2Fabcdefabcdef.bin']) {
+        const download = await fetch(`${baseUrl}/v1/runtime/artifacts/${name}/download`, {
+          headers: rpcEdgeHeaders,
+        })
+        expect(download.status, name).not.toBe(200)
+      }
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('lists a generated file without its save record folder', async () => {
+    outputDir = makeOutputDir()
+    fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
+    // Records are written under the resolved folder, as the generator's adapter writes them.
+    writeSaveLedgerRecord(fs.realpathSync(outputDir), {
+      id: '0123456789ab',
+      name: 'report.md',
+      format: 'md',
+      outcome: 'delivered',
+      createdAt: new Date().toISOString(),
+      deliveredSha256: '0'.repeat(64),
+    })
+    expect(fs.readdirSync(path.join(outputDir, SAVE_LEDGER_DIR))).toEqual([
+      ledgerRecordFileName('report.md'),
+    ])
+    const { server, baseUrl } = await startServer(outputDir)
+
+    try {
+      const res = await fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: rpcEdgeHeaders })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { artifacts: Array<{ name: string }> }
+      expect(body.artifacts.map(artifact => artifact.name)).toEqual(['report.md'])
+      const record = await fetch(`${baseUrl}/v1/runtime/artifacts/${SAVE_LEDGER_DIR}/download`, {
+        headers: rpcEdgeHeaders,
+      })
+      expect(record.status).toBe(404)
     } finally {
       await server.stop()
     }

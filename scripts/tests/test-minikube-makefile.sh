@@ -304,6 +304,7 @@ assert_contains minikube-sync-auth-key-if-present "rpc-proxy-secrets"
 assert_electron_materialized_before_lock minikube-run-image-capabilities
 assert_electron_materialized_before_lock minikube-run-document-upload
 assert_electron_materialized_before_lock minikube-run-attachment-gfs-save
+assert_electron_materialized_before_lock minikube-run-generated-gfs-save
 assert_electron_materialized_before_lock minikube-prepare-codex-approved-tools
 assert_electron_materialized_before_lock minikube-run-codex-approved-tools
 assert_file_contains Makefile "T2_MUTATION_LOCK_WRAPPED"
