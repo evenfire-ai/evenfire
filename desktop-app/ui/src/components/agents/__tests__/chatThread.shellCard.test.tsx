@@ -205,6 +205,18 @@ describe('ChatThread — auto shell card', () => {
     expect(getByTestId('approval-deny-btn')).not.toBeNull()
   })
 
+  it('does not offer Allow this command when the shell card has no preview', async () => {
+    progressByMessageId = {
+      'msg-1': await deriveApprovalProgress({
+        shellCard: { channelCommandOffered: true, desktopCommandOffered: true },
+      }),
+    }
+    const { queryByTestId, getByTestId } = render(<ChatThread />)
+
+    expect(queryByTestId('approval-shell-command-btn')).toBeNull()
+    expect(getByTestId('approval-shell-once-btn')).not.toBeNull()
+  })
+
   it('does not offer Allow this command from a truncated or redacted preview', async () => {
     progressByMessageId = {
       'msg-1': await deriveApprovalProgress({
@@ -300,6 +312,30 @@ describe('ApprovalModePicker', () => {
     expect(getByTestId('approval-mode-classifier-note').textContent).toBe(
       'shell always asks on this model'
     )
+  })
+
+  it('shows the save error when the mode write fails', async () => {
+    setApprovalMode.mockRejectedValue(new Error('Set approval mode failed (500)'))
+    noteHostApprovalModeFromSession('agent-x', 'chat-1', {
+      approvalMode: 'manual',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'manual',
+      shellClassifierAvailable: true,
+    })
+    const { getByTestId, queryByTestId } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-1" />
+    )
+
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-mode-option-auto'))
+    })
+
+    expect(getByTestId('approval-mode-write-error').textContent).toBe(
+      'The approval mode could not be saved.'
+    )
+    expect(queryByTestId('approval-mode-label')).toBeNull()
   })
 
   it('hides the shell note when the classifier is available', () => {
