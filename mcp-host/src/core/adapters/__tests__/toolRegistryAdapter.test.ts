@@ -255,12 +255,13 @@ describe('McpToolRegistryAdapter', () => {
   // ─── Principal binding (PR #319 C2/H1) ──────────────────────────────────────
   //
   // The userId the adapter forwards to `manager.callTool` (which becomes the
-  // oauth grantScope='user' broker grant subject) MUST be the authenticated task
-  // sender baked into the adapter at construction (taskExecutor threads
-  // `task.sourceMessage.sender`), NEVER a value the model can choose. These lock
-  // that the principal is the constructor identity and cannot be spoofed by a
-  // tool argument named `userId`, and that two per-user adapters never cross.
-  describe('principal binding — broker userId is the authenticated sender, not a tool arg', () => {
+  // oauth grantScope='user' broker grant subject) MUST be the connector
+  // principal baked into the adapter at construction (taskExecutor threads the
+  // principal chosen by chooseConnectorPrincipal), NEVER a value the model can
+  // choose. These lock that the principal is the constructor identity and
+  // cannot be spoofed by a tool argument named `userId`, and that two per-user
+  // adapters never cross.
+  describe('principal binding — broker userId is the constructor principal, not a tool arg', () => {
     function capturingManager(): {
       manager: unknown
       calls: Array<{ tool: string; params: Record<string, unknown>; options: unknown }>

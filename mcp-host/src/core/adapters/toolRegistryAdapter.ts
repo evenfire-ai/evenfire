@@ -304,10 +304,11 @@ export class McpToolRegistryAdapter implements ToolRegistry {
   private tools = new Map<string, Tool>()
 
   /**
-   * @param userId caller identity (authenticated session `sender`) threaded to
-   *   `manager.callTool` so oauth grantScope='user' tools dispatch to the
-   *   caller's per-user partition. A fresh adapter is built per turn, so it
-   *   always carries exactly one userId.
+   * @param userId the connector principal threaded to `manager.callTool` so
+   *   oauth grantScope='user' tools dispatch to that user's per-user partition:
+   *   the authenticated rpc caller, or the linked Evenfire user of a 1:1
+   *   channel conversation. Absent when the principal is withheld. A fresh
+   *   adapter is built per registry build, so it carries exactly one userId.
    */
   constructor(
     private readonly mcpManager: McpManager,
