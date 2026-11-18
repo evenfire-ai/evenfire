@@ -5,9 +5,11 @@ import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0137_user_access_foundation',
   '0138_legacy_password_security_epoch_backfill',
-  '0145_oidc_protocol_attempts',
-  '0146_oidc_protocol_attempt_expiry_index',
-  '0147_oidc_protocol_attempt_browser_binding',
+  '0139_llm_catalog_prune_columns',
+  '0140_llm_catalog_prune_episodes',
+  '0141_oidc_protocol_attempts',
+  '0142_oidc_protocol_attempt_expiry_index',
+  '0143_oidc_protocol_attempt_browser_binding',
 ] as const)
 
 // The one bound between initDb's single dev batch and this runner: every migration

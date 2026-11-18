@@ -44,6 +44,7 @@ invitations	none
 llm_allowed_models	none
 llm_allowed_models_audit	none
 llm_catalog_dismissed	none
+llm_catalog_prune_runs	none
 llm_catalog_sync_runs	none
 llm_model_prices	none
 llm_provider_attempt_tickets	none
