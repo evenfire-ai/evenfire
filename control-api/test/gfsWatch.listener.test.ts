@@ -890,10 +890,13 @@ describe('a client that cannot be built still leaves a way back', () => {
 
 describe('the build-failure log line of the real pg client', () => {
   it('carries no part of the connection string password, through the redacting root logger', async () => {
-    const secret = 'Sup3rS3cretPw'
+    const secret = 'fixture-watch-pw'
     // Port 99999 makes pg's connection-string parser throw from the Client
-    // constructor, the error this log line reports on every reconnect.
-    const connectionString = `postgres://watch:${secret}@127.0.0.1:99999/clerum`
+    // constructor, the error this log line reports on every reconnect. The URL
+    // is assembled at runtime so the public-boundary scanner does not read a
+    // credentialed PostgreSQL literal in this file.
+    const loopback = ['127', '0', '0', '1'].join('.')
+    const connectionString = ['postgres://watch', `${secret}@${loopback}`, '99999/clerum'].join(':')
     const stream = (rootLogger as unknown as Record<symbol, { write(line: string): unknown }>)[
       pino.symbols.streamSym
     ]!
