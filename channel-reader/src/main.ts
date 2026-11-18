@@ -275,7 +275,7 @@ function shellCardMessageOptions(
   if (channelType === 'slack') {
     return {
       slackBlocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: notification } },
+        { type: 'section', text: { type: 'plain_text', text: notification, emoji: false } },
         {
           type: 'actions',
           block_id: `tool_approval_${actionToken}`,
@@ -360,7 +360,7 @@ function toolApprovalMessageOptions(
   if (channelType === 'slack') {
     return {
       slackBlocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: notification } },
+        { type: 'section', text: { type: 'plain_text', text: notification, emoji: false } },
         {
           type: 'actions',
           block_id: `tool_approval_${actionToken}`,
