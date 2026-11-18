@@ -8,6 +8,21 @@ import type { ChatMessage, TokenUsage, UsageContext } from '../types'
 
 export type ShellVerdict = 'APPROVE' | 'ESCALATE' | 'CANCELLED'
 
+/**
+ * The pair the classifier judges. A live failover pair wins over the Host
+ * primary, so a fallback the table would refuse cannot skip the card.
+ */
+export function classifierServingPair(input: {
+  primaryProvider: string
+  primaryModel: string
+  served: { provider: string; model: string; fallback: boolean } | null | undefined
+}): { providerType: string; modelName: string } {
+  if (input.served?.fallback) {
+    return { providerType: input.served.provider, modelName: input.served.model }
+  }
+  return { providerType: input.primaryProvider, modelName: input.primaryModel }
+}
+
 const CLASSIFIER_TIMEOUT_MS = 10_000
 const ARGUMENT_CHAR_LIMIT = 8_192
 

@@ -2789,6 +2789,7 @@ async function startRPCServer(): Promise<void> {
       const resolved = resolveSessionModel(hostAllowlistView(), provider, hostDefault, selections)
       return { providerType: provider, modelName: resolved.model }
     },
+    servedModel: () => failoverEngine?.servedBy() ?? null,
   })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {

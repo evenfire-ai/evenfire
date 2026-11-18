@@ -11,7 +11,12 @@ import type { UsageReporter } from '../../../usage/usageReporter'
 import { ConversationManager } from '../../conversation/conversation'
 import { type ChatMessage, ConversationState, FinishReason, type UsageContext } from '../../types'
 import { approvalLogId } from '../grantMemory'
-import { type ShellVerdict, classifierAvailable, classifyToolCall } from '../shellClassifier'
+import {
+  type ShellVerdict,
+  classifierAvailable,
+  classifierServingPair,
+  classifyToolCall,
+} from '../shellClassifier'
 
 const SENDER = 'sender-sentinel@example.test'
 const THREAD = 'thread-sentinel@example.test'
@@ -201,6 +206,36 @@ async function histogramCounts(): Promise<[number, number, number]> {
     await count(clerumPromptCacheWriteTokens, 'clerum_prompt_cache_creation_tokens_count'),
   ]
 }
+
+describe('classifierServingPair', () => {
+  it('uses the Host primary when failover is not serving a fallback', () => {
+    expect(
+      classifierServingPair({
+        primaryProvider: 'openai',
+        primaryModel: 'gpt-4o',
+        served: { provider: 'openai', model: 'gpt-4o', fallback: false },
+      })
+    ).toEqual({ providerType: 'openai', modelName: 'gpt-4o' })
+    expect(
+      classifierServingPair({
+        primaryProvider: 'openai',
+        primaryModel: 'gpt-4o',
+        served: null,
+      })
+    ).toEqual({ providerType: 'openai', modelName: 'gpt-4o' })
+  })
+
+  it('uses the fallback pair when failover is serving it', () => {
+    expect(
+      classifierServingPair({
+        primaryProvider: 'openai',
+        primaryModel: 'gpt-4o',
+        served: { provider: 'azure', model: 'my-deployment', fallback: true },
+      })
+    ).toEqual({ providerType: 'azure', modelName: 'my-deployment' })
+    expect(classifierAvailable('azure', 'my-deployment', {})).toBe(false)
+  })
+})
 
 describe('shell classifier', () => {
   it('maps model text, a throw, a 10s timeout and a task abort', async () => {

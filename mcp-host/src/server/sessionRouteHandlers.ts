@@ -56,6 +56,11 @@ export interface SessionRouteHandlerDeps {
     providerType: string
     modelName: string
   }
+  /**
+   * The pair currently serving the Host when failover is active. Absent or
+   * not a fallback means the session model is the classifier pair.
+   */
+  servedModel?: () => { provider: string; model: string; fallback: boolean } | null
 }
 
 export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
@@ -86,12 +91,20 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     const cap = readChannelCap(snapshot, channelType)
     const approvalMode = normalizeApprovalMode(stored)
     const model = sessionModel(selections)
+    const served = deps.servedModel?.() ?? null
+    const classifierModel = served?.fallback
+      ? { providerType: served.provider, modelName: served.model }
+      : model
     return {
       approvalMode,
       modeCeiling: ceiling,
       channelCap: cap,
       effectiveApprovalMode: effectiveApprovalMode(approvalMode, ceiling, cap),
-      shellClassifierAvailable: classifierAvailable(model.providerType, model.modelName, {}),
+      shellClassifierAvailable: classifierAvailable(
+        classifierModel.providerType,
+        classifierModel.modelName,
+        {}
+      ),
     }
   }
 

@@ -51,6 +51,7 @@ function callbackValues(options: SendMessageOptions | undefined): string[] {
     if (block.type !== 'actions') continue
     for (const element of block.elements) values.push(element.value)
   }
+  for (const action of options?.teamsActions ?? []) values.push(action.value)
   return values
 }
 
@@ -149,6 +150,45 @@ describe('shell card approval handler', () => {
       { shellAction }
     )
     expect(rpc.sendDenial).not.toHaveBeenCalled()
+  })
+
+  it('a Teams shell card offers Approve and Deny only', async () => {
+    const { adapter, sent } = capturingAdapter('teams')
+    const rpc = makeRpcClient({
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-teams',
+          requestId: 'approval-teams',
+          userId: 'teams-user',
+          notification: NOTIFICATION,
+          shellCard: OFFERED,
+        },
+      })),
+    })
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      adapters: new Map([['teams', adapter]]),
+      channels: [],
+      sleep: async () => undefined,
+    })
+    await reader.handleMessages([
+      {
+        channelType: 'teams',
+        channelId: '19:channel@thread.tacv2',
+        sender: 'teams-user',
+        content: 'pwd',
+        timestamp: new Date('2026-05-12T12:00:00.000Z'),
+        messageId: 'teams-msg-1',
+      },
+    ])
+    const values = callbackValues(sent.at(-1)?.options)
+    expect(values.some(value => value.startsWith('tool:a:'))).toBe(true)
+    expect(values.some(value => value.startsWith('tool:d:'))).toBe(true)
+    expect(values.some(value => /^tool:[cs]:/.test(value))).toBe(false)
+    const titles = sent.at(-1)?.options?.teamsActions?.map(action => action.title)
+    expect(titles).toEqual(['Approve', 'Deny'])
   })
 
   it('rejects an unknown code without sendDenial', async () => {

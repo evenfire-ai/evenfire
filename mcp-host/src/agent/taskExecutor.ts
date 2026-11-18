@@ -26,6 +26,7 @@ import type { ApprovalModeInputs } from '../core/approval/gateCause'
 import { approvalLogId } from '../core/approval/grantMemory'
 import type { ShellAction } from '../core/approval/shellCard'
 import {
+  classifierServingPair,
   classifyToolCall,
   classifierAvailable as isClassifierAvailable,
 } from '../core/approval/shellClassifier'
@@ -2361,22 +2362,57 @@ export class TaskExecutor {
     return new Set(['clerum__gfs_download'])
   }
 
+  /**
+   * The model serving this turn. Failover's sticky pair wins; otherwise the
+   * Host primary that this task was built with.
+   */
+  private classifierCaller(): {
+    provider: Pick<SingleTurnProvider, 'completeSingleTurn'>
+    providerType: string
+    modelName: string
+  } {
+    const primaryProvider = this.deps.llmProvider.getProviderType()
+    const primaryModel = this.deps.modelName
+    const served = this.deps.failover?.engine.servedBy()
+    const pair = classifierServingPair({ primaryProvider, primaryModel, served })
+    if (!served?.fallback) {
+      return {
+        provider: this.deps.llmProvider,
+        providerType: pair.providerType,
+        modelName: pair.modelName,
+      }
+    }
+    const entry = this.deps.failover!.policy.fallbacks.find(
+      item => item.provider === served.provider
+    )
+    const built = entry
+      ? this.deps.failover!.buildProvider({ ...entry, model: served.model })
+      : null
+    if (!built) {
+      return { provider: this.deps.llmProvider, providerType: 'unknown', modelName: pair.modelName }
+    }
+    return { provider: built, providerType: built.getProviderType(), modelName: pair.modelName }
+  }
+
   private approvalModeInputs(conversation: Conversation): ApprovalModeInputs {
     return {
       storedMode: () => normalizeApprovalMode(conversation.approval_mode),
       ceiling: () => readModeCeiling(this.approvalSnapshot()),
       channelCap: () =>
         readChannelCap(this.approvalSnapshot(), conversation.channel_type ?? undefined),
-      classifierAvailable: args =>
-        isClassifierAvailable(this.deps.llmProvider.getProviderType(), this.deps.modelName, args),
-      classify: (call, description) =>
-        classifyToolCall({
+      classifierAvailable: args => {
+        const caller = this.classifierCaller()
+        return isClassifierAvailable(caller.providerType, caller.modelName, args)
+      },
+      classify: (call, description) => {
+        const caller = this.classifierCaller()
+        return classifyToolCall({
           toolName: call.name,
           description,
           args: call.arguments,
-          provider: this.deps.llmProvider,
-          providerType: this.deps.llmProvider.getProviderType(),
-          modelName: this.deps.modelName,
+          provider: caller.provider,
+          providerType: caller.providerType,
+          modelName: caller.modelName,
           taskSignal: this.abortController.signal,
           usage: {
             reporter: this.deps.usageReporter,
@@ -2392,7 +2428,8 @@ export class TaskExecutor {
             },
           },
           sessionLogId: approvalLogId(conversation.id),
-        }),
+        })
+      },
     }
   }
 

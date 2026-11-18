@@ -186,6 +186,11 @@ command, while `http_request` still runs with no card. That includes OpenAI's
 default `gpt-5.4-mini` (it is in the reasoning family), Azure, the subscription
 providers, and Vertex and Gemini.
 
+The judge is the model serving the turn. When failover is serving a fallback,
+that pair is the one checked and called. A fallback the table would refuse
+shows the card. With no failover, the session's model on the Host provider is
+the pair.
+
 An explicit `tools.shell_exec: true` keeps a card on every shell call in auto,
 with no classifier and no shell memory. Remove the line if auto should judge
 shell. See [Host CRD](../crds/host.md#approval-mode-ceiling).

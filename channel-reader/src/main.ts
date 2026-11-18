@@ -318,9 +318,7 @@ function shellCardMessageOptions(
   if (channelType === 'teams') {
     return {
       teamsActions: [
-        { title: 'Allow once', value: once, style: 'positive' },
-        ...(offerCommand ? [{ title: 'Allow this command', value: command }] : []),
-        { title: 'Always allow shell', value: shell },
+        { title: 'Approve', value: once, style: 'positive' },
         { title: 'Deny', value: deny, style: 'destructive' },
       ],
     }
