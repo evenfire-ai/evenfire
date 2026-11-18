@@ -63,7 +63,7 @@ import {
   markPluginGfsPreviewUnavailable,
   shouldRevalidateGfsQuery,
 } from '@lib/gfsEntityChangeState'
-import { resolveGfsPreview } from '@lib/gfsPreview'
+import { gfsResourceOpenTarget, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
 import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
@@ -1260,19 +1260,9 @@ export function App() {
 
   React.useEffect(() => {
     const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
-      // One detection rule for "previewable, and as what" (spec 18 §3.B.2), the
-      // same one Files uses. Only a file can be previewable; a folder always
-      // opens in the browser.
-      const preview =
-        resource.kind === 'file'
-          ? resolveGfsPreview({
-              gfsUri: resource.gfsUri,
-              name: resource.name,
-              bytes: resource.bytes ?? 0,
-              version: resource.version,
-            })
-          : null
-      if (preview?.kind === 'image') {
+      const target = gfsResourceOpenTarget(resource)
+      if (target.kind === 'preview' && target.preview.kind === 'image') {
+        const preview = target.preview
         // An image opens as an overlay OVER the plugin, keeping the user in the
         // plugin's context (the intended modal). The embed's WebContentsView
         // paints above renderer DOM, so it has to be hidden for the overlay to
@@ -1288,19 +1278,19 @@ export function App() {
         })
         return
       }
-      if (preview) {
+      if (target.kind === 'preview') {
         // Other previewable kinds (markdown, video, …) open directly as a
         // workspace preview tab. Routing them through openFilesSection would seed
         // a files tab that immediately re-previews and unmounts, leaving a tab
         // that jumps back to the preview whenever it is selected (R1-H3).
-        vm.openPreviewSection(preview)
+        vm.openPreviewSection(target.preview)
         return
       }
       // Folders and non-previewable files belong in the full browser, where the
       // user gets breadcrumbs, download, and sharing. Open (or focus) a files tab
       // AT this gfsUri — dedupe by path focuses the tab already showing it, or
       // spawns a new instance (mini-spec 06 §3).
-      vm.openFilesSection(resource.gfsUri)
+      vm.openFilesSection(target.gfsUri)
     })
     return () => off?.()
   }, [vm.openFilesSection, vm.openPreviewSection])

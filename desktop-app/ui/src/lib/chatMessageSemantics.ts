@@ -4,6 +4,8 @@ import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
 import remarkRehype from 'remark-rehype'
 import { unified } from 'unified'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
+import { externalUrlToOpen } from '../../../src/externalUrl'
 import type { AgentChatMessage } from '../uiTypes'
 import { parseChatMessageDisplay } from './chatMessageAttachments'
 import { looksLikeJson } from './format'
@@ -50,17 +52,57 @@ const FLOW_BOUNDARIES = new Set([
   'th',
 ])
 const URL_PROPERTIES = new Set(['href', 'src'])
+const URL_SCHEME = /^([a-z][a-z0-9+.-]*):/i
+
+/**
+ * The only link targets a chat message may carry, in the exact form the click
+ * handler hands on. Anything else (relative paths, `#` fragments such as GFM
+ * footnotes, `href=""`) would navigate the app's own document and reload it,
+ * dropping every open tab, so it is rendered as plain text instead.
+ */
+export function canonicalChatLinkHref(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const scheme = URL_SCHEME.exec(raw)?.[1]?.toLowerCase()
+  if (scheme === 'http' || scheme === 'https') {
+    try {
+      const url = new URL(raw)
+      return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null
+    } catch {
+      return null
+    }
+  }
+  if (scheme === 'mailto') {
+    try {
+      return externalUrlToOpen(raw)
+    } catch {
+      // `app:openUrl` would refuse this target, so it must not render as a link.
+      return null
+    }
+  }
+  if (scheme === 'gfs') return normalizeGfsResourceUri(raw)
+  return null
+}
+
+function normalizeChildren<T extends RootContent>(children: T[]): T[] {
+  return children.flatMap(child => {
+    if (child.type === 'raw') return [{ type: 'text', value: child.value } as T]
+    normalizeTree(child)
+    if (child.type !== 'element' || child.tagName !== 'a') return [child]
+    const href = canonicalChatLinkHref(child.properties.href)
+    if (href === null) return child.children as T[]
+    child.properties.href = href
+    if (/^https?:/.test(href)) child.properties.title = href
+    return [child]
+  })
+}
 
 function normalizeTree(node: RootContent | Root): void {
   if ('children' in node) {
-    node.children = node.children.map(child => {
-      if (child.type === 'raw') return { type: 'text', value: child.value }
-      normalizeTree(child)
-      return child
-    }) as typeof node.children
+    node.children = normalizeChildren<RootContent>(node.children) as typeof node.children
   }
   if (node.type === 'element') {
     for (const property of URL_PROPERTIES) {
+      if (node.tagName === 'a' && property === 'href') continue
       if (Object.hasOwn(node.properties, property)) {
         node.properties[property] = defaultUrlTransform(String(node.properties[property] || ''))
       }
