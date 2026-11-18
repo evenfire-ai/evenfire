@@ -289,6 +289,7 @@ function slackMessageIdentity(payload: unknown): {
   eventId: string
   threadTs?: string | null
   ts: string
+  channelType: string | null
 } | null {
   const body = asRecord(payload)
   if (asString(body.type) !== 'event_callback') return null
@@ -312,6 +313,9 @@ function slackMessageIdentity(payload: unknown): {
     eventId,
     ts,
     threadTs: asString(event.thread_ts) || null,
+    // Slack's signed event names the live conversation type (`im` for a
+    // direct message); an `app_mention` event carries none.
+    channelType: asString(event.channel_type) || null,
   }
 }
 
@@ -655,6 +659,7 @@ export function normalizeSlackMessage(
     providerEventId: `slack:${message.teamId}:${message.channelId}:${message.eventId}`,
     providerMessageTs: message.ts,
     threadTs: message.threadTs,
+    ...(message.channelType ? { providerChannelType: message.channelType } : {}),
   }
 }
 
