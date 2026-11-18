@@ -151,6 +151,27 @@ describe('RPCClient - sendMessage()', () => {
     expect(result.approval?.requestId).toBe('req-1')
   })
 
+  it('keeps alwaysApproveAllowed when the Host says the card cannot store a grant', async () => {
+    mockFetch.mockReturnValueOnce(
+      mockOkResponse({
+        success: true,
+        status: 'waiting_approval',
+        approval: {
+          taskId: 'task-1',
+          requestId: 'req-1',
+          userId: 'user-1',
+          notification: 'Tool was denied and must be approved again.',
+          alwaysApproveAllowed: false,
+        },
+      })
+    )
+
+    const client = new RPCClient('http://localhost:9999')
+    const result = await client.sendMessage(makeMessage())
+
+    expect(result.approval?.alwaysApproveAllowed).toBe(false)
+  })
+
   it('returns error response on HTTP failure', async () => {
     mockFetch.mockReturnValueOnce(mockErrorResponse(500))
 
