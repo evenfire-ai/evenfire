@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TeamsAdapter } from '../channels/teams'
-import type { TeamsMessageHandoff } from '../handoffServer'
+import type { SlackMessageHandoff, TeamsMessageHandoff } from '../handoffServer'
 import { ChannelReader, type ChannelReaderOptions, profileSocialChannelUrl } from '../main'
 import { createProgressStream } from '../progressClient'
 import type { MessageResponse } from '../rpcClient'
@@ -356,6 +356,66 @@ describe('ChannelReader Slack polling', () => {
     expect(adapter.fetchMessages).not.toHaveBeenCalled()
     expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
+})
+
+describe('ChannelReader Slack handoff', () => {
+  function slackHandoff(overrides: Partial<SlackMessageHandoff>): SlackMessageHandoff {
+    return {
+      kind: 'slack.message',
+      content: 'read my mail',
+      providerUserId: 'U123',
+      providerWorkspaceId: 'T123',
+      providerChannelId: 'D123',
+      providerEventId: 'slack:T123:D123:1710000000.000001',
+      providerMessageTs: '1710000000.000001',
+      responseThreadTs: null,
+      providerTarget: {
+        hostRef: 'chatllm',
+        communicationChannelNamespace: 'channels',
+        communicationChannelName: 'slack-main',
+      },
+      ...overrides,
+    }
+  }
+
+  it.each([
+    { providerChannelId: 'D123', providerChannelType: 'im', expected: 'im' },
+    { providerChannelId: 'C123', providerChannelType: 'im', expected: undefined },
+    { providerChannelId: 'D123', providerChannelType: undefined, expected: undefined },
+    { providerChannelId: 'C123', providerChannelType: 'channel', expected: 'channel' },
+  ])(
+    'channel $providerChannelId with type $providerChannelType reaches the runtime as $expected',
+    async ({ providerChannelId, providerChannelType, expected }) => {
+      const rpc = rpcClient()
+      // Deny at the authorization gate so the identity is captured without
+      // needing a Slack adapter for the reply.
+      rpc.authorizeProviderMessage = vi.fn(async () => ({ authorized: false }))
+      const reader = new ChannelReader({
+        rpcClient: rpc,
+        notificationDeliveryClient: null,
+        adapters: new Map(),
+      })
+
+      const response = await reader.handleSlackHandoff(
+        slackHandoff({
+          providerChannelId,
+          providerEventId: `slack:T123:${providerChannelId}:1710000000.000001`,
+          ...(providerChannelType ? { providerChannelType } : {}),
+        })
+      )
+
+      expect(response).toEqual({ ok: true })
+      expect(rpc.authorizeProviderMessage).toHaveBeenCalledTimes(1)
+      const identity = vi.mocked(rpc.authorizeProviderMessage).mock.calls[0]![0]
+      expect(identity).toMatchObject({ medium: 'slack', providerChannelId })
+      if (expected === undefined) {
+        expect(identity).not.toHaveProperty('providerChannelType')
+      } else {
+        expect(identity.providerChannelType).toBe(expected)
+      }
+      expect(rpc.sendMessage).not.toHaveBeenCalled()
+    }
+  )
 })
 
 describe('ChannelReader Teams handoff', () => {
