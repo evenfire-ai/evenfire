@@ -644,6 +644,14 @@ describeRealPostgres('GFS watch session hint and roots window model', () => {
           b.gates.session.hook = hook
           b.gates.roots.hook = hook
           const confirm0 = b.gates.session.done
+          let stopped = false
+          const stop = async () => {
+            if (stopped) return
+            stopped = true
+            b.gates.session.hook = null
+            b.gates.roots.hook = null
+            await b.stop()
+          }
           try {
             const wrapped = [...cmds].map(c => ({
               check: () => true,
@@ -665,18 +673,17 @@ describeRealPostgres('GFS watch session hint and roots window model', () => {
               const conn = b.connOf(c.socket)
               return conn && conn.phase === 'closed' ? [conn] : []
             })
-            const violations = [
+            // The rest state and the model are read before stop, which closes
+            // every stream; the socket checks after it, so its writes count.
+            const atRest = [
               ...real.failures,
-              ...b.violations(),
               ...restInvariantViolations(b, closed),
               ...checkModel(real, checked),
               ...i35(b),
               ...i36(b),
               ...i38Handles(b),
               ...i38Count(b),
-              ...unhandled.map(e => `unhandled: ${String(e)}`),
             ]
-            unhandled = []
             livenessPerRun.push(checked.n)
             for (const m of real.conns) {
               const reasons = m.socket.framesOf('stream.closing').map(f => f.reason)
@@ -694,11 +701,16 @@ describeRealPostgres('GFS watch session hint and roots window model', () => {
             if (confirmations > 0 && real.writes.length === 0 && real.failEvs.length === 0) {
               coverage.falseHintsResolved += 1
             }
+            await stop()
+            const violations = [
+              ...atRest,
+              ...b.violations(),
+              ...unhandled.map(e => `unhandled: ${String(e)}`),
+            ]
+            unhandled = []
             expect(violations).toEqual([])
           } finally {
-            b.gates.session.hook = null
-            b.gates.roots.hook = null
-            await b.stop()
+            await stop()
           }
         }
       ),

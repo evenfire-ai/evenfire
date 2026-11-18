@@ -695,6 +695,13 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
             failures: [],
             pParent: h.tree.root,
           }
+          let stopped = false
+          const stop = async () => {
+            if (stopped) return
+            stopped = true
+            b.gates.cte.hook = b.gates.read.hook = b.gates.mint.hook = null
+            await b.stop()
+          }
           try {
             await fc.asyncModelRun(() => ({ model: {}, real }), cmds)
             b.gates.cte.mode = 'pass'
@@ -706,19 +713,24 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
             const closed = real.conns.flatMap(c =>
               c.conn && c.conn.phase === 'closed' ? [c.conn] : []
             )
-            const violations = [
+            // The rest state and the model are read before stop, which closes
+            // every stream; the socket checks after it, so its writes count.
+            const atRest = [
               ...real.failures,
-              ...b.violations(),
               ...restInvariantViolations(b, closed),
               ...checkModel(real),
+            ]
+            recordCoverage(real)
+            await stop()
+            const violations = [
+              ...atRest,
+              ...b.violations(),
               ...unhandled.map(e => `unhandled: ${String(e)}`),
             ]
             unhandled = []
-            recordCoverage(real)
             expect(violations).toEqual([])
           } finally {
-            b.gates.cte.hook = b.gates.read.hook = b.gates.mint.hook = null
-            await b.stop()
+            await stop()
           }
         }
       ),

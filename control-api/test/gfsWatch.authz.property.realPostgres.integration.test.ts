@@ -768,6 +768,13 @@ describeRealPostgres('GFS watch authorization window model (T-M3, T-SB80)', () =
           }
           const fc0 = await failclosedTotal()
           const exp0 = b.gates.expansion.done
+          let stopped = false
+          const stop = async () => {
+            if (stopped) return
+            stopped = true
+            b.gates.expansion.hook = null
+            await b.stop()
+          }
           try {
             const wrapped = [...cmds].map(c => ({
               check: () => true,
@@ -785,18 +792,17 @@ describeRealPostgres('GFS watch authorization window model (T-M3, T-SB80)', () =
               return conn && conn.phase === 'closed' ? [conn] : []
             })
             const model = checkModel(real)
-            const violations = [
+            // The rest state and the model are read before stop, which closes
+            // every stream; the socket checks after it, so its writes count.
+            const atRest = [
               ...real.failures,
-              ...b.violations(),
               ...restInvariantViolations(b, closed),
               ...model.violations,
               ...i35(b),
               ...i36(b),
               ...i38Handles(b),
               ...i38Count(b),
-              ...unhandled.map(e => `unhandled: ${String(e)}`),
             ]
-            unhandled = []
             for (const m of real.conns) {
               coverage.reauthorize += m.socket
                 .framesOf('stream.closing')
@@ -809,10 +815,16 @@ describeRealPostgres('GFS watch authorization window model (T-M3, T-SB80)', () =
             coverage.listenerLoss += real.events.filter(e => e.kind === 'loss').length
             coverage.failclosed += (await failclosedTotal()) - fc0
             coverage.expansions += b.gates.expansion.done - exp0
+            await stop()
+            const violations = [
+              ...atRest,
+              ...b.violations(),
+              ...unhandled.map(e => `unhandled: ${String(e)}`),
+            ]
+            unhandled = []
             expect(violations).toEqual([])
           } finally {
-            b.gates.expansion.hook = null
-            await b.stop()
+            await stop()
           }
         }
       ),

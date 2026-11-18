@@ -64,9 +64,11 @@ describeRealPostgres('GFS watch roots window and session hints on real Postgres'
   })
 
   afterEach(async () => {
-    const violations = b?.violations() ?? []
+    // After stop and the confirmations it releases: their writes are checked
+    // like any other frame.
     await b?.stop()
     await b?.settle(() => (b?.registry.state.windows().sessionConfirming.length ?? 0) === 0)
+    const violations = b?.violations() ?? []
     const w = b?.registry.state.windows()
     h.decisions.clear()
     expect(violations).toEqual([])
