@@ -117,10 +117,19 @@ const assertPauseTokenBoundaries = () => {
   )
 }
 
+// The result is a copy at every depth: no record of the caller's value is
+// returned, and none is frozen in place.
+const assertCopied = (result, value) => {
+  if (value === null || typeof value !== 'object') return
+  assert.notEqual(result, value, 'the validator returned a caller record instead of a copy')
+  assert.ok(!Object.isFrozen(value), 'the validator froze a caller record')
+  for (const key of Object.keys(value)) assertCopied(result[key], value[key])
+}
+
 const assertAccepts = (validator, value) => {
   const result = validator(value)
   assert.deepEqual(result, value)
-  assert.notEqual(result, value, 'the validator returned the caller object instead of a copy')
+  assertCopied(result, value)
   assertDeepFrozen(result)
   return result
 }
@@ -234,6 +243,19 @@ describe('fixtures', () => {
       assert.equal(claims.action.decision, decision)
       assert.deepEqual(parsePauseActionValue(`tool:${codes[decision]}:${claims.action.token}`), claims.action)
     }
+  })
+
+  it('returns fresh copies of nested records and leaves the caller value writable', () => {
+    const value = load('admission.refused.missing_channel_grant.json')
+    const result = validateChannelAdmission(value)
+    assert.deepEqual(result, value)
+    assert.notEqual(result.event, value.event)
+    assert.notEqual(result.event.action, value.event.action)
+    assert.equal(Object.isFrozen(value.event), false)
+    assert.equal(Object.isFrozen(value.event.action), false)
+    value.event.action.written = 'fixture-after-validation'
+    assert.equal(value.event.action.written, 'fixture-after-validation')
+    assert.equal(Object.hasOwn(result.event.action, 'written'), false)
   })
 })
 
