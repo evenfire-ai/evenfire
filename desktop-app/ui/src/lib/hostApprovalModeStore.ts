@@ -330,6 +330,7 @@ export async function selectHostApprovalMode(
 
 export function resetHostApprovalModeStore(): void {
   scopeGeneration += 1
-  writeSeq = 0
+  // writeSeq stays monotonic. A read captured before this reset must still
+  // lose to a write that happens after it.
   entries.clear()
 }

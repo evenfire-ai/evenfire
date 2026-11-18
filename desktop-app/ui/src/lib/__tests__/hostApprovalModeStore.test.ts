@@ -112,6 +112,20 @@ describe('hostApprovalModeStore', () => {
     expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
   })
 
+  it('a read captured before a scope reset cannot paint over the next write', async () => {
+    const { client, setApprovalMode } = transport()
+    setApprovalMode.mockResolvedValue(snapshot('auto'))
+    await selectHostApprovalMode(client, AGENT, CHAT, 'auto')
+    const readSeq = hostApprovalModeEpoch(AGENT, CHAT)
+
+    resetHostApprovalModeStore()
+    setApprovalMode.mockResolvedValue(snapshot('allow_all'))
+    await selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'), readSeq)
+
+    expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
+  })
+
   it('a catalog read started before a write does not paint the old mode', async () => {
     const { client, setApprovalMode } = transport()
     const catalogSeq = hostApprovalModeEpoch(AGENT, null)
