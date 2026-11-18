@@ -52,6 +52,8 @@ export interface PendingTaskEntry {
     // generic approval (back-compat).
     reason?: 'approval_required' | 'connect_required'
     mcpServerName?: string
+    /** false when the card must not offer "Always approve". */
+    alwaysApproveAllowed?: false
   }
 }
 
@@ -66,6 +68,7 @@ export interface PendingTaskEntry {
 function connectApprovalFields(data: Record<string, unknown>): {
   reason?: 'approval_required' | 'connect_required'
   mcpServerName?: string
+  alwaysApproveAllowed?: false
 } {
   const reason = data.reason as 'approval_required' | 'connect_required' | undefined
   const isConnect = reason === 'connect_required'
@@ -77,6 +80,7 @@ function connectApprovalFields(data: Record<string, unknown>): {
     ...(isConnect && typeof data.mcpServerName === 'string'
       ? { mcpServerName: data.mcpServerName }
       : {}),
+    ...(data.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false as const } : {}),
   }
 }
 

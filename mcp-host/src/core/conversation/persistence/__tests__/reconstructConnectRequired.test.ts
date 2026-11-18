@@ -179,7 +179,8 @@ describe('U5 — connect_required durable round-trip', () => {
     conversation.state = ConversationState.AwaitingApproval
 
     await manager.approve(conversation, true)
-    expect(conversation.auto_approved_tools).toEqual(new Set(['*', 'internal', 'internal__do']))
+    // An ordinary card stores only its exact tool name: no wildcard, no prefix.
+    expect(conversation.auto_approved_tools).toEqual(new Set(['internal__do']))
   })
 })
 
