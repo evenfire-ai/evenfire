@@ -1,4 +1,4 @@
-ARG NODE_IMAGE=node:24.22.1-alpine
+ARG NODE_IMAGE=node:24.22.3-alpine
 FROM ${NODE_IMAGE} AS builder
 WORKDIR /app
 COPY package*.json ./
