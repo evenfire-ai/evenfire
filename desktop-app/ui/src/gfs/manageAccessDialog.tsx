@@ -19,6 +19,7 @@ import {
   type GfsGrantListItem,
 } from '@/gfs/delegation'
 import type { GfsInheritedAccessSource, GfsInheritedCoverageState } from '@/gfs/delegation.types'
+import type { Tone } from '@/uiTypes'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type { GfsManageAccessDialogProps, MyAgentEntry } from './manageAccessDialog.types'
 import { bindGfsActionGuards } from './resourceActionRunners'
@@ -154,6 +155,7 @@ export function GfsManageAccessDialog({
   isCurrent,
   deps,
   pushToast,
+  mayPresentOutcome,
   onClose,
 }: GfsManageAccessDialogProps) {
   const access = useGfsResourceAccess(target, deps.gate, {
@@ -197,12 +199,30 @@ export function GfsManageAccessDialog({
   }, [])
   const isCurrentRef = useRef(isCurrent)
   isCurrentRef.current = isCurrent
-  const bindGuards = () =>
-    bindGfsActionGuards({
+  const mayPresentOutcomeRef = useRef(mayPresentOutcome)
+  mayPresentOutcomeRef.current = mayPresentOutcome
+  const bindGuards = () => {
+    const session = {
       readAccessState: deps.readAccessState,
       publishedGeneration: deps.publishedGeneration,
+    }
+    const action = bindGfsActionGuards({
+      ...session,
       isCurrent: () => mountedRef.current && isCurrentRef.current(),
     })
+    // The outcome of a write that already ran is still worth reporting after
+    // the dialog closes, but never into another session: by the time the
+    // write settles, main may run another team the renderer has not published.
+    const outcome = action && bindGfsActionGuards(session)
+    if (!action || !outcome) return null
+    const presentOutcome = async (message: string, tone: Tone) => {
+      if (!pushToast || !(await outcome.admitEffect())) return
+      const ownerGate = mayPresentOutcomeRef.current
+      if (ownerGate && !((await ownerGate()) && outcome.isCurrent())) return
+      pushToast(message, tone)
+    }
+    return { ...action, presentOutcome }
+  }
 
   // Opening Share on a target re-reads its authority once; later renders must
   // not keep re-reading it.
@@ -315,7 +335,7 @@ export function GfsManageAccessDialog({
       throw grantError
     }
     if (isDraftCurrent()) {
-      pushToast?.(
+      await guards.presentOutcome(
         `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
         'success'
       )
@@ -335,11 +355,12 @@ export function GfsManageAccessDialog({
     }
     try {
       await access.revokeGrant(target, grantId)
-      pushToast?.(`Access revoked for ${label}`, 'success')
     } catch (revokeError) {
       if (deps.failClosed(revokeError)) return
-      pushToast?.(describeGfsGrantError(revokeError).message, 'error')
+      await guards.presentOutcome(describeGfsGrantError(revokeError).message, 'error')
+      return
     }
+    await guards.presentOutcome(`Access revoked for ${label}`, 'success')
   }
 
   const handleRevokeShare = async (shareId: string, label: string) => {
@@ -353,11 +374,12 @@ export function GfsManageAccessDialog({
     }
     try {
       await access.revokeShare(target, shareId)
-      pushToast?.(`Shared access revoked for ${label}`, 'success')
     } catch (revokeError) {
       if (deps.failClosed(revokeError)) return
-      pushToast?.(describeGfsGrantError(revokeError).message, 'error')
+      await guards.presentOutcome(describeGfsGrantError(revokeError).message, 'error')
+      return
     }
+    await guards.presentOutcome(`Shared access revoked for ${label}`, 'success')
   }
 
   const handleAccessRoleChange = async (
@@ -383,7 +405,7 @@ export function GfsManageAccessDialog({
     try {
       if (!(await guards.admitEffect())) return
       await access.grant(target, [subjectKey], bits, item.inherit)
-      pushToast?.(
+      await guards.presentOutcome(
         `${label} is now ${role === 'editor' ? 'an Editor' : 'Read-only'}${inheritedCoverageCaveat(
           access.inheritedCoverage
         )}`,
@@ -392,7 +414,7 @@ export function GfsManageAccessDialog({
       await Promise.all([access.refreshGrants(), access.refreshShares()])
     } catch (roleError) {
       if (deps.failClosed(roleError)) return
-      pushToast?.(describeGfsGrantError(roleError).message, 'error')
+      await guards.presentOutcome(describeGfsGrantError(roleError).message, 'error')
     } finally {
       setUpdatingAccessRole(false)
     }

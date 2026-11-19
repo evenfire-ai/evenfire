@@ -798,4 +798,155 @@ describe('FilesPage delegation request lifecycle', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
     await waitFor(() => expect(revokeShare).toHaveBeenCalledWith(shareId))
   })
+
+  describe('write outcome toasts across a session switch in main', () => {
+    const GRANT_ID = '42424242-4242-4242-4242-424242424242'
+    const SHARE_ID = '43434343-4343-4343-4343-434343434343'
+    const agentGrantRow = {
+      id: GRANT_ID,
+      drive: 'main',
+      resourceId: 'folder-a',
+      subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+      permissions: ['read'],
+      inherit: true,
+    }
+    const agentShareRow = {
+      id: SHARE_ID,
+      drive: 'main',
+      resourceId: 'folder-a',
+      subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+      permissions: ['read'],
+      includeDescendants: true,
+    }
+
+    type Write = ReturnType<typeof deferred<void>>
+    const settle = () =>
+      act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+    interface Case {
+      name: string
+      success: string
+      mount: (write: ReturnType<typeof vi.fn>) => Promise<Awaited<ReturnType<typeof createPage>>>
+      start: (dialog: HTMLElement) => Promise<void>
+    }
+    const removeAccess = async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Actions for chatllm' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    }
+    const cases: Case[] = [
+      {
+        name: 'grant',
+        success: 'Access granted to 1 subject',
+        mount: write => createPage(write),
+        start: async dialog => {
+          await selectAgent(dialog)
+          fireEvent.click(within(dialog).getByRole('button', { name: 'Share' }))
+        },
+      },
+      {
+        name: 'role change',
+        success: 'chatllm is now an Editor',
+        mount: async write => createPage(write, { grants: await grantsListPage([agentGrantRow]) }),
+        start: async () => {
+          fireEvent.click(await screen.findByRole('button', { name: 'Access role for chatllm' }))
+          fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+        },
+      },
+      {
+        name: 'grant removal',
+        success: 'Access revoked for chatllm',
+        mount: async write =>
+          createPage(vi.fn(), {
+            grants: await grantsListPage([agentGrantRow]),
+            gfs: { revokeGrant: write },
+          }),
+        start: removeAccess,
+      },
+      {
+        name: 'share removal',
+        success: 'Shared access revoked for chatllm',
+        mount: async write =>
+          createPage(vi.fn(), {
+            shares: await sharesListPage([agentShareRow]),
+            gfs: { revokeShare: write },
+          }),
+        start: removeAccess,
+      },
+    ]
+
+    const runWrite = async (testCase: Case, switchSessionMidWrite: boolean) => {
+      const write: Write = deferred<void>()
+      const ipc = vi.fn(() => write.promise)
+      const page = await testCase.mount(ipc)
+      await testCase.start(page.dialog)
+      await waitFor(() => expect(ipc).toHaveBeenCalledOnce())
+      if (switchSessionMidWrite) page.getSessionGeneration.mockResolvedValue(SESSION_GENERATION + 1)
+      const confirmationsBeforeSettle = page.getSessionGeneration.mock.calls.length
+      await act(async () => write.resolve())
+      await settle()
+      return { ...page, confirmationsBeforeSettle }
+    }
+
+    for (const testCase of cases) {
+      it(`shows no ${testCase.name} toast once main runs another session`, async () => {
+        const { pushToast, getSessionGeneration, confirmationsBeforeSettle } = await runWrite(
+          testCase,
+          true
+        )
+        expect(pushToast).not.toHaveBeenCalled()
+        // The settled write did reach its outcome: it asked main before deciding.
+        expect(getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmationsBeforeSettle)
+      })
+
+      it(`shows the ${testCase.name} toast while the session is unchanged`, async () => {
+        const { pushToast } = await runWrite(testCase, false)
+        await waitFor(() =>
+          expect(pushToast).toHaveBeenCalledWith(
+            expect.stringContaining(testCase.success),
+            'success'
+          )
+        )
+      })
+    }
+
+    it('shows no removal failure toast once main runs another session', async () => {
+      const failure = await gfsRouteFailureMessage(
+        client => client.revokeGrant(GRANT_ID, SESSION_TOKEN),
+        500,
+        { code: 'internal', message: 'upstream failed' }
+      )
+      const write = deferred<void>()
+      const revokeGrant = vi.fn(() => write.promise)
+      const { getSessionGeneration, pushToast } = await createPage(vi.fn(), {
+        grants: await grantsListPage([agentGrantRow]),
+        gfs: { revokeGrant },
+      })
+      await removeAccess()
+      await waitFor(() => expect(revokeGrant).toHaveBeenCalledOnce())
+      getSessionGeneration.mockResolvedValue(SESSION_GENERATION + 1)
+      const confirmationsBeforeSettle = getSessionGeneration.mock.calls.length
+      await act(async () => write.reject(new Error(failure)))
+      await settle()
+      expect(pushToast).not.toHaveBeenCalled()
+      expect(getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmationsBeforeSettle)
+    })
+
+    it('still reports a write that settles after Share closes in the same session', async () => {
+      const write = deferred<void>()
+      const revokeGrant = vi.fn(() => write.promise)
+      const { dialog, pushToast } = await createPage(vi.fn(), {
+        grants: await grantsListPage([agentGrantRow]),
+        gfs: { revokeGrant },
+      })
+      await removeAccess()
+      await waitFor(() => expect(revokeGrant).toHaveBeenCalledOnce())
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close share dialog' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      await act(async () => write.resolve())
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith('Access revoked for chatllm', 'success')
+      )
+    })
+  })
 })

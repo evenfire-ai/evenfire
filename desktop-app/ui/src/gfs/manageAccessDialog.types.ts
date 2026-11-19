@@ -40,6 +40,12 @@ export interface GfsManageAccessDialogProps {
   isCurrent: () => boolean
   deps: GfsManageAccessDeps
   pushToast?: (message: string, tone: Tone) => void
+  /**
+   * The owner's own last word before a write's outcome toast, checked after
+   * the dialog has confirmed with main that the session the write ran under
+   * is still the live one. Omit it when the dialog's session check suffices.
+   */
+  mayPresentOutcome?: () => Promise<boolean>
   onClose: () => void
 }
 
