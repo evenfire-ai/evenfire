@@ -13,6 +13,11 @@ import {
 } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
 import {
+  applyOidcProtocolAttemptBrowserBindingSchema,
+  applyOidcProtocolAttemptExpiryIndexMigration,
+  applyOidcProtocolAttemptSchema,
+} from './oidc/protocolAttemptStore.js'
+import {
   applyUserAccessFoundationSchema,
   backfillLegacyPasswordSecurityEpochs,
 } from './services/access/userAccessFoundationSchema.js'
@@ -6480,6 +6485,39 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0147_gfs_watch_session_users_notify',
     apply: applyGfsWatchSessionUsersSchema,
     lockRetries: 2,
+  },
+  {
+    version: '0148_oidc_protocol_attempts',
+    // Full version strings from earlier OIDC slots. They do not match the
+    // GFS notify migrations that now own 0141–0147.
+    legacyVersions: [
+      '0130_oidc_protocol_attempts',
+      '0131_oidc_protocol_attempts',
+      '0139_oidc_protocol_attempts',
+      '0141_oidc_protocol_attempts',
+      '0145_oidc_protocol_attempts',
+    ],
+    apply: applyOidcProtocolAttemptSchema,
+  },
+  {
+    version: '0149_oidc_protocol_attempt_expiry_index',
+    legacyVersions: [
+      '0132_oidc_protocol_attempt_expiry_index',
+      '0140_oidc_protocol_attempt_expiry_index',
+      '0142_oidc_protocol_attempt_expiry_index',
+      '0146_oidc_protocol_attempt_expiry_index',
+    ],
+    apply: applyOidcProtocolAttemptExpiryIndexMigration,
+  },
+  {
+    version: '0150_oidc_protocol_attempt_browser_binding',
+    legacyVersions: [
+      '0133_oidc_protocol_attempt_browser_binding',
+      '0141_oidc_protocol_attempt_browser_binding',
+      '0143_oidc_protocol_attempt_browser_binding',
+      '0147_oidc_protocol_attempt_browser_binding',
+    ],
+    apply: applyOidcProtocolAttemptBrowserBindingSchema,
   },
 ]
 
