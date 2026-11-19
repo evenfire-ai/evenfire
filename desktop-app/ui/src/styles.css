@@ -4450,6 +4450,33 @@ body.sidebar-resizing {
   opacity: 0.55;
 }
 
+/* Approval-mode picker. It reuses the model selector's chip, upward popover and
+ * rows above so the two composer controls match. Only its own pieces live here:
+ * a save error that floats above the chip like the "applies to your next
+ * message" badge, out of the flex flow so it never shoves the send button, and
+ * the Allow-all confirmation that replaces the menu inside the popover. */
+.approval-mode-picker-error {
+  position: absolute;
+  bottom: calc(100% + var(--space-1));
+  right: 0;
+  font-size: var(--font-size-2xs);
+  color: var(--danger);
+  white-space: nowrap;
+}
+
+.approval-mode-picker-confirm-text {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text);
+  line-height: var(--line-height-normal);
+}
+
+.approval-mode-picker-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
 .agent-workspace-agent-breadcrumb-actions {
   display: inline-flex;
   align-items: center;
