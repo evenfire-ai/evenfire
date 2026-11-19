@@ -1,4 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import type { AppService } from '../../../../src/appService'
+import type { ResolvedGfsResource } from '../../../../src/gfs/uriHandler'
 import {
   openGfsResourcePayload,
   resolveResource,
@@ -7,13 +12,47 @@ import {
 } from '../../gfs/__fixtures__/gfsProducerFixtures'
 import { gfsResourceOpenTarget } from '../gfsPreview'
 
+// Only so the main-process plugin runtime can load; nothing here touches it.
+vi.mock('electron', () => ({
+  app: { isReady: vi.fn(() => false), getPath: vi.fn(() => '/unused') },
+  BrowserWindow: class {},
+  Notification: class {},
+}))
+
 const RID = '859df99de46b407bb0ec4b0f7cb424a5'
 const URI = `gfs://main/${RID}`
+
+const runtimeDirs: string[] = []
+afterAll(async () => {
+  await Promise.all(runtimeDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })))
+})
+
+/**
+ * The `pluginSdk:openGfsResource` payload exactly as the real main-process
+ * `PluginSdkRuntime.openGfsResource` sends it, for a resource the real
+ * `GfsClient` resolved, structured-cloned as Electron IPC does.
+ */
+async function runtimePayload(resource: ResolvedGfsResource) {
+  const resolved = await resolveResource(resource)
+  const userDataDir = await mkdtemp(path.join(os.tmpdir(), 'evenfire-open-target-'))
+  runtimeDirs.push(userDataDir)
+  const send = vi.fn()
+  const { PluginSdkRuntime } = await import('../../../../src/pluginSdkRuntime')
+  const runtime = new PluginSdkRuntime({
+    service: { resolveGfsUri: async () => resolved } as unknown as AppService,
+    getMainWindow: () => ({ isDestroyed: () => false, webContents: { send } }) as never,
+    userDataDir,
+  })
+  await expect(runtime.openGfsResource(resource.gfsUri)).resolves.toEqual({ opened: true })
+  const sent = send.mock.calls.filter(([channel]) => channel === 'pluginSdk:openGfsResource')
+  expect(sent).toHaveLength(1)
+  return structuredClone(sent[0]![1]) as Awaited<ReturnType<typeof openGfsResourcePayload>>
+}
 
 // Both producers that feed `gfsResourceOpenTarget`: the plugin SDK wire payload
 // (`bytes: null` when the resolve omits it) and the resolve result itself.
 const producers = [
-  ['plugin payload', openGfsResourcePayload],
+  ['plugin payload', runtimePayload],
   ['resolved resource', resolveResource],
 ] as const
 
@@ -75,8 +114,27 @@ describe.each(producers)('gfsResourceOpenTarget — %s', (_label, produce) => {
   })
 })
 
-it('the plugin payload carries `bytes: null` when the resolve omits it', async () => {
-  const { bytes: _omitted, ...withoutBytes } = resolvedFile(RID, 'demo.mp4', { gfsUri: URI })
+describe('plugin open payload', () => {
+  it('carries `bytes: null` when the resolve omits it', async () => {
+    const { bytes: _omitted, ...withoutBytes } = resolvedFile(RID, 'demo.mp4', { gfsUri: URI })
 
-  expect((await openGfsResourcePayload(withoutBytes)).bytes).toBeNull()
+    expect(await runtimePayload(withoutBytes)).toEqual({
+      gfsUri: URI,
+      name: 'demo.mp4',
+      kind: 'file',
+      bytes: null,
+      version: 1,
+    })
+  })
+
+  // The renderer App suites cannot load the runtime (it imports `electron`),
+  // so they use the fixture's mirror of its projection; this keeps the mirror
+  // honest.
+  it.each([
+    ['with a byte count', resolvedFile(RID, 'README.md', { gfsUri: URI, bytes: 120, version: 7 })],
+    ['without a byte count', resolvedFile(RID, 'demo.mp4', { gfsUri: URI, bytes: undefined })],
+    ['for a directory', resolvedDirectory(RID, 'Folder', { gfsUri: URI })],
+  ])('matches the fixture mirror %s', async (_label, resource) => {
+    expect(await openGfsResourcePayload(resource)).toEqual(await runtimePayload(resource))
+  })
 })
