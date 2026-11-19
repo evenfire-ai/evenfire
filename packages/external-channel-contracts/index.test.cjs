@@ -146,9 +146,11 @@ it('keeps runtime exports aligned with the declaration file', () => {
 })
 
 // No TypeScript run compiles index.d.ts, so this test compares its text with the runtime.
-// Scope: string-literal vocabularies and literal constants only. Not covered: nullability,
-// optionality, field names, parameter and return types, declaration syntax.
-it('keeps the literal vocabularies and constants of the declaration file aligned with the runtime', () => {
+// Scope: the rows below, each compared as a set of literals. Not compared: the literal fields
+// outcome ('admitted', 'refused'), kind ('member') and ver (1); which literal belongs to which
+// variant of a union; nullability, optionality, field names, parameter and return types,
+// declaration syntax.
+it('keeps the listed literal sets of the declaration file aligned with the runtime', () => {
   const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
   const source = fs.readFileSync(path.join(__dirname, 'index.cjs'), 'utf8')
   const literals = text => Array.from(text.matchAll(/'([^']*)'/g), match => match[1])
