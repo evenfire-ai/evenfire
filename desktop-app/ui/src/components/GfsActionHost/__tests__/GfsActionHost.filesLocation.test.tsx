@@ -3,16 +3,18 @@ import { useRef, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useGfsWatchSubscription } from '@hooks/domain/useGfsWatchSubscription'
 import { useGfsWatchKeyReactions } from '@hooks/useGfsWatchKeyReactions'
 import { gfsWatchKey } from '@lib/gfsWatchKeys'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { FilesPage } from '@pages/FilesPage'
 import {
+  accessibleResource,
   childView,
   listAccessiblePage,
   listChildrenPage,
+  moveResourceReceipt,
   renameResourceResult,
   resolveResource,
   resolvedDirectory,
@@ -45,11 +47,15 @@ const A = 'aaaa0000aaaa0000aaaa0000aaaa0000'
 const Q = 'bbbb0000bbbb0000bbbb0000bbbb0000'
 const T = 'cccc0000cccc0000cccc0000cccc0000'
 const C = 'dddd0000dddd0000dddd0000dddd0000'
+// Another root folder, a destination for moves.
+const Z = 'eeee0000eeee0000eeee0000eeee0000'
 const Q_URI = `gfs://main/${Q}`
 const Q_KEY = mainDriveKey('dir', Q)
 
 interface World {
   names: Record<string, string>
+  /** Where Q lives; a host Move changes it. */
+  parentOfQ?: string
   resolveCalls: string[]
   /** Highest number of location resolves of Q in flight at once. */
   maxConcurrentQ: number
@@ -68,11 +74,18 @@ async function installBridge(world: World) {
       await new Promise(done => window.setTimeout(done, 15))
       inFlightQ -= 1
       return resolveResource(
-        resolvedDirectory(Q, world.names[Q]!, { parentResourceId: A, gfsUri: Q_URI })
+        resolvedDirectory(Q, world.names[Q]!, {
+          parentResourceId: world.parentOfQ ?? A,
+          gfsUri: Q_URI,
+          version: world.parentOfQ && world.parentOfQ !== A ? 4 : 3,
+        })
       )
     }
     if (id === A) {
       return resolveResource(resolvedDirectory(A, world.names[A]!, { parentResourceId: null }))
+    }
+    if (id === Z && world.names[Z]) {
+      return resolveResource(resolvedDirectory(Z, world.names[Z], { parentResourceId: null }))
     }
     if (id === T) {
       return resolveResource(resolvedFile(T, world.names[T]!, { parentResourceId: A, version: 3 }))
@@ -86,6 +99,10 @@ async function installBridge(world: World) {
     world.names[resourceId] = name
     return renameResourceResult(resourceId, name, 4)
   })
+  const moveResource = vi.fn(async (resourceId: string, destinationId: string) => {
+    if (resourceId === Q) world.parentOfQ = destinationId
+    return moveResourceReceipt(resourceId, destinationId, 4)
+  })
   const listChildren = vi.fn(async (parentId: string) =>
     listChildrenPage(
       parentId === Q
@@ -96,8 +113,22 @@ async function installBridge(world: World) {
   const bridge = {
     resolve,
     renameResource,
+    moveResource,
     listChildren,
-    listAccessible: vi.fn(async () => listAccessiblePage([])),
+    listAccessible: vi.fn(async () =>
+      listAccessiblePage(
+        world.names[Z]
+          ? [
+              accessibleResource(A, world.names[A]!, 'directory', {
+                permissions: ['read', 'write'],
+              }),
+              accessibleResource(Z, world.names[Z], 'directory', {
+                permissions: ['read', 'write'],
+              }),
+            ]
+          : []
+      )
+    ),
     affordances: vi.fn(async () =>
       delegationAffordances(new Set(['read', 'write', 'delete', 'manage_acl']), false)
     ),
@@ -255,6 +286,26 @@ describe('GfsActionHost — the Files location on screen', () => {
     await rename(await target(A, 'Alpha', 'directory', null), 'Alpha 2')
 
     await waitFor(() => expect(crumbs()).toEqual(['Alpha 2', 'Quarterly']))
+    expect(locations[locations.length - 1]).toBe(Q_URI)
+  })
+
+  it('L2: moving Q into another folder shows its new crumbs at rest', async () => {
+    const w = { ...world(), names: { ...world().names, [Z]: 'Zeta' } }
+    const { bridge, locations } = await mount(w)
+    const quarterly: GfsHostActionTarget = {
+      ...(await target(Q, 'Quarterly', 'directory', A)),
+      version: 3,
+      ancestorCrumbs: [],
+    }
+
+    act(() => hostValue!.openGfsAction(quarterly, 'move'))
+    const moveDialog = await screen.findByRole('dialog', { name: /move folder quarterly/i })
+    fireEvent.click(await within(moveDialog).findByRole('button', { name: 'Zeta' }))
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (Zeta)' }))
+    await waitFor(() => expect(bridge.moveResource).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+    await waitFor(() => expect(crumbs()).toEqual(['Zeta', 'Quarterly']))
     expect(locations[locations.length - 1]).toBe(Q_URI)
   })
 

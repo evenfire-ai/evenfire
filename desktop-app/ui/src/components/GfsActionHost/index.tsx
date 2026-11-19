@@ -626,7 +626,7 @@ export function GfsActionHost({
       const running = enterPhase(action, 'running')
       if (!running) return { status: 'gesture-lost' }
       try {
-        return await commitGfsExplicitMove(
+        const outcome = await commitGfsExplicitMove(
           {
             ops,
             handleAuthorityFailure: (message, scope) =>
@@ -649,6 +649,13 @@ export function GfsActionHost({
             isCurrent: () => options.isCurrent?.() !== false && isActionCurrent(running),
           }
         )
+        // The move's convergence relocates caches and open-location entries,
+        // but not the crumbs a Files tab shows for the moved folder or a
+        // descendant: only a re-read of that location does.
+        if (outcome.status === 'committed' && isActionCurrent(running)) {
+          refreshFilesLocationRef.current()
+        }
+        return outcome
       } finally {
         // Back to the dialog: it shows a failure in place, or closes on success.
         leaveRunning(running, true)

@@ -691,8 +691,8 @@ describe('GfsActionHost — move', () => {
     await waitFor(() => expect(dialog()).toBeNull())
     expect(h.host().hostMovingResourceId).toBeNull()
     expect(toastMessages(h)).toContain('Moved notes.txt to Archive')
-    // A move converges through its own receipt, never through a location refresh.
-    expect(h.refreshFilesLocation).not.toHaveBeenCalled()
+    // The receipt converges the caches; the Files location still needs its own re-read.
+    expect(h.refreshFilesLocation).toHaveBeenCalledTimes(1)
   })
 })
 
