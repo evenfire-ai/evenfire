@@ -1010,8 +1010,10 @@ function menuViolations(w: World): string[] {
 }
 
 function checkAtRest(w: World) {
-  // An answer a fixed example still holds back by hand: not at rest yet.
-  if (w.heldGen || w.releaseGen || w.heldBits.size > 0 || w.heldPublish) {
+  // A generation answer a fixed example still holds: an outcome is pending,
+  // so L1 cannot be judged yet. Held bit reads and a held publish leave the
+  // composition at rest (a pending menu, a renderer behind main) and are checked.
+  if (w.heldGen || w.releaseGen) {
     expect(w.violations).toEqual([])
     return
   }
@@ -2047,6 +2049,8 @@ const closeDuringMove = (): Cmd[] => [
 const lateBitsOnCrossedMenu = (): Cmd[] => [
   new HoldBits(NOTES),
   new OpenMenuOn('notes.txt'),
+  // At rest with the menu still waiting for its bits: it covers the view (S6).
+  new Rest(),
   new OpenMenuOn('readme.md'),
   new Rest(),
   new ReleaseBits(NOTES),
