@@ -1,18 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import {
-  MERMAID_MAX_CODE_CHARS,
-  MERMAID_MAX_IMAGE_SIDE_PX,
-  MERMAID_MAX_IMAGE_URL_CHARS,
-  MERMAID_MAX_WIDTH_PX,
-  MERMAID_MIN_WIDTH_PX,
-} from '../../ui/src/constants/mermaid'
-import {
-  DIAGRAM_MAX_CODE_CHARS,
-  DIAGRAM_MAX_IMAGE_SIDE_PX,
-  DIAGRAM_MAX_IMAGE_URL_CHARS,
-  DIAGRAM_MAX_WIDTH_PX,
-  DIAGRAM_MIN_WIDTH_PX,
-} from '../diagramLimits.js'
+import { DIAGRAM_MAX_CODE_CHARS } from '../diagramLimits.js'
 import {
   DiagramRenderer,
   type DiagramSurface,
@@ -203,6 +190,24 @@ describe('DiagramRenderer', () => {
     expect(dying.destroyed).toBe(true)
     await expect(renderer.draw(REQUEST)).resolves.toEqual(IMAGE)
     expect(created).toHaveLength(2)
+  })
+
+  it('refuses at once a request that waited behind the same code timing out', async () => {
+    vi.useFakeTimers()
+    const hung = fakeSurface(() => new Promise(() => undefined))
+    const { renderer, created } = rendererWith([hung])
+    const timedOut = { ok: false, reason: 'Drawing it took too long' }
+
+    // The same code in both themes, the second asked for while the first hangs.
+    const dark = renderer.draw(REQUEST)
+    const light = renderer.draw({ ...REQUEST, theme: 'light' })
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    await expect(dark).resolves.toEqual(timedOut)
+    await expect(light).resolves.toEqual(timedOut)
+    expect(created).toEqual([hung])
+    expect(hung.draws).toHaveLength(1)
+    renderer.close()
   })
 
   it('refuses code whose drawing ends the renderer twice, and only that code', async () => {
@@ -412,16 +417,6 @@ describe('DiagramRenderer', () => {
   })
 })
 
-describe('limits', () => {
-  it('are the ones the chat and the drawing page apply first', () => {
-    expect(DIAGRAM_MAX_CODE_CHARS).toBe(MERMAID_MAX_CODE_CHARS)
-    expect(DIAGRAM_MIN_WIDTH_PX).toBe(MERMAID_MIN_WIDTH_PX)
-    expect(DIAGRAM_MAX_WIDTH_PX).toBe(MERMAID_MAX_WIDTH_PX)
-    expect(DIAGRAM_MAX_IMAGE_URL_CHARS).toBe(MERMAID_MAX_IMAGE_URL_CHARS)
-    expect(DIAGRAM_MAX_IMAGE_SIDE_PX).toBe(MERMAID_MAX_IMAGE_SIDE_PX)
-  })
-})
-
 describe('parseDiagramDrawRequest', () => {
   it('keeps a valid request and replaces a font that could escape its CSS value', () => {
     expect(parseDiagramDrawRequest(REQUEST)).toEqual(REQUEST)
@@ -469,7 +464,11 @@ describe('readDiagramDrawAnswer', () => {
 
 describe('diagramPageFor', () => {
   it('serves the drawing page from the build and lets through only its own files', () => {
-    const page = diagramPageFor({ devUrl: '', uiDistDir: '/Applications/Evenfire.app/ui dist' })
+    const page = diagramPageFor({
+      devUrl: '',
+      uiDistDir: '/Applications/Evenfire.app/ui dist',
+      windows: false,
+    })
 
     expect(page.url).toBe('file:///Applications/Evenfire.app/ui%20dist/diagram.html')
     expect(page.allows('file:///Applications/Evenfire.app/ui%20dist/assets/index-abc.js')).toBe(

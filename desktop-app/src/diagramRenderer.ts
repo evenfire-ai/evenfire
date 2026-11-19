@@ -186,8 +186,8 @@ export class DiagramRenderer {
   draw(input: unknown): Promise<DiagramDrawResult> {
     const request = parseDiagramDrawRequest(input)
     if (!request) return Promise.resolve(INVALID)
-    if (this.timedOut.includes(request.code)) return Promise.resolve(TIMED_OUT)
-    if (this.crashed.includes(request.code)) return Promise.resolve(CRASHED)
+    const refused = this.refusalFor(request.code)
+    if (refused) return Promise.resolve(refused)
     if (this.waiting >= this.options.maxWaiting) return Promise.resolve(BUSY)
     this.waiting += 1
     const generation = this.generation
@@ -217,6 +217,9 @@ export class DiagramRenderer {
     generation: number
   ): Promise<DiagramDrawResult> {
     if (generation !== this.generation) return STOPPED
+    // The same code, asked for in another theme, may have been refused meanwhile.
+    const refused = this.refusalFor(request.code)
+    if (refused) return refused
     this.cancelIdleClose()
     try {
       let open: OpenSurface
@@ -254,6 +257,13 @@ export class DiagramRenderer {
     } finally {
       if (generation === this.generation) this.scheduleIdleClose()
     }
+  }
+
+  /** The answer for code refused for the rest of the session, or null. */
+  private refusalFor(code: string): DiagramDrawResult | null {
+    if (this.timedOut.includes(code)) return TIMED_OUT
+    if (this.crashed.includes(code)) return CRASHED
+    return null
   }
 
   /**
