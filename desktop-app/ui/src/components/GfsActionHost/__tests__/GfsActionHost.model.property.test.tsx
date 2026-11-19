@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
-import { useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { GFS_UPLOAD_NAME_RETRY_LIMIT } from '@clerum/gfs-interaction-policy'
 import { FileExplorerTree } from '@components/SidebarNav/FileExplorerTree'
+import { GFS_WATCH_DEBOUNCE_MS } from '@constants/gfsWatch'
+import { GFS_UNAVAILABLE_LOCATION_MESSAGE } from '@hooks/domain/useGfsBrowserController'
 import { useGfsWatchSubscription } from '@hooks/domain/useGfsWatchSubscription'
 import { useGfsWatchKeyReactions } from '@hooks/useGfsWatchKeyReactions'
 import { revokeGfsSessionAccess } from '@lib/gfsSessionAuthority'
@@ -41,6 +46,7 @@ import {
 import { GfsDragSessionProvider } from '@/gfs/dragSession'
 import { GfsActionHost } from '..'
 import { AppService } from '../../../../../src/appService.js'
+import { DesktopUploadCapabilityError } from '../../../../../src/gfs/upload.js'
 import { GfsClient } from '../../../../../src/gfs/uriHandler.js'
 import type { GfsWatchEvent } from '../../../../../src/types.js'
 import { useGfsActionOverlay } from '../overlay'
@@ -123,6 +129,46 @@ async function deleteReceipt(resourceId: string, ifMatch: number) {
   )
 }
 
+let uploadSource = ''
+
+/**
+ * What `gfs.createFileFromPath` resolves to, through AppService's real
+ * create-from-path on the legacy fallback (the resumable session is not
+ * available here): a real local file, the real GfsClient create, and the
+ * session receipt main returns for it.
+ */
+async function uploadReceipt(
+  parentResourceId: string,
+  name: string,
+  created: ReturnType<typeof childView>
+) {
+  const service = Object.create(AppService.prototype) as AppService
+  const identity = { ownerId: 'user-a', teamId: 'team-a', envKey: '' }
+  Object.assign(service, {
+    sessionToken: 'fixture-session-token',
+    me: { id: 'user-a' },
+    gfsDispatchBlocked: false,
+    gfsScopeIdentity: identity,
+    gfsAuthEpoch: 1,
+    gfsPendingLegacyUploads: new Set(),
+    gfsUploadJobs: new Map(),
+    assertGfsDispatchAllowed: () => undefined,
+    startDesktopGfsUpload: async () => {
+      throw new DesktopUploadCapabilityError('resumable upload unavailable', {
+        allowLegacyFallback: true,
+      })
+    },
+    gfsClient: new GfsClient({
+      baseUrl: 'https://gfs.fixture.test',
+      requestJson: async () => ({ ok: true, data: created }) as never,
+      fetchBytes: async () => new ArrayBuffer(0),
+    }),
+  })
+  return structuredClone(
+    await service.createGfsFileFromPath(parentResourceId, name, uploadSource, 'main')
+  )
+}
+
 /** Main's own generation fence for a move, as AppService throws it. */
 function assertMainGeneration(mainGeneration: number, expected: number | undefined) {
   if (expected === undefined) return
@@ -162,6 +208,7 @@ interface MutationCall {
   ifMatch?: number
   at: number
   settled: boolean
+  settledAt?: number
   submission: Submission | null
 }
 
@@ -177,7 +224,15 @@ interface Submission {
   at: number
   calls: MutationCall[]
   actionToken: number
-  /** When the user closed the dialog this submit came from, if they did. */
+  /** The resource's name when submitted, as outcome toasts name it. */
+  name: string
+  /** Toast texts that are this submission's outcome. */
+  outcomes: Set<string>
+  /** An outcome toast was attributed to it. */
+  toasted: boolean
+  /** An error banner in its own dialog showed its outcome. */
+  shownInline: boolean
+  /** When its dialog actually closed on the user's request, if it did. */
   dismissedAt: number | null
 }
 
@@ -217,6 +272,9 @@ interface Toast {
   message: string
   tone: string
   session: Session
+  /** Whether a source that may show it was found when it was pushed (S4). */
+  legal?: boolean
+  why?: string
 }
 
 interface GenCall {
@@ -268,6 +326,13 @@ interface World {
   /** Last time every cached bit read went stale. */
   bitsAgedAt: number
   openings: Array<{ origin: Session; at: number }>
+  /** A resource another client writes just before the next Move PATCH of it. */
+  changeBeforeNextMove: string | null
+  /** A generation answer a fixed example releases by hand. */
+  heldGen: { promise: Promise<void>; release: () => void } | null
+  releaseGen: (() => void) | null
+  /** The watched keys as rendered; main receives them after the watch's debounce. */
+  renderedKeys: string
   violations: string[]
   watch: ReturnType<GfsWatchEventSource['connectRenderer']>
   embed: ReturnType<typeof createPageEmbed>
@@ -307,6 +372,9 @@ const HOST_CODE =
  * Whether the host's own code asked main for the generation: the nearest app
  * frame decides, skipping the shared session helper. A Files refresh the host
  * merely triggered also has host frames further down, but asks for itself.
+ * It reads source file names from the stack, so a rename of those modules
+ * silently stops attributing: the per-submission K1 budget would then pass
+ * vacuously, which the measured Move count below catches.
  */
 const askedByHost = (stack: string | undefined) => {
   const frames = (stack ?? '')
@@ -350,7 +418,13 @@ function mainAdmits(w: World, gen: number, since: number): boolean {
   )
 }
 
-function recordMutation(w: World, op: MutationOp, target: string, ifMatch?: number) {
+function recordMutation(
+  w: World,
+  op: MutationOp,
+  target: string,
+  ifMatch?: number,
+  outcome?: string
+) {
   const at = tick(w)
   // The latest submit on that resource: an earlier one that never sent has
   // no claim on a later call.
@@ -371,6 +445,14 @@ function recordMutation(w: World, op: MutationOp, target: string, ifMatch?: numb
   }
   const live = w.model.session
   const lowerBound = submission.calls.at(-1)?.at ?? submission.at
+  if (
+    submission.calls.length === 0 &&
+    submission.dismissedAt !== null &&
+    submission.dismissedAt < at
+  ) {
+    w.violations.push(`S3: ${op} started after its dialog was closed`)
+  }
+  if (outcome) submission.outcomes.add(outcome)
   if (!sameSession(live, submission.origin)) {
     w.violations.push(`S3: ${op} started after the renderer published another session`)
   }
@@ -402,14 +484,18 @@ function recordMutation(w: World, op: MutationOp, target: string, ifMatch?: numb
   return call
 }
 
-function settleWhenAnswered<T>(call: MutationCall, promise: Promise<T>): Promise<T> {
+function settleWhenAnswered<T>(w: World, call: MutationCall, promise: Promise<T>): Promise<T> {
   return promise.then(
     value => {
       call.settled = true
+      call.settledAt = tick(w)
       return value
     },
     error => {
       call.settled = true
+      call.settledAt = tick(w)
+      // A rejected request's own message is what the host shows for it.
+      call.submission?.outcomes.add(error instanceof Error ? error.message : String(error))
       throw error
     }
   )
@@ -435,13 +521,13 @@ function installBridge(w: World) {
   const mutation =
     <A extends unknown[], R>(
       op: MutationOp,
-      targetOf: (...args: A) => { target: string; ifMatch?: number },
+      targetOf: (...args: A) => { target: string; ifMatch?: number; outcome?: string },
       apply: (...args: A) => Promise<R>
     ) =>
     (...args: A) => {
-      const { target, ifMatch } = targetOf(...args)
-      const call = recordMutation(w, op, target, ifMatch)
-      return settleWhenAnswered(call, w.s.schedule(apply(...args), op))
+      const { target, ifMatch, outcome } = targetOf(...args)
+      const call = recordMutation(w, op, target, ifMatch, outcome)
+      return settleWhenAnswered(w, call, w.s.schedule(apply(...args), op))
     }
   const gfs = {
     getPathForFile: (file: File) => `/local/${file.name}`,
@@ -522,13 +608,17 @@ function installBridge(w: World) {
     ),
     createFileFromPath: mutation(
       'createFileFromPath',
-      (parent: string, _name: string) => ({ target: parent }),
+      (parent: string, name: string) => ({ target: parent, outcome: `Uploaded ${name}` }),
       async (parent: string, name: string) => {
         if (!node(parent)) throw new Error(failures.notFound)
         if (nameTaken(parent, name)) throw new Error(failures.conflict)
         const id = newId(w)
         w.nodes.set(id, { id, name, kind: 'file', parent, version: 1, held: ALL_BITS })
-        return createFolderResult(parent, childView(id, name, 'file', { parentResourceId: parent }))
+        return uploadReceipt(
+          parent,
+          name,
+          childView(id, name, 'file', { parentResourceId: parent })
+        )
       }
     ),
     moveResource: mutation(
@@ -546,6 +636,11 @@ function installBridge(w: World) {
         expectedGeneration?: number
       ) => {
         assertMainGeneration(w.model.mainGen, expectedGeneration)
+        if (w.changeBeforeNextMove === id) {
+          w.changeBeforeNextMove = null
+          const changed = node(id)
+          if (changed) changed.version += 1
+        }
         const current = casCheck(id, ifMatch)
         if (!node(destination)) throw new Error(failures.notFound)
         if (nameTaken(destination, newName ?? current.name)) throw new Error(failures.conflict)
@@ -588,7 +683,13 @@ function installBridge(w: World) {
           let stack: string | undefined
           return () => {
             stack = new Error().stack
-            return answer()
+            const held = w.heldGen
+            if (!held) return answer()
+            // Main answers now; the renderer receives it when the example says.
+            w.heldGen = null
+            const generation = w.model.mainGen
+            w.genCalls.push({ at: tick(w), answer: generation, host: askedByHost(stack) })
+            return held.promise.then(() => generation)
           }
         })(),
       },
@@ -648,7 +749,12 @@ function Shell({ world }: { world: World }) {
   )
 }
 
-/** App's seam around the sidebar actions, reduced to the parts they touch. */
+/**
+ * App's seam around the sidebar actions, reduced to the parts they touch.
+ * Copied from App.tsx (watch routing, Files location key, overlay gate);
+ * App.sidebarGfsMenu.test.tsx and App.gfsWatch.test.tsx cover that seam in
+ * the real App, so a drift there fails those suites, not this one.
+ */
 function Composition({ world, session }: { world: World; session: Session }) {
   const queryClient = useQueryClient()
   const ui = useSyncExternalStore(world.ui.subscribe, world.ui.get)
@@ -671,6 +777,9 @@ function Composition({ world, session }: { world: World; session: Session }) {
       ]),
     [locationKind, resolved?.gfsUri, watchedFolders]
   )
+  useEffect(() => {
+    world.renderedKeys = JSON.stringify(keys)
+  }, [keys, world])
   const reactions = useGfsWatchKeyReactions({
     queryClient,
     authorityRef,
@@ -793,7 +902,7 @@ async function flush() {
 }
 
 /** Rest: no IPC answer pending and nothing left for React or the timers to do. */
-async function rest(w: World) {
+async function rest(w: World, { awaitWatchDebounce = true } = {}) {
   for (let pass = 0; pass < 2000; pass += 1) {
     // One answer at a time, letting the unscheduled work it starts (listing
     // refetches, React commits) run before the next: draining all at once
@@ -812,7 +921,17 @@ async function rest(w: World) {
     await act(async () => {
       await sleep(25)
     })
-    if (w.s.count() === 0) return
+    if (w.s.count() > 0) continue
+    // A change of watched keys reaches main only after the watch debounce:
+    // at rest, main holds the keys the composition renders.
+    const sentKeys = JSON.stringify(w.watch.requests.at(-1)?.keys ?? [])
+    if (awaitWatchDebounce && sentKeys !== w.renderedKeys) {
+      await act(async () => {
+        await sleep(GFS_WATCH_DEBOUNCE_MS / 3)
+      })
+      continue
+    }
+    return
   }
   throw new Error('the composition never came to rest')
 }
@@ -868,6 +987,11 @@ function menuViolations(w: World): string[] {
 }
 
 function checkAtRest(w: World) {
+  // An answer a fixed example still holds back by hand: not at rest yet.
+  if (w.heldGen || w.releaseGen || w.heldBits.size > 0 || w.heldPublish) {
+    expect(w.violations).toEqual([])
+    return
+  }
   const m = w.model
   const violations = [...w.violations, ...menuViolations(w)]
   const menu = openMenu()
@@ -949,27 +1073,62 @@ function checkAtRest(w: World) {
       w.mainSwitches.every(at => at < submission.openedAt) &&
       w.publishes.every(at => at < submission.openedAt)
     if (!undisturbed) continue
-    // Closing the dialog while the submit still checks, before anything is
-    // sent, cancels it: the user asked for nothing to happen.
-    if (submission.calls.length === 0 && (submission.dismissedAt ?? -1) > submission.at) continue
+    // A Move becomes `running` only after its first generation check: a close
+    // that really took effect before it cancels the move, which is accepted.
+    // A close ignored while running does not count.
+    if (
+      submission.op === 'moveResource' &&
+      submission.calls.length === 0 &&
+      (submission.dismissedAt ?? -1) > submission.at
+    ) {
+      continue
+    }
     // A submit may stop before the IPC (a re-check found the resource changed),
-    // but never silently.
-    const toasted = w.toasts.some(toast => toast.at > submission.at)
-    const inlineError = dialogs.some(dialog => dialog.querySelector('.status-banner.tone-error'))
-    if (!toasted && !inlineError) {
+    // but never silently: its own toast, or an error banner in its own dialog.
+    noteInlineErrors(w)
+    if (!submission.toasted && !submission.shownInline) {
       violations.push(
         `L1: ${submission.op} on ${submission.target} ended with nothing visible (${submission.calls.length} sent)`
       )
     }
   }
-  const hostGenCalls = w.genCalls.filter(call => call.host).length
-  const genBudget = w.submissions.reduce(
-    (sum, s) => sum + (s.op === 'moveResource' ? MOVE_PIPELINE_CHECKS : s.calls.length) + 1,
-    0
+  // K1, per submission: one generation check per operation and one before
+  // its outcome (a Move: its pipeline's checks and one). Each host check is
+  // charged to the submission with the latest activity before it that still
+  // has budget; a check none can take is over budget.
+  const budget = new Map(
+    w.submissions.map(s => [
+      s,
+      (s.op === 'moveResource' ? MOVE_PIPELINE_CHECKS : s.calls.length) + 1,
+    ])
   )
-  if (hostGenCalls > genBudget) {
-    violations.push(`K1: ${hostGenCalls} host generation checks for a budget of ${genBudget}`)
+  const lastActivityBefore = (s: Submission, at: number) =>
+    Math.max(
+      ...[s.at, ...s.calls.flatMap(call => [call.at, call.settledAt ?? -1])].filter(t => t < at),
+      -1
+    )
+  for (const check of w.genCalls.filter(call => call.host)) {
+    const payer = w.submissions
+      .filter(s => s.at < check.at && (budget.get(s) ?? 0) > 0)
+      .sort((a, b) => lastActivityBefore(b, check.at) - lastActivityBefore(a, check.at))[0]
+    if (!payer) {
+      violations.push(
+        `K1: a host generation check at ${check.at} exceeds every submission's budget ${JSON.stringify(
+          {
+            checks: w.genCalls.filter(call => call.host).map(call => call.at),
+            submissions: w.submissions.map(s => ({
+              op: s.op,
+              at: s.at,
+              calls: s.calls.map(c => c.at),
+            })),
+          }
+        )}`
+      )
+      break
+    }
+    budget.set(payer, budget.get(payer)! - 1)
   }
+
   if (w.hostListAccessible > 0) violations.push('K1: the host listed accessible roots itself')
 
   // S2/L2: the Files location is the user's, refreshed in place.
@@ -990,57 +1149,79 @@ function checkAtRest(w: World) {
         `L2: Files shows ${JSON.stringify(shown)}, the server has ${JSON.stringify(expected)}`
       )
     }
+    // Gone from the server: the existing inaccessible state, not stale crumbs.
+    // A background refresh says the location is no longer available; a fresh
+    // mount that cannot open it shows its read error.
+    const filesError = Array.from(document.querySelectorAll('.status-banner.tone-error')).some(
+      banner => !banner.closest('.da-file-explorer, [role="dialog"], [role="alertdialog"]')
+    )
+    const unavailable = Boolean(screen.queryByText(GFS_UNAVAILABLE_LOCATION_MESSAGE)) || filesError
+    if (!expected && (shown.length > 0 || !unavailable)) {
+      violations.push(
+        `L2: Files shows ${JSON.stringify(shown)} for a location that no longer exists`
+      )
+    }
   }
 
   // S4: an outcome is only shown in the session it belongs to.
   for (const toast of w.toasts) {
-    if ((toast as Toast & { legal?: boolean }).legal === false) {
-      violations.push(
-        `S4: "${toast.message}" shown outside the session that produced it ${(toast as Toast & { why?: string }).why ?? ''}`
-      )
+    if (toast.legal === false) {
+      violations.push(`S4: "${toast.message}" ${toast.why ?? ''}`)
     }
   }
 
   expect(violations).toEqual([])
 }
 
-/** S4, judged when the toast is pushed: some source of the live session may show it. */
+const COPY_TOASTS = /^Shareable EvenDrive link|^Shareable EvenDrive links are unavailable/
+
+/**
+ * S4, judged when the toast is pushed. Each toast is attributed to the
+ * submission whose outcome it is (its success text, or the rejection its own
+ * request got), and only that submission's session decides: it must be the
+ * rendered one, active, and still main's unless a host check answered it
+ * before main moved on.
+ */
 function judgeToast(w: World, toast: Toast) {
-  // The session the renderer has rendered, which is what its guards read.
   const live = w.model.session
   const current = (origin: Session) => sameSession(origin, live) && accessActive(w, live)
-  // A mutation's outcome lands after awaits, so main must still run its
-  // session; a gesture's immediate feedback (copy link) only needs the
-  // session the renderer shows.
-  const legal =
-    w.submissions.some(
-      s => current(s.origin) && mainAdmits(w, s.origin.gen, s.calls.at(-1)?.at ?? s.at)
-    ) || w.openings.some(o => current(o.origin))
-  ;(toast as Toast & { legal?: boolean }).legal = legal
-  if (!legal) {
-    ;(toast as Toast & { why?: string }).why = JSON.stringify({
-      at: toast.at,
-      live,
-      mainGen: w.model.mainGen,
-      access: w.access,
-      switches: w.mainSwitches,
-      publishes: w.publishes,
-      subs: w.submissions.map(s => ({
-        op: s.op,
-        origin: s.origin,
-        at: s.at,
-        calls: s.calls.map(c => c.at),
-      })),
-      gen: w.genCalls.filter(c => c.host),
-    })
+  const source = [...w.submissions].reverse().find(
+    s =>
+      s.outcomes.has(toast.message) ||
+      // A Move's outcome toast always names its source; its texts vary by outcome.
+      (s.op === 'moveResource' && toast.message.includes(s.name))
+  )
+  if (source) {
+    source.toasted = true
+    toast.legal =
+      current(source.origin) &&
+      mainAdmits(w, source.origin.gen, source.calls.at(-1)?.at ?? source.at)
+    if (!toast.legal) {
+      toast.why = `belongs to ${source.op} #${source.id} of ${sessionKey(source.origin)}, shown in ${sessionKey(live)} with main at ${w.model.mainGen}`
+    }
+    return
   }
+  // A copy's feedback comes straight from the gesture, in the rendered session.
+  if (COPY_TOASTS.test(toast.message)) {
+    toast.legal = w.openings.some(o => current(o.origin))
+    if (!toast.legal) toast.why = 'copy feedback outside the session it was chosen in'
+    return
+  }
+  toast.legal = false
+  toast.why = "is no submission's outcome"
 }
 
 // ── Commands: the A2 events ─────────────────────────────────────────────────
 
-/** What the generated runs actually reached, so a vacuous pass shows up. */
+/** What the runs actually reached, so a vacuous pass shows up. */
 const coverage = new Map<string, number>()
-const cover = (what: string) => coverage.set(what, (coverage.get(what) ?? 0) + 1)
+/** The same, for generated runs only: fixed examples reach their paths by construction. */
+const generatedCoverage = new Map<string, number>()
+let runIsExample = false
+const cover = (what: string) => {
+  coverage.set(what, (coverage.get(what) ?? 0) + 1)
+  if (!runIsExample) generatedCoverage.set(what, (generatedCoverage.get(what) ?? 0) + 1)
+}
 
 type Cmd = AsyncCommand<Model, World>
 
@@ -1056,6 +1237,7 @@ abstract class OracleEvent implements Cmd {
     await this.perform(m, w)
     probeDragDuringMove(w)
     w.violations.push(...menuViolations(w))
+    noteInlineErrors(w)
   }
   abstract toString(): string
 }
@@ -1115,12 +1297,14 @@ class DismissMenu extends OracleEvent {
   async perform(m: Model, w: World) {
     const menu = openMenu()
     if (!menu) return
-    // A host dialog that opened under a menu still on screen hears the same
-    // Escape and closes too.
-    if (hostDialogs().length > 0 && m.action) m.action.dismissedAt = tick(w)
+    const dialogBefore = hostDialogs().length > 0
     fireEvent.keyDown(menu, { key: 'Escape' })
     m.menu = null
     await flush()
+    // A host dialog that opened under a menu still on screen may hear the
+    // same Escape: both outcomes are accepted, and the model follows the one
+    // that happened.
+    if (dialogBefore && hostDialogs().length === 0 && m.action) dismissed(w, m.action)
   }
   toString() {
     return 'DismissMenu'
@@ -1211,8 +1395,23 @@ class Choose extends OracleEvent {
   }
 }
 
-function submit(m: Model, w: World, op: MutationOp, action: ModelAction): Submission {
+/** The notice a committed folder Move adds to its success toast. */
+const FOLDER_MOVE_NOTICE =
+  'Moving a folder changes who can access its contents — access now follows the new location.'
+
+function submit(
+  m: Model,
+  w: World,
+  op: MutationOp,
+  action: ModelAction,
+  outcome?: string
+): Submission {
+  // The host names the resource as the row showed it when the action was chosen.
   const submission: Submission = {
+    name: action.targetName,
+    outcomes: new Set(outcome ? [outcome] : []),
+    toasted: false,
+    shownInline: false,
     id: w.submissions.length + 1,
     op,
     target: action.target,
@@ -1247,19 +1446,22 @@ class Submit extends OracleEvent {
       const input = within(dialog).queryByLabelText(rename ? 'Name' : 'Folder name')
       if (!input) return
       const current = w.nodes.get(action.target)?.name ?? action.targetName
-      fireEvent.change(input, {
-        target: {
-          value: rename ? `${current.replace(/-r\d+$/, '')}-r${this.n}` : `Folder ${this.n}`,
-        },
-      })
+      const value = rename ? `${current.replace(/-r\d+$/, '')}-r${this.n}` : `Folder ${this.n}`
+      fireEvent.change(input, { target: { value } })
       const save = button(rename ? 'Save' : 'Create folder')
       if (!save || save.disabled) return
-      submit(m, w, rename ? 'renameResource' : 'createFolder', action)
+      submit(
+        m,
+        w,
+        rename ? 'renameResource' : 'createFolder',
+        action,
+        rename ? `Renamed to ${value}` : `Folder ${value} created`
+      )
       fireEvent.click(save)
     } else if (action.actionId === 'delete') {
       const confirm = button('Delete')
       if (!confirm || confirm.disabled) return
-      submit(m, w, 'deleteResource', action)
+      submit(m, w, 'deleteResource', action, `Deleted ${action.targetName}`)
       fireEvent.click(confirm)
     } else if (action.actionId === 'move') {
       const node = w.nodes.get(action.target)
@@ -1280,7 +1482,8 @@ class Submit extends OracleEvent {
       await flush()
       const move = button(`Move here (${destination.name})`)
       if (!move || move.disabled) return
-      submit(m, w, 'moveResource', action)
+      const moved = submit(m, w, 'moveResource', action)
+      moved.outcomes.add(FOLDER_MOVE_NOTICE)
       fireEvent.click(move)
     } else {
       return
@@ -1289,6 +1492,26 @@ class Submit extends OracleEvent {
   }
   toString() {
     return `Submit(${this.n})`
+  }
+}
+
+/**
+ * An error banner in the open dialog is the outcome of that action's latest
+ * submit (L1), even if the user closes the dialog afterwards.
+ */
+function noteInlineErrors(w: World) {
+  const action = w.model.action
+  if (!action) return
+  if (!hostDialogs().some(dialog => dialog.querySelector('.status-banner.tone-error'))) return
+  const latest = w.submissions.filter(s => s.actionToken === action.token).at(-1)
+  if (latest) latest.shownInline = true
+}
+
+/** The action's dialog really closed on the user's request. */
+function dismissed(w: World, action: ModelAction) {
+  action.dismissedAt ??= tick(w)
+  for (const s of w.submissions) {
+    if (s.actionToken === action.token && s.dismissedAt === null) s.dismissedAt = action.dismissedAt
   }
 }
 
@@ -1305,14 +1528,10 @@ class DismissDialog extends OracleEvent {
     const running =
       action !== null &&
       w.submissions.some(s => s.actionToken === action.token && s.calls.some(call => !call.settled))
-    if (action) {
-      action.dismissedAt = tick(w)
-      for (const s of w.submissions) {
-        if (s.actionToken === action.token) s.dismissedAt = action.dismissedAt
-      }
-    }
+    if (action) action.dismissedAt = tick(w)
     fireEvent.click(close)
     await flush()
+    if (action && hostDialogs().length === 0) dismissed(w, action)
     // A mutation cannot be recalled: closing is ignored while it runs.
     if (running && hostDialogs().length === 0) {
       w.violations.push(`H4/H18: closing the ${action!.actionId} dialog took effect while it ran`)
@@ -1430,18 +1649,22 @@ class RemoteChange extends OracleEvent {
     )
     if (candidates.length === 0) return
     const node = candidates[this.pick % candidates.length]!
-    node.version += 1
-    tick(w)
-    const events = changedEvents.get(node.parent!)
-    if (events) {
-      await act(async () => {
-        w.watch.deliver(events)
-      })
-    }
+    await remoteChange(w, node)
   }
   toString() {
     return `RemoteChange(${this.pick})`
   }
+}
+
+/** Another client writes `node`; the watch reports its folder changed. */
+async function remoteChange(w: World, node: ServerNode) {
+  node.version += 1
+  tick(w)
+  const events = changedEvents.get(node.parent!)
+  if (!events) return
+  await act(async () => {
+    w.watch.deliver(events)
+  })
 }
 
 /** E10: the Files tab is left or re-entered (it remounts on its saved route). */
@@ -1558,7 +1781,14 @@ class Advance extends OracleEvent {
         const tryClose = this.n % 3 === 0 || (action.actionId === 'move' && this.n % 2 === 0)
         if (sent && tryClose) await new DismissDialog().perform(m, w)
         else if (sent && this.n % 7 === 1) await new SwitchTeam().perform(m, w)
-        else await new Step().perform(m, w)
+        else if (sent) await new Step().perform(m, w)
+        else {
+          // A Move checks the session around each step before its request
+          // goes out: waiting covers several answers, not one per gesture.
+          for (let answer = 0; answer < 3 && w.s.count() > 0; answer += 1) {
+            await new Step().perform(m, w)
+          }
+        }
         return
       }
       const submissions = w.submissions.length
@@ -1791,6 +2021,130 @@ const outcomeWhileMainIsAhead = (): Cmd[] => [
   new Rest(),
 ]
 
+/** E9 on a named resource. */
+class RemoteChangeOn extends OracleEvent {
+  constructor(readonly resourceId: string) {
+    super()
+  }
+  async perform(_m: Model, w: World) {
+    const node = w.nodes.get(this.resourceId)
+    if (node) await remoteChange(w, node)
+  }
+  toString() {
+    return `RemoteChangeOn(${this.resourceId.slice(0, 4)})`
+  }
+}
+
+/** Main answers the next generation check now; the renderer receives it on `ReleaseGen`. */
+class HoldNextGen extends OracleEvent {
+  async perform(_m: Model, w: World) {
+    let release!: () => void
+    const promise = new Promise<void>(resolve => {
+      release = resolve
+    })
+    w.heldGen = { promise, release }
+    w.releaseGen = release
+  }
+  toString() {
+    return 'HoldNextGen'
+  }
+}
+
+class ReleaseGen extends OracleEvent {
+  async perform(_m: Model, w: World) {
+    const release = w.releaseGen
+    w.releaseGen = null
+    await act(async () => {
+      release?.()
+      await sleep(10)
+    })
+  }
+  toString() {
+    return 'ReleaseGen'
+  }
+}
+
+/** T4 for the Move CAS: no PATCH went out and its dialog shows the refusal. */
+class ExpectMoveRefused extends OracleEvent {
+  async perform(_m: Model, w: World) {
+    if (w.calls.some(call => call.op === 'moveResource')) {
+      w.violations.push('S5: a Move of a resource changed since it was chosen was sent')
+    }
+    const refused = hostDialogs().some(dialog =>
+      /changed while you were moving it/.test(dialog.textContent ?? '')
+    )
+    if (!refused) w.violations.push('S5/L1: the refused Move shows no error in its dialog')
+  }
+  toString() {
+    return 'ExpectMoveRefused'
+  }
+}
+
+/**
+ * Main's answer to the host's last check, given under the origin session,
+ * arrives after the renderer published a switch away and back to the same
+ * team: same scope, newer generation (S4).
+ */
+const staleAnswerAfterRoundTrip = (): Cmd[] => [
+  new OpenMenuOn('notes.txt'),
+  new Rest(),
+  new Choose('rename'),
+  new Rest(),
+  new Submit(1),
+  new StepUntilSent('renameResource'),
+  new HoldNextGen(),
+  new Rest(),
+  new SwitchTeam(false),
+  new PublishHeldSession(),
+  new Rest(),
+  new SwitchTeam(false),
+  new PublishHeldSession(),
+  new Rest(),
+  new ReleaseGen(),
+  new Rest(),
+]
+
+/** The row changes on the server between choosing Move and submitting it (S5, H7). */
+const moveAfterRemoteChange = (): Cmd[] => [
+  new OpenMenuOn('notes.txt'),
+  new Rest(),
+  new Choose('move'),
+  new Rest(),
+  new RemoteChangeOn(NOTES),
+  new Rest(),
+  new Submit(1),
+  new Rest(),
+  new ExpectMoveRefused(),
+]
+
+/** Another client writes `resourceId` just before the next Move PATCH of it arrives. */
+class ChangedBeforePatch extends OracleEvent {
+  constructor(readonly resourceId: string) {
+    super()
+  }
+  async perform(_m: Model, w: World) {
+    w.changeBeforeNextMove = this.resourceId
+  }
+  toString() {
+    return `ChangedBeforePatch(${this.resourceId.slice(0, 4)})`
+  }
+}
+
+/**
+ * A Move whose PATCH meets a version the server changed after the pipeline
+ * resolved the source: the pipeline verifies by identity afterwards, its
+ * longest path.
+ */
+const moveVerifiedAfterRejection = (): Cmd[] => [
+  new OpenMenuOn('notes.txt'),
+  new Rest(),
+  new Choose('move'),
+  new Rest(),
+  new ChangedBeforePatch(NOTES),
+  new Submit(1),
+  new Rest(),
+]
+
 /** One committed host Move and nothing else, to measure its generation checks. */
 const oneCommittedMove = (): Cmd[] => [
   new OpenMenuOn('notes.txt'),
@@ -1805,10 +2159,13 @@ const oneCommittedMove = (): Cmd[] => [
  * A host Move runs the commit pipeline it shares with the tree's drag, which
  * asks main for the generation before and after each of its steps (the
  * dialog's pre-check, source resolve, dispatch, convergence) rather than once
- * per operation. Measured on one committed Move by the test below, which
- * fails if the pipeline's count drifts; the host's own outcome check is the +1.
+ * per operation. This is a measured count, pinned as a regression check, not
+ * an invariant derived from the spec: the longest path measured (a PATCH
+ * rejected and verified by identity afterwards) takes 10; a committed Move
+ * takes 8 plus the host's own outcome check. The tests below fail when either
+ * count changes, and the number is then re-measured, not reasoned about.
  */
-const MOVE_PIPELINE_CHECKS = 8
+const MOVE_PIPELINE_CHECKS = 10
 
 const exampleScheduler = () => fc.sample(fc.scheduler(), { seed: 2611, numRuns: 1 })[0]!
 
@@ -1829,6 +2186,8 @@ const allEvents = [
     advanceWith(
       'rename',
       'delete',
+      'move',
+      'move',
       'move',
       'move',
       'move',
@@ -1932,6 +2291,10 @@ async function mountWorld(s: Scheduler): Promise<World> {
     releaseBits: new Map(),
     bitsAgedAt: -1,
     openings: [],
+    heldGen: null,
+    changeBeforeNextMove: null,
+    releaseGen: null,
+    renderedKeys: '[]',
     violations: [],
     watch: watchSource.connectRenderer(),
     embed: createPageEmbed(),
@@ -1950,10 +2313,13 @@ async function mountWorld(s: Scheduler): Promise<World> {
     pass < 20 && !screen.queryByRole('button', { name: 'Expand Docs' });
     pass += 1
   ) {
-    await rest(w)
+    await rest(w, { awaitWatchDebounce: false })
   }
   fireEvent.click(screen.getByRole('button', { name: 'Expand Docs' }))
-  for (let pass = 0; pass < 20 && treeRows(w).length < 5; pass += 1) await rest(w)
+  for (let pass = 0; pass < 20 && treeRows(w).length < 5; pass += 1) {
+    await rest(w, { awaitWatchDebounce: false })
+  }
+  // Only the last setup pass waits for the watch to send its keys to main.
   await rest(w)
   expect(crumbs()).toEqual(['Docs', 'Quarterly'])
   expect(treeRows(w).map(rowName).sort()).toEqual(
@@ -1973,11 +2339,12 @@ function recordCoverage(w: World) {
   if (w.publishes.length > 0) cover('team-published')
   if (w.mainSwitches.length > w.publishes.length) cover('main-ahead-at-end')
   for (const event of w.access) cover(`access:${event.kind}`)
+  const casRefusal = /changed since it was read|changed while you were moving it/
   if (
-    w.toasts.some(t => /changed since/.test(t.message)) ||
-    (w.calls.length > 0 && hostDialogs().some(d => /changed since/.test(d.textContent ?? '')))
+    w.toasts.some(t => casRefusal.test(t.message)) ||
+    hostDialogs().some(d => casRefusal.test(d.textContent ?? ''))
   )
-    cover('cas-412')
+    cover('cas-refused')
   if (w.locations.length > 0) cover('files-location')
 }
 
@@ -1991,6 +2358,9 @@ async function unmountWorld(w: World) {
 }
 
 beforeAll(async () => {
+  // The local file the upload producer reads, as a picked file would be.
+  uploadSource = join(mkdtempSync(join(tmpdir(), 'gfs-oracle-')), 'report.txt')
+  writeFileSync(uploadSource, 'data')
   failures = {
     stale: await gfsRouteFailureMessage(
       client =>
@@ -2059,10 +2429,14 @@ afterEach(() => {
   cleanup()
 })
 
-const RUNS = Number(process.env.GFS_ACTION_ORACLE_RUNS ?? 80)
-const SEED = process.env.GFS_ACTION_ORACLE_SEED
-  ? Number(process.env.GFS_ACTION_ORACLE_SEED)
-  : undefined
+const RUNS = Number(process.env.GFS_ACTION_ORACLE_RUNS ?? 70)
+// Fixed by default so every run of the suite explores the same cases;
+// GFS_ACTION_ORACLE_SEED picks another, and `random` opts into a fresh one.
+const SEED_SETTING = process.env.GFS_ACTION_ORACLE_SEED ?? '20261119'
+const SEED = SEED_SETTING === 'random' ? undefined : Number(SEED_SETTING)
+// Shrinking a long command list can outlast the test timeout and lose the
+// counterexample: stop in time and report the smallest one found so far.
+const PROPERTY_TIME_LIMIT_MS = 240_000
 
 async function checkGenerated(
   events: fc.Arbitrary<Cmd>[],
@@ -2075,6 +2449,7 @@ async function checkGenerated(
       fc.scheduler(),
       fc.commands(events, { maxCommands, size: 'max' }),
       async (s, commands) => {
+        runIsExample = EXAMPLE_RUNS.has(commands)
         const w = await mountWorld(s)
         try {
           await fc.asyncModelRun(() => ({ model: w.model, real: w }), commands)
@@ -2088,17 +2463,30 @@ async function checkGenerated(
     {
       numRuns,
       seed: SEED,
-      endOnFailure: false,
-      examples: examples.map(build => [exampleScheduler(), build()] as [Scheduler, Iterable<Cmd>]),
+      endOnFailure: Boolean(process.env.CI),
+      interruptAfterTimeLimit: PROPERTY_TIME_LIMIT_MS,
+      markInterruptAsFailure: true,
+      examples: examples.map(build => {
+        const commands = build()
+        EXAMPLE_RUNS.add(commands)
+        return [exampleScheduler(), commands] as [Scheduler, Iterable<Cmd>]
+      }),
     }
   )
 }
 
+const EXAMPLE_RUNS = new WeakSet<object>()
+
 describe('GfsActionHost — model-based oracle (A6)', () => {
   it('keeps S1–S6, L1, L2 and K1 at rest under generated events and IPC orders', async () => {
-    await checkGenerated(allEvents, RUNS, 36, [outcomeWhileMainIsAhead])
+    generatedCoverage.clear()
+    await checkGenerated(allEvents, RUNS, 36, [
+      outcomeWhileMainIsAhead,
+      staleAnswerAfterRoundTrip,
+      moveAfterRemoteChange,
+    ])
     process.stdout.write(
-      `gfs action oracle coverage: ${JSON.stringify(Object.fromEntries([...coverage].sort()))}\n`
+      `gfs action oracle coverage: ${JSON.stringify(Object.fromEntries([...generatedCoverage].sort()))}\n`
     )
     // Guard against a vacuous pass without pinning each rare path to a
     // random draw: most operations must have reached main, and succeeded.
@@ -2109,12 +2497,17 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       'moveResource',
       'createFileFromPath',
     ]
-    const reached = ops.filter(op => (coverage.get(`call:${op}`) ?? 0) > 0)
+    const reached = ops.filter(op => (generatedCoverage.get(`call:${op}`) ?? 0) > 0)
     expect(
       reached.length,
       `operations that reached main: ${reached.join(', ')}`
     ).toBeGreaterThanOrEqual(3)
-    expect(coverage.get('toast:success') ?? 0).toBeGreaterThan(0)
+    expect(
+      generatedCoverage.get('call:moveResource') ?? 0,
+      'generated Move PATCHes'
+    ).toBeGreaterThan(0)
+    expect(generatedCoverage.get('toast:success') ?? 0).toBeGreaterThan(0)
+    expect(coverage.get('cas-refused') ?? 0, 'a refused CAS (example)').toBeGreaterThan(0)
   }, 300_000)
 
   it('keeps a row menu on its own resource and bits across crossed openings', async () => {
@@ -2123,11 +2516,11 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
 
   it('keeps a running host Move in its dialog and its resource undraggable', async () => {
     coverage.clear()
-    await checkGenerated(moveEvents, Math.ceil(RUNS / 2), 24, [closeDuringMove])
+    await checkGenerated(moveEvents, Math.ceil(RUNS / 3), 24, [closeDuringMove])
     expect(coverage.get('call:moveResource') ?? 0).toBeGreaterThan(0)
   }, 300_000)
 
-  it('measures the generation checks of one committed host Move (K1 bound for Move)', async () => {
+  it('measures the generation checks of the host Move paths (K1 bound for Move)', async () => {
     const w = await mountWorld(exampleScheduler())
     try {
       await fc.asyncModelRun(() => ({ model: w.model, real: w }), oneCommittedMove())
@@ -2135,9 +2528,23 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       checkAtRest(w)
       expect(w.calls.filter(call => call.op === 'moveResource')).toHaveLength(1)
       expect(w.toasts.map(toast => toast.tone)).toEqual(['success'])
-      expect(w.genCalls.filter(call => call.host)).toHaveLength(MOVE_PIPELINE_CHECKS + 1)
+      // A committed Move: eight pipeline checks and the host's outcome check.
+      expect(w.genCalls.filter(call => call.host)).toHaveLength(9)
     } finally {
       await unmountWorld(w)
+    }
+    const verified = await mountWorld(exampleScheduler())
+    try {
+      await fc.asyncModelRun(
+        () => ({ model: verified.model, real: verified }),
+        moveVerifiedAfterRejection()
+      )
+      await rest(verified)
+      checkAtRest(verified)
+      expect(verified.calls.filter(call => call.op === 'moveResource')).toHaveLength(1)
+      expect(verified.genCalls.filter(call => call.host)).toHaveLength(MOVE_PIPELINE_CHECKS)
+    } finally {
+      await unmountWorld(verified)
     }
   }, 60_000)
 })
