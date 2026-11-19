@@ -7,14 +7,14 @@ spec:
   description: >-
     Smallest possible recipe with spec.webhooks[]. Used by
     scripts/e2e/e2e-webhooks-basic.sh to gate the webhook stack on a
-    real cluster. The handler is nginxinc/nginx-unprivileged with a
+    real cluster. The handler is nginx/nginx-unprivileged with a
     minimal endpoint that accepts POST and returns 200, proving the
     verify+forward pipeline. Headers sent by the gateway show up in
     the nginx access log.
   workloads:
     - id: handler
       type: deployment
-      image: nginxinc/nginx-unprivileged:1.30.6-alpine
+      image: nginx/nginx-unprivileged:1.30.7-alpine
       port: 8080
       command: ['/bin/sh', '-c']
       args:
