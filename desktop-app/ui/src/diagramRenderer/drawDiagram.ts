@@ -13,11 +13,26 @@ import type { DiagramDrawerDeps } from './drawDiagram.types'
 const XHTML_NAMESPACE = 'http://www.w3.org/1999/xhtml'
 const MAX_REASON_CHARS = 160
 const MAX_LABEL_CHARS = 300
-// `url(...)` that does not point inside the drawing, such as `url(#arrowhead)` does.
-const OUTSIDE_URL = /url\(\s*(?!['"]?#)[^)]*\)/i
 
+/**
+ * The value with every `url(...)` that does not point inside the drawing, as
+ * `url(#arrowhead)` does, replaced by `none`; an unclosed one runs to the end,
+ * as CSS reads it. One pass, since a value can be as long as the code.
+ */
 function withoutOutsideUrls(value: string): string {
-  return value.replace(new RegExp(OUTSIDE_URL.source, 'gi'), 'none')
+  const opening = /url\(/gi
+  let kept = ''
+  let from = 0
+  for (let match = opening.exec(value); match; match = opening.exec(value)) {
+    const close = value.indexOf(')', match.index + 4)
+    const end = close === -1 ? value.length : close + 1
+    const target = value.slice(match.index + 4, end).trimStart()
+    const inside = target.startsWith('#') || /^['"]#/.test(target)
+    kept += value.slice(from, match.index) + (inside ? value.slice(match.index, end) : 'none')
+    from = end
+    opening.lastIndex = end
+  }
+  return kept + value.slice(from)
 }
 
 /**
@@ -47,8 +62,12 @@ export function svgToDiagramImage(markup: string, diagramType = ''): DiagramImag
     // escaped or image-set() URLs stay, and only the image keeps them inert.
     for (const { name, value } of Array.from(element.attributes)) {
       const linksOut = (name === 'href' || name === 'xlink:href') && !value.startsWith('#')
-      if (linksOut) element.removeAttribute(name)
-      else if (OUTSIDE_URL.test(value)) element.setAttribute(name, withoutOutsideUrls(value))
+      if (linksOut) {
+        element.removeAttribute(name)
+        continue
+      }
+      const cleaned = withoutOutsideUrls(value)
+      if (cleaned !== value) element.setAttribute(name, cleaned)
     }
   }
   for (const style of svg.querySelectorAll('style')) {
@@ -83,10 +102,22 @@ function imageLabel(svg: SVGSVGElement, diagramType: string): string {
   return label.length > MAX_LABEL_CHARS ? `${label.slice(0, MAX_LABEL_CHARS - 1)}…` : label
 }
 
+/**
+ * The text without its closing spaces, colons and dots. A loop, not a regular
+ * expression: the text can be as long as the code.
+ */
+function withoutClosingPunctuation(text: string): string {
+  let end = text.length
+  while (end > 0 && /[\s:.]/.test(text.charAt(end - 1))) end -= 1
+  return text.slice(0, end)
+}
+
 /** The first line of Mermaid's error, which names the problem and its line. */
 function reasonOf(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error ?? '')
-  const line = (message.split('\n').find(part => part.trim()) ?? '').trim().replace(/[\s:.]+$/, '')
+  const line = withoutClosingPunctuation(
+    (message.split('\n').find(part => part.trim()) ?? '').trim()
+  )
   if (!line) return 'Mermaid could not read the code'
   return line.length > MAX_REASON_CHARS ? `${line.slice(0, MAX_REASON_CHARS - 1)}…` : line
 }
