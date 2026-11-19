@@ -406,6 +406,83 @@ describe('ApprovalModePicker state — chat switch (C1)', () => {
   })
 })
 
+describe('ApprovalModePicker state — focus (F1)', () => {
+  function openConfirmation() {
+    const utils = renderPicker('chat-1')
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    fireEvent.click(utils.getByTestId('approval-mode-option-allow-all'))
+    return utils
+  }
+
+  it('R11: focuses Cancel when the Allow-all confirmation opens', () => {
+    const { getByTestId } = openConfirmation()
+    expect(document.activeElement).toBe(getByTestId('approval-mode-cancel-allow-all'))
+  })
+
+  it('R12: Tab and Shift+Tab stay inside the confirmation', () => {
+    const { getByTestId } = openConfirmation()
+    const cancel = getByTestId('approval-mode-cancel-allow-all')
+    const confirm = getByTestId('approval-mode-confirm-allow-all')
+
+    confirm.focus()
+    fireEvent.keyDown(confirm, { key: 'Tab' })
+    expect(document.activeElement).toBe(cancel)
+
+    fireEvent.keyDown(cancel, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(confirm)
+  })
+
+  it('R19: focus left on the confirmation itself still cannot Tab out of it', () => {
+    const { getByRole, getByTestId } = openConfirmation()
+    const dialog = getByRole('dialog', { name: 'Confirm allow all' })
+    // A mousedown on the text moves focus to the nearest focusable ancestor.
+    expect(dialog.getAttribute('tabindex')).toBe('-1')
+
+    dialog.focus()
+    fireEvent.keyDown(dialog, { key: 'Tab' })
+    expect(document.activeElement).toBe(getByTestId('approval-mode-cancel-allow-all'))
+
+    dialog.focus()
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(getByTestId('approval-mode-confirm-allow-all'))
+  })
+
+  it('R13: Cancel returns focus to the chip', () => {
+    const { getByTestId } = openConfirmation()
+    fireEvent.click(getByTestId('approval-mode-cancel-allow-all'))
+    expect(document.activeElement).toBe(getByTestId('approval-mode-picker'))
+  })
+
+  it('R13: Escape closes the confirmation and returns focus to the chip', () => {
+    const { getByTestId, queryByTestId } = openConfirmation()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(queryByTestId('approval-mode-confirm-allow-all')).toBeNull()
+    expect(document.activeElement).toBe(getByTestId('approval-mode-picker'))
+  })
+
+  it('R13: Confirm returns focus to the chip', async () => {
+    setApprovalMode.mockResolvedValueOnce(patchSuccess('allow_all'))
+    const { getByTestId } = openConfirmation()
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-mode-confirm-allow-all'))
+    })
+    expect(document.activeElement).toBe(getByTestId('approval-mode-picker'))
+    expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1', 'allow_all')
+  })
+
+  it('R21: picking a mode from the menu returns focus to the chip', async () => {
+    setApprovalMode.mockResolvedValueOnce(patchSuccess('auto'))
+    const utils = renderPicker('chat-1')
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    const row = utils.getByTestId('approval-mode-option-auto')
+    row.focus()
+    await act(async () => {
+      fireEvent.click(row)
+    })
+    expect(document.activeElement).toBe(utils.getByTestId('approval-mode-picker'))
+  })
+})
+
 // ---------------------------------------------------------------------------
 // A6 — independent oracle: a trivial reference model of the A4 invariants.
 // ---------------------------------------------------------------------------

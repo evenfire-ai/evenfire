@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Button, Pill } from '@components/Common'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useHostApprovalMode } from '@hooks/useHostApprovalMode'
@@ -27,7 +28,7 @@ const MODE_OPTIONS: ReadonlyArray<{ mode: ApprovalMode; label: string; testId: s
  * controls read as one pair.
  *
  * "Allow all" asks before it writes; the confirmation replaces the menu inside
- * the popover.
+ * the popover, takes focus, keeps Tab inside, and hands focus back to the chip.
  *
  * The composer mounts the picker without a key, so a chat switch only changes
  * its props. The menu and the confirmation reset during that render, so nothing
@@ -56,6 +57,8 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  const confirmRef = useRef<HTMLButtonElement | null>(null)
   const classifierNoteId = useId()
 
   // Reset during render, not in an effect: a passive effect would commit the
@@ -80,21 +83,44 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
     setConfirming(false)
   }, [])
 
+  const focusChip = useCallback(() => {
+    containerRef.current?.querySelector<HTMLElement>('.model-selector-chip')?.focus()
+  }, [])
+
+  // A pointer elsewhere closes the menu and leaves focus where the user clicked.
   useClickOutside(containerRef, menuOpen, close)
 
-  // ESC closes the popover, matching the model selector.
+  // ESC closes the popover, matching the model selector, and hands focus back.
   useEffect(() => {
     if (!menuOpen) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close()
+      if (event.key !== 'Escape') return
+      close()
+      focusChip()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [menuOpen, close])
+  }, [menuOpen, close, focusChip])
 
   const choose = (mode: ApprovalMode) => {
     close()
+    focusChip()
     void selectMode(mode)
+  }
+
+  // Tab and Shift+Tab wrap between the two buttons, also when a click on the
+  // text left focus on the confirmation itself.
+  const keepFocusInConfirmation = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Tab') return
+    const active = document.activeElement
+    const fromContainer = active === event.currentTarget
+    if (event.shiftKey && (fromContainer || active === cancelRef.current)) {
+      event.preventDefault()
+      confirmRef.current?.focus()
+    } else if (!event.shiftKey && (fromContainer || active === confirmRef.current)) {
+      event.preventDefault()
+      cancelRef.current?.focus()
+    }
   }
 
   return (
@@ -162,19 +188,31 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
       ) : null}
 
       {menuOpen && confirming ? (
-        <div className="model-selector-popover" role="dialog" aria-label="Confirm allow all">
+        <div
+          className="model-selector-popover"
+          role="dialog"
+          aria-label="Confirm allow all"
+          tabIndex={-1}
+          onKeyDown={keepFocusInConfirmation}
+        >
           <p className="approval-mode-picker-confirm-text">{ALLOW_ALL_CONFIRM}</p>
           <div className="approval-mode-picker-confirm-actions">
             <Button
+              ref={cancelRef}
+              autoFocus
               size="xs"
               variant="ghost"
               color="neutral"
               data-testid="approval-mode-cancel-allow-all"
-              onClick={close}
+              onClick={() => {
+                close()
+                focusChip()
+              }}
             >
               Cancel
             </Button>
             <Button
+              ref={confirmRef}
               size="xs"
               variant="solid"
               color="primary"
