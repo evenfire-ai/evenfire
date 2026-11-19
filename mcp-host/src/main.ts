@@ -219,6 +219,12 @@ setOutputDirHostAccessor(() => currentHost)
 let currentKeys: ApiKeys = {}
 let currentProvider: SingleTurnProvider | null = null
 let configStore: ConfigStore | null = null
+// The failover credential slots the installed `configStore` was opened with.
+// A Host event decides whether to rebuild by comparing its own slots with
+// these, never with `currentPolicy`: an earlier event that is still opening its
+// store has already refreshed `currentPolicy`, and that store is dropped when a
+// newer event commits first.
+let configStoreFallbackSlots: string[] = []
 setCodexPolicyBindingReader(() => configStore?.codexPolicyBinding() ?? null)
 setGrokPolicyBindingReader(() => configStore?.grokPolicyBinding() ?? null)
 // R5 — provider-fallback. `currentPolicy` is the normalized `spec.llmPolicy`
@@ -648,6 +654,33 @@ function buildProviderForModel(model: string): SingleTurnProvider | null {
 }
 
 /**
+ * The `(provider, model)` pair a task for these selections runs with, without
+ * building a provider. The task model resolver and the session read both use
+ * it, so a session view reports the pair admission judges.
+ *
+ * R5.10 — boot fallback: the primary is inconstructible, so the boot fallback
+ * pair serves (cross-provider → ignore the session selection, R5.4). Otherwise
+ * the session's model on the Host provider, resolved against the global
+ * allowlist view like every task.
+ */
+function taskModelPair(
+  selections: Record<string, string> | undefined
+): { provider: string; model: string } | null {
+  const modelCfg = currentHost?.spec.model
+  if (!modelCfg?.provider || !modelCfg.name) return null
+  if (bootFallbackEntry && currentProvider) {
+    return { provider: bootFallbackEntry.provider, model: bootFallbackEntry.model }
+  }
+  const { model } = resolveSessionModel(
+    allowlistView(),
+    modelCfg.provider,
+    modelCfg.name,
+    selections
+  )
+  return { provider: modelCfg.provider, model }
+}
+
+/**
  * R2 — the per-task model resolver injected into the agent. Turns a session's
  * saved `{ provider → model }` selection into the concrete provider instance +
  * effective model + context window for the task. Falls back to the Host default
@@ -657,24 +690,15 @@ function resolveTaskModel(
   selections: Record<string, string> | undefined
 ): ResolvedTaskModel | null {
   const modelCfg = currentHost?.spec.model
-  if (!modelCfg?.provider || !modelCfg.name) return null
-  const view = allowlistView()
-  // R5.10 — boot fallback: the primary is inconstructible, so serve the boot
-  // fallback pair (cross-provider → ignore the session selection, R5.4). The
-  // runtime failover engine (currentFailoverSupport) still advances from here.
+  const pair = taskModelPair(selections)
+  if (!modelCfg || !pair) return null
+  const { model } = pair
+  const contextWindowTokens = contextWindowForModel(allowlistView(), pair.provider, model)
+  // R5.10 — the boot fallback pair serves on the boot provider. The runtime
+  // failover engine (currentFailoverSupport) still advances from here.
   if (bootFallbackEntry && currentProvider) {
-    return {
-      provider: currentProvider,
-      model: bootFallbackEntry.model,
-      contextWindowTokens: contextWindowForModel(
-        view,
-        bootFallbackEntry.provider,
-        bootFallbackEntry.model
-      ),
-    }
+    return { provider: currentProvider, model, contextWindowTokens }
   }
-  const { model } = resolveSessionModel(view, modelCfg.provider, modelCfg.name, selections)
-  const contextWindowTokens = contextWindowForModel(view, modelCfg.provider, model)
   // Hot-path short-circuit (review nit): when the resolution lands on the Host
   // default, reuse the process provider instead of constructing a fresh
   // instance per task. Rotation-safe: onChange rebuilds currentProvider too.
@@ -686,14 +710,21 @@ function resolveTaskModel(
   return { provider, model, contextWindowTokens }
 }
 
+interface OpenedConfigStore {
+  store: ConfigStore
+  /** The failover credential slots this store loads. */
+  fallbackSlots: string[]
+}
+
 /**
  * (Re)create the ConfigStore for the current Host. Used at boot and on
  * Host CRD changes that flip `spec.secretRef` (which would also have
  * triggered a Deployment rollout in HCC, but we re-create here anyway
  * so a soft secretRef change without HCC also picks up correctly).
  */
-async function openConfigStore(host: HostCRD): Promise<ConfigStore> {
+async function openConfigStore(host: HostCRD): Promise<OpenedConfigStore> {
   const provider = host.spec.model?.provider ?? null
+  const fallbackSlots = fallbackCredentialSlotsFor(currentPolicy)
   const store = new ConfigStore({
     namespace: config.namespace,
     hostRef: host.name,
@@ -703,15 +734,17 @@ async function openConfigStore(host: HostCRD): Promise<ConfigStore> {
     allowlistConfigMapName: config.llmAllowlistConfigMapName,
     // R5 — load the failover policy's referenced credential slots from the same
     // LLM Secret (kept out of the effective env; read via fallbackSlotValue).
-    fallbackCredentialSlots: fallbackCredentialSlotsFor(currentPolicy),
+    fallbackCredentialSlots: fallbackSlots,
   })
   await store.start()
-  return store
+  return { store, fallbackSlots }
 }
 
-function installConfigStore(store: ConfigStore, host: HostCRD): void {
+function installConfigStore(opened: OpenedConfigStore, host: HostCRD): void {
+  const { store } = opened
   if (configStore && configStore !== store) configStore.stop()
   configStore = store
+  configStoreFallbackSlots = opened.fallbackSlots
   currentKeys = apiKeysFromConfigStore(store)
   const provider = host.spec.model?.provider ?? null
 
@@ -773,9 +806,9 @@ function installConfigStore(store: ConfigStore, host: HostCRD): void {
 }
 
 async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
-  const store = await openConfigStore(host)
-  installConfigStore(store, host)
-  return store
+  const opened = await openConfigStore(host)
+  installConfigStore(opened, host)
+  return opened.store
 }
 
 /**
@@ -1533,7 +1566,10 @@ async function applyResolvedGuardrails(): Promise<void> {
   agent.setGuardrailsConfig(withResolvedHookDescriptors(hostGuardrails, resolved))
 }
 
-async function onHostChange(host: HostCRD): Promise<void> {
+/**
+ * Host watch handler. Exported so tests drive this handler, not a copy of it.
+ */
+export async function onHostChange(host: HostCRD): Promise<void> {
   logger.info({ name: host.name }, '[Main] Host configuration changed:')
 
   const contextChanged =
@@ -1568,17 +1604,18 @@ async function onHostChange(host: HostCRD): Promise<void> {
   }
 
   // R5 — refresh the failover policy BEFORE (re)building the ConfigStore so the
-  // fallback credential slots are loaded. Captured before the await so a newer
-  // event can publish its approval policy while this one is still reconciling.
-  const prevFallbackSlots = fallbackCredentialSlotsFor(currentPolicy)
-  const stagedStores = new Map<HostCRD, ConfigStore>()
+  // fallback credential slots are loaded. The slots are compared with the ones
+  // the installed store holds, and provider/secretRef/connectionRef with the
+  // committed Host, so an event that overlaps an uncommitted rebuild still
+  // rebuilds when the installed store does not match it.
+  const stagedStores = new Map<HostCRD, OpenedConfigStore>()
   await applyHostChange(host, {
     gate: hostEventGate,
     publishApproval,
     ensureConfigStore: async eventHost => {
       refreshFailoverPolicy(eventHost)
       const fallbackSlotsChanged =
-        JSON.stringify(prevFallbackSlots) !==
+        JSON.stringify(configStoreFallbackSlots) !==
         JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
       if (
         !configStore ||
@@ -1596,9 +1633,12 @@ async function onHostChange(host: HostCRD): Promise<void> {
     },
     commitHost: eventHost => {
       const staged = stagedStores.get(eventHost)
-      stagedStores.delete(eventHost)
-      if (staged) installConfigStore(staged, eventHost)
-      else if (configStore) currentKeys = apiKeysFromConfigStore(configStore)
+      if (staged) {
+        installConfigStore(staged, eventHost)
+        // Only an installed store leaves the map; one whose install threw is
+        // stopped by the cleanup below.
+        stagedStores.delete(eventHost)
+      } else if (configStore) currentKeys = apiKeysFromConfigStore(configStore)
       currentHost = eventHost
       // R5.10 — only a primary credential-surface change may clear a sticky
       // runtime cooldown. A stale completion does not reach this assignment.
@@ -1631,9 +1671,16 @@ async function onHostChange(host: HostCRD): Promise<void> {
         await applyResolvedGuardrails()
       })
     },
+  }).finally(() => {
+    // Runs on success and on a throw. A store this event opened but never
+    // installed is stopped so its watches do not stay live: a newer event
+    // committed first, or the commit threw before the install finished. The
+    // store in use is never stopped here. The rejection still propagates.
+    for (const abandoned of stagedStores.values()) {
+      if (abandoned.store !== configStore) abandoned.store.stop()
+    }
+    stagedStores.clear()
   })
-  for (const abandoned of stagedStores.values()) abandoned.stop()
-  stagedStores.clear()
 }
 
 /**
@@ -2863,10 +2910,11 @@ async function startRPCServer(): Promise<void> {
     redactTitle,
     approvalSnapshot: () => agent!.approvalSnapshot(),
     sessionModel: selections => {
-      const provider = currentHost?.spec.model?.provider ?? 'unknown'
-      const hostDefault = currentHost?.spec.model?.name ?? 'unknown'
-      const resolved = resolveSessionModel(hostAllowlistView(), provider, hostDefault, selections)
-      return { providerType: provider, modelName: resolved.model }
+      const pair = taskModelPair(selections)
+      // No Host model means no task can run; 'unknown' reads as "no classifier".
+      return pair
+        ? { providerType: pair.provider, modelName: pair.model }
+        : { providerType: 'unknown', modelName: 'unknown' }
     },
     servedModel: () => failoverEngine?.servedBy() ?? null,
   })
@@ -3855,6 +3903,27 @@ async function main(): Promise<void> {
 // Run main only when this module is the executable entry point. Keeping imports
 // side-effect free allows the authoritative initialization contract to be
 // regression-tested without starting the service.
+/**
+ * Test seams for main's own RPC wiring. A suite installs the agent and starts
+ * the RPC server main wires, so it exercises main's handlers instead of copies
+ * of them. Production never calls these.
+ */
+export const mainRpcTestSeams = {
+  setAgent(next: AgentStateMachine | null): void {
+    agent = next
+  },
+  setMessageQueue(next: MessageQueue | null): void {
+    messageQueue = next
+  },
+  failoverEngine(): FailoverEngine | null {
+    return failoverEngine
+  },
+  async startRPCServer(): Promise<RPCServer> {
+    await startRPCServer()
+    return rpcServer!
+  },
+}
+
 if (require.main === module) {
   // Global crash guards (defense-in-depth): a throw that escapes a stray event
   // listener (e.g. a transport listener) must be LOGGED, not a silent process

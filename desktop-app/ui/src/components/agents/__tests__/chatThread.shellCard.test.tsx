@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { trackerStateToTaskProgress } from '@hooks/domain/trackerToProgress'
 import { buildLoadedChatSemanticModels } from '../../../lib/chatMessageSemantics'
 import {
+  beginApprovalModeFirstSend,
   noteHostApprovalModeFromSession,
   resetHostApprovalModeStore,
 } from '../../../lib/hostApprovalModeStore'
@@ -296,6 +297,52 @@ describe('ApprovalModePicker', () => {
 
     expect(setApprovalMode).toHaveBeenCalledTimes(1)
     expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1', 'allow_all')
+  })
+
+  it('is disabled and closes its menu while the first send is in flight', async () => {
+    const { getByTestId, queryByTestId } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-new" />
+    )
+    const trigger = getByTestId('approval-mode-picker') as HTMLButtonElement
+    fireEvent.click(trigger)
+    expect(getByTestId('approval-mode-option-manual')).not.toBeNull()
+
+    let send!: ReturnType<typeof beginApprovalModeFirstSend>
+    act(() => {
+      send = beginApprovalModeFirstSend('agent-x', 'chat-new')
+    })
+
+    expect(trigger.disabled).toBe(true)
+    expect(queryByTestId('approval-mode-option-manual')).toBeNull()
+    fireEvent.click(trigger)
+    expect(queryByTestId('approval-mode-option-manual')).toBeNull()
+    expect(setApprovalMode).not.toHaveBeenCalled()
+
+    act(() => {
+      send.release()
+    })
+    expect(trigger.disabled).toBe(false)
+    fireEvent.click(trigger)
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-mode-option-auto'))
+    })
+    expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-new', 'auto')
+  })
+
+  it('closes an open Allow all confirmation when the first send starts', () => {
+    const { getByTestId, queryByTestId } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-new" />
+    )
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    fireEvent.click(getByTestId('approval-mode-option-allow-all'))
+    expect(getByTestId('approval-mode-confirm-allow-all')).not.toBeNull()
+
+    act(() => {
+      beginApprovalModeFirstSend('agent-x', 'chat-new')
+    })
+
+    expect(queryByTestId('approval-mode-confirm-allow-all')).toBeNull()
+    expect(setApprovalMode).not.toHaveBeenCalled()
   })
 
   it('shows the shell note when the classifier is unavailable', () => {

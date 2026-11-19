@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useHostApprovalMode } from '@hooks/useHostApprovalMode'
 import type { ApprovalMode } from '@lib/hostApprovalModeStore'
 
@@ -9,23 +9,30 @@ export interface ApprovalModePickerProps {
 
 const ALLOW_ALL_CONFIRM =
   'Allow all runs tools in this chat without asking, except scheduled tasks. Continue?'
+const FIRST_SEND_LOCK_HINT = 'The approval mode can change once the first message reaches the Host.'
 
 /**
  * Session approval-mode control, sat next to the model selector.
  * "Allow all" asks before it writes. Auto and allow-all keep a visible label.
  * When the session's model cannot run the shell classifier, say so next to
  * Auto-approve: shell still asks.
+ * While the chat's first send is in flight the control is disabled and an open
+ * menu or confirmation closes: the store refuses the change in that window.
  */
 export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps) {
   const selectionChatId = chatId || null
-  const { label, effectiveMode, shellClassifierAvailable, selectMode } = useHostApprovalMode(
-    agentRef,
-    selectionChatId
-  )
+  const { label, effectiveMode, shellClassifierAvailable, firstSendInFlight, selectMode } =
+    useHostApprovalMode(agentRef, selectionChatId)
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [writeError, setWriteError] = useState<string | null>(null)
   const showClassifierNote = effectiveMode === 'auto' && shellClassifierAvailable === false
+
+  useEffect(() => {
+    if (!firstSendInFlight) return
+    setOpen(false)
+    setConfirming(false)
+  }, [firstSendInFlight])
 
   const choose = (mode: ApprovalMode) => {
     setOpen(false)
@@ -56,7 +63,9 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
         type="button"
         data-testid="approval-mode-picker"
         aria-haspopup="menu"
-        aria-expanded={open}
+        aria-expanded={open && !firstSendInFlight}
+        disabled={firstSendInFlight}
+        title={firstSendInFlight ? FIRST_SEND_LOCK_HINT : undefined}
         onClick={() => {
           setConfirming(false)
           setOpen(current => !current)
@@ -64,7 +73,7 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
       >
         {label ?? 'Manual'}
       </button>
-      {open && !confirming ? (
+      {open && !confirming && !firstSendInFlight ? (
         <div role="menu">
           <button
             type="button"
@@ -92,7 +101,7 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
           </button>
         </div>
       ) : null}
-      {confirming ? (
+      {confirming && !firstSendInFlight ? (
         <div role="dialog" aria-label="Confirm allow all">
           <p>{ALLOW_ALL_CONFIRM}</p>
           <button

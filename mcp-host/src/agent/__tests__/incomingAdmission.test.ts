@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import type { ApprovalConfigSnapshot } from '../../core/approval/approvalMode'
 import { approvalLogId } from '../../core/approval/grantMemory'
 import { ConversationManager } from '../../core/conversation/conversation'
+import { InMemoryConversationStore } from '../../core/conversation/conversationStore'
 import {
   type StoreHandle,
   makeSqliteStore,
@@ -1123,6 +1124,87 @@ describe('approval mode writers at admission', () => {
     })
     expect(manager.getSessionByKey(key)?.approval_mode).toBe('manual')
     expect(manager.getSessionByKey(key)?.channel_type).toBeUndefined()
+  })
+
+  it('answers that the mode could not be stored when the command write fails, and keeps manual', async () => {
+    class FailingModeWrite extends InMemoryConversationStore {
+      override async persistApprovalMode(): Promise<void> {
+        throw new Error('fixture approval-mode write failure')
+      }
+    }
+    const manager = new ConversationManager(new FailingModeWrite())
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    const { admit, spies } = admitWith(manager, OPEN_CEILING)
+    try {
+      const response = await admit(
+        message({
+          channelType: 'slack',
+          channelId: 'C1',
+          threadId: 'thread-1',
+          sender: 'slack-user',
+          content: 'approval-mode auto',
+        })
+      )
+      expect(response).toEqual({
+        success: false,
+        error: {
+          code: 'LLM_API_CALL_FAILED',
+          message: 'The approval mode could not be stored.',
+          retryable: true,
+          provider: 'zai',
+        },
+      })
+      expect(warn).toHaveBeenCalledWith(
+        { err: expect.objectContaining({ message: 'fixture approval-mode write failure' }) },
+        'Approval mode command could not be stored'
+      )
+      expect(spies.dispatch).not.toHaveBeenCalled()
+      const conv = manager.getSessionByKey(
+        serializeSessionKey({
+          userId: 'slack-user',
+          channelType: 'slack',
+          channelId: 'C1',
+          threadId: 'thread-1',
+        })
+      )
+      expect(conv?.approval_mode).toBe('manual')
+      expect(l1Calls(info as unknown as Mock)).toHaveLength(0)
+    } finally {
+      info.mockRestore()
+      warn.mockRestore()
+    }
+  })
+
+  it('refuses a first message whose mode cannot be stored and starts no turn', async () => {
+    class FailingColdLoad extends InMemoryConversationStore {
+      override async getOrLoad(): Promise<never> {
+        throw new Error('fixture session read failure')
+      }
+    }
+    const manager = new ConversationManager(new FailingColdLoad())
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    const { admit, spies } = admitWith(manager)
+    try {
+      const response = await admit(message({ approvalMode: 'auto' }))
+      expect(response).toEqual({
+        success: false,
+        error: {
+          code: 'LLM_API_CALL_FAILED',
+          message: 'The approval mode could not be stored.',
+          retryable: true,
+          provider: 'zai',
+        },
+      })
+      expect(warn).toHaveBeenCalledWith(
+        { err: expect.objectContaining({ message: 'fixture session read failure' }) },
+        'First-message approval mode could not be stored'
+      )
+      expect(spies.dispatch).not.toHaveBeenCalled()
+      expect(manager.getStore().listByPrefix('')).toHaveLength(0)
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('is never recognized on an rpc message', async () => {

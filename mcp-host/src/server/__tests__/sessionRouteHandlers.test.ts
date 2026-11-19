@@ -342,3 +342,49 @@ describe('createSessionRouteHandlers — Always approve eligibility on every vie
     }
   })
 })
+
+describe('createSessionRouteHandlers — classifier pair while failover serves (R6-MJ6)', () => {
+  const KEY = 'user-1:rpc:agent-1:chat-1'
+
+  async function viewsWith(
+    served: { provider: string; model: string; fallback: boolean } | null,
+    session: { providerType: string; modelName: string }
+  ) {
+    const convManager = new ConversationManager()
+    await seed(convManager, KEY)
+    const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
+      getConversationManager: () => convManager,
+      redactToolError: (_toolName, rawError) => rawError,
+      redactTitle: rawTitle => rawTitle,
+      sessionModel: () => session,
+      servedModel: () => served,
+    })
+    const list = await handleSessionsList('user-1', {})
+    const page = await handleSessionMessages('user-1', 'agent-1', 'chat-1', {})
+    expect(list.items).toHaveLength(1)
+    expect(page).not.toBeNull()
+    return [list.items[0]!.shellClassifierAvailable, page!.shellClassifierAvailable]
+  }
+
+  const claude = { providerType: 'claude', modelName: 'claude-sonnet-4-5' }
+  const zai = { providerType: 'zai', modelName: 'glm-4.6' }
+
+  it('reports a serving fallback the table refuses as unavailable, though the session model is eligible', async () => {
+    expect(await viewsWith({ provider: 'zai', model: 'glm-4.6', fallback: true }, claude)).toEqual([
+      false,
+      false,
+    ])
+  })
+
+  it('reports an eligible serving fallback as available, though the session model is refused', async () => {
+    expect(
+      await viewsWith({ provider: 'claude', model: 'claude-haiku-4-5', fallback: true }, zai)
+    ).toEqual([true, true])
+  })
+
+  it('reports the session model while the primary serves', async () => {
+    expect(await viewsWith({ provider: 'zai', model: 'glm-4.6', fallback: false }, claude)).toEqual(
+      [true, true]
+    )
+  })
+})

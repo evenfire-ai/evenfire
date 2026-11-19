@@ -40,7 +40,7 @@ import {
 } from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
-  approvalModeForFirstSend,
+  beginApprovalModeFirstSend,
   confirmHeldApprovalModeFromSend,
   hostApprovalModeEpoch,
   migrateHeldApprovalMode,
@@ -844,8 +844,14 @@ export function useAgentChatController({
       fsm,
       loadSessionMessages: (agentRef, chatId, query, stillRelevant) =>
         reconcileBranchesRef.current!.loadSessionMessages(agentRef, chatId, query, stillRelevant),
-      attachLiveTask: (chatKey, resp, epoch, stillRelevant) =>
-        reconcileBranchesRef.current!.attachLiveTask(chatKey, resp, epoch, stillRelevant),
+      attachLiveTask: (chatKey, resp, epoch, approvalReadEpoch, stillRelevant) =>
+        reconcileBranchesRef.current!.attachLiveTask(
+          chatKey,
+          resp,
+          epoch,
+          approvalReadEpoch,
+          stillRelevant
+        ),
       settleIdle: (chatKey, resp, epoch, hint, stillRelevant) =>
         reconcileBranchesRef.current!.settleIdle(chatKey, resp, epoch, hint, stillRelevant),
       revokeAccess: chatKey => reconcileBranchesRef.current!.revokeAccess(chatKey),
@@ -2355,11 +2361,7 @@ export function useAgentChatController({
   )
 
   const reconcileAttachLiveTask = useCallback<ReconcileChatDeps['attachLiveTask']>(
-    async (chatKey, resp, snapshotEpoch, stillRelevant) => {
-      const approvalReadEpoch = hostApprovalModeEpoch(
-        parseTaskKey(chatKey).agentRef,
-        parseTaskKey(chatKey).chatId
-      )
+    async (chatKey, resp, snapshotEpoch, approvalReadEpoch, stillRelevant) => {
       // Staleness guard for the TRACKER (the FSM has R2, the coordinator does not):
       // if a newer local `SEND_STARTED` bumped the epoch since this reconcile's
       // fetch began, the server's `activeTaskId` is stale — calling `attach` would
@@ -3895,6 +3897,9 @@ export function useAgentChatController({
       // send that was handed to main and failed in another way keeps its turn,
       // and its input is retained with the failure.
       let postIssued = false
+      // Unlocks the approval-mode picker that this send locked for a chat whose
+      // session row the store has not seen. Idempotent; every exit calls it.
+      let releaseApprovalModeFirstSend: () => void = () => undefined
       const sendHeldByAnotherPath = () =>
         sendAuthScopeIsCurrent() && !sendChatWasDeleted() && isHostAccessBlocked(sendAgent)
       const endSendHeldByAnotherPath = async (detail: string, kind: FailedAgentSend['kind']) => {
@@ -3919,7 +3924,14 @@ export function useAgentChatController({
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
         const fileReferences = fileReferencesForSend
-        const heldApprovalMode = sendChatId ? approvalModeForFirstSend(sendAgent, sendChatId) : null
+        // Reads the held mode and locks the picker in one step: a pick after
+        // this point would PATCH before the POST creates the session row, get
+        // a 404 and paint a mode the session never stores (R6-MJ1).
+        const firstSendApproval = sendChatId
+          ? beginApprovalModeFirstSend(sendAgent, sendChatId)
+          : null
+        if (firstSendApproval) releaseApprovalModeFirstSend = firstSendApproval.release
+        const heldApprovalMode = firstSendApproval?.mode ?? null
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -3954,6 +3966,7 @@ export function useAgentChatController({
         const responseRecord = response as Record<string, unknown>
         const ackOk = !responseRecord.error && responseRecord.success !== false
         if (ackOk && sendChatId) confirmHeldApprovalModeFromSend(sendAgent, sendChatId)
+        releaseApprovalModeFirstSend()
         // #654 H1 — the send IS the write. Its ack carries the revision that
         // write produced, and adopting it is what arms the NEXT conditional
         // write correctly; without it the client keeps the revision it read
@@ -4211,6 +4224,7 @@ export function useAgentChatController({
         // The task owns the activity entry from here.
         activityHandedToTask = true
       } catch (error) {
+        releaseApprovalModeFirstSend()
         const message = error instanceof Error ? error.message : String(error)
         if (
           isAuthorizationError(error) &&
@@ -4288,6 +4302,7 @@ export function useAgentChatController({
         )
         await keepUndeliveredTurn()
       } finally {
+        releaseApprovalModeFirstSend()
         // A send that handed its activity entry to no task releases it here,
         // whichever exit it took.
         if (!activityHandedToTask) releaseSendActivity()

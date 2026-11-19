@@ -197,6 +197,48 @@ describe('session approval mode and channel type', () => {
     })
   })
 
+  it('moves the in-memory mode only after the worker stored it', async () => {
+    await withStore(1, async (handle, manager) => {
+      const key = 'erin:rpc:agent:barrier'
+      const conv = await manager.getOrCreate(key, {
+        userId: 'erin',
+        channelType: 'rpc',
+        approvalMode: 'manual',
+      })
+      const write = handle.store.persistApprovalMode(conv, 'auto')
+      expect(conv.approval_mode).toBe('manual')
+      await write
+      expect(conv.approval_mode).toBe('auto')
+      // No drain: the awaited write is the barrier.
+      const row = handle.worker.db
+        .prepare('SELECT approval_mode AS mode FROM sessions WHERE session_key = ?')
+        .get(key) as { mode: string }
+      expect(row.mode).toBe('auto')
+    })
+  })
+
+  it('rejects a write for a missing row and keeps the previous in-memory mode', async () => {
+    await withStore(1, async (handle, manager) => {
+      const key = 'erin:rpc:agent:gone'
+      const conv = await manager.getOrCreate(key, {
+        userId: 'erin',
+        channelType: 'rpc',
+        approvalMode: 'manual',
+      })
+      await handle.persistQueue.drainSessionKey(key)
+      const removed = handle.worker.db
+        .prepare('DELETE FROM sessions WHERE session_key = ?')
+        .run(key)
+      expect(removed.changes).toBe(1)
+
+      await expect(handle.store.persistApprovalMode(conv, 'allow_all')).rejects.toMatchObject({
+        code: 'APPROVAL_MODE_SESSION_NOT_FOUND',
+        message: expect.stringContaining(`no session row for id=${conv.id}`),
+      })
+      expect(conv.approval_mode).toBe('manual')
+    })
+  })
+
   it('updates the in-memory store', async () => {
     const store = new InMemoryConversationStore()
     const manager = new ConversationManager(store)

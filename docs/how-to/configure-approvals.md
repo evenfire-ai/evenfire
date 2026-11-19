@@ -200,8 +200,8 @@ providers, and Vertex and Gemini.
 
 The judge is the model serving the turn. When failover is serving a fallback,
 that pair is the one checked and called. A fallback the table would refuse
-shows the card. With no failover, the session's model on the Host provider is
-the pair.
+shows the card. With no failover, the pair is the session's model on the Host
+provider, or the boot fallback's pair while the Host primary cannot be built.
 
 An explicit `tools.shell_exec: true` keeps a card on every shell call in auto,
 with no classifier and no shell memory. Remove the line if auto should judge
