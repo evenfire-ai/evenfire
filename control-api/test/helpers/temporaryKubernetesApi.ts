@@ -1,0 +1,212 @@
+import { randomUUID } from 'node:crypto'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+type KubernetesObject = Readonly<Record<string, unknown>>
+
+type RecordedRequest = Readonly<{
+  method: string
+  namespace: string
+  plural: string
+  name: string | null
+  watch: boolean
+  resourceVersion: string | null
+  limit: string | null
+  continueToken: string | null
+}>
+
+function metadata(value: KubernetesObject): Record<string, unknown> {
+  const candidate = value.metadata
+  return candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    ? (candidate as Record<string, unknown>)
+    : {}
+}
+
+function json(response: ServerResponse, status: number, body: unknown): void {
+  const serialized = JSON.stringify(body)
+  response.writeHead(status, {
+    'content-type': 'application/json',
+    'content-length': Buffer.byteLength(serialized),
+  })
+  response.end(serialized)
+}
+
+/**
+ * A namespaced clerum.io/v1alpha1 Kubernetes API on 127.0.0.1 for real
+ * K8sGateway reads: GET by name, paged LIST (`limit` and `continue`), and
+ * POST create. Every GET is recorded in `requests`, including its `watch`,
+ * `resourceVersion`, `limit` and `continue` query values.
+ */
+export class TemporaryKubernetesApi {
+  private readonly objects = new Map<string, KubernetesObject>()
+  private readonly server: Server
+  private scratchDirectory: string | null = null
+  private kubeconfigPath: string | null = null
+  private origin: string | null = null
+  readonly requests: RecordedRequest[] = []
+
+  constructor() {
+    this.server = createServer((request, response) => {
+      void this.handle(request, response)
+    })
+  }
+
+  async start(): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      this.server.once('error', reject)
+      this.server.listen(0, '127.0.0.1', () => {
+        this.server.off('error', reject)
+        resolve()
+      })
+    })
+    const address = this.server.address()
+    if (!address || typeof address === 'string') throw new Error('temporary_kubernetes_address')
+    this.origin = `http://127.0.0.1:${address.port}`
+    const scratchRoot = process.env.CODEX_SCRATCH_ROOT || tmpdir()
+    this.scratchDirectory = await mkdtemp(join(scratchRoot, 'evenfire-k8s-api-'))
+    this.kubeconfigPath = join(this.scratchDirectory, 'kubeconfig.yaml')
+    await writeFile(
+      this.kubeconfigPath,
+      `apiVersion: v1
+kind: Config
+clusters:
+  - name: temporary
+    cluster:
+      server: ${this.origin}
+      insecure-skip-tls-verify: true
+users:
+  - name: temporary
+    user: {}
+contexts:
+  - name: temporary
+    context:
+      cluster: temporary
+      user: temporary
+current-context: temporary
+`,
+      'utf8'
+    )
+  }
+
+  kubeconfig(): string {
+    if (!this.kubeconfigPath) throw new Error('temporary_kubernetes_not_started')
+    return this.kubeconfigPath
+  }
+
+  put(plural: string, namespace: string, object: KubernetesObject): void {
+    const name = String(metadata(object).name ?? '')
+    if (!name) throw new Error('temporary_kubernetes_name_missing')
+    this.objects.set(`${namespace}/${plural}/${name}`, object)
+  }
+
+  delete(plural: string, namespace: string, name: string): void {
+    this.objects.delete(`${namespace}/${plural}/${name}`)
+  }
+
+  async close(): Promise<void> {
+    this.server.closeAllConnections?.()
+    if (this.server.listening) {
+      await new Promise<void>(resolve => this.server.close(() => resolve()))
+    }
+    if (this.scratchDirectory) await rm(this.scratchDirectory, { recursive: true, force: true })
+    this.scratchDirectory = null
+    this.kubeconfigPath = null
+  }
+
+  private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const method = request.method ?? 'GET'
+    const rawUrl = request.url ?? '/'
+    const requestUrl = new URL(rawUrl, this.origin ?? 'http://127.0.0.1')
+    const match = requestUrl.pathname.match(
+      /^\/apis\/clerum\.io\/v1alpha1\/namespaces\/([^/]+)\/([^/]+)(?:\/([^/]+))?$/
+    )
+    if (!match) {
+      json(response, 404, { kind: 'Status', code: 404, reason: 'NotFound' })
+      return
+    }
+    const namespace = decodeURIComponent(match[1])
+    const plural = decodeURIComponent(match[2])
+    const name = match[3] ? decodeURIComponent(match[3]) : null
+    if (method === 'POST' && !name) {
+      try {
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as KubernetesObject
+        const bodyMetadata = metadata(body)
+        const createdName = String(bodyMetadata.name ?? '')
+        if (!createdName || this.objects.has(`${namespace}/${plural}/${createdName}`)) {
+          json(response, 409, { kind: 'Status', code: 409, reason: 'AlreadyExists' })
+          return
+        }
+        const kind =
+          { hosts: 'Host', contexts: 'Context', mcpservers: 'McpServer' }[plural] ?? plural
+        const created = {
+          ...body,
+          apiVersion: 'clerum.io/v1alpha1',
+          kind,
+          metadata: {
+            ...bodyMetadata,
+            namespace,
+            uid: randomUUID(),
+            resourceVersion: '1',
+            generation: 1,
+          },
+        }
+        this.put(plural, namespace, created)
+        json(response, 201, created)
+      } catch {
+        json(response, 400, { kind: 'Status', code: 400, reason: 'BadRequest' })
+      }
+      return
+    }
+    if (method !== 'GET') {
+      json(response, 404, { kind: 'Status', code: 404, reason: 'NotFound' })
+      return
+    }
+    const watch = requestUrl.searchParams.get('watch') === 'true'
+    this.requests.push(
+      Object.freeze({
+        method,
+        namespace,
+        plural,
+        name,
+        watch,
+        resourceVersion: requestUrl.searchParams.get('resourceVersion'),
+        limit: requestUrl.searchParams.get('limit'),
+        continueToken: requestUrl.searchParams.get('continue'),
+      })
+    )
+    if (name) {
+      const object = this.objects.get(`${namespace}/${plural}/${name}`)
+      if (!object) {
+        json(response, 404, { kind: 'Status', code: 404, reason: 'NotFound' })
+        return
+      }
+      json(response, 200, object)
+      return
+    }
+    const all = [...this.objects.entries()]
+      .filter(([key]) => key.startsWith(`${namespace}/${plural}/`))
+      .map(([, object]) => object)
+      .sort((left, right) =>
+        String(metadata(left).name).localeCompare(String(metadata(right).name))
+      )
+    const start = Number(requestUrl.searchParams.get('continue') ?? 0)
+    const requestedLimit = Number(requestUrl.searchParams.get('limit') ?? 100)
+    const limit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0 ? requestedLimit : 100
+    const items = all.slice(start, start + limit)
+    const next = start + items.length < all.length ? String(start + items.length) : ''
+    const resourceVersion = all.reduce(
+      (maximum, object) => Math.max(maximum, Number(metadata(object).resourceVersion ?? 0)),
+      1
+    )
+    json(response, 200, {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'List',
+      metadata: { resourceVersion: String(resourceVersion), continue: next },
+      items,
+    })
+  }
+}

@@ -7,6 +7,7 @@ import type { RPCServer } from '../server'
 import { MAX_ARTIFACT_BYTES } from '../workflow/artifactPaths'
 import { CALLER_OUTPUTS_DIR, resolveRpcCallerOutputDir } from '../workspace/callerOutputs'
 import { deriveUserKeyFromSource } from '../workspace/userKey'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 const ORIGINAL_ENABLE_AUTH = process.env.CLERUM_ENABLE_AUTH
 const ORIGINAL_OUTPUT_DIR = process.env.CLERUM_OUTPUT_DIR
@@ -42,11 +43,11 @@ async function startServer(
 }
 
 function edgeHeaders(userId: string): Record<string, string> {
-  return {
+  return withRpcProxyEdgeTestAuthentication({
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': 'chatllm',
     'x-clerum-edge-user-id': userId,
-  }
+  })
 }
 
 const rpcEdgeHeaders = edgeHeaders('user-1')
@@ -115,7 +116,7 @@ describe('RPCServer runtime artifact routes', () => {
 
   it("lists only regular downloadable artifacts from the caller's own folder", async () => {
     outputDir = makeOutputDir()
-    outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
+    outsideFile = path.join(hostRoot, 'outside-list.txt')
     fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
     fs.writeFileSync(path.join(outputDir, '.clerum-state'), '{}')
     fs.writeFileSync(path.join(outputDir, '.clerum-partial-in-progress'), 'half a file')
@@ -149,7 +150,7 @@ describe('RPCServer runtime artifact routes', () => {
 
   it("does not download symlink artifacts from the caller's folder", async () => {
     outputDir = makeOutputDir()
-    outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
+    outsideFile = path.join(hostRoot, 'outside-download.txt')
     fs.writeFileSync(outsideFile, 'secret outside output')
     fs.symlinkSync(outsideFile, path.join(outputDir, 'leak.md'))
     const { server, baseUrl } = await startServer(outputDir)
