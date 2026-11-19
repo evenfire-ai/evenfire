@@ -32,6 +32,7 @@ const MODE_OPTIONS: ReadonlyArray<{ mode: ApprovalMode; label: string; testId: s
  * readers; the open menu says it too. Nothing is added to the composer row.
  * While the chat's first send is in flight the chip is disabled and an open
  * menu or confirmation closes: the store refuses the change in that window.
+ * A chat switch closes them too, in the same render.
  */
 export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps) {
   const selectionChatId = chatId || null
@@ -42,6 +43,21 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
   const [writeError, setWriteError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const classifierNoteId = useId()
+
+  // Reset during render, not in an effect: a passive effect would commit the
+  // previous chat's menu under the next chat first, and could undo a click
+  // that lands before it runs. The same reset runs when the chat's first send
+  // starts, so a released lock does not bring the menu back.
+  const scopeKey = `${agentRef}::${selectionChatId ?? ''}`
+  const [renderedFor, setRenderedFor] = useState({ scopeKey, locked: firstSendInFlight })
+  if (renderedFor.scopeKey !== scopeKey || renderedFor.locked !== firstSendInFlight) {
+    if (renderedFor.scopeKey !== scopeKey || (firstSendInFlight && !renderedFor.locked)) {
+      setOpen(false)
+      setConfirming(false)
+    }
+    setRenderedFor({ scopeKey, locked: firstSendInFlight })
+  }
+
   const chipLabel = label ?? 'Manual'
   const showClassifierNote = effectiveMode === 'auto' && shellClassifierAvailable === false
   const menuOpen = open && !firstSendInFlight
@@ -63,21 +79,14 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [menuOpen, close])
 
-  useEffect(() => {
-    if (!firstSendInFlight) return
-    close()
-  }, [firstSendInFlight, close])
-
   // The composer mounts the picker un-keyed, so a chat or tab switch only
-  // changes its props. Close the menu and the Allow-all confirmation, and drop
-  // the save error, so nothing opened for one chat writes to or shows on the
-  // next. A write still in flight for the old chat must not report here either.
+  // changes its props. Drop the save error so it does not show on the next
+  // chat. A write still in flight for the old chat must not report here either.
   const chatScope = useRef(0)
   useEffect(() => {
     chatScope.current += 1
-    close()
     setWriteError(null)
-  }, [agentRef, chatId, close])
+  }, [agentRef, chatId])
 
   const choose = (mode: ApprovalMode) => {
     close()
