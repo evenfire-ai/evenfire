@@ -6,6 +6,7 @@ import path from 'node:path'
 import { testSessionMe, testTeamSwitchResult } from '../../testSupport/authTestFixtures.js'
 import { resolvedDirectory } from '../../ui/src/gfs/__fixtures__/gfsProducerFixtures.js'
 import { AppService } from '../appService.js'
+import { AuthClient } from '../authClient.js'
 import { config } from '../config.js'
 import type { SessionMe } from '../types.js'
 
@@ -23,10 +24,19 @@ const RESOLVE_PATH = '/api/v1/me/gfs/resolve'
 const tokenFor = (teamId: string) => `fixture-session-${teamId}`
 const meFor = (teamId: string): SessionMe =>
   testSessionMe({ teamId, teamName: teamId.toUpperCase() })
+// A session of a different user on the same team, answered by the same `/me` route.
+const OTHER_USER_TOKEN = 'fixture-other-user-session'
+const OTHER_USER_ME: SessionMe = testSessionMe({
+  id: 'user-b',
+  email: 'user-b@example.test',
+  name: 'User B',
+  teamId: 'team-a',
+  teamName: 'TEAM-A',
+})
 
 type ServiceState = {
   sessionToken: string | null
-  me: SessionMe | { id: string } | null
+  me: SessionMe | null
   gfsAuthEpoch: number
   gfsDispatchBlocked: boolean
   tokenStore: unknown
@@ -76,6 +86,11 @@ beforeAll(async () => {
       return
     }
     const bearer = String(req.headers.authorization ?? '').replace(/^Bearer /, '')
+    if (pathname === '/api/v1/me' && req.method === 'GET' && bearer === OTHER_USER_TOKEN) {
+      authRequests.push('me:other-user')
+      send(200, OTHER_USER_ME)
+      return
+    }
     const teamId = bearer.startsWith('fixture-session-')
       ? bearer.slice('fixture-session-'.length)
       : ''
@@ -254,8 +269,10 @@ describe('AppService.resolveGfsUriForNavigation (S-10)', () => {
   it.each([
     [
       'the signed-in user changes',
-      (s: ServiceState) => {
-        s.me = { id: 'user-b' }
+      async (s: ServiceState) => {
+        // The other user's principal as the real AuthClient reads it from `/me`.
+        s.me = await new AuthClient().getMe(OTHER_USER_TOKEN)
+        expect(s.me).toEqual(OTHER_USER_ME)
       },
     ],
     [
