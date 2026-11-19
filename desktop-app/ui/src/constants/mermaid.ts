@@ -1,27 +1,20 @@
-/**
- * Longer code stays a code block. A chat diagram of about 25 shapes needs some
- * 2,000 characters; the main process enforces its own copy of this limit.
- */
-export const MERMAID_MAX_CODE_CHARS = 20_000
+// The limits the main process enforces too, from the module both sides share.
+export {
+  DIAGRAM_MAX_CODE_CHARS as MERMAID_MAX_CODE_CHARS,
+  DIAGRAM_MAX_IMAGE_SIDE_PX as MERMAID_MAX_IMAGE_SIDE_PX,
+  DIAGRAM_MAX_IMAGE_URL_CHARS as MERMAID_MAX_IMAGE_URL_CHARS,
+  DIAGRAM_MAX_WIDTH_PX as MERMAID_MAX_WIDTH_PX,
+  DIAGRAM_MIN_WIDTH_PX as MERMAID_MIN_WIDTH_PX,
+} from '../../../src/diagramLimits'
 
 /** Mermaid's own default limit on connections in one flowchart. */
 export const MERMAID_MAX_EDGES = 500
 
-/** Layout widths the main process accepts; a message outside them is drawn at the nearest. */
-export const MERMAID_MIN_WIDTH_PX = 100
-export const MERMAID_MAX_WIDTH_PX = 4_000
-
 /**
- * The largest drawing returned, as its data URL. A 20,000-character diagram
- * comes to about 3 MB at most; one of 25 shapes to 40 to 65 KB.
+ * Drawn diagrams kept in memory, counted in characters of their code and
+ * drawing. A drawing is ASCII, which takes a byte per character.
  */
-export const MERMAID_MAX_IMAGE_URL_CHARS = 4 * 1024 * 1024
-
-/** The longest side a drawing may have, in CSS pixels. */
-export const MERMAID_MAX_IMAGE_SIDE_PX = 100_000
-
-/** Drawn diagrams kept in memory, measured by the size of their images. */
-export const MERMAID_CACHE_MAX_BYTES = 16 * 1024 * 1024
+export const MERMAID_CACHE_MAX_CHARS = 16 * 1024 * 1024
 
 /** Wait before asking once more when the renderer, not the code, failed. */
 export const MERMAID_RETRY_DELAY_MS = 1_000

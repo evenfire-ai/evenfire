@@ -42,7 +42,9 @@ export function svgToDiagramImage(markup: string, diagramType = ''): DiagramImag
     // Labels are HTML with a literal `xmlns` attribute; the serializer declares
     // their namespace itself, and some serializers would write it twice.
     if (element.namespaceURI === XHTML_NAMESPACE) element.removeAttribute('xmlns')
-    // An image loads nothing anyway; the drawing keeps no reference outside itself.
+    // Shown as an image, the drawing loads nothing. Dropping its links and
+    // url() references is a second guard, not a full CSS sanitizer: @import,
+    // escaped or image-set() URLs stay, and only the image keeps them inert.
     for (const { name, value } of Array.from(element.attributes)) {
       const linksOut = (name === 'href' || name === 'xlink:href') && !value.startsWith('#')
       if (linksOut) element.removeAttribute(name)

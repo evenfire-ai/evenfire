@@ -94,9 +94,9 @@ or front matter cannot set the security, stylesheet, font, theme or sanitizer
 keys; labels lose images, embeds, form controls and SVG filters; code over
 20,000 characters, a flowchart over 500 connections, or a drawing over 4 MB
 or 100,000 pixels on a side is not shown. The
-result is shown as an `<img>` of its SVG, stripped of every link and URL that
-points outside the drawing, so it runs no script, loads nothing and its
-stylesheet cannot reach the app; the app's CSP is unchanged. Accessibility:
+result is shown as an `<img>` of its SVG, so it runs no script, loads nothing
+and its stylesheet cannot reach the app; its links and `url()` references are
+also dropped, as a second guard. The app's CSP is unchanged. Accessibility:
 the image's text alternative is the diagram's own accessible title and
 description, or else its kind and the words in it; a diagram still drawing is
 announced as busy; code Mermaid cannot draw stays a readable code block with

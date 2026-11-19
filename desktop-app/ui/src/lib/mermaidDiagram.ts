@@ -1,5 +1,5 @@
 import {
-  MERMAID_CACHE_MAX_BYTES,
+  MERMAID_CACHE_MAX_CHARS,
   MERMAID_MAX_CODE_CHARS,
   MERMAID_RETRY_DELAY_MS,
 } from '@constants/mermaid'
@@ -32,37 +32,42 @@ function cacheKey(code: string, style: MermaidDiagramStyle): string {
  * again show its diagram at once.
  */
 export function createMermaidDiagramClient(deps: MermaidDiagramClientDeps): MermaidDiagramClient {
-  const cache = new Map<string, { result: DiagramDrawResult; bytes: number }>()
+  const cache = new Map<string, { result: DiagramDrawResult; chars: number }>()
   const pending = new Map<string, Promise<DiagramDrawResult>>()
-  let cachedBytes = 0
+  let cachedChars = 0
 
   const remember = (key: string, result: DiagramDrawResult) => {
-    const bytes = result.ok ? result.image.src.length : result.reason.length
-    if (bytes > deps.cacheMaxBytes) return
-    cache.set(key, { result, bytes })
-    cachedBytes += bytes
+    // The key holds the whole code, so it counts as well.
+    const chars = key.length + (result.ok ? result.image.src.length : result.reason.length)
+    if (chars > deps.cacheMaxChars) return
+    cache.set(key, { result, chars })
+    cachedChars += chars
     for (const [oldKey, entry] of cache) {
-      if (cachedBytes <= deps.cacheMaxBytes) break
+      if (cachedChars <= deps.cacheMaxChars) break
       cache.delete(oldKey)
-      cachedBytes -= entry.bytes
+      cachedChars -= entry.chars
     }
+  }
+
+  const recall = (key: string): DiagramDrawResult | null => {
+    const hit = cache.get(key)
+    if (!hit) return null
+    // Most recently used last, so the oldest drawing is forgotten first.
+    cache.delete(key)
+    cache.set(key, hit)
+    return hit.result
   }
 
   return {
     peek: (code, style) => {
       if (code.length > MERMAID_MAX_CODE_CHARS) return TOO_LONG
-      return cache.get(cacheKey(code, style))?.result ?? null
+      return recall(cacheKey(code, style))
     },
     draw: (code, style, width) => {
       if (code.length > MERMAID_MAX_CODE_CHARS) return Promise.resolve(TOO_LONG)
       const key = cacheKey(code, style)
-      const hit = cache.get(key)
-      if (hit) {
-        // Most recently used last, so the oldest drawing is forgotten first.
-        cache.delete(key)
-        cache.set(key, hit)
-        return Promise.resolve(hit.result)
-      }
+      const hit = recall(key)
+      if (hit) return Promise.resolve(hit)
       const inFlight = pending.get(key)
       if (inFlight) return inFlight
       const request = { code, theme: style.theme, fontFamily: style.fontFamily, width }
@@ -90,6 +95,6 @@ export function createMermaidDiagramClient(deps: MermaidDiagramClientDeps): Merm
 
 export const mermaidDiagrams: MermaidDiagramClient = createMermaidDiagramClient({
   draw: request => window.clerum.diagrams.draw(request),
-  cacheMaxBytes: MERMAID_CACHE_MAX_BYTES,
+  cacheMaxChars: MERMAID_CACHE_MAX_CHARS,
   retryDelayMs: MERMAID_RETRY_DELAY_MS,
 })
