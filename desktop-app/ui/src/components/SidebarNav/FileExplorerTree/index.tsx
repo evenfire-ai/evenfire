@@ -248,11 +248,16 @@ function FileExplorerNode({
   }, [clearClickTimer, runActivate])
 
   // Chromium on Windows raises a contextmenu on the ContextMenu key's keyup,
-  // even when its keydown was handled: that event belongs to the opening the
-  // key already made. The mark covers only that event, so it ends a macrotask
-  // after the keyup (or after a short fallback if the keyup never comes), and
-  // every later contextmenu (right-click, VO+Shift+M, long press) opens.
-  // Shift+F10 never arms it: preventing its keydown suppresses the follow-up.
+  // even when its keydown was handled, at whatever holds focus by then.
+  // Normally that is the opened menu's first item, so the event never reaches
+  // the row. It does when the menu has nothing to focus (every item absent or
+  // inert) and focus stays on the row: without this mark that contextmenu
+  // would replace the menu the key just opened. Kept as hardening because the
+  // keyup behaviour is not verified on Windows. The mark covers only that
+  // event, so it ends a macrotask after the keyup (or after a short fallback
+  // if the keyup never comes), and every later contextmenu (right-click,
+  // VO+Shift+M, long press) opens. Shift+F10 never arms it: preventing its
+  // keydown suppresses the follow-up.
   const keyboardOpenedMenuRef = useRef(false)
   const disarmKeyboardOpenRef = useRef<(() => void) | null>(null)
   const disarmKeyboardOpen = useCallback(() => {

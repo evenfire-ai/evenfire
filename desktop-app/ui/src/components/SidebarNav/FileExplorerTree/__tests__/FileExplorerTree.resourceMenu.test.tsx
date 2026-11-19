@@ -412,7 +412,7 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
     expect(affordances).not.toHaveBeenCalled()
   })
 
-  it('opens once for the ContextMenu key and the contextmenu event that follows it', async () => {
+  it("keeps focus in the opened menu, where the ContextMenu key's own contextmenu lands", async () => {
     installClerum({
       listAccessible: vi.fn(async () =>
         listAccessiblePage([
@@ -439,6 +439,42 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
     fireEvent.contextMenu(row, { clientX: 5, clientY: 5 })
     const reopened = await screen.findByRole('menu', { name: 'Actions for shared.txt' })
     expect(reopened).not.toBe(menu)
+  })
+
+  it('opens once for the ContextMenu key when its menu has nothing to focus', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('file-u', 'locked.bin', 'file', { permissions: ['read'] }),
+        ])
+      ),
+    })
+    // No action host and a file with no preview: the menu has no item to
+    // focus, so the key's contextmenu reaches the row.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <AuthContext.Provider value={authFor('team-1')}>
+        <QueryClientProvider client={queryClient}>
+          <GfsDragSessionProvider>
+            <FileExplorerTree
+              onOpenFolder={() => undefined}
+              onOpenPreview={() => undefined}
+              pushToast={() => undefined}
+            />
+          </GfsDragSessionProvider>
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    const row = await screen.findByRole('button', { name: /locked\.bin/ })
+    row.focus()
+    fireEvent.keyDown(row, { key: 'ContextMenu' })
+    const menu = await screen.findByRole('menu', { name: 'Actions for locked.bin' })
+    expect(document.activeElement).toBe(row)
+
+    fireEvent.keyUp(row, { key: 'ContextMenu' })
+    fireEvent.contextMenu(row)
+
+    expect(screen.getByRole('menu', { name: 'Actions for locked.bin' })).toBe(menu)
   })
 
   it.each([
