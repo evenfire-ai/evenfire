@@ -99,8 +99,10 @@ class WireLedger {
     inner: typeof fetch = (input, init) => fetch(input, init)
   ): typeof fetch {
     return (input, init) => {
-      const entry = this.open(init?.method ?? 'GET', urlOf(input), owner())
-      const headers = new Headers(init?.headers)
+      // As `fetch` does, `init` overrides a `Request`'s method, and its headers replace the Request's.
+      const request = input instanceof Request ? input : undefined
+      const entry = this.open(init?.method ?? request?.method ?? 'GET', urlOf(input), owner())
+      const headers = new Headers(init?.headers ?? request?.headers)
       headers.set(WIRE_HEADER, entry.id)
       let pending: Promise<Response>
       try {

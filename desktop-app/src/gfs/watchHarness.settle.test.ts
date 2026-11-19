@@ -317,4 +317,31 @@ describe('watch harness settle() waits for I/O in flight', () => {
     await settle({ signature: () => 'constant', maxMs: 150 })
     expect(wireLedger.inTransit()).toEqual([])
   })
+
+  it('n: a Request keeps its own method and headers, plus the ledger tag', async () => {
+    const seen: Array<{ kept: string | null; tagged: boolean }> = []
+    let answer: (res: Response) => void = () => undefined
+    const held = wireLedger.fetch(
+      () => 'case n',
+      (_input, init) => {
+        const headers = new Headers(init?.headers)
+        seen.push({ kept: headers.get('x-case-n'), tagged: headers.has('x-harness-wire') })
+        return new Promise<Response>(resolve => {
+          answer = resolve
+        })
+      }
+    )
+    const pending = held(
+      new Request('http://watch.test/api/v1/me/gfs/watch', {
+        method: 'PUT',
+        headers: { 'x-case-n': 'kept' },
+        body: '{}',
+      })
+    )
+    expect(seen).toEqual([{ kept: 'kept', tagged: true }])
+    expect(wireLedger.inTransit()).toMatchObject([{ method: 'PUT', phase: 'not received' }])
+    answer(new Response(null, { status: 204 }))
+    await pending
+    expect(wireLedger.inTransit()).toEqual([])
+  })
 })
