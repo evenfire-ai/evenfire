@@ -946,27 +946,63 @@ describe('FilesPage delegation request lifecycle', () => {
       })
     }
 
-    it('shows no removal failure toast once main runs another session', async () => {
-      const failure = await gfsRouteFailureMessage(
-        client => client.revokeGrant(GRANT_ID, SESSION_TOKEN),
-        500,
-        { code: 'internal', message: 'upstream failed' }
-      )
-      const write = deferred<void>()
-      const revokeGrant = vi.fn(() => write.promise)
-      const { getSessionGeneration, pushToast } = await createPage(vi.fn(), {
-        grants: await grantsListPage([agentGrantRow]),
-        gfs: { revokeGrant },
-      })
-      await removeAccess()
-      await waitFor(() => expect(revokeGrant).toHaveBeenCalledOnce())
-      getSessionGeneration.mockResolvedValue(SESSION_GENERATION + 1)
-      const confirmationsBeforeSettle = getSessionGeneration.mock.calls.length
-      await act(async () => write.reject(new Error(failure)))
-      await settle()
-      expect(pushToast).not.toHaveBeenCalled()
-      expect(getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmationsBeforeSettle)
-    })
+    const failedWrites = [
+      {
+        name: 'role change',
+        reject: (client: Parameters<Parameters<typeof gfsRouteFailureMessage>[0]>[0]) =>
+          client.grant(
+            {
+              resourceId: 'folder-a',
+              subjects: [{ type: 'host', id: '1st:mcp-host/chatllm' }],
+              permissions: ['read', 'write'],
+            },
+            SESSION_TOKEN
+          ),
+      },
+      {
+        name: 'grant removal',
+        reject: (client: Parameters<Parameters<typeof gfsRouteFailureMessage>[0]>[0]) =>
+          client.revokeGrant(GRANT_ID, SESSION_TOKEN),
+      },
+      {
+        name: 'share removal',
+        reject: (client: Parameters<Parameters<typeof gfsRouteFailureMessage>[0]>[0]) =>
+          client.revokeShare(SHARE_ID, SESSION_TOKEN),
+      },
+    ]
+
+    for (const failedWrite of failedWrites) {
+      const testCase = cases.find(({ name }) => name === failedWrite.name)!
+      for (const switchSessionMidWrite of [true, false]) {
+        it(`${switchSessionMidWrite ? 'shows no' : 'shows the'} ${failedWrite.name} failure toast ${
+          switchSessionMidWrite
+            ? 'once main runs another session'
+            : 'while the session is unchanged'
+        }`, async () => {
+          const failure = await gfsRouteFailureMessage(failedWrite.reject, 500, {
+            code: 'internal',
+            message: 'upstream failed',
+          })
+          const write = deferred<void>()
+          const ipc = vi.fn(() => write.promise)
+          const { dialog, getSessionGeneration, pushToast } = await testCase.mount(ipc)
+          await testCase.start(dialog)
+          await waitFor(() => expect(ipc).toHaveBeenCalledOnce())
+          if (switchSessionMidWrite) getSessionGeneration.mockResolvedValue(SESSION_GENERATION + 1)
+          const confirmationsBeforeSettle = getSessionGeneration.mock.calls.length
+
+          await act(async () => write.reject(new Error(failure)))
+          await settle()
+
+          if (switchSessionMidWrite) {
+            expect(pushToast).not.toHaveBeenCalled()
+          } else {
+            expect(pushToast).toHaveBeenCalledWith(expect.any(String), 'error')
+          }
+          expect(getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmationsBeforeSettle)
+        })
+      }
+    }
 
     it('still reports a write that settles after Share closes in the same session', async () => {
       const write = deferred<void>()
