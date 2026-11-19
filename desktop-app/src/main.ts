@@ -42,6 +42,7 @@ import {
 } from './ipc.js'
 import { mainWindowRoundedCorners } from './mainWindowChrome.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
+import { wireMainWindowNavigationGuard } from './mainWindowNavigationGuard.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
 import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
@@ -642,13 +643,7 @@ async function createWindow(): Promise<void> {
   wireAppWindowVisibility()
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  window.webContents.on('will-navigate', (event, url) => {
-    const allowFile = url.startsWith('file://')
-    const allowDev = Boolean(devUrl) && url.startsWith(devUrl)
-    if (!allowFile && !allowDev) {
-      event.preventDefault()
-    }
-  })
+  wireMainWindowNavigationGuard(window.webContents, devUrl)
 
   try {
     if (devUrl) {

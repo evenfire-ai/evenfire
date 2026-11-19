@@ -214,6 +214,7 @@ export type ResumeSourceMessage = Pick<
   | 'imageModel'
   | 'fileReferenceResolutions'
   | 'displayCapabilities'
+  | 'authorityV2'
 > & {
   /** Only the team scope survives; the channel's raw payload is not persisted. */
   metadata?: { teamId: string }

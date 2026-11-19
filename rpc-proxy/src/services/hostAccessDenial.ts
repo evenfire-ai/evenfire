@@ -39,9 +39,9 @@ export function hostAccessDenied(code: HostAccessDenialCode): HostAccessDenial {
 
 /** Narrows `resolveHostConnectionForUser`'s result: true means "respond 403". */
 export function isHostAccessDenied<T extends object>(
-  resolved: T | HostAccessDenial
+  resolved: T | HostAccessDenial | null
 ): resolved is HostAccessDenial {
-  return (resolved as Partial<HostAccessDenial>).denied === true
+  return resolved !== null && (resolved as Partial<HostAccessDenial>).denied === true
 }
 
 const RESERVED_HOST_ACCESS_CODES: ReadonlySet<unknown> = new Set<HostAccessDenialCode>([

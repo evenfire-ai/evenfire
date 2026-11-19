@@ -42,6 +42,7 @@ import {
 } from './reconciler/resourceBuilder'
 import { SecretReverseIndex } from './reconciler/secretReverseIndex'
 import { SecretWatcher } from './reconciler/secretWatcher'
+import { createWorkflowRunAuthorityCheckpointer } from './reconciler/workflowActionCheckpointClient'
 import {
   type ReconcileResult,
   TRANSIENT_REQUEUE_BASE_MS,
@@ -438,7 +439,8 @@ export function workflowNeedsRuntimeCredentialRefresh(recipe: WorkflowRecipeCRD)
   return (
     workflowPhase === 'initializing' ||
     workflowPhase === 'running' ||
-    workflowPhase === 'recovering'
+    workflowPhase === 'recovering' ||
+    workflowPhase === 'authorization_paused'
   )
 }
 
@@ -754,6 +756,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         pool,
         runPollMs: this.config.db.runPollMs,
         createChildRecipe: this.makeChildRecipeCreator(),
+        checkpointAuthority: createWorkflowRunAuthorityCheckpointer(),
         childRecipeExists: this.makeChildRecipeExists(),
         onRunStarted: runId => {
           this.traceReporter?.enqueueWorkflowLifecycle({

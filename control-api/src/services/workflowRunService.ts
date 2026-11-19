@@ -1,11 +1,28 @@
 import { createHash } from 'node:crypto'
-import { type DbClient, pool } from '../db.js'
+import { type DbClient, pool, withTransaction } from '../db.js'
 import { stableStringify } from '../utils/stableStringify.js'
 import { consumeApprovalForTrigger } from './userApprovalRequestService.js'
+import {
+  type WorkflowAuthorityBinding,
+  persistWorkflowAuthorityBinding,
+} from './workflows/workflowAuthorityBindingService.js'
 
-export type WorkflowRunPhase = 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled'
+export type WorkflowRunPhase =
+  | 'Pending'
+  | 'Running'
+  | 'AuthorizationPaused'
+  | 'Succeeded'
+  | 'Failed'
+  | 'Canceled'
 
 export type WorkflowRunActorType = 'user' | 'admin' | 'autonomous' | 'scheduled'
+
+export type WorkflowRunFailureReason =
+  | 'workflow_authority_denied'
+  | 'workflow_authority_not_found'
+  | 'workflow_authority_access_path_stale'
+  | 'workflow_authority_invalid_binding'
+  | 'workflow_authority_unavailable'
 
 export interface WorkflowRunRow {
   run_id: string
@@ -33,6 +50,8 @@ export interface WorkflowRunRow {
   last_reconciled_at: string | null
   created_at: string
   updated_at: string
+  initiating_authority_binding_id: string | null
+  failure_reason: WorkflowRunFailureReason | null
 }
 
 export interface CreateRunInput {
@@ -49,6 +68,28 @@ export interface CreateRunInput {
   output_overrides?: Record<string, unknown> | null
   max_duration_seconds?: number | null
   ttl_seconds_after_finished?: number | null
+  authority?: WorkflowAuthorityBinding | null
+  validateCurrentInTransaction?: WorkflowTriggerAuthorityValidator
+}
+
+export type WorkflowTriggerAuthorityValidator = (
+  db: DbClient,
+  authority: WorkflowAuthorityBinding
+) => Promise<WorkflowAuthorityBinding>
+
+/**
+ * A V2 trigger authority is persisted only after its bound rows are re-checked
+ * inside the insert transaction, so a caller that supplies an authority
+ * without that row-check validator is a wiring defect: it fails before any
+ * database work.
+ */
+export function requireTriggerAuthorityValidator(
+  validateCurrentInTransaction: WorkflowTriggerAuthorityValidator | undefined
+): WorkflowTriggerAuthorityValidator {
+  if (!validateCurrentInTransaction) {
+    throw new Error('workflow_trigger_current_authority_validator_required')
+  }
+  return validateCurrentInTransaction
 }
 
 export interface CreateApprovedRunInput extends CreateRunInput {
@@ -56,6 +97,7 @@ export interface CreateApprovedRunInput extends CreateRunInput {
   idempotency_payload_hash: string
   approval_caller_key: string
   correlation_id: string
+  initiating_authority_binding_id?: string | null
 }
 
 export interface CreateRunResult {
@@ -86,6 +128,7 @@ type WorkflowApprovalTriggerRunIntentRow = {
   maxDurationSeconds: number | null
   ttlSecondsAfterFinished: number | null
   idempotencyPayloadHash: string
+  authorityBindingId: string | null
 }
 
 function getDb(db?: DbClient): DbClient {
@@ -111,10 +154,13 @@ async function resolveApprovedRunInputFromIntent(
             watri.output_overrides AS "outputOverrides",
             watri.max_duration_seconds AS "maxDurationSeconds",
             watri.ttl_seconds_after_finished AS "ttlSecondsAfterFinished",
-            watri.idempotency_payload_hash AS "idempotencyPayloadHash"
+            watri.idempotency_payload_hash AS "idempotencyPayloadHash",
+            war.trigger_authority_binding_id AS "authorityBindingId"
        FROM workflow_approval_trigger_run_intents watri
        JOIN workflow_approval_trigger_intents wati
          ON wati.approval_request_id = watri.approval_request_id
+       JOIN workflow_approval_requests war
+         ON war.id = watri.approval_request_id
       WHERE watri.approval_request_id = $1`,
     [input.approval_request_id]
   )
@@ -146,6 +192,7 @@ async function resolveApprovedRunInputFromIntent(
     max_duration_seconds: row.maxDurationSeconds,
     ttl_seconds_after_finished: row.ttlSecondsAfterFinished,
     idempotency_payload_hash: row.idempotencyPayloadHash,
+    initiating_authority_binding_id: row.authorityBindingId,
   }
 }
 
@@ -161,6 +208,7 @@ export function computeWorkflowRunPayloadHash(params: {
   inputs?: Record<string, unknown> | null
   intermediateParameters?: Record<string, unknown> | null
   outputOverrides?: Record<string, unknown> | null
+  authorityBindingHash?: string | null
 }): string {
   const canonical = stableStringify({
     recipeNamespace: params.recipeNamespace,
@@ -174,6 +222,7 @@ export function computeWorkflowRunPayloadHash(params: {
     inputs: params.inputs ?? {},
     intermediateParameters: params.intermediateParameters ?? null,
     outputOverrides: params.outputOverrides ?? null,
+    ...(params.authorityBindingHash ? { authorityBindingHash: params.authorityBindingHash } : {}),
   })
   return createHash('sha256').update(canonical).digest('hex')
 }
@@ -186,15 +235,57 @@ export function computeWorkflowRunPayloadHash(params: {
  * If `idempotency_key` is null, the caller always gets a new run.
  */
 export async function createRun(input: CreateRunInput, db?: DbClient): Promise<CreateRunResult> {
+  const validateCurrentInTransaction = input.authority
+    ? requireTriggerAuthorityValidator(input.validateCurrentInTransaction)
+    : null
+  if (input.authority && !db) {
+    return withTransaction(transaction => createRun(input, transaction))
+  }
   const client = getDb(db)
+  if (input.authority && input.idempotency_key) {
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+      `workflow_run:${input.recipe_namespace}:${input.recipe_name}:${input.idempotency_key}`,
+    ])
+    const existing = await client.query(
+      `SELECT wr.*, binding.binding_hash AS "authorityBindingHash"
+         FROM workflow_runs wr
+         LEFT JOIN workflow_authority_bindings binding
+           ON binding.id = wr.initiating_authority_binding_id
+        WHERE wr.recipe_namespace = $1 AND wr.recipe_name = $2 AND wr.idempotency_key = $3`,
+      [input.recipe_namespace, input.recipe_name, input.idempotency_key]
+    )
+    if ((existing.rowCount ?? 0) > 0) {
+      const row = existing.rows[0] as WorkflowRunRow & { authorityBindingHash?: string | null }
+      if (row.authorityBindingHash !== input.authority.bindingHash) {
+        throw new WorkflowRunIdempotencyConflictError()
+      }
+      return { row, created: false }
+    }
+  }
+  const authority =
+    input.authority && validateCurrentInTransaction
+      ? await validateCurrentInTransaction(client, input.authority)
+      : null
+  if (input.authority && authority?.bindingHash !== input.authority.bindingHash) {
+    throw new WorkflowRunIdempotencyConflictError()
+  }
+  const authorityBindingId = authority
+    ? await persistWorkflowAuthorityBinding(client, {
+        authority,
+        kind: 'trigger',
+        entityType: 'workflow_trigger',
+        entityId: `${input.recipe_namespace}/${input.recipe_name}:${input.idempotency_key ?? authority.binding.delegationJti}`,
+      })
+    : null
 
   const inserted = await client.query(
     `INSERT INTO workflow_runs (
        recipe_namespace, recipe_name, phase, actor_type, team_id, usage_team_id, actor_id,
        idempotency_key, trigger_source, inputs, intermediate_parameters,
-       output_overrides, max_duration_seconds, ttl_seconds_after_finished
+       output_overrides, max_duration_seconds, ttl_seconds_after_finished,
+       initiating_authority_binding_id
      )
-     VALUES ($1, $2, 'Pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     VALUES ($1, $2, 'Pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      ON CONFLICT (recipe_namespace, recipe_name, idempotency_key)
        WHERE idempotency_key IS NOT NULL
        DO NOTHING
@@ -213,6 +304,7 @@ export async function createRun(input: CreateRunInput, db?: DbClient): Promise<C
       input.output_overrides ?? null,
       input.max_duration_seconds ?? null,
       input.ttl_seconds_after_finished ?? null,
+      authorityBindingId,
     ]
   )
 
@@ -232,7 +324,11 @@ export async function createRun(input: CreateRunInput, db?: DbClient): Promise<C
   if (!existing.rowCount) {
     throw new Error('workflowRunService.createRun: conflict row vanished between INSERT and SELECT')
   }
-  return { row: existing.rows[0] as WorkflowRunRow, created: false }
+  const row = existing.rows[0] as WorkflowRunRow
+  if (row.initiating_authority_binding_id !== authorityBindingId) {
+    throw new WorkflowRunIdempotencyConflictError()
+  }
+  return { row, created: false }
 }
 
 /** Atomic approval consumption + run creation for mcp-host-control triggers. */
@@ -245,6 +341,15 @@ export async function createApprovedRun(input: CreateApprovedRunInput): Promise<
   try {
     await client.query('BEGIN')
     const runInput = await resolveApprovedRunInputFromIntent(client, input)
+
+    // The approval row comes before the run key, the order an approve decision
+    // uses (approval row → run key → run row), so this path and the decision
+    // cannot each hold one lock and wait on the other's. A missing row is left
+    // to the idempotent-run branch or the consume below, as before; the
+    // consume's own `FOR UPDATE OF war` is then re-entrant.
+    await client.query(`SELECT id FROM workflow_approval_requests WHERE id = $1 FOR UPDATE`, [
+      runInput.approval_request_id,
+    ])
 
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
       `workflow_run:${runInput.recipe_namespace}:${runInput.recipe_name}:${runInput.idempotency_key}`,
@@ -264,7 +369,9 @@ export async function createApprovedRun(input: CreateApprovedRunInput): Promise<
       if (
         row.idempotency_payload_hash !== runInput.idempotency_payload_hash ||
         row.approval_request_id !== runInput.approval_request_id ||
-        row.actor_id !== runInput.actor_id
+        row.actor_id !== runInput.actor_id ||
+        (row.initiating_authority_binding_id ?? null) !==
+          (runInput.initiating_authority_binding_id ?? null)
       ) {
         throw new WorkflowRunIdempotencyConflictError()
       }
@@ -288,9 +395,9 @@ export async function createApprovedRun(input: CreateApprovedRunInput): Promise<
          recipe_namespace, recipe_name, phase, actor_type, team_id, usage_team_id, actor_id,
          idempotency_key, trigger_source, inputs, intermediate_parameters,
          output_overrides, max_duration_seconds, ttl_seconds_after_finished, approval_request_id,
-         idempotency_payload_hash
+         idempotency_payload_hash, initiating_authority_binding_id
        )
-       VALUES ($1, $2, 'Pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+       VALUES ($1, $2, 'Pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING *`,
       [
         runInput.recipe_namespace,
@@ -308,6 +415,7 @@ export async function createApprovedRun(input: CreateApprovedRunInput): Promise<
         runInput.ttl_seconds_after_finished ?? null,
         runInput.approval_request_id,
         runInput.idempotency_payload_hash,
+        runInput.initiating_authority_binding_id ?? null,
       ]
     )
 

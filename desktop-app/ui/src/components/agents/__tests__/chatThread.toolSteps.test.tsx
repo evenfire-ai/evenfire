@@ -231,7 +231,9 @@ describe('ChatThread local-search highlighting', () => {
 
     render(<ChatThread />)
 
-    expect(document.querySelector('a')?.getAttribute('href')).toBe('')
+    // An unsafe target is not a link at all: an `href=""` would reload the app.
+    expect(document.querySelector('a')).toBeNull()
+    expect(screen.getByText(/unsafe/)).toBeTruthy()
     expect(document.querySelector('button[onclick]')).toBeNull()
     expect(screen.getByText(/<button onclick="evil\(\)">literal<\/button>/)).toBeTruthy()
   })

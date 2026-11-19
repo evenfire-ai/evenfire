@@ -13,15 +13,18 @@ import * as k8s from '@kubernetes/client-node'
 import { OperatorConfig, loadConfig, registryUrlStartupWarning } from './config'
 import { WorkflowRecipeProvider, createWorkflowRecipeProvider } from './k8sClient'
 import { ClerumMcpServer } from './mcp/server'
+import { startPr2ReadinessReporter } from './pr2ReadinessReporter'
 import { assertInternalControlJwtHmacSecret } from './utils/internalControlSigner'
 
 let provider: WorkflowRecipeProvider | null = null
 let mcpServer: ClerumMcpServer | null = null
 let isShuttingDown = false
+let stopReadinessReporter: (() => void) | null = null
 
 async function shutdown(signal: string): Promise<void> {
   if (isShuttingDown) return
   isShuttingDown = true
+  stopReadinessReporter?.()
 
   console.log(`\n[Clerum] Received ${signal} — shutting down`)
 
@@ -124,6 +127,7 @@ async function main(): Promise<void> {
     tokenFactory
   )
   await mcpServer.start()
+  stopReadinessReporter = startPr2ReadinessReporter()
 
   // Graceful shutdown
   process.once('SIGTERM', () => shutdown('SIGTERM'))
