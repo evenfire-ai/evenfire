@@ -8,6 +8,7 @@ import {
   signV1SessionToken,
 } from '../../testSupport/gfsWatch/sessionTokens.js'
 import { WatchHarness } from '../../testSupport/gfsWatch/watchHarness.js'
+import { wireLedger } from '../../testSupport/gfsWatch/wireLedger.js'
 
 // `settle()` of both watch harnesses waits for I/O still on the wire. Each case
 // slows one step of the watch transport with a stub of the global `fetch` (the
@@ -225,5 +226,14 @@ describe('watch harness settle() waits for I/O in flight', () => {
     expect(stub.delayed).toBe(1)
     expect(watch.server.puts).toHaveLength(1)
     expect(watch.server.current()?.keys).toEqual(new Set(keys))
+  })
+
+  it('i: a tagged request the fake server answers with 404 leaves nothing on the wire', async () => {
+    watch = await new WatchHarness().start()
+    const res = await wireLedger.fetch(() => 'case i')(`${watch.server.baseUrl}/not-the-watch`)
+    expect(res.status).toBe(404)
+    expect(await res.text()).toBe('')
+    await watch.settle(300)
+    expect(wireLedger.inTransit()).toEqual([])
   })
 })

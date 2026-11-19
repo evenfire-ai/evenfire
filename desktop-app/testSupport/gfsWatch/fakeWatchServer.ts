@@ -214,11 +214,12 @@ export class FakeWatchServer {
     const url = new URL(req.url ?? '/', 'http://x')
     const auth = String(req.headers.authorization ?? '')
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    // Tapped before routing, so a tagged request to any path is swept once both ends are done.
+    const received = wireLedger.tapServer(req, res)
     if (url.pathname !== '/api/v1/me/gfs/watch') {
       res.writeHead(404).end()
       return
     }
-    const received = wireLedger.tapServer(req, res)
     if (req.method === 'GET') this.onGet(url, token, res, received)
     else if (req.method === 'PUT') this.onPut(req, token, res, received)
     else res.writeHead(405).end()
