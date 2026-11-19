@@ -170,6 +170,20 @@ describe('ApprovalModePicker state — save errors (A3 rows)', () => {
     expect(again.queryByTestId('approval-mode-write-error')?.textContent).toBe(SAVE_ERROR)
   })
 
+  it('R7: opening the menu after a failed save clears the error for good', async () => {
+    setApprovalMode.mockRejectedValueOnce(patchFailure(500))
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+    await flush()
+    expect(utils.queryByTestId('approval-mode-write-error')).not.toBeNull()
+
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(utils.queryByTestId('approval-mode-option-manual')).toBeNull()
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+
   it('R14: an error that arrives while the menu is open shows once the chip closes the menu', async () => {
     const write = deferred<ApprovalModeResult>()
     setApprovalMode.mockReturnValueOnce(write.promise)
