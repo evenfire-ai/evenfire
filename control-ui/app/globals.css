@@ -13601,6 +13601,10 @@ button.cu-gfs-tree__button:focus-visible,
   text-underline-offset: 2px;
 }
 
+:root[data-theme='light'] .cu-identity-preview__document .cu-gfs-markdown-preview__content a {
+  color: var(--cu-link);
+}
+
 .cu-gfs-markdown-preview__content code {
   padding: 0.1rem var(--cu-space-1);
   border-radius: calc(var(--cu-radius-sm) - 3px);
