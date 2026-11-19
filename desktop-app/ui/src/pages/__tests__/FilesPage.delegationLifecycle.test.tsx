@@ -910,6 +910,42 @@ describe('FilesPage delegation request lifecycle', () => {
       })
     }
 
+    for (const testCase of cases.filter(({ name }) => name === 'grant' || name === 'role change')) {
+      it(`settles the ${testCase.name} without waiting for main to confirm its toast`, async () => {
+        const write = deferred<void>()
+        const ipc = vi.fn(() => write.promise)
+        const page = await testCase.mount(ipc)
+        await testCase.start(page.dialog)
+        await waitFor(() => expect(ipc).toHaveBeenCalledOnce())
+        const confirmation = deferred<number>()
+        page.getSessionGeneration.mockImplementation(() => confirmation.promise)
+        const listsBefore = page.listGrants.mock.calls.length
+
+        await act(async () => write.resolve())
+
+        // The list re-reads and the row's role control is usable again while
+        // main has still not answered whether the toast may be shown.
+        await waitFor(() => expect(page.listGrants.mock.calls.length).toBeGreaterThan(listsBefore))
+        if (testCase.name === 'role change') {
+          await waitFor(() =>
+            expect(
+              (screen.getByRole('button', { name: 'Access role for chatllm' }) as HTMLButtonElement)
+                .disabled
+            ).toBe(false)
+          )
+        }
+        expect(page.pushToast).not.toHaveBeenCalled()
+
+        await act(async () => confirmation.resolve(SESSION_GENERATION))
+        await waitFor(() =>
+          expect(page.pushToast).toHaveBeenCalledWith(
+            expect.stringContaining(testCase.success),
+            'success'
+          )
+        )
+      })
+    }
+
     it('shows no removal failure toast once main runs another session', async () => {
       const failure = await gfsRouteFailureMessage(
         client => client.revokeGrant(GRANT_ID, SESSION_TOKEN),

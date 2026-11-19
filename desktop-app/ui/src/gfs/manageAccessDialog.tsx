@@ -213,9 +213,14 @@ export function GfsManageAccessDialog({
       isCurrent: () => mountedRef.current && isCurrentRef.current(),
     })
     if (!action) return null
-    const presentOutcome = async (message: string, tone: Tone) => {
-      if (!pushToast || !(await outcome.admitEffect())) return
-      pushToast(message, tone)
+    // Fire and forget: confirming with main must not hold the write's own
+    // follow-up (list refresh, busy state). admitEffect resolves false on an
+    // IPC failure instead of rejecting.
+    const presentOutcome = (message: string, tone: Tone): void => {
+      if (!pushToast) return
+      void outcome.admitEffect().then(admitted => {
+        if (admitted) pushToast(message, tone)
+      })
     }
     return { ...action, presentOutcome }
   }
@@ -331,7 +336,7 @@ export function GfsManageAccessDialog({
       throw grantError
     }
     if (isDraftCurrent()) {
-      await guards.presentOutcome(
+      guards.presentOutcome(
         `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
         'success'
       )
@@ -353,10 +358,10 @@ export function GfsManageAccessDialog({
       await access.revokeGrant(target, grantId)
     } catch (revokeError) {
       if (deps.failClosed(revokeError)) return
-      await guards.presentOutcome(describeGfsGrantError(revokeError).message, 'error')
+      guards.presentOutcome(describeGfsGrantError(revokeError).message, 'error')
       return
     }
-    await guards.presentOutcome(`Access revoked for ${label}`, 'success')
+    guards.presentOutcome(`Access revoked for ${label}`, 'success')
   }
 
   const handleRevokeShare = async (shareId: string, label: string) => {
@@ -372,10 +377,10 @@ export function GfsManageAccessDialog({
       await access.revokeShare(target, shareId)
     } catch (revokeError) {
       if (deps.failClosed(revokeError)) return
-      await guards.presentOutcome(describeGfsGrantError(revokeError).message, 'error')
+      guards.presentOutcome(describeGfsGrantError(revokeError).message, 'error')
       return
     }
-    await guards.presentOutcome(`Shared access revoked for ${label}`, 'success')
+    guards.presentOutcome(`Shared access revoked for ${label}`, 'success')
   }
 
   const handleAccessRoleChange = async (
@@ -401,7 +406,7 @@ export function GfsManageAccessDialog({
     try {
       if (!(await guards.admitEffect())) return
       await access.grant(target, [subjectKey], bits, item.inherit)
-      await guards.presentOutcome(
+      guards.presentOutcome(
         `${label} is now ${role === 'editor' ? 'an Editor' : 'Read-only'}${inheritedCoverageCaveat(
           access.inheritedCoverage
         )}`,
@@ -410,7 +415,7 @@ export function GfsManageAccessDialog({
       await Promise.all([access.refreshGrants(), access.refreshShares()])
     } catch (roleError) {
       if (deps.failClosed(roleError)) return
-      await guards.presentOutcome(describeGfsGrantError(roleError).message, 'error')
+      guards.presentOutcome(describeGfsGrantError(roleError).message, 'error')
     } finally {
       setUpdatingAccessRole(false)
     }
