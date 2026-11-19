@@ -2152,8 +2152,8 @@ export function FilesPage({
 
   const openMoveTarget = (target: GfsActionTarget) => {
     const authority = gfsActionOpeningAuthority(target, 'move')
-    if (authority.kind !== 'check') {
-      if (authority.kind === 'unverifiable') pushToast?.(authority.message, 'error')
+    if (authority.kind === 'unverifiable') {
+      pushToast?.(authority.message, 'error')
       return
     }
     // Only an opening that can run supersedes a pending one.
