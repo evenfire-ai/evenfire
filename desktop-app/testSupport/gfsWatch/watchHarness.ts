@@ -1,10 +1,10 @@
-import { expect } from 'vitest'
 import {
   type GfsWatchClient,
   type GfsWatchLogger,
   createGfsWatchClient,
 } from '../../src/gfs/watchClient.js'
 import { requestJson } from '../../src/httpClient.js'
+import { currentTest } from './currentTest.js'
 import { FakeOwner } from './fakeOwner.js'
 import { FakeWatchServer } from './fakeWatchServer.js'
 import { USER_A, signV1SessionToken } from './sessionTokens.js'
@@ -12,9 +12,6 @@ import { VirtualClock, type VirtualTimer, seededRandom } from './virtualClock.js
 import { settle, wireLedger } from './wireLedger.js'
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
-
-/** The test running now, recorded on each request the harness sends. */
-const currentTest = () => expect.getState().currentTestName ?? '<outside a test>'
 
 /**
  * The real watch client with the real `fetch` and `requestJson` against a

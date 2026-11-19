@@ -14,7 +14,7 @@ import type http from 'node:http'
  * `FakeWatchServer` under Electron, and requests without the header are ignored.
  */
 
-export const WIRE_HEADER = 'x-harness-wire'
+const WIRE_HEADER = 'x-harness-wire'
 
 type WireEntry = {
   id: string
@@ -36,7 +36,7 @@ type WireEntry = {
   clientDone: boolean
 }
 
-export type InTransit = { id: string; method: string; path: string; owner: string; phase: string }
+type InTransit = { id: string; method: string; path: string; owner: string; phase: string }
 
 type PutOptions = { token?: string; body: unknown; signal: AbortSignal; timeoutMs: number }
 type PutWithHeaders = (
@@ -44,7 +44,7 @@ type PutWithHeaders = (
   url: string,
   options: PutOptions & { headers?: Record<string, string> }
 ) => Promise<unknown>
-export type PutTransport = (method: 'PUT', url: string, options: PutOptions) => Promise<unknown>
+type PutTransport = (method: 'PUT', url: string, options: PutOptions) => Promise<unknown>
 
 const urlOf = (input: string | URL | Request): string =>
   typeof input === 'string' ? input : input instanceof URL ? input.href : input.url

@@ -1,10 +1,11 @@
-import { expect, vi } from 'vitest'
+import { vi } from 'vitest'
 import { AppService } from '../../src/appService.js'
 import { config } from '../../src/config.js'
 import type { GfsWatchLogger } from '../../src/gfs/watchClient.js'
 import { decodeJwtPayload } from '../../src/gfs/watchProtocol.js'
 import { requestJson } from '../../src/httpClient.js'
 import type { SessionMe } from '../../src/types.js'
+import { currentTest } from './currentTest.js'
 import { FakeOwner } from './fakeOwner.js'
 import { FakeWatchServer } from './fakeWatchServer.js'
 import { signV1SessionToken } from './sessionTokens.js'
@@ -14,9 +15,6 @@ import { settle, wireLedger } from './wireLedger.js'
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 type Mock = ReturnType<typeof vi.fn>
-
-/** The test running now, recorded on each watch request the harness sends. */
-const currentTest = () => expect.getState().currentTestName ?? '<outside a test>'
 
 /**
  * `/me` for a session token, as ERA resolves it: the user and team come from
