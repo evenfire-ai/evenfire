@@ -215,4 +215,15 @@ describe('watch harness settle() waits for I/O in flight', () => {
     app = undefined
     await stopped.stop()
   })
+
+  it('h: a WatchHarness PUT that leaves the client late is applied before subscribe() returns', async () => {
+    const stub = slowWatch('firstPut')
+    watch = await new WatchHarness().start()
+    await watch.login()
+    const keys = [key('file', 1), key('dir', 2)]
+    await watch.subscribe(keys)
+    expect(stub.delayed).toBe(1)
+    expect(watch.server.puts).toHaveLength(1)
+    expect(watch.server.current()?.keys).toEqual(new Set(keys))
+  })
 })
