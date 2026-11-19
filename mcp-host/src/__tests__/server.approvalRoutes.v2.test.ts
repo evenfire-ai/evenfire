@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { resolve } from 'node:path'
 import {
