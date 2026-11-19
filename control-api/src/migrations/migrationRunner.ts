@@ -15,6 +15,9 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0145_gfs_authz_control_admins_notify',
   '0146_gfs_authz_team_members_notify',
   '0147_gfs_watch_session_users_notify',
+  '0148_oidc_protocol_attempts',
+  '0149_oidc_protocol_attempt_expiry_index',
+  '0150_oidc_protocol_attempt_browser_binding',
 ] as const)
 
 // The one bound between initDb's single dev batch and this runner: every migration

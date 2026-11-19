@@ -188,4 +188,31 @@ describe('probeMcpTransport — SSRF kernel', () => {
     // Fail-closed: nothing was fetched.
     expect(transport).not.toHaveBeenCalled()
   })
+
+  it('classifies the bounded DNS-resolution deadline from its typed cause', async () => {
+    const transport = vi.fn<PinnedTransport>(async () => ({
+      status: 200,
+      headers: {},
+      bodyText: '',
+    }))
+    const outcome = await probeMcpTransport('https://mcp.notion.com/mcp', {
+      transport,
+      resolveDns: async () => new Promise<string[]>(() => {}),
+    })
+
+    expect(outcome).toMatchObject({ status: 'inconclusive', reason: 'timeout' })
+    expect(transport).not.toHaveBeenCalled()
+  })
+
+  it('does not infer the request deadline from a provider timeout diagnostic', async () => {
+    const transport: PinnedTransport = async () => {
+      throw new Error('upstream timeout while sending the request')
+    }
+    const outcome = await probeMcpTransport('https://mcp.notion.com/mcp', {
+      transport,
+      resolveDns: async () => [PUBLIC_IP],
+    })
+
+    expect(outcome).toMatchObject({ status: 'inconclusive', reason: 'transport_failed' })
+  })
 })
