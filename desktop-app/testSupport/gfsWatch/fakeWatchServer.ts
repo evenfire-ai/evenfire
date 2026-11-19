@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { parseKeys } from '../../../control-api/src/services/gfsWatch/keys.js'
+import { wireLedger } from './wireLedger.js'
 
 /**
  * A stand-in for ERA + control-api on GET/PUT `/api/v1/me/gfs/watch`, over a
@@ -217,12 +218,18 @@ export class FakeWatchServer {
       res.writeHead(404).end()
       return
     }
-    if (req.method === 'GET') this.onGet(url, token, res)
-    else if (req.method === 'PUT') this.onPut(req, token, res)
+    const received = wireLedger.tapServer(req, res)
+    if (req.method === 'GET') this.onGet(url, token, res, received)
+    else if (req.method === 'PUT') this.onPut(req, token, res, received)
     else res.writeHead(405).end()
   }
 
-  private onGet(url: URL, token: string, res: http.ServerResponse): void {
+  private onGet(
+    url: URL,
+    token: string,
+    res: http.ServerResponse,
+    received: (() => void) | undefined
+  ): void {
     const rec: GetRec = {
       n: this.gets.length + 1,
       keys: url.searchParams.getAll('k'),
@@ -231,6 +238,7 @@ export class FakeWatchServer {
       closed: false,
     }
     this.gets.push(rec)
+    received?.()
     res.on('close', () => {
       rec.closed = true
       if (rec.conn) rec.conn.alive = false
@@ -307,7 +315,12 @@ export class FakeWatchServer {
     }
   }
 
-  private onPut(req: http.IncomingMessage, token: string, res: http.ServerResponse): void {
+  private onPut(
+    req: http.IncomingMessage,
+    token: string,
+    res: http.ServerResponse,
+    received: (() => void) | undefined
+  ): void {
     let raw = ''
     req.setEncoding('utf8')
     req.on('data', (chunk: string) => (raw += chunk))
@@ -335,6 +348,7 @@ export class FakeWatchServer {
         answered: false,
       }
       this.puts.push(rec)
+      received?.()
       res.on('close', () => (rec.closed = true))
       this.answerPut(rec, this.putPolicy(rec))
     })

@@ -1,3 +1,4 @@
+import { expect } from 'vitest'
 import {
   type GfsWatchClient,
   type GfsWatchLogger,
@@ -8,13 +9,18 @@ import { FakeOwner } from './fakeOwner.js'
 import { FakeWatchServer } from './fakeWatchServer.js'
 import { USER_A, signV1SessionToken } from './sessionTokens.js'
 import { VirtualClock, type VirtualTimer, seededRandom } from './virtualClock.js'
+import { settle, wireLedger } from './wireLedger.js'
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+/** The test running now, recorded on each request the harness sends. */
+const currentTest = () => expect.getState().currentTestName ?? '<outside a test>'
 
 /**
  * The real watch client with the real `fetch` and `requestJson` against a
  * fake watch over HTTP, and every client timer on a virtual clock. Real I/O
- * is awaited with `settle()`, which waits until nothing observable moves.
+ * is awaited with `settle()`, which waits until no request is on the wire and
+ * nothing observable moves, and throws when that does not happen in time.
  */
 export class WatchHarness {
   clock = new VirtualClock()
@@ -42,10 +48,12 @@ export class WatchHarness {
       warn: (message, meta) => this.logs.push({ level: 'warn', message, meta }),
       error: (message, meta) => this.logs.push({ level: 'error', message, meta }),
     }
+    const get = wireLedger.fetch(currentTest)
+    const put = wireLedger.requestJson(currentTest, requestJson)
     this.client = createGfsWatchClient({
       baseUrl: () => this.server.baseUrl,
       fetch: (input, init) =>
-        fetch(input, init).then(res => {
+        get(input, init).then(res => {
           const hook = this.beforeGetResponse
           this.beforeGetResponse = null
           hook?.()
@@ -61,7 +69,7 @@ export class WatchHarness {
         this.putsInFlight += 1
         this.maxPutsInFlight = Math.max(this.maxPutsInFlight, this.putsInFlight)
         options.signal.addEventListener('abort', done)
-        const p = requestJson(method, url, options)
+        const p = put(method, url, options)
         p.then(done, done)
         return p
       },
@@ -78,10 +86,13 @@ export class WatchHarness {
 
   async stop(): Promise<void> {
     this.client.dispose()
-    await this.settle()
-    await this.server.stop()
-    await sleep(5)
-    process.off('unhandledRejection', this.onUnhandled)
+    try {
+      await this.settle()
+    } finally {
+      await this.server.stop()
+      await sleep(5)
+      process.off('unhandledRejection', this.onUnhandled)
+    }
   }
 
   /** A V1 token for `userId` at `authGeneration`; every call is a distinct token. */
@@ -126,23 +137,12 @@ export class WatchHarness {
     return this.clock.isPending(handle)
   }
 
-  /** Waits until neither the client, the server nor the owners change for a few rounds of real I/O. */
+  /**
+   * Waits until no request is on the wire and neither the client, the server
+   * nor the owners change for a few rounds of real I/O; throws after `maxMs`.
+   */
   async settle(maxMs = 3_000): Promise<void> {
-    const started = Date.now()
-    let last = ''
-    let stable = 0
-    while (Date.now() - started < maxMs) {
-      await new Promise<void>(resolve => setImmediate(resolve))
-      await sleep(2)
-      const s = this.signature()
-      if (s === last) {
-        stable += 1
-        if (stable >= 3) return
-      } else {
-        stable = 0
-        last = s
-      }
-    }
+    await settle({ signature: () => this.signature(), maxMs })
   }
 
   private signature(): string {
