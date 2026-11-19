@@ -676,7 +676,6 @@ describe('parseStatelessHeartbeatIntervalMs (config load validation)', () => {
   it('returns the 30s default when unset or empty', () => {
     expect(parseStatelessHeartbeatIntervalMs(undefined)).toBe(30_000)
     expect(parseStatelessHeartbeatIntervalMs('')).toBe(30_000)
-    expect(parseStatelessHeartbeatIntervalMs('   ')).toBe(30_000)
   })
 
   it('parses an explicitly-set positive integer', () => {
@@ -685,7 +684,7 @@ describe('parseStatelessHeartbeatIntervalMs (config load validation)', () => {
   })
 
   it('fails config load loudly on garbage values', () => {
-    for (const bad of ['banana', '0', '-5', '1.5', '10s', 'NaN', 'Infinity']) {
+    for (const bad of ['banana', '0', '-5', '1.5', '10s', 'NaN', 'Infinity', '   ']) {
       expect(() => parseStatelessHeartbeatIntervalMs(bad)).toThrow(/not a positive integer/)
     }
   })

@@ -30,6 +30,7 @@ import {
   getUserNotificationPreferences,
   upsertUserNotificationPreferences,
 } from '../../services/userNotificationPreferencesService.js'
+import { setStreamHeaders } from '../streamHeaders.js'
 
 const logger = rootLogger.child({ module: 'external-notification-stream' })
 
@@ -81,15 +82,6 @@ type StreamMessage =
 
 function writeStreamMessage(res: Response, message: StreamMessage): boolean {
   return res.write(`${JSON.stringify(message)}\n`)
-}
-
-function setStreamHeaders(res: Response): void {
-  res.status(200)
-  res.setHeader('content-type', 'application/x-ndjson; charset=utf-8')
-  res.setHeader('cache-control', 'no-cache, no-transform')
-  res.setHeader('connection', 'keep-alive')
-  res.setHeader('x-accel-buffering', 'no')
-  res.flushHeaders?.()
 }
 
 export function createExternalNotificationsRouter(): Router {

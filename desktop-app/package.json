@@ -18,6 +18,8 @@
     "test:e2e:playwright": "npm run build && playwright test --config test/e2e-playwright/playwright.config.ts",
     "test:e2e:playwright:gfs-drag-and-drop": "npm run build && node test/e2e-playwright/run-gfs-drag-and-drop.mjs",
     "test:native:sandbox-find": "npm run build:main --silent && node ./scripts/run-native-sandbox-find.mjs",
+    "typecheck:native": "tsc -p tsconfig.native-tests.json --noEmit",
+    "test:native:gfs-watch-ipc": "npm run build:main --silent && node ./scripts/run-native-gfs-watch-ipc.mjs",
     "test:native:sandbox-shortcut-focus": "npm run build:main --silent && node ./scripts/run-native-sandbox-shortcut-focus.mjs",
     "test:native:chat-workspace-geometry": "node ./scripts/run-native-chat-workspace-geometry.mjs",
     "test:native:sidebar-navigation-geometry": "node ./scripts/run-native-sidebar-navigation-geometry.mjs",
@@ -85,7 +87,8 @@
     "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
     "cross-env": "^10.0.0",
-    "electron": "^44.10.2",
+    "electron": "^44.11.4",
+    "esbuild": "0.28.1",
     "fast-check": "^4.9.0",
     "jsdom": "^29.0.2",
     "mermaid": "11.17.2",
@@ -95,7 +98,7 @@
     "wait-on": "^8.0.5"
   },
   "engines": {
-    "node": "^24.22.1"
+    "node": "^24.22.3"
   },
   "overrides": {
     "@tootallnate/once": "^3.0.1",

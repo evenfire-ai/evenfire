@@ -19,6 +19,22 @@ describe('host-context-controller RBAC manifest', () => {
     expect(mcpServerRule?.[1]).toContain('"patch"')
   })
 
+  it('can watch managed Deployments in the mcp-server namespace', () => {
+    const manifest = readFileSync(
+      path.join(__dirname, '../../deploy/base/mcp-server/rbac.yaml'),
+      'utf8'
+    )
+
+    const role = manifest
+      .split('name: host-context-controller\n  namespace: mcp-server\nrules:')[1]
+      ?.split('---')[0]
+
+    expect(role).toBeTruthy()
+    const deploymentRule = role?.match(/resources: \["deployments"\]\n\s+verbs: \[([^\]]+)\]/)
+
+    expect(deploymentRule?.[1]).toContain('"watch"')
+  })
+
   it('can reconcile LlmHook workloads and read pods in the llm-hooks namespace', () => {
     const manifest = readFileSync(
       path.join(__dirname, '../../deploy/base/llm-hooks/rbac.yaml'),

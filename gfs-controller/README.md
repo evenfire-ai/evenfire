@@ -89,7 +89,7 @@ relaxes them for local runs only.
 | `GFS_PG_CONNECTION_STRING`  | Permission-store DSN — the least-privilege `gfs_controller` role (required)                                                    | —                |
 | `GFS_JWT_PUBLIC_KEY`        | RS256 public key (PEM) verifying gfs access tokens; required to serve in production. In dev mode an empty key runs probes-only | —                |
 | `GFS_TOKEN_AUDIENCE`        | Expected `aud` on inbound tokens                                                                                               | `gfs-controller` |
-| `GFS_DRIVE_NAME`            | Drive this gfsc serves (a cluster singleton in the open-source release)                                                        | `main`           |
+| `GFS_DRIVE_NAME`            | Drive this gfsc serves (a cluster singleton in the open-source release); must match `^[a-z0-9-]{1,63}$` or gfsc fails at boot  | `main`           |
 | `GFS_DECISION_CACHE_TTL_MS` | Decision-cache TTL; bounds staleness even with no invalidation signal                                                          | `5000`           |
 | `GFS_DEV_MODE`              | Relax required vars for local runs and tests                                                                                   | `false`          |
 

@@ -314,3 +314,31 @@ describe('GFS_AGENT_*_RL_PER_MIN_PER_REPLICA', () => {
     })
   })
 })
+
+describe('GFS_DRIVE_NAME', () => {
+  beforeEach(() => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_STORAGE_ROLE', 'writer')
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it.each([undefined, ''])('defaults to main when absent or empty (%s)', value => {
+    vi.stubEnv('GFS_DRIVE_NAME', value)
+    expect(loadConfig().driveName).toBe('main')
+  })
+
+  it.each(['main', 'team-drive-2', '0', 'a'.repeat(63)])('accepts %s', value => {
+    vi.stubEnv('GFS_DRIVE_NAME', value)
+    expect(loadConfig().driveName).toBe(value)
+  })
+
+  it.each(['Main', 'my_drive', 'drive.one', 'drive/x', ' main', 'main ', 'dríve', 'main\n', 'a'.repeat(64)])(
+    'fails to load with %s',
+    value => {
+      vi.stubEnv('GFS_DRIVE_NAME', value)
+      expect(() => loadConfig()).toThrow(/GFS_DRIVE_NAME must match/)
+    }
+  )
+})

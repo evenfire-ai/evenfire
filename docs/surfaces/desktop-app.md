@@ -199,14 +199,14 @@ makers:
 
 ### Prepare the toolchain
 
-Packaging uses the same guard as every other Desktop build. Use Node 24.22.1 or later in the Node 24 line
-(`engines.node` is `^24.22.1`), install with `npm ci` **without**
+Packaging uses the same guard as every other Desktop build. Use Node 24.22.3 or later in the Node 24 line
+(`engines.node` is `^24.22.3`), install with `npm ci` **without**
 `--ignore-scripts`, then run the check:
 
 ```bash
 cd desktop-app
 npm ci
-npm run verify:electron   # fails unless Node is 24.x >=24.22.1 and `electron` resolves to a runtime
+npm run verify:electron   # fails unless Node is 24.x >=24.22.3 and `electron` resolves to a runtime
 ```
 
 Electron 42 and later download the runtime the first time `electron` is

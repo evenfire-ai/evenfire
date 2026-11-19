@@ -274,36 +274,23 @@ export type WorkflowNotificationStreamEvent =
       type: 'closed'
     }
 
-export type EntityChangeScope = 'gfs' | 'authorization'
+/** An event of the GFS watch, pushed by main to every subscribed window on `gfsWatch:event`. */
+export type GfsWatchEvent =
+  | { type: 'changed'; keys: string[] }
+  | { type: 'resync'; keys: string[] }
+  | { type: 'rejected'; keys: string[] }
+  | { type: 'accessChanged' }
+  | { type: 'accessChangedRoots' }
+  | { type: 'sessionExpired' }
 
-export type EntityChangeStreamEvent =
-  | { type: 'open' }
-  | {
-      type: 'resync_required'
-      schemaVersion: 1
-      cursor: string
-      scopes: EntityChangeScope[]
-    }
-  | {
-      type: 'scope.invalidated'
-      schemaVersion: 1
-      cursor: string
-      scopes: EntityChangeScope[]
-    }
-  | {
-      type: 'heartbeat'
-      schemaVersion: 1
-      cursor: string
-      observedAt: string
-    }
-  | {
-      type: 'stream.closing'
-      schemaVersion: 1
-      cursor: string
-      reason: 'max_lifetime' | 'session_expired' | 'server_shutdown' | 'slow_consumer'
-    }
-  | { type: 'error'; message: string }
-  | { type: 'closed' }
+/**
+ * A window's GFS watch list. `keys` is ordered by priority; `userId` is the id
+ * of the user the list was derived for (`me.id`), so a list built for a
+ * previous session is dropped instead of being watched for the next one.
+ */
+export type GfsWatchSubscriptionRequest = { keys: string[]; userId: string | null }
+
+export type GfsWatchSubscriptionResult = { sessionExpired: boolean }
 
 export type WorkflowInputContractProperty = {
   type: 'string' | 'integer' | 'number' | 'boolean'
@@ -993,6 +980,9 @@ export type TaskProgressStreamEvent =
         // approval prompt) and correlates the later deep-link completion back to
         // this suspension by `mcpServerName`. Absent for `approval_required`.
         mcpServerName?: string
+        // `false` when the host refuses to allowlist this call ("Always approve"
+        // is hidden). Absent means allowed.
+        alwaysApproveAllowed?: false
       }
     }
   | { type: 'cancelled'; data: { taskId: string; reason: string } }
@@ -1097,6 +1087,9 @@ export interface PendingApprovalLite {
   // Absent on ordinary `approval_required` suspensions (byte-identical there).
   reason?: string
   mcpServerName?: string
+  // `false` when the host refuses to allowlist this call ("Always approve" is
+  // hidden). Absent means allowed.
+  alwaysApproveAllowed?: false
 }
 
 /**
@@ -1112,6 +1105,9 @@ export interface PendingApprovalLite {
 export interface ApprovalDecisionResult {
   success: boolean
   error?: string
+  // Structured failure code. `denial_not_saved`: the host cancelled the call and
+  // consumed the approval, but could not durably record the denial.
+  code?: string
 }
 
 /**

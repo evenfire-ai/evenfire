@@ -153,6 +153,9 @@ export default function MembersPage() {
           <header className="header-row">
             <div>
               <h1 className="page-title">Members</h1>
+              <div className="small-plus muted">
+                Manage your team members and pending invitations.
+              </div>
             </div>
             <div className="toolbar">
               <Button

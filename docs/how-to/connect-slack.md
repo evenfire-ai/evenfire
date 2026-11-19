@@ -52,14 +52,14 @@ For reference, the manifest the Control UI generates looks like this:
 
 ```yaml
 display_information:
-  name: "Evenfire"
+  name: 'Evenfire'
 features:
   app_home:
     home_tab_enabled: false
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
   bot_user:
-    display_name: "Evenfire"
+    display_name: 'Evenfire'
     always_online: false
 oauth_config:
   scopes:
@@ -91,8 +91,8 @@ logs.
 
 `app_home.messages_tab_enabled` matters more than it looks. Slack defaults it to
 **false**, and an app installed from a manifest that says nothing about
-`app_home` refuses direct messages with *"Sending messages to this app has been
-turned off."* That breaks [Confirm your Slack identity](#confirm-your-slack-identity),
+`app_home` refuses direct messages with _"Sending messages to this app has been
+turned off."_ That breaks [Confirm your Slack identity](#confirm-your-slack-identity),
 which asks you to DM the app. **If your app was created before this was added,
 switch it on by hand: Features → App Home → Show Tabs → Messages Tab, and tick
 "Allow users to send Slash commands and messages from the messages tab".**
@@ -280,7 +280,7 @@ Slack conversations are bound to a user rather than configured by hand. Each
 person does this once per conversation:
 
 1. In the Profile UI, open the Slack verification panel
-   (`/settings/social/slack`) and start verification. It issues a six-digit
+   (`/channels/slack`; legacy `/settings/social/slack` redirects here) and start verification. It issues a six-digit
    code.
 2. In Slack, send the code to the app:
 
@@ -330,23 +330,30 @@ at all: the click dies in Slack, nothing reaches the cluster, and every service
 log stays silent. Slack marks the buttons with a warning tooltip reading "This
 app is not configured to handle interactive responses."
 
-A tool approval posts **three** buttons, not two
-(`channel-reader/src/main.ts:154-186`):
+A tool approval posts **Approve** and **Deny**. **Always approve** is added
+only when the Host card can store a lasting grant
+(`channel-reader/src/main.ts`, `toolApprovalMessageOptions`):
 
-| Button             | Value      | Effect on the conversation                                                     |
-| ------------------ | ---------- | ------------------------------------------------------------------------------ |
-| **Approve**        | `tool:a:…` | Runs the call, and auto-approves `*` plus, for MCP tools, that server's prefix |
-| **Always approve** | `tool:l:…` | Same, and additionally stores the bare tool name for future turns              |
-| **Deny**           | `tool:d:…` | Cancels the call and releases the session                                      |
+| Button             | Value      | Effect on the conversation                                                                                                                                           |
+| ------------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Approve**        | `tool:a:…` | Runs that call only. For `shell_exec`, `http_request` or `cron_manage`, covers that tool for the rest of the task                                                    |
+| **Always approve** | `tool:l:…` | Runs the call and allowlists that exact tool name for later turns while the conversation stays in memory. Omitted when the Host sets `alwaysApproveAllowed` to false |
+| **Deny**           | `tool:d:…` | Cancels the call and blocks that tool name until it is approved                                                                                                      |
 
 The value is `tool:<a|l|d>:<16-char token>`
 (`main.ts:110-121`, matched by `decisionHandler.ts:93`). Typing `/approve`,
-`/approve always`, or `/deny` works too.
+`/approve always`, or `/deny` works too. A denial re-ask, a forced cron card, a
+guardrail ask, a live-tool card, and an OAuth connect card cannot store a
+grant. Their Host payload
+sets `alwaysApproveAllowed` to false, the **Always approve** button is left
+off, and a typed `/approve always` runs only that call. The reply does not say
+the tool was allowlisted.
 
 Three properties of that token that produce confusing failures:
 
 - It lives in `channel-reader`'s memory with a 10-minute TTL
-  (`main.ts:95`). Clicking later returns "No pending approval found".
+  (`PENDING_APPROVAL_TTL_MS` in `channel-reader/src/main.ts`). Clicking later
+  returns "No pending approval found".
 - Any `channel-reader` restart wipes it, and **saving an edit to the channel in
   the Control UI restarts that pod**. Approve after such a save and the click is
   already dead.

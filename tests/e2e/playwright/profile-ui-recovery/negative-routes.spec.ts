@@ -19,7 +19,7 @@ test('negative routes show an explicit error and never issue a session', async (
     await witnessPage.goto('/')
     await signInThroughUi(witnessPage, LOGOUT_MEMBER.email, LOGOUT_MEMBER.password)
     await expect(
-      witnessPage.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })
+      witnessPage.getByRole('heading', { name: 'Social channels', exact: true })
     ).toBeVisible()
     expect(await sessionCookieValue(witnessPage)).toBeTruthy()
   } finally {
@@ -87,7 +87,7 @@ test('direct access to the authenticated home without login shows the login form
     await witnessPage.goto('/')
     await signInThroughUi(witnessPage, LOGOUT_MEMBER.email, LOGOUT_MEMBER.password)
     await expect(
-      witnessPage.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })
+      witnessPage.getByRole('heading', { name: 'Social channels', exact: true })
     ).toBeVisible()
     expect(await sessionCookieValue(witnessPage)).toBeTruthy()
   } finally {
@@ -100,7 +100,7 @@ test('direct access to the authenticated home without login shows the login form
   await page.goto('/')
   expect((await homeSession).status()).toBe(401)
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: /Welcome,/ })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Password updated' })).toHaveCount(0)
   expect(await sessionCookieValue(page)).toBeNull()
 

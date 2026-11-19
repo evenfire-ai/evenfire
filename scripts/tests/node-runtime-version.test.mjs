@@ -19,8 +19,8 @@ import { assertNodeVersion, minimumNodeVersion } from '../check-node-version.cjs
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 
-test('the repository pins the October 2026 Node 24 security release', () => {
-  assert.equal(minimumNodeVersion, '24.22.1')
+test('the repository pins the November 2026 Node 24 security release', () => {
+  assert.equal(minimumNodeVersion, '24.22.3')
 })
 
 test('the minimum rejects earlier patches, older majors and prereleases', () => {
@@ -32,7 +32,9 @@ test('the minimum rejects earlier patches, older majors and prereleases', () => 
     '24.18.0',
     '24.21.0',
     '24.22.0',
-    '24.22.1-rc.1',
+    '24.22.1',
+    '24.22.2',
+    '24.22.3-rc.1',
     '24',
     'invalid',
   ]) {
@@ -42,7 +44,7 @@ test('the minimum rejects earlier patches, older majors and prereleases', () => 
 })
 
 test('the patched runtime and later Node 24 patches satisfy both contracts', () => {
-  for (const version of ['24.22.1', '24.22.2', '24.23.0']) {
+  for (const version of ['24.22.3', '24.23.0']) {
     assert.doesNotThrow(() => assertNodeVersion(version))
     assert.doesNotThrow(() => assertNodeVersion(version, { major: 24 }))
   }
@@ -75,12 +77,12 @@ test('the real CLI enforces version and argument admission through physical and 
           ],
           { encoding: 'utf8', timeout: 5_000 }
         )
-      const unpatched = run('24.22.0')
+      const unpatched = run('24.22.2')
       assert.equal(unpatched.error, undefined)
       assert.equal(unpatched.status, 1)
-      assert.match(unpatched.stderr, /24\.22\.1 is required/)
-      assert.equal(run('24.22.1').status, 0)
-      const invalid = run('24.22.1', ['--major=26'])
+      assert.match(unpatched.stderr, /24\.22\.3 is required/)
+      assert.equal(run('24.22.3').status, 0)
+      const invalid = run('24.22.3', ['--major=26'])
       assert.equal(invalid.status, 1)
       assert.match(invalid.stderr, /Usage:/)
     }
@@ -128,15 +130,15 @@ test('the staged Desktop verifier keeps its policy and rejects missing policy fi
         ],
         { encoding: 'utf8', timeout: 5_000 }
       )
-    assert.equal(run('24.22.1').status, 0)
-    const unpatched = run('24.22.0')
+    assert.equal(run('24.22.3').status, 0)
+    const unpatched = run('24.22.2')
     assert.equal(unpatched.status, 1)
-    assert.match(unpatched.stderr, /24\.22\.1 is required/)
+    assert.match(unpatched.stderr, /24\.22\.3 is required/)
     rmSync(path.join(context, '.nvmrc'))
-    assert.equal(run('24.22.1').status, 1)
+    assert.equal(run('24.22.3').status, 1)
     copyFileSync(path.join(root, '.nvmrc'), path.join(context, '.nvmrc'))
     rmSync(path.join(context, 'scripts/check-node-version.cjs'))
-    assert.equal(run('24.22.1').status, 1)
+    assert.equal(run('24.22.3').status, 1)
   } finally {
     rmSync(context, { recursive: true, force: true })
   }
@@ -184,7 +186,7 @@ test('the staged Desktop verifier --check-only never executes electron or downlo
           '--input-type=module',
           '-e',
           "Object.defineProperty(process.versions, 'node', { value: process.argv[1] }); await import(process.argv[2])",
-          '24.22.1',
+          '24.22.3',
           verifier,
           '--check-only',
         ],
@@ -275,7 +277,7 @@ test('image admission rejects floating aliases and old patches in build and exec
     `FROM node@sha256:${'a'.repeat(64)}`,
   ])
     assert.throws(() => checkNodeImages(source, 'unit-image-source'))
-  assert.equal(checkNodeImages("image ?? 'node:24.22.1-alpine'", 'unit-image-source'), 1)
+  assert.equal(checkNodeImages("image ?? 'node:24.22.3-alpine'", 'unit-image-source'), 1)
   assert.equal(
     checkNodeImages("import fs from 'node:fs'; require('node:http')", 'unit-image-source'),
     0
