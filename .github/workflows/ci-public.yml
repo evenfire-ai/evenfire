@@ -1376,6 +1376,17 @@ jobs:
         env:
           NGINX_REGISTRY_MIRROR: mirror.gcr.io
         run: bash scripts/verify-nginx-image-digests.sh
+      - name: Verify unprivileged NGINX tags used by recipe samples
+        shell: bash
+        run: |
+          images="$(
+            yq -N -r '
+              .spec.workloads[]? | .image // "" |
+              select(test("^(docker[.]io/)?(nginx|nginxinc)/nginx-unprivileged:"))
+            ' workflow-recipes/samples/*.yaml | sort -u
+          )"
+          mapfile -t image_refs <<< "$images"
+          bash scripts/verify-nginx-image-digests.sh --tags "${image_refs[@]}"
 
   # ─── Remote MCP egress proxy TLS contract (native amd64 + arm64) ──────────
   nginx-egress-proxy-tls:

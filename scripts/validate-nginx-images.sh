@@ -7,10 +7,10 @@
 # fixtures that install platform NGINX). Unit tests that never pull an image
 # are not scanned.
 #
-# Every nginx / nginxinc/nginx-unprivileged reference in the scanned paths must
-# carry a full x.y.z tag at or above the floor of its release line. Floating,
-# untagged and variable tags are rejected. A digest is accepted only next to
-# such a tag; scripts/verify-nginx-image-digests.sh checks in CI that each
+# Every nginx, nginx/nginx-unprivileged and nginxinc/nginx-unprivileged
+# reference in the scanned paths must carry a full x.y.z tag at or above its
+# release floor. Floating, untagged and variable tags are rejected. A digest
+# is accepted only next to such a tag. The CI digest verifier checks that each
 # pinned digest really is that NGINX version. Any image named nginx, under any
 # registry path, is treated as upstream NGINX.
 #
@@ -33,12 +33,12 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=scripts/nginx-image-policy.sh
 source "$SCRIPT_DIR/nginx-image-policy.sh"
 
-FIXED_NGINX_IMAGE="nginx:1.30.6-alpine"
+FIXED_NGINX_IMAGE="nginx:1.30.7-alpine"
 EGRESS_PROXY_IMAGE="clerum/nginx-egress-proxy:0.1.0"
 
 # Pieces of the reference patterns. An optional literal registry[:port]/path/
 # prefix may precede the repository name.
-NGINX_NAME='(nginx|nginxinc/nginx-unprivileged)'
+NGINX_NAME='(nginx|(nginx|nginxinc)/nginx-unprivileged)'
 REGISTRY_PREFIX='([[:alnum:]_.-]+(:[0-9]+)?/)*'
 # After an untagged name: anything that cannot continue a reference ('}' ends it).
 # shellcheck disable=SC2016 # literal '$' and '{' in a regular expression
@@ -48,7 +48,7 @@ QUOTE="[\"']"
 # An NGINX image reference: the repository name, then a tag and/or digest. The
 # leading group keeps clerum/nginx-egress-proxy and foo-nginx:1 out. '$', '{'
 # and '*' are captured so variable and glob tags are seen; '}' ends the token
-# so a flow map such as {image: nginx:1.30.6-alpine} yields the reference.
+# so a flow map such as {image: nginx:1.30.7-alpine} yields the reference.
 # shellcheck disable=SC2016 # literal '$' and '{' in a regular expression
 NGINX_REF_REGEX='(^|[^[:alnum:]_.-])'"$REGISTRY_PREFIX$NGINX_NAME"'[:@][[:alnum:]_.:@${*-]*'
 # An untagged NGINX image (implicitly :latest) in an image field (after an

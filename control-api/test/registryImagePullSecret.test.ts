@@ -61,7 +61,7 @@ describe('imageRefHost', () => {
     expect(imageRefHost('localhost:8085/acme/forecast:1.0.0')).toBe('localhost:8085')
   })
   it('treats a bare single-segment ref (no slash) as no host even with a tag colon', () => {
-    expect(imageRefHost('nginx:latest')).toBeNull()
+    expect(imageRefHost('nginx:1.30.7-alpine')).toBeNull()
     expect(imageRefHost('nginx')).toBeNull()
   })
   it('returns null for empty/whitespace input', () => {
