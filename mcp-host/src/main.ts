@@ -1182,56 +1182,135 @@ async function initializeMcpServers(): Promise<void> {
 }
 
 /**
- * Poll context-mapper for McpServer changes.
+ * The body of one context-mapper poll, with the module state it reads passed
+ * in, so tests run the real order of checks (#1491): a cold start retries the
+ * authoritative initialization; otherwise the snapshot is fetched, published
+ * only into the manager that was current when the poll started, and success
+ * is recorded only while that manager is still current. Any failure goes to
+ * `onFailure`.
  */
-async function pollContextMapper(): Promise<void> {
-  if (!contextMapperClient) return
-
+export async function runContextMapperPoll<M>(deps: {
+  getManager: () => M | null
+  isShuttingDown: () => boolean
+  initialize: () => Promise<void>
+  pollServers: () => Promise<{ servers: McpServerInfo[] }>
+  reconcile: (servers: McpServerInfo[], manager: M) => Promise<void>
+  recordSuccess: () => void
+  onFailure: (error: unknown) => void
+}): Promise<void> {
   try {
     // Cold-start discovery failures intentionally leave the manager unset.
     // Retry the authoritative initialization instead of declaring an empty
     // fleet or permanently no-oping every reconciliation tick.
-    if (!mcpManager) {
-      await initializeMcpServers()
+    const manager = deps.getManager()
+    if (!manager) {
+      await deps.initialize()
       return
     }
 
-    const manager = mcpManager
     await pollAuthoritativeMcpSnapshotIfCurrent({
-      poll: () => contextMapperClient!.pollServers(),
+      poll: deps.pollServers,
       // A delayed fetch may resolve after shutdown or after a manager swap.
       // Never publish that stale snapshot into a closed/retired manager.
-      isCurrent: () => !isShuttingDown && mcpManager === manager,
-      reconcile: servers =>
+      isCurrent: () => !deps.isShuttingDown() && deps.getManager() === manager,
+      reconcile: servers => deps.reconcile(servers, manager),
+    })
+    if (!deps.isShuttingDown() && deps.getManager() === manager) {
+      deps.recordSuccess()
+    }
+  } catch (error) {
+    deps.onFailure(error)
+  }
+}
+
+type ContextMapperPollManager = Parameters<typeof reconcileAuthoritativeMcpSnapshot>[0]['manager']
+
+/**
+ * The module state one context-mapper poll reads and writes. This module
+ * binds the poll to its live state when it loads; a test passes its own, so
+ * the adapter below is the code both run.
+ */
+export type ContextMapperPollState<M extends ContextMapperPollManager> = {
+  getClient: () => Pick<ContextMapperClient, 'pollServers' | 'getAuthToken'> | null
+  getManager: () => M | null
+  isShuttingDown: () => boolean
+  initialize: () => Promise<void>
+  getServerState: () => Map<string, string>
+  coordinator: AuthoritativeMcpFleetCoordinator
+  recordSuccess: () => void
+  lastSuccessAt: () => number
+  revoke: (reason: string, restartPolling: boolean) => void
+}
+
+/**
+ * Bind the poll body (runContextMapperPoll) to the state of one process:
+ * which client is polled, which manager and server state the snapshot is
+ * reconciled into, what records a success, and what a failure revokes.
+ */
+export function createContextMapperPoll<M extends ContextMapperPollManager>(
+  state: ContextMapperPollState<M>
+): () => Promise<void> {
+  return async () => {
+    if (!state.getClient()) return
+
+    await runContextMapperPoll<M>({
+      getManager: () => state.getManager(),
+      isShuttingDown: () => state.isShuttingDown(),
+      initialize: () => state.initialize(),
+      pollServers: () => state.getClient()!.pollServers(),
+      reconcile: (servers, manager) =>
         reconcileAuthoritativeMcpSnapshot({
           servers,
           manager,
-          serverState: lastServerState,
+          serverState: state.getServerState(),
           getAuthToken: (serverName, expectedRevision) =>
-            contextMapperClient!.getAuthToken(serverName, expectedRevision),
-          coordinator: mcpFleetCoordinator,
+            state.getClient()!.getAuthToken(serverName, expectedRevision),
+          coordinator: state.coordinator,
         }),
+      recordSuccess: () => state.recordSuccess(),
+      onFailure: error =>
+        handleMcpAuthorityPollFailure(
+          error,
+          createMcpAuthorityPollFailureOptions({
+            getManager: () => state.getManager(),
+            lastSuccessAt: () => state.lastSuccessAt(),
+            revoke: (reason, restartPolling) => state.revoke(reason, restartPolling),
+            onCallerAuthorizationRejected: () =>
+              logger.warn({}, '[Main] HCC poll rejected caller authority'),
+            onInventoryAuthorityRevoked: () =>
+              logger.warn({}, '[Main] HCC inventory no longer resolves live Host authority'),
+            onUnavailable: () =>
+              logger.error({}, '[Main] HCC authority poll failed (reason=unavailable)'),
+          })
+        ),
     })
-    if (!isShuttingDown && mcpManager === manager) {
-      recordMcpAuthoritySuccess()
-    }
-  } catch (error) {
-    handleMcpAuthorityPollFailure(
-      error,
-      createMcpAuthorityPollFailureOptions({
-        getManager: () => mcpManager,
-        lastSuccessAt: () => mcpAuthorityLastSuccessAt,
-        revoke: revokeMcpAuthority,
-        onCallerAuthorizationRejected: () =>
-          logger.warn({}, '[Main] HCC poll rejected caller authority'),
-        onInventoryAuthorityRevoked: () =>
-          logger.warn({}, '[Main] HCC inventory no longer resolves live Host authority'),
-        onUnavailable: () =>
-          logger.error({}, '[Main] HCC authority poll failed (reason=unavailable)'),
-      })
-    )
   }
 }
+
+/**
+ * The live module state the context-mapper poll is bound to when this module
+ * loads. Documented limit (#1491): these bindings read module-private
+ * variables that no test can set, and their types accept null or an empty
+ * value, so neither the tests nor the type checker detect a binding to the
+ * wrong variable. Only recordSuccess, lastSuccessAt and revoke are checked
+ * through this object (main.contextMapperPollAdapter.test.ts, A7).
+ */
+export const contextMapperPollState: ContextMapperPollState<McpManager> = {
+  getClient: () => contextMapperClient,
+  getManager: () => mcpManager,
+  isShuttingDown: () => isShuttingDown,
+  initialize: () => initializeMcpServers(),
+  getServerState: () => lastServerState,
+  coordinator: mcpFleetCoordinator,
+  recordSuccess: () => recordMcpAuthoritySuccess(),
+  lastSuccessAt: () => mcpAuthorityLastSuccessAt,
+  revoke: (reason, restartPolling) => revokeMcpAuthority(reason, restartPolling),
+}
+
+/**
+ * Poll context-mapper for McpServer changes.
+ */
+const pollContextMapper = createContextMapperPoll(contextMapperPollState)
 
 /**
  * Serialize periodic polling while coalescing any number of overlapping ticks

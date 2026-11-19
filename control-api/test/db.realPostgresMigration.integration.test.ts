@@ -1734,15 +1734,15 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       REVOKE ALL ON TABLE pr2_readiness_activations FROM control_api_runtime;
       REVOKE ALL ON TABLE pr2_readiness_evidence FROM control_api_runtime;
       DELETE FROM schema_migrations
-       WHERE version = '0151_pr2_runtime_privileges';
+       WHERE version = '0154_pr2_runtime_privileges';
     `)
     await initDb(connector)
     const upgradedPr2Corrections = await dbPool.query<{ version: string }>(
       `SELECT version FROM schema_migrations
-        WHERE version = '0151_pr2_runtime_privileges'`
+        WHERE version = '0154_pr2_runtime_privileges'`
     )
     expect(upgradedPr2Corrections.rows.map(row => row.version)).toEqual([
-      '0151_pr2_runtime_privileges',
+      '0154_pr2_runtime_privileges',
     ])
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0063_workflow_approval_trace_binding'

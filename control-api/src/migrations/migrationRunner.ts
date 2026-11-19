@@ -15,6 +15,9 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0145_gfs_authz_control_admins_notify',
   '0146_gfs_authz_team_members_notify',
   '0147_gfs_watch_session_users_notify',
+  '0148_oidc_protocol_attempts',
+  '0149_oidc_protocol_attempt_expiry_index',
+  '0150_oidc_protocol_attempt_browser_binding',
 ] as const)
 
 // The one bound between initDb's single dev batch and this runner: every migration
@@ -63,12 +66,12 @@ const EARLIER_PR1_HEAD_CLEANUP_REFERENCE =
   'see docs/deploy/user-access-foundation-upgrade.md#databases-that-ran-an-earlier-head-of-this-change'
 
 export const PR2_MIGRATION_VERSIONS = Object.freeze([
-  '0148_workflow_authority_bindings',
-  '0149_gfs_upload_authority_bindings',
-  '0150_pr2_readiness_evidence',
-  '0151_pr2_runtime_privileges',
-  '0152_workflow_run_failure_reason',
-  '0153_workflow_authorization_pause',
+  '0151_workflow_authority_bindings',
+  '0152_gfs_upload_authority_bindings',
+  '0153_pr2_readiness_evidence',
+  '0154_pr2_runtime_privileges',
+  '0155_workflow_run_failure_reason',
+  '0156_workflow_authorization_pause',
 ])
 
 export const RUNNER_MIGRATION_VERSIONS = Object.freeze([

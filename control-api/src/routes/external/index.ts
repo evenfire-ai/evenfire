@@ -10,6 +10,7 @@ import { createExternalInvitationsRouter } from './invitations.js'
 import { createExternalMembersRouter } from './members.js'
 import { createExternalNotificationsRouter } from './notifications.routes.js'
 import { createExternalOauthGrantsRouter } from './oauthGrants.js'
+import { createExternalOidcProfileFlowRouter } from './oidcProfileFlow.js'
 import { createExternalRpcDelegationsRouter } from './rpcDelegations.js'
 import { createExternalSharedFilesystemsRouter } from './sharedFilesystems.js'
 import { createExternalTeamsRouter } from './teams.js'
@@ -37,5 +38,6 @@ export function createExternalRouter(gateway: K8sGateway): Router {
   router.use(createExternalWorkflowApprovalMediumsRouter(gateway))
   router.use(createExternalWorkflowsRouter(gateway))
   router.use(createExternalOauthGrantsRouter())
+  router.use(createExternalOidcProfileFlowRouter())
   return router
 }

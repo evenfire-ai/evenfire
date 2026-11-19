@@ -12,6 +12,11 @@ import {
   applyPendingPr1Migrations,
 } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
+import {
+  applyOidcProtocolAttemptBrowserBindingSchema,
+  applyOidcProtocolAttemptExpiryIndexMigration,
+  applyOidcProtocolAttemptSchema,
+} from './oidc/protocolAttemptStore.js'
 import { applyPr2ReadinessEvidenceSchema } from './services/access/pr2ReadinessEvidenceSchema.js'
 import {
   applyUserAccessFoundationSchema,
@@ -6705,30 +6710,63 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     lockRetries: 2,
   },
   {
-    // PR2 follows dev's last migration, 0147_gfs_watch_session_users_notify,
+    version: '0148_oidc_protocol_attempts',
+    // Full version strings from earlier OIDC slots. They do not match the
+    // GFS notify migrations that now own 0141–0147.
+    legacyVersions: [
+      '0130_oidc_protocol_attempts',
+      '0131_oidc_protocol_attempts',
+      '0139_oidc_protocol_attempts',
+      '0141_oidc_protocol_attempts',
+      '0145_oidc_protocol_attempts',
+    ],
+    apply: applyOidcProtocolAttemptSchema,
+  },
+  {
+    version: '0149_oidc_protocol_attempt_expiry_index',
+    legacyVersions: [
+      '0132_oidc_protocol_attempt_expiry_index',
+      '0140_oidc_protocol_attempt_expiry_index',
+      '0142_oidc_protocol_attempt_expiry_index',
+      '0146_oidc_protocol_attempt_expiry_index',
+    ],
+    apply: applyOidcProtocolAttemptExpiryIndexMigration,
+  },
+  {
+    version: '0150_oidc_protocol_attempt_browser_binding',
+    legacyVersions: [
+      '0133_oidc_protocol_attempt_browser_binding',
+      '0141_oidc_protocol_attempt_browser_binding',
+      '0143_oidc_protocol_attempt_browser_binding',
+      '0147_oidc_protocol_attempt_browser_binding',
+    ],
+    apply: applyOidcProtocolAttemptBrowserBindingSchema,
+  },
+  {
+    // PR2 follows dev's last migration, 0150_oidc_protocol_attempt_browser_binding,
     // in consecutive slots. No shared database recorded an earlier PR2 name,
     // so none is carried as an alias.
-    version: '0148_workflow_authority_bindings',
+    version: '0151_workflow_authority_bindings',
     apply: applyWorkflowAuthorityBindingsSchema,
   },
   {
-    version: '0149_gfs_upload_authority_bindings',
+    version: '0152_gfs_upload_authority_bindings',
     apply: applyGfsUploadAuthorityBindingSchema,
   },
   {
-    version: '0150_pr2_readiness_evidence',
+    version: '0153_pr2_readiness_evidence',
     apply: applyPr2ReadinessEvidenceSchema,
   },
   {
-    version: '0151_pr2_runtime_privileges',
+    version: '0154_pr2_runtime_privileges',
     apply: applyPr2RuntimePrivilegesSchema,
   },
   {
-    version: '0152_workflow_run_failure_reason',
+    version: '0155_workflow_run_failure_reason',
     apply: applyWorkflowRunFailureReasonSchema,
   },
   {
-    version: '0153_workflow_authorization_pause',
+    version: '0156_workflow_authorization_pause',
     apply: applyWorkflowRunAuthorizationPauseSchema,
   },
 ]

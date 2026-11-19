@@ -20,7 +20,32 @@ function minLevel(): LogLevel {
 function sanitize(value: unknown, seen = new WeakSet<object>()): unknown {
   if (Array.isArray(value)) return value.map(item => sanitize(item, seen))
   // Error.message / stack are non-enumerable; Object.entries would log `{ err: {} }`.
-  if (value instanceof Error) return { name: value.name, message: value.message }
+  // An Error is rendered from a fixed set of fields, never from its own keys: an
+  // ApiException carries the response `body` and `headers`, which are not copied.
+  // - `stack` keeps the frame lines only. Its first line repeats the message, and
+  //   an ApiException message embeds the response body. The search for the first
+  //   frame starts after the `name: message` header, so a message that contains
+  //   frame-like text is not copied a second time.
+  // - `code` is kept when it is a string or a number.
+  // - `cause` is rendered when it is an Error. The Error is held in `seen` only
+  //   while its own cause chain renders, so a cause cycle ends, and the same Error
+  //   under two fields still renders twice.
+  if (value instanceof Error) {
+    const error: LogFields = { name: value.name, message: value.message }
+    const stack = typeof value.stack === 'string' ? value.stack : ''
+    const header = `${value.name}: ${value.message}`
+    const frames = stack.indexOf('\n    at ', stack.startsWith(header) ? header.length : 0)
+    if (frames !== -1) error.stack = stack.slice(frames + 1)
+    const code = (value as { code?: unknown }).code
+    if (typeof code === 'string' || typeof code === 'number') error.code = code
+    const cause = (value as { cause?: unknown }).cause
+    if (cause instanceof Error && !seen.has(value)) {
+      seen.add(value)
+      error.cause = sanitize(cause, seen)
+      seen.delete(value)
+    }
+    return error
+  }
   if (!value || typeof value !== 'object') return value
   if (seen.has(value)) return '[Circular]'
   seen.add(value)

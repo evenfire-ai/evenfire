@@ -5687,6 +5687,13 @@ export class HostReconciler {
           throw new Error(`apply did not converge (${result})`)
         }
       } catch (err) {
+        // #1495: a superseded Host is withdrawn here, as the sibling steps do, with
+        // no error line and no failure entry per policy. A supersession that
+        // persists was already withdrawn by the revalidation after the last policy;
+        // one that reverses itself now withdraws too instead of ending degraded.
+        // The watch event that moved the dependency, or the fleet pass of the cache
+        // recovery after an authority loss, reconciles the Host again.
+        if (isBenignSupersessionError(err)) throw err
         log.error('Failed to ensure Host NetworkPolicy', { host: host.name, policy: name, err })
         npFailures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
       }

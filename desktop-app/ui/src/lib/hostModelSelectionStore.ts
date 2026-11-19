@@ -59,7 +59,6 @@ const CONFLICT_RECHECKING_ERROR =
 /** Inline error once that re-read landed: the rejected pick stays unapplied. */
 const CONFLICT_SETTLED_ERROR =
   'This chat’s model was changed elsewhere — your model choice was not applied.'
-/** Broker-backed hosts have no static default; the operator must name a model. */
 const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
 const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription'
 
@@ -197,10 +196,10 @@ function effectiveModelFor(entry: Entry): { model: string; pending: boolean } {
     // the model it observed before that write.
     if (!entry.staleRead && data.sessionModel) return { model: data.sessionModel, pending: false }
     if (entry.lastConfirmedModel) return { model: entry.lastConfirmedModel, pending: false }
-    if (!isBrokerBackedProvider(data.provider)) {
-      return { model: data.hostDefault ?? '', pending: false }
-    }
-    return { model: '', pending: false }
+    // Broker-backed hosts fall back to the Host default too: the runtime
+    // dispatches `spec.model.name` for a session without a selection, even
+    // when the catalog does not list it, so the view must name that model.
+    return { model: data.hostDefault ?? '', pending: false }
   }
   // No projection (yet): an accepted write is still the newest known selection.
   if (entry.lastConfirmedModel) return { model: entry.lastConfirmedModel, pending: false }

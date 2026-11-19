@@ -72,7 +72,8 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     const passwordAdmission = '0130_password_login_success_admission'
     const lastDev = '0136_llm_catalog_dismissed_backfill'
     // The runner's post-dev versions (PR1's two, then dev's catalog-prune and
-    // GFS watch versions), then PR2's in consecutive slots after dev's last.
+    // GFS watch versions, then dev's OIDC versions), then PR2's in consecutive
+    // slots after dev's last.
     const task106 = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]
     expect(task106.slice(0, 4)).toEqual([
       '0137_user_access_foundation',
@@ -80,6 +81,11 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0139_llm_catalog_prune_columns',
       '0140_llm_catalog_prune_episodes',
     ])
+    const oidc = [
+      '0148_oidc_protocol_attempts',
+      '0149_oidc_protocol_attempt_expiry_index',
+      '0150_oidc_protocol_attempt_browser_binding',
+    ]
 
     expect(
       versions.slice(versions.indexOf(parentDev[0]!), versions.indexOf(parentDev[0]!) + 3)
@@ -92,8 +98,9 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
     expect(versions.at(-1)).toBe(task106.at(-1))
-    // Dev's GFS watch migrations follow its catalog-prune pair, and PR2 follows
-    // dev's last watch trigger.
+    // Dev's GFS watch migrations follow its catalog-prune pair, its OIDC
+    // migrations follow the watch triggers, and PR2 follows dev's last OIDC
+    // migration.
     expect(versions[versions.indexOf('0140_llm_catalog_prune_episodes') + 1]).toBe(
       '0141_gfs_resource_changed_notify'
     )
@@ -108,6 +115,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     const afterResourceNotify = versions.indexOf('0141_gfs_resource_changed_notify') + 1
     expect(versions.slice(afterResourceNotify)).toEqual([
       ...watchTriggers,
+      ...oidc,
       ...PR2_MIGRATION_VERSIONS,
     ])
   })
