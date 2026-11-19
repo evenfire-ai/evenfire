@@ -73,6 +73,7 @@ function installClerum(gfs: Record<string, unknown>) {
 }
 
 const overlayHistory: boolean[] = []
+const previewsOpened: unknown[] = []
 
 function Shell() {
   const overlay = useGfsActionOverlay()
@@ -85,7 +86,7 @@ function Shell() {
     >
       <FileExplorerTree
         onOpenFolder={() => undefined}
-        onOpenPreview={() => undefined}
+        onOpenPreview={preview => previewsOpened.push(preview)}
         pushToast={() => undefined}
         onGfsMenuOpenChange={overlay.onGfsMenuOpenChange}
       />
@@ -130,6 +131,7 @@ function menuItem(menu: HTMLElement, name: string) {
 
 beforeEach(() => {
   overlayHistory.length = 0
+  previewsOpened.length = 0
 })
 
 afterEach(() => {
@@ -509,6 +511,47 @@ describe('FileExplorerTree forest-root resource menu', () => {
 describe('FileExplorerTree row resource menu focus', () => {
   afterEach(() => {
     delete (navigator as { clipboard?: unknown }).clipboard
+  })
+
+  it('leaves the row out of reach while Move opened from the keyboard is up', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('file-r', 'report.txt', 'file', {
+            parentResourceId: 'source-parent',
+            permissions: ['read'],
+          }),
+        ])
+      ),
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+    })
+    renderShell()
+    const row = await screen.findByRole('button', { name: 'report.txt' })
+    row.focus()
+    fireEvent.keyDown(row, { key: 'F10', shiftKey: true })
+    const menu = await screen.findByRole('menu', { name: 'Actions for report.txt' })
+    const move = await waitFor(() => {
+      const found = menuItem(menu, 'Move to')
+      expect(found?.disabled).toBe(false)
+      return found!
+    })
+    move.focus()
+    fireEvent.click(move)
+    const dialog = await screen.findByRole('dialog', { name: 'Move file report.txt' })
+
+    // Whatever holds focus now gets the next keys.
+    const focused = document.activeElement ?? document.body
+    fireEvent.keyDown(focused, { key: 'Enter' })
+    fireEvent.keyDown(focused, { key: 'F10', shiftKey: true })
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    expect(previewsOpened).toEqual([])
+    expect(screen.queryByRole('menu', { name: 'Actions for report.txt' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBe(dialog)
   })
 
   it.each([

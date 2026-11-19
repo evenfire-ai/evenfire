@@ -47,6 +47,17 @@ function isMenuAction(action: GfsResourceMenuAction | null): action is GfsResour
   return action !== null
 }
 
+// Actions that finish without opening a dialog or picker: they navigate,
+// save a file or write the clipboard.
+const ACTIONS_WITHOUT_SURFACE: ReadonlySet<GfsResourceMenuActionKey> = new Set([
+  'preview',
+  'download',
+  'download-zip',
+  'copy-link',
+  'copy-route',
+  'open-folder',
+])
+
 const EDGE_INSET = 8
 const GAP = 6
 
@@ -388,14 +399,16 @@ export function GfsResourceMenu({
     items[nextIndex]?.focus()
   }
 
-  const runAction = (action: () => void) => {
+  const runAction = (action: GfsResourceMenuAction) => {
     dismissMenu()
     // An anchored menu unmounts with the item that had focus, which drops it
-    // to <body> for an action that opens nothing of its own (Preview,
-    // Download, a copy). Returning it first also makes the anchor the opener
-    // a dialog the action mounts will hand focus back to.
-    if (anchorMode) returnFocusRef.current?.focus()
-    action()
+    // to <body>. For an action that opens nothing of its own, focus goes back
+    // to the anchor. An action that opens a host surface leaves it where it
+    // falls: that surface may not take focus (the Move dialog does not, and
+    // the host checks permissions before any dialog mounts), and a focused
+    // row under it would still answer Enter or Shift+F10.
+    if (anchorMode && ACTIONS_WITHOUT_SURFACE.has(action.key)) returnFocusRef.current?.focus()
+    action.onClick()
   }
 
   // The fallback Share child is keyed apart from its submenu parent.
@@ -466,8 +479,9 @@ export function GfsResourceMenu({
     actions !== undefined
       ? (sharedActions ?? [])
           .filter(action => ['share', 'copy-link', 'copy-route'].includes(action.key))
-          .map(action =>
-            action.key === 'share' ? { ...action, key: 'share-access', label: 'Share' } : action
+          .map(
+            (action): GfsResourceMenuAction =>
+              action.key === 'share' ? { ...action, key: 'share-access', label: 'Share' } : action
           )
       : fallbackShareChildren.map(gateFallback)
   const hasShareSubmenu = shareMenuChildren.length > 0
@@ -559,7 +573,7 @@ export function GfsResourceMenu({
                           if (action.submenu) {
                             action.onClick()
                           } else {
-                            runAction(action.onClick)
+                            runAction(action)
                           }
                         }}
                       >
@@ -591,7 +605,7 @@ export function GfsResourceMenu({
                       role="menuitem"
                       onClick={() => {
                         if (action.disabled) return
-                        runAction(action.onClick)
+                        runAction(action)
                       }}
                     >
                       {action.label}
