@@ -386,8 +386,7 @@ describe('ApprovalModePicker state — chat switch (C1)', () => {
       container.querySelector('[data-testid="approval-mode-picker"]') as HTMLElement
     try {
       root.render(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
-      await new Promise(resolve => setTimeout(resolve, 20))
-      expect(chip().textContent).toBe('Manual')
+      await vi.waitFor(() => expect(chip()?.textContent).toBe('Manual'))
 
       // Click in the first microtask after the transition's DOM commit, before
       // the scheduler gets to run passive effects.
@@ -408,10 +407,13 @@ describe('ApprovalModePicker state — chat switch (C1)', () => {
         root.render(<ApprovalModePicker agentRef="agent-x" chatId="chat-2" />)
       })
       await clickedAfterCommit
-      await new Promise(resolve => setTimeout(resolve, 50))
-
-      expect(chip().textContent).toBe('Auto-approve')
-      expect(container.querySelector('[data-testid="approval-mode-option-manual"]')).not.toBeNull()
+      const menu = () => container.querySelector('[data-testid="approval-mode-option-manual"]')
+      await vi.waitFor(() => expect(chip().textContent).toBe('Auto-approve'))
+      // With a passive reset effect pending, the click is undone and the menu
+      // never appears; with the render-phase reset it opens and stays open.
+      await vi.waitFor(() => expect(menu()).not.toBeNull())
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(menu()).not.toBeNull()
     } finally {
       root.unmount()
       container.remove()
