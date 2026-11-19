@@ -219,6 +219,12 @@ setOutputDirHostAccessor(() => currentHost)
 let currentKeys: ApiKeys = {}
 let currentProvider: SingleTurnProvider | null = null
 let configStore: ConfigStore | null = null
+// The failover credential slots the installed `configStore` was opened with.
+// A Host event decides whether to rebuild by comparing its own slots with
+// these, never with `currentPolicy`: an earlier event that is still opening its
+// store has already refreshed `currentPolicy`, and that store is dropped when a
+// newer event commits first.
+let configStoreFallbackSlots: string[] = []
 setCodexPolicyBindingReader(() => configStore?.codexPolicyBinding() ?? null)
 setGrokPolicyBindingReader(() => configStore?.grokPolicyBinding() ?? null)
 // R5 — provider-fallback. `currentPolicy` is the normalized `spec.llmPolicy`
@@ -686,14 +692,21 @@ function resolveTaskModel(
   return { provider, model, contextWindowTokens }
 }
 
+interface OpenedConfigStore {
+  store: ConfigStore
+  /** The failover credential slots this store loads. */
+  fallbackSlots: string[]
+}
+
 /**
  * (Re)create the ConfigStore for the current Host. Used at boot and on
  * Host CRD changes that flip `spec.secretRef` (which would also have
  * triggered a Deployment rollout in HCC, but we re-create here anyway
  * so a soft secretRef change without HCC also picks up correctly).
  */
-async function openConfigStore(host: HostCRD): Promise<ConfigStore> {
+async function openConfigStore(host: HostCRD): Promise<OpenedConfigStore> {
   const provider = host.spec.model?.provider ?? null
+  const fallbackSlots = fallbackCredentialSlotsFor(currentPolicy)
   const store = new ConfigStore({
     namespace: config.namespace,
     hostRef: host.name,
@@ -703,15 +716,17 @@ async function openConfigStore(host: HostCRD): Promise<ConfigStore> {
     allowlistConfigMapName: config.llmAllowlistConfigMapName,
     // R5 — load the failover policy's referenced credential slots from the same
     // LLM Secret (kept out of the effective env; read via fallbackSlotValue).
-    fallbackCredentialSlots: fallbackCredentialSlotsFor(currentPolicy),
+    fallbackCredentialSlots: fallbackSlots,
   })
   await store.start()
-  return store
+  return { store, fallbackSlots }
 }
 
-function installConfigStore(store: ConfigStore, host: HostCRD): void {
+function installConfigStore(opened: OpenedConfigStore, host: HostCRD): void {
+  const { store } = opened
   if (configStore && configStore !== store) configStore.stop()
   configStore = store
+  configStoreFallbackSlots = opened.fallbackSlots
   currentKeys = apiKeysFromConfigStore(store)
   const provider = host.spec.model?.provider ?? null
 
@@ -773,9 +788,9 @@ function installConfigStore(store: ConfigStore, host: HostCRD): void {
 }
 
 async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
-  const store = await openConfigStore(host)
-  installConfigStore(store, host)
-  return store
+  const opened = await openConfigStore(host)
+  installConfigStore(opened, host)
+  return opened.store
 }
 
 /**
@@ -1571,17 +1586,18 @@ export async function onHostChange(host: HostCRD): Promise<void> {
   }
 
   // R5 — refresh the failover policy BEFORE (re)building the ConfigStore so the
-  // fallback credential slots are loaded. Captured before the await so a newer
-  // event can publish its approval policy while this one is still reconciling.
-  const prevFallbackSlots = fallbackCredentialSlotsFor(currentPolicy)
-  const stagedStores = new Map<HostCRD, ConfigStore>()
+  // fallback credential slots are loaded. The slots are compared with the ones
+  // the installed store holds, and provider/secretRef/connectionRef with the
+  // committed Host, so an event that overlaps an uncommitted rebuild still
+  // rebuilds when the installed store does not match it.
+  const stagedStores = new Map<HostCRD, OpenedConfigStore>()
   await applyHostChange(host, {
     gate: hostEventGate,
     publishApproval,
     ensureConfigStore: async eventHost => {
       refreshFailoverPolicy(eventHost)
       const fallbackSlotsChanged =
-        JSON.stringify(prevFallbackSlots) !==
+        JSON.stringify(configStoreFallbackSlots) !==
         JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
       if (
         !configStore ||
@@ -1635,7 +1651,7 @@ export async function onHostChange(host: HostCRD): Promise<void> {
       })
     },
   })
-  for (const abandoned of stagedStores.values()) abandoned.stop()
+  for (const abandoned of stagedStores.values()) abandoned.store.stop()
   stagedStores.clear()
 }
 
