@@ -11,6 +11,7 @@ import { discardCandidate, PgBlobStagingStore, stageVerifiedBlob, type GfsConten
 export type { GfsContent, GfsContentSource } from "./blobStaging";
 import { publishCopy, type CopyPublicationResult } from "./copyPublication";
 import { acquireBeforeDeadline } from "./deadlineQuery";
+import { holdClientErrorListener, type ErrorEventSource } from "./pool";
 import {
   inspectCreateOutcome,
   inspectReplaceRollback,
@@ -37,7 +38,7 @@ export interface TransactionOptions {
 
 /** A pg Pool checked out for one transaction (connect → BEGIN → fn → COMMIT). */
 export interface PoolLike {
-  connect(): Promise<{
+  connect(): Promise<ErrorEventSource & {
     query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
     /** Passing an error destroys the client instead of returning it to the pool. */
     release(error?: Error | boolean): void;
@@ -86,6 +87,9 @@ export class PgTransactor implements Transactor {
     const client = options
       ? await acquireBeforeDeadline(() => this.pool.connect(), options)
       : await this.pool.connect();
+    // A connection error while checked out fails the next statement (pg marks
+    // the client not queryable) and destroys the client on release.
+    const checkoutError = holdClientErrorListener(client);
     let commitSent = false;
     let poison: Error | undefined;
     try {
@@ -123,7 +127,8 @@ export class PgTransactor implements Transactor {
       }
       throw err;
     } finally {
-      client.release(poison);
+      checkoutError.detach();
+      client.release(poison ?? checkoutError.error);
     }
   }
 }

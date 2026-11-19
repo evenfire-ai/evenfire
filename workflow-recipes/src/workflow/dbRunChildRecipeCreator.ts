@@ -1,6 +1,12 @@
 import * as k8s from '@kubernetes/client-node'
 import { isDeepStrictEqual } from 'node:util'
-import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants.js'
+import {
+  CRD_GROUP,
+  CRD_VERSION,
+  RUN_AUTHORITY_BOUND,
+  RUN_AUTHORITY_LABEL,
+  WORKFLOWRECIPE_PLURAL,
+} from '../reconciler/crdConstants.js'
 import type { ChildRecipeRef, DbRunRow } from '../reconciler/dbRunProcessor.js'
 import { getErrorCode } from '../reconciler/k8sErrors.js'
 import type { WorkflowRecipeGfsIntentSpec } from '../types.js'
@@ -79,6 +85,7 @@ function isExpectedExistingChild(
     name: string
     namespace: string
     runId: string
+    runAuthority: typeof RUN_AUTHORITY_BOUND | undefined
     parentName: string
     parentUid: string
     spec: ParentRecipeResponse['spec']
@@ -94,6 +101,7 @@ function isExpectedExistingChild(
     existing.metadata?.name === expected.name &&
     existing.metadata?.namespace === expected.namespace &&
     existing.metadata?.labels?.[RUN_ID_LABEL] === expected.runId &&
+    existing.metadata?.labels?.[RUN_AUTHORITY_LABEL] === expected.runAuthority &&
     existing.metadata?.labels?.[PARENT_RECIPE_LABEL] === expected.parentName &&
     existing.metadata?.annotations?.[INHERITED_PARENT_RESOURCES_ANNOTATION] === 'true' &&
     controllerOwner?.apiVersion === WORKFLOW_RECIPE_API_VERSION &&
@@ -130,6 +138,10 @@ export async function createDbRunChildRecipe(
     run.trigger_source === 'schedule' ? 'schedule' : 'onDemand'
   const childName = buildDbRunChildName(parentName, run.run_id)
   const usageTeamId = run.usage_team_id
+  // A run with an authority binding marks its child, so the status endpoints
+  // run the durable running boundary only for it. The binding is fixed when
+  // the row is inserted, so the label never needs to change afterwards.
+  const runAuthority = run.authority_binding ? RUN_AUTHORITY_BOUND : undefined
   const parentRecipe: ParentRecipe = {
     metadata: {
       name: parentName,
@@ -165,6 +177,7 @@ export async function createDbRunChildRecipe(
     labels: {
       'clerum.io/trigger-source': run.trigger_source,
       [RUN_ID_LABEL]: run.run_id,
+      ...(runAuthority ? { [RUN_AUTHORITY_LABEL]: runAuthority } : {}),
       ...(usageTeamId ? { [RUN_TEAM_ID_LABEL]: usageTeamId } : {}),
       ...(run.actor_type === 'user' || run.actor_type === 'admin'
         ? { [RUN_ACTOR_TYPE_LABEL]: run.actor_type }
@@ -221,6 +234,7 @@ export async function createDbRunChildRecipe(
         name: childName,
         namespace: parentNamespace,
         runId: run.run_id,
+        runAuthority,
         parentName,
         parentUid,
         spec: expectedChildSpec,

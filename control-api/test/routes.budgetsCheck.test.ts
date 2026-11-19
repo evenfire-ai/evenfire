@@ -173,7 +173,7 @@ describe('POST /api/v1/internal/budgets/check', () => {
   })
 
   it('resolves team_id from context_ref and matches a team-scoped budget', async () => {
-    teamRows = [{ team_id: 'team-X' }]
+    teamRows = [{ context_id: 'trader-context', team_id: 'team-X' }]
     budgetsRows = [budgetRow({ scope: { team_id: ['team-X'] } })]
     spendQueue = [{ rows: [{ spent: '100' }] }]
 
@@ -186,11 +186,11 @@ describe('POST /api/v1/internal/budgets/check', () => {
     const teamCall = mockPoolQuery.mock.calls.find(c => /team_contexts/.test(String(c[0])))
     expect(teamCall).toBeDefined()
     expect(String(teamCall![0])).toMatch(/DISTINCT ON \(context_id\)/)
-    expect((teamCall![1] as unknown[])[0]).toBe('trader-context')
+    expect((teamCall![1] as unknown[])[0]).toEqual(['trader-context'])
   })
 
   it('uses the context-resolved team when body team_id agrees (matches, no override)', async () => {
-    teamRows = [{ team_id: 'team-X' }]
+    teamRows = [{ context_id: 'trader-context', team_id: 'team-X' }]
     budgetsRows = [budgetRow({ scope: { team_id: ['team-X'] } })]
     spendQueue = [{ rows: [{ spent: '100' }] }]
 
@@ -206,7 +206,7 @@ describe('POST /api/v1/internal/budgets/check', () => {
     // Body claims team-attacker but the context canonically resolves to team-real.
     // Matching must use team-real: the attacker-scoped budget must NOT match and
     // the real-team budget MUST, and the disagreement is audited.
-    teamRows = [{ team_id: 'team-real' }]
+    teamRows = [{ context_id: 'trader-context', team_id: 'team-real' }]
     budgetsRows = [
       budgetRow({ id: 'atk', name: 'attacker', scope: { team_id: ['team-attacker'] } }),
       budgetRow({ id: 'real', name: 'real', scope: { team_id: ['team-real'] } }),
