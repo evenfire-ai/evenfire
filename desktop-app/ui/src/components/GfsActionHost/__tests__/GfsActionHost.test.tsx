@@ -86,6 +86,7 @@ interface Bridge {
   listShares: ReturnType<typeof vi.fn>
   download: ReturnType<typeof vi.fn>
   grant: ReturnType<typeof vi.fn>
+  revokeGrant: ReturnType<typeof vi.fn>
 }
 
 interface Harness {
@@ -139,6 +140,7 @@ async function harness(
     listShares: vi.fn(async () => emptyShares),
     download: vi.fn(),
     grant: vi.fn(async () => undefined),
+    revokeGrant: vi.fn(async () => undefined),
   }
   Object.defineProperty(window, 'clerum', {
     configurable: true,
@@ -1040,6 +1042,64 @@ describe('GfsActionHost — review round', () => {
       })
 
       expect(h.bridge.grant).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('removing access from the host Share', () => {
+    const grantId = '42424242-4242-4242-4242-424242424242'
+    const agent = {
+      name: 'chatllm',
+      contextRef: 'ctx-1',
+      mcpServers: [],
+      gfsSubject: { type: 'host' as const, id: '1st:mcp-host/chatllm' },
+    }
+
+    /** Opens Share on a folder whose access list holds one agent grant and removes it. */
+    async function removeAgentAccess(h: Harness) {
+      const agentGrant = await grantsListPage([
+        {
+          id: grantId,
+          drive: 'main',
+          resourceId: 'folder-s',
+          subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+          permissions: ['read'],
+          inherit: true,
+        },
+      ])
+      h.bridge.listGrants.mockImplementation(async () => agentGrant)
+      h.bridge.resolve.mockImplementation(async () =>
+        resolveResource(resolvedDirectory('folder-s', 'Shared', { parentResourceId: null }))
+      )
+      const revoked = deferred<undefined>()
+      h.bridge.revokeGrant.mockImplementation(() => revoked.promise)
+      h.open(await listedRow('folder-s', 'Shared', 'directory', null), 'share')
+      const share = await screen.findByRole('dialog', { name: /shared/i })
+      fireEvent.click(await within(share).findByRole('button', { name: 'Actions for chatllm' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+      await waitFor(() => expect(h.bridge.revokeGrant).toHaveBeenCalledWith(grantId))
+      return revoked
+    }
+
+    it('a removal that lands after a session switch shows no toast in the new session', async () => {
+      const h = await harness({ myAgents: [agent] })
+      const revoked = await removeAgentAccess(h)
+
+      h.main.generation = 2
+      h.publish(2)
+      await waitFor(() => expect(dialog()).toBeNull())
+      await act(async () => revoked.resolve(undefined))
+      await act(async () => {})
+
+      expect(h.toasts).toEqual([])
+    })
+
+    it('(control) the same removal in the same session toasts it', async () => {
+      const h = await harness({ myAgents: [agent] })
+      const revoked = await removeAgentAccess(h)
+
+      await act(async () => revoked.resolve(undefined))
+
+      await waitFor(() => expect(toastMessages(h)).toEqual(['Access revoked for chatllm']))
     })
   })
 })
