@@ -233,6 +233,8 @@ interface Submission {
   toasted: boolean
   /** An error banner in its own dialog showed its outcome. */
   shownInline: boolean
+  /** That banner refused a Move whose source changed since it was chosen. */
+  refusedAsChanged: boolean
   /** When its dialog actually closed on the user's request, if it did. */
   dismissedAt: number | null
 }
@@ -331,6 +333,9 @@ interface World {
   /** Last time every cached bit read went stale. */
   bitsAgedAt: number
   openings: Array<{ origin: Session; at: number }>
+  /** The Move generation check during which a fixed example revokes access. */
+  revokeAtMoveCheck: number | null
+  moveChecksSeen: number
   /** A resource another client writes just before the next Move PATCH of it. */
   changeBeforeNextMove: string | null
   /** A generation answer a fixed example releases by hand. */
@@ -724,6 +729,15 @@ function installBridge(w: World) {
               host: askedByHost(stack),
               family: askingFamily(stack),
             })
+            if (askingFamily(stack) === 'move') {
+              w.moveChecksSeen += 1
+              // A fixed example revokes access right as the Move asks main.
+              if (w.moveChecksSeen === w.revokeAtMoveCheck) {
+                const live = w.model.session
+                w.access.push({ at: tick(w), session: sessionKey(live), kind: 'revoke' })
+                revokeGfsSessionAccess(w.queryClient, scopeOf(live.team), live.gen)
+              }
+            }
             return generation
           })
           let stack: string | undefined
@@ -1154,7 +1168,7 @@ function checkAtRest(w: World) {
   const routeBudget = (s: Submission) => {
     if (s.op !== 'moveResource') return s.calls.length + 1
     const call = s.calls[0]
-    if (!call) return MOVE_REFUSED_CHECKS
+    if (!call) return s.refusedAsChanged ? MOVE_REFUSED_CHECKS : MOVE_UNSENT_CHECKS
     return call.rejected ? MOVE_VERIFIED_CHECKS : MOVE_COMMITTED_CHECKS
   }
   const charged = new Map<Submission, number>()
@@ -1483,6 +1497,7 @@ function submit(
     outcomes: new Set(outcome ? [outcome] : []),
     toasted: false,
     shownInline: false,
+    refusedAsChanged: false,
     id: w.submissions.length + 1,
     op,
     target: action.target,
@@ -1573,9 +1588,16 @@ class Submit extends OracleEvent {
 function noteInlineErrors(w: World) {
   const action = w.model.action
   if (!action) return
-  if (!hostDialogs().some(dialog => dialog.querySelector('.status-banner.tone-error'))) return
+  const banners = hostDialogs().flatMap(dialog =>
+    Array.from(dialog.querySelectorAll('.status-banner.tone-error'))
+  )
+  if (banners.length === 0) return
   const latest = w.submissions.filter(s => s.actionToken === action.token).at(-1)
-  if (latest) latest.shownInline = true
+  if (!latest) return
+  latest.shownInline = true
+  if (banners.some(banner => /changed while you were moving it/.test(banner.textContent ?? ''))) {
+    latest.refusedAsChanged = true
+  }
 }
 
 /** The action's dialog really closed on the user's request. */
@@ -2236,6 +2258,30 @@ const echoDuringHostRefresh = (): Cmd[] => [
   new Rest(),
 ]
 
+/** Revokes access while the Move asks main for the `n`-th time. */
+class RevokeAtMoveCheck extends OracleEvent {
+  constructor(readonly n: number) {
+    super()
+  }
+  async perform(_m: Model, w: World) {
+    w.revokeAtMoveCheck = w.moveChecksSeen + this.n
+  }
+  toString() {
+    return `RevokeAtMoveCheck(${this.n})`
+  }
+}
+
+/** A Move that passes every pre-dispatch check and loses access right before its PATCH. */
+const moveLostBeforeDispatch = (): Cmd[] => [
+  new OpenMenuOn('notes.txt'),
+  new Rest(),
+  new Choose('move'),
+  new Rest(),
+  new RevokeAtMoveCheck(4),
+  new Submit(1),
+  new Rest(),
+]
+
 /** Another client writes `resourceId` just before the next Move PATCH of it arrives. */
 class ChangedBeforePatch extends OracleEvent {
   constructor(readonly resourceId: string) {
@@ -2307,8 +2353,13 @@ const oneCommittedMove = (): Cmd[] => [
 const MOVE_COMMITTED_CHECKS = 9
 /** A PATCH rejected and verified by identity afterwards, the longest path. */
 const MOVE_VERIFIED_CHECKS = 10
-/** No PATCH sent; the longest such path refuses a source changed since it was chosen. */
+/** No PATCH sent: the source changed since it was chosen and the Move is refused. */
 const MOVE_REFUSED_CHECKS = 5
+/**
+ * No PATCH sent for any other reason: the longest such path passes every
+ * pre-dispatch check and loses the session right before the PATCH.
+ */
+const MOVE_UNSENT_CHECKS = 6
 
 const exampleScheduler = () => fc.sample(fc.scheduler(), { seed: 2611, numRuns: 1 })[0]!
 
@@ -2436,6 +2487,8 @@ async function mountWorld(s: Scheduler): Promise<World> {
     openings: [],
     heldGen: null,
     changeBeforeNextMove: null,
+    revokeAtMoveCheck: null,
+    moveChecksSeen: 0,
     releaseGen: null,
     qReads: [],
     triggers: [],
@@ -2709,6 +2762,16 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       expect(refused.genCalls.filter(call => call.host)).toHaveLength(MOVE_REFUSED_CHECKS)
     } finally {
       await unmountWorld(refused)
+    }
+    const lost = await mountWorld(exampleScheduler())
+    try {
+      await fc.asyncModelRun(() => ({ model: lost.model, real: lost }), moveLostBeforeDispatch())
+      await rest(lost)
+      checkAtRest(lost)
+      expect(lost.calls.filter(call => call.op === 'moveResource')).toHaveLength(0)
+      expect(lost.genCalls.filter(call => call.host)).toHaveLength(MOVE_UNSENT_CHECKS)
+    } finally {
+      await unmountWorld(lost)
     }
   }, 60_000)
 })
