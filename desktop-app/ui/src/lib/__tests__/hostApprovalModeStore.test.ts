@@ -182,6 +182,33 @@ describe('hostApprovalModeStore', () => {
     expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
   })
 
+  it('a read that starts during a write and answers after it does not paint the old mode', async () => {
+    let resolvePatch!: (value: SessionApprovalSnapshot) => void
+    const { client } = transport({
+      setApprovalMode: vi.fn(
+        () =>
+          new Promise<SessionApprovalSnapshot>(resolve => {
+            resolvePatch = resolve
+          })
+      ),
+    })
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('auto'))
+
+    const write = selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')
+    // The server may answer this read before the PATCH lands.
+    const readDuringWrite = hostApprovalModeEpoch(AGENT, CHAT)
+    resolvePatch(snapshot('allow_all'))
+    await expect(write).resolves.toBe(true)
+
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('auto'), readDuringWrite)
+    expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
+
+    // A read that starts after the write completed is applied.
+    const readAfterWrite = hostApprovalModeEpoch(AGENT, CHAT)
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'), readAfterWrite)
+    expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('manual')
+  })
+
   it('a catalog read after a write still updates that chat', async () => {
     const { client, setApprovalMode } = transport()
     setApprovalMode.mockResolvedValue(snapshot('auto'))

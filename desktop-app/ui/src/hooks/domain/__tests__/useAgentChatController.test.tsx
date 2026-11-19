@@ -182,6 +182,95 @@ describe('useAgentChatController — characterization (D.0)', () => {
       resetHostApprovalModeStore()
     })
 
+    it('R6-MJ2 a live-task reconcile read from before a mode write does not repaint the old mode', async () => {
+      resetHostApprovalModeStore()
+      const autoFields = {
+        approvalMode: 'auto',
+        modeCeiling: 'allow_all',
+        channelCap: 'allow_all',
+        effectiveApprovalMode: 'auto',
+        shellClassifierAvailable: true,
+      } as const
+      clerum.chat.loadMessages.mockResolvedValue([])
+      clerum.rpc.loadSessionMessages.mockResolvedValue({
+        agent: 'agent-x',
+        chatId: 'chat-1',
+        state: 'idle',
+        turns: [],
+        ...autoFields,
+      })
+      const { result } = renderController()
+      await settleMount()
+      await act(async () => {
+        await result.current.switchToChat('agent-x', 'chat-1')
+      })
+      expect(readHostApprovalMode('agent-x', 'chat-1').label).toBe('Auto-approve')
+
+      // The reconcile read starts before the write and answers after it.
+      const staleRead = deferred<unknown>()
+      const readsBefore = clerum.rpc.loadSessionMessages.mock.calls.length
+      clerum.rpc.loadSessionMessages.mockImplementationOnce(() => staleRead.promise)
+      const reconcile = result.current.reconcileChat(makeTaskKey('agent-x', 'chat-1'), {
+        reason: 'approval_decided',
+      })
+      await waitFor(() =>
+        expect(clerum.rpc.loadSessionMessages.mock.calls.length).toBe(readsBefore + 1)
+      )
+      const transport: HostApprovalModeTransport = {
+        setApprovalMode: vi.fn(async () => ({
+          ...autoFields,
+          approvalMode: 'allow_all' as const,
+          effectiveApprovalMode: 'allow_all' as const,
+        })),
+        readSessionApproval: vi.fn(async () => ({ ...autoFields })),
+      }
+      await act(async () => {
+        await selectHostApprovalMode(transport, 'agent-x', 'chat-1', 'allow_all')
+      })
+      expect(readHostApprovalMode('agent-x', 'chat-1').label).toBe('Allow all')
+
+      const subscribesBefore = clerum.rpc.subscribeTaskProgress.mock.calls.length
+      await act(async () => {
+        staleRead.resolve({
+          agent: 'agent-x',
+          chatId: 'chat-1',
+          state: 'processing',
+          activeTaskId: 'task-live',
+          turns: [],
+          ...autoFields,
+        })
+        await reconcile
+      })
+      // Witness: the live-task branch ran and re-attached the stream.
+      expect(clerum.rpc.subscribeTaskProgress.mock.calls.length).toBeGreaterThan(subscribesBefore)
+      expect(clerum.rpc.subscribeTaskProgress.mock.calls.at(-1)?.[1]).toBe('task-live')
+      expect(readHostApprovalMode('agent-x', 'chat-1').label).toBe('Allow all')
+
+      // A read that starts after the write is applied by the same branch.
+      clerum.rpc.loadSessionMessages.mockResolvedValueOnce({
+        agent: 'agent-x',
+        chatId: 'chat-1',
+        state: 'processing',
+        activeTaskId: 'task-live',
+        turns: [],
+        ...autoFields,
+      })
+      await act(async () => {
+        await result.current.reconcileChat(makeTaskKey('agent-x', 'chat-1'), {
+          reason: 'approval_decided',
+        })
+      })
+      expect(readHostApprovalMode('agent-x', 'chat-1').label).toBe('Auto-approve')
+
+      await act(async () => {
+        clerum.emitTaskProgress('task-live', {
+          type: 'terminal',
+          data: { taskId: 'task-live', status: 'cancelled', reason: 'cleanup' },
+        })
+      })
+      resetHostApprovalModeStore()
+    })
+
     it('preserves cached history when the same chat is reopened during setLastActive', async () => {
       await clerum.chat.create('agent-x', 'chat-a')
       await clerum.chat.upsertMessages('agent-x', 'chat-a', [

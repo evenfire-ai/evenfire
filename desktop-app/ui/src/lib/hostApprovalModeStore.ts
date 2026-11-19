@@ -63,7 +63,11 @@ interface Entry {
   firstSendsInFlight: number
   /** First sends ever begun for this chat. A write compares it across its PATCH. */
   firstSendsBegun: number
-  /** Store-wide write sequence at the moment this chat's last write started. */
+  /**
+   * Store-wide write sequence when this chat's last write started, stamped
+   * again when it completed. A read that started before the completion stamp
+   * may have been answered before the write landed.
+   */
   lastWriteSeq: number
   listeners: Set<() => void>
   view: HostApprovalModeView | null
@@ -71,7 +75,10 @@ interface Entry {
 
 const entries = new Map<string, Entry>()
 let scopeGeneration = 0
-/** Bumps on every mode write, for every chat. Reads capture this before they start. */
+/**
+ * Bumps when a mode write starts and again when a PATCH completes, for every
+ * chat. Reads capture this before they start.
+ */
 let writeSeq = 0
 
 function keyFor(agentRef: string, chatId: string | null): string {
@@ -379,7 +386,12 @@ export async function selectHostApprovalMode(
     }
     return false
   } finally {
+    // A read captured while the PATCH was in flight holds the start stamp, and
+    // the server may have answered it before the PATCH landed. Stamp the
+    // completion so such a read cannot paint the pre-write mode (R6-MJ2).
+    writeSeq += 1
     if (current(entry)) {
+      entry.lastWriteSeq = writeSeq
       entry.writing = false
       notify(entry)
     }

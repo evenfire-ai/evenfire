@@ -844,8 +844,14 @@ export function useAgentChatController({
       fsm,
       loadSessionMessages: (agentRef, chatId, query, stillRelevant) =>
         reconcileBranchesRef.current!.loadSessionMessages(agentRef, chatId, query, stillRelevant),
-      attachLiveTask: (chatKey, resp, epoch, stillRelevant) =>
-        reconcileBranchesRef.current!.attachLiveTask(chatKey, resp, epoch, stillRelevant),
+      attachLiveTask: (chatKey, resp, epoch, approvalReadEpoch, stillRelevant) =>
+        reconcileBranchesRef.current!.attachLiveTask(
+          chatKey,
+          resp,
+          epoch,
+          approvalReadEpoch,
+          stillRelevant
+        ),
       settleIdle: (chatKey, resp, epoch, hint, stillRelevant) =>
         reconcileBranchesRef.current!.settleIdle(chatKey, resp, epoch, hint, stillRelevant),
       revokeAccess: chatKey => reconcileBranchesRef.current!.revokeAccess(chatKey),
@@ -2355,11 +2361,7 @@ export function useAgentChatController({
   )
 
   const reconcileAttachLiveTask = useCallback<ReconcileChatDeps['attachLiveTask']>(
-    async (chatKey, resp, snapshotEpoch, stillRelevant) => {
-      const approvalReadEpoch = hostApprovalModeEpoch(
-        parseTaskKey(chatKey).agentRef,
-        parseTaskKey(chatKey).chatId
-      )
+    async (chatKey, resp, snapshotEpoch, approvalReadEpoch, stillRelevant) => {
       // Staleness guard for the TRACKER (the FSM has R2, the coordinator does not):
       // if a newer local `SEND_STARTED` bumped the epoch since this reconcile's
       // fetch began, the server's `activeTaskId` is stale — calling `attach` would
