@@ -96,10 +96,11 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "create", "update", "delete"]
-  # Manage Deployments for MCP servers
+  # Manage Deployments for MCP servers. Watch re-enqueues a server whose rollout
+  # reached a terminal verdict when its Deployment converges, changes or is deleted.
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "create", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
   # Manage Services for MCP servers
   - apiGroups: [""]
     resources: ["services"]

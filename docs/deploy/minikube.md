@@ -47,8 +47,9 @@ Ready before E2E results are interpreted.
 - **Docker Desktop** installed and running (**≥10 GB RAM / 6 CPUs**)
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl** (`brew install kubectl`)
+- **jq** (`brew install jq`)
 - **python3** (for JWT key sync)
-- **Node.js** 24.22.1 or later (Node 24 is required for Desktop and the validation harness)
+- **Node.js** 24.22.3 or later (Node 24 is required for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration overlay)
 - `.env` file at project root with LLM API keys (optional — uses placeholders if missing)
 
@@ -66,6 +67,15 @@ make minikube-status   # Confirm all services after setup
 
 The script is idempotent — safe to run again if interrupted or if something fails.
 It needs `ADMIN_PASSWORD` in `.env` for the default seed profile.
+
+The connector associations of `mcp-server/context1` are managed through Control
+UI. Removing an entry from the bootstrap overlay does not remove that association;
+remove it in Control UI or through an explicit administrative update instead.
+
+If `deploy/scripts/provision-gfs-runtime.sh` fails while applying instances, it
+stops before finalizing GFS credentials, but earlier steps may already have
+changed resources. Correct the reported cause before retrying; an invalid
+last-applied annotation does not repair itself.
 
 ### Setup options
 
@@ -87,6 +97,10 @@ to it.)
 | `ARGS="--defer-bootstrap-seed"` or `MINIKUBE_DEFER_BOOTSTRAP_SEED=true` | off | Skips the admin/user seed so the first admin is created through the Control UI setup screen (`/api/v1/admin/auth/setup`). Requires `IMAGE_SOURCE=local` and the `minimal` seed profile; `ADMIN_PASSWORD` is then not needed. |
 | `ARGS="--force-keys"` | off | Regenerates all JWT signing keys; invalidates existing tokens. |
 | `MINIKUBE_MEMORY=<MB>`, `MINIKUBE_CPUS=<n>` | `10240`, `6` | Size of the minikube VM when setup has to start it (`scripts/minikube/start.sh`). |
+
+The E2E profile selects demo connectors only when `context1` is first created.
+On an existing context, setup preserves the connector selection; use Control UI
+to add demo connectors if needed.
 
 Combine them as needed, for example
 `make minikube-setup SKIP_UIS=true REUSE_DB=true ARGS="--skip-build"`.

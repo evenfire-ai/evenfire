@@ -120,8 +120,9 @@ function inconclusiveFromPinnedError(
         detail: `ssrf kernel rejected ${error.field}`,
       }
     case 'transport_failed': {
-      // AbortSignal.timeout rejects with an abort/timeout message; keep them distinct.
-      const reason = /timeout|aborted|abort/i.test(error.detail) ? 'timeout' : 'transport_failed'
+      // Only the bounded request deadline is a timeout. Provider error text is diagnostic,
+      // and may contain words such as ETIMEDOUT without representing our deadline.
+      const reason = error.cause === 'request_deadline' ? 'timeout' : 'transport_failed'
       return { status: 'inconclusive', probedUrl, reason, detail: error.detail }
     }
     case 'content_encoding_rejected':

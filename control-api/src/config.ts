@@ -8,11 +8,34 @@ import {
 import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
 import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
 import { rootLogger } from './observability/logger.js'
+import {
+  GFS_WATCH_MAX_CONNECTIONS,
+  GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL,
+} from './services/gfsWatch/admissionLimits.js'
 import { assertSafeCatalogUrl, resolveModelsDevApiUrl } from './services/modelsDevCatalogUrl.js'
+
+function isBoundedInteger(value: number, min: number, max: number): boolean {
+  return Number.isSafeInteger(value) && value >= min && value <= max
+}
 
 function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
   const parsed = Number(process.env[name])
-  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
+  return isBoundedInteger(parsed, min, max) ? parsed : fallback
+}
+
+// Same tolerance as boundedIntegerEnv (an unusable value boots with the
+// default instead of refusing), but says so: a silently ignored cap leaves the
+// operator believing the replica runs with the value they wrote.
+function warnedBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return fallback
+  const parsed = Number(raw)
+  if (isBoundedInteger(parsed, min, max)) return parsed
+  rootLogger.warn(
+    { event: 'env_value_out_of_range', env: name, value: raw, min, max, default: fallback },
+    `${name} is outside [${min}, ${max}] or not an integer; using the default`
+  )
+  return fallback
 }
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -245,6 +268,15 @@ type Config = {
   // (the code default) a later run is only a manual sync or a boot sync.
   llmCatalogAutoEnableMaxPerProviderPerRun: number
   llmCatalogAutoEnableMaxPerRun: number
+  // The catalog prune disables an enabled 'catalog'-managed model that has been
+  // stale (gone from a live models.dev catalog) for longer than this grace and
+  // that nobody uses. Counted from the moment the row first became stale, not
+  // from its last sighting, so the grace does not depend on the sync cadence.
+  // Default 7 days; refused below 1 hour, which could not absorb an id that
+  // flickers out of the catalog for one run.
+  llmCatalogPruneStaleGraceMs: number
+  // Most models one prune run may disable. Models over it wait for the next run.
+  llmCatalogPruneMaxPerRun: number
   // Default OFF. Codex subscription management/admission stays dark until
   // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
   codexSubscriptionEnabled: boolean
@@ -407,11 +439,13 @@ type Config = {
   entityChangeDispatchBatchSize: number
   entityChangeMaxRecoveryEvents: number
   entityChangeStreamPollMs: number
-  entityChangeUserVisibilityRefreshMs: number
   entityChangeStreamHeartbeatMs: number
   entityChangeStreamMaxLifetimeMs: number
   entityChangeStreamMaxConnections: number
   entityChangeStreamMaxConnectionsPerPrincipal: number
+  gfsWatchHeartbeatMs: number
+  gfsWatchMaxConnections: number
+  gfsWatchMaxConnectionsPerPrincipal: number
   notificationsDesktopFirstEnabled: boolean
   notificationDesktopGraceSeconds: number
   // Stricter than the normal refresh limiter: a client reaching reissue has
@@ -616,10 +650,18 @@ function boundedIntegerFromEnv(name: string, defaultValue: number, maxValue: num
  * for the same reason every other invalid value here is refused: a silently corrected
  * interval leaves the operator's setting and the running behaviour disagreeing forever.
  */
-function intervalMsFromEnv(name: string, defaultValue: number, minValue: number): number {
+function intervalMsFromEnv(
+  name: string,
+  defaultValue: number,
+  minValue: number,
+  maxValue?: number
+): number {
   const value = positiveIntegerFromEnv(name, defaultValue)
   if (value < minValue) {
     throw new Error(`${name} must be an integer >= ${minValue} (milliseconds)`)
+  }
+  if (maxValue !== undefined && value > maxValue) {
+    throw new Error(`${name} must be an integer <= ${maxValue} (milliseconds)`)
   }
   return value
 }
@@ -645,6 +687,14 @@ const LLM_CATALOG_AUTO_ENABLE_MAX_CAP = 1000
 // came from. The floor is two sync intervals: anything shorter would expire the
 // evidence before the cron could possibly renew it.
 const LLM_CATALOG_IMAGE_EVIDENCE_MIN_TTL_MS = 2 * LLM_CATALOG_SYNC_MIN_INTERVAL_MS
+const LLM_CATALOG_PRUNE_MIN_GRACE_MS = 60 * 60 * 1000
+// The prune subtracts the grace from NOW() in SQL; a value past PostgreSQL's
+// timestamp range boots fine and then aborts every run with 22008. Ten years
+// is far beyond any useful grace and far inside the range.
+const LLM_CATALOG_PRUNE_MAX_GRACE_MS = 10 * 365 * 24 * 60 * 60 * 1000
+// Same ceiling as the auto-enable caps: one run never moves more than this many
+// entries of the allowlist ConfigMap.
+const LLM_CATALOG_PRUNE_MAX_CAP = 1000
 // Unlike the discovery sync (one call to models.dev per tick), a subscription
 // reconciliation tick calls each broker once PER CONNECTED GRANT and can rotate
 // a Grok refresh token on the way. Fifteen minutes is the floor below which the
@@ -836,6 +886,11 @@ if (memberRegistrationMode === 'hosted') {
 // Computed once so every consumer below reads the exact same resolved value
 // (rather than re-parsing REGISTRY_CONNECTION_MODE a second time).
 const registryConnectionMode: 'managed' | 'self-hosted' = parseRegistryConnectionMode()
+const oauthEncryptionKey = requiredOrDevDefault(
+  'CONTROL_API_OAUTH_ENCRYPTION_KEY',
+  // 32-byte hex-encoded dev key (AES-256-GCM). Prod must override.
+  '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
+)
 
 // Computed as locals because the two values are coupled: image-input evidence
 // written by a sync expires TTL after the capture it came from, so a TTL shorter
@@ -1078,6 +1133,17 @@ export const config: Config = {
     'LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN',
     300,
     LLM_CATALOG_AUTO_ENABLE_MAX_CAP
+  ),
+  llmCatalogPruneStaleGraceMs: intervalMsFromEnv(
+    'LLM_CATALOG_PRUNE_STALE_GRACE_MS',
+    7 * 24 * 60 * 60 * 1000,
+    LLM_CATALOG_PRUNE_MIN_GRACE_MS,
+    LLM_CATALOG_PRUNE_MAX_GRACE_MS
+  ),
+  llmCatalogPruneMaxPerRun: boundedIntegerFromEnv(
+    'LLM_CATALOG_PRUNE_MAX_PER_RUN',
+    50,
+    LLM_CATALOG_PRUNE_MAX_CAP
   ),
   // How often to re-assert the platform image-pull credential. This is a standing
   // invariant, not a fast path: a WorkflowRecipe created by `kubectl apply` or the WRC
@@ -1438,17 +1504,34 @@ export const config: Config = {
     100000
   ),
   entityChangeStreamPollMs: boundedIntegerEnv('ENTITY_CHANGE_STREAM_POLL_MS', 1000, 250, 5000),
-  entityChangeUserVisibilityRefreshMs: boundedIntegerEnv(
-    'ENTITY_CHANGE_USER_VISIBILITY_REFRESH_MS',
-    4000,
-    1000,
-    5000
-  ),
   entityChangeStreamHeartbeatMs: boundedIntegerEnv(
     'ENTITY_CHANGE_STREAM_HEARTBEAT_MS',
     20 * 1000,
     1000,
     60 * 1000
+  ),
+  // Kept apart from ENTITY_CHANGE_STREAM_HEARTBEAT_MS (ceiling 60 s): the value
+  // travels in the watch `ready` frame, and the desktop treats a `ready` whose
+  // heartbeat is outside [5 s, 25 s] as invalid and reopens.
+  gfsWatchHeartbeatMs: warnedBoundedIntegerEnv(
+    'GFS_WATCH_HEARTBEAT_MS',
+    20 * 1000,
+    5 * 1000,
+    25 * 1000
+  ),
+  gfsWatchMaxConnections: warnedBoundedIntegerEnv(
+    'GFS_WATCH_MAX_CONNECTIONS',
+    GFS_WATCH_MAX_CONNECTIONS,
+    1,
+    10000
+  ),
+  // Ceiling well under the process default: one desktop holds one stream, so a
+  // larger per-principal cap only lets a single account crowd out the replica.
+  gfsWatchMaxConnectionsPerPrincipal: warnedBoundedIntegerEnv(
+    'GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL',
+    GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL,
+    1,
+    64
   ),
   entityChangeStreamMaxLifetimeMs: boundedIntegerEnv(
     'ENTITY_CHANGE_STREAM_MAX_LIFETIME_MS',
@@ -1488,11 +1571,7 @@ export const config: Config = {
     'CONTROL_API_OAUTH_STATE_HMAC_SECRET',
     'dev-oauth-state-hmac-secret-32-bytes-pad'
   ),
-  oauthEncryptionKey: requiredOrDevDefault(
-    'CONTROL_API_OAUTH_ENCRYPTION_KEY',
-    // 32-byte hex-encoded dev key (AES-256-GCM). Prod must override.
-    '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
-  ),
+  oauthEncryptionKey,
   // Optional: when set, used verbatim as the origin of the public OAuth callback
   // URL (the redirect_uri). Empty → derive from the request Host (local dev).
   oauthCallbackBaseUrl: process.env.CONTROL_API_OAUTH_CALLBACK_BASE_URL ?? '',

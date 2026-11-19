@@ -14,7 +14,8 @@ import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { StatusBanner } from '@components/Common'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
-import { describeGfsReadError } from '@lib/gfsGrantErrors'
+import { GFS_PREVIEW_UPDATE_FAILED_MESSAGE } from '@constants/gfsPreview'
+import { describeGfsReadError, isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
 import type { GfsMarkdownPreviewBodyProps } from './types'
 
@@ -83,19 +84,26 @@ const GFS_MARKDOWN_REMARK_PLUGINS = [remarkGfm]
  */
 export function GfsMarkdownPreviewBody({
   byteLength,
+  contentVersion,
   fileName,
   gfsUri,
   onDownloadError,
   onCopyContentReady,
   titleId,
   titleActions,
+  permissionProgress,
   headerActions,
   headingLevel = 3,
 }: GfsMarkdownPreviewBodyProps) {
   const generatedTitleId = useId()
   const headingId = titleId ?? generatedTitleId
-  const [source, setSource] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState<{ gfsUri: string; source: string } | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [updateError, setUpdateError] = useState<string | null>(null)
+  const loadedUriRef = useRef<string | null>(null)
+  // Content is only ever shown for the URI it was downloaded from, so a caller
+  // that swaps `gfsUri` without remounting never sees another file's text.
+  const source = loaded?.gfsUri === gfsUri ? loaded.source : null
   const mountedRef = useRef(true)
   const onDownloadErrorRef = useRef(onDownloadError)
   const isPlainText = isPlainTextName(fileName)
@@ -127,7 +135,11 @@ export function GfsMarkdownPreviewBody({
         )
         assertGfsMarkdownPreviewSize(bytes.byteLength)
         const markdown = new TextDecoder().decode(bytes)
-        if (active) setSource(markdown)
+        if (!active) return
+        loadedUriRef.current = gfsUri
+        setLoaded({ gfsUri, source: markdown })
+        setPreviewError(null)
+        setUpdateError(null)
       } catch (error) {
         if (!active) return
         onDownloadErrorRef.current?.(error)
@@ -136,11 +148,22 @@ export function GfsMarkdownPreviewBody({
         // reaches the banner as "Error invoking remote method
         // 'gfs:downloadPreview': Error: 429 …"; every other verdict, including
         // the size guard and the download ceiling, passes through untouched.
-        setPreviewError(
+        const message =
           error instanceof Error
             ? describeGfsReadError(error).message
             : 'Could not load the Markdown preview'
-        )
+        const rawMessage = error instanceof Error ? error.message : String(error)
+        // A rejected session fails closed even mid-reload: text fetched under it
+        // must not stay on screen. A per-resource 403/404 instead keeps the
+        // version already shown — losing access to this one file is decided by
+        // the authoritative resolve, which remounts this body.
+        if (isGfsSessionAuthorityFailure(rawMessage, 'operation')) {
+          loadedUriRef.current = null
+          setLoaded(null)
+          setUpdateError(null)
+          setPreviewError(message)
+        } else if (loadedUriRef.current === gfsUri) setUpdateError(message)
+        else setPreviewError(message)
       }
     }
 
@@ -148,7 +171,7 @@ export function GfsMarkdownPreviewBody({
     return () => {
       active = false
     }
-  }, [byteLength, gfsUri])
+  }, [byteLength, contentVersion, gfsUri])
 
   const copySourceToClipboard = useCallback(async (): Promise<boolean> => {
     if (source === null || !mountedRef.current || previewError) return false
@@ -177,11 +200,20 @@ export function GfsMarkdownPreviewBody({
             {fileName}
           </HeadingTag>
           {titleActions}
+          {permissionProgress}
         </div>
         <div className="da-gfs-markdown-preview-dialog__header-actions">{headerActions}</div>
       </header>
       <div className="da-gfs-markdown-preview-dialog__body">
         {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
+        {updateError && source !== null && !previewError ? (
+          <div role="status">
+            <StatusBanner
+              tone="warn"
+              text={`${GFS_PREVIEW_UPDATE_FAILED_MESSAGE} ${updateError}`}
+            />
+          </div>
+        ) : null}
         {!previewError && source === null ? (
           <div className="da-gfs-markdown-preview-dialog__loading" role="status">
             Loading preview…

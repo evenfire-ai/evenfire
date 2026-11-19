@@ -495,8 +495,12 @@ describe('AppService explicit Profile UI browser actions', () => {
       }>
       openProfileSettings: (
         email: string,
-        options?: { section?: 'profile'; action?: 'password' }
-      ) => Promise<{ profileUiUrl: string; dispatchAccepted: true; correlationId: string }>
+        options?: { section?: 'profile' | 'social'; action?: 'password'; network?: string }
+      ) => Promise<{
+        profileUiUrl: string
+        dispatchAccepted: true
+        correlationId: string
+      }>
     }
     const getInvitationProfile = vi.fn()
     service.memberRegistrationServiceClient = { getInvitationProfile } as never
@@ -514,7 +518,16 @@ describe('AppService explicit Profile UI browser actions', () => {
       profileUiUrl: 'https://profile.self-hosted.example/settings/profile?action=password',
       dispatchAccepted: true,
     })
+    await expect(
+      service.openProfileSettings(' User@Example.COM ', { section: 'social', network: 'telegram' })
+    ).resolves.toMatchObject({
+      profileUiUrl: 'https://profile.self-hosted.example/channels/telegram',
+      dispatchAccepted: true,
+    })
     const { shell } = await import('electron')
+    expect(shell.openExternal).toHaveBeenCalledWith(
+      'https://profile.self-hosted.example/channels/telegram'
+    )
 
     expect(shell.openExternal).toHaveBeenNthCalledWith(
       1,

@@ -237,9 +237,9 @@ has an unready required deployment, the orchestrator planner selects
 `PROFILE_UNHEALTHY` before a transition exists; the T1 lane restores
 branch-profile GFS credentials on exit and `pre-gate-sync` provisions GFS
 serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true` and
-`GFS_RECOVER_ABANDONED_STATE=true` in the `minikube-t2` transition, so other
-security gates do not mutate GFS and no manual repair script belongs between
-plan and verdict. Harness GFS reconciles settle
+`GFS_RECOVER_ABANDONED_STATE=true` only in the `minikube-t2` transition, so
+other security gates refresh MCP auth without mutating GFS and no manual
+repair script belongs between plan and verdict. Harness GFS reconciles settle
 Ready-reader leftovers first (`settle-gfs-reader-rollout.sh`) and wait on
 reader readiness through the `gfs-rollout-shim` PATH prefix instead of a
 generation-based `rollout status`, because HCC's gfsReconciler now preserves
@@ -257,8 +257,8 @@ recovery window.
 Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by
-silently skipping the suites. The JSON reporter must be complete and green,
-must identify the exact selected physical files, and the Vitest process must
+silently skipping the suites. The JSON reporter must be complete and green
+(zero failures, zero pending), must identify the exact selected physical files, and the Vitest process must
 also exit zero; a green reporter cannot hide a teardown, worker, OOM, signal,
 or partial-selection failure. Run the local Node/package/Docker preflight
 before expensive T0 work. That preflight (`packages=2`) only checks host
@@ -380,3 +380,121 @@ When modifying an individual file:
   E2E/fixtures, or intentional development-only diagnostics. Do not import a
   server logger into browser/renderer bundles; use their existing client
   logging boundary.
+
+## Before every push
+
+Agent-authored PRs between 2026-09-19 and 2026-11-18 failed the same CI gates
+and drew the same review findings again and again. The checks below catch
+those repeats locally, without a cluster. Run them before every push,
+including the push after a merge of `dev`.
+
+### 1. Cheap CI gates
+
+CI runs these on the PR merge result, so run them on a head that contains
+`origin/dev`:
+
+```bash
+git fetch origin dev
+git merge-base --is-ancestor origin/dev HEAD || echo "merge origin/dev first (merge, never rebase)"
+```
+
+Then:
+
+```bash
+bash scripts/tests/test-minikube-t2-public-boundary.sh
+git ls-files -s '*.sh' | awk '$1 != "100755" {print $4}'
+node scripts/release/validate-release-version-bumps.mjs --previous origin/dev --all-services
+bash scripts/ci/check-no-infra-identifiers.sh
+(cd control-api && node ../scripts/ci/password-recovery-suite-contract.mjs verify)
+```
+
+- `PUBLIC_BOUNDARY_REJECTED` (40 agent PRs, e.g. #766, #806, #932, #1111,
+  #1231): the diff adds a credential assignment, a loopback or private URL
+  with a port, a PostgreSQL URL, a bearer token or a private key, almost
+  always in a test fixture. A credential assignment passes only when its
+  value is built at runtime (contains `$`) or names itself as synthetic
+  (contains `fixture`, `placeholder`, `fake`, `example`, `dummy` or
+  `test-token`). Build loopback, private and PostgreSQL URLs at runtime from
+  config instead of writing them as literals. Never widen the scanner's
+  patterns or exemptions.
+- The `awk` line prints a path (12 agent PRs, e.g. #739, #1111, #1243, #1336):
+  run `git update-index --chmod=+x <path>`.
+- `code changed but <pkg>/package.json stayed at <version>` (11 agent PRs,
+  e.g. #796, #932, #1231, #1450): bump that package above the version on
+  `dev`.
+- `PostgreSQL suite census differs from exact manifest` (12 agent PRs, e.g.
+  #1193, #1231, #1285, #1498): every `control-api/test/**/*realPostgres*.test.ts`
+  added, renamed or removed is listed in
+  `tests/contracts/password-recovery-suites.json` in the same commit.
+- Run each added or changed shell script and shell test under `/bin/bash`
+  (3.2) and under bash 5 (#1305: a check failed only under `/bin/bash`; #1336: `mapfile: command
+  not found`).
+
+### 2. Text the change made false
+
+The most repeated review finding (64 agent PRs, e.g. #702, #806, #1231, #1453,
+#1498) is a comment, doc, test title or PR body that still describes the code
+before the change. When a commit removes or renames a file, symbol, flag, env
+var, error code or test, or changes behaviour that text describes:
+
+```bash
+git diff --name-status origin/dev...HEAD
+git grep -n '<each removed or renamed name>'
+```
+
+Fix every hit in code comments, `*.md`, `docs/`, `.d.ts` files, test titles
+and the PR body in the same push. Head SHAs, commit counts and test counts in
+the PR body describe the head being pushed (`git log --oneline
+origin/dev..HEAD`) or name the head they refer to. When code is removed, also
+delete the helpers that only it called (`git grep -n '<helper>'`; orphans in
+12 agent PRs, e.g. #702, #726, #1451).
+
+### 3. Every caller of the thing you fixed
+
+A fix to a guard, validation, limit, error mapping or shared helper that
+reaches one call site while a sibling keeps the defect was found in 30 agent
+PRs (e.g. #701, #726, #1483, #1510). Before committing such a fix, run
+`git grep -n '<function, route or constant>'` and list each caller in the
+commit body as "fixed" or "not affected: <reason>".
+
+### 4. Fixing review findings
+
+Fix commits pushed between review rounds broke behaviour the round had not
+flagged in 26 agent PRs (e.g. #796, #806, #1305, #1454). Fix one finding per
+commit and name the finding in the subject. Before the push:
+
+```bash
+git diff <reviewed-head> HEAD -- '*.test.*' '*.spec.*' 'scripts/tests/test-*.sh' | grep -E '^-.*(expect|assert)'
+```
+
+Each removed or rewritten assertion maps to a finding; restore any other.
+Then run the test files of the reviewed head against the new code.
+
+### 5. A new test must fail without the fix
+
+Tests that pass with or without the change they claim to prove were found in
+65 agent PRs (e.g. #697, #726, #1499, #1502). For every test that proves a fix:
+
+```bash
+git status --porcelain   # must be empty: commit the fix and the test first
+git checkout origin/dev -- <production files the fix changes>
+<run the new test>   # it must FAIL
+git checkout HEAD -- <production files the fix changes>
+```
+
+A production file the fix adds does not exist on `origin/dev`: delete it for
+the run instead, and restore it with the same last command. A test that still
+passes proves nothing; fix the test. A negative assertion
+(`not.toHaveBeenCalled`, "nothing was written") needs a positive assertion in
+the same test that the code path ran. A fixture that stands for another
+component's payload is copied from that component's real output or its own
+fixtures, not written by hand.
+
+### 6. Errors stay visible
+
+Swallowed errors and silent fallbacks were flagged in 17 agent PRs (e.g.
+#806, #1453, #1500). The flagged shapes were `.catch(() => ({}))`, a failed
+read that builds a default value, and a parser that returns a default on
+invalid input. Before pushing, read every `catch`, `.catch(` and default value
+your diff adds: each one rethrows, logs through the service logger, or has a
+comment saying why dropping the error is correct.

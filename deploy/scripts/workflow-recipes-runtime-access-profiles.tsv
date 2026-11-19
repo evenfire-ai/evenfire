@@ -44,6 +44,7 @@ invitations	none
 llm_allowed_models	none
 llm_allowed_models_audit	none
 llm_catalog_dismissed	none
+llm_catalog_prune_runs	none
 llm_catalog_sync_runs	none
 llm_model_prices	none
 llm_provider_attempt_tickets	none
@@ -54,6 +55,7 @@ mcp_secret_rollback_permits	none
 notification_deliveries	none
 dynamic_clients	none
 oauth_grants	none
+oidc_protocol_attempts	none
 password_admission_rollout_state	none
 password_identifier_state	none
 password_verification_pace	none

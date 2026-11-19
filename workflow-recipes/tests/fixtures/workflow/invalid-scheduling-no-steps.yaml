@@ -7,6 +7,6 @@ spec:
   workloads:
     - id: app
       type: deployment
-      image: nginx:1.30.6-alpine
+      image: nginx:1.30.7-alpine
   scheduling:
     cron: '0 9 * * *'

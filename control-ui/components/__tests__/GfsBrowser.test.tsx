@@ -206,7 +206,6 @@ async function controlApiSessionExpiredProducerFrame(): Promise<string> {
     res as unknown as Parameters<typeof streamEntityChanges>[1],
     null,
     async () => ++authorizationChecks === 1,
-    'operator',
     'operator-session-expiry-test'
   )
   await vi.waitFor(() => expect(res.writableEnded).toBe(true))

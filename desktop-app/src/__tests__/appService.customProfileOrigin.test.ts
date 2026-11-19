@@ -22,7 +22,6 @@ type LinkService = {
   createGfsResourceDeepLink: (uri: string) => Promise<{ url: string }>
   suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
   stopAllStreams: () => void
-  ensureEntityChangeConnection: () => void
 }
 
 async function authenticatedLinkService(
@@ -38,7 +37,6 @@ async function authenticatedLinkService(
   const service = harness.service as unknown as LinkService
   service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
   service.stopAllStreams = vi.fn()
-  service.ensureEntityChangeConnection = vi.fn()
   service.sessionToken = sessionToken
   service.me = { id: 'user-1', email: 'user@example.test' }
   return service

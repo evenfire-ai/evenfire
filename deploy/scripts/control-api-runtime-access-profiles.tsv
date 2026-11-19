@@ -44,6 +44,7 @@ invitations	legacy_dml
 llm_allowed_models	legacy_dml
 llm_allowed_models_audit	append
 llm_catalog_dismissed	append
+llm_catalog_prune_runs	append
 llm_catalog_sync_runs	append
 llm_model_prices	legacy_dml
 llm_provider_attempt_tickets	upsert
@@ -54,6 +55,7 @@ mcp_secret_rollback_permits	legacy_dml
 notification_deliveries	legacy_dml
 dynamic_clients	legacy_dml
 oauth_grants	legacy_dml
+oidc_protocol_attempts	legacy_dml
 password_admission_rollout_state	none
 password_identifier_state	legacy_dml
 password_verification_pace	legacy_dml

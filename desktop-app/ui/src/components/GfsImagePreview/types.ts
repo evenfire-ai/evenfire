@@ -35,12 +35,18 @@ export type GfsImagePreviewProps = {
  */
 export type GfsImagePreviewBodyProps = {
   byteLength: number
+  /**
+   * Bumped when the server publishes a newer version of the same file. The body
+   * re-downloads in place, keeping the current content until the new one lands.
+   */
+  contentVersion?: number
   fileName: string
   mimeType: string
   onDownloadError?: (error: unknown) => void
   onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
   titleId?: string
   titleActions?: ReactNode
+  permissionProgress?: ReactNode
   headerActions?: ReactNode
   headingLevel?: 2 | 3
 } & GfsImagePreviewSource

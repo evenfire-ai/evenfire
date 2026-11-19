@@ -13,6 +13,11 @@ import {
 } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
 import {
+  applyOidcProtocolAttemptBrowserBindingSchema,
+  applyOidcProtocolAttemptExpiryIndexMigration,
+  applyOidcProtocolAttemptSchema,
+} from './oidc/protocolAttemptStore.js'
+import {
   applyUserAccessFoundationSchema,
   backfillLegacyPasswordSecurityEpochs,
 } from './services/access/userAccessFoundationSchema.js'
@@ -46,12 +51,25 @@ import {
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
 import {
+  applyGfsAuthzControlAdminsSchema,
+  applyGfsAuthzGrantsSchema,
+  applyGfsAuthzOperatorLinksSchema,
+  applyGfsAuthzSharesSchema,
+  applyGfsAuthzTeamMembersSchema,
+  applyGfsWatchSessionUsersSchema,
+} from './services/gfsWatch/authzChangedSchema.js'
+import { applyGfsResourceChangedSchema } from './services/gfsWatch/resourceChangedSchema.js'
+import {
   applyGrokCatalogModelsSchema,
   applyGrokSubscriptionConnectionSchema,
   applyGrokSubscriptionOAuthStateSchema,
   applyGrokSubscriptionTerminalConnectionKeySchema,
   applyLlmProviderAttemptsGrokBrokerSchema,
 } from './services/grokSubscriptionSchema.js'
+import {
+  applyLlmCatalogPruneColumnsSchema,
+  applyLlmCatalogPruneStateSchema,
+} from './services/llmCatalogPruneStateSchema.js'
 import {
   applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptConnectionIntegritySchema,
@@ -140,6 +158,8 @@ type DbMigration = {
   // Equivalent names used before a branch merge renumbered the same migration body.
   legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
+  // Extra attempts when the transaction loses a lock wait (runner versions only).
+  lockRetries?: number
 }
 
 export type { BoundedPoolBudget, PoolConstructor } from './boundedPgPool.js'
@@ -6422,6 +6442,83 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0138_legacy_password_security_epoch_backfill',
     apply: backfillLegacyPasswordSecurityEpochs,
   },
+  {
+    version: '0139_llm_catalog_prune_columns',
+    // The alias is the version an earlier head of this change applied both
+    // parts under, in one migration; such a database already has the columns
+    // and the CHECK, and the next migration is idempotent over it.
+    legacyVersions: ['0139_llm_catalog_prune_state'],
+    apply: applyLlmCatalogPruneColumnsSchema,
+  },
+  {
+    version: '0140_llm_catalog_prune_episodes',
+    apply: applyLlmCatalogPruneStateSchema,
+  },
+  {
+    version: '0141_gfs_resource_changed_notify',
+    apply: applyGfsResourceChangedSchema,
+  },
+  {
+    version: '0142_gfs_authz_grants_notify',
+    apply: applyGfsAuthzGrantsSchema,
+  },
+  {
+    version: '0143_gfs_authz_shares_notify',
+    apply: applyGfsAuthzSharesSchema,
+  },
+  {
+    version: '0144_gfs_authz_operator_links_notify',
+    apply: applyGfsAuthzOperatorLinksSchema,
+  },
+  {
+    version: '0145_gfs_authz_control_admins_notify',
+    apply: applyGfsAuthzControlAdminsSchema,
+  },
+  {
+    version: '0146_gfs_authz_team_members_notify',
+    apply: applyGfsAuthzTeamMembersSchema,
+    // Every login writes users and team_members: CREATE TRIGGER on them can
+    // lose its lock wait at a busy moment, which should not fail the Job.
+    lockRetries: 2,
+  },
+  {
+    version: '0147_gfs_watch_session_users_notify',
+    apply: applyGfsWatchSessionUsersSchema,
+    lockRetries: 2,
+  },
+  {
+    version: '0148_oidc_protocol_attempts',
+    // Full version strings from earlier OIDC slots. They do not match the
+    // GFS notify migrations that now own 0141–0147.
+    legacyVersions: [
+      '0130_oidc_protocol_attempts',
+      '0131_oidc_protocol_attempts',
+      '0139_oidc_protocol_attempts',
+      '0141_oidc_protocol_attempts',
+      '0145_oidc_protocol_attempts',
+    ],
+    apply: applyOidcProtocolAttemptSchema,
+  },
+  {
+    version: '0149_oidc_protocol_attempt_expiry_index',
+    legacyVersions: [
+      '0132_oidc_protocol_attempt_expiry_index',
+      '0140_oidc_protocol_attempt_expiry_index',
+      '0142_oidc_protocol_attempt_expiry_index',
+      '0146_oidc_protocol_attempt_expiry_index',
+    ],
+    apply: applyOidcProtocolAttemptExpiryIndexMigration,
+  },
+  {
+    version: '0150_oidc_protocol_attempt_browser_binding',
+    legacyVersions: [
+      '0133_oidc_protocol_attempt_browser_binding',
+      '0141_oidc_protocol_attempt_browser_binding',
+      '0143_oidc_protocol_attempt_browser_binding',
+      '0147_oidc_protocol_attempt_browser_binding',
+    ],
+    apply: applyOidcProtocolAttemptBrowserBindingSchema,
+  },
 ]
 
 /**
@@ -6434,9 +6531,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
  *   pairs an operator added by hand (Azure deployments, Bedrock inference
  *   profiles), which the sync would then mark stale. Pairs models.dev does not
  *   list stay `manual` for the same reason. `enabled`, display name and context
- *   window are not written here. The sync never changes `enabled` on an
- *   existing row, and never the display name or context window of an enabled
- *   one; on a disabled one it only fills them while they are NULL.
+ *   window are not written here. The sync changes `enabled` on an existing
+ *   row only through the catalog prune and its re-enable, and only on rows it
+ *   manages (`enabled_managed_by = 'catalog'`), which these pairs are not. It
+ *   never changes the display name or context window of an enabled row; on a
+ *   disabled one it only fills them while they are NULL.
  * - 0044's placeholder prices are left in place. The sync loads a catalog
  *   price only when it inserts the model, and never over an existing price
  *   row. Half of these pairs are seeded allowlist rows the sync will never

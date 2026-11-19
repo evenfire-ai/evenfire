@@ -1996,6 +1996,13 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
     expect(ackResult).toBe(true)
     expect(fixture.gfsQueue.list()).toEqual([])
     transition(model, { kind: 'ack', id: link.id, applied: true })
+    if (!uri.endsWith('f'.repeat(32))) {
+      await waitFor(() =>
+        expect(
+          fixture.gfsResolveStacks.filter(stack => stack.includes('useFilePreviewResourceActions'))
+        ).toHaveLength(1)
+      )
+    }
     const finalObservation = await observe(fixture, link)
     expect(finalObservation.actualResolverEntriesById.get(link.id)).toBe(
       uri.endsWith('f'.repeat(32)) ? 1 : 2

@@ -269,6 +269,13 @@ jobs:
         working-directory: mcp-host
         run: npm ci
 
+      # The native GFS watch fixture imports control-api source through
+      # testSupport/gfsWatch, so its typecheck resolves control-api's packages.
+      - name: Install Control API dependencies for Desktop native fixture typecheck
+        if: matrix.service == 'desktop-app'
+        working-directory: control-api
+        run: npm ci
+
       # Host's native HTTP admission test imports each proxy server. Install the
       # existing locked proxy dependencies on this otherwise isolated matrix job.
       - name: Install Codex proxy dependencies for Host integration
@@ -299,6 +306,14 @@ jobs:
         if: matrix.service == 'control-api' || matrix.service == 'rpc-proxy' || matrix.service == 'external-rest-api'
         working-directory: ${{ matrix.service }}
         run: npm run typecheck:jwt-contract
+
+      # The native Electron fixtures do not run in CI. The TypeScript one
+      # (test/native/*.ts) is typechecked so it cannot drift from the src/
+      # contracts it drives; the .cjs fixtures are not covered.
+      - name: Typecheck Desktop native test fixtures
+        if: matrix.service == 'desktop-app'
+        working-directory: desktop-app
+        run: npm run typecheck:native
 
       - name: Build Profile UI image builder stage
         if: matrix.service == 'profile-ui'
@@ -381,6 +396,30 @@ jobs:
         working-directory: tests/e2e/playwright
         run: npm ci
 
+      - name: Test Context persistence command cleanup on Playwright timeout
+        if: matrix.service == 'external-rest-api'
+        timeout-minutes: 3
+        run: |
+          node --test scripts/tests/test-issue-628-diagnostics.test.mjs
+          node scripts/tests/test-issue-628-command-drain.mjs
+
+      - name: Collect Context connector persistence E2E without a cluster
+        if: matrix.service == 'external-rest-api'
+        working-directory: tests/e2e/playwright
+        run: |
+          set -euo pipefail
+          for restart in false true; do
+            listed="$(ISSUE628_PROFILE_RESTART="$restart" node node_modules/@playwright/test/cli.js test --config=issue-628.config.ts --list --reporter=list)"
+            printf '%s\n' "$listed"
+            printf '%s\n' "$listed" | grep -Fxq 'Total: 2 tests in 1 file'
+            printf '%s\n' "$listed" | grep -Fq 'unauthenticated access does not expose the agent connector inventory'
+            if [ "$restart" = true ]; then
+              printf '%s\n' "$listed" | grep -Fq 'Control UI connector survives a full Minikube profile restart'
+            else
+              printf '%s\n' "$listed" | grep -Fq 'Control UI connector survives provisioning and runtime restarts'
+            fi
+          done
+
       - name: Install Profile UI recovery Chromium
         if: matrix.service == 'external-rest-api'
         working-directory: tests/e2e/playwright
@@ -398,7 +437,7 @@ jobs:
         timeout-minutes: 10
         run: |
           node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 300 --heartbeat-seconds 20 --kill-grace-seconds 5 --label web-search-ci-image-build -- \
-            docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24.22.1-alpine -t issue198-ci-image:test .
+            docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24.22.3-alpine -t issue198-ci-image:test .
           web_search_image_id="$(node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 10 --heartbeat-seconds 5 --kill-grace-seconds 5 --label web-search-ci-image-inspect -- \
             docker image inspect issue198-ci-image:test --format '{{.Id}}')"
           node test/run-network.mjs --image "$web_search_image_id"
@@ -1095,8 +1134,23 @@ jobs:
       - name: Test Plugin Workload SDK auth bootstrap policy
         run: bash scripts/tests/test-plugin-workload-sdk-auth-bootstrap.sh
 
+      - name: Test isolated Minikube prerequisite environment
+        run: bash scripts/tests/test-check-prereqs-isolated-dotenv.sh
+
+      - name: Test isolated Minikube LLM Secret application
+        run: bash scripts/tests/test-apply-llm-secret-isolation.sh
+
       - name: Test GFS grant WorkflowRecipe seed rendering
         run: bash scripts/tests/test-seed-gfs-grant-workflow.sh
+
+      - name: Test GFS provisioning preserves Context connectors
+        run: bash scripts/tests/test-provision-gfs-runtime.sh
+
+      - name: Test isolated Context persistence restart guards
+        run: bash scripts/tests/test-issue-628-profile-restart.sh
+
+      - name: Audit Context connector persistence E2E
+        run: python3 -I -S tools/e2e_static_audit.py tests/e2e/playwright/issue-628/connector-persistence.spec.ts
 
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh
@@ -1289,6 +1343,17 @@ jobs:
         env:
           NGINX_REGISTRY_MIRROR: mirror.gcr.io
         run: bash scripts/verify-nginx-image-digests.sh
+      - name: Verify unprivileged NGINX tags used by recipe samples
+        shell: bash
+        run: |
+          images="$(
+            yq -N -r '
+              .spec.workloads[]? | .image // "" |
+              select(test("^(docker[.]io/)?(nginx|nginxinc)/nginx-unprivileged:"))
+            ' workflow-recipes/samples/*.yaml | sort -u
+          )"
+          mapfile -t image_refs <<< "$images"
+          bash scripts/verify-nginx-image-digests.sh --tags "${image_refs[@]}"
 
   # ─── Remote MCP egress proxy TLS contract (native amd64 + arm64) ──────────
   nginx-egress-proxy-tls:

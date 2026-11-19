@@ -320,7 +320,7 @@ function hostFromUrl(url: string): string {
  *
  * An OCI reference's host is the first `/`-separated segment, and only when it looks like a
  * host (contains a dot or colon, or is `localhost`) — otherwise the reference is a Docker
- * Hub shorthand like `nginx:latest` with no host at all.
+ * Hub shorthand like `nginx:1.30.7-alpine` with no host at all.
  */
 function imageHostOf(image: string): string {
   const first = image.split('/')[0] ?? ''

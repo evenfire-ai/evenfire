@@ -2012,6 +2012,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'llm_allowed_models',
       'llm_allowed_models_audit',
       'llm_catalog_sync_runs',
+      'llm_catalog_prune_runs',
       'llm_provider_attempt_tickets',
       'llm_provider_attempts',
       'codex_subscription_connections',
@@ -2035,6 +2036,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       llm_allowed_models: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models_audit: ['INSERT', 'SELECT'],
       llm_catalog_sync_runs: ['INSERT', 'SELECT'],
+      llm_catalog_prune_runs: ['INSERT', 'SELECT'],
       llm_provider_attempt_tickets: ['INSERT', 'SELECT', 'UPDATE'],
       llm_provider_attempts: ['INSERT', 'SELECT', 'UPDATE'],
       codex_subscription_connections: ['INSERT', 'SELECT', 'UPDATE'],
@@ -3748,10 +3750,13 @@ describeRealPostgres('control-api real Postgres migrations', () => {
              'entity_change_capture_resource',
              'entity_change_capture_scope',
              'entity_change_dispatch_batch',
-             'entity_change_read_checkpoint'
+             'entity_change_read_checkpoint',
+             'gfs_resource_changed_notify'
            )
       `)
-      expect(functionPaths.rows).toHaveLength(4)
+      // The watch trigger runs with the writer's rights, but the probe INSERT
+      // above also fires it: its casts must not resolve to the temp domain.
+      expect(functionPaths.rows).toHaveLength(5)
       for (const { config } of functionPaths.rows) {
         expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
       }
