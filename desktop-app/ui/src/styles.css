@@ -16333,6 +16333,16 @@ pre {
   backdrop-filter: blur(12px) saturate(0.86);
 }
 
+.da-gfs-action-host {
+  display: contents;
+}
+
+/* The sidebar's actions open at the window root, so their backdrop dims the
+   sidebar too, unlike the Files dialogs scoped to the content panel. */
+.da-gfs-action-host .da-gfs-manage-modal {
+  z-index: var(--layer-window-dialog);
+}
+
 .da-gfs-manage-dialog {
   /* Keep every Share-dialog accent in the blue family while preserving the
      global semantic palette used by the rest of Desktop. */

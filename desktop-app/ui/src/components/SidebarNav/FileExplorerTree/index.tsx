@@ -17,9 +17,8 @@ import {
   type GfsCrumb,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
-import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
+import { readCachedGfsChildNames } from '@lib/gfsCachedChildNames'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
-import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
@@ -35,10 +34,10 @@ import {
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
+import { GfsExplicitMoveDialog, commitGfsExplicitMove } from '@/gfs/explicitMoveDialog'
+import type { GfsExplicitMoveCommitOptions } from '@/gfs/explicitMoveDialog.types'
 import { toastMoveOutcome } from '@/gfs/moveCommit'
-import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
-import { GfsMoveDialog } from '@/gfs/moveDialog'
 import { IconChevronRight, IconContexts } from '../icons'
 import type { FileExplorerNodeProps, FileExplorerTreeProps, VisibleExpandedFolder } from './types'
 
@@ -583,13 +582,9 @@ export function FileExplorerTree({
   const moveDialogTargetRef = useRef(moveDialogTarget)
   moveDialogTargetRef.current = moveDialogTarget
   const mountedRef = useRef(false)
-  const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | 'failed' | null>(
-    null
-  )
 
   const closeMoveDialog = useCallback(() => {
     moveDialogTargetRef.current = null
-    setMovePermissionStatus(null)
     setMoveDialogTarget(null)
   }, [])
 
@@ -632,7 +627,6 @@ export function FileExplorerTree({
     setDragSourceName(null)
     moveDialogTargetRef.current = null
     setMoveDialogTarget(null)
-    setMovePermissionStatus(null)
     // A NEW live session makes any session-ended refusal stale. A transition
     // TO revoked (scope null) must NOT clear it: that is exactly when the
     // message has to survive (A11), and the revoked surface below carries it.
@@ -658,22 +652,13 @@ export function FileExplorerTree({
   /** Cached destination names for the numbered-name ladder and suggestion —
    * the same shared children cache the Files page seeds its commit from. */
   const cachedDestinationNames = useCallback(
-    (destinationId: string): Set<string> => {
-      if (!ctrl.sessionScope || !isGfsSessionGeneration(ctrl.sessionGeneration)) {
-        return new Set()
-      }
-      const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsBrowserChild[] }> }>(
-        desktopQueryKeys.gfsChildren(
-          ctrl.sessionScope,
-          destinationId,
-          GFS_DRIVE_MAIN,
-          ctrl.sessionGeneration
-        )
-      )
-      return new Set(
-        (cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? [])
-      )
-    },
+    (destinationId: string): Set<string> =>
+      readCachedGfsChildNames(
+        queryClient,
+        ctrl.sessionScope,
+        ctrl.sessionGeneration,
+        destinationId
+      ),
     [ctrl.sessionScope, ctrl.sessionGeneration, queryClient]
   )
 
@@ -877,57 +862,22 @@ export function FileExplorerTree({
     async (
       source: GfsDragSource,
       destination: { resourceId: string; name: string },
-      isCurrent?: () => boolean,
-      isPresentationCurrent?: () => boolean,
-      reportOutcomes = true,
-      authoritativeSessionGeneration?: number
+      options: GfsExplicitMoveCommitOptions
     ) => {
       movingResourceIdRef.current = source.resourceId
       setMovingResourceId(source.resourceId)
       try {
-        return await runGfsMoveCommit(
+        return await commitGfsExplicitMove(
           {
-            moveResource: (
-              resourceId,
-              destinationId,
-              ifMatch,
-              newName,
-              oldParentId,
-              expectedSessionGeneration
-            ) =>
-              ctrl.moveResource(
-                resourceId,
-                destinationId,
-                ifMatch,
-                newName,
-                oldParentId,
-                source.scope,
-                true,
-                expectedSessionGeneration
-              ),
-            handleAuthorityFailure: message =>
-              ctrl.handleAuthorityFailure(message, 'operation', source.scope),
-            convergeCommittedMove: (input, receipt) =>
-              ctrl.convergeCommittedMove(input, receipt, source.scope),
-            ...(reportOutcomes
-              ? {
-                  pushToast: (message, tone) => {
-                    if (!isPresentationCurrent || isPresentationCurrent()) {
-                      pushToast(message, tone)
-                    }
-                  },
-                }
-              : {}),
+            ops: ctrl,
+            handleAuthorityFailure: (message, scope) =>
+              ctrl.handleAuthorityFailure(message, 'operation', scope),
+            occupiedDestinationNames: cachedDestinationNames,
+            pushToast,
           },
-          {
-            source,
-            destination,
-            occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
-            ...(authoritativeSessionGeneration !== undefined
-              ? { sessionGeneration: authoritativeSessionGeneration }
-              : {}),
-            ...(isCurrent ? { isCurrent } : {}),
-          }
+          source,
+          destination,
+          options
         )
       } finally {
         movingResourceIdRef.current = null
@@ -1025,13 +975,14 @@ export function FileExplorerTree({
         await commitMove(
           source,
           { resourceId: node.resourceId, name: node.name },
-          () => ownsPublishedAuthority() && ownsDrop(source, epoch, sessionGeneration),
-          () =>
-            ownsPublishedAuthority() &&
-            mountedRef.current &&
-            liveDragScopeRef.current === source.scope,
-          true,
-          authoritativeSessionGeneration
+          {
+            isCurrent: () => ownsPublishedAuthority() && ownsDrop(source, epoch, sessionGeneration),
+            isPresentationCurrent: () =>
+              ownsPublishedAuthority() &&
+              mountedRef.current &&
+              liveDragScopeRef.current === source.scope,
+            authoritativeSessionGeneration,
+          }
         )
       } finally {
         finishNodeDropCleanup(source, epoch, sessionGeneration)
@@ -1055,112 +1006,10 @@ export function FileExplorerTree({
     (node: GfsBrowserChild, ancestorCrumbs: readonly GfsCrumb[]) => {
       const target = { node, initialCrumbs: [...ancestorCrumbs] }
       moveDialogTargetRef.current = target
-      setMovePermissionStatus(null)
       setMoveDialogTarget(target)
     },
     []
   )
-
-  const handleRetryMovePermission = async (
-    destinationId: string,
-    _destinationName: string,
-    isDialogCurrent: () => boolean
-  ) => {
-    const target = moveDialogTarget
-    if (!target || !isDialogCurrent()) return
-    const scope = ctrl.sessionScope
-    const expectedScope = scope ?? 'anonymous'
-    const expectedGeneration = ctrl.sessionGeneration
-    const ownsRetry = () =>
-      moveDialogTargetRef.current === target &&
-      liveDragScopeRef.current === expectedScope &&
-      isGfsSessionAuthorityCurrent(
-        scope,
-        expectedGeneration,
-        liveAuthorityRef.current.scope,
-        liveAuthorityRef.current.generation
-      ) &&
-      isDialogCurrent()
-    const drive = target.node.drive || GFS_DRIVE_MAIN
-    setMovePermissionStatus('checking')
-
-    try {
-      if (!scope || !isGfsSessionGeneration(expectedGeneration)) {
-        throw new Error('Could not verify the source folder for this move.')
-      }
-      const destinationKey = desktopQueryKeys.gfsAffordances(
-        scope,
-        destinationId,
-        drive,
-        expectedGeneration
-      )
-      assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
-
-      if (!ownsRetry()) {
-        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
-        return
-      }
-      const resolvedSource = await window.clerum.gfs.resolve(target.node.gfsUri)
-      if (!ownsRetry()) {
-        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
-        return
-      }
-      if (resolvedSource.resourceId !== target.node.resourceId) {
-        throw new Error('Could not verify the source folder for this move.')
-      }
-      const sourceParentId = resolvedSource.parentResourceId
-      if (!sourceParentId) {
-        throw new Error('Could not verify the source folder for this move.')
-      }
-      const sourceKey = desktopQueryKeys.gfsAffordances(
-        scope,
-        sourceParentId,
-        drive,
-        expectedGeneration
-      )
-      assertGfsAuthorityRetryAllowed(queryClient, sourceKey)
-      assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
-
-      const [source, destination] = await Promise.all([
-        queryClient.fetchQuery({
-          queryKey: sourceKey,
-          queryFn: () => window.clerum.gfs.affordances(sourceParentId, drive),
-          staleTime: 0,
-          retry: false,
-        }),
-        queryClient.fetchQuery({
-          queryKey: destinationKey,
-          queryFn: () => window.clerum.gfs.affordances(destinationId, drive),
-          staleTime: 0,
-          retry: false,
-        }),
-      ])
-      if (!ownsRetry()) {
-        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
-        return
-      }
-      if (!hasGfsMoveSourcePermissions(source.held)) {
-        throw new Error('You do not have write and delete access to the source folder.')
-      }
-      if (!destination.held.includes('write')) {
-        throw new Error('You do not have write access to the destination folder.')
-      }
-      setMovePermissionStatus(null)
-    } catch (retryError) {
-      if (moveDialogTargetRef.current !== target) return
-      if (!ownsRetry()) {
-        setMovePermissionStatus(null)
-        return
-      }
-      const message = errorMessage(retryError) ?? String(retryError)
-      if (ctrl.handleAuthorityFailure(message, 'operation', scope, expectedGeneration)) {
-        closeMoveDialog()
-        return
-      }
-      setMovePermissionStatus('failed')
-      throw retryError
-    }
-  }
 
   const handleActivateFolder = useCallback(
     (node: GfsBrowserChild) => {
@@ -1332,110 +1181,39 @@ export function FileExplorerTree({
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void commitMove(
-                pending.source,
-                pending.destination,
-                () =>
+              void commitMove(pending.source, pending.destination, {
+                isCurrent: () =>
                   ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration),
-                () => mountedRef.current && liveDragScopeRef.current === pending.source.scope,
-                true,
-                pending.authoritativeSessionGeneration
-              )
+                isPresentationCurrent: () =>
+                  mountedRef.current && liveDragScopeRef.current === pending.source.scope,
+                authoritativeSessionGeneration: pending.authoritativeSessionGeneration,
+              })
             }
           }}
         />
       ) : null}
 
       {moveDialogTarget ? (
-        <GfsMoveDialog
-          busy={ctrl.mutating || movePermissionStatus === 'checking'}
-          initialCrumbs={moveDialogTarget.initialCrumbs}
-          onClose={closeMoveDialog}
-          onMoveWithOwnership={async (destinationId, destinationName, isDialogCurrent) => {
-            setMovePermissionStatus(null)
-            const target = moveDialogTargetRef.current
-            if (!target) return
-            const publishedGeneration = ctrl.sessionGeneration
-            const publishedScope = ctrl.sessionScope
-            const ownsPublishedAuthority = () =>
-              isGfsSessionAuthorityCurrent(
-                publishedScope,
-                publishedGeneration,
-                liveAuthorityRef.current.scope,
-                liveAuthorityRef.current.generation
-              )
-            if (!ownsPublishedAuthority()) return
-            const source: GfsDragSource = {
-              resourceId: target.node.resourceId,
-              gfsUri: target.node.gfsUri,
-              drive: target.node.drive || GFS_DRIVE_MAIN,
-              kind: target.node.kind === 'directory' ? 'directory' : 'file',
-              name: target.node.name,
-              ...(Number.isSafeInteger(target.node.version)
-                ? { version: target.node.version }
-                : {}),
-              parentKnown: target.node.parentResourceId != null,
-              parentResourceId: target.node.parentResourceId ?? null,
-              knownAncestorIds: [],
-              origin: 'sidebar',
-              scope: ctrl.sessionScope ?? 'anonymous',
-              generation: dragSessionEpochRef.current,
-            }
-            const isCurrent = () =>
-              ownsPublishedAuthority() &&
-              mountedRef.current &&
-              moveDialogTargetRef.current === target &&
-              liveDragScopeRef.current === source.scope &&
-              isDialogCurrent()
-            const isPresentationCurrent = () =>
-              ownsPublishedAuthority() &&
-              mountedRef.current &&
-              liveDragScopeRef.current === source.scope
-            const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
-            if (authoritativeSessionGeneration !== publishedGeneration || !isCurrent()) return
-            const outcome = await commitMove(
-              source,
-              { resourceId: destinationId, name: destinationName },
-              isCurrent,
-              isPresentationCurrent,
-              false,
-              authoritativeSessionGeneration
-            )
-            if (outcome.status === 'gesture-lost') return
-            if (outcome.status === 'session-lost') {
-              if (moveDialogTargetRef.current === target) closeMoveDialog()
-              return
-            }
-            if (!isCurrent()) {
-              if (isPresentationCurrent()) {
-                toastMoveOutcome(pushToast, outcome, source.name, destinationName, source.kind)
-              }
-              return
-            }
-            if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
-              if (
-                moveDialogTargetRef.current === target &&
-                outcome.status === 'unconfirmed' &&
-                outcome.retryPermissionCheck === true
-              ) {
-                setMovePermissionStatus('failed')
-              }
-              throw new Error(outcome.message)
-            }
-            toastMoveOutcome(pushToast, outcome, source.name, destinationName, source.kind)
-            if (moveDialogTargetRef.current === target) closeMoveDialog()
-          }}
-          onRetryPermissionCheck={handleRetryMovePermission}
-          onAuthorityFailure={handleAuthorityFailure}
+        <GfsExplicitMoveDialog
+          key={moveDialogTarget.node.resourceId}
+          target={moveDialogTarget}
           sessionScope={ctrl.sessionScope}
           sessionGeneration={ctrl.sessionGeneration}
-          target={{
-            resourceId: moveDialogTarget.node.resourceId,
-            name: moveDialogTarget.node.name,
-            kind: moveDialogTarget.node.kind === 'directory' ? 'directory' : 'file',
-            parentResourceId: moveDialogTarget.node.parentResourceId ?? null,
-          }}
-          permissionStatus={movePermissionStatus}
+          accessActive={ctrl.accessState !== 'revoked'}
+          busy={ctrl.mutating}
+          isOwnerCurrent={() => moveDialogTargetRef.current === moveDialogTarget}
+          isPresentationCurrent={source =>
+            mountedRef.current && liveDragScopeRef.current === source.scope
+          }
+          sourceGeneration={() => dragSessionEpochRef.current}
+          commitMove={commitMove}
+          handleAuthorityFailure={(message, scope, sessionGeneration) =>
+            ctrl.handleAuthorityFailure(message, 'operation', scope, sessionGeneration)
+          }
+          reportOutcome={(outcome, source, destinationName) =>
+            toastMoveOutcome(pushToast, outcome, source.name, destinationName, source.kind)
+          }
+          onClose={closeMoveDialog}
         />
       ) : null}
     </div>

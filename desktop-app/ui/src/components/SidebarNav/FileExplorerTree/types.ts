@@ -22,6 +22,12 @@ export interface FileExplorerTreeProps {
    * the tree unmounts, so the owner can watch exactly what is on screen.
    */
   onVisibleExpandedFoldersChange?: (gfsUris: string[]) => void
+  /**
+   * Open-state report of a row's resource menu, for the native-view gate.
+   * Reports state only, `false` included when the tree unmounts with it open.
+   * Not wired yet: the rows have no resource menu so far.
+   */
+  onGfsMenuOpenChange?: (open: boolean) => void
 }
 
 /** An expanded, rendered folder and its position in the tree (pre-order sibling indices). */

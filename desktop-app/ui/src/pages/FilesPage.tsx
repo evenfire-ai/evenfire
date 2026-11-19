@@ -48,6 +48,7 @@ import {
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
+import { gfsActionOpeningAuthority } from '@lib/gfsActionOpeningAuthority'
 import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
@@ -71,6 +72,7 @@ import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import type { GfsResourceActionId } from '@lib/gfsResourceActions'
 import { copyGfsDeepLink, copyGfsResourceId } from '@lib/gfsResourceClipboard'
 import { gfsRowActionAvailability } from '@lib/gfsRowActionAvailability'
 import type { GfsRowActionAvailability } from '@lib/gfsRowActionAvailability.types'
@@ -744,14 +746,30 @@ export function FilesPage({
     action()
     return true
   }
-  const openDeleteTarget = (resource: GfsActionTarget) => {
+  const runWithOpeningAuthority = (
+    target: GfsActionTarget,
+    actionId: GfsResourceActionId,
+    action: () => void
+  ) => {
+    const authority = gfsActionOpeningAuthority(target, actionId)
+    if (authority.kind === 'unverifiable') {
+      pushToast?.(authority.message, 'error')
+      return
+    }
+    if (authority.kind === 'none') {
+      action()
+      return
+    }
     void runWithFreshResourcePermissions(
-      resource,
-      resource.resourceId,
-      resource.name,
-      ['delete'],
-      () => setDeleteTarget(resource)
+      target,
+      authority.resourceId,
+      authority.resourceName,
+      [...authority.bits],
+      action
     )
+  }
+  const openDeleteTarget = (resource: GfsActionTarget) => {
+    runWithOpeningAuthority(resource, 'delete', () => setDeleteTarget(resource))
   }
   const currentPermissionPresentationAvailable = Boolean(
     (affordances ?? cachedCurrentAffordances) &&
@@ -2124,25 +2142,26 @@ export function FilesPage({
   }
 
   const openRenameTarget = (target: GfsActionTarget) => {
-    void runWithFreshResourcePermissions(target, target.resourceId, target.name, ['write'], () => {
+    runWithOpeningAuthority(target, 'rename', () => {
       setRenameTarget(target)
       setRenameDraft(target.name)
     })
   }
 
   const openMoveTarget = (target: GfsActionTarget) => {
-    const sourceParentId = target.parentResourceId
-    if (!sourceParentId) {
-      pushToast?.('Could not verify the source folder for this move.', 'error')
+    const authority = gfsActionOpeningAuthority(target, 'move')
+    if (authority.kind !== 'check') {
+      if (authority.kind === 'unverifiable') pushToast?.(authority.message, 'error')
       return
     }
+    // Only an opening that can run supersedes a pending one.
     const openGeneration = moveDialogGenerationRef.current + 1
     moveDialogGenerationRef.current = openGeneration
     void runWithFreshResourcePermissions(
       target,
-      sourceParentId,
-      'the source folder',
-      ['write', 'delete'],
+      authority.resourceId,
+      authority.resourceName,
+      [...authority.bits],
       () => {
         if (moveDialogGenerationRef.current === openGeneration) setMoveTarget(target)
       }
@@ -2272,51 +2291,39 @@ export function FilesPage({
   // row still opens the file first, because the open file is the only way
   // into the current-file view (Replace, preview, download from the title).
   const openManage = (resource: GfsDriveResource) => {
-    void runWithFreshResourcePermissions(
-      resource,
-      resource.resourceId,
-      resource.name,
-      ['manage_acl'],
-      () => {
-        setCreateFolderOpen(false)
-        if (resource.kind === 'directory') {
-          manageReturnCrumbsRef.current = null
-          setManageTarget({ resource, sessionScope, sessionGeneration: ctrl.sessionGeneration })
-          return
-        }
-        if (resource.resourceId !== current?.resourceId) {
-          beginExplicitFilesNavigation()
-          manageReturnCrumbsRef.current = [...crumbs]
-          ctrl.openResource(resource)
-        } else {
-          manageReturnCrumbsRef.current = crumbs.slice(0, -1)
-        }
-        setManageTarget({
-          resource: 'current',
-          sessionScope,
-          sessionGeneration: ctrl.sessionGeneration,
-        })
+    runWithOpeningAuthority(resource, 'share', () => {
+      setCreateFolderOpen(false)
+      if (resource.kind === 'directory') {
+        manageReturnCrumbsRef.current = null
+        setManageTarget({ resource, sessionScope, sessionGeneration: ctrl.sessionGeneration })
+        return
       }
-    )
+      if (resource.resourceId !== current?.resourceId) {
+        beginExplicitFilesNavigation()
+        manageReturnCrumbsRef.current = [...crumbs]
+        ctrl.openResource(resource)
+      } else {
+        manageReturnCrumbsRef.current = crumbs.slice(0, -1)
+      }
+      setManageTarget({
+        resource: 'current',
+        sessionScope,
+        sessionGeneration: ctrl.sessionGeneration,
+      })
+    })
   }
 
   const openManageCurrent = () => {
     if (!current) return
-    void runWithFreshResourcePermissions(
-      current,
-      current.resourceId,
-      current.name,
-      ['manage_acl'],
-      () => {
-        manageReturnCrumbsRef.current = currentIsFile ? crumbs.slice(0, -1) : null
-        setCreateFolderOpen(false)
-        setManageTarget({
-          resource: 'current',
-          sessionScope,
-          sessionGeneration: ctrl.sessionGeneration,
-        })
-      }
-    )
+    runWithOpeningAuthority(current, 'share', () => {
+      manageReturnCrumbsRef.current = currentIsFile ? crumbs.slice(0, -1) : null
+      setCreateFolderOpen(false)
+      setManageTarget({
+        resource: 'current',
+        sessionScope,
+        sessionGeneration: ctrl.sessionGeneration,
+      })
+    })
   }
 
   const currentResourceActions = current

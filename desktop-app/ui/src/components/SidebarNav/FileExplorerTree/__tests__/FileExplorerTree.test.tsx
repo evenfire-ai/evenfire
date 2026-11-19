@@ -1248,6 +1248,55 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     }
   })
 
+  it('still reports a Move whose dialog was closed while the PATCH was in flight', async () => {
+    let finishMove!: () => void
+    let markMoveStarted!: () => void
+    const moveStarted = new Promise<void>(resolve => {
+      markMoveStarted = resolve
+    })
+    const moveGate = new Promise<void>(resolve => {
+      finishMove = resolve
+    })
+    const resolved = await resolveSource()
+    const moveResource = vi.fn(async () => {
+      markMoveStarted()
+      await moveGate
+      return moveResourceReceipt(sourceResourceId, destinationAId, 5)
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve: vi.fn(async () => resolved),
+      moveResource,
+    })
+    const { pushToast, queryClient } = renderTreeWithSession()
+
+    try {
+      const dialog = await openMoveDialog()
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+      await moveStarted
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+      expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
+
+      await act(async () => {
+        finishMove()
+        await moveGate
+      })
+
+      await waitFor(() =>
+        expect(vi.mocked(pushToast).mock.calls.map(([message]) => message)).toEqual([
+          'Moved report.txt to Archive A',
+        ])
+      )
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      queryClient.clear()
+    }
+  })
+
   it('suppresses same-tuple old-generation Sidebar Move cache and presentation effects', async () => {
     let sessionGeneration = 7
     let finishMove!: () => void

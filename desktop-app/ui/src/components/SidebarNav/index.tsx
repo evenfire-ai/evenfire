@@ -48,6 +48,7 @@ export function SidebarNav({
   onSelect,
   onOpenFilesSection,
   onVisibleExpandedFoldersChange,
+  onGfsMenuOpenChange,
   onOpenPreviewSection,
   pushToast,
   toggleRequestId = 0,
@@ -694,6 +695,7 @@ export function SidebarNav({
                   }}
                   pushToast={pushToast}
                   onVisibleExpandedFoldersChange={onVisibleExpandedFoldersChange}
+                  onGfsMenuOpenChange={onGfsMenuOpenChange}
                 />
               </div>
             )}
