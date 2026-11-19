@@ -9,7 +9,7 @@ import { externalUrlToOpen } from '../../../src/externalUrl'
 import type { AgentChatMessage } from '../uiTypes'
 import { parseChatMessageDisplay } from './chatMessageAttachments'
 import { looksLikeJson } from './format'
-import { urlScheme } from './urlScheme'
+import { EXTERNAL_LINK_SCHEMES, urlScheme } from './urlScheme'
 
 type SemanticText = Text & { searchFragmentId?: string }
 
@@ -64,6 +64,8 @@ const URL_PROPERTIES = new Set(['href', 'src'])
 export function canonicalChatLinkHref(raw: unknown): string | null {
   if (typeof raw !== 'string') return null
   const scheme = urlScheme(raw)
+  if (scheme === 'gfs') return normalizeGfsResourceUri(raw)
+  if (scheme === null || !EXTERNAL_LINK_SCHEMES.has(scheme)) return null
   if (scheme === 'http' || scheme === 'https') {
     try {
       const url = new URL(raw)
@@ -80,7 +82,6 @@ export function canonicalChatLinkHref(raw: unknown): string | null {
       return null
     }
   }
-  if (scheme === 'gfs') return normalizeGfsResourceUri(raw)
   return null
 }
 

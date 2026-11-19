@@ -1,5 +1,5 @@
 import { type GfsPreviewResource, gfsResourceOpenTarget } from './gfsPreview'
-import { urlScheme } from './urlScheme'
+import { EXTERNAL_LINK_SCHEMES, urlScheme } from './urlScheme'
 
 type GfsNavigationResolution = Awaited<ReturnType<Window['clerum']['gfs']['resolveForNavigation']>>
 
@@ -49,7 +49,7 @@ export function createChatLinkActivation(deps: ChatLinkActivationDeps): ChatLink
       else deps.openFilesSection(target.gfsUri)
       return
     }
-    if (scheme === 'http' || scheme === 'https' || scheme === 'mailto') {
+    if (scheme !== null && EXTERNAL_LINK_SCHEMES.has(scheme)) {
       deps.beginUserNavigationIntent()
       try {
         await deps.openUrl(href)
