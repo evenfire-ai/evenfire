@@ -134,6 +134,7 @@ import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
+import { chooseConnectorPrincipal } from './connectorPrincipal'
 import type { CronScheduler } from './cronScheduler'
 import { referencedFilesForTurnContext } from './fileReferenceResolver'
 import {
@@ -371,10 +372,11 @@ export class TaskExecutor {
   /**
    * C15/C16 — one turn-owned attachment read ledger per executor. An executor
    * runs one task, and a task is one turn, so the ledger starts zeroed and is
-   * never reset. The native tool registry is memoized for the life of this
-   * executor, so the tool holds THIS instance by reference and the ledger
-   * mutates in place; `restore()` loads the persisted snapshot on an approval
-   * resume that continues the same turn.
+   * never reset. The native tool registry is memoized per executor but rebuilt
+   * on a connect_required Continue; every build passes THIS instance by
+   * reference, so the ledger survives the rebuild and mutates in place.
+   * `restore()` loads the persisted snapshot on an approval resume that
+   * continues the same turn.
    */
   private readonly attachmentReadLedger = new AttachmentReadLedger()
   /**
@@ -704,6 +706,13 @@ export class TaskExecutor {
       if (savedApproval) this.restoreAttachmentReadLedger(savedApproval)
       mergeCollectedAttachments(this.completedAttachments, savedApproval?.attachments ?? [])
       collectToolAttachments(savedApproval?.completed_results ?? [], this.completedAttachments)
+      if (savedApproval?.reason === 'connect_required') {
+        // The user may have linked, relinked or revoked while the prompt waited:
+        // drop the cached caller context and registry so the principal is
+        // resolved afresh on this Continue.
+        this.workflowCallerContextOverride = undefined
+        this.toolRegistryPromise = null
+      }
       this.executionBudget.start(this.abortController)
       const approvalBeforeResolution = this.conversation.pending_approval
       if (this.legacyApprovalBudget && approvalBeforeResolution) {
@@ -2264,17 +2273,18 @@ export class TaskExecutor {
   }
 
   /**
-   * Best-effort per-turn catalog bootstrap. Opens the caller's grant-backed
-   * remote OAuth partitions (per-user and SHARED oauth-context) so their tools
-   * are in the catalog this turn builds — a failure only forfeits that head start
-   * and falls back to lazy admission, so it NEVER throws. It runs once per task
-   * (createToolRegistry is cached by toolRegistryPromise), and the abort only cuts
-   * this turn's wait: the admissions belong to the manager, are coalesced there,
-   * and outlive the turn.
+   * Best-effort per-turn catalog bootstrap. Opens the connector principal's
+   * grant-backed remote OAuth partitions (per-user and SHARED oauth-context) so
+   * their tools are in the catalog this turn builds — a failure only forfeits
+   * that head start and falls back to lazy admission, so it NEVER throws. It runs
+   * on every registry build: once per task (createToolRegistry is cached by
+   * toolRegistryPromise) and again on each connect_required Continue, which
+   * drops that cache. It is skipped while the principal is withheld. The abort
+   * only cuts this turn's wait: the admissions belong to the manager, are
+   * coalesced there, and outlive the turn.
    */
-  private async bootstrapMcpCatalog(): Promise<void> {
+  private async bootstrapMcpCatalog(userId: string | undefined): Promise<void> {
     const manager = this.deps.mcpManager
-    const userId = this.task.sourceMessage?.sender
     if (!manager || !userId) return
     const started = Date.now()
     try {
@@ -2311,6 +2321,18 @@ export class TaskExecutor {
       this.workflowCallerContextOverride === undefined
         ? await this.prepareChannelWorkflowCallerContext()
         : this.workflowCallerContextOverride
+    // The connector principal is the linked Evenfire user, never the channel
+    // sender: `sender` stays the session key and approval binding.
+    const principal = chooseConnectorPrincipal(this.task, workflowCallerContext)
+    logger.info(
+      {
+        taskId: this.taskId,
+        channel: this.task.sourceMessage?.channelType,
+        principalChosen: !!principal.userId,
+        denial: principal.denial,
+      },
+      'Connector principal chosen'
+    )
     // Failover reuses this registry: any Codex provider in the chain requires
     // Codex-compatible presentation before the first provider attempt.
     const presentation = resolveToolPresentation(
@@ -2384,16 +2406,16 @@ export class TaskExecutor {
     // read, so grant-backed tools exist in the very first turn instead of after a
     // failed lazy call. Best-effort: a failure here must never invalidate the
     // registry promise or the task.
-    await this.bootstrapMcpCatalog()
+    await this.bootstrapMcpCatalog(principal.userId)
     const mcpRegistry = this.deps.mcpManager
-      ? // Thread the authenticated caller identity so oauth grantScope='user'
-        // tools dispatch to the caller's per-user partition (fail-closed when
-        // absent). buildToolRegistry runs per turn, so one userId per adapter.
-        new McpToolRegistryAdapter(
-          this.deps.mcpManager,
-          this.task.sourceMessage?.sender ?? undefined,
-          { strictValidation: presentation.codexMode !== undefined }
-        )
+      ? // Thread the connector principal from chooseConnectorPrincipal so oauth
+        // grantScope='user' tools dispatch to that user's per-user partition
+        // (fail-closed when withheld). One userId per adapter: each registry
+        // build constructs a fresh adapter.
+        new McpToolRegistryAdapter(this.deps.mcpManager, principal.userId, {
+          strictValidation: presentation.codexMode !== undefined,
+          principalDenial: principal.denial,
+        })
       : nativeRegistry
     const compositeRegistry = this.deps.mcpManager
       ? new CompositeToolRegistry(nativeRegistry, mcpRegistry)

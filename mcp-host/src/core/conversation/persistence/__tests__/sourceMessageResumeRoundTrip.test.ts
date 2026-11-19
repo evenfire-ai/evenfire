@@ -106,6 +106,56 @@ describe('#666 R4-M2 — source message resume round-trip', () => {
     // it only proves the column stores what it is given.
   })
 
+  it('persists the six-key channel identity and reconstructs it', async () => {
+    handle = makeSqliteStore()
+    const manager = new ConversationManager(handle.store)
+    const conv = await manager.getOrCreate(SESSION_KEY)
+    await manager.startTurn(conv, 'connect my account', 'task-identity')
+    const identity = {
+      medium: 'teams' as const,
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: 'a:personal-chat-1',
+      providerChannelType: 'personal',
+      providerTarget: {
+        hostRef: 'host-1',
+        communicationChannelNamespace: 'ns-1',
+        communicationChannelName: 'teams-main',
+        providerBotId: 'bot-1',
+      },
+    }
+    const sourceMessage: ResumeSourceMessage = {
+      content: 'connect my account',
+      channelType: 'teams',
+      channelId: 'a:personal-chat-1',
+      sender: 'teams-user-1',
+      timestamp: '2026-10-30T10:00:00Z',
+      messageId: 'message-identity',
+      hostRef: 'host-1',
+      providerIdentity: identity,
+    }
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-identity',
+      tool_name: 'internal__do',
+      parameters: {},
+      description: 'Approve internal__do',
+      tool_call_id: 'call-identity',
+      context_snapshot: [],
+      sourceMessage,
+      task_budget: {
+        elapsedActiveMs: 0,
+        iterationsUsed: 1,
+        durationMs: 86400000,
+        maxIterations: 1000,
+      },
+    })
+
+    const s = prepareStatements(handle.worker.db)
+    const row = s.selectPendingApprovalBySession.get(conv.id) as PendingApprovalRow
+    const reconstructed = reconstructPendingApproval(row)
+    expect(reconstructed.sourceMessage?.providerIdentity).toEqual(identity)
+  })
+
   it('persists a really admitted file: reference, digest and detected type survive, bytes and raw payload do not', async () => {
     const bytes = Buffer.from('SENTINEL-666-admitted-bytes')
     const admission = validateIncomingAttachments(
@@ -140,7 +190,12 @@ describe('#666 R4-M2 — source message resume round-trip', () => {
       hostRef: 'chatllm',
       attachments: admission.attachments,
       metadata: { teamId: 'team-1', raw: 'SENTINEL-666-raw-metadata' },
-      providerIdentity: { provider: 'SENTINEL-666-identity' },
+      providerIdentity: {
+        medium: 'teams',
+        providerUserId: 'teams-user-1',
+        providerChannelId: 'a:personal-chat-1',
+        providerEventId: 'SENTINEL-666-event',
+      },
     } as unknown as Parameters<typeof sourceMessageForResume>[0]
     await handle.store.persistSuspend(conv, {
       request_id: 'req-real',

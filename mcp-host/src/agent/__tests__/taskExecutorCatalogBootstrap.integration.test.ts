@@ -26,6 +26,7 @@ import type { GrantExistenceChecker, McpCatalogBootstrapConfig } from '../../mcp
 import { McpManager } from '../../mcp/manager'
 import type { Task } from '../../queue/types'
 import type { McpServerInfo } from '../../types'
+import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
 
 // Strict (spec-compliant) remote upstream: 401s at `initialize` when a token-less
@@ -55,6 +56,12 @@ vi.mock('../../core/net/ssrf', () => ({
   SsrfBlockedError: class SsrfBlockedError extends Error {},
   resolvePinnedPublicIp: vi.fn(async () => '93.184.216.34'),
 }))
+
+vi.mock('../../workflow/providerWorkflowCallerContextClient', () => ({
+  resolveProviderWorkflowCallerContext: vi.fn(),
+}))
+
+const UUID = '11111111-2222-4333-8444-555555555555'
 
 function remoteOauthUserServer(name = 'calendar'): McpServerInfo {
   return {
@@ -99,6 +106,26 @@ function taskFor(sender: string): Task {
     },
     conversationHistory: [{ role: 'user', content: 'Do the thing', timestamp: new Date() }],
     responseCallback: vi.fn(async () => {}),
+  }
+}
+
+function teamsTaskFor(sender: string): Task {
+  const task = taskFor(sender)
+  return {
+    ...task,
+    sourceMessage: {
+      ...task.sourceMessage!,
+      channelType: 'teams',
+      channelId: 'teams-conversation',
+      providerIdentity: {
+        medium: 'teams',
+        providerUserId: sender,
+        providerWorkspaceId: 'teams-tenant-1',
+        providerChannelId: 'teams-conversation',
+        providerChannelType: 'personal',
+        providerEventId: 'teams:conversation:activity-1',
+      },
+    },
   }
 }
 
@@ -160,10 +187,9 @@ function depsFor(
 
 async function runTurn(
   manager: McpManager,
-  sender: string,
+  task: Task,
   seenTools: string[][]
 ): Promise<{ deps: TaskExecutorDeps; executor: TaskExecutor }> {
-  const task = taskFor(sender)
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
   const deps = depsFor(manager, recordingProvider(seenTools), lifecycle)
@@ -173,6 +199,7 @@ async function runTurn(
 }
 
 afterEach(() => {
+  vi.mocked(resolveProviderWorkflowCallerContext).mockReset()
   sdk.transports = []
   sdk.probeAuth = []
   sdk.callToolImpl = null
@@ -196,7 +223,7 @@ describe('per-turn catalog bootstrap at the task level (spec §7.3)', () => {
     expect(manager.getAllTools()).toEqual([])
 
     const seenTools: string[][] = []
-    const { deps: runDeps } = await runTurn(manager, 'alice', seenTools)
+    const { deps: runDeps } = await runTurn(manager, taskFor('alice'), seenTools)
 
     expect(runDeps.onFail).not.toHaveBeenCalled()
     // The tool is in the FIRST (only) turn's definitions — bootstrap admitted the
@@ -222,15 +249,87 @@ describe('per-turn catalog bootstrap at the task level (spec §7.3)', () => {
 
     const seenTools: string[][] = []
     // Turn 1: the probe throws → backoff → the turn proceeds on lazy admission.
-    const { deps: t1 } = await runTurn(manager, 'alice', seenTools)
+    const { deps: t1 } = await runTurn(manager, taskFor('alice'), seenTools)
     expect(t1.onFail).not.toHaveBeenCalled()
     expect(seenTools[0]).not.toContain('calendar__do') // no partition opened
     expect(existsCalls).toHaveLength(1) // one probe was attempted (it threw)
 
     // Turn 2, still inside backoffMs: the plan is paused, so NO new probe POSTs.
     clock += 5_000
-    const { deps: t2 } = await runTurn(manager, 'alice', seenTools)
+    const { deps: t2 } = await runTurn(manager, taskFor('alice'), seenTools)
     expect(t2.onFail).not.toHaveBeenCalled()
     expect(existsCalls).toHaveLength(1) // still one — the backoff suppressed turn 2
+  })
+})
+
+describe('connector principal through the broker (T2)', () => {
+  function brokerManager(grantStore: Set<string>, now?: () => number) {
+    const wiring = brokerWiring(grantStore)
+    const grantExistence: GrantExistenceChecker = (queries, { timeoutMs }) =>
+      checkGrantExistence({ ...wiring.deps, timeoutMs }, queries)
+    const manager = new McpManager(undefined, undefined, wiring.factory, {
+      grantExistence,
+      catalogBootstrap: bootstrapConfig(),
+      ...(now ? { now } : {}),
+    })
+    return { manager, ...wiring }
+  }
+
+  it('a linked Teams user is probed and minted by Evenfire user id; the provider id never reaches the broker', async () => {
+    vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce({
+      targetUserId: UUID,
+      originChannelType: 'teams',
+    })
+    const { manager, existsCalls, userTokenCalls } = brokerManager(new Set([`calendar:${UUID}`]))
+    await manager.addServer(remoteOauthUserServer())
+
+    const seenTools: string[][] = []
+    await runTurn(manager, teamsTaskFor('teams-user-1'), seenTools)
+
+    expect(seenTools[0]).toContain('calendar__do')
+    expect(existsCalls.length).toBeGreaterThan(0)
+    expect(existsCalls.flat().every(q => q.userId === UUID)).toBe(true)
+    expect(userTokenCalls.length).toBeGreaterThan(0)
+    expect(userTokenCalls.every(c => c.userId === UUID)).toBe(true)
+    expect(JSON.stringify({ existsCalls, userTokenCalls })).not.toContain('teams-user-1')
+  })
+
+  it('an unresolved Teams user is never probed and sees no per-user tool', async () => {
+    vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce(null)
+    const { manager, existsCalls, userTokenCalls } = brokerManager(new Set([`calendar:${UUID}`]))
+    await manager.addServer(remoteOauthUserServer())
+
+    const seenTools: string[][] = []
+    const { deps: runDeps } = await runTurn(manager, teamsTaskFor('teams-user-1'), seenTools)
+
+    expect(existsCalls).toHaveLength(0)
+    expect(userTokenCalls).toHaveLength(0)
+    expect(seenTools[0]).not.toContain('calendar__do')
+    expect(runDeps.onFail).not.toHaveBeenCalled()
+  })
+
+  it('after the bootstrap recorded the grant absent, a callTool for that user still POSTs /user-token within the negative TTL', async () => {
+    let clock = 1_000
+    const grantStore = new Set<string>() // nobody has a grant yet
+    const { manager, existsCalls, userTokenCalls } = brokerManager(grantStore, () => clock)
+    await manager.addServer(remoteOauthUserServer())
+    vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce({
+      targetUserId: UUID,
+      originChannelType: 'teams',
+    })
+
+    const seenTools: string[][] = []
+    await runTurn(manager, teamsTaskFor('teams-user-1'), seenTools)
+    expect(existsCalls).toHaveLength(1) // probed once -> exists:false -> recordAbsent
+    expect(seenTools[0]).not.toContain('calendar__do')
+    expect(userTokenCalls).toHaveLength(0)
+
+    grantStore.add(`calendar:${UUID}`) // the person connected in Profile UI
+    clock += 1_000 // still inside negativeTtlMs
+    const result = await manager.callTool('calendar__do', {}, { userId: UUID })
+
+    expect(userTokenCalls).toEqual([{ mcpServerName: 'calendar', userId: UUID }])
+    expect(existsCalls).toHaveLength(1) // the lazy path asked no probe
+    expect(result.connectRequired).toBeUndefined()
   })
 })

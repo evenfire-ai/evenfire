@@ -1624,12 +1624,14 @@ export class McpManager {
 
     let key: string
     if (isOauthUser) {
-      // options.userId originates from the authenticated session (`sender`,
-      // rpc-proxy's auth.sub). It is forwarded verbatim as the broker grant
-      // subject: mcp-host asserts the identity, and control-api is the
-      // authorization authority that resolves the grant against it (spec §U4
-      // must-fix). Fail-closed in practice — a non-sub principal matches no grant
-      // → 404/no_grant → no token. No authz is enforced here by design.
+      // options.userId is the connector principal the task executor chose: the
+      // authenticated rpc caller (rpc-proxy's auth.sub) or the Evenfire user
+      // linked to a 1:1 channel conversation, never a channel sender id. It is
+      // forwarded verbatim as the broker grant subject: mcp-host asserts the
+      // identity, and control-api is the authorization authority that resolves
+      // the grant against it. Fail-closed in practice — a non-sub principal
+      // matches no grant → 404/no_grant → no token. No authz is enforced here
+      // by design.
       const userId = options.userId
       // Fail-closed: never resolve a token (nor forward the call) without a
       // concrete user identity on a per-user oauth server.
@@ -1640,6 +1642,7 @@ export class McpManager {
             error: `Authentication required: ${serverName} needs a per-user connection, but no user identity was provided`,
           },
           isError: true,
+          principalRequired: true,
         }
       }
       key = this.userKey(serverName, userId)

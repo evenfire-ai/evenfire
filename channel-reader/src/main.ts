@@ -280,6 +280,18 @@ function supportedTelegramOperationalChatType(value: unknown): TelegramProviderC
   return value === 'private' || value === 'group' || value === 'supergroup' ? value : null
 }
 
+/**
+ * The live Slack conversation type the reader copied from the signed event.
+ * Slack direct-message ids start with `D`, so an `im` on any other id is
+ * dropped rather than trusted; other types pass through unchanged.
+ */
+function slackHandoffChannelType(handoff: SlackMessageHandoff): string | null {
+  const value = handoff.providerChannelType
+  if (typeof value !== 'string' || !value) return null
+  if (value === 'im' && !handoff.providerChannelId.startsWith('D')) return null
+  return value
+}
+
 function providerTargetFromChannel(
   channelCRD: CommunicationChannelCRD
 ): ProviderTargetIdentity | null {
@@ -881,6 +893,7 @@ export class ChannelReader {
     }
 
     const timestampMs = Number.parseFloat(handoff.providerMessageTs) * 1000
+    const providerChannelType = slackHandoffChannelType(handoff)
     return {
       channelType: 'slack',
       channelId: handoff.providerChannelId,
@@ -894,6 +907,7 @@ export class ChannelReader {
         providerUserId: handoff.providerUserId,
         providerWorkspaceId: handoff.providerWorkspaceId,
         providerChannelId: handoff.providerChannelId,
+        ...(providerChannelType ? { providerChannelType } : {}),
         providerEventId: handoff.providerEventId,
         providerTarget,
       },

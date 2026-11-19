@@ -10,6 +10,8 @@ export type SlackMessageHandoff = {
   providerUserId: string
   providerWorkspaceId: string
   providerChannelId: string
+  /** Slack's signed event `channel_type`; an older reader sends none. */
+  providerChannelType?: string
   providerEventId: string
   providerMessageTs: string
   responseThreadTs?: string | null

@@ -1,3 +1,4 @@
+import { PRINCIPAL_DENIAL_COPY, type PrincipalDenial } from '../../agent/connectorPrincipal'
 import { serverNameOf } from '../../capabilities/toolCatalogTools'
 import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
@@ -98,7 +99,8 @@ class McpToolAdapter implements Tool {
      */
     private readonly serverName: string,
     private readonly userId: string | undefined,
-    private readonly strictValidation: boolean
+    private readonly strictValidation: boolean,
+    private readonly principalDenial?: PrincipalDenial
   ) {}
 
   name() {
@@ -236,9 +238,9 @@ class McpToolAdapter implements Tool {
         }
       }
       // Principal binding (PR #319 C2/H1): the broker grant subject is ALWAYS
-      // `this.userId` — the authenticated task sender baked in at construction
-      // (taskExecutor threads `task.sourceMessage.sender`, itself bound to the
-      // rpc-proxy edge `auth.sub` in handleMessageRoute). `params` is model /
+      // `this.userId` — the connector principal baked in at construction
+      // (taskExecutor threads the chosen principal: the rpc-proxy edge `auth.sub`
+      // for rpc tasks, the linked Evenfire user for channel tasks). `params` is model /
       // tool-arg data and is forwarded as the call payload only; it can NEVER
       // become the identity, so a `userId` field inside `params` cannot spoof
       // another user's broker token.
@@ -247,6 +249,13 @@ class McpToolAdapter implements Tool {
         ...(context?.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
         ...(context?.signal ? { signal: context.signal } : {}),
       })
+      if (result.principalRequired && this.principalDenial) {
+        return {
+          content: PRINCIPAL_DENIAL_COPY[this.principalDenial],
+          duration_ms: Date.now() - startTime,
+          is_error: true,
+        }
+      }
       const { textParts, attachments } = extractMcpContent(result.result, this.fullName)
 
       let content: string
@@ -295,17 +304,18 @@ export class McpToolRegistryAdapter implements ToolRegistry {
   private tools = new Map<string, Tool>()
 
   /**
-   * @param userId caller identity (authenticated session `sender`) threaded to
-   *   `manager.callTool` so oauth grantScope='user' tools dispatch to the
-   *   caller's per-user partition. A fresh adapter is built per turn, so it
-   *   always carries exactly one userId.
+   * @param userId the connector principal threaded to `manager.callTool` so
+   *   oauth grantScope='user' tools dispatch to that user's per-user partition:
+   *   the authenticated rpc caller, or the linked Evenfire user of a 1:1
+   *   channel conversation. Absent when the principal is withheld. A fresh
+   *   adapter is built per registry build, so it carries exactly one userId.
    */
   constructor(
     private readonly mcpManager: McpManager,
     private readonly userId?: string,
     // Codex bridge dispatch promises local, bounded schema validation. Other
     // providers retain their existing MCP server-side validation contract.
-    private readonly options: { strictValidation?: boolean } = {}
+    private readonly options: { strictValidation?: boolean; principalDenial?: PrincipalDenial } = {}
   ) {
     this.refresh()
   }
@@ -351,7 +361,8 @@ export class McpToolRegistryAdapter implements ToolRegistry {
           this.mcpManager,
           serverNameOf(mcpTool),
           this.userId,
-          this.options.strictValidation === true
+          this.options.strictValidation === true,
+          this.options.principalDenial
         )
       )
     }

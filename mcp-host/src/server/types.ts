@@ -25,6 +25,7 @@ export interface ProviderIdentity {
     communicationChannelName: string
     providerBotId?: string | null
     providerBotUsername?: string | null
+    communicationChannelAlias?: string | null
   }
 }
 

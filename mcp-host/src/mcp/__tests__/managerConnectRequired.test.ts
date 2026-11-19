@@ -162,6 +162,17 @@ beforeEach(() => {
 })
 
 describe('manager.callTool — U5 reactive consent classification', () => {
+  it('no user identity on an oauth-user server → principalRequired marker, no connect_required', async () => {
+    const manager = new McpManager(undefined, undefined, tokenFactory())
+    await manager.addServer(oauthUserServer('monday'))
+    for (const userId of [undefined, 'anonymous']) {
+      const result = await manager.callTool('monday__do', {}, { userId })
+      expect(result.isError).toBe(true)
+      expect(result.principalRequired).toBe(true)
+      expect(result.connectRequired).toBeUndefined()
+    }
+  })
+
   it('401 on an oauth server → typed connect_required marker (mcpServerName only)', async () => {
     const manager = new McpManager(undefined, undefined, tokenFactory())
     await manager.addServer(oauthUserServer('monday'))
