@@ -141,43 +141,40 @@ function assertExpectedContextAndPortForwards(): void {
   }
 }
 
-async function loginProfileUi(page: Page, baseUrl: string): Promise<void> {
-  await page.goto(baseUrl)
+async function loginProfileUi(page: Page): Promise<void> {
+  // E2E_GUARDIAN_NAVIGATION: root-entry — ordinary password login owns this session.
+  await page.goto('/')
   const emailInput = page.getByLabel('Email')
   await expect(emailInput).toBeVisible({ timeout: 30_000 })
   await emailInput.fill(E2E_EMAIL)
   await page.getByLabel('Password').fill(E2E_DESKTOP_PASSWORD)
+  const loginResponse = page.waitForResponse(
+    response =>
+      response.url().endsWith('/api/v1/auth/password-login') &&
+      response.request().method() === 'POST'
+  )
   await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page.getByRole('link', { name: 'Approval Channels' })).toBeVisible({
+  expect((await loginResponse).status()).toBe(200)
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toBeVisible({
     timeout: 30_000,
   })
 }
 
-async function openApprovalChannels(page: Page, baseUrl: string): Promise<void> {
-  await page.getByRole('link', { name: 'Approval Channels' }).click()
-  await expect(page).toHaveURL(`${baseUrl}/approval-channels`)
-  await expect(
-    page.locator('header').getByRole('heading', { name: 'Approval Channels' })
-  ).toBeVisible()
-  const manageButton = page.getByRole('button', { name: 'Manage' })
-  await expect(manageButton).toBeVisible({ timeout: 30_000 })
-  await manageButton.click()
-  await expect(page).toHaveURL(`${baseUrl}/settings/social/telegram`)
-  await expect(page.getByRole('tab', { name: 'Social channels' })).toHaveAttribute(
-    'aria-selected',
-    'true'
-  )
+async function openSocialChannels(page: Page, baseUrl: string): Promise<void> {
+  await page.getByRole('link', { name: 'Social channels' }).click()
+  await expect(page).toHaveURL(`${baseUrl}/channels/telegram`)
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Telegram' })).toHaveAttribute('aria-selected', 'true')
 }
 
 async function startTelegramConnection(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Connect Telegram' }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByRole('heading', { name: 'Connect Telegram' })).toBeVisible()
+  await expect(dialog.getByRole('heading', { name: 'Verify your Telegram channel' })).toBeVisible()
   const continueButton = dialog.getByRole('button', { name: 'Continue' })
   await expect(continueButton).toBeEnabled()
   await continueButton.click()
-  await expect(dialog.getByRole('heading', { name: 'Verify Telegram' })).toBeVisible()
+  await expect(page.getByTestId('telegram-verification-command')).toBeVisible()
 }
 
 async function visibleVerificationCode(page: Page): Promise<string> {
@@ -285,9 +282,9 @@ test.describe('Profile UI Telegram approval medium verification', () => {
           telegramPortForward = telegram.portForward
           await setTelegramClientIdentity(telegramPage, VERIFIED_TELEGRAM_IDENTITY)
 
-          profilePage = await browser.newPage()
-          await loginProfileUi(profilePage, profileUiBaseUrl)
-          await openApprovalChannels(profilePage, profileUiBaseUrl)
+          profilePage = await browser.newPage({ baseURL: profileUiBaseUrl })
+          await loginProfileUi(profilePage)
+          await openSocialChannels(profilePage, profileUiBaseUrl)
         }
       )
       if (!telegramPage || !profilePage) {
@@ -366,7 +363,7 @@ test.describe('Profile UI Telegram approval medium verification', () => {
           )
           await profilePage.getByRole('dialog').getByRole('button', { name: 'Confirm' }).click()
           const privateAccountRow = profilePage
-            .locator('.settings-target-row')
+            .getByRole('row')
             .filter({ hasText: TELEGRAM_CHANNEL_NAME })
             .filter({ hasText: 'Private chat' })
           await expect(privateAccountRow).toBeVisible({ timeout: 30_000 })
@@ -505,11 +502,12 @@ test.describe('Profile UI Telegram approval medium verification', () => {
 
       await watchdogStep('disconnect verified Telegram identity', 45_000, async () => {
         const verifiedAccountRow = profilePage
-          .locator('.settings-target-row')
+          .getByRole('row')
           .filter({ hasText: TELEGRAM_CHANNEL_NAME })
           .filter({ hasText: 'Private chat' })
         await expect(verifiedAccountRow).toBeVisible({ timeout: 30_000 })
-        await verifiedAccountRow.getByRole('button', { name: 'Delete' }).click()
+        await verifiedAccountRow.getByRole('button', { name: /Actions for/ }).click()
+        await profilePage!.getByRole('menuitem', { name: 'Delete connection' }).click()
         await profilePage.getByRole('button', { name: 'Delete connection' }).click()
         await expect(profilePage.getByText('Telegram identity disconnected.')).toBeVisible({
           timeout: 30_000,

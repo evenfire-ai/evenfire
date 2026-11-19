@@ -97,7 +97,7 @@ The read-inventory test scans all production TypeScript under `src` for direct
 dot-property `readNamespaced*`/`readCluster*` calls. Each must be observed or match an explicit
 exclusion keyed by file, enclosing operation and SDK method, with an expected
 expression count and reason. It currently accounts for 26 observed expressions
-and 43 excluded ones. New unclassified reads and stale exclusions fail the test.
+and 46 excluded ones. New unclassified reads and stale exclusions fail the test.
 The plan's forecast of 27 reads became 26: 21 original expressions plus six new
 ones minus the duplicate channel-reader Deployment expression. That retry now
 uses the helper's validated read callback; no retry path was removed.

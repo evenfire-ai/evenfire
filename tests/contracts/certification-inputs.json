@@ -24,7 +24,8 @@
       "grok-llm-proxy"
     ],
     "desktop-app": [
-      "mcp-host"
+      "mcp-host",
+      "control-api"
     ],
     "profile-ui": [
       "packages/frontend-components"

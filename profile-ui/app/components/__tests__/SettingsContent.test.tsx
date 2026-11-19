@@ -11,16 +11,14 @@ const mocks = vi.hoisted(() => ({
   buildDesktopEnvironmentLink: vi.fn(),
   checkAuth: vi.fn(),
   confirm: vi.fn(),
-  disconnectWorkflowApprovalMedium: vi.fn(),
   getConfiguredExternalRestApiBaseUrl: vi.fn(),
   getDesktopEnvironment: vi.fn(),
   getMe: vi.fn(),
   isSilentApiError: vi.fn(),
-  listWorkflowApprovalMediums: vi.fn(),
   logout: vi.fn(),
   navigateToDesktopApp: vi.fn(),
-  refreshApprovalTargets: vi.fn(),
   refreshReleaseIdentity: vi.fn(),
+  refreshApprovalTargets: vi.fn(),
   routerPush: vi.fn(),
   routerReplace: vi.fn(),
   showToast: vi.fn(),
@@ -70,15 +68,23 @@ vi.mock('@components/ConfirmDialog', () => ({
   useConfirmDialog: () => ({ confirm: mocks.confirm, confirmDialog: null }),
 }))
 
-vi.mock('@components/ProfileAccessContext', () => ({
-  useProfileAccess: () => ({
-    approvalTargets: [],
-    refreshApprovalTargets: mocks.refreshApprovalTargets,
-  }),
-}))
-
 vi.mock('@components/ProfileBodySkeleton', () => ({
   ProfileBodySkeleton: () => null,
+}))
+
+const access = vi.hoisted(() => ({ approvalTargets: [{ id: 'slack-target' }] }))
+
+vi.mock('@components/ProfileAccessContext', () => ({
+  useProfileAccess: () => ({
+    approvalTargets: access.approvalTargets,
+    approvalTargetsLoading: false,
+    canManageMembers: false,
+    manageableTeams: [],
+    manageableTeamsError: false,
+    manageableTeamsLoading: false,
+    refreshApprovalTargets: mocks.refreshApprovalTargets,
+    refreshManageableTeams: vi.fn(),
+  }),
 }))
 
 vi.mock('@components/ProfileShell', () => ({
@@ -102,11 +108,6 @@ vi.mock('@lib/api', () => ({
   updateProfile: mocks.updateProfile,
 }))
 
-vi.mock('@lib/approvalChannels', () => ({
-  disconnectWorkflowApprovalMedium: mocks.disconnectWorkflowApprovalMedium,
-  listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums,
-}))
-
 vi.mock('@lib/desktopAppLinks', async importOriginal => {
   const actual = await importOriginal<typeof import('@lib/desktopAppLinks')>()
   return {
@@ -122,19 +123,51 @@ vi.mock('@lib/releaseIdentity', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
+  access.approvalTargets = [{ id: 'slack-target' }]
+  mocks.refreshApprovalTargets.mockResolvedValue(undefined)
   vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'true')
   mocks.buildDesktopEnvironmentLink.mockReturnValue(null)
   mocks.getConfiguredExternalRestApiBaseUrl.mockReturnValue('https://api.example.com')
   mocks.getDesktopEnvironment.mockResolvedValue(desktopEnvironment)
   mocks.getMe.mockResolvedValue(currentUser)
   mocks.isSilentApiError.mockReturnValue(false)
-  mocks.listWorkflowApprovalMediums.mockResolvedValue([])
-  mocks.refreshApprovalTargets.mockResolvedValue([])
 })
 
 afterEach(() => {
   cleanup()
   vi.unstubAllEnvs()
+})
+
+describe('Settings header structure', () => {
+  it('refreshes channel access so newly granted approval settings become visible', async () => {
+    access.approvalTargets = []
+    render(<SettingsContent />)
+    const refresh = await screen.findByRole('button', { name: 'Refresh settings' })
+    await waitFor(() => expect(refresh).toBeEnabled())
+    expect(screen.queryByRole('tab', { name: 'Approval channels' })).not.toBeInTheDocument()
+    mocks.refreshApprovalTargets.mockImplementationOnce(async () => {
+      access.approvalTargets = [{ id: 'new-target' }]
+    })
+    fireEvent.click(refresh)
+    expect(await screen.findByRole('tab', { name: 'Approval channels' })).toBeInTheDocument()
+    expect(mocks.refreshApprovalTargets).toHaveBeenLastCalledWith({ force: true })
+  })
+
+  it('renders the lean shared header used by the other sections', async () => {
+    render(<SettingsContent />)
+
+    expect(await screen.findByRole('button', { name: 'Refresh settings' })).toBeInTheDocument()
+    expect(screen.queryByText('Profile settings')).toBeNull()
+    expect(screen.queryByText(/Signed in as/)).toBeNull()
+
+    const toolbar = screen
+      .getByRole('button', { name: 'Refresh settings' })
+      .closest('.toolbar') as HTMLElement | null
+    expect(toolbar).not.toBeNull()
+    expect(
+      within(toolbar as HTMLElement).getByRole('button', { name: 'Setup desktop app' })
+    ).toBeInTheDocument()
+  })
 })
 
 describe('Settings desktop setup handoff', () => {
@@ -143,7 +176,7 @@ describe('Settings desktop setup handoff', () => {
       'evenfire://desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.com&tenantName=Example+Tenant'
     mocks.buildDesktopEnvironmentLink.mockReturnValue(desktopHref)
 
-    render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+    render(<SettingsContent />)
 
     const setupButton = await screen.findByRole('button', { name: 'Setup desktop app' })
     await waitFor(() => expect(setupButton).toBeEnabled())
@@ -163,7 +196,7 @@ describe('Settings desktop setup handoff', () => {
   it('keeps manual REST setup available while automatic handoff is disabled', async () => {
     vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'false')
 
-    render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+    render(<SettingsContent />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Setup desktop app' }))
 
@@ -194,7 +227,7 @@ describe('Settings password update recovery messaging', () => {
     )
 
     try {
-      render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+      render(<SettingsContent />)
       const openButton = await screen.findByRole('button', { name: 'Update password' })
       fireEvent.click(openButton)
 

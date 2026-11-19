@@ -340,7 +340,6 @@ describe('parseHeartbeatPollMs (config load validation)', () => {
     const { parseHeartbeatPollMs } = await import('../src/config')
     expect(parseHeartbeatPollMs(undefined)).toBe(10_000)
     expect(parseHeartbeatPollMs('')).toBe(10_000)
-    expect(parseHeartbeatPollMs('   ')).toBe(10_000)
   })
 
   it('parses an explicitly-set positive integer', async () => {
@@ -351,7 +350,7 @@ describe('parseHeartbeatPollMs (config load validation)', () => {
 
   it('fails config load loudly on garbage values', async () => {
     const { parseHeartbeatPollMs } = await import('../src/config')
-    for (const bad of ['banana', '0', '-5', '1.5', '10s', 'NaN', 'Infinity']) {
+    for (const bad of ['banana', '0', '-5', '1.5', '10s', 'NaN', 'Infinity', '   ']) {
       expect(() => parseHeartbeatPollMs(bad)).toThrow(/positive integer/)
     }
   })

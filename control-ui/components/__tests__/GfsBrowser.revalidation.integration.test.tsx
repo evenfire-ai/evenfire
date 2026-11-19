@@ -18,7 +18,6 @@ const controlApiProducerConfig = vi.hoisted(() => ({
   entityChangeStreamHeartbeatMs: 20_000,
   entityChangeStreamMaxLifetimeMs: 600_000,
   entityChangeStreamPollMs: 250,
-  entityChangeUserVisibilityRefreshMs: 4_000,
   entityChangeStreamMaxConnections: 256,
   entityChangeStreamMaxConnectionsPerPrincipal: 32,
 }))
@@ -126,14 +125,7 @@ async function controlApiProducerFrame(): Promise<string> {
   controlApiProducer.subscribeEntityChangeFeedWake.mockReturnValue(vi.fn())
   const req = new ProducerRequest()
   const res = new ProducerResponse()
-  streamEntityChanges(
-    req as never,
-    res as never,
-    null,
-    async () => true,
-    'operator',
-    'control-ui-integration'
-  )
+  streamEntityChanges(req as never, res as never, null, async () => true, 'control-ui-integration')
   await vi.waitFor(() => expect(res.frames.length).toBeGreaterThan(0))
   const frame = res.frames
     .map(value => value.trim())

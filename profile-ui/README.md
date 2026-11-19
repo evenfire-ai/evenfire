@@ -5,8 +5,10 @@
 ## Features
 
 - Password login through `external-rest-api /api/v1/auth/password-login`
-- Authenticated profile home with the signed-in user and email
-- Authenticated settings surface at `/settings` (redirects to `/settings/profile`) for editing your profile, changing your password, and managing social channels (`/settings/social`, `/settings/social/[network]`)
+- Signed-in landing redirects from `/` to `/channels`, then to `/channels/telegram`
+- Social channel connections and verification at `/channels/[network]` (`telegram`, `slack`, or `teams`), with account status and record actions
+- Authenticated settings at `/settings` (redirects to `/settings/profile`) for editing your profile and changing your password; approval preferences live at `/settings/approval-channels`
+- Compatibility redirects preserve existing `/settings/social` and `/settings/social/[network]` links; `/approval-channels` redirects to `/settings/approval-channels`
 - Authenticated member invitation route at `/members/invite`, which posts to `external-rest-api /api/v1/members/invite`
 - Invitation confirmation route at `/invitations/[token]`
 - Desktop app authorization route at `/desktop-setup`

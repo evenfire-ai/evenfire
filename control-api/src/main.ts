@@ -18,6 +18,7 @@ import {
   startEntityChangeDispatcher,
   stopEntityChangeDispatcher,
 } from './services/entityChangeService.js'
+import { closeGfsWatchPool } from './services/gfsWatch/process.js'
 import { catalogPruneFromGateway } from './services/llmCatalogPrune.js'
 import { syncDiscoveredModels } from './services/llmCatalogSync.js'
 import {
@@ -108,6 +109,7 @@ const shutdown = createShutdownHandler(async () => {
       'oauth-shared-grant-sweep': stopOauthSharedGrantSweepCron,
       'workflow-approval-trace-projector': stopWorkflowApprovalTraceProjector,
       'entity-change-dispatcher': stopEntityChangeDispatcher,
+      'watch-database-pool': closeGfsWatchPool,
       'core-database-pool': () => pool.end(),
       'rate-limit-database-pool': () => rateLimitPool.end(),
       'trace-database-pools': closeTracingPools,

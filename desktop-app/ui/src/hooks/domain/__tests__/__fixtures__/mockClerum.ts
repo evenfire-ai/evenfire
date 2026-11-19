@@ -60,6 +60,7 @@ interface ChatMock {
 
 interface RpcMock {
   invokeHostMessage: Fn
+  setHostModel: Fn
   getTaskResult: Fn
   listSessions: Fn
   loadSessionMessages: Fn
@@ -158,6 +159,13 @@ export function installMockClerum(): MockClerum {
 
   const rpc = {
     invokeHostMessage: vi.fn(async () => ({ taskId: 'task-default' })),
+    // Accepts every write with the `SetHostModelResult` shape the bridge returns.
+    setHostModel: vi.fn(async (_hostRef: string, _chatId: string, model: string) => ({
+      effective: 'next-task' as const,
+      provider: 'mock',
+      model,
+      modelSelectionRevision: 1,
+    })),
     getTaskResult: vi.fn(async () => ({ response: 'ok' })),
     listSessions: vi.fn(async () => ({ items: [] })),
     loadSessionMessages: vi.fn(async () => ({ agent: '', chatId: '', turns: [] })),
