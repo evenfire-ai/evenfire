@@ -319,6 +319,19 @@ describe('provider event receipt claims', () => {
     assert.equal(assertAccepts(validateProviderEventReceiptClaims, decoded).aud, PROVIDER_EVENT_RECEIPT_AUDIENCE)
   })
 
+  it('refuses a Teams conversation id that carries a messageid parameter in any spelling', () => {
+    assert.equal(assertAccepts(validateProviderEventReceiptClaims, teams).conversationId, teams.conversationId)
+    for (const suffix of [';messageid=1', ';messageId=1', ';MESSAGEID=1', '?messageid=1', '&messageid=1', ';messageid=']) {
+      const value = { ...teams, conversationId: `${teams.conversationId}${suffix}` }
+      assertRejects(validateProviderEventReceiptClaims, value, RECEIPT_ERROR, 'conversationId', suffix)
+    }
+    const noSeparator = { ...teams, conversationId: '19:messageid=fixture@thread.v2' }
+    assert.equal(assertAccepts(validateProviderEventReceiptClaims, noSeparator).conversationId, noSeparator.conversationId)
+    // The rule is Teams-only: a Slack conversation id is not checked for it.
+    const slack = { ...message, conversationId: `${message.conversationId};messageid=1` }
+    assert.equal(assertAccepts(validateProviderEventReceiptClaims, slack).conversationId, slack.conversationId)
+  })
+
   it('accepts an action receipt whose clicked value is not a pause action', () => {
     assert.equal(assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.action.other.json')).action, null)
   })

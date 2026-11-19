@@ -49,7 +49,7 @@ export type ProviderEventReceiptClaims = {
   readonly deliveryAlias: string | null
   /** Slack: the sender's own team or enterprise id when the event carries one */
   readonly senderScopeId: string | null
-  /** Slack channel id; Teams conversation id without ";messageid=" */
+  /** Slack channel id; Teams conversation id without a `messageid=` parameter (after `;`, `?` or `&`, any letter case) */
   readonly conversationId: string
   /** set on eventKind 'message'; null on 'action' */
   readonly conversationKind: ConversationKind | null

@@ -60,7 +60,8 @@ const ATTESTING_COMPONENTS = Object.freeze(['control-api', 'approval-reader'])
 const AUDIENCE_MODES = Object.freeze(['members', 'workspace'])
 const REPLY_STYLES = Object.freeze(['thread', 'conversation', 'quote'])
 const CHANNEL_REF_PATTERN = /^[^/\s]+\/[^/\s]+$/
-const TEAMS_MESSAGE_ID_SUFFIX = ';messageid='
+// A messageid parameter after ;, ? or &, in any letter case. An empty value is refused too.
+const TEAMS_MESSAGE_ID_PATTERN = /[;?&]messageid=/i
 
 const RECEIPT_KEYS = Object.freeze([
   'ver',
@@ -225,7 +226,7 @@ function validateProviderEventReceiptClaims(input) {
     checkReceipt(value.deliveryAlias === null, 'deliveryAlias')
   } else {
     checkReceipt(value.providerOrgId === null, 'providerOrgId')
-    checkReceipt(!value.conversationId.includes(TEAMS_MESSAGE_ID_SUFFIX), 'conversationId')
+    checkReceipt(!TEAMS_MESSAGE_ID_PATTERN.test(value.conversationId), 'conversationId')
   }
   checkReceipt(isText(value.eventId), 'eventId')
   checkReceipt(ATTESTING_COMPONENTS.includes(value.attestedBy), 'attestedBy')
