@@ -621,6 +621,13 @@ async function createWindow(): Promise<void> {
       diagramRenderer?.close()
     }
   })
+  // A reload or a crash replaces the chat's page; the diagrams the old page
+  // asked for would only keep the new one waiting.
+  const endDiagramsOfReplacedPage = () => {
+    if (mainWindow === window) diagramRenderer?.close()
+  }
+  window.webContents.on('did-navigate', endDiagramsOfReplacedPage)
+  window.webContents.on('render-process-gone', endDiagramsOfReplacedPage)
   wireMainWindowRendererReadiness({
     webContents: window.webContents,
     isCurrentWindow: () => mainWindow === window,

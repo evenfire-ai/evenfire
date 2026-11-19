@@ -1,7 +1,15 @@
 import { BrowserWindow, type Session, session } from 'electron'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  DIAGRAM_MAX_CODE_CHARS,
+  DIAGRAM_MAX_IMAGE_SIDE_PX,
+  DIAGRAM_MAX_IMAGE_URL_CHARS,
+  DIAGRAM_MAX_WIDTH_PX,
+  DIAGRAM_MIN_WIDTH_PX,
+} from './diagramLimits.js'
 import type { DiagramDrawRequest, DiagramDrawResult } from './types.js'
+import { markUntrustedIpcSender } from './untrustedIpcSenders.js'
 
 /**
  * Draws the chat's Mermaid diagrams in a hidden window of their own.
@@ -12,15 +20,10 @@ import type { DiagramDrawRequest, DiagramDrawResult } from './types.js'
  * process: a sandboxed hidden window with no preload, an in-memory session that
  * refuses every request outside the app's own files, and a strict policy in its
  * page. The main process sends one diagram at a time and, when one takes too
- * long, kills that process; the next diagram starts a new one.
+ * long, kills that process; the next diagram starts a new one. Code that never
+ * finishes, or whose drawing ends that process twice, is not drawn again in
+ * the session.
  */
-
-/** The main process's own copies of the chat's limits. */
-export const DIAGRAM_MAX_CODE_CHARS = 20_000
-export const DIAGRAM_MIN_WIDTH_PX = 100
-export const DIAGRAM_MAX_WIDTH_PX = 4_000
-export const DIAGRAM_MAX_IMAGE_URL_CHARS = 4 * 1024 * 1024
-export const DIAGRAM_MAX_IMAGE_SIDE_PX = 100_000
 
 export const DIAGRAM_START_TIMEOUT_MS = 20_000
 export const DIAGRAM_DRAW_TIMEOUT_MS = 10_000
@@ -31,12 +34,20 @@ const DIAGRAM_PARTITION = 'diagram-renderer'
 const DIAGRAM_PAGE = 'diagram.html'
 const IMAGE_URL_PREFIX = 'data:image/svg+xml;charset=utf-8,'
 const FONT_FAMILY_PATTERN = /^[\w\s"',.-]{1,200}$/
-const MAX_REMEMBERED_TIMEOUTS = 64
+const MAX_REMEMBERED_CODES = 64
 const MAX_REASON_CHARS = 200
 const MAX_LABEL_CHARS = 300
+// WebRTC goes past the session's request filter and the page's policy. Its UDP
+// is off in the drawing window, and its TCP can only use this proxy, where
+// nothing listens. Loopback addresses skip it, which leaves the dev server.
+const UNREACHABLE_PROXY = 'http://127.0.0.1:9'
 
 const INVALID: DiagramDrawResult = { ok: false, reason: 'The diagram request is not valid' }
 const TIMED_OUT: DiagramDrawResult = { ok: false, reason: 'Drawing it took too long' }
+const CRASHED: DiagramDrawResult = {
+  ok: false,
+  reason: 'Drawing it stopped the diagram renderer',
+}
 // Retryable: the same code may draw once the renderer is back.
 const NOT_STARTED: DiagramDrawResult = {
   ok: false,
@@ -87,6 +98,12 @@ export type DiagramRendererOptions = {
   drawTimeoutMs: number
   idleCloseMs: number
   maxWaiting: number
+}
+
+/** Adds the code to a list that keeps only the most recent ones. */
+function rememberCode(list: string[], code: string): void {
+  list.push(code)
+  if (list.length > MAX_REMEMBERED_CODES) list.shift()
 }
 
 function within<T>(work: Promise<T>, timeoutMs: number): Promise<T | typeof TIMEOUT> {
@@ -157,8 +174,12 @@ export class DiagramRenderer {
   // Moves on at every close(): what was asked for before opens no new window.
   private generation = 0
   private idleTimer: ReturnType<typeof setTimeout> | null = null
-  // Code that never finished: refused at once for the rest of the session.
+  // Code that never finished, or whose drawing ended the window's process
+  // twice: refused at once for the rest of the session.
   private readonly timedOut: string[] = []
+  private readonly crashed: string[] = []
+  // Code that was drawing when the window's process died once.
+  private readonly crashedOnce: string[] = []
 
   constructor(private readonly options: DiagramRendererOptions) {}
 
@@ -166,6 +187,7 @@ export class DiagramRenderer {
     const request = parseDiagramDrawRequest(input)
     if (!request) return Promise.resolve(INVALID)
     if (this.timedOut.includes(request.code)) return Promise.resolve(TIMED_OUT)
+    if (this.crashed.includes(request.code)) return Promise.resolve(CRASHED)
     if (this.waiting >= this.options.maxWaiting) return Promise.resolve(BUSY)
     this.waiting += 1
     const generation = this.generation
@@ -217,19 +239,35 @@ export class DiagramRenderer {
         this.closeSurface(open)
         return STOPPED
       }
-      // The window was closed or its process died: the code is not to blame.
-      if (answer === ENDED) return STOPPED
+      if (answer === ENDED) {
+        // Closed by close(): the code is not to blame.
+        if (generation !== this.generation) return STOPPED
+        return this.noteProcessDeath(request.code)
+      }
       if (answer === TIMEOUT) {
         // A busy page never answers; ending its process is the only way to stop it.
         this.closeSurface(open)
-        this.timedOut.push(request.code)
-        if (this.timedOut.length > MAX_REMEMBERED_TIMEOUTS) this.timedOut.shift()
+        rememberCode(this.timedOut, request.code)
         return TIMED_OUT
       }
       return readDiagramDrawAnswer(answer)
     } finally {
       if (generation === this.generation) this.scheduleIdleClose()
     }
+  }
+
+  /**
+   * The window's process died while it drew this code. Once may be the
+   * system's doing, and the chat asks once more; a second time, the code is
+   * to blame and is refused like code that never finishes.
+   */
+  private noteProcessDeath(code: string): DiagramDrawResult {
+    if (!this.crashedOnce.includes(code)) {
+      rememberCode(this.crashedOnce, code)
+      return STOPPED
+    }
+    rememberCode(this.crashed, code)
+    return CRASHED
   }
 
   private openSurface(): OpenSurface {
@@ -329,18 +367,28 @@ export function diagramPageFor(input: { devUrl: string; uiDistDir: string; windo
   }
 }
 
-const hardenedSessions = new WeakSet<Session>()
+// Applied once per session; resolves when its proxy is in place.
+const hardenedSessions = new WeakMap<Session, Promise<void>>()
 
-/** No permission, no download, and no request outside the drawing page's files. */
-function applyDiagramSessionPolicies(ses: Session, allows: (requestUrl: string) => boolean): void {
-  if (hardenedSessions.has(ses)) return
-  hardenedSessions.add(ses)
+/**
+ * No permission, no download, no request outside the drawing page's files,
+ * and only a proxy that leads nowhere.
+ */
+function applyDiagramSessionPolicies(
+  ses: Session,
+  allows: (requestUrl: string) => boolean
+): Promise<void> {
+  const applied = hardenedSessions.get(ses)
+  if (applied) return applied
   ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   ses.setPermissionCheckHandler(() => false)
   ses.on('will-download', event => event.preventDefault())
   ses.webRequest.onBeforeRequest((details, callback) => {
     callback({ cancel: !allows(details.url) })
   })
+  const proxied = ses.setProxy({ mode: 'fixed_servers', proxyRules: UNREACHABLE_PROXY })
+  hardenedSessions.set(ses, proxied)
+  return proxied
 }
 
 /** The production surface: a sandboxed hidden window that loads the drawing page. */
@@ -349,7 +397,7 @@ export function createHiddenDiagramSurface(page: {
   allows: (requestUrl: string) => boolean
 }): DiagramSurface {
   const partitionSession = session.fromPartition(DIAGRAM_PARTITION, { cache: false })
-  applyDiagramSessionPolicies(partitionSession, page.allows)
+  const policies = applyDiagramSessionPolicies(partitionSession, page.allows)
   const window = new BrowserWindow({
     show: false,
     skipTaskbar: true,
@@ -373,6 +421,9 @@ export function createHiddenDiagramSurface(page: {
     },
   })
   const contents = window.webContents
+  // Its page loads from the app's files, but it handles the agent's code.
+  markUntrustedIpcSender(contents)
+  contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp')
   contents.setWindowOpenHandler(() => ({ action: 'deny' }))
   contents.on('will-navigate', event => event.preventDefault())
   contents.on('will-redirect', event => event.preventDefault())
@@ -388,6 +439,7 @@ export function createHiddenDiagramSurface(page: {
   window.on('closed', markGone)
   return {
     async ready() {
+      await policies
       await window.loadURL(page.url)
       const ready = await contents.executeJavaScript("typeof window.__drawDiagram === 'function'")
       if (ready !== true) throw new Error('The diagram page did not load')

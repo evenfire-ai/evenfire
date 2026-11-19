@@ -162,8 +162,11 @@ main process opens on the first diagram: no preload, an in-memory session that
 refuses every request outside the app's own files, and a page policy that
 allows only the app's scripts and inline images. The main process sends one
 diagram at a time and ends that window's process when a drawing takes more
-than 10 seconds; the window also closes after two idle minutes, when its
-process dies and with the main window, so it never keeps the app running. The
+than 10 seconds; code that times out, or whose drawing ends that process
+twice, is not drawn again in the session. The window also closes after two
+idle minutes, when its process dies and with the main window, so it never
+keeps the app running, and a reload of the main window drops the diagrams the
+old page asked for. The
 agent's code is treated as untrusted: Mermaid runs in `strict` mode with its
 config locked against the diagram, and the chat shows the result as an image
 of the SVG, which cannot run script, load anything or restyle the app. See the
