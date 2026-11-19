@@ -85,16 +85,19 @@ describe('key set changes over PUT', () => {
 
   it('T-CB2: five list changes during one PUT cost two PUTs and no open', async () => {
     await start()
+    await h.until(() => h.linkKind() === 'Ready')
     h.server.putPolicy = () => ({ kind: 'hold' })
     const o = h.owner()
     const uid = st().session!.binding!.userId
-    for (const keys of [[A], [B], [A, B], [C], [C, D]])
+    h.client.setSubscriptions(o, { keys: [A], userId: uid }, o.frameToken)
+    await h.until(() => h.server.openPuts().length === 1)
+    expect(openPut().keys).toEqual([A])
+    for (const keys of [[B], [A, B], [C], [C, D]])
       h.client.setSubscriptions(o, { keys, userId: uid }, o.frameToken)
-    await h.settle()
     expect(puts()).toHaveLength(1)
     h.server.putPolicy = () => ({ kind: 'accept' })
     h.server.answerPut(openPut(), { kind: 'accept' })
-    await h.settle()
+    await h.until(() => puts().length >= 2 && st().put === null)
     expect(puts()).toHaveLength(2)
     expect(puts()[1]!.keys).toEqual([C, D])
     expect([...h.server.current()!.keys]).toEqual([C, D])
