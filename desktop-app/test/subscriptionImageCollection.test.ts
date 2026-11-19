@@ -30,6 +30,7 @@ function collectionEnv(root: string): NodeJS.ProcessEnv {
   return {
     PATH: path.dirname(process.execPath),
     HOME: root,
+    PWTEST_CACHE_DIR: path.join(root, 'playwright-cache'),
     E2E_SUBSCRIPTION_IMAGE_INPUT: '1',
     E2E_SUBSCRIPTION_IMAGE_MODE: 'fixture',
     SUBSCRIPTION_IMAGE_FIXTURE_CONFIRM: '1',
@@ -74,11 +75,19 @@ describe('subscription image configuration collection safety', () => {
     expect(project?.testIgnore).toContain('**/subscription-image-input.spec.ts')
   })
   it('actual Playwright config rejects absent opt-ins before any fixture activation', () => {
-    const result = list({ PATH: path.dirname(process.execPath) })
-    expect(result.error).toBeUndefined()
-    expect(result.status).toBe(1)
-    expect(result.stdout + result.stderr).toContain('requires E2E_SUBSCRIPTION_IMAGE_INPUT=1')
-    expect(result.stdout + result.stderr).not.toContain('Physical runner')
+    const root = realFs.mkdtempSync(path.join(os.tmpdir(), 'subscription-image-collection-unit-'))
+    try {
+      const result = list({
+        PATH: path.dirname(process.execPath),
+        PWTEST_CACHE_DIR: path.join(root, 'playwright-cache'),
+      })
+      expect(result.error).toBeUndefined()
+      expect(result.status).toBe(1)
+      expect(result.stdout + result.stderr).toContain('requires E2E_SUBSCRIPTION_IMAGE_INPUT=1')
+      expect(result.stdout + result.stderr).not.toContain('Physical runner')
+    } finally {
+      realFs.rmSync(root, { recursive: true, force: true })
+    }
   })
   it('actual dedicated list selects all fourteen provider journeys without opening a nonexistent receipt or launching Electron', () => {
     const root = realFs.mkdtempSync(path.join(os.tmpdir(), 'subscription-image-collection-unit-'))

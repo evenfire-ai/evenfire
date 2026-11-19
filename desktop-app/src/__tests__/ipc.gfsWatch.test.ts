@@ -72,14 +72,15 @@ describe('gfsWatch IPC', () => {
       new FakeWebContents(203),
     ]
     for (const w of [w1, w2, w3]) await setSubscriptions(w.ipcEvent(), { keys: [], userId: USER_A })
+    await h.until(() => h.linkKind() === 'Ready')
+    const eventsBeforeDestroy = w1.events()
     w1.destroyed = true // still registered: `destroyed` has not been emitted yet
     w2.throwOnSend = true
 
     h.server.frame({ type: 'roots_changed' })
-    await h.settle()
+    await vi.waitFor(() => expect(w3.events()).toContainEqual({ type: 'accessChangedRoots' }))
 
-    expect(w1.events()).toEqual([])
-    expect(w3.events()).toContainEqual({ type: 'accessChangedRoots' })
+    expect(w1.events()).toEqual(eventsBeforeDestroy)
   })
 
   it('T-CB31: an untrusted sender is refused and an ownerId in the payload is ignored', async () => {

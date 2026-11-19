@@ -12,7 +12,7 @@ export interface WatchServerLike {
   baseUrl: string
   gets: Array<{ keys: string[]; token: string }>
   puts: Array<{ keys: string[]; token: string }>
-  current(): { keys: Set<string> } | undefined
+  current(): { connId: string; keys: Set<string> } | undefined
   openStreams(): unknown[]
   frame(frame: Record<string, unknown>): void
   start(): Promise<void>
@@ -30,6 +30,7 @@ export interface WatchHarnessLike {
   owner(id?: number): FakeOwner
   subscribe(keys: string[], id?: number, userId?: string): Promise<{ sessionExpired: boolean }>
   settle(maxMs?: number): Promise<void>
+  until(pred: () => boolean, maxMs?: number): Promise<void>
   fireNext(): Promise<unknown>
 }
 

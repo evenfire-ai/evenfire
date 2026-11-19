@@ -65,19 +65,21 @@ function assertTimedExit(): void {
 describe('key set changes over PUT', () => {
   it('T-CB1: a key added before its ack is resynced after its subscriptions frame', async () => {
     await start()
+    await h.until(() => h.linkKind() === 'Ready')
     h.server.putPolicy = () => ({ kind: 'hold' })
     await h.subscribe([A])
+    await h.until(() => h.server.openPuts().length === 1)
     const owner = h.owner()
     // A write on A while the PUT is unacknowledged produces no `changed` for it:
     // the server only notifies accepted keys, so the resync is what shows v2.
     expect(owner.ofType('changed')).toEqual([])
     const before = owner.events.length
     h.server.answerPut(openPut(), { kind: 'accept' })
-    await h.settle()
+    await h.until(() => st().put === null)
     expect(owner.events.slice(before)).toContainEqual({ type: 'resync', keys: [A] })
     // From then on a write on A is forwarded as the server sends it.
     h.server.frame({ type: 'changed', keys: [A] })
-    await h.settle()
+    await h.until(() => owner.ofType('changed').length > 0)
     expect(owner.ofType('changed')).toEqual([{ type: 'changed', keys: [A] }])
   })
 
@@ -1029,6 +1031,7 @@ describe('session, binding and latch', () => {
 
   it('a switch to another environment without a new token opens nothing', async () => {
     await start({ keys: [A] })
+    await h.until(() => h.linkKind() === 'Ready')
     h.client.onEnvSwitchStart()
     h.client.onEnvSwitchEnd(true)
     await h.advance(600_000)
