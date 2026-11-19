@@ -160,9 +160,12 @@ export function GfsActionHost({
     } catch {
       return false
     }
+    // Main's answer can predate a switch the renderer has since published:
+    // the same scope under a newer generation is another session.
     return (
       authoritativeGeneration === action.originGen &&
       liveRef.current.scope === action.originScope &&
+      liveRef.current.generation === action.originGen &&
       readGfsAccessState(queryClient, action.originScope, action.originGen) === 'active'
     )
   }

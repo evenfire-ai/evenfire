@@ -430,6 +430,30 @@ describe('GfsActionHost — submitting', () => {
     expect(h.toasts).toEqual([])
   })
 
+  it('S-4: an answer main gave before a switch shows no toast once the renderer publishes the new generation', async () => {
+    const h = await harness()
+    const target = await listedRow('file-t', 'notes.txt', 'file')
+    await openRename(h, target)
+    const landed = deferred<Awaited<ReturnType<typeof renameResourceResult>>>()
+    h.bridge.renameResource.mockImplementation(() => landed.promise)
+    typeName('renamed.txt')
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(h.bridge.renameResource).toHaveBeenCalledTimes(1))
+    // Main answers the last check under the old generation, and the answer
+    // arrives only after the same team was published under a newer one.
+    const lastCheck = deferred<number>()
+    h.bridge.getSessionGeneration.mockImplementationOnce(() => lastCheck.promise)
+
+    await act(async () => landed.resolve(await renameResourceResult('file-t', 'renamed.txt', 4)))
+    await waitFor(() => expect(h.bridge.getSessionGeneration).toHaveBeenCalledTimes(2))
+    h.main.generation = 2
+    h.publish(2)
+    await act(async () => lastCheck.resolve(1))
+    await act(async () => {})
+
+    expect(h.toasts).toEqual([])
+  })
+
   it('S-4 (control): the same mutation in the same session toasts its success', async () => {
     const h = await harness()
     const target = await listedRow('file-t', 'notes.txt', 'file')
