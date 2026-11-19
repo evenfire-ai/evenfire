@@ -39,11 +39,18 @@ const WATCH_PATH = '/api/v1/me/gfs/watch'
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 const realFetch = globalThis.fetch
 
-type Slow = 'firstGet' | 'firstGetResponse' | 'getChunksAfterFirst' | 'firstPut' | 'getNeverSent'
+type Slow =
+  | 'firstGet'
+  | 'firstGetResponse'
+  | 'getChunksAfterFirst'
+  | 'eofLate'
+  | 'closeLate'
+  | 'firstPut'
+  | 'getNeverSent'
 
 /** Stubs the global `fetch`, slowing one step of the watch transport; counts what it slowed. */
 function slowWatch(slow: Slow) {
-  const stub = { gets: 0, puts: 0, delayed: 0, delayedChunks: 0 }
+  const stub = { gets: 0, puts: 0, delayed: 0, delayedChunks: 0, delayedEofs: 0, delayedCloses: 0 }
   const isWatch = (input: string | URL | Request) =>
     new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
       .pathname === WATCH_PATH
@@ -63,12 +70,19 @@ function slowWatch(slow: Slow) {
         stub.delayed += 1
         await sleep(DELAY_MS)
       }
-      const res = await realFetch(input, init)
+      // closeLate: the real request has its own signal, so the client's abort reaches it late.
+      const late = slow === 'closeLate' ? new AbortController() : null
+      if (late) {
+        const forward = () => void sleep(DELAY_MS).then(() => late.abort())
+        init?.signal?.addEventListener('abort', forward, { once: true })
+      }
+      const res = await realFetch(input, late ? { ...init, signal: late.signal } : init)
       if (slow === 'firstGetResponse' && stub.gets === 1) {
         stub.delayed += 1
         await sleep(DELAY_MS)
       }
-      if (slow === 'getChunksAfterFirst' && res.body) {
+      const wrapped = slow === 'getChunksAfterFirst' || slow === 'eofLate' || slow === 'closeLate'
+      if (wrapped && res.body) {
         const reader = res.body.getReader()
         let chunks = 0
         const body = new ReadableStream<Uint8Array>(
@@ -76,17 +90,27 @@ function slowWatch(slow: Slow) {
             async pull(controller) {
               const r = await reader.read()
               if (r.done) {
+                if (slow === 'eofLate') {
+                  stub.delayedEofs += 1
+                  await sleep(DELAY_MS)
+                }
                 controller.close()
                 return
               }
               chunks += 1
-              if (chunks > 1) {
+              if (slow === 'getChunksAfterFirst' && chunks > 1) {
                 stub.delayedChunks += 1
                 await sleep(DELAY_MS)
               }
               controller.enqueue(r.value)
             },
-            cancel: reason => reader.cancel(reason),
+            async cancel(reason) {
+              if (slow === 'closeLate') {
+                stub.delayedCloses += 1
+                await sleep(DELAY_MS)
+              }
+              await reader.cancel(reason)
+            },
           },
           { highWaterMark: 0 }
         )
@@ -254,5 +278,27 @@ describe('watch harness settle() waits for I/O in flight', () => {
       meta: { err: 'Error', message: 'hook failed in case j' },
     })
     expect(wireLedger.inTransit()).toEqual([])
+  })
+
+  it('k: the end of a GET stream the client reads late is seen before settle() returns', async () => {
+    const stub = slowWatch('eofLate')
+    watch = await new WatchHarness().start()
+    await watch.login()
+    expect(watch.linkKind()).toBe('Ready')
+    watch.server.eof()
+    await watch.settle()
+    expect(stub.delayedEofs).toBe(1)
+    expect(watch.linkKind()).toBe('Backoff')
+  })
+
+  it('l: a GET the client drops is closed on the server before settle() returns', async () => {
+    const stub = slowWatch('closeLate')
+    watch = await new WatchHarness().start()
+    await watch.login()
+    expect(watch.linkKind()).toBe('Ready')
+    await watch.publish(null)
+    expect(stub.delayedCloses).toBe(1)
+    expect(watch.server.gets).toHaveLength(1)
+    expect(watch.server.gets[0]!.closed).toBe(true)
   })
 })
