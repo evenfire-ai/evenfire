@@ -921,6 +921,11 @@ export class AppService {
   // A transient runWithTeamContext hop temporarily installs another team's
   // token in sessionToken. Existing GFS jobs keep their captured token and
   // scope, but new GFS operations must not capture that temporary token.
+  // Exempt: the click-navigation read (resolveGfsUriForNavigation) may run
+  // with the hop token and is deliberately not gated on this depth. GFS
+  // authority is per user, not per team: the server mints a user-scoped token
+  // and resolves across every active membership, so the hop token reads
+  // exactly what the home token would, and blocking would drop real clicks.
   private gfsTransientTeamHopDepth = 0
   // While a `runWithTeamContext` hop that will restore the original team is in
   // flight, `me.teamId` holds the borrowed team. The chat store (and the delete
