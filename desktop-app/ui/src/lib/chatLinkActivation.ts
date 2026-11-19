@@ -53,9 +53,15 @@ export function createChatLinkActivation(deps: ChatLinkActivationDeps): ChatLink
       deps.beginUserNavigationIntent()
       try {
         await deps.openUrl(href)
-      } catch {
+      } catch (error) {
         // The system browser or mail client failing to launch (or the bridge
-        // being absent, which throws synchronously) has no in-app recovery.
+        // being absent, which throws synchronously) has no in-app recovery, so
+        // there is no toast. Only the error class is logged: main's message can
+        // name the target, and a chat link may carry private paths or addresses.
+        console.warn(
+          '[chatLinkActivation] external link open failed:',
+          error instanceof Error ? error.name : typeof error
+        )
       }
     }
   }

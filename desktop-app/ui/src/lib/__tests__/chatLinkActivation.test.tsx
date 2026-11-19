@@ -94,6 +94,7 @@ type Gate = (label: string) => Promise<void>
 // The core is fired from a click handler with `void`: a rejection would be an
 // unhandled error in production, so every activation must settle fulfilled.
 const activationRejections: unknown[] = []
+const warnSpies: Array<{ mockRestore: () => void }> = []
 
 function manualGates() {
   const releases: Array<() => void> = []
@@ -119,13 +120,17 @@ function createHarness(gate: Gate) {
   const completions: number[] = []
   const pushToast = vi.fn()
   const setVisible = vi.fn()
-  const openUrl = vi.fn((_url: string): Promise<void> => {
+  const openUrl = vi.fn((url: string): Promise<void> => {
     // A missing bridge method throws before any promise exists.
     if (nextOpenUrlThrowsSync) throw new TypeError('window.clerum.app.openUrl is not a function')
+    // Electron forwards main's error message across `invoke`, and a launch
+    // failure there may name the target, so the rejection carries the URL.
     return nextOpenUrlRejects
-      ? Promise.reject(new Error('no handler for this URL'))
+      ? Promise.reject(new Error(`Error invoking remote method 'app:openUrl': ${url}`))
       : Promise.resolve()
   })
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  warnSpies.push(warn)
   const resolveForNavigation = vi.fn(async (uri: string): Promise<Resolution> => {
     const callId = resolveCalls.push(uri) - 1
     const outcome = nextOutcome
@@ -171,6 +176,7 @@ function createHarness(gate: Gate) {
     pushToast,
     setVisible,
     openUrl,
+    warn,
     nav,
     tabs: () => nav().workspaceTabs.tabs.map(tabKey),
     activeKey: () => {
@@ -235,6 +241,7 @@ type Harness = ReturnType<typeof createHarness>
 afterEach(() => {
   cleanup()
   delete (window as { clerum?: unknown }).clerum
+  for (const spy of warnSpies.splice(0)) spy.mockRestore()
   const rejections = activationRejections.splice(0)
   expect(rejections).toEqual([])
 })
@@ -393,6 +400,28 @@ describe('chat link activation — scenarios', () => {
     expect(h.tabs()).toEqual(['chat'])
     expect(h.pushToast).not.toHaveBeenCalled()
     expect(h.resolveCalls).toEqual([])
+  })
+
+  it('logs a failed external launch without the URL, and logs nothing when it succeeds', async () => {
+    const h = createHarness(manualGates().gate)
+    await h.clickWeb('https://evenfire.ai/private-path?q=secret')
+    expect(h.openUrl.mock.calls).toEqual([['https://evenfire.ai/private-path?q=secret']])
+    expect(h.warn).not.toHaveBeenCalled()
+
+    await h.clickWeb('mailto:someone@example.com', true)
+    await h.clickWeb('https://evenfire.ai/other', false, true)
+
+    expect(h.openUrl).toHaveBeenCalledTimes(3)
+    expect(h.warn).toHaveBeenCalledTimes(2)
+    const logged = h.warn.mock.calls.map(call => call.map(String).join(' '))
+    expect(logged[0]).toContain('external link open failed')
+    expect(logged[0]).toContain('Error')
+    expect(logged[1]).toContain('TypeError')
+    for (const line of logged) {
+      expect(line).not.toContain('someone@example.com')
+      expect(line).not.toContain('evenfire.ai')
+    }
+    expect(h.pushToast).not.toHaveBeenCalled()
   })
 
   it('settles fulfilled and shows nothing when openUrl throws synchronously', async () => {
