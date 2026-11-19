@@ -245,6 +245,7 @@ export async function controlApiRequestWithStatus<T>(
     body?: unknown
     userSessionToken?: string
     extraHeaders?: Record<string, string>
+    signal?: AbortSignal
     redirect?: RequestRedirect
   }
 ): Promise<ControlApiResponse<T>> {
@@ -272,6 +273,7 @@ export async function controlApiRequestWithStatus<T>(
       method,
       headers,
       body,
+      signal: options?.signal,
       ...(options?.redirect ? { redirect: options.redirect } : {}),
     })
   } catch {
