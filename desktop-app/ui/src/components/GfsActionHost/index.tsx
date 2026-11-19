@@ -500,7 +500,12 @@ export function GfsActionHost({
     activeAction?.actionId === 'move' && activeAction.phase === 'running'
       ? activeAction.target.resourceId
       : null
-  const actionOpen = activeAction !== null
+  // Checking and picking show nothing of the host's: Escape there is not ours.
+  const shownAction =
+    activeAction && (activeAction.phase === 'dialog' || activeAction.phase === 'running')
+      ? activeAction
+      : null
+  const actionOpen = shownAction !== null
   const contextValue = useMemo<GfsActionHostContextValue>(
     () => ({ openGfsAction, hostMovingResourceId, actionOpen }),
     [actionOpen, hostMovingResourceId, openGfsAction]
@@ -680,11 +685,6 @@ export function GfsActionHost({
         leaveRunning(running, true)
       }
     }
-
-  const shownAction =
-    activeAction && (activeAction.phase === 'dialog' || activeAction.phase === 'running')
-      ? activeAction
-      : null
 
   return (
     <GfsActionHostContext.Provider value={contextValue}>

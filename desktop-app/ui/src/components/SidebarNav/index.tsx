@@ -189,7 +189,7 @@ export function SidebarNav({
 
   useEffect(() => {
     // The host's dialogs listen on window, after this document listener: while
-    // one is open the drawer must not take Escape from it.
+    // one is shown, or its action runs, the drawer must not take Escape from it.
     if (!compactMenuOpen || gfsActionOpen) return undefined
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return

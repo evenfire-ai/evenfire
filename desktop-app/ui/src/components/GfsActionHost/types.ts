@@ -58,7 +58,11 @@ export interface GfsActionHostContextValue {
   openGfsAction: (target: GfsHostActionTarget, actionId: GfsHostActionId) => void
   /** The resource a host Move is committing, so a drag of it can be refused. */
   hostMovingResourceId: string | null
-  /** An action is open: it owns Escape, so surfaces under it must not consume the key. */
+  /**
+   * A host dialog is shown (also while its action runs): it owns Escape, so
+   * surfaces under it must not consume the key. False while an action is
+   * still checking its permissions or waiting on the file picker.
+   */
   actionOpen: boolean
 }
 

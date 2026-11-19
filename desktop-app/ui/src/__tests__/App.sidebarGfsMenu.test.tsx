@@ -422,6 +422,75 @@ describe('App sidebar GFS resource menu', () => {
     }
   )
 
+  it.each([
+    { action: 'Delete', row: 'notes.txt', dialog: 'Delete notes.txt?' },
+    { action: 'Rename', row: 'notes.txt', dialog: 'Rename file' },
+    { action: 'New folder', row: 'Reports', dialog: 'New folder' },
+  ])(
+    'S-12b: Escape in the compact drawer while the host $action is still checking closes the drawer',
+    async ({ action, row, dialog: dialogName }) => {
+      compact = true
+      const { bridge } = installBridge()
+      const notes = resolvedFile(NOTES_ID, 'notes.txt', {
+        parentResourceId: NOTES_PARENT_ID,
+        version: 3,
+      })
+      bridge.gfs.listAccessible = vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource(REPORTS_ID, 'Reports', 'directory', {
+            permissions: ['read', 'write'],
+          }),
+          accessibleResource(NOTES_ID, 'notes.txt', 'file', {
+            version: 3,
+            parentResourceId: NOTES_PARENT_ID,
+            permissions: ['read', 'write', 'delete', 'manage_acl'],
+          }),
+        ])
+      )
+      bridge.gfs.resolve = vi.fn(async (uri: string) => {
+        if (uri === REPORTS.gfsUri) return resolveResource(REPORTS)
+        if (uri === notes.gfsUri) return resolveResource(notes)
+        throw new Error(`unexpected resolve of ${uri}`)
+      })
+      const affordances = appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete', 'manage_acl'])
+      )
+      bridge.gfs.affordances = vi.fn(affordances)
+      renderApp()
+      await waitForShell()
+      fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+      expect(drawerOpen()).toBe(true)
+      openExplorer()
+
+      const menu = await openRowMenu(row)
+      const item = await within(menu).findByRole('menuitem', { name: action })
+      await waitFor(() => expect((item as HTMLButtonElement).disabled).toBe(false))
+      // From the click on, the host's fresh permission check waits on main.
+      let releaseAffordances!: () => void
+      const affordancesHeld = new Promise<void>(resolve => {
+        releaseAffordances = resolve
+      })
+      bridge.gfs.affordances = vi.fn(async (...args: Parameters<typeof affordances>) => {
+        await affordancesHeld
+        return affordances(...args)
+      })
+      fireEvent.click(item)
+      await waitFor(() => expect(bridge.gfs.affordances).toHaveBeenCalled())
+      expect(screen.queryByRole('dialog', { name: dialogName })).toBeNull()
+
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+      expect(drawerOpen()).toBe(false)
+
+      await act(async () => {
+        releaseAffordances()
+        await Promise.resolve()
+      })
+      expect(await screen.findByRole('dialog', { name: dialogName })).toBeTruthy()
+      expect(bridge.gfs.renameResource).not.toHaveBeenCalled()
+      expect(bridge.gfs.deleteResource).not.toHaveBeenCalled()
+    }
+  )
+
   it('S-8: in-place actions on another resource leave the Files tab, its location and its crumbs alone', async () => {
     const { bridge } = installBridge()
     renderApp()
