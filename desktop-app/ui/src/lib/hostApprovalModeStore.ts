@@ -2,10 +2,13 @@
  * Per-session approval mode, following hostModelSelectionStore.
  *
  * A blank chat has no chatId, so the pick is held locally and the first send
- * carries it. After the session exists, a change is a PATCH. A 400, 401 or 404
- * leaves the painted label alone. Any other failure is not proof of the stored
- * mode: the next session read paints the label, including a write the server
- * committed before the response was dropped.
+ * carries it. After the session exists, a change is a PATCH. A 400 or 401
+ * leaves the painted label alone. A 404 before the first send holds the mode
+ * for that send. While the first send of a chat whose session row the store
+ * has not seen is in flight, the mode cannot change: a PATCH would reach the
+ * Host before the send creates the row. Any other failure is not proof of the
+ * stored mode: the next session read paints the label, including a write the
+ * server committed before the response was dropped.
  */
 import type { ApprovalMode } from '../../../src/types'
 
@@ -27,6 +30,11 @@ export interface HostApprovalModeView {
   shellClassifierAvailable: boolean
   /** Non-manual mode the first message should carry. Null once the server has it. */
   firstSendMode: ApprovalMode | null
+  /**
+   * The chat's first send is in flight and the store has not seen its session
+   * row. The mode cannot change until the send is acknowledged or fails.
+   */
+  firstSendInFlight: boolean
 }
 
 export interface HostApprovalModeTransport {
@@ -51,6 +59,10 @@ interface Entry {
   heldForFirstSend: ApprovalMode | null
   persisted: boolean
   writing: boolean
+  /** First sends handed to main for this chat and not yet acknowledged or failed. */
+  firstSendsInFlight: number
+  /** First sends ever begun for this chat. A write compares it across its PATCH. */
+  firstSendsBegun: number
   /** Store-wide write sequence at the moment this chat's last write started. */
   lastWriteSeq: number
   listeners: Set<() => void>
@@ -103,6 +115,7 @@ function buildView(entry: Entry): HostApprovalModeView {
     label: labelFor(entry.effectiveMode),
     shellClassifierAvailable: entry.shellClassifierAvailable,
     firstSendMode: entry.persisted ? null : entry.heldForFirstSend,
+    firstSendInFlight: entry.firstSendsInFlight > 0,
   }
 }
 
@@ -127,6 +140,8 @@ function getEntry(agentRef: string, chatId: string | null): Entry {
       heldForFirstSend: null,
       persisted: false,
       writing: false,
+      firstSendsInFlight: 0,
+      firstSendsBegun: 0,
       lastWriteSeq: 0,
       listeners: entry?.scopeGeneration === scopeGeneration ? entry.listeners : new Set(),
       view: null,
@@ -244,6 +259,40 @@ export function approvalModeForFirstSend(
   return entry.heldForFirstSend
 }
 
+/**
+ * Marks the chat's first send as handed to main and returns the mode it
+ * carries, in one step so no pick can land between the two. Until `release`
+ * runs, `selectHostApprovalMode` refuses a change for the chat: a PATCH sent
+ * now would reach the Host before the send creates the session row, get a 404,
+ * and paint a mode the session never stores. A chat the store already knows
+ * the server has is not locked. `release` is idempotent; call it when the send
+ * is acknowledged, fails or is abandoned.
+ */
+export function beginApprovalModeFirstSend(
+  agentRef: string,
+  chatId: string
+): { mode: ApprovalMode | null; release: () => void } {
+  const mode = approvalModeForFirstSend(agentRef, chatId)
+  if (!agentRef || !chatId) return { mode, release: () => undefined }
+  const entry = getEntry(agentRef, chatId)
+  if (entry.persisted) return { mode, release: () => undefined }
+  entry.firstSendsInFlight += 1
+  entry.firstSendsBegun += 1
+  notify(entry)
+  let released = false
+  return {
+    mode,
+    release: () => {
+      if (released) return
+      released = true
+      // A scope reset dropped this entry; the new scope's entry was never locked.
+      if (!current(entry) || entries.get(keyFor(agentRef, chatId)) !== entry) return
+      entry.firstSendsInFlight -= 1
+      notify(entry)
+    },
+  }
+}
+
 /** Moves a blank-chat hold onto the chat created by the first send. */
 export function migrateHeldApprovalMode(agentRef: string, chatId: string): void {
   if (!agentRef || !chatId) return
@@ -283,6 +332,9 @@ export async function selectHostApprovalMode(
 ): Promise<boolean> {
   if (!agentRef || !isMode(mode)) return false
   const entry = getEntry(agentRef, chatId)
+  // Refused before the write is stamped, so a read that starts now still
+  // paints the label. The picker is disabled for the same window.
+  if (chatId && entry.firstSendsInFlight > 0) return false
   writeSeq += 1
   entry.lastWriteSeq = writeSeq
   if (!chatId) {
@@ -294,6 +346,7 @@ export async function selectHostApprovalMode(
     return true
   }
 
+  const firstSendsBegunAtStart = entry.firstSendsBegun
   entry.writing = true
   notify(entry)
   try {
@@ -304,6 +357,11 @@ export async function selectHostApprovalMode(
   } catch (error) {
     if (!current(entry)) return false
     if (isNotFound(error)) {
+      // A first send began after this PATCH left. The 404 only says the row
+      // did not exist yet; the send creates it with the mode it carried, which
+      // the label still shows. Holding this mode would paint a mode the
+      // session never stores.
+      if (entry.firstSendsBegun !== firstSendsBegunAtStart) return false
       entry.storedMode = mode
       entry.effectiveMode = mode
       entry.heldForFirstSend = mode === 'manual' ? null : mode

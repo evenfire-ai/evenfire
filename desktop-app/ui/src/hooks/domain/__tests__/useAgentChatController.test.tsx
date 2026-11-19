@@ -17,7 +17,13 @@ import { classifyBytes } from '@clerum/gfs-interaction-policy'
 import { base64Length, composerNonImageShareBytes } from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
-import { readHostApprovalMode, resetHostApprovalModeStore } from '@lib/hostApprovalModeStore'
+import {
+  type HostApprovalModeTransport,
+  type SessionApprovalSnapshot,
+  readHostApprovalMode,
+  resetHostApprovalModeStore,
+  selectHostApprovalMode,
+} from '@lib/hostApprovalModeStore'
 import {
   getHostModelSelectionSnapshot,
   loadHostModels,
@@ -544,6 +550,118 @@ describe('useAgentChatController — characterization (D.0)', () => {
       })
       await act(async () => {
         await firstSend
+      })
+    })
+
+    describe('R6-MJ1 approval mode during the first send', () => {
+      const approvalSnapshot = (
+        mode: SessionApprovalSnapshot['approvalMode']
+      ): SessionApprovalSnapshot => ({
+        approvalMode: mode,
+        modeCeiling: 'allow_all',
+        channelCap: 'allow_all',
+        effectiveApprovalMode: mode,
+        shellClassifierAvailable: true,
+      })
+      // No session row exists until the POST creates it, so a PATCH answers 404.
+      function approvalTransport() {
+        const setApprovalMode = vi.fn<HostApprovalModeTransport['setApprovalMode']>(async () => {
+          throw new Error('Set approval mode failed (404)')
+        })
+        const readSessionApproval = vi.fn<HostApprovalModeTransport['readSessionApproval']>(
+          async () => approvalSnapshot('manual')
+        )
+        return { setApprovalMode, readSessionApproval }
+      }
+      const sentThreadId = () =>
+        (clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { threadId?: string } | undefined)
+          ?.threadId
+
+      beforeEach(() => resetHostApprovalModeStore())
+      afterEach(() => resetHostApprovalModeStore())
+
+      it('refuses a pick while the POST is in flight and accepts it after the ack', async () => {
+        const post = deferred<{ taskId: string }>()
+        clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+        clerum.rpc.getTaskResult.mockResolvedValue({ response: 'ok' })
+        const transport = approvalTransport()
+        const { result } = renderController()
+        await settleMount()
+        await act(async () => {
+          await selectHostApprovalMode(transport, 'agent-x', null, 'allow_all')
+        })
+
+        const sendPromise = result.current.handleSendAgentMessage('first message')
+        await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+        const chatId = sentThreadId()!
+        expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+          approvalMode: 'allow_all',
+        })
+
+        let accepted: boolean | undefined
+        await act(async () => {
+          accepted = await selectHostApprovalMode(transport, 'agent-x', chatId, 'manual')
+        })
+        expect(accepted).toBe(false)
+        expect(transport.setApprovalMode).not.toHaveBeenCalled()
+        expect(readHostApprovalMode('agent-x', chatId).label).toBe('Allow all')
+        expect(readHostApprovalMode('agent-x', chatId).firstSendInFlight).toBe(true)
+
+        await act(async () => {
+          post.resolve({ taskId: 'task-abc' })
+        })
+        await waitForProgressHandler('task-abc')
+        expect(readHostApprovalMode('agent-x', chatId).firstSendInFlight).toBe(false)
+
+        // The row exists after the ack: the same pick now reaches the Host.
+        transport.setApprovalMode.mockResolvedValueOnce(approvalSnapshot('manual'))
+        await act(async () => {
+          accepted = await selectHostApprovalMode(transport, 'agent-x', chatId, 'manual')
+        })
+        expect(accepted).toBe(true)
+        expect(transport.setApprovalMode).toHaveBeenCalledWith('agent-x', chatId, 'manual')
+        expect(readHostApprovalMode('agent-x', chatId).label).toBeNull()
+
+        await act(async () => {
+          clerum.emitTaskProgress('task-abc', {
+            type: 'terminal',
+            data: { taskId: 'task-abc', status: 'completed' },
+          })
+        })
+        await act(async () => {
+          await sendPromise
+        })
+      })
+
+      it('unlocks the picker when the POST throws', async () => {
+        const post = deferred<{ taskId: string }>()
+        clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+        const transport = approvalTransport()
+        const { result } = renderController()
+        await settleMount()
+        await act(async () => {
+          await selectHostApprovalMode(transport, 'agent-x', null, 'auto')
+        })
+
+        const sendPromise = result.current.handleSendAgentMessage('first message')
+        await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+        const chatId = sentThreadId()!
+        expect(readHostApprovalMode('agent-x', chatId).firstSendInFlight).toBe(true)
+
+        await act(async () => {
+          post.reject(new Error('fetch failed'))
+          await sendPromise
+        })
+        expect(readHostApprovalMode('agent-x', chatId).firstSendInFlight).toBe(false)
+
+        // No row was created, so the pick is held for the retry.
+        let accepted: boolean | undefined
+        await act(async () => {
+          accepted = await selectHostApprovalMode(transport, 'agent-x', chatId, 'manual')
+        })
+        expect(accepted).toBe(true)
+        expect(transport.setApprovalMode).toHaveBeenCalledWith('agent-x', chatId, 'manual')
+        expect(readHostApprovalMode('agent-x', chatId).firstSendMode).toBeNull()
       })
     })
 

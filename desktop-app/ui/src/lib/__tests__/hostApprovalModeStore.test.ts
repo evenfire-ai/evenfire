@@ -4,7 +4,10 @@ import {
   type HostApprovalModeTransport,
   type SessionApprovalSnapshot,
   approvalModeForFirstSend,
+  beginApprovalModeFirstSend,
+  confirmHeldApprovalModeFromSend,
   hostApprovalModeEpoch,
+  migrateHeldApprovalMode,
   noteHostApprovalModeFromSession,
   readHostApprovalMode,
   resetHostApprovalModeStore,
@@ -88,6 +91,84 @@ describe('hostApprovalModeStore', () => {
     expect(readSessionApproval).not.toHaveBeenCalled()
     expect(approvalModeForFirstSend(AGENT, CHAT)).toBe('allow_all')
     expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Allow all')
+  })
+
+  it('refuses a change while the first send is in flight, and PATCHes once it is acknowledged', async () => {
+    const { client, setApprovalMode } = transport()
+    await selectHostApprovalMode(client, AGENT, null, 'allow_all')
+    migrateHeldApprovalMode(AGENT, CHAT)
+
+    const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    expect(send.mode).toBe('allow_all')
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'manual')).resolves.toBe(false)
+
+    expect(setApprovalMode).not.toHaveBeenCalled()
+    expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Allow all')
+    expect(readHostApprovalMode(AGENT, CHAT).firstSendMode).toBe('allow_all')
+    expect(readHostApprovalMode(AGENT, CHAT).firstSendInFlight).toBe(true)
+
+    confirmHeldApprovalModeFromSend(AGENT, CHAT)
+    send.release()
+    send.release()
+    expect(readHostApprovalMode(AGENT, CHAT).firstSendInFlight).toBe(false)
+
+    setApprovalMode.mockResolvedValue(snapshot('manual'))
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'manual')).resolves.toBe(true)
+    expect(setApprovalMode).toHaveBeenCalledWith(AGENT, CHAT, 'manual')
+    expect(readHostApprovalMode(AGENT, CHAT).label).toBeNull()
+  })
+
+  it('unlocks the picker when the first send fails without an ack', async () => {
+    const { client, setApprovalMode } = transport()
+    const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    expect(send.mode).toBeNull()
+    expect(readHostApprovalMode(AGENT, CHAT).firstSendInFlight).toBe(true)
+
+    send.release()
+    setApprovalMode.mockRejectedValue(new Error('Set approval mode failed (404)'))
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'auto')).resolves.toBe(true)
+
+    expect(setApprovalMode).toHaveBeenCalledWith(AGENT, CHAT, 'auto')
+    expect(approvalModeForFirstSend(AGENT, CHAT)).toBe('auto')
+  })
+
+  it('does not lock a chat the server already has', async () => {
+    const { client, setApprovalMode } = transport()
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+
+    const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    expect(readHostApprovalMode(AGENT, CHAT).firstSendInFlight).toBe(false)
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'auto')).resolves.toBe(true)
+
+    expect(setApprovalMode).toHaveBeenCalledWith(AGENT, CHAT, 'auto')
+    send.release()
+  })
+
+  it('a 404 that answers after the first send began neither paints nor holds the mode', async () => {
+    let rejectPatch!: (error: Error) => void
+    const { client, readSessionApproval } = transport({
+      setApprovalMode: vi.fn(
+        () =>
+          new Promise<SessionApprovalSnapshot>((_resolve, reject) => {
+            rejectPatch = reject
+          })
+      ),
+    })
+    await selectHostApprovalMode(client, AGENT, null, 'allow_all')
+    migrateHeldApprovalMode(AGENT, CHAT)
+
+    const write = selectHostApprovalMode(client, AGENT, CHAT, 'manual')
+    expect(client.setApprovalMode).toHaveBeenCalledWith(AGENT, CHAT, 'manual')
+    const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    expect(send.mode).toBe('allow_all')
+    rejectPatch(new Error('Set approval mode failed (404)'))
+
+    await expect(write).resolves.toBe(false)
+    expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Allow all')
+    expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
+    expect(approvalModeForFirstSend(AGENT, CHAT)).toBe('allow_all')
+    expect(readSessionApproval).not.toHaveBeenCalled()
+    send.release()
   })
 
   it('a session read from before a write does not paint the old mode', async () => {
