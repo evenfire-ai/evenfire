@@ -9221,6 +9221,8 @@ td.cu-registry-description {
   flex-wrap: wrap;
   gap: var(--cu-space-2);
   margin: var(--cu-space-4) 0 var(--cu-space-6);
+  /* Match the tab rail gutter plus the existing tab button's inline padding. */
+  padding-inline-start: calc(var(--cu-space-5) + 10px);
 }
 
 .cu-identity-dirty {

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 
 const controlUiStyles = readFileSync(path.join(__dirname, '../app/globals.css'), 'utf8')
+const alignmentTolerancePx = 0.5
 
 const identityMarkup = `
   <body class="cu-body">
@@ -13,10 +14,14 @@ const identityMarkup = `
         </p>
         <nav class="cu-tabs cu-tabs--compact cu-identity-tabs"
           aria-label="Identity file sections" role="tablist">
-          <button class="cu-tab" role="tab" aria-selected="true">Identity</button>
-          <button class="cu-tab" role="tab" aria-selected="false">Soul</button>
-          <button class="cu-tab" role="tab" aria-selected="false">Agent instructions</button>
-          <button class="cu-tab" role="tab" aria-selected="false">User context</button>
+          <button type="button" class="cu-tab" role="tab" data-active="true"
+            aria-selected="true">Identity</button>
+          <button type="button" class="cu-tab" role="tab" data-active="false"
+            aria-selected="false">Soul</button>
+          <button type="button" class="cu-tab" role="tab" data-active="false"
+            aria-selected="false">Agent instructions</button>
+          <button type="button" class="cu-tab" role="tab" data-active="false"
+            aria-selected="false">User context</button>
         </nav>
         <div class="cu-identity-section">
           <h3 class="cu-identity-section__title">IDENTITY.md</h3>
@@ -27,10 +32,7 @@ const identityMarkup = `
   </body>
 `
 
-test('Identity notice keeps space before tabs across themes and narrow viewports', async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 1440, height: 900 })
+test('Identity notice aligns with the first tab and keeps its spacing', async ({ page }) => {
   await page.setContent(`<style>${controlUiStyles}</style>${identityMarkup}`)
 
   const notice = page.getByText(
@@ -47,34 +49,52 @@ test('Identity notice keeps space before tabs across themes and narrow viewports
   ])
 
   for (const theme of ['dark', 'light']) {
+    await page.setViewportSize({ width: 1440, height: 900 })
     await page
       .locator('html')
       .evaluate((html, value) => html.setAttribute('data-theme', value), theme)
-    const desktopGap = await page.evaluate(() => {
-      const banner = document.querySelector('.cu-identity-panel__intro')!.getBoundingClientRect()
-      const nav = document.querySelector('.cu-identity-tabs')!.getBoundingClientRect()
-      return { gap: nav.top - banner.bottom, bannerTop: banner.top }
-    })
-    expect(desktopGap.gap).toBeGreaterThanOrEqual(24)
-    expect(desktopGap.bannerTop).toBe(16)
+    const desktopLayout = await readIdentityLayout(page)
+    expect(
+      Math.abs(desktopLayout.noticeTextLeft - desktopLayout.firstTabTextLeft)
+    ).toBeLessThanOrEqual(alignmentTolerancePx)
+    expect(Math.abs(desktopLayout.bannerTop - 16)).toBeLessThanOrEqual(alignmentTolerancePx)
+    expect(Math.abs(desktopLayout.gap - 24)).toBeLessThanOrEqual(alignmentTolerancePx)
+
+    await page.setViewportSize({ width: 375, height: 812 })
+    const mobileLayout = await readIdentityLayout(page)
+    expect(
+      Math.abs(mobileLayout.noticeTextLeft - mobileLayout.firstTabTextLeft)
+    ).toBeLessThanOrEqual(alignmentTolerancePx)
+    expect(Math.abs(mobileLayout.bannerTop - 16)).toBeLessThanOrEqual(alignmentTolerancePx)
+    expect(Math.abs(mobileLayout.gap - 24)).toBeLessThanOrEqual(alignmentTolerancePx)
+    expect(mobileLayout.documentWidth).toBeLessThanOrEqual(mobileLayout.viewportWidth)
   }
 
-  await page.setViewportSize({ width: 375, height: 812 })
-  const mobileLayout = await page.evaluate(() => {
-    const banner = document.querySelector('.cu-identity-panel__intro')!.getBoundingClientRect()
-    const nav = document.querySelector('.cu-identity-tabs')!.getBoundingClientRect()
-    return {
-      documentWidth: document.documentElement.scrollWidth,
-      gap: nav.top - banner.bottom,
-      bannerTop: banner.top,
-      viewportWidth: window.innerWidth,
-    }
-  })
-  expect(mobileLayout.documentWidth).toBeLessThanOrEqual(mobileLayout.viewportWidth)
-  expect(mobileLayout.gap).toBeGreaterThanOrEqual(24)
-  expect(mobileLayout.bannerTop).toBe(16)
-
+  await page.setViewportSize({ width: 1440, height: 900 })
   await page.keyboard.press('Tab')
   await expect(tabs.getByRole('tab', { name: 'Identity' })).toBeFocused()
   await expect(tabs.getByRole('tab', { name: 'Identity' })).toHaveCSS('outline-style', 'solid')
 })
+
+async function readIdentityLayout(page: import('@playwright/test').Page) {
+  return page.evaluate(() => {
+    const notice = document.querySelector('.cu-identity-panel__intro')!
+    const nav = document.querySelector('.cu-identity-tabs')!
+    const firstTab = nav.querySelector('[role="tab"]')!
+    const textLeft = (element: Element) => {
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      return range.getBoundingClientRect().left
+    }
+    const noticeRect = notice.getBoundingClientRect()
+    const navRect = nav.getBoundingClientRect()
+    return {
+      noticeTextLeft: textLeft(notice),
+      firstTabTextLeft: textLeft(firstTab),
+      bannerTop: noticeRect.top,
+      gap: navRect.top - noticeRect.bottom,
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+    }
+  })
+}
