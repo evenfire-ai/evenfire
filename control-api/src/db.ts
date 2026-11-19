@@ -6,6 +6,14 @@ import {
 } from './boundedPgPool.js'
 import { config } from './config.js'
 import { SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG } from './data/llmCatalogLegacySeeds.js'
+import {
+  GOVERNED_TRACE_RETENTION_MIGRATION,
+  applyGovernedTraceRetention,
+} from './migrations/governedTraceRetention.js'
+import {
+  GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
+  applyGovernedTraceRetentionHardening,
+} from './migrations/governedTraceRetentionHardening.js'
 import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
 import {
   LAST_DEV_MIGRATION_VERSION,
@@ -6768,6 +6776,16 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0156_workflow_authorization_pause',
     apply: applyWorkflowRunAuthorizationPauseSchema,
+  },
+  {
+    version: GOVERNED_TRACE_RETENTION_MIGRATION,
+    legacyVersions: ['0151_governed_trace_retention_indexed'],
+    apply: applyGovernedTraceRetention,
+  },
+  {
+    version: GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
+    legacyVersions: ['0153_governed_trace_retention_hardening'],
+    apply: applyGovernedTraceRetentionHardening,
   },
 ]
 

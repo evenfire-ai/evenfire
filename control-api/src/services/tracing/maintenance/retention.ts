@@ -7,6 +7,12 @@ export type RetentionGrain =
   | 'infrastructure_cost'
   | 'approval_prompt'
 
+export type RetentionAttempt = {
+  grain: RetentionGrain
+  durationMs: number
+  outcome: 'completed' | 'failed'
+}
+
 export type RetentionResult = {
   eventsDeleted: number
   costsDeleted: number
@@ -54,7 +60,11 @@ async function pruneExpiredPrompts(
   return { deleted, saturated: deleted === limit }
 }
 
-export async function runRetentionBatch(db: DbClient, _now = new Date()): Promise<RetentionResult> {
+export async function runRetentionBatch(
+  db: DbClient,
+  _now = new Date(),
+  observe?: (attempt: RetentionAttempt) => void
+): Promise<RetentionResult> {
   const grains: Array<{
     grain: RetentionGrain
     prune(limit: number): Promise<{ deleted: number; saturated: boolean }>
@@ -84,10 +94,26 @@ export async function runRetentionBatch(db: DbClient, _now = new Date()): Promis
         continue
       }
       const limit = Math.min(FAIR_SHARE_ROWS_PER_GRAIN, remainingBudget)
-      const result = await entry.prune(limit)
-      if (result.deleted < 0 || result.deleted > limit) {
-        throw new Error(`retention grain ${entry.grain} exceeded its bounded delete budget`)
+      const startedAt = performance.now()
+      let result: Awaited<ReturnType<typeof entry.prune>>
+      try {
+        result = await entry.prune(limit)
+        if (result.deleted < 0 || result.deleted > limit) {
+          throw new Error(`retention grain ${entry.grain} exceeded its bounded delete budget`)
+        }
+      } catch (error) {
+        observe?.({
+          grain: entry.grain,
+          durationMs: performance.now() - startedAt,
+          outcome: 'failed',
+        })
+        throw error
       }
+      observe?.({
+        grain: entry.grain,
+        durationMs: performance.now() - startedAt,
+        outcome: 'completed',
+      })
       deletedByGrain.set(entry.grain, (deletedByGrain.get(entry.grain) ?? 0) + result.deleted)
       remainingBudget -= result.deleted
       if (result.saturated) nextSaturated.add(entry.grain)
