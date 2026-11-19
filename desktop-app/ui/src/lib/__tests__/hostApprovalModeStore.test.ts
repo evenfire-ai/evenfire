@@ -312,7 +312,7 @@ describe('hostApprovalModeStore — save failure flag (picker spec C2)', () => {
     send.release()
   })
 
-  it('a refusal for an older pick does not outlive a newer write', async () => {
+  it('an older write that settles after a refused newer pick does not clear the failure', async () => {
     let resolvePatch!: (value: SessionApprovalSnapshot) => void
     const { client } = transport({
       setApprovalMode: vi.fn(
@@ -322,12 +322,20 @@ describe('hostApprovalModeStore — save failure flag (picker spec C2)', () => {
           })
       ),
     })
-    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+    await selectHostApprovalMode(client, AGENT, null, 'allow_all')
+    migrateHeldApprovalMode(AGENT, CHAT)
+
     const older = selectHostApprovalMode(client, AGENT, CHAT, 'auto')
+    const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'manual')).resolves.toBe(false)
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+
     resolvePatch(snapshot('auto'))
     await expect(older).resolves.toBe(true)
 
-    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(false)
+    expect(readHostApprovalMode(AGENT, CHAT).storedMode).toBe('auto')
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+    send.release()
   })
 
   it('the explicit clear drops the flag and notifies', async () => {

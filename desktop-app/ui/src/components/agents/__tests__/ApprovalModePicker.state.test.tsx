@@ -518,7 +518,8 @@ interface Model {
   confirming: boolean
   writes: ModelWrite[]
   stored: Record<ChatKey, ApprovalMode>
-  errorFor: Record<ChatKey, boolean>
+  /** L1: the latest write's requested mode while it failed and the stored mode has not equalled it since. */
+  failedRequest: Record<ChatKey, ApprovalMode | null>
   expectedCalls: ChatKey[]
 }
 interface Real {
@@ -557,7 +558,7 @@ function assertInvariants(model: Model, real: Real): void {
   )
   // S2 + L1: the error shows exactly for the chat on screen with the menu closed.
   expect(queryByTestId('approval-mode-write-error') !== null).toBe(
-    model.errorFor[model.screen] && !model.menuOpen
+    model.failedRequest[model.screen] !== null && !model.menuOpen
   )
   // S1 + C1: every PATCH targeted the chat on screen at the click.
   expect(setApprovalMode.mock.calls.map(call => call[2])).toEqual(model.expectedCalls)
@@ -603,7 +604,7 @@ class ToggleMenu implements fc.AsyncCommand<Model, Real> {
       closeMenu(model)
     } else {
       model.menuOpen = true
-      model.errorFor[model.screen] = false
+      model.failedRequest[model.screen] = null
     }
     fireEvent.click(real.utils.getByTestId('approval-mode-picker'))
     assertInvariants(model, real)
@@ -698,11 +699,15 @@ class Settle implements fc.AsyncCommand<Model, Real> {
     if (!write) throw new Error(`settled unknown write ${real.settledIds[before]}`)
     write.settled = true
     if (write.outcome !== 'fail') model.stored[write.chat] = write.mode
-    // S3: only the latest write for its chat decides that chat's error, and a
-    // lost response is not an error when the Host shows the requested mode.
+    // S3: only the latest write for its chat decides that chat's error.
     const latest = [...model.writes].reverse().find(entry => entry.chat === write.chat)
     if (latest?.id === write.id) {
-      model.errorFor[write.chat] = write.outcome !== 'ok' && model.stored[write.chat] !== write.mode
+      model.failedRequest[write.chat] = write.outcome === 'ok' ? null : write.mode
+    }
+    // L1: once the stored mode equals the failed request, the error is gone for
+    // good, whichever write or read brought the stored mode there.
+    if (model.failedRequest[write.chat] === model.stored[write.chat]) {
+      model.failedRequest[write.chat] = null
     }
     assertInvariants(model, real)
   }
@@ -775,7 +780,7 @@ describe('ApprovalModePicker state — A6 command model', () => {
             confirming: false,
             writes: [],
             stored: { 'chat-1': 'manual', 'chat-2': 'manual' },
-            errorFor: { 'chat-1': false, 'chat-2': false },
+            failedRequest: { 'chat-1': null, 'chat-2': null },
             expectedCalls: [],
           }
           await fc.asyncModelRun(() => ({ model, real }), commands)
