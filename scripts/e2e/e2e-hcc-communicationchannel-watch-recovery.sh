@@ -369,18 +369,18 @@ ended="$(log_count_from "$final_logs" 'CommunicationChannel watch ended;')"
 started="$(log_count_from "$final_logs" 'Starting CommunicationChannel watch')"
 recovered="$(log_count_from "$final_logs" 'Recovered [0-9]+ CommunicationChannel\(s\) into cache')"
 failed="$(log_count_from "$final_logs" 'cache recovery failed;')"
-fleet_passes="$(
-  log_count_from "$final_logs" \
-    'Completed Host reconciliation after (CommunicationChannel recovery|Host watch recovery convergence)$'
-)"
+fleet_passes="$(recovery_fleet_pass_count "$final_logs")"
 [ "$ended" = 2 ] && [ "$started" = 2 ] && [ "$recovered" = 2 ] && \
   [ "$failed" = "$TOTAL_RETRY_FAILURES" ] && [ "$failed" -le "$TOTAL_RETRY_FAILURE_LIMIT" ] ||
   die "unexpected watch lifecycle counts: ended=${ended}, started=${started}, recovered=${recovered}, failed=${failed}"
 [ "$fleet_passes" -ge 2 ] && [ "$fleet_passes" -le 4 ] ||
   die "unexpected successful fleet reconcile count ${fleet_passes}; expected 2..4 passes"
-# Each recovered snapshot requires one causally ordered successful pass; a
-# Host-watch recovery pass may cover the same fresh CC+Host inventories. At
-# most one already queued covering pass may also finish per cycle. The deterministic
+# Each recovered snapshot requires one causally ordered successful pass;
+# recovery_fleet_pass_count counts it once per cycle, by the lifecycle generation
+# it applied, whatever reason the scheduler kept for it. A Host-watch recovery
+# pass may cover the same fresh CC+Host inventories and is counted on its own.
+# Because channel passes count at most once per cycle, the upper bound of 4
+# limits only the Host-watch recovery passes. The deterministic
 # max-concurrency=1 proof stays in k8sClient unit tests where overlapping passes
 # can be barrier-controlled.
 

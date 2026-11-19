@@ -1,20 +1,19 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type React from 'react'
-import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
 import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { FormField } from '@components/FormField'
+import { ModalCloseButton } from '@components/ModalCloseButton'
 import { useProfileAccess } from '@components/ProfileAccessContext'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
-import { ReleaseLabel } from '@components/ReleaseLabel'
 import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
-import { IconCopy, IconRefresh } from '@components/icons'
+import { IconCopy } from '@components/icons'
 import { PROFILE_ROUTES } from '@constants/routes'
 import {
   getConfiguredExternalRestApiBaseUrl,
@@ -24,10 +23,6 @@ import {
   updatePassword,
   updateProfile,
 } from '@lib/api'
-import {
-  disconnectWorkflowApprovalMedium,
-  listWorkflowApprovalMediums,
-} from '@lib/approvalChannels'
 import {
   buildDesktopEnvironmentLink,
   isDesktopEnvironmentHandoffEnabled,
@@ -44,34 +39,26 @@ import {
 } from '@lib/profileSettings'
 import { refreshReleaseIdentity } from '@lib/releaseIdentity'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
-import type { WorkflowApprovalMediumAccount } from '@/app/types/approvalChannels'
 import type { Me } from '@/app/types/profile'
 import { SettingsChannelSection } from './SettingsChannelSection'
-import { TelegramVerificationPanel } from './TelegramVerificationPanel'
-import { EMAIL_CHANNEL_SECTION, PROFILE_SOCIAL_CHANNEL_TABS } from './constants'
+import { SettingsPageHeader } from './SettingsPageHeader'
+import { SettingsTabs } from './SettingsTabs'
+import { EMAIL_CHANNEL_SECTION } from './constants'
 import type {
   ProfileChannelDraft,
   ProfileChannelKey,
   ProfileChannelSection,
   ReadonlyChannelValue,
-  SocialChannelTabKey,
 } from './types'
 
 type LoadState = 'loading' | 'ready' | 'error'
-type SettingsTab = 'profile' | 'social'
 type EditScope = 'profile' | null
 
-export function SettingsContent({
-  activeSettingsTab,
-  activeSocialTab,
-}: {
-  activeSettingsTab: SettingsTab
-  activeSocialTab: SocialChannelTabKey
-}) {
+export function SettingsContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { checkAuth, logout } = useAuth()
-  const { approvalTargets: targets, refreshApprovalTargets } = useProfileAccess()
+  const { refreshApprovalTargets } = useProfileAccess()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [me, setMe] = useState<Me | null>(null)
@@ -79,7 +66,6 @@ export function SettingsContent({
   const [draft, setDraft] = useState<ProfileChannelDraft>(() =>
     channelsToDraft(EMPTY_PROFILE_CHANNELS)
   )
-  const [accounts, setAccounts] = useState<WorkflowApprovalMediumAccount[]>([])
   const [state, setState] = useState<LoadState>('loading')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -95,45 +81,6 @@ export function SettingsContent({
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
-
-  const telegramTargets = useMemo(
-    () => targets.filter(target => target.medium === 'telegram'),
-    [targets]
-  )
-  const slackTargets = useMemo(() => targets.filter(target => target.medium === 'slack'), [targets])
-  const teamsTargets = useMemo(() => targets.filter(target => target.medium === 'teams'), [targets])
-  const telegramAccounts = useMemo(() => {
-    const targetIds = new Set(telegramTargets.map(target => target.id))
-    return accounts.filter(
-      account =>
-        account.medium === 'telegram' &&
-        (account.targets || []).some(target => targetIds.has(target.id))
-    )
-  }, [accounts, telegramTargets])
-  const slackAccounts = useMemo(() => {
-    const targetIds = new Set(slackTargets.map(target => target.id))
-    return accounts.filter(
-      account =>
-        account.medium === 'slack' &&
-        (account.targets || []).some(target => targetIds.has(target.id))
-    )
-  }, [accounts, slackTargets])
-  const teamsAccounts = useMemo(() => {
-    const targetIds = new Set(teamsTargets.map(target => target.id))
-    return accounts.filter(
-      account =>
-        account.medium === 'teams' &&
-        (account.targets || []).some(target => targetIds.has(target.id))
-    )
-  }, [accounts, teamsTargets])
-  const visibleSocialTabs = useMemo(
-    () =>
-      PROFILE_SOCIAL_CHANNEL_TABS.filter(tab => targets.some(target => target.medium === tab.key)),
-    [targets]
-  )
-  const currentSocialTab =
-    visibleSocialTabs.find(tab => tab.key === activeSocialTab) || visibleSocialTabs[0] || null
-  const hasSocialAccess = visibleSocialTabs.length > 0
   const formDisabled = busy || state === 'loading'
   const configuredExternalRestApiBaseUrl = useMemo(() => getConfiguredExternalRestApiBaseUrl(), [])
   const desktopSetupExternalRestApiBaseUrl =
@@ -155,16 +102,11 @@ export function SettingsContent({
     // defeat the per-session cache the label shares with the sidebar.
     if (forceAccess) void refreshReleaseIdentity()
     try {
-      const [current, , nextAccounts] = await Promise.all([
-        getMe(),
-        refreshApprovalTargets({ force: forceAccess }),
-        listWorkflowApprovalMediums({ includeDisabled: true }),
-      ])
+      const [current] = await Promise.all([getMe(), refreshApprovalTargets({ force: forceAccess })])
       const channels = normalizeProfileChannels(current.profile.channels)
       setMe({ ...current, profile: { ...current.profile, channels } })
       setDisplayName(current.profile.displayName || current.name || current.email)
       setDraft(channelsToDraft(channels))
-      setAccounts(nextAccounts)
       setState('ready')
     } catch (err) {
       if (isSilentApiError(err)) return
@@ -246,53 +188,6 @@ export function SettingsContent({
     }
   }
 
-  async function removeApprovalMediumAccount(accountId: string, isDisconnected: boolean) {
-    const account = accounts.find(item => item.id === accountId)
-    const providerLabel =
-      account?.medium === 'slack'
-        ? 'Slack'
-        : account?.medium === 'teams'
-          ? 'Microsoft Teams'
-          : 'Telegram'
-    const shouldRemove = await confirm({
-      title: isDisconnected
-        ? `Remove ${providerLabel} record?`
-        : `Delete ${providerLabel} connection?`,
-      message: isDisconnected
-        ? `Permanently remove this disconnected ${providerLabel} verification record?`
-        : `Delete this ${providerLabel} identity connection and stop using it with Evenfire?`,
-      confirmLabel: isDisconnected ? 'Remove record' : 'Delete connection',
-      tone: 'danger',
-    })
-    if (!shouldRemove) return
-    setBusy(true)
-    setError('')
-    try {
-      await disconnectWorkflowApprovalMedium(accountId)
-      setAccounts(await listWorkflowApprovalMediums({ includeDisabled: true }))
-      showToast(
-        isDisconnected
-          ? `Disconnected ${providerLabel} verification record removed.`
-          : `${providerLabel} identity disconnected.`,
-        { tone: 'success' }
-      )
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : `Failed to update ${providerLabel} verification`
-      )
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const refreshApprovalAccounts = useCallback(async (): Promise<
-    WorkflowApprovalMediumAccount[]
-  > => {
-    const next = await listWorkflowApprovalMediums({ includeDisabled: true })
-    setAccounts(next)
-    return next
-  }, [])
-
   async function submitPasswordUpdate() {
     setPasswordError('')
     if (newPassword.length < 8) {
@@ -345,72 +240,28 @@ export function SettingsContent({
 
   return (
     <ProfileShell currentRoute="settings">
-      <div className="profile-page profile-page--settings">
-        <header className="header-row">
-          <div>
-            <p className="eyebrow">Profile settings</p>
-            <h1 className="page-title">Settings</h1>
-            <ReleaseLabel className="small-plus muted" />
-            <div className="small-plus muted">
-              {me ? `Signed in as ${me.email}` : 'Loading user session'}
-            </div>
-            <Button
-              variant="secondary"
-              className="settings-desktop-setup-button"
-              onClick={openDesktopSetupModal}
-              disabled={formDisabled}
-            >
+      <div className="profile-page">
+        <SettingsPageHeader
+          disabled={formDisabled}
+          spinning={state === 'loading'}
+          refreshAriaLabel={state === 'loading' ? 'Refreshing settings' : 'Refresh settings'}
+          onRefresh={() => void loadAll(true)}
+          actions={
+            <Button variant="secondary" onClick={openDesktopSetupModal} disabled={formDisabled}>
               Setup desktop app
             </Button>
-          </div>
-          <div className="toolbar">
-            <Button
-              variant="secondary"
-              className="cu-btn--icon cu-btn--toolbar"
-              onClick={() => void loadAll(true)}
-              disabled={formDisabled}
-              aria-label={state === 'loading' ? 'Refreshing settings' : 'Refresh settings'}
-            >
-              <IconRefresh className={state === 'loading' ? 'cu-spin' : undefined} />
-            </Button>
-          </div>
-        </header>
+          }
+        />
+        <SettingsTabs active="profile" />
 
         {error && <div className="message message--error">{error}</div>}
-
-        <div className="tabs" role="tablist" aria-label="Settings sections">
-          <Link
-            href={PROFILE_ROUTES.settings.profile}
-            className={`tab-button${activeSettingsTab === 'profile' ? ' is-active' : ''}`}
-            role="tab"
-            aria-selected={activeSettingsTab === 'profile'}
-          >
-            Profile
-          </Link>
-          {hasSocialAccess ? (
-            <Link
-              href={PROFILE_ROUTES.settings.social(
-                currentSocialTab?.key || visibleSocialTabs[0]?.key || 'telegram'
-              )}
-              className={`tab-button${activeSettingsTab === 'social' ? ' is-active' : ''}`}
-              role="tab"
-              aria-selected={activeSettingsTab === 'social'}
-            >
-              Social channels
-            </Link>
-          ) : null}
-        </div>
 
         {state === 'loading' ? (
           <ProfileBodySkeleton
             label="Loading settings"
-            sections={[
-              activeSettingsTab === 'profile'
-                ? { title: 'Profile', actions: ['Update password', 'Edit'], rows: 3 }
-                : { title: 'Social channels', actions: ['Connect'], rows: 4 },
-            ]}
+            sections={[{ title: 'Profile', actions: ['Update password', 'Edit'], rows: 3 }]}
           />
-        ) : activeSettingsTab === 'profile' ? (
+        ) : (
           <section className="section settings-section">
             <div className="settings-section-head">
               <div>
@@ -444,54 +295,7 @@ export function SettingsContent({
               />
             </div>
           </section>
-        ) : null}
-
-        {state !== 'loading' && activeSettingsTab === 'social' && currentSocialTab ? (
-          <section className="section settings-section">
-            <div className="tabs" role="tablist" aria-label="Social networks">
-              {visibleSocialTabs.map(tab => (
-                <Link
-                  key={tab.key}
-                  href={PROFILE_ROUTES.settings.social(tab.key)}
-                  className={`tab-button${tab.key === activeSocialTab ? ' is-active' : ''}`}
-                  role="tab"
-                  aria-selected={tab.key === activeSocialTab}
-                >
-                  {tab.label}
-                </Link>
-              ))}
-            </div>
-            {currentSocialTab.key === 'telegram' ? (
-              <TelegramVerificationPanel
-                targets={telegramTargets}
-                accounts={telegramAccounts}
-                disabled={formDisabled}
-                onAccountsRefresh={refreshApprovalAccounts}
-                onRemoveAccount={removeApprovalMediumAccount}
-              />
-            ) : null}
-            {currentSocialTab.key === 'slack' ? (
-              <TelegramVerificationPanel
-                medium="slack"
-                targets={slackTargets}
-                accounts={slackAccounts}
-                disabled={formDisabled}
-                onAccountsRefresh={refreshApprovalAccounts}
-                onRemoveAccount={removeApprovalMediumAccount}
-              />
-            ) : null}
-            {currentSocialTab.key === 'teams' ? (
-              <TelegramVerificationPanel
-                medium="teams"
-                targets={teamsTargets}
-                accounts={teamsAccounts}
-                disabled={formDisabled}
-                onAccountsRefresh={refreshApprovalAccounts}
-                onRemoveAccount={removeApprovalMediumAccount}
-              />
-            ) : null}
-          </section>
-        ) : null}
+        )}
       </div>
 
       {editScope ? (
@@ -547,14 +351,7 @@ export function SettingsContent({
               <h3 id="settings-password-title" className="cu-modal-panel__title">
                 Update password
               </h3>
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost"
-                onClick={closePasswordModal}
-                disabled={passwordBusy}
-              >
-                Close
-              </button>
+              <ModalCloseButton onClose={closePasswordModal} disabled={passwordBusy} />
             </div>
             <div className="cu-modal-panel__body">
               <FormField label="Current password">
@@ -696,9 +493,7 @@ function DesktopSetupModal({
           <h3 id="settings-desktop-setup-title" className="cu-modal-panel__title">
             Setup desktop app
           </h3>
-          <button type="button" className="cu-btn cu-btn--ghost" onClick={onClose} disabled={busy}>
-            Close
-          </button>
+          <ModalCloseButton onClose={onClose} disabled={busy} />
         </div>
         <div className="cu-modal-panel__body">
           <div className="form-field">
@@ -772,9 +567,7 @@ function SettingsEditModal({
           <h3 id="settings-edit-title" className="cu-modal-panel__title">
             {title}
           </h3>
-          <button type="button" className="cu-btn cu-btn--ghost" onClick={onClose} disabled={busy}>
-            Close
-          </button>
+          <ModalCloseButton onClose={onClose} disabled={busy} />
         </div>
         <div className="cu-modal-panel__body">{children}</div>
         <div className="cu-modal-panel__foot">

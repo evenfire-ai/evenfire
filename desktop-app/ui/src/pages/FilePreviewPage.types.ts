@@ -9,7 +9,7 @@ export interface FilePreviewPageProps {
   mimeType?: string
   /** File size in bytes, for the per-kind size-guard (not the bytes). */
   byteLength: number
-  /** Changes on remote invalidation so all current preview bodies remount generically. */
+  /** Bumped when a newer server version is resolved; the body reloads it in place. */
   reloadVersion?: number
   /** Set when an authoritative re-resolve denies access or the file is no longer previewable. */
   unavailable?: boolean

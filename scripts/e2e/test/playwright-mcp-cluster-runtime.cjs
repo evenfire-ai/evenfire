@@ -17,7 +17,7 @@ const requiredTools = [
 ]
 
 async function runSmoke(sdk, nodeVersion = process.versions.node) {
-  assert.equal(nodeVersion, '24.22.1', 'Unexpected Node version')
+  assert.equal(nodeVersion, '24.22.3', 'Unexpected Node version')
   const fixture = createServer((_request, response) => {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', Connection: 'close' })
     response.end(
@@ -60,8 +60,8 @@ async function runSmoke(sdk, nodeVersion = process.versions.node) {
     await call('browser_click', { element: 'Run check button', ref: button[1] })
     assert.match(text(await call('browser_snapshot')), /check completed/)
     const agent = text(await call('browser_evaluate', { function: '() => navigator.userAgent' }))
-    const browserVersion = /(?:HeadlessChrome|Chrome)\/[\d.]+/.exec(agent)
-    assert.ok(browserVersion, 'Chromium user agent is missing')
+    const browserVersion = /(?:HeadlessChrome|Chrome)\/157(?:\.\d+){3}\b/.exec(agent)
+    assert.ok(browserVersion, 'Expected Chromium 157 in the MCP session')
     await call('browser_take_screenshot', { filename: screenshotPath })
     const screenshot = fs.readFileSync(screenshotPath)
     assert.equal(screenshot.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')

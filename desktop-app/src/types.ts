@@ -274,36 +274,23 @@ export type WorkflowNotificationStreamEvent =
       type: 'closed'
     }
 
-export type EntityChangeScope = 'gfs' | 'authorization'
+/** An event of the GFS watch, pushed by main to every subscribed window on `gfsWatch:event`. */
+export type GfsWatchEvent =
+  | { type: 'changed'; keys: string[] }
+  | { type: 'resync'; keys: string[] }
+  | { type: 'rejected'; keys: string[] }
+  | { type: 'accessChanged' }
+  | { type: 'accessChangedRoots' }
+  | { type: 'sessionExpired' }
 
-export type EntityChangeStreamEvent =
-  | { type: 'open' }
-  | {
-      type: 'resync_required'
-      schemaVersion: 1
-      cursor: string
-      scopes: EntityChangeScope[]
-    }
-  | {
-      type: 'scope.invalidated'
-      schemaVersion: 1
-      cursor: string
-      scopes: EntityChangeScope[]
-    }
-  | {
-      type: 'heartbeat'
-      schemaVersion: 1
-      cursor: string
-      observedAt: string
-    }
-  | {
-      type: 'stream.closing'
-      schemaVersion: 1
-      cursor: string
-      reason: 'max_lifetime' | 'session_expired' | 'server_shutdown' | 'slow_consumer'
-    }
-  | { type: 'error'; message: string }
-  | { type: 'closed' }
+/**
+ * A window's GFS watch list. `keys` is ordered by priority; `userId` is the id
+ * of the user the list was derived for (`me.id`), so a list built for a
+ * previous session is dropped instead of being watched for the next one.
+ */
+export type GfsWatchSubscriptionRequest = { keys: string[]; userId: string | null }
+
+export type GfsWatchSubscriptionResult = { sessionExpired: boolean }
 
 export type WorkflowInputContractProperty = {
   type: 'string' | 'integer' | 'number' | 'boolean'

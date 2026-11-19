@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ControlApiError,
+  ControlApiNonJsonResponseError,
   ControlApiTransportError,
   controlApiBinaryRequestWithStatus,
   controlApiRequest,
@@ -122,6 +123,39 @@ describe('controlApiClient transport classification', () => {
     expect(error.operation).toBe('mutation')
     expect(error.phase).toBe('response')
     expect(error.message).not.toContain('private proof')
+  })
+})
+
+describe('controlApiClient non-JSON bodies', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  // Callers that give a meaning to a status (the GFS watch among them) tell a
+  // body control-api never wrote apart by this class, so it must not be the
+  // plain error with the upstream status, whatever that status is.
+  it.each([
+    ['a 4xx HTML page', 413, 'text/html', '<html>Too Large</html>'],
+    ['a 5xx HTML page', 503, 'text/html', '<html>Unavailable</html>'],
+    ['a 2xx text body', 200, 'text/plain', 'ok'],
+  ])('answers %s with the synthetic 502', async (_name, status, contentType, body) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(body, {
+          status,
+          headers: { 'content-type': contentType, 'x-request-id': 'req-1' },
+        })
+      )
+    )
+
+    const error = await captureError(() =>
+      controlApiRequestWithStatus('PUT', '/external/gfs/watch', { body: {} })
+    )
+
+    expect(error).toBeInstanceOf(ControlApiNonJsonResponseError)
+    expect(error.status).toBe(502)
+    expect((error as ControlApiNonJsonResponseError).upstreamStatus).toBe(status)
+    expect(error.body).toEqual({ error: 'Upstream returned non-JSON body', status })
+    expect(error.headers).toEqual({ 'x-request-id': 'req-1' })
   })
 })
 

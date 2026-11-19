@@ -18,7 +18,11 @@ import { base64Length, composerNonImageShareBytes } from '@lib/composerFileAdmis
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import { readHostApprovalMode, resetHostApprovalModeStore } from '@lib/hostApprovalModeStore'
-import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
+import {
+  getHostModelSelectionSnapshot,
+  loadHostModels,
+  resetHostModelSelectionStore,
+} from '@lib/hostModelSelectionStore'
 import type { HostModelsResult } from '../../../../../src/types'
 import type {
   ComposerGlobalFileReference,
@@ -2265,7 +2269,6 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
     const codexCatalog: HostModelsResult = {
       provider: 'codex-subscription',
       hostDefault: 'gpt-5.5',
-      // A broker-backed provider has no silent default: the session names its model.
       sessionModel: 'gpt-5.5',
       degraded: false,
       modelSelectionRevision: 0,
@@ -2316,6 +2319,122 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
     expect(sentAttachmentIds()).toEqual(['image-codex'])
     const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
     expect(request.content).toHaveLength(fullBodyText)
+  })
+
+  it('sends an image on a broker chat without a selection with the Host default as its model', async () => {
+    // The Host acks a send on the model the session already runs on with the
+    // unchanged revision: nothing was written.
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-1', modelSelectionRevision: 0 })
+    const rendered = renderController()
+    await settleMount()
+    const brokerCatalog: HostModelsResult = {
+      provider: 'codex-subscription',
+      hostDefault: 'gpt-5.5',
+      sessionModel: null,
+      degraded: false,
+      modelSelectionRevision: 0,
+      // The default is not the first row, so a seeded `models[0]` would show.
+      models: [
+        { name: 'gpt-5.3', imageInput: { state: 'supported', reason: 'supported' } },
+        { name: 'gpt-5.5', imageInput: { state: 'supported', reason: 'supported' } },
+      ],
+    }
+    const brokerTransport = {
+      getHostModels: vi.fn(async () => brokerCatalog),
+      setHostModel: vi.fn(),
+    }
+    await act(async () => {
+      await loadHostModels(brokerTransport, 'agent-x', null)
+    })
+    const image: ComposerImageAttachment = {
+      id: 'image-default',
+      name: 'scan.png',
+      mimeType: 'image/png',
+      dataBase64: 'AAAA',
+      sizeBytes: 3,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('describe')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      model?: string
+      modelSelectionRevision?: number
+      threadId?: string
+    }
+    expect(request).toMatchObject({ model: 'gpt-5.5', modelSelectionRevision: 0 })
+    expect(sentAttachmentIds()).toEqual(['image-default'])
+
+    // The ack confirmed the default; the next settled read of the chat (still
+    // without an explicit selection) keeps naming it.
+    const chatId = request.threadId ?? null
+    expect(chatId).toBeTruthy()
+    expect(getHostModelSelectionSnapshot('agent-x', chatId).effectiveModel).toBe('gpt-5.5')
+    await act(async () => {
+      await loadHostModels(brokerTransport, 'agent-x', chatId, { force: true })
+    })
+    expect(getHostModelSelectionSnapshot('agent-x', chatId)).toMatchObject({
+      effectiveModel: 'gpt-5.5',
+      pending: false,
+      canAttachImages: true,
+    })
+
+    // The ack confirmed the default, not a selection: once the operator moves
+    // the Host default, the next settled read names the new one.
+    brokerTransport.getHostModels.mockResolvedValue({ ...brokerCatalog, hostDefault: 'gpt-5.3' })
+    await act(async () => {
+      await loadHostModels(brokerTransport, 'agent-x', chatId, { force: true })
+    })
+    expect(getHostModelSelectionSnapshot('agent-x', chatId)).toMatchObject({
+      effectiveModel: 'gpt-5.3',
+      pending: false,
+    })
+    // Sending with the default must not persist it as the chat's selection:
+    // no write reached the RPC bridge (the controller's write path), and none
+    // went through the transport handed to the reads above (the load path).
+    expect(clerum.rpc.setHostModel).not.toHaveBeenCalled()
+    expect(brokerTransport.setHostModel).not.toHaveBeenCalled()
+  })
+
+  it('sends text on a broker chat without a selection with no model, although the store resolves the Host default', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-1', modelSelectionRevision: 0 })
+    const rendered = renderController()
+    await settleMount()
+    const brokerCatalog: HostModelsResult = {
+      provider: 'codex-subscription',
+      hostDefault: 'gpt-5.5',
+      sessionModel: null,
+      degraded: false,
+      modelSelectionRevision: 0,
+      models: [
+        { name: 'gpt-5.3', imageInput: { state: 'supported', reason: 'supported' } },
+        { name: 'gpt-5.5', imageInput: { state: 'supported', reason: 'supported' } },
+      ],
+    }
+    await act(async () => {
+      await loadHostModels(
+        { getHostModels: vi.fn(async () => brokerCatalog), setHostModel: vi.fn() },
+        'agent-x',
+        null
+      )
+    })
+    // Positive witness: the store the send reads does name the Host default,
+    // so an absent `model` below is the text path omitting it, not an empty store.
+    expect(getHostModelSelectionSnapshot('agent-x', null).effectiveModel).toBe('gpt-5.5')
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('hello')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as Record<string, unknown>
+    expect(request.content).toBe('hello')
+    // The Host resolves a text send's model itself; pinning the default here
+    // would freeze it on the session even after the operator moves it.
+    expect('model' in request).toBe(false)
+    expect('modelSelectionRevision' in request).toBe(false)
   })
 
   it('refuses a twenty-first attachment and sends twenty', async () => {

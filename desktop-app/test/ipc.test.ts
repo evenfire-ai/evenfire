@@ -868,7 +868,7 @@ describe('ipc host status stream handlers', () => {
 
   it('opens the canonical Profile UI social route through the auth handler', async () => {
     service.openProfileSettings.mockResolvedValue({
-      profileUiUrl: 'http://localhost:3001/settings/social/telegram',
+      profileUiUrl: 'http://localhost:3001/channels/telegram',
     })
     const { event } = makeTrustedEvent()
     const handler = testState.handlers.get('auth:openProfileSettings')

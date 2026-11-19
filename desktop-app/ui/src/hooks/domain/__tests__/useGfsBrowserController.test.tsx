@@ -29,8 +29,8 @@ import {
   resolvedFile,
   sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
-import { shouldRevalidateGfsQuery } from '@/lib/gfsEntityChangeState'
 import { readGfsOpenLocations } from '@/lib/gfsOpenLocations'
+import { refetchGfsAccess, refetchWatchedFolder } from '@/lib/gfsWatchReaction'
 import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
 import type { DesktopRuntimeConfigState } from '../../../../../src/types'
 import { desktopQueryKeys } from '../queryKeys'
@@ -212,14 +212,15 @@ function Probe() {
       <button
         type="button"
         onClick={() =>
-          void queryClient.invalidateQueries({
-            queryKey: desktopQueryKeys.gfsRoot,
-            predicate: query => shouldRevalidateGfsQuery(query.queryKey),
-            refetchType: 'active',
-          })
+          void refetchWatchedFolder(
+            queryClient,
+            { scope: ':user-a:team-a', generation: 1 },
+            'main',
+            'root'
+          )
         }
       >
-        revalidate GFS scope
+        watched folder changed
       </button>
       <button type="button" onClick={() => ctrl.loadMore()}>
         load more
@@ -467,7 +468,50 @@ describe('useGfsBrowserController', () => {
     await act(async () => resolveChildrenRefresh(emptyChildrenPage))
   })
 
-  it('keeps loaded pages and avoids per-row reads during a scope revalidation', async () => {
+  it('re-reads a folder left before an access change when the same view returns to it', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const rootPage = await listChildrenPage([
+      childView('sub', 'Sub', 'directory', { parentResourceId: 'root' }),
+    ])
+    const subPage = await listChildrenPage([])
+    const listChildren = vi.fn(async (resourceId: string) =>
+      resourceId === 'root' ? rootPage : subPage
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => root),
+          listChildren,
+          affordances: vi.fn(async () => delegationAffordances(new Set(['read']), false)),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await act(async () => (await screen.findByRole('button', { name: 'child Sub' })).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('sub'))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledWith('sub', 'main', undefined))
+    const rootReads = () => listChildren.mock.calls.filter(([id]) => id === 'root').length
+    expect(rootReads()).toBe(1)
+
+    await act(async () => {
+      await refetchGfsAccess(lastHarnessQueryClient!, { scope: ':user-a:team-a', generation: 1 })
+    })
+    expect(rootReads()).toBe(1)
+
+    // Returning by link (openUri), the one navigation that does not revalidate
+    // the folder it lands on, unlike a crumb or a child click.
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(rootReads()).toBe(2))
+  })
+
+  it('keeps loaded pages and avoids per-row reads when the watched folder changes', async () => {
     const root = await resolveResource(
       resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
     )
@@ -517,7 +561,7 @@ describe('useGfsBrowserController', () => {
     const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
     const affordanceKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'row-0', 'main', 1)
 
-    await act(async () => screen.getByRole('button', { name: 'revalidate GFS scope' }).click())
+    await act(async () => screen.getByRole('button', { name: 'watched folder changed' }).click())
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(3))
     expect(screen.getByTestId('items-count').textContent).toBe('31')
     expect(affordances).toHaveBeenCalledTimes(32)
@@ -539,13 +583,12 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(4))
     await waitFor(() => expect(affordances).toHaveBeenCalledTimes(32))
 
-    // Two retained pages are refetched, but the 31 cached row permission
-    // queries are not repeated on a periodic scope tick.
-    expect(listAccessible).toHaveBeenCalledTimes(2)
+    // The two retained pages of the changed folder are refetched; the roots and
+    // the 31 cached row permission queries are not touched by a folder change.
+    expect(listAccessible).toHaveBeenCalledTimes(1)
     expect(affordances).toHaveBeenCalledTimes(32)
     expect(screen.getByTestId('items-count').textContent).toBe('31')
-    expect(shouldRevalidateGfsQuery(childrenKey)).toBe(true)
-    expect(shouldRevalidateGfsQuery(affordanceKey)).toBe(false)
+    expect(lastHarnessQueryClient?.getQueryState(affordanceKey)?.isInvalidated).toBe(false)
   })
 
   afterEach(() => {

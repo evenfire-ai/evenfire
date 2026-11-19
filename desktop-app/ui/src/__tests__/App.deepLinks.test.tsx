@@ -52,7 +52,6 @@ import type { FilesPageProps } from '@pages/FilesPage.types'
 import type { SandboxUiPageProps } from '@pages/SandboxUiPage.types'
 import { App } from '@/App'
 import type { GfsResourceDeepLinkEnvelope, SandboxUiDeepLinkEnvelope } from '@/App.types'
-import { USER_SCOPE_INVALIDATED } from '@/gfs/__fixtures__/entityChangeFixtures'
 import {
   accessibleResource,
   childView,
@@ -61,6 +60,7 @@ import {
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { GfsWatchEventSource, mainDriveKey } from '@/gfs/__fixtures__/gfsWatchEvents'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { GfsClient, type GfsTransport } from '../../../src/gfs/uriHandler'
 import {
@@ -958,7 +958,7 @@ describe('App deep-link orchestration', () => {
     const controllerBridge = window.clerum
     Object.assign(window.clerum, {
       shortcuts: rendererBridge.shortcuts,
-      entityChanges: rendererBridge.entityChanges,
+      gfsWatch: rendererBridge.gfsWatch,
       app: rendererBridge.app,
       sandboxUi: { ...(controllerBridge.sandboxUi ?? {}), ...rendererBridge.sandboxUi },
       gfs: { ...(controllerBridge.gfs ?? {}), ...rendererBridge.gfs },
@@ -1003,8 +1003,6 @@ describe('App deep-link orchestration', () => {
       bindCurrentChatStore: () => Promise<void>
       updateDesktopGfsUploadState: () => Promise<void>
       migrateLegacyDesktopGfsUploadScopes: () => Promise<void>
-      updateEntityChangeSessionToken: () => void
-      restartEntityChangeStreamForSessionReplacement: () => void
     }
     transportBoundaries.authClient.googleLogin = vi
       .fn()
@@ -1014,8 +1012,6 @@ describe('App deep-link orchestration', () => {
     transportBoundaries.bindCurrentChatStore = vi.fn(async () => undefined)
     transportBoundaries.updateDesktopGfsUploadState = vi.fn(async () => undefined)
     transportBoundaries.migrateLegacyDesktopGfsUploadScopes = vi.fn(async () => undefined)
-    transportBoundaries.updateEntityChangeSessionToken = vi.fn()
-    transportBoundaries.restartEntityChangeStreamForSessionReplacement = vi.fn()
     return { userA, service, transportBoundaries }
   }
 
@@ -5700,8 +5696,6 @@ describe('App deep-link orchestration', () => {
         bindCurrentChatStore: () => Promise<void>
         updateDesktopGfsUploadState: () => Promise<void>
         migrateLegacyDesktopGfsUploadScopes: () => Promise<void>
-        updateEntityChangeSessionToken: () => void
-        restartEntityChangeStreamForSessionReplacement: () => void
       }
       transports.authClient.googleLogin = vi
         .fn()
@@ -5710,8 +5704,6 @@ describe('App deep-link orchestration', () => {
       transports.bindCurrentChatStore = vi.fn(async () => undefined)
       transports.updateDesktopGfsUploadState = vi.fn(async () => undefined)
       transports.migrateLegacyDesktopGfsUploadScopes = vi.fn(async () => undefined)
-      transports.updateEntityChangeSessionToken = vi.fn()
-      transports.restartEntityChangeStreamForSessionReplacement = vi.fn()
       const rootId = 'a'.repeat(32)
       const sourceId = 'b'.repeat(32)
       const destinationId = 'c'.repeat(32)
@@ -5880,15 +5872,20 @@ describe('App deep-link orchestration', () => {
   it('R6-M4 ignores an outgoing preview refresh 401 after replacement publication', async () => {
     const { userA, service } = installSameIdentityLoginFixture()
     await service.googleLogin('fixture-google-A')
-    let dispatch: ((event: unknown) => void) | null = null
-    window.clerum.entityChanges = {
-      subscribe: vi.fn(async handler => {
-        dispatch = handler as (event: unknown) => void
-        return vi.fn(async () => undefined)
-      }),
-    }
-    const { getController, queryClient } = await mountSessionBackedApp(userA, desktopQueryClient)
     const uri = 'gfs://main/' + 'c'.repeat(32)
+    const fileKey = mainDriveKey('file', 'c'.repeat(32))
+    // This suite stubs `fetch`; the watch client behind the events talks to its
+    // own loopback server through the real one.
+    const watchEvents = new GfsWatchEventSource()
+    const suiteFetch = globalThis.fetch
+    globalThis.fetch = (input, init) =>
+      watchEvents.baseUrl && String(input).startsWith(watchEvents.baseUrl)
+        ? producerHttpFetch(input, init)
+        : suiteFetch(input, init)
+    await watchEvents.start([fileKey])
+    const watch = watchEvents.connectRenderer()
+    window.clerum.gfsWatch = watch.bridge
+    const { getController, queryClient } = await mountSessionBackedApp(userA, desktopQueryClient)
     let rejectResolve!: (error: Error) => void
     const pending = new Promise<never>((_resolve, reject) => {
       rejectResolve = reject
@@ -5901,7 +5898,6 @@ describe('App deep-link orchestration', () => {
     const resolve = vi
       .fn()
       .mockResolvedValue(resource)
-      .mockResolvedValueOnce(resource)
       .mockResolvedValueOnce(resource)
       .mockImplementationOnce(() => pending)
     window.clerum.gfs.resolve = resolve
@@ -5917,15 +5913,17 @@ describe('App deep-link orchestration', () => {
     )
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(queryClient.isFetching()).toBe(0))
-    await waitFor(() => expect(dispatch).toBeTypeOf('function'))
-    act(() => dispatch?.({ ...USER_SCOPE_INVALIDATED }))
-    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(3))
+    await waitFor(() => expect(watch.opens).toBe(1))
+    await act(async () => {
+      await watchEvents.changed([fileKey])
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
     expect(queryClient.isFetching()).toBe(0)
     await service.googleLogin('fixture-google-B')
     await act(async () => {
       await getController().loadSession({ preserveNav: true })
     })
-    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(4))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(3))
     const generation = service.getSessionGeneration()
     const scope = getController().runtimeConfigState!.envKey + ':user-a:team-a'
     const key = desktopQueryKeys.gfsAffordances(scope, 'c'.repeat(32), 'main', generation)
@@ -5949,6 +5947,8 @@ describe('App deep-link orchestration', () => {
     expect(preview?.preview?.unavailable).not.toBe(true)
     expect(preview?.title).toBe('Captured.png')
     queryClient.clear()
+    await watchEvents.stop()
+    globalThis.fetch = suiteFetch
   })
 
   it.each([false, true])(
@@ -6131,8 +6131,6 @@ describe('App deep-link orchestration', () => {
       tokenStore: { setSessionToken: (token: string, envKey: string) => Promise<void> }
       switchTeam: (teamId: string) => ReturnType<typeof main.service.switchTeam>
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
-      updateEntityChangeSessionToken: (token: string | null) => void
-      restartEntityChangeStreamForSessionReplacement: () => void
     }
     sessionAuthority.sessionGeneration = 7
     sessionAuthority.sessionToken = 'session-a'
@@ -6143,8 +6141,6 @@ describe('App deep-link orchestration', () => {
     sessionAuthority.authClient.getMe = vi.fn(async () => userInTeamB)
     sessionAuthority.tokenStore.setSessionToken = vi.fn(async () => undefined)
     sessionAuthority.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => undefined)
-    sessionAuthority.updateEntityChangeSessionToken = vi.fn()
-    sessionAuthority.restartEntityChangeStreamForSessionReplacement = vi.fn()
     const appQueue = new SandboxUiDeepLinkQueue()
     main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
     main.setSessionInvalidationCleanup(() => ({
@@ -6271,8 +6267,6 @@ describe('App deep-link orchestration', () => {
       tokenStore: { setSessionToken: (token: string, envKey: string) => Promise<void> }
       switchTeam: (teamId: string) => ReturnType<typeof main.service.switchTeam>
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
-      updateEntityChangeSessionToken: (token: string | null) => void
-      restartEntityChangeStreamForSessionReplacement: () => void
     }
     sessionAuthority.sessionGeneration = 7
     sessionAuthority.sessionToken = 'session-a'
@@ -6283,8 +6277,6 @@ describe('App deep-link orchestration', () => {
     sessionAuthority.authClient.getMe = vi.fn(async () => userInTeamB)
     sessionAuthority.tokenStore.setSessionToken = vi.fn(async () => undefined)
     sessionAuthority.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => undefined)
-    sessionAuthority.updateEntityChangeSessionToken = vi.fn()
-    sessionAuthority.restartEntityChangeStreamForSessionReplacement = vi.fn()
     const appQueue = new SandboxUiDeepLinkQueue()
     main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
     main.setSessionInvalidationCleanup(() => ({

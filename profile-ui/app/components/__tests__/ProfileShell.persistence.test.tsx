@@ -30,7 +30,7 @@ vi.mock('@components/Sidebar', () => ({
 }))
 
 vi.mock('@constants/routes', () => ({
-  PROFILE_ROUTES: { home: '/' },
+  PROFILE_ROUTES: { root: '/' },
 }))
 
 afterEach(() => {
@@ -51,14 +51,14 @@ describe('ProfileShell persistence', () => {
     expect(sidebar).toBeInstanceOf(HTMLElement)
     expect(sidebar).toHaveAttribute('data-current-route', 'members')
 
-    navigationState.pathname = '/approval-channels'
+    navigationState.pathname = '/connected-accounts'
     view.rerender(
       <ProfileShell>
-        <div data-testid="profile-page">Approval channels</div>
+        <div data-testid="profile-page">Connected accounts</div>
       </ProfileShell>
     )
     expect(view.container.querySelector('.cu-sidebar')).toBe(sidebar)
-    expect(sidebar).toHaveAttribute('data-current-route', 'approvalChannels')
+    expect(sidebar).toHaveAttribute('data-current-route', 'connectedAccounts')
 
     navigationState.pathname = '/settings/profile'
     view.rerender(

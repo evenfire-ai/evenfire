@@ -112,29 +112,27 @@ const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 const UNRESOLVED_NOTICE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const UNRESOLVED_NOTICE_COPY =
   "I can't accept messages from this Slack account. If you haven't linked it yet on the " +
-  'profile UI, open Settings > Social channels > Slack and choose Connect Slack. ' +
+  'profile UI, open Social channels > Slack and choose Connect Slack. ' +
   'If you think you should already have access, contact your admin.'
 const UNRESOLVED_NOTICE_COPY_TEAMS =
   "I can't accept messages from this Teams account. If you haven't linked it yet on the " +
-  'profile UI, open Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
+  'profile UI, open Social channels > Teams and choose Connect Microsoft Teams. ' +
   'If you think you should already have access, contact your admin.'
 
 /**
  * Profile UI tab that owns the Connect button for a provider.
  *
- * The bare Profile UI root lands the user on their profile with no sign of
- * where to go next, and the control they need is four levels in: Settings >
- * Social channels > <provider> > Connect. These are real App Router segments
- * (profile-ui/app/settings/social/[network]), not query params, so they are
- * safe to link directly.
+ * Social channels > <provider> owns the Connect action. These are real App
+ * Router segments (profile-ui/app/channels/[network]), so they are safe to
+ * link directly. Legacy /settings/social provider URLs remain redirects.
  *
  * The copy above still names the path in words. A deep link can be defeated by
  * a sign-in redirect that drops the user at the root, and someone reading this
  * from a phone needs to be able to find the screen without the link.
  */
 const PROFILE_SOCIAL_CHANNEL_PATH: Partial<Record<ChannelType, string>> = {
-  slack: '/settings/social/slack',
-  teams: '/settings/social/teams',
+  slack: '/channels/slack',
+  teams: '/channels/teams',
 }
 
 /**
