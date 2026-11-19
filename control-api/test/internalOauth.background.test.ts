@@ -25,7 +25,7 @@ function seedRecipeWithBackgroundOAuth(gateway: MockGateway, opts: { recipeName:
     {
       metadata: { name: opts.recipeName },
       spec: {
-        workloads: [{ id: 'api', type: 'deployment', image: 'nginx:alpine' }],
+        workloads: [{ id: 'api', type: 'deployment', image: 'nginx:1.30.7-alpine' }],
         ui: { workloadRef: 'api', port: 8080 },
         oauthClients: [
           {

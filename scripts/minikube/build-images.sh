@@ -594,7 +594,7 @@ BUILD_BASE_IMAGES=(
   "node:24.22.3-alpine"
   "node:24.22.3"
   "node:24.22.3-slim"
-  "nginx:1.30.6-alpine"
+  "nginx:1.30.7-alpine"
 )
 
 normalize_minikube_image_tag() {
@@ -1373,7 +1373,7 @@ if [ "$SKIP_PUBLIC" = false ]; then
   PUBLIC_IMAGES=(
     "postgres:16-alpine"
     "redis:7-alpine"
-    "nginx:1.30.6-alpine"
+    "nginx:1.30.7-alpine"
     # MinIO is not pulled here: nothing in this distribution consumes the
     # image; the optional sibling evenfire-registry deployment pulls its own.
     "axllent/mailpit:latest"
