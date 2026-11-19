@@ -118,7 +118,9 @@ export function GfsActionHost({
     if (ownsToken(token)) writeAction(null)
   }
   // Dismissal while the mutation runs is ignored: the mutation cannot be
-  // recalled, and closing would let a drag of the same resource start.
+  // recalled, and closing would let a drag of the same resource start. Each
+  // dialog also disables its close paths while running, so this guard is
+  // never the user's only feedback.
   const dismiss = (token: number) => {
     const action = activeActionRef.current
     if (!action || action.token !== token || action.phase === 'running') return
@@ -573,6 +575,7 @@ export function GfsActionHost({
             sessionGeneration={sessionGeneration}
             accessActive={accessState === 'active'}
             busy={busy || ops.mutating}
+            closeLocked={busy}
             isOwnerCurrent={() => ownsToken(token)}
             isPresentationCurrent={() => ownsToken(token)}
             sourceGeneration={() => token}

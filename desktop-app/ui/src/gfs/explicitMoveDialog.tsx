@@ -96,6 +96,7 @@ export function GfsExplicitMoveDialog({
   sessionGeneration,
   accessActive,
   busy,
+  closeLocked = false,
   isOwnerCurrent,
   isPresentationCurrent: isOwnerPresentationCurrent,
   sourceGeneration,
@@ -298,6 +299,7 @@ export function GfsExplicitMoveDialog({
   return (
     <GfsMoveDialog
       busy={busy || permissionStatus === 'checking'}
+      closeLocked={closeLocked}
       initialCrumbs={target.initialCrumbs}
       onClose={onClose}
       onMoveWithOwnership={handleMove}

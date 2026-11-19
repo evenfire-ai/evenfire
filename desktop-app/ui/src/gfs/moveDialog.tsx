@@ -235,6 +235,7 @@ export function GfsMoveDialog({
   onRetryPermissionCheck,
   onClose,
   busy = false,
+  closeLocked = false,
   permissionStatus = null,
   onAuthorityFailure,
 }: GfsMoveDialogProps) {
@@ -311,6 +312,7 @@ export function GfsMoveDialog({
     resolve?.(accepted)
   }, [])
   const closeDialog = () => {
+    if (closeLocked) return
     settleNumberedNameConsent(false)
     onClose()
   }
@@ -514,7 +516,13 @@ export function GfsMoveDialog({
             <h3>Move “{target.name}”</h3>
           </span>
           <span className="da-gfs-manage-dialog__top-actions">
-            <IconButton label="Close move dialog" onClick={closeDialog} size="sm" variant="ghost">
+            <IconButton
+              disabled={closeLocked}
+              label="Close move dialog"
+              onClick={closeDialog}
+              size="sm"
+              variant="ghost"
+            >
               <IconClose />
             </IconButton>
           </span>
@@ -643,7 +651,7 @@ export function GfsMoveDialog({
               )}
             </span>
             <span className="da-gfs-move-dialog__action-buttons">
-              <Button onClick={closeDialog} type="button" variant="ghost">
+              <Button disabled={closeLocked} onClick={closeDialog} type="button" variant="ghost">
                 Cancel
               </Button>
               <Button

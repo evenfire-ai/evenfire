@@ -643,7 +643,7 @@ async function openMenuOn(name: string) {
 }
 
 describe('FileExplorerTree drag during a host Move (S-10)', () => {
-  it('ignores a close while the host Move runs and refuses to drag the resource it moves', async () => {
+  it('disables closing while the host Move runs and refuses to drag the resource it moves', async () => {
     let finishMove!: () => void
     const moveGate = new Promise<void>(resolve => {
       finishMove = resolve
@@ -693,7 +693,15 @@ describe('FileExplorerTree drag during a host Move (S-10)', () => {
       await moveStarted
     })
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+    const close = within(dialog).getByRole<HTMLButtonElement>('button', {
+      name: 'Close move dialog',
+    })
+    const cancel = within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Cancel' })
+    expect(close.disabled).toBe(true)
+    expect(cancel.disabled).toBe(true)
+    fireEvent.click(close)
+    fireEvent.click(cancel)
+    fireEvent.mouseDown(dialog.parentElement!)
     expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBe(dialog)
 
     const refused = { types: [] as string[], effectAllowed: 'none', setData: vi.fn() }

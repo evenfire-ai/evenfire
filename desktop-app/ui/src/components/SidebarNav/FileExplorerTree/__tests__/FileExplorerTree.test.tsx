@@ -1153,6 +1153,21 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     )
   }
 
+  /** Every close path of a running host Move is disabled, and trying them keeps it open. */
+  async function expectMoveCloseLocked(dialog: HTMLElement) {
+    const close = within(dialog).getByRole<HTMLButtonElement>('button', {
+      name: 'Close move dialog',
+    })
+    const cancel = within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Cancel' })
+    // The host's running phase renders after the gated producer was entered.
+    await waitFor(() => expect(close.disabled).toBe(true))
+    expect(cancel.disabled).toBe(true)
+    fireEvent.click(close)
+    fireEvent.click(cancel)
+    fireEvent.mouseDown(dialog.parentElement!)
+    expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBe(dialog)
+  }
+
   async function resolveSource() {
     return resolveResource(
       resolvedFile(sourceResourceId, 'report.txt', {
@@ -1164,7 +1179,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 
   it.each([
     [
-      'ignores a close while the source resolve is pending and still dispatches the Move once',
+      'disables closing while the source resolve is pending and still dispatches the Move once',
       'dialog closes',
     ],
     [
@@ -1204,9 +1219,9 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       await resolveStarted
 
       if (ownerChange === 'dialog closes') {
-        // The host already runs the Move: a close cannot recall it and is ignored.
-        fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
-        expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBe(dialog)
+        // The host already runs the Move: a close cannot recall it, so no
+        // close path is offered.
+        await expectMoveCloseLocked(dialog)
       } else {
         await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
       }
@@ -1301,7 +1316,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     }
   })
 
-  it('ignores a close while the PATCH is in flight and still reports the Move', async () => {
+  it('disables closing while the PATCH is in flight and still reports the Move', async () => {
     let finishMove!: () => void
     let markMoveStarted!: () => void
     const moveStarted = new Promise<void>(resolve => {
@@ -1331,9 +1346,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
       await moveStarted
-      // Ignored while the host's Move runs.
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
-      expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBe(dialog)
+      await expectMoveCloseLocked(dialog)
 
       await act(async () => {
         finishMove()

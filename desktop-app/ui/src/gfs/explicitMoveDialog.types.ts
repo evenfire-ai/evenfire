@@ -52,6 +52,8 @@ export interface GfsExplicitMoveDialogProps {
   accessActive: boolean
   /** The owner's in-flight state (its operations are pending). */
   busy: boolean
+  /** The owner cannot recall its commit: every close path is disabled. */
+  closeLocked?: boolean
   /** The owner still shows this dialog for this target. */
   isOwnerCurrent: () => boolean
   /**
