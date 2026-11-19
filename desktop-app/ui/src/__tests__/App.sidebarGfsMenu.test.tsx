@@ -15,7 +15,12 @@ import {
   renameResourceResult,
   resolveResource,
   resolvedDirectory,
+  resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  appServiceAffordanceProducer,
+  heldPermissionResponse,
+} from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { GfsClient } from '../../../src/gfs/uriHandler.js'
 
 // The real App: real SidebarNav, FileExplorerTree, GfsActionHost, FilesPage
@@ -39,6 +44,7 @@ const MEASURED_SLOT = {
 
 const REPORTS_ID = 'a1'.repeat(16)
 const NOTES_ID = 'b2'.repeat(16)
+const NOTES_PARENT_ID = 'c3'.repeat(16)
 const REPORTS = resolvedDirectory(REPORTS_ID, 'Reports')
 
 /** What `gfs.deleteResource` resolves to, through the real GfsClient and the IPC clone. */
@@ -335,6 +341,86 @@ describe('App sidebar GFS resource menu', () => {
     expect(drawerOpen()).toBe(false)
     expect(bridge.gfs.renameResource).not.toHaveBeenCalled()
   })
+
+  it.each([
+    { action: 'Delete', row: 'notes.txt', dialog: 'Delete notes.txt?', escapeCloses: true },
+    { action: 'Rename', row: 'notes.txt', dialog: 'Rename file', escapeCloses: true },
+    { action: 'New folder', row: 'Reports', dialog: 'New folder', escapeCloses: true },
+    { action: 'Share', row: 'notes.txt', dialog: 'Share file notes.txt', escapeCloses: true },
+    // The Move dialog has no Escape of its own: the drawer still leaves it alone.
+    { action: 'Move to', row: 'notes.txt', dialog: 'Move file notes.txt', escapeCloses: false },
+  ])(
+    'S-12b: Escape in the compact drawer with the host $action dialog open leaves the drawer open',
+    async ({ action, row, dialog: dialogName, escapeCloses }) => {
+      compact = true
+      const { bridge } = installBridge()
+      // Every host action offered: write on the folder, manage_acl on the file,
+      // and a known parent so Move can be judged on it.
+      const notes = resolvedFile(NOTES_ID, 'notes.txt', {
+        parentResourceId: NOTES_PARENT_ID,
+        version: 3,
+      })
+      bridge.gfs.listAccessible = vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource(REPORTS_ID, 'Reports', 'directory', {
+            permissions: ['read', 'write'],
+          }),
+          accessibleResource(NOTES_ID, 'notes.txt', 'file', {
+            version: 3,
+            parentResourceId: NOTES_PARENT_ID,
+            permissions: ['read', 'write', 'delete', 'manage_acl'],
+          }),
+        ])
+      )
+      bridge.gfs.resolve = vi.fn(async (uri: string) => {
+        if (uri === REPORTS.gfsUri) return resolveResource(REPORTS)
+        if (uri === notes.gfsUri) return resolveResource(notes)
+        throw new Error(`unexpected resolve of ${uri}`)
+      })
+      bridge.gfs.affordances = vi.fn(
+        appServiceAffordanceProducer(async () =>
+          heldPermissionResponse(['read', 'write', 'delete', 'manage_acl'])
+        )
+      )
+      // Share reads its lists on open; they stay pending, the dialog is open either way.
+      bridge.gfs.listGrants = vi.fn(() => new Promise(() => undefined))
+      bridge.gfs.listShares = vi.fn(() => new Promise(() => undefined))
+      renderApp()
+      await waitForShell()
+      fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+      expect(drawerOpen()).toBe(true)
+      openExplorer()
+
+      const menu = await openRowMenu(row)
+      const item = await within(menu).findByRole('menuitem', { name: action })
+      await waitFor(() => expect((item as HTMLButtonElement).disabled).toBe(false))
+      fireEvent.click(item)
+      if (action === 'Share') {
+        // Share opens its flyout; the flyout's Share opens the dialog.
+        const flyout = await screen.findByRole('menu', { name: `Share options for ${row}` })
+        fireEvent.click(within(flyout).getByRole('menuitem', { name: 'Share' }))
+      }
+      const dialog = await screen.findByRole('dialog', { name: dialogName })
+      expect(drawerOpen()).toBe(true)
+
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+
+      expect(drawerOpen()).toBe(true)
+      if (escapeCloses) {
+        await waitFor(() => expect(dialog.isConnected).toBe(false))
+      } else {
+        expect(dialog.isConnected).toBe(true)
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+        await waitFor(() => expect(dialog.isConnected).toBe(false))
+      }
+      expect(drawerOpen()).toBe(true)
+
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+      expect(drawerOpen()).toBe(false)
+      expect(bridge.gfs.renameResource).not.toHaveBeenCalled()
+      expect(bridge.gfs.deleteResource).not.toHaveBeenCalled()
+    }
+  )
 
   it('S-8: in-place actions on another resource leave the Files tab, its location and its crumbs alone', async () => {
     const { bridge } = installBridge()
