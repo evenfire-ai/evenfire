@@ -141,8 +141,12 @@ async function installCardLedger(page: Page): Promise<void> {
     const cards: ApprovalCard[] = []
     const seen = new WeakSet<Element>()
     const record = (): void => {
+      // A shell card (auto mode) renders the shell buttons and hides
+      // approval-approve-btn, so each card is keyed on whichever of the two it has.
       for (const button of Array.from(
-        document.querySelectorAll('[data-testid="approval-approve-btn"]')
+        document.querySelectorAll(
+          '[data-testid="approval-approve-btn"], [data-testid="approval-shell-once-btn"]'
+        )
       )) {
         if (seen.has(button)) continue
         seen.add(button)
@@ -365,8 +369,10 @@ function patchHost(operations: unknown[]): void {
  * Named precondition: raises `spec.approval.modeCeiling` on the chatllm Host
  * for one row. Both patches test the Host uid and the whole live
  * `spec.approval`, so a concurrent edit fails the patch instead of being
- * overwritten. `restore` puts back the value read before `apply` (absent on
- * the canonical overlay) and refuses to overwrite a different value.
+ * overwritten. The canonical overlay sets no ceiling, so a ceiling that is
+ * already there is a leftover from an interrupted run and fails the row
+ * instead of being taken as the original. `restore` removes the ceiling again
+ * and refuses to overwrite a different value.
  */
 function modeCeilingFixture(ceiling: ApprovalMode) {
   const context = process.env.E2E_K8S_CONTEXT
@@ -376,11 +382,17 @@ function modeCeilingFixture(ceiling: ApprovalMode) {
     )
   }
   const original = readHostApproval()
-  const originalCeiling = original.approval.modeCeiling
+  if (original.approval.modeCeiling !== undefined) {
+    throw new Error(
+      `The chatllm Host already has spec.approval.modeCeiling=${String(
+        original.approval.modeCeiling
+      )}; the canonical overlay sets none, so an interrupted run left it. Remove it before rerunning.`
+    )
+  }
   const raised = { ...original.approval, modeCeiling: ceiling }
   return {
     /** The ceiling mcp-host reports once `restore` has run: absent reads manual. */
-    restoredCeiling: (originalCeiling ?? 'manual') as ApprovalMode,
+    restoredCeiling: 'manual' as ApprovalMode,
     apply: () => {
       patchHost([
         { op: 'test', path: '/metadata/uid', value: original.uid },
@@ -399,12 +411,34 @@ function modeCeilingFixture(ceiling: ApprovalMode) {
       patchHost([
         { op: 'test', path: '/metadata/uid', value: original.uid },
         { op: 'test', path: '/spec/approval', value: raised },
-        originalCeiling === undefined
-          ? { op: 'remove', path: '/spec/approval/modeCeiling' }
-          : { op: 'replace', path: '/spec/approval/modeCeiling', value: originalCeiling },
+        { op: 'remove', path: '/spec/approval/modeCeiling' },
       ])
       expect(readHostApproval().approval).toEqual(original.approval)
     },
+  }
+}
+
+/**
+ * Cleanup for a row that raised the ceiling. Restore always runs; the wait for
+ * mcp-host to report the restored ceiling runs only after a passing body. A
+ * restore failure never replaces the row's own failure: it is rethrown with the
+ * row's failure as its cause, and the message says the ceiling may still be raised.
+ */
+async function restoreModeCeiling(
+  page: Page,
+  fixture: ReturnType<typeof modeCeilingFixture>,
+  rowFailure: unknown
+): Promise<void> {
+  try {
+    fixture.restore()
+    if (rowFailure === undefined) await waitForHostModeCeiling(page, fixture.restoredCeiling)
+  } catch (restoreError) {
+    throw new Error(
+      `modeCeiling restore failed; spec.approval.modeCeiling may still be raised on the chatllm Host: ${String(
+        restoreError
+      )}`,
+      { cause: rowFailure ?? restoreError }
+    )
   }
 }
 
@@ -598,9 +632,7 @@ test.describe.serial('per-task tool approval scope', () => {
   }, testInfo) => {
     const marker = markerFor(testInfo, 'CMD')
     const ceiling = modeCeilingFixture('auto')
-    // Restore always runs; the wait for mcp-host to drop the ceiling again runs
-    // only after a passing body, so it cannot replace the body's failure.
-    let bodyPassed = false
+    let rowFailure: unknown
     try {
       await test.step('an admin raises the Host ceiling to auto', async () => {
         ceiling.apply()
@@ -670,10 +702,11 @@ test.describe.serial('per-task tool approval scope', () => {
         expectShellStep(steps, marker, 'CMD-GRANT')
         expect(turn.approvalLog).toEqual([])
       })
-      bodyPassed = true
+    } catch (error) {
+      rowFailure = error
+      throw error
     } finally {
-      ceiling.restore()
-      if (bodyPassed) await waitForHostModeCeiling(appPage, ceiling.restoredCeiling)
+      await restoreModeCeiling(appPage, ceiling, rowFailure)
     }
   })
 
@@ -682,7 +715,7 @@ test.describe.serial('per-task tool approval scope', () => {
   }, testInfo) => {
     const marker = markerFor(testInfo, 'ALL')
     const ceiling = modeCeilingFixture('allow_all')
-    let bodyPassed = false
+    let rowFailure: unknown
     try {
       await test.step('an admin raises the Host ceiling to allow_all', async () => {
         ceiling.apply()
@@ -747,10 +780,11 @@ test.describe.serial('per-task tool approval scope', () => {
         )
         expect(turn.approvalLog).toEqual(['cron_manage'])
       })
-      bodyPassed = true
+    } catch (error) {
+      rowFailure = error
+      throw error
     } finally {
-      ceiling.restore()
-      if (bodyPassed) await waitForHostModeCeiling(appPage, ceiling.restoredCeiling)
+      await restoreModeCeiling(appPage, ceiling, rowFailure)
     }
   })
 
