@@ -49,10 +49,17 @@ export type ProviderEventReceiptClaims = {
   readonly deliveryAlias: string | null
   /** Slack: the sender's own team or enterprise id when the event carries one */
   readonly senderScopeId: string | null
-  /** Slack channel id; Teams conversation id without a `messageid=` parameter (after `;`, `?` or `&`, any letter case) */
+  /**
+   * Slack channel id; Teams conversation id without a `messageid=` parameter (after `;`, `?` or `&`, any letter case).
+   * The Teams issuer (stack PR 1) removes the parameter before signing, for message and action events.
+   */
   readonly conversationId: string
   /** set on eventKind 'message'; null on 'action' */
   readonly conversationKind: ConversationKind | null
+  /**
+   * The Teams issuer (stack PR 1) sets a non-null root on a Teams message receipt whose conversationKind
+   * is channel: a Teams channel origin uses the thread reply style, which requires a root.
+   */
   readonly threadRootId: string | null
   readonly messageId: string
   readonly eventId: string
@@ -102,6 +109,8 @@ export type ChannelAdmission =
  * Which replyStyle a medium and conversation kind get is decided by the producer of the
  * route (the Host's origin rules); this contract checks only what each replyStyle carries.
  * A Teams conversationId is copied from a validated receipt; the route does not re-check it.
+ * Obligation on the origin producer (stack PR 2): every Teams group origin uses the quote reply
+ * style and carries quotedMessageId.
  */
 export type OriginRoute =
   | {
