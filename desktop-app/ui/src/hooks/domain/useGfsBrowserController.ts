@@ -14,7 +14,9 @@ import {
   GFS_AUTHORITY_STALE_TIME_MS,
   GFS_ROW_PRESENTATION_CACHE_MS,
   gfsAuthorityQueryPolicy,
+  gfsAuthorityRetryPauseRemainingMs,
 } from '@lib/gfsAuthorityQueryPolicy'
+import { isGfsReadDeferred, useGfsDeferredReadGate } from '@lib/gfsDeferredReadGate'
 import { applyMoveConvergence } from '@lib/gfsEntityChangeState'
 import {
   describeGfsReadError,
@@ -294,6 +296,7 @@ export { isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 export function useGfsBrowserController(options: GfsBrowserControllerOptions = {}) {
   const { grantsListEnabled = false } = options
   const queryClient = useQueryClient()
+  useGfsDeferredReadGate(queryClient)
   const {
     isAuthenticated,
     me,
@@ -459,7 +462,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   useEffect(() => {
     const previous = previousSessionScopeRef.current
     if (previous?.scope === sessionScope && previous.generation === sessionGeneration) return
-    previousSessionScopeRef.current = { scope: sessionScope, generation: sessionGeneration }
+    previousSessionScopeRef.current = {
+      scope: sessionScope,
+      generation: sessionGeneration,
+    }
     if (previous?.scope && previous.scope !== sessionScope) {
       setCrumbs([])
       setOpenError(null)
@@ -489,7 +495,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // reachable here. `'always'` is unconditional, which is what we want when
   // not paused.)
   const refetchOnFocusUnlessPaused = useCallback(
-    (): 'always' | false => (Date.now() >= pausedUntilRef.current ? 'always' : false),
+    (query: { state: { error: unknown; errorUpdatedAt: number } }): 'always' | false =>
+      Date.now() >= pausedUntilRef.current &&
+      gfsAuthorityRetryPauseRemainingMs(query.state.error, query.state.errorUpdatedAt) === 0
+        ? 'always'
+        : false,
     []
   )
 
@@ -542,16 +552,18 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     currentIsDirectory &&
     accessState === 'active'
 
+  const childrenQueryKey = desktopQueryKeys.gfsChildren(
+    sessionScope ?? 'anonymous',
+    current?.resourceId ?? '',
+    DRIVE,
+    sessionGeneration
+  )
   const childrenQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsChildren(
-      sessionScope ?? 'anonymous',
-      current?.resourceId ?? '',
-      DRIVE,
-      sessionGeneration
-    ),
+    queryKey: childrenQueryKey,
     queryFn: ({ pageParam }) =>
       window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam),
-    enabled: childrenQueryEnabled,
+    enabled: childrenQueryEnabled && !isGfsReadDeferred(queryClient, childrenQueryKey),
+    meta: { gfsDeferredReadEligible: childrenQueryEnabled },
     // Folder contents change out-of-band: agents with host grants, other
     // sessions, and operator writes never pass through this client. Revisit
     // and window focus must revalidate — an Infinity-fresh cached listing
@@ -570,11 +582,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       sessionGeneration
     ),
     queryFn: () => window.clerum.gfs.affordances(current!.resourceId, DRIVE),
+    meta: {
+      gfsDeferredReadEligible:
+        Boolean(sessionScope) &&
+        sessionGeneration !== null &&
+        Boolean(current) &&
+        accessState === 'active',
+    },
     enabled:
       Boolean(sessionScope) &&
       sessionGeneration !== null &&
       Boolean(current) &&
-      accessState === 'active',
+      accessState === 'active' &&
+      !isGfsReadDeferred(
+        queryClient,
+        desktopQueryKeys.gfsAffordances(
+          sessionScope ?? 'anonymous',
+          current?.resourceId ?? '',
+          DRIVE,
+          sessionGeneration
+        )
+      ),
     ...gfsAuthorityQueryPolicy,
   })
   const refreshAffordances = useCallback(async () => {
@@ -605,11 +633,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       sessionGeneration
     ),
     queryFn: () => window.clerum.gfs.affordances(rowAffordancesResourceId!, DRIVE),
+    meta: {
+      gfsDeferredReadEligible:
+        Boolean(sessionScope) &&
+        sessionGeneration !== null &&
+        Boolean(rowAffordancesResourceId) &&
+        accessState === 'active',
+    },
     enabled:
       Boolean(sessionScope) &&
       sessionGeneration !== null &&
       Boolean(rowAffordancesResourceId) &&
-      accessState === 'active',
+      accessState === 'active' &&
+      !isGfsReadDeferred(
+        queryClient,
+        desktopQueryKeys.gfsAffordances(
+          sessionScope ?? 'anonymous',
+          rowAffordancesResourceId ?? '',
+          DRIVE,
+          sessionGeneration
+        )
+      ),
     ...gfsAuthorityQueryPolicy,
   })
   // The grants listing is the revoke-id source (the grant PUT returns no ids),
@@ -980,35 +1024,40 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
    * per-row queries remain fail-closed until their own server verdict arrives.
    */
   const rowAffordancesQueries = useQueries({
-    queries: items.map(item => ({
-      queryKey: desktopQueryKeys.gfsAffordances(
+    queries: items.map(item => {
+      const queryKey = desktopQueryKeys.gfsAffordances(
         sessionScope ?? 'anonymous',
         item.resourceId,
         DRIVE,
         sessionGeneration
-      ),
-      queryFn: () => window.clerum.gfs.affordances(item.resourceId, DRIVE),
-      enabled:
+      )
+      const eligible =
         Boolean(sessionScope) &&
         sessionGeneration !== null &&
         Boolean(current) &&
         currentIsDirectory &&
         !authorityPending &&
-        accessState === 'active',
-      notifyOnChangeProps: 'all',
-      ...gfsAuthorityQueryPolicy,
-      // Row data remains stale for authorization after 15 seconds, but a
-      // navigation remount only refreshes the presentation cache after 60.
-      refetchOnMount: (query: Query) =>
-        query.state.isInvalidated ||
-        query.state.dataUpdatedAt === 0 ||
-        Date.now() - query.state.dataUpdatedAt >= GFS_ROW_PRESENTATION_CACHE_MS,
-      // A folder can expose many child actions. The stale-time policy is not a
-      // request scheduler. Cache row affordances for presentation through
-      // short navigation gaps; exact use-time checks keep the 15-second
-      // authority window before opening an editor or mutating.
-      refetchOnWindowFocus: false,
-    })),
+        accessState === 'active'
+      return {
+        queryKey,
+        queryFn: () => window.clerum.gfs.affordances(item.resourceId, DRIVE),
+        enabled: eligible && !isGfsReadDeferred(queryClient, queryKey),
+        meta: { gfsDeferredReadEligible: eligible },
+        notifyOnChangeProps: 'all',
+        ...gfsAuthorityQueryPolicy,
+        // Row data remains stale for authorization after 15 seconds, but a
+        // navigation remount only refreshes the presentation cache after 60.
+        refetchOnMount: (query: Query) =>
+          query.state.isInvalidated ||
+          query.state.dataUpdatedAt === 0 ||
+          Date.now() - query.state.dataUpdatedAt >= GFS_ROW_PRESENTATION_CACHE_MS,
+        // A folder can expose many child actions. The stale-time policy is not a
+        // request scheduler. Cache row affordances for presentation through
+        // short navigation gaps; exact use-time checks keep the 15-second
+        // authority window before opening an editor or mutating.
+        refetchOnWindowFocus: false,
+      }
+    }),
   })
   const moveSourceParentIds = useMemo(() => {
     const ids = new Set<string>()
@@ -1021,21 +1070,26 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     return [...ids]
   }, [current?.parentResourceId, current?.resourceId, rowMoveSourceParentResourceId])
   const moveSourceParentQueries = useQueries({
-    queries: moveSourceParentIds.map(resourceId => ({
-      queryKey: desktopQueryKeys.gfsAffordances(
+    queries: moveSourceParentIds.map(resourceId => {
+      const queryKey = desktopQueryKeys.gfsAffordances(
         sessionScope ?? 'anonymous',
         resourceId,
         DRIVE,
         sessionGeneration
-      ),
-      queryFn: () => window.clerum.gfs.affordances(resourceId, DRIVE),
-      enabled:
+      )
+      const eligible =
         Boolean(sessionScope) &&
         sessionGeneration !== null &&
         !authorityPending &&
-        accessState === 'active',
-      ...gfsAuthorityQueryPolicy,
-    })),
+        accessState === 'active'
+      return {
+        queryKey,
+        queryFn: () => window.clerum.gfs.affordances(resourceId, DRIVE),
+        enabled: eligible && !isGfsReadDeferred(queryClient, queryKey),
+        meta: { gfsDeferredReadEligible: eligible },
+        ...gfsAuthorityQueryPolicy,
+      }
+    }),
   })
   const moveSourceParentAffordancesById = useMemo(() => {
     const byId: Record<string, GfsBrowserAffordances> = {}
@@ -1099,16 +1153,28 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // the session/authority boundary; per-resource verdicts stay local.
   const queryAuthorizationError = [
     accessibleQuery.error
-      ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
+      ? {
+          message: toMessage(accessibleQuery.error),
+          surface: 'discovery' as const,
+        }
       : null,
     childrenQuery.error
-      ? { message: toMessage(childrenQuery.error), surface: 'operation' as const }
+      ? {
+          message: toMessage(childrenQuery.error),
+          surface: 'operation' as const,
+        }
       : null,
     affordancesQuery.error
-      ? { message: toMessage(affordancesQuery.error), surface: 'operation' as const }
+      ? {
+          message: toMessage(affordancesQuery.error),
+          surface: 'operation' as const,
+        }
       : null,
     rowAffordancesQuery.error
-      ? { message: toMessage(rowAffordancesQuery.error), surface: 'operation' as const }
+      ? {
+          message: toMessage(rowAffordancesQuery.error),
+          surface: 'operation' as const,
+        }
       : null,
     ...rowAffordancesQueries.map(query =>
       query.error ? { message: toMessage(query.error), surface: 'operation' as const } : null
@@ -1123,7 +1189,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       ? { message: toMessage(sharesQuery.error), surface: 'operation' as const }
       : null,
     inheritedAccessQuery.error
-      ? { message: toMessage(inheritedAccessQuery.error), surface: 'operation' as const }
+      ? {
+          message: toMessage(inheritedAccessQuery.error),
+          surface: 'operation' as const,
+        }
       : null,
   ]
     .filter(
@@ -1534,7 +1603,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     async (options?: { background?: boolean }) => {
       const uri = current?.gfsUri
       if (!uri) return false
-      return openUri(uri, { clearIfUnavailable: true, background: options?.background })
+      return openUri(uri, {
+        clearIfUnavailable: true,
+        background: options?.background,
+      })
     },
     [current?.gfsUri, openUri]
   )
@@ -1937,11 +2009,19 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     createFile: (parentResourceId: string, name: string, encodedData: string) =>
       createFileMutation.mutateAsync({ parentResourceId, name, encodedData }),
     createFileFromPath: (parentResourceId: string, name: string, filePath: string) =>
-      createFileFromPathMutation.mutateAsync({ parentResourceId, name, filePath }),
+      createFileFromPathMutation.mutateAsync({
+        parentResourceId,
+        name,
+        filePath,
+      }),
     replaceFile: (resourceId: string, encodedData: string, ifMatch?: number) =>
       replaceFileMutation.mutateAsync({ resourceId, encodedData, ifMatch }),
     replaceFileFromPath: (resourceId: string, filePath: string, ifMatch?: number) =>
-      replaceFileFromPathMutation.mutateAsync({ resourceId, filePath, ifMatch }),
+      replaceFileFromPathMutation.mutateAsync({
+        resourceId,
+        filePath,
+        ifMatch,
+      }),
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>
       renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
     moveResource: (

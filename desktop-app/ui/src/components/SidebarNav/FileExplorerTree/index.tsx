@@ -18,6 +18,8 @@ import {
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
+import { gfsAuthorityRetryPauseRemainingMs } from '@lib/gfsAuthorityQueryPolicy'
+import { isGfsReadDeferred, useGfsDeferredReadGate } from '@lib/gfsDeferredReadGate'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
@@ -119,6 +121,7 @@ function FileExplorerNode({
   onRequestMove,
 }: FileExplorerNodeProps) {
   const queryClient = useQueryClient()
+  useGfsDeferredReadGate(queryClient)
   const isDirectory = node.kind === 'directory'
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
@@ -128,7 +131,10 @@ function FileExplorerNode({
     // Keyed per rendered copy: nested grants render one folder both as a root
     // and as a child, and one copy unmounting must not drop the other's entry.
     const instanceKey = `${visibleOrderKey}|${node.resourceId}`
-    onExpandedFolderVisibility(instanceKey, { gfsUri: node.gfsUri, order: visibleOrder })
+    onExpandedFolderVisibility(instanceKey, {
+      gfsUri: node.gfsUri,
+      order: visibleOrder,
+    })
     return () => onExpandedFolderVisibility(instanceKey, null)
     // visibleOrder is a fresh array each render; its content is visibleOrderKey.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -147,6 +153,7 @@ function FileExplorerNode({
     GFS_DRIVE_MAIN,
     sessionGeneration
   )
+  const childQueryEligible = isExpanded && accessActive && isGfsSessionGeneration(sessionGeneration)
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
@@ -154,7 +161,8 @@ function FileExplorerNode({
     // Gate on live access as the controller's own children query does: a revoked
     // session fetches nothing (the subtree also unmounts as accessibleResources
     // empties, but this keeps the guard robust to future refactors).
-    enabled: isExpanded && accessActive && isGfsSessionGeneration(sessionGeneration),
+    enabled: childQueryEligible && !isGfsReadDeferred(queryClient, childQueryKey),
+    meta: { gfsDeferredReadEligible: childQueryEligible },
     // Folder contents change out-of-band: agents with host grants, other
     // sessions, and operator writes never pass through this client. The sidebar
     // is a persistent surface, so under the app's Infinity staleTime an expanded
@@ -162,7 +170,10 @@ function FileExplorerNode({
     // and new files never appear until a hard reload. Revalidate on revisit and
     // window focus, matching the controller's own children query.
     refetchOnMount: 'always',
-    refetchOnWindowFocus: 'always',
+    refetchOnWindowFocus: query =>
+      gfsAuthorityRetryPauseRemainingMs(query.state.error, query.state.errorUpdatedAt) === 0
+        ? 'always'
+        : false,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -606,8 +617,14 @@ export function FileExplorerTree({
   const liveDragScope = ctrl.accessState === 'revoked' ? null : (ctrl.sessionScope ?? 'anonymous')
   const liveDragScopeRef = useRef(liveDragScope)
   liveDragScopeRef.current = liveDragScope
-  const liveAuthorityRef = useRef({ scope: ctrl.sessionScope, generation: ctrl.sessionGeneration })
-  liveAuthorityRef.current = { scope: ctrl.sessionScope, generation: ctrl.sessionGeneration }
+  const liveAuthorityRef = useRef({
+    scope: ctrl.sessionScope,
+    generation: ctrl.sessionGeneration,
+  })
+  liveAuthorityRef.current = {
+    scope: ctrl.sessionScope,
+    generation: ctrl.sessionGeneration,
+  }
   const previousDragAuthorityRef = useRef({
     scope: liveDragScope,
     generation: ctrl.sessionGeneration,
@@ -662,7 +679,9 @@ export function FileExplorerTree({
       if (!ctrl.sessionScope || !isGfsSessionGeneration(ctrl.sessionGeneration)) {
         return new Set()
       }
-      const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsBrowserChild[] }> }>(
+      const cached = queryClient.getQueryData<{
+        pages?: Array<{ items?: GfsBrowserChild[] }>
+      }>(
         desktopQueryKeys.gfsChildren(
           ctrl.sessionScope,
           destinationId,
@@ -832,7 +851,12 @@ export function FileExplorerTree({
       event.dataTransfer.dropEffect = 'move'
       if (verdict.state === 'checking') {
         adjudication.scheduleColdCheck(
-          { resourceId: node.resourceId, name: node.name, kind: node.kind, ancestorIds },
+          {
+            resourceId: node.resourceId,
+            name: node.name,
+            kind: node.kind,
+            ancestorIds,
+          },
           source.parentKnown ? source.parentResourceId : null,
           () => {
             if (hoverOwnerRef.current !== source) return

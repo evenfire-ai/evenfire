@@ -10,6 +10,10 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import fc, { type Scheduler } from 'fast-check'
+import { FileExplorerTree } from '@components/SidebarNav/FileExplorerTree'
+import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
+import { isGfsReadDeferred, releaseExpiredGfsDeferredReads } from '@lib/gfsDeferredReadGate'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -29,8 +33,11 @@ import {
   resolvedFile,
   sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { affordancesApiError } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { readGfsOpenLocations } from '@/lib/gfsOpenLocations'
+import { gfsRidOfResourceId } from '@/lib/gfsWatchKeys'
 import { refetchGfsAccess, refetchWatchedFolder } from '@/lib/gfsWatchReaction'
+import { FilePreviewPage } from '@/pages/FilePreviewPage'
 import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
 import type { DesktopRuntimeConfigState } from '../../../../../src/types'
 import { desktopQueryKeys } from '../queryKeys'
@@ -296,6 +303,29 @@ function Probe() {
   )
 }
 
+function A6MixedFocusSurfaces() {
+  useWindowFocusBridge()
+  const [sidebarMounted, setSidebarMounted] = useState(true)
+  return (
+    <>
+      <Probe />
+      <button type="button" onClick={() => setSidebarMounted(mounted => !mounted)}>
+        toggle Sidebar
+      </button>
+      {sidebarMounted ? (
+        <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={vi.fn()} />
+      ) : null}
+      <FilePreviewPage
+        gfsUri="gfs://main/a6-focus-preview"
+        fileName="a6-focus-preview.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={1}
+      />
+    </>
+  )
+}
+
 function Harness({
   children,
   productionQueryDefaults = false,
@@ -433,7 +463,10 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('loading-current-view').textContent).toBe('idle')
 
     act(() => {
-      void lastHarnessQueryClient?.invalidateQueries({ exact: true, queryKey: accessibleKey })
+      void lastHarnessQueryClient?.invalidateQueries({
+        exact: true,
+        queryKey: accessibleKey,
+      })
     })
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(2)
@@ -457,7 +490,10 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('loading-current-view').textContent).toBe('idle')
 
     act(() => {
-      void lastHarnessQueryClient?.invalidateQueries({ exact: true, queryKey: childrenKey })
+      void lastHarnessQueryClient?.invalidateQueries({
+        exact: true,
+        queryKey: childrenKey,
+      })
     })
     await waitFor(() => {
       expect(listChildren).toHaveBeenCalledTimes(2)
@@ -500,7 +536,10 @@ describe('useGfsBrowserController', () => {
     expect(rootReads()).toBe(1)
 
     await act(async () => {
-      await refetchGfsAccess(lastHarnessQueryClient!, { scope: ':user-a:team-a', generation: 1 })
+      await refetchGfsAccess(lastHarnessQueryClient!, {
+        scope: ':user-a:team-a',
+        generation: 1,
+      })
     })
     expect(rootReads()).toBe(1)
 
@@ -516,7 +555,9 @@ describe('useGfsBrowserController', () => {
       resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
     )
     const firstPageItems = Array.from({ length: 30 }, (_, index) =>
-      childView(`row-${index}`, `row-${index}.md`, 'file', { parentResourceId: 'root' })
+      childView(`row-${index}`, `row-${index}.md`, 'file', {
+        parentResourceId: 'root',
+      })
     )
     const secondPageItems = [childView('row-30', 'row-30.md', 'file', { parentResourceId: 'root' })]
     const firstPage = await listChildrenPage(firstPageItems, 'next-page')
@@ -545,7 +586,12 @@ describe('useGfsBrowserController', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
-        gfs: { listAccessible, resolve: vi.fn(async () => root), listChildren, affordances },
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(async () => root),
+          listChildren,
+          affordances,
+        },
       },
     })
 
@@ -698,7 +744,9 @@ describe('useGfsBrowserController', () => {
         isLocalhost: false,
         selectorVisible: false,
         activeOptionId: `option-${envKey}`,
-        currentConfig: { externalRestApiBaseUrl: `https://${envKey}.example.test` },
+        currentConfig: {
+          externalRestApiBaseUrl: `https://${envKey}.example.test`,
+        },
         envKey,
         storagePath: `/fixture/${envKey}`,
         options: [],
@@ -956,10 +1004,14 @@ describe('useGfsBrowserController', () => {
     'keeps a newly opened child folder when an older refresh completes with %s',
     async completion => {
       const folderA = await resolveResource(
-        resolvedDirectory('folder-a', 'Folder A', { gfsUri: 'gfs://main/root' })
+        resolvedDirectory('folder-a', 'Folder A', {
+          gfsUri: 'gfs://main/root',
+        })
       )
       const folderAChildren = await listChildrenPage([
-        childView('folder-b', 'Folder B', 'directory', { parentResourceId: 'folder-a' }),
+        childView('folder-b', 'Folder B', 'directory', {
+          parentResourceId: 'folder-a',
+        }),
       ])
       let resolveRefresh!: (resource: typeof folderA) => void
       let rejectRefresh!: (reason?: unknown) => void
@@ -1019,7 +1071,9 @@ describe('useGfsBrowserController', () => {
       resolvedDirectory('folder-a', 'Folder A', { gfsUri: 'gfs://main/root' })
     )
     const folderB = await resolveResource(
-      resolvedDirectory('folder-b', 'Folder B', { gfsUri: 'gfs://main/folder-b' })
+      resolvedDirectory('folder-b', 'Folder B', {
+        gfsUri: 'gfs://main/folder-b',
+      })
     )
     let finishUserNavigation!: (resource: typeof folderB) => void
     const deferredUserNavigation = new Promise<typeof folderB>(resolve => {
@@ -1315,7 +1369,10 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
-          listAccessible: vi.fn(async () => ({ items: [parent], nextCursor: null })),
+          listAccessible: vi.fn(async () => ({
+            items: [parent],
+            nextCursor: null,
+          })),
           listChildren,
           affordances,
         },
@@ -1382,7 +1439,10 @@ describe('useGfsBrowserController', () => {
       version: index + 2,
       bytes: 10,
     }))
-    const listChildren = vi.fn(async () => ({ items: children, nextCursor: null }))
+    const listChildren = vi.fn(async () => ({
+      items: children,
+      nextCursor: null,
+    }))
     // The open folder and its rows answer differently, so a row asserted below
     // can only have been filled by that row's own query.
     const affordances = vi.fn(async (resourceId: string) => ({
@@ -1395,7 +1455,10 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
-          listAccessible: vi.fn(async () => ({ items: [parent], nextCursor: null })),
+          listAccessible: vi.fn(async () => ({
+            items: [parent],
+            nextCursor: null,
+          })),
           listChildren,
           affordances,
         },
@@ -1467,6 +1530,678 @@ describe('useGfsBrowserController', () => {
     await enterWorkspace()
     await waitFor(() => expect(rowCalls()).toBe(6))
   })
+
+  it.each(['no-data', 'cached-data'] as const)(
+    'T-R4: a deferred row 429 does not trigger an early same-key remount read (%s)',
+    async scenario => {
+      const parent = {
+        resourceId: 'folder-root',
+        rid: 'folder-root',
+        gfsUri: 'gfs://main/folder-root',
+        drive: 'main',
+        parentResourceId: null,
+        name: 'Workspace',
+        kind: 'directory' as const,
+        path: '/Workspace',
+        version: 1,
+        bytes: 0,
+        sources: ['grant'],
+        permissions: ['read'],
+        coversDescendants: true,
+      }
+      const target = {
+        resourceId: 'target-folder',
+        rid: 'target-folder',
+        gfsUri: 'gfs://main/target-folder',
+        drive: 'main',
+        parentResourceId: 'folder-root',
+        name: 'Target',
+        kind: 'directory' as const,
+        path: '/Workspace/Target',
+        version: 2,
+        bytes: 0,
+      }
+      const unrelated = {
+        ...target,
+        resourceId: 'new-child',
+        rid: 'new-child',
+        gfsUri: 'gfs://main/new-child',
+        name: 'New child',
+        kind: 'file' as const,
+      }
+      let includeUnrelated = false
+      const listChildren = vi.fn(async (resourceId: string) => ({
+        items:
+          resourceId === 'folder-root' ? (includeUnrelated ? [target, unrelated] : [target]) : [],
+        nextCursor: null,
+      }))
+      const denied = new Error(
+        await affordancesFailureMessage(
+          429,
+          {
+            code: 'rate_limited',
+            message: 'too many requests',
+          },
+          'target-folder'
+        )
+      )
+      let targetReads = 0
+      let unrelatedReads = 0
+      const affordances = vi.fn(async (resourceId: string) => {
+        if (resourceId === 'target-folder') {
+          targetReads += 1
+          if (scenario === 'no-data' ? targetReads === 1 : targetReads === 2) throw denied
+        }
+        if (resourceId === 'new-child') unrelatedReads += 1
+        return {
+          held: ['read', 'write'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        }
+      })
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => ({
+              items: [parent],
+              nextCursor: null,
+            })),
+            listChildren,
+            affordances,
+          },
+        },
+      })
+
+      const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+      const wrapper = ({ children: node }: { children: ReactNode }) => (
+        <AuthContext.Provider value={authValue(userA)}>
+          <QueryClientProvider client={client}>{node}</QueryClientProvider>
+        </AuthContext.Provider>
+      )
+      const rendered = render(<Probe />, { wrapper })
+      await act(async () => {
+        screen.getByRole('button', { name: 'open' }).click()
+      })
+      await screen.findByRole('button', { name: 'open Workspace' })
+      vi.useFakeTimers({ toFake: ['Date'] })
+      await act(async () => screen.getByRole('button', { name: 'open Workspace' }).click())
+      await waitFor(() => expect(screen.getByRole('button', { name: 'child Target' })).toBeTruthy())
+      await waitFor(() => expect(targetReads).toBe(1))
+
+      await act(async () => {
+        await refetchGfsAccess(client, {
+          scope: ':user-a:team-a',
+          generation: 1,
+        })
+      })
+
+      includeUnrelated = true
+      await act(async () => screen.getByRole('button', { name: 'child Target' }).click())
+      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('target-folder'))
+      await act(async () => screen.getByRole('button', { name: 'crumb Workspace' }).click())
+      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-root'))
+
+      // Same scope/generation/key is active again during the producer's 7s
+      // cooldown. The remount must retain the row and defer its next read.
+      expect(unrelatedReads).toBe(1)
+      const allowedReads = scenario === 'cached-data' ? 2 : 1
+      const readsDuringCooldown = targetReads
+
+      // On a later same-key activation after Retry-After, the ordinary row
+      // check is eligible and should be one read with current permission bits.
+      vi.setSystemTime(Date.now() + 61_000)
+      act(() => releaseExpiredGfsDeferredReads(client))
+      const targetKey = desktopQueryKeys.gfsAffordances(
+        ':user-a:team-a',
+        'target-folder',
+        'main',
+        1
+      )
+      expect(isGfsReadDeferred(client, targetKey)).toBe(false)
+      expect(client.getQueryCache().find({ queryKey: targetKey, exact: true })?.isActive()).toBe(
+        true
+      )
+      await act(async () => screen.getByRole('button', { name: 'child Target' }).click())
+      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('target-folder'))
+      await act(async () => screen.getByRole('button', { name: 'crumb Workspace' }).click())
+      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-root'))
+      await waitFor(() => expect(client.isFetching()).toBe(0))
+      await waitFor(() => expect(targetReads).toBe(allowedReads + 1))
+      expect(screen.getByTestId('row-affordances-target-folder').textContent).toBe('read,write')
+
+      // The pair records both A4 predicates: no extra cooldown read and one
+      // eligible same-key read after the deferred event's deadline.
+      expect({ readsDuringCooldown, afterDeadlineReads: targetReads }).toEqual({
+        readsDuringCooldown: allowedReads,
+        afterDeadlineReads: allowedReads + 1,
+      })
+      rendered.unmount()
+      client.clear()
+    }
+  )
+
+  it.each(['cached-data', 'no-data'] as const)(
+    'T-R1/T-X1: mixed real surfaces match the cooldown model after a %s row 429',
+    async scenario => {
+      const scope = ':user-a:team-a'
+      const resourceIds = ['row-a', 'row-b', 'row-c']
+      const children = resourceIds.map((resourceId, index) => ({
+        resourceId,
+        rid: resourceId,
+        gfsUri: `gfs://main/${resourceId}`,
+        drive: 'main',
+        parentResourceId: 'folder-root',
+        name: `Folder-${index}`,
+        kind: 'directory' as const,
+        path: `/Workspace/file-${index}.txt`,
+        version: index + 2,
+        bytes: 10,
+      }))
+      const root = resolvedDirectory('folder-root', 'Workspace')
+      const producedLimit = await affordancesApiError(
+        429,
+        { code: 'rate_limited', message: 'too many requests' },
+        'row-a'
+      )
+      const reads = new Map(resourceIds.map(resourceId => [resourceId, 0]))
+      let previewReads = 0
+      const rowReadSnapshot = () =>
+        Object.fromEntries(
+          Array.from(reads).filter(([resourceId]) => resourceIds.includes(resourceId))
+        )
+      let blocked = scenario === 'no-data'
+      let scheduler!: Scheduler
+      const previewResolve = vi.fn(async (uri: string) => {
+        if (uri !== 'gfs://main/a6-focus-preview') return root
+        previewReads += 1
+        return scheduler.schedule(
+          Promise.resolve(
+            resolvedFile('a6-focus-preview', 'a6-focus-preview.png', {
+              gfsUri: uri,
+            })
+          ),
+          'IPC preview resolve'
+        )
+      })
+      const affordances = vi.fn(async (resourceId: string) => {
+        reads.set(resourceId, (reads.get(resourceId) ?? 0) + 1)
+        const value = {
+          held: ['read', 'write'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        }
+        if (!scheduler) {
+          if (blocked) throw producedLimit
+          return value
+        }
+        const outcome = await scheduler.schedule(
+          Promise.resolve(
+            blocked ? { ok: false as const, error: producedLimit } : { ok: true as const, value }
+          ),
+          `IPC affordances ${resourceId}`
+        )
+        if (!outcome.ok) throw outcome.error
+        return outcome.value
+      })
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => ({
+              items: [root],
+              nextCursor: null,
+            })),
+            resolve: previewResolve,
+            listChildren: vi.fn(async (resourceId: string) => ({
+              items: resourceId === 'folder-root' ? children : [],
+              nextCursor: null,
+            })),
+            affordances,
+            downloadPreview: vi.fn(async () => ({
+              bytes: new Uint8Array([1]).buffer,
+            })),
+          },
+        },
+      })
+
+      interface IndependentRowKey {
+        resourceId: string
+        scope: string
+        generation: number
+        queryKey: readonly unknown[]
+        active: boolean
+        identityRetired: boolean
+        sameKeyReturnPossible: boolean
+        inFlight: boolean
+        errorKind: 'none' | 'rate-limited'
+        blockedUntil: number
+        pendingRelevantWatch: boolean
+        pendingDue: boolean
+        cacheInvalidated: boolean
+        controllerEffectApplied: boolean
+        visibleAuthority: 'unknown'
+        requestedPages: readonly (string | undefined)[]
+        lastAcceptedVersion: number | null
+        backendReadCount: number
+      }
+      interface IndependentModel {
+        keys: Map<string, IndependentRowKey>
+        currentScope: string
+        preview: {
+          uri: string
+          scope: string
+          latestVerdict: 'allowed' | 'denied' | 'unknown'
+          bodyVisible: boolean
+          copyEnabled: boolean
+          resolveFlight: boolean
+          backendReadCount: number
+        }
+        eventQueue: string[]
+      }
+      interface RealModel {
+        client: QueryClient
+        scheduler: Scheduler
+        previewReads: number
+      }
+      class AccessChangedDuringCooldown implements fc.AsyncCommand<IndependentModel, RealModel> {
+        check(model: IndependentModel): boolean {
+          return Array.from(model.keys.values()).some(
+            key => key.active && !key.identityRetired && key.pendingRelevantWatch
+          )
+        }
+        async run(model: IndependentModel, real: RealModel): Promise<void> {
+          model.eventQueue.push('E3 accessChanged during exact-key 429 cooldown')
+          const work = refetchGfsAccess(real.client, { scope, generation: 1 })
+          await real.scheduler.waitIdle()
+          await work
+          await real.scheduler.waitIdle()
+        }
+        toString(): string {
+          return 'E3 accessChanged while the independent model retains a live 429 obligation'
+        }
+      }
+
+      class WindowFocusDuringCooldown implements fc.AsyncCommand<IndependentModel, RealModel> {
+        check(model: IndependentModel): boolean {
+          return Array.from(model.keys.values()).some(
+            key => key.active && !key.identityRetired && key.blockedUntil > Date.now()
+          )
+        }
+        async run(model: IndependentModel, real: RealModel): Promise<void> {
+          model.eventQueue.push('E1 native focus followed by delayed Query focus')
+          const readsBeforeFocus = real.previewReads
+          let releaseDelayedFocus!: () => void
+          const delayedFocus = new Promise<void>(resolve => {
+            releaseDelayedFocus = resolve
+          })
+          vi.spyOn(real.client, 'resumePausedMutations').mockReturnValue(delayedFocus)
+          await act(async () => {
+            window.dispatchEvent(new Event('blur'))
+            window.dispatchEvent(new Event('focus'))
+          })
+          await real.scheduler.waitIdle()
+          await waitFor(() => expect(real.client.isFetching()).toBe(0))
+          releaseDelayedFocus()
+          await real.scheduler.waitIdle()
+          await waitFor(() => expect(real.client.isFetching()).toBe(0))
+          const focusReads = real.previewReads - readsBeforeFocus
+          model.eventQueue.push(`E1 physical Preview reads=${focusReads}`)
+          model.preview.backendReadCount += 1
+        }
+        toString(): string {
+          return 'E1 native plus delayed Query focus has one physical resolver read'
+        }
+      }
+
+      class WatchedFolderChangeDuringCooldown implements fc.AsyncCommand<
+        IndependentModel,
+        RealModel
+      > {
+        check(model: IndependentModel): boolean {
+          return Array.from(model.keys.values()).some(
+            key => key.active && !key.identityRetired && key.pendingRelevantWatch
+          )
+        }
+        async run(model: IndependentModel, real: RealModel): Promise<void> {
+          model.eventQueue.push('E2 watched-folder change during row 429 cooldown')
+          const work = refetchWatchedFolder(
+            real.client,
+            { scope, generation: 1 },
+            'main',
+            gfsRidOfResourceId('folder-root')
+          )
+          await real.scheduler.waitIdle()
+          await work
+          await real.scheduler.waitIdle()
+        }
+        toString(): string {
+          return 'E2 watched folder resync during exact-key row cooldown'
+        }
+      }
+
+      class SameKeyDisappearAndReturn implements fc.AsyncCommand<IndependentModel, RealModel> {
+        check(model: IndependentModel): boolean {
+          return Array.from(model.keys.values()).some(
+            key => key.active && key.sameKeyReturnPossible
+          )
+        }
+        async run(model: IndependentModel, real: RealModel): Promise<void> {
+          model.eventQueue.push('E6 same-key row disappearance and return')
+          for (const key of model.keys.values()) key.active = false
+          await act(async () => screen.getByRole('button', { name: 'child Folder-0' }).click())
+          await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('row-a'))
+          for (const key of model.keys.values()) key.active = true
+          await act(async () => screen.getByRole('button', { name: 'crumb Workspace' }).click())
+          await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-root'))
+          await real.scheduler.waitIdle()
+        }
+        toString(): string {
+          return 'E6 temporarily removes and restores the same row Query keys'
+        }
+      }
+
+      class SidebarSameKeyRemountDuringCooldown implements fc.AsyncCommand<
+        IndependentModel,
+        RealModel
+      > {
+        check(model: IndependentModel): boolean {
+          return Array.from(model.keys.values()).some(key => key.active && key.pendingRelevantWatch)
+        }
+        async run(model: IndependentModel, real: RealModel): Promise<void> {
+          model.eventQueue.push('E6 Sidebar observer unmount/remount during 429 cooldown')
+          const before = rowReadSnapshot()
+          await act(async () => screen.getByRole('button', { name: 'toggle Sidebar' }).click())
+          await real.scheduler.waitIdle()
+          await act(async () => screen.getByRole('button', { name: 'toggle Sidebar' }).click())
+          await real.scheduler.waitIdle()
+          await waitFor(() => expect(real.client.isFetching()).toBe(0))
+          expect(rowReadSnapshot()).toEqual(before)
+        }
+        toString(): string {
+          return 'E6 Sidebar same-key cached observer remount stays inside the 429 cooldown'
+        }
+      }
+
+      class SameKeyActivationAfterDeadline implements fc.AsyncCommand<IndependentModel, RealModel> {
+        check(model: IndependentModel): boolean {
+          return Array.from(model.keys.values()).some(key => key.active && key.pendingRelevantWatch)
+        }
+        async run(model: IndependentModel, real: RealModel): Promise<void> {
+          model.eventQueue.push('E6 same-key activation after the 429 deadline')
+          const before = rowReadSnapshot()
+          const blockedUntil = Math.max(...Array.from(model.keys.values(), key => key.blockedUntil))
+          vi.setSystemTime(Math.max(Date.now(), blockedUntil + 1))
+          blocked = false
+          act(() => releaseExpiredGfsDeferredReads(real.client))
+          const firstRowKey = desktopQueryKeys.gfsAffordances(scope, 'row-a', 'main', 1)
+          const dueQuery = real.client.getQueryCache().find({ queryKey: firstRowKey, exact: true })
+          expect(dueQuery?.observers.map(observer => observer.options.meta)).toContainEqual({
+            gfsDeferredReadEligible: true,
+          })
+          expect(isGfsReadDeferred(real.client, firstRowKey)).toBe(false)
+          await act(async () => screen.getByRole('button', { name: 'child Folder-0' }).click())
+          await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('row-a'))
+          await act(async () => screen.getByRole('button', { name: 'crumb Workspace' }).click())
+          await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-root'))
+          await real.scheduler.waitIdle()
+          await waitFor(() => expect(real.client.isFetching()).toBe(0))
+          await waitFor(() =>
+            expect(
+              resourceIds.every(
+                resourceId =>
+                  screen.getByTestId(`row-affordances-${resourceId}`).textContent === 'read,write'
+              )
+            ).toBe(true)
+          )
+          await waitFor(() =>
+            expect(
+              resourceIds.every(
+                resourceId => (rowReadSnapshot()[resourceId] ?? 0) > (before[resourceId] ?? 0)
+              )
+            ).toBe(true)
+          )
+          for (const key of model.keys.values()) key.backendReadCount += 1
+        }
+        toString(): string {
+          return 'E6 same-key activation is eligible once its 429 deadline expires'
+        }
+      }
+
+      class AuthorityReplacement implements fc.AsyncCommand<IndependentModel, RealModel> {
+        check(model: IndependentModel): boolean {
+          return Array.from(model.keys.values()).some(key => key.active && !key.identityRetired)
+        }
+        async run(model: IndependentModel, real: RealModel): Promise<void> {
+          model.eventQueue.push('E5 replace the current team authority')
+          const oldScope = model.currentScope
+          const beforeRows = rowReadSnapshot()
+          const beforePreviewReads = real.previewReads
+          await act(async () => screen.getByRole('button', { name: 'replace authority' }).click())
+          await real.scheduler.waitIdle()
+          await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
+          await waitFor(() => expect(real.previewReads).toBeGreaterThan(beforePreviewReads))
+          expect(rowReadSnapshot()).toEqual(beforeRows)
+
+          // E5 retires old scoped obligations; the replacement authority gets
+          // its ordinary one-per-child first checks. A late old-scope event is
+          // then inert because no old observer remains active.
+          for (const [id, key] of model.keys) {
+            model.keys.set(id, {
+              ...key,
+              active: false,
+              identityRetired: true,
+              pendingRelevantWatch: false,
+              pendingDue: false,
+            })
+          }
+          const nextScope = ':user-a:team-b'
+          model.currentScope = nextScope
+          model.preview.backendReadCount += 1
+          model.preview.scope = nextScope
+          const rowsAfterSwitch = rowReadSnapshot()
+          const lateOldScopeEvent = refetchGfsAccess(real.client, {
+            scope: oldScope,
+            generation: 1,
+          })
+          await real.scheduler.waitIdle()
+          await lateOldScopeEvent
+          await real.scheduler.waitIdle()
+          expect(rowReadSnapshot()).toEqual(rowsAfterSwitch)
+        }
+        toString(): string {
+          return 'E5 replaces team scope and retires old-key watch work'
+        }
+      }
+
+      const commands = fc.commands(
+        [
+          fc.constant(new AccessChangedDuringCooldown()),
+          fc.constant(new WindowFocusDuringCooldown()),
+          fc.constant(new WatchedFolderChangeDuringCooldown()),
+          fc.constant(new SameKeyDisappearAndReturn()),
+          fc.constant(new SidebarSameKeyRemountDuringCooldown()),
+          fc.constant(new AuthorityReplacement()),
+        ],
+        {
+          maxCommands: 5,
+          size: 'max',
+        }
+      )
+      await fc.assert(
+        fc.asyncProperty(fc.scheduler(), commands, async (nextScheduler, generated) => {
+          scheduler = nextScheduler
+          vi.useFakeTimers({ toFake: ['Date'] })
+          vi.setSystemTime(1_800_000_000_000)
+          blocked = scenario === 'no-data'
+          for (const resourceId of resourceIds) reads.set(resourceId, 0)
+          const client = new QueryClient({
+            defaultOptions: desktopQueryDefaults,
+          })
+          const wrapper = ({ children: node }: { children: ReactNode }) => {
+            const [currentUser, setCurrentUser] = useState(userA)
+            return (
+              <AuthContext.Provider value={authValue(currentUser)}>
+                <QueryClientProvider client={client}>
+                  {node}
+                  <button type="button" onClick={() => setCurrentUser(userB)}>
+                    replace authority
+                  </button>
+                </QueryClientProvider>
+              </AuthContext.Provider>
+            )
+          }
+          const rendered = render(<A6MixedFocusSurfaces />, { wrapper })
+          try {
+            await screen.findByAltText('Preview of a6-focus-preview.png')
+            await scheduler.waitIdle()
+            const initialPreviewReads = previewReads
+            expect(initialPreviewReads).toBeGreaterThan(0)
+            await act(async () => screen.getByRole('button', { name: 'open' }).click())
+            await scheduler.waitIdle()
+            await act(async () => screen.getByRole('button', { name: 'Expand Workspace' }).click())
+            await scheduler.waitIdle()
+            await waitFor(() =>
+              expect(rowReadSnapshot()).toEqual({
+                'row-a': 1,
+                'row-b': 1,
+                'row-c': 1,
+              })
+            )
+            for (const resourceId of resourceIds) {
+              const key = desktopQueryKeys.gfsAffordances(scope, resourceId, 'main', 1)
+              if (scenario === 'no-data') {
+                expect(client.getQueryData(key)).toBeUndefined()
+              } else {
+                expect(client.getQueryData(key)).toBeDefined()
+              }
+            }
+            blocked = true
+            const firstAccessChange = refetchGfsAccess(client, {
+              scope,
+              generation: 1,
+            })
+            await scheduler.waitIdle()
+            await firstAccessChange
+            await scheduler.waitIdle()
+            expect(rowReadSnapshot()).toEqual({
+              'row-a': scenario === 'no-data' ? 1 : 2,
+              'row-b': scenario === 'no-data' ? 1 : 2,
+              'row-c': scenario === 'no-data' ? 1 : 2,
+            })
+            const firstDeniedAt = Math.min(
+              ...resourceIds.map(
+                resourceId =>
+                  client.getQueryState(
+                    desktopQueryKeys.gfsAffordances(scope, resourceId, 'main', 1)
+                  )?.errorUpdatedAt ?? Date.now()
+              )
+            )
+
+            const model: IndependentModel = {
+              keys: new Map(
+                resourceIds.map(resourceId => [
+                  `${scope}:${resourceId}`,
+                  {
+                    resourceId,
+                    scope,
+                    generation: 1,
+                    queryKey: desktopQueryKeys.gfsAffordances(scope, resourceId, 'main', 1),
+                    active: true,
+                    identityRetired: false,
+                    sameKeyReturnPossible: true,
+                    inFlight: false,
+                    errorKind: 'rate-limited',
+                    blockedUntil: firstDeniedAt + 60_000,
+                    pendingRelevantWatch: true,
+                    pendingDue: true,
+                    cacheInvalidated: true,
+                    controllerEffectApplied: true,
+                    visibleAuthority: 'unknown',
+                    requestedPages: [],
+                    lastAcceptedVersion: null,
+                    // Cached success needs a second denied read; a no-data
+                    // first denial is reused to defer this event without retry.
+                    backendReadCount: scenario === 'no-data' ? 1 : 2,
+                  },
+                ])
+              ),
+              currentScope: scope,
+              preview: {
+                uri: 'gfs://main/a6-model-preview',
+                scope,
+                latestVerdict: 'allowed' as const,
+                bodyVisible: true,
+                copyEnabled: true,
+                resolveFlight: false,
+                backendReadCount: initialPreviewReads,
+              },
+              eventQueue: ['E8 first three ordinary row checks', 'E3 accessChanged returns 429'],
+            }
+            const sequence = Array.from(
+              new Map(
+                Array.from(generated)
+                  .filter(command => !(command instanceof AuthorityReplacement))
+                  .map(command => [command.constructor, command])
+              ).values()
+            )
+            if (!sequence.some(command => command instanceof WindowFocusDuringCooldown))
+              sequence.push(new WindowFocusDuringCooldown())
+            if (!sequence.some(command => command instanceof SameKeyDisappearAndReturn))
+              sequence.push(new SameKeyDisappearAndReturn())
+            if (!sequence.some(command => command instanceof SidebarSameKeyRemountDuringCooldown))
+              sequence.push(new SidebarSameKeyRemountDuringCooldown())
+            if (!sequence.some(command => command instanceof AccessChangedDuringCooldown))
+              sequence.push(new AccessChangedDuringCooldown())
+            if (!sequence.some(command => command instanceof WatchedFolderChangeDuringCooldown))
+              sequence.push(new WatchedFolderChangeDuringCooldown())
+            sequence.push(new SameKeyActivationAfterDeadline())
+            sequence.push(new AuthorityReplacement())
+            await fc.asyncModelRun(
+              () => ({
+                model,
+                real: {
+                  client,
+                  scheduler,
+                  get previewReads() {
+                    return previewReads
+                  },
+                },
+              }),
+              sequence
+            )
+            await act(async () => scheduler.waitIdle())
+            await waitFor(() => expect(client.isFetching()).toBe(0))
+
+            // Compare only at quiescence so the generated event schedule runs
+            // to completion and the oracle sees the combined E1/E3 sequence.
+            expect({
+              rowReads: rowReadSnapshot(),
+              previewReads,
+              previewVisible: Boolean(screen.queryByAltText('Preview of a6-focus-preview.png')),
+            }).toEqual({
+              rowReads: Object.fromEntries(
+                resourceIds.map(resourceId => [
+                  resourceId,
+                  Array.from(model.keys.values())
+                    .filter(key => key.resourceId === resourceId)
+                    .reduce((total, key) => total + key.backendReadCount, 0),
+                ])
+              ),
+              previewReads: model.preview.backendReadCount,
+              previewVisible: model.preview.bodyVisible,
+            })
+          } finally {
+            rendered.unmount()
+            client.clear()
+          }
+        }),
+        { seed: 1241503, numRuns: 20, verbose: 2 }
+      )
+    }
+  )
 
   it('loads accessible GFS resources and opens one without a pasted link', async () => {
     Object.defineProperty(window, 'clerum', {
@@ -1624,7 +2359,9 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByRole('button', { name: 'open Marketing' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'open lonely.md' })).toBeTruthy()
     expect(
-      screen.queryByRole('button', { name: 'open enterprise-ai-agents-mockup.txt' })
+      screen.queryByRole('button', {
+        name: 'open enterprise-ai-agents-mockup.txt',
+      })
     ).toBeNull()
     expect(screen.queryByRole('button', { name: 'open nested.txt' })).toBeNull()
   })
@@ -1840,7 +2577,10 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
-          listAccessible: vi.fn(async () => ({ items: [fileResource], nextCursor: null })),
+          listAccessible: vi.fn(async () => ({
+            items: [fileResource],
+            nextCursor: null,
+          })),
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
@@ -1849,7 +2589,10 @@ describe('useGfsBrowserController', () => {
             grantableBits: [],
             canCreateShare: false,
           })),
-          renameResource: vi.fn(async () => ({ resourceId: 'file-1', version: 2 })),
+          renameResource: vi.fn(async () => ({
+            resourceId: 'file-1',
+            version: 2,
+          })),
           replaceFile: vi.fn(async () => ({
             ...fileResource,
             name: 'Renamed report.md',
@@ -2179,7 +2922,10 @@ describe('useGfsBrowserController', () => {
       version: 1,
       bytes: 10,
     }
-    const listChildren = vi.fn(async () => ({ items: [child], nextCursor: null }))
+    const listChildren = vi.fn(async () => ({
+      items: [child],
+      nextCursor: null,
+    }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -2581,8 +3327,14 @@ describe('useGfsBrowserController', () => {
       if (!resource) throw new Error(`Unexpected URI: ${uri}`)
       return resource
     })
-    const moveResource = vi.fn(async () => ({ resourceId: docsId, version: 9 }))
-    const renameResource = vi.fn(async () => ({ resourceId: docsId, version: 10 }))
+    const moveResource = vi.fn(async () => ({
+      resourceId: docsId,
+      version: 9,
+    }))
+    const renameResource = vi.fn(async () => ({
+      resourceId: docsId,
+      version: 10,
+    }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -2694,7 +3446,10 @@ describe('useGfsBrowserController', () => {
       grantableBits: [],
       canCreateShare: false,
     }))
-    const renameResource = vi.fn(async () => ({ resourceId: 'root', version: 2 }))
+    const renameResource = vi.fn(async () => ({
+      resourceId: 'root',
+      version: 2,
+    }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -2745,7 +3500,9 @@ describe('useGfsBrowserController', () => {
       resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
     )
     const accessibleRoot = childView('other-root', 'Other folder', 'directory')
-    const child = childView('private-child', 'private.md', 'file', { parentResourceId: 'root' })
+    const child = childView('private-child', 'private.md', 'file', {
+      parentResourceId: 'root',
+    })
     let denyRefresh!: (error: Error) => void
     const deniedRefresh = new Promise<never>((_resolve, reject) => {
       denyRefresh = reject
@@ -2758,7 +3515,10 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
-          listAccessible: vi.fn(async () => ({ items: [accessibleRoot], nextCursor: null })),
+          listAccessible: vi.fn(async () => ({
+            items: [accessibleRoot],
+            nextCursor: null,
+          })),
           resolve: vi.fn(async () => root),
           listChildren,
           affordances: vi.fn(async () => ({
@@ -2798,7 +3558,9 @@ describe('useGfsBrowserController', () => {
       resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
     )
     const folderB = await resolveResource(
-      resolvedDirectory('folder-b', 'Folder B', { gfsUri: 'gfs://main/folder-b' })
+      resolvedDirectory('folder-b', 'Folder B', {
+        gfsUri: 'gfs://main/folder-b',
+      })
     )
     let finishNavigation!: (resource: typeof folderB) => void
     const pendingNavigation = new Promise<typeof folderB>(resolve => {
@@ -2851,7 +3613,10 @@ describe('useGfsBrowserController', () => {
 
   it('keeps the complete breadcrumb trail and retries a transient ancestor failure', async () => {
     const parent = await resolveResource(
-      resolvedDirectory('parent', 'Parent', { gfsUri: 'gfs://main/parent', path: '/Parent' })
+      resolvedDirectory('parent', 'Parent', {
+        gfsUri: 'gfs://main/parent',
+        path: '/Parent',
+      })
     )
     const leaf = await resolveResource(
       resolvedDirectory('leaf', 'Leaf', {
@@ -2894,13 +3659,18 @@ describe('useGfsBrowserController', () => {
     })
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(4))
     expect(screen.getByTestId('crumbs').textContent).toBe('Parent / Leaf')
-    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(6), { timeout: 2000 })
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(6), {
+      timeout: 2000,
+    })
     expect(screen.getByTestId('crumbs').textContent).toBe('Parent / Leaf')
   })
 
   it('drops only an authoritatively denied ancestor while keeping the readable location open', async () => {
     const parent = await resolveResource(
-      resolvedDirectory('parent', 'Parent', { gfsUri: 'gfs://main/parent', path: '/Parent' })
+      resolvedDirectory('parent', 'Parent', {
+        gfsUri: 'gfs://main/parent',
+        path: '/Parent',
+      })
     )
     const leaf = await resolveResource(
       resolvedDirectory('leaf', 'Leaf', {
@@ -4273,7 +5043,9 @@ describe('captured GFS authority callbacks', () => {
       code: 'unauthorized',
       message: 'Session expired',
     })
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
     let current!: ReturnType<typeof useGfsBrowserController>
     const scope = ':user-a:team-a'
     function CapturedProbe() {
@@ -4287,12 +5059,17 @@ describe('captured GFS authority callbacks', () => {
         </QueryClientProvider>
       </AuthContext.Provider>
     )
-    Object.defineProperty(window, 'clerum', { configurable: true, value: { gfs: {} } })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: {} },
+    })
     const rendered = render(view(1))
     const oldCallback = current.handleAuthorityFailure
     rendered.rerender(view(2))
     const markerKey = desktopQueryKeys.gfsChildren(scope, 'replacement-folder', 'main', 2)
-    client.setQueryData(markerKey, { pages: [{ items: [{ resourceId: 'replacement-file' }] }] })
+    client.setQueryData(markerKey, {
+      pages: [{ items: [{ resourceId: 'replacement-file' }] }],
+    })
     const remove = vi.spyOn(client, 'removeQueries')
     await act(async () => {
       expect(oldCallback(failure, 'operation', scope, 1)).toBe(true)
@@ -4374,7 +5151,9 @@ describe('denied-location cleanup ownership', () => {
         },
       },
     })
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
     let controller!: ReturnType<typeof useGfsBrowserController>
     let publishGeneration!: (generation: number) => void
     function OwnerProbe() {
@@ -4405,7 +5184,10 @@ describe('denied-location cleanup ownership', () => {
     const replacementChildren = await listChildrenPage([
       childView('new-child', 'new.md', 'file', { parentResourceId: 'root' }),
     ])
-    client.setQueryData(replacementKey, { pages: [replacementChildren], pageParams: [undefined] })
+    client.setQueryData(replacementKey, {
+      pages: [replacementChildren],
+      pageParams: [undefined],
+    })
     await act(async () => {
       const refresh = controller.refreshCurrentLocation({ background: true })
       await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))

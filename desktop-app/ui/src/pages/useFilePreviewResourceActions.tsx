@@ -18,6 +18,7 @@ import {
   assertGfsAuthorityRetryAllowed,
   gfsAuthorityQueryPolicy,
 } from '@lib/gfsAuthorityQueryPolicy'
+import { isGfsReadDeferred, useGfsDeferredReadGate } from '@lib/gfsDeferredReadGate'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import {
   describeGfsGrantError,
@@ -140,6 +141,7 @@ export function useFilePreviewResourceActions({
   pushToast,
 }: FilePreviewResourceActionsProps) {
   const queryClient = useQueryClient()
+  useGfsDeferredReadGate(queryClient)
   const [shareOpen, setShareOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [moveOpen, setMoveOpen] = useState(false)
@@ -181,24 +183,36 @@ export function useFilePreviewResourceActions({
       isGfsSessionGeneration(sessionGeneration)
     ),
     refetchOnMount: 'always',
-    refetchOnWindowFocus: 'always',
+    // FilePreviewPage's native focus handler is the sole focus-driven resolver
+    // owner; Query focus can arrive later and spend a second read serially.
+    refetchOnWindowFocus: false,
   })
   const resource = resourceQuery.isError ? undefined : resourceQuery.data
   const resourceId = resource?.resourceId ?? ''
   const drive = resource?.drive ?? GFS_DRIVE_MAIN
+  const affordancesQueryKey = desktopQueryKeys.gfsAffordances(
+    sessionScope,
+    resourceId || gfsUri,
+    drive,
+    sessionGeneration
+  )
   const affordancesQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsAffordances(
-      sessionScope,
-      resourceId || gfsUri,
-      drive,
-      sessionGeneration
-    ),
+    queryKey: affordancesQueryKey,
     queryFn: () => window.clerum.gfs.affordances(resourceId, drive),
+    meta: {
+      gfsDeferredReadEligible: Boolean(
+        canResolve &&
+        resourceId &&
+        resource?.kind === 'file' &&
+        isGfsSessionGeneration(sessionGeneration)
+      ),
+    },
     enabled: Boolean(
       canResolve &&
       resourceId &&
       resource?.kind === 'file' &&
-      isGfsSessionGeneration(sessionGeneration)
+      isGfsSessionGeneration(sessionGeneration) &&
+      !isGfsReadDeferred(queryClient, affordancesQueryKey)
     ),
     ...gfsAuthorityQueryPolicy,
   })
@@ -228,19 +242,29 @@ export function useFilePreviewResourceActions({
     drive: resource?.drive ?? GFS_DRIVE_MAIN,
     version: resource?.version ?? null,
   }
+  const sourceParentAffordancesQueryKey = desktopQueryKeys.gfsAffordances(
+    sessionScope,
+    sourceParentId ?? gfsUri,
+    drive,
+    sessionGeneration
+  )
   const sourceParentAffordancesQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsAffordances(
-      sessionScope,
-      sourceParentId ?? gfsUri,
-      drive,
-      sessionGeneration
-    ),
+    queryKey: sourceParentAffordancesQueryKey,
     queryFn: () => window.clerum.gfs.affordances(sourceParentId!, drive),
+    meta: {
+      gfsDeferredReadEligible: Boolean(
+        canResolve &&
+        resource?.kind === 'file' &&
+        sourceParentId &&
+        isGfsSessionGeneration(sessionGeneration)
+      ),
+    },
     enabled: Boolean(
       canResolve &&
       resource?.kind === 'file' &&
       sourceParentId &&
-      isGfsSessionGeneration(sessionGeneration)
+      isGfsSessionGeneration(sessionGeneration) &&
+      !isGfsReadDeferred(queryClient, sourceParentAffordancesQueryKey)
     ),
     ...gfsAuthorityQueryPolicy,
   })
@@ -761,7 +785,9 @@ export function useFilePreviewResourceActions({
       'the source folder',
       ['write', 'delete'],
       async () => {
-        const result = await sourceParentAffordancesQuery.refetch({ cancelRefetch: false })
+        const result = await sourceParentAffordancesQuery.refetch({
+          cancelRefetch: false,
+        })
         if (result.isError || !result.data) {
           throw result.error ?? new Error('Could not verify source folder permissions.')
         }
@@ -1037,7 +1063,9 @@ export function useFilePreviewResourceActions({
           moveContext.sessionGeneration
         )
       )
-      const sourceCheck = await sourceParentAffordancesQuery.refetch({ cancelRefetch: false })
+      const sourceCheck = await sourceParentAffordancesQuery.refetch({
+        cancelRefetch: false,
+      })
       if (!(await isCurrentSessionGeneration())) {
         clearStaleMovePresentation()
         return

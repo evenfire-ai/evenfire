@@ -1,9 +1,11 @@
-import type { QueryClient } from '@tanstack/react-query'
+import type { Query, QueryClient } from '@tanstack/react-query'
 import {
   desktopQueryKeys,
   hasGfsSessionGeneration,
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
+import { deferGfsReadForRateLimit, reserveGfsReadForWatchJoin } from './gfsDeferredReadGate'
+import { parseHttpStatus } from './gfsGrantErrors'
 import { gfsRidOfResourceId } from './gfsWatchKeys'
 
 /** The session a reaction acts for: queries of any other scope or generation are left alone. */
@@ -12,7 +14,7 @@ export interface GfsWatchAuthority {
   generation: number | null
 }
 
-type QueryLike = { queryKey: readonly unknown[] }
+type QueryLike = Pick<Query, 'queryKey' | 'queryHash'>
 
 const ACCESS_FAMILIES = new Set([
   'accessible',
@@ -50,23 +52,65 @@ function ownsSession(authority: GfsWatchAuthority): boolean {
  */
 async function refetchActiveJoining(
   queryClient: QueryClient,
-  filters: ReturnType<typeof sessionFilter>
+  filters: ReturnType<typeof sessionFilter>,
+  deferRateLimited: (query: Query) => boolean = () => false
 ): Promise<void> {
-  const joined = new Set(
+  const matching = queryClient.getQueryCache().findAll(filters)
+  const deferred = new Set<string>()
+  for (const query of matching) {
+    if (deferRateLimited(query) && deferGfsReadForRateLimit(queryClient, query)) {
+      query.invalidate()
+      deferred.add(query.queryHash)
+    }
+  }
+  const eligibleFilters = {
+    ...filters,
+    predicate: (query: QueryLike) => filters.predicate(query) && !deferred.has(query.queryHash),
+  }
+  const joinedQueries = queryClient
+    .getQueryCache()
+    .findAll({ ...eligibleFilters, fetchStatus: 'fetching' })
+    .filter(query => query.isActive())
+  const joined = new Set(joinedQueries.map(query => query.queryHash))
+  for (const query of joinedQueries) {
+    if (deferRateLimited(query)) reserveGfsReadForWatchJoin(queryClient, query)
+  }
+  await queryClient.invalidateQueries(
+    { ...eligibleFilters, refetchType: 'active' },
+    { cancelRefetch: false }
+  )
+  for (const query of queryClient.getQueryCache().findAll(filters)) {
+    if (deferRateLimited(query) && deferGfsReadForRateLimit(queryClient, query)) {
+      query.invalidate()
+      deferred.add(query.queryHash)
+    }
+  }
+  const terminalDenied = new Set(
     queryClient
       .getQueryCache()
-      .findAll({ ...filters, fetchStatus: 'fetching' })
+      .findAll({
+        ...filters,
+        predicate: query => joined.has(query.queryHash) && filters.predicate(query),
+      })
+      .filter(query => {
+        const message =
+          query.state.error instanceof Error
+            ? query.state.error.message
+            : String(query.state.error ?? '')
+        const status = parseHttpStatus(message)
+        return status === 401 || status === 403
+      })
       .map(query => query.queryHash)
-  )
-  await queryClient.invalidateQueries(
-    { ...filters, refetchType: 'active' },
-    { cancelRefetch: false }
   )
   if (joined.size > 0) {
     await queryClient.invalidateQueries(
       {
         queryKey: filters.queryKey,
-        predicate: query => joined.has(query.queryHash) && filters.predicate(query),
+        predicate: query =>
+          joined.has(query.queryHash) &&
+          filters.predicate(query) &&
+          !deferred.has(query.queryHash) &&
+          !terminalDenied.has(query.queryHash),
         refetchType: 'active',
       },
       { cancelRefetch: false }
@@ -91,7 +135,8 @@ export async function refetchWatchedFolder(
         key[4] === drive &&
         typeof key[5] === 'string' &&
         gfsRidOfResourceId(key[5]) === rid
-    )
+    ),
+    query => query.queryKey[3] === 'children'
   )
 }
 
@@ -109,7 +154,8 @@ export async function refetchGfsAccess(
   await Promise.all([
     refetchActiveJoining(
       queryClient,
-      sessionFilter(authority, key => ACCESS_FAMILIES.has(String(key[3])))
+      sessionFilter(authority, key => ACCESS_FAMILIES.has(String(key[3]))),
+      query => query.queryKey[3] === 'affordances'
     ),
     queryClient.invalidateQueries({
       ...sessionFilter(authority, key => key[3] === 'children'),

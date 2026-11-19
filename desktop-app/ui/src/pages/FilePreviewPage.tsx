@@ -12,6 +12,7 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import { gfsAuthorityRetryPauseRemainingMs } from '@lib/gfsAuthorityQueryPolicy'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
 import { useFilePreviewResourceActions } from './useFilePreviewResourceActions'
@@ -297,11 +298,14 @@ export function FilePreviewPage({
       { sessionGeneration: ctrl.sessionGeneration },
     ] as const
     try {
-      // Use the mounted resource query so React Query's own focus refetch and
-      // this access check share one in-flight resolver request.
+      const queryState = queryClient.getQueryState(resourceQueryKey)
+      if (gfsAuthorityRetryPauseRemainingMs(queryState?.error, queryState?.errorUpdatedAt ?? 0) > 0)
+        return
+      // The native focus handler is the sole resolver owner. Repeated native
+      // focus events join this exact mounted query instead of cancelling it.
       await queryClient.refetchQueries(
         { queryKey: resourceQueryKey, exact: true },
-        { throwOnError: true }
+        { cancelRefetch: false, throwOnError: true }
       )
       if (
         !isGfsSessionAuthorityCurrent(
