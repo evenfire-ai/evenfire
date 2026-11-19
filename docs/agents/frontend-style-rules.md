@@ -79,6 +79,32 @@ image `src` to inline `data:image` URIs and link hrefs to
 The behavior is covered by the GfsMarkdownPreview test suites in both
 applications. This exception is scoped to these preview components only.
 
+Recorded exception — Desktop chat diagrams. The Desktop chat renders agent
+replies through its own semantic Markdown pipeline (`chatMessageSemantics`,
+which also feeds the in-chat search), and `ChatMarkdownContent` shows a fenced
+`mermaid` block of an agent reply as a diagram instead of as code. Mermaid
+never runs in the app's renderer: the main process draws each diagram in a
+hidden, sandboxed window with no preload, its own in-memory session that
+refuses every request outside the app's files, and a page policy that allows
+only the app's scripts, inline styles and inline images (`diagram.html`). It
+sends one
+diagram at a time and ends that window's process when a drawing takes more
+than 10 seconds, so code that keeps Mermaid busy cannot freeze the app.
+Mermaid runs at its `strict` security level; the diagram's own `%%{init}%%`
+or front matter cannot set the security, stylesheet, base font, theme or
+sanitizer keys; labels lose images, embeds, form controls and SVG filters; code over
+20,000 characters, a flowchart over 500 connections, or a drawing over 4 MB
+or 100,000 pixels on a side is not shown. The
+result is shown as an `<img>` of its SVG, so it runs no script, loads nothing
+and its stylesheet cannot reach the app; its links and `url()` references are
+also dropped, as a second guard. The app's CSP is unchanged. Accessibility:
+the image's text alternative is the diagram's own accessible title and
+description, or else its kind and the words in it; a diagram still drawing is
+marked busy; code Mermaid cannot draw stays a readable code block with
+the reason, and while the chat search matches text inside the code, the code
+shows with the match. This exception is scoped to agent replies in the
+Desktop chat.
+
 ## Types, constants, and imports
 
 - Do not declare exported or reusable `type` or `interface` definitions inside

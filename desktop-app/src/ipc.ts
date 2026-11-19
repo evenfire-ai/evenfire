@@ -51,6 +51,7 @@ import {
   TaskProgressStreamEvent,
   WorkflowNotificationStreamEvent,
 } from './types.js'
+import { isUntrustedIpcSender } from './untrustedIpcSenders.js'
 
 type DeepLinkQueue = {
   list(): Array<{ id: number }>
@@ -411,6 +412,7 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
 }
 
 export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {
+  if (isUntrustedIpcSender(event.sender)) throw new Error('Untrusted IPC sender')
   const senderUrl = String(event.senderFrame?.url || '')
   const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
   const isFileSender = senderUrl.startsWith('file://')

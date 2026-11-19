@@ -127,6 +127,8 @@ export type HostRuntimeMessageRequest = {
   // verbatim. mcp-host owns the contract and answers 200 `success:false` with
   // a typed code for any malformed value.
   fileReferences?: unknown
+  /** Known values only (`knownDisplayCapabilities`): what the Desktop draws in a reply. */
+  displayCapabilities?: string[]
   [key: string]: unknown
 }
 

@@ -31,7 +31,11 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
 4. **Chat.** Sending a message is
    `POST /api/v1/rpc/hosts/:hostRef/messages`, through `rpc-proxy`. Each
    answer carries a collapsed summary of the tool calls behind it, plus the
-   input and output token counts for the thread.
+   input and output token counts for the thread. When the agent answers with
+   a fenced `mermaid` block, the chat draws it as a diagram in the reply.
+   Each message declares `displayCapabilities: ["mermaid"]`, and only then
+   does the Host tell the agent to write diagrams that way; Telegram, Slack,
+   Teams, email and older Desktop builds never get that instruction.
 
    ![Evenfire Desktop App chat with the chatllm agent: the agent's answer sits above a collapsed "More details · 1 tool" summary, with thread token counts in the header](../assets/desktop-app-chat.webp)
    *Dev cluster, demo tenant.*
@@ -152,6 +156,23 @@ The renderer runs with `contextIsolation: true`, `sandbox: true`, and
 process is the preload bridge (`window.clerum.*`); there is no direct Node or
 Electron API access from React code. IPC senders are validated in the main
 process handlers before any privileged call runs.
+
+Diagrams in the chat are drawn by Mermaid in a hidden, sandboxed window the
+main process opens on the first diagram: no preload, an in-memory session that
+refuses every request outside the app's own files, and a page policy that
+allows only the app's scripts, inline styles and inline images. The main
+process sends one
+diagram at a time and ends that window's process when a drawing takes more
+than 10 seconds; code that times out, or whose drawing ends that process
+twice, is not drawn again in the session. The window also closes after two
+idle minutes, when its process dies and with the main window, so it never
+keeps the app running, and a reload of the main window drops the diagrams the
+old page asked for. The
+agent's code is treated as untrusted: Mermaid runs in `strict` mode with its
+config locked against the diagram, and the chat shows the result as an image
+of the SVG, which cannot run script, load anything or restyle the app. See the
+recorded exception in
+[`frontend-style-rules.md`](../agents/frontend-style-rules.md).
 
 ## Run it
 
