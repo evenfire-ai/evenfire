@@ -202,6 +202,14 @@ describe('fixtures', () => {
   }
 
   // 0-U2: exactly one refusal fixture per reason, compared as sets from the directory listing.
+  it('resolves every fixture and package.json through the package name', () => {
+    assert.equal(fixtureNames.length, 30)
+    for (const name of fixtureNames) {
+      assert.deepEqual(require(`@clerum/external-channel-contracts/fixtures/${name}`), load(name), name)
+    }
+    assert.equal(require('@clerum/external-channel-contracts/package.json').name, '@clerum/external-channel-contracts')
+  })
+
   it('0-U2 refusal fixtures cover exactly ADMISSION_REFUSAL_REASONS', () => {
     const reasons = fixtureNames
       .map(name => /^admission\.refused\.(.+)\.json$/.exec(name))
