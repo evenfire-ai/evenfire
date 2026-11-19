@@ -112,10 +112,11 @@ async function renderCurrentFileReplaceScenario(
     throw new Error(`unexpected resource URI: ${uri}`)
   })
   const pushToast = vi.fn()
+  const getSessionGeneration = vi.fn(async () => 1)
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
-      auth: { getSessionGeneration: vi.fn(async () => 1) },
+      auth: { getSessionGeneration },
       gfs: {
         listAccessible,
         listChildren: vi.fn(async () => listChildrenPage([])),
@@ -150,6 +151,7 @@ async function renderCurrentFileReplaceScenario(
     affordances,
     client,
     fileId,
+    getSessionGeneration,
     key,
     pushToast,
     replaceFileFromPath,
@@ -363,6 +365,40 @@ describe('FilesPage current-file Replace permission freshness', () => {
       '/fixture/report.txt',
       'main',
       7
+    )
+    scenario.client.clear()
+  })
+
+  it('starts no Replace once main runs another session the renderer has not published', async () => {
+    const scenario = await renderCurrentFileReplaceScenario()
+    const replaceMenuItem = await reachCurrentFileReplaceThroughKeyboard(scenario.user)
+    scenario.getSessionGeneration.mockResolvedValue(2)
+    const confirmationsBefore = scenario.getSessionGeneration.mock.calls.length
+
+    await selectReplacement(replaceMenuItem)
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    expect(scenario.replaceFileFromPath).not.toHaveBeenCalled()
+    // Replace did reach its last check: it asked main which session it runs.
+    expect(scenario.getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmationsBefore)
+    scenario.client.clear()
+  })
+
+  it('replaces the file while main still runs the session it started under', async () => {
+    const scenario = await renderCurrentFileReplaceScenario()
+    const replaceMenuItem = await reachCurrentFileReplaceThroughKeyboard(scenario.user)
+
+    await selectReplacement(replaceMenuItem)
+
+    await waitFor(() =>
+      expect(scenario.replaceFileFromPath).toHaveBeenCalledWith(
+        scenario.fileId,
+        '/fixture/report.txt',
+        'main',
+        7
+      )
     )
     scenario.client.clear()
   })

@@ -1197,55 +1197,91 @@ describe('useGfsResourceAccess — owner gate and fail-closed boundary', () => {
     expect(screen.getByTestId('crumbs').textContent).toBe('')
   })
 
-  for (const sameSession of [true, false]) {
-    it(`judges a late revoke rejection by the session it was sent under (${
-      sameSession ? 'same session revokes' : 'replaced session keeps access'
-    })`, async () => {
-      const failure = await sessionRejection(client =>
-        client.revokeGrant('42424242-4242-4242-4242-424242424242', 'fixture-session-token')
-      )
-      const revoke = deferred<void>()
-      const revokeGrant = vi.fn(() => revoke.promise)
-      Object.defineProperty(window, 'clerum', {
-        configurable: true,
-        value: {
-          gfs: {
-            listAccessible: vi.fn(async () => listAccessiblePage([])),
-            resolve: vi.fn(async () => rootDirectory()),
-            listChildren: vi.fn(async () => listChildrenPage([])),
-            affordances: vi.fn(async () =>
-              affordancesResult(heldAffordances(['read', 'manage_acl']))
-            ),
-            listGrants: vi.fn(async () => directGrant()),
-            listShares: vi.fn(async () => sharesListPage([])),
-            revokeGrant,
+  const lateRejectedWrites = [
+    {
+      write: 'grant',
+      button: 'grant inherit true',
+      ipc: 'grant',
+      sentWith: ['root', ['user:bob'], ['read'], 'main', true],
+      rejection: () =>
+        sessionRejection(client =>
+          client.grant(
+            { resourceId: 'root', subjects: [{ type: 'user', id: 'bob' }], permissions: ['read'] },
+            'fixture-session-token'
+          )
+        ),
+    },
+    {
+      write: 'revokeGrant',
+      button: 'revoke grant',
+      ipc: 'revokeGrant',
+      sentWith: ['grant-42'],
+      rejection: () =>
+        sessionRejection(client =>
+          client.revokeGrant('42424242-4242-4242-4242-424242424242', 'fixture-session-token')
+        ),
+    },
+    {
+      write: 'revokeShare',
+      button: 'revoke share',
+      ipc: 'revokeShare',
+      sentWith: ['share-42'],
+      rejection: () =>
+        sessionRejection(client =>
+          client.revokeShare('43434343-4343-4343-4343-434343434343', 'fixture-session-token')
+        ),
+    },
+  ] as const
+  for (const lateWrite of lateRejectedWrites)
+    for (const sameSession of [true, false]) {
+      it(`judges a late ${lateWrite.write} rejection by the session it was sent under (${
+        sameSession ? 'same session revokes' : 'replaced session keeps access'
+      })`, async () => {
+        const failure = await lateWrite.rejection()
+        const write = deferred<void>()
+        const writeIpc = vi.fn(() => write.promise)
+        Object.defineProperty(window, 'clerum', {
+          configurable: true,
+          value: {
+            gfs: {
+              listAccessible: vi.fn(async () => listAccessiblePage([])),
+              resolve: vi.fn(async () => rootDirectory()),
+              listChildren: vi.fn(async () => listChildrenPage([])),
+              affordances: vi.fn(async () =>
+                affordancesResult(heldAffordances(['read', 'manage_acl']))
+              ),
+              listGrants: vi.fn(async () => directGrant()),
+              listShares: vi.fn(async () => sharesListPage([])),
+              [lateWrite.ipc]: writeIpc,
+            },
           },
-        },
+        })
+
+        render(<ManageProbe />, { wrapper: Harness })
+        await act(async () => screen.getByRole('button', { name: 'open root' }).click())
+        await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+        await act(async () => screen.getByRole('button', { name: 'open manage' }).click())
+        await waitFor(() => expect(screen.getByTestId('grants-count').textContent).toBe('1'))
+        await act(async () => screen.getByRole('button', { name: lateWrite.button }).click())
+        await waitFor(() => expect(writeIpc).toHaveBeenCalledWith(...lateWrite.sentWith))
+
+        if (!sameSession) {
+          await act(async () => screen.getByRole('button', { name: 'switch team' }).click())
+        }
+        await act(async () => write.reject(new Error(failure)))
+
+        const client = lastHarnessQueryClient!
+        if (sameSession) {
+          await waitFor(() =>
+            expect(screen.getByTestId('access-state').textContent).toBe('revoked')
+          )
+          expect(client.getQueryData(desktopQueryKeys.gfsAccessState(SCOPE_A, 1))).toBe('revoked')
+        } else {
+          expect(screen.getByTestId('access-state').textContent).toBe('active')
+          expect(client.getQueryData(desktopQueryKeys.gfsAccessState(SCOPE_B, 1))).toBe('active')
+        }
       })
-
-      render(<ManageProbe />, { wrapper: Harness })
-      await act(async () => screen.getByRole('button', { name: 'open root' }).click())
-      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
-      await act(async () => screen.getByRole('button', { name: 'open manage' }).click())
-      await waitFor(() => expect(screen.getByTestId('grants-count').textContent).toBe('1'))
-      await act(async () => screen.getByRole('button', { name: 'revoke grant' }).click())
-      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('grant-42'))
-
-      if (!sameSession) {
-        await act(async () => screen.getByRole('button', { name: 'switch team' }).click())
-      }
-      await act(async () => revoke.reject(new Error(failure)))
-
-      const client = lastHarnessQueryClient!
-      if (sameSession) {
-        await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
-        expect(client.getQueryData(desktopQueryKeys.gfsAccessState(SCOPE_A, 1))).toBe('revoked')
-      } else {
-        expect(screen.getByTestId('access-state').textContent).toBe('active')
-        expect(client.getQueryData(desktopQueryKeys.gfsAccessState(SCOPE_B, 1))).toBe('active')
-      }
-    })
-  }
+    }
 })
 
 // What App does with a watch `accessChanged`: the open sharing dialogs re-read.

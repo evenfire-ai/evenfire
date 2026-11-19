@@ -103,6 +103,7 @@ import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import { GfsNameDialog } from '@/gfs/nameDialog'
 import {
+  bindGfsActionGuards,
   runGfsCreateFolder,
   runGfsDelete,
   runGfsRename,
@@ -1718,6 +1719,8 @@ export function FilesPage({
     }
     const requestContext = rowActionContextRef.current
     try {
+      const guards = bindGfsActionGuards(actionRunnerDeps())
+      if (!guards) return
       assertGfsFileUploadSize(file.size)
       const filePath = window.clerum.gfs.getPathForFile(file)
       if (!filePath) throw new Error('Could not resolve the selected local file')
@@ -1736,7 +1739,7 @@ export function FilesPage({
         )
         return
       }
-      if (!allowed) return
+      if (!allowed || !(await guards.admitEffect())) return
       await ctrl.replaceFileFromPath(target.resourceId, filePath, target.version)
       pushToast?.(`Replaced ${target.name}`, 'success')
     } catch (replaceError) {
@@ -1749,15 +1752,18 @@ export function FilesPage({
   }
 
   const handleDeleteResource = async (resource: GfsActionTarget) => {
-    const result = await runGfsDelete(actionRunnerDeps(), resource)
-    setDeleteTarget(null)
-    if (result.status === 'done') {
-      pushToast?.(`Deleted ${resource.name}`, 'success')
-    } else if (result.status === 'failed' && !failClosedOnAuthorizationError(result.error)) {
-      pushToast?.(
-        result.error instanceof Error ? result.error.message : String(result.error),
-        'error'
-      )
+    try {
+      const result = await runGfsDelete(actionRunnerDeps(), resource)
+      if (result.status === 'done') {
+        pushToast?.(`Deleted ${resource.name}`, 'success')
+      } else if (result.status === 'failed' && !failClosedOnAuthorizationError(result.error)) {
+        pushToast?.(
+          result.error instanceof Error ? result.error.message : String(result.error),
+          'error'
+        )
+      }
+    } finally {
+      setDeleteTarget(null)
     }
   }
 
