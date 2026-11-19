@@ -68,9 +68,22 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
     close()
   }, [firstSendInFlight, close])
 
+  // The composer mounts the picker un-keyed, so a chat or tab switch only
+  // changes its props. Close the menu and the Allow-all confirmation, and drop
+  // the save error, so nothing opened for one chat writes to or shows on the
+  // next. A write still in flight for the old chat must not report here either.
+  const chatScope = useRef(0)
+  useEffect(() => {
+    chatScope.current += 1
+    close()
+    setWriteError(null)
+  }, [agentRef, chatId, close])
+
   const choose = (mode: ApprovalMode) => {
     close()
+    const scope = chatScope.current
     void selectMode(mode).then(ok => {
+      if (scope !== chatScope.current) return
       setWriteError(ok ? null : WRITE_ERROR)
     })
   }

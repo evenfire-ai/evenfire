@@ -161,3 +161,67 @@ describe('ApprovalModePicker — model selector look', () => {
     expect(queryByTestId('approval-mode-write-error')).toBeNull()
   })
 })
+
+describe('ApprovalModePicker — chat switch', () => {
+  // The composer mounts the picker un-keyed, so a chat or tab switch only
+  // changes its props. Nothing opened for one chat may act on the next.
+  it('drops an open Allow all confirmation when the chat changes', () => {
+    seed('chat-1', 'manual')
+    seed('chat-2', 'manual')
+    const { getByTestId, queryByTestId, rerender } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-1" />
+    )
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    fireEvent.click(getByTestId('approval-mode-option-allow-all'))
+    expect(getByTestId('approval-mode-confirm-allow-all')).not.toBeNull()
+
+    rerender(<ApprovalModePicker agentRef="agent-x" chatId="chat-2" />)
+
+    expect(getByTestId('approval-mode-picker').getAttribute('aria-expanded')).toBe('false')
+    expect(queryByTestId('approval-mode-confirm-allow-all')).toBeNull()
+    expect(queryByTestId('approval-mode-option-manual')).toBeNull()
+    expect(setApprovalMode).not.toHaveBeenCalled()
+  })
+
+  it('does not carry a save error over to another chat', async () => {
+    setApprovalMode.mockRejectedValue(new Error('Set approval mode failed (500)'))
+    seed('chat-1', 'manual')
+    seed('chat-2', 'manual')
+    const { getByTestId, queryByTestId, rerender } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-1" />
+    )
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-mode-option-auto'))
+    })
+    expect(getByTestId('approval-mode-write-error')).not.toBeNull()
+
+    rerender(<ApprovalModePicker agentRef="agent-x" chatId="chat-2" />)
+
+    expect(queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+
+  it('does not show a save error from the previous chat that fails after the switch', async () => {
+    let rejectWrite!: (error: Error) => void
+    setApprovalMode.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectWrite = reject
+      })
+    )
+    seed('chat-1', 'manual')
+    seed('chat-2', 'manual')
+    const { getByTestId, queryByTestId, rerender } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-1" />
+    )
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    fireEvent.click(getByTestId('approval-mode-option-auto'))
+    expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1', 'auto')
+
+    rerender(<ApprovalModePicker agentRef="agent-x" chatId="chat-2" />)
+    await act(async () => {
+      rejectWrite(new Error('Set approval mode failed (500)'))
+    })
+
+    expect(queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+})
