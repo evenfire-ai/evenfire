@@ -135,6 +135,7 @@ describe('FilesPage submits through the shared action runners', () => {
       expect.stringContaining('Could not verify permissions'),
       expect.anything()
     )
+    expect(pushToast).not.toHaveBeenCalled()
     client.clear()
   })
 })
