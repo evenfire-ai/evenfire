@@ -1482,7 +1482,6 @@ export function useGfsBrowserController() {
     authorityPending,
     retryAccess,
     handleAuthorityFailure,
-    clearGfsState,
     accessibleResources,
     items,
     affordances:
