@@ -101,6 +101,7 @@ import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import { GfsNameDialog } from '@/gfs/nameDialog'
 import {
+  bindGfsActionGuards,
   runGfsCreateFolder,
   runGfsDelete,
   runGfsRename,
@@ -1697,6 +1698,8 @@ export function FilesPage({
 
   const handleReplaceCurrentFile = async (file: File | null | undefined) => {
     if (!file || !current) return
+    const guards = bindGfsActionGuards(actionRunnerDeps())
+    if (!guards) return
     const target = {
       resourceId: current.resourceId,
       name: current.name,
@@ -1722,7 +1725,7 @@ export function FilesPage({
         )
         return
       }
-      if (!allowed) return
+      if (!allowed || !(await guards.admitEffect())) return
       await ctrl.replaceFileFromPath(target.resourceId, filePath, target.version)
       pushToast?.(`Replaced ${target.name}`, 'success')
     } catch (replaceError) {
