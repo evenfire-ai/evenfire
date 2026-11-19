@@ -19,6 +19,14 @@ export class GfsWatchEventSource {
     await this.harness.start()
     await this.harness.login(USER_A)
     if (keys.length > 0) await this.harness.subscribe(keys)
+    if (this.harness.client.inspect().link.kind !== 'Ready') {
+      throw new Error('the watch client did not open the stream')
+    }
+    const watched = this.harness.server.current()?.keys ?? new Set<string>()
+    const missing = keys.filter(key => !watched.has(key))
+    if (missing.length > 0) {
+      throw new Error(`the watch stream does not carry ${missing.join(', ')}`)
+    }
     return this
   }
 
