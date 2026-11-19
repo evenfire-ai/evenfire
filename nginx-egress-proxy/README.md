@@ -160,7 +160,7 @@ The generated template requires an image that provides:
 - the base image's `15-local-resolvers.envsh`, which exports the pod's local
   nameservers as `NGINX_LOCAL_RESOLVERS` for the generated `resolver` line.
 
-The pinned `nginx:1.30.6-alpine` base in the [Dockerfile](./Dockerfile)
+The pinned `nginx:1.30.7-alpine` base in the [Dockerfile](./Dockerfile)
 provides both, so the image built here satisfies the requirement. The release
 floor in [scripts/nginx-image-policy.sh](../scripts/nginx-image-policy.sh) is
 already above 1.27.3, so a platform-accepted official `nginx` release does not
@@ -224,9 +224,10 @@ A newer fixed release on an accepted line (for example 1.30.6 → 1.30.7):
    `scripts/minikube/build-images.sh` and `scripts/bootstrap-cluster.sh`.
 3. Find the remaining references of both images:
    `git grep -nE '(nginx|nginx-unprivileged):<old>-alpine'`. These are the
-   `nginxinc/nginx-unprivileged` recipe samples, the recipe guides, E2E scripts
-   and specs, and unit tests. They stay valid at or above the floor, so moving
-   them to the new release is optional; the validator does not require it.
+   `nginx/nginx-unprivileged` recipe samples, the recipe guides, E2E scripts
+   and specs, and unit tests. Include the former `nginxinc/nginx-unprivileged`
+   name when checking for older references. References at or above the floor
+   can move to the newer release independently.
 4. Run `bash scripts/validate-nginx-images.sh`,
    `bash scripts/tests/test-validate-nginx-images.sh`,
    `bash scripts/tests/test-verify-nginx-image-digests.sh` and
@@ -237,14 +238,19 @@ release from the validator and the Dockerfile. When a new CVE raises the
 minimum, also edit `NGINX_RELEASE_FLOORS` and its CVE comment in
 `scripts/nginx-image-policy.sh`, the floor cases in
 `scripts/tests/test-validate-nginx-images.sh`, and every reference the
-validator then reports as below the new floor, including the
-`nginxinc/nginx-unprivileged` ones.
+validator then reports as below the new floor, including both
+`nginx-unprivileged` names.
 
 ## Build & deploy
 
 CI builds and publishes the image via
 [.github/workflows/build-publish.yml](../.github/workflows/build-publish.yml)
-(ghcr.io), tagged `sha-<short>`. The private infra repo then mirrors that tag
+(ghcr.io), tagged `sha-<short>`. The release workflow promotes the image to a
+common release tag selected by the
+[GHCR deployment component](../deploy/components/ghcr-images/kustomization.yaml).
+See [Releases and upgrades](../docs/deploy/releases-and-upgrades.md).
+
+The private infra repo mirrors the SHA-tagged image
 into the deploy-time GCP Artifact Registry. There are no static manifests for
 this service: Deployments, ConfigMaps, and Services are created dynamically by
 host-context-controller — see its [README](../host-context-controller/README.md).

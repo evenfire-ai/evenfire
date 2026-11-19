@@ -46,6 +46,7 @@ async function start(opts: { keys?: string[] } = {}): Promise<void> {
   h = await new WatchHarness().start()
   await h.login()
   if (opts.keys) await h.subscribe(opts.keys)
+  expect(h.linkKind()).toBe('Ready')
 }
 
 /** The link's timed exit exists for its state (I45, read as pending timers). */
