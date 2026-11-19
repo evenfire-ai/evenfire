@@ -63,6 +63,9 @@ describe('D34 migration execution policy', () => {
       '0145_gfs_authz_control_admins_notify',
       '0146_gfs_authz_team_members_notify',
       '0147_gfs_watch_session_users_notify',
+      '0148_oidc_protocol_attempts',
+      '0149_oidc_protocol_attempt_expiry_index',
+      '0150_oidc_protocol_attempt_browser_binding',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -696,6 +699,9 @@ describe('PR1 earlier-head guard', () => {
       '0145_gfs_authz_control_admins_notify',
       '0146_gfs_authz_team_members_notify',
       '0147_gfs_watch_session_users_notify',
+      '0148_oidc_protocol_attempts',
+      '0149_oidc_protocol_attempt_expiry_index',
+      '0150_oidc_protocol_attempt_browser_binding',
     ])
   })
 })

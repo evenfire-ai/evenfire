@@ -76,7 +76,7 @@ describe('WorkflowRecipeCRD interface (Risk 1.2)', () => {
           {
             id: 'nginx',
             type: 'deployment',
-            image: 'nginx:1.30.6-alpine',
+            image: 'nginx:1.30.7-alpine',
           },
         ],
       },
