@@ -331,6 +331,12 @@ interface World {
   /** A generation answer a fixed example releases by hand. */
   heldGen: { promise: Promise<void>; release: () => void } | null
   releaseGen: (() => void) | null
+  /** Location reads of Q: when each started and settled. */
+  qReads: Array<{ start: number; end: number | null }>
+  /** Events that can make Files re-read Q; a mutation landing opens a K1 window. */
+  triggers: Array<{ at: number; mutation: boolean }>
+  /** Watch events delivered as the next read of Q starts. */
+  echoOnQRead: GfsWatchEvent[] | null
   /** The watched keys as rendered; main receives them after the watch's debounce. */
   renderedKeys: string
   violations: string[]
@@ -489,6 +495,7 @@ function settleWhenAnswered<T>(w: World, call: MutationCall, promise: Promise<T>
     value => {
       call.settled = true
       call.settledAt = tick(w)
+      w.triggers.push({ at: call.settledAt, mutation: true })
       return value
     },
     error => {
@@ -554,15 +561,30 @@ function installBridge(w: World) {
         )
       )
     }),
-    resolve: vi.fn(async (uri: string) => {
-      const current = node(uri.replace('gfs://main/', ''))
-      if (!current) throw new Error(failures.notFound)
-      const overrides = { parentResourceId: current.parent, version: current.version }
-      return resolveResource(
-        current.kind === 'directory'
-          ? resolvedDirectory(current.id, current.name, overrides)
-          : resolvedFile(current.id, current.name, overrides)
-      )
+    resolve: vi.fn((uri: string) => {
+      const produce = async () => {
+        const current = node(uri.replace('gfs://main/', ''))
+        if (!current) throw new Error(failures.notFound)
+        const overrides = { parentResourceId: current.parent, version: current.version }
+        return resolveResource(
+          current.kind === 'directory'
+            ? resolvedDirectory(current.id, current.name, overrides)
+            : resolvedFile(current.id, current.name, overrides)
+        )
+      }
+      if (uri !== QUARTER_URI) return produce()
+      // The Files location's own read is ordered by the scheduler, so two
+      // reads of it can actually overlap and K1 can see it.
+      const record = { start: tick(w), end: null as number | null }
+      w.qReads.push(record)
+      const read = w.s.schedule(produce(), 'resolve-location').finally(() => {
+        record.end = tick(w)
+      })
+      // The watch echo of the host's own write, landing while Q is re-read.
+      const echo = w.echoOnQRead
+      w.echoOnQRead = null
+      if (echo) w.watch.deliver(echo)
+      return read
     }),
     affordances: (id: string, drive?: string) => {
       w.affordanceCalls += 1
@@ -729,6 +751,7 @@ function Shell({ world }: { world: World }) {
     if (sameSession(m.session, session)) return
     m.session = session
     world.publishes.push(tick(world))
+    world.triggers.push({ at: world.clock, mutation: false })
     m.pendingPublish = false
     m.filesTab.mountedAt = world.clock
   }, [session, world])
@@ -1129,6 +1152,25 @@ function checkAtRest(w: World) {
     budget.set(payer, budget.get(payer)! - 1)
   }
 
+  // K1 for the location on screen: after a mutation lands, the background
+  // re-reads of Q it causes (the host's refresh, the watch echo) are at most
+  // two and never overlap. The window closes at the next event that re-reads
+  // Q for its own reasons (a Files mount, a remote change, a session change).
+  const triggers = [...w.triggers].sort((a, b) => a.at - b.at)
+  triggers.forEach((trigger, index) => {
+    if (!trigger.mutation) return
+    const end = triggers[index + 1]?.at ?? Infinity
+    const reads = w.qReads.filter(read => read.start > trigger.at && read.start < end)
+    if (reads.length > 2) {
+      violations.push(`K1: ${reads.length} reads of the Files location after one mutation`)
+    }
+    const overlapping = reads.some(read =>
+      reads.some(
+        other => other !== read && other.start > read.start && other.start < (read.end ?? Infinity)
+      )
+    )
+    if (overlapping) violations.push('K1: 2 reads of the Files location at once after one mutation')
+  })
   if (w.hostListAccessible > 0) violations.push('K1: the host listed accessible roots itself')
 
   // S2/L2: the Files location is the user's, refreshed in place.
@@ -1572,6 +1614,7 @@ class Revoke extends OracleEvent {
   async perform(m: Model, w: World) {
     const session = m.session
     w.access.push({ at: tick(w), session: sessionKey(session), kind: 'revoke' })
+    w.triggers.push({ at: w.clock, mutation: false })
     await act(async () => {
       revokeGfsSessionAccess(w.queryClient, scopeOf(session.team), session.gen)
     })
@@ -1585,6 +1628,7 @@ class Revoke extends OracleEvent {
 class SessionExpired extends OracleEvent {
   async perform(m: Model, w: World) {
     w.access.push({ at: tick(w), session: sessionKey(m.session), kind: 'expired' })
+    w.triggers.push({ at: w.clock, mutation: false })
     await act(async () => {
       w.watch.deliver(sessionExpiredEvents)
     })
@@ -1601,6 +1645,7 @@ class RetryAccess extends OracleEvent {
     const retry = retryButton()
     if (!retry) return
     w.access.push({ at: tick(w), session: sessionKey(m.session), kind: 'retry' })
+    w.triggers.push({ at: w.clock, mutation: false })
     fireEvent.click(retry)
     await flush()
   }
@@ -1659,7 +1704,7 @@ class RemoteChange extends OracleEvent {
 /** Another client writes `node`; the watch reports its folder changed. */
 async function remoteChange(w: World, node: ServerNode) {
   node.version += 1
-  tick(w)
+  w.triggers.push({ at: tick(w), mutation: false })
   const events = changedEvents.get(node.parent!)
   if (!events) return
   await act(async () => {
@@ -1675,6 +1720,7 @@ class ToggleFilesTab extends OracleEvent {
     if (m.filesTab.active) {
       m.filesTab.route = w.locations.length > 0 ? (w.locations.at(-1) ?? null) : QUARTER_URI
       m.filesTab.mountedAt = tick(w)
+      w.triggers.push({ at: w.clock, mutation: false })
     }
     const ui = w.ui.get()
     await act(async () => {
@@ -2021,6 +2067,32 @@ const outcomeWhileMainIsAhead = (): Cmd[] => [
   new Rest(),
 ]
 
+/** Expands a named folder of the tree. */
+class ExpandOn extends OracleEvent {
+  constructor(readonly name: string) {
+    super()
+  }
+  async perform(_m: Model, _w: World) {
+    const toggle = screen.queryByRole('button', { name: `Expand ${this.name}` })
+    if (!toggle) return
+    fireEvent.click(toggle)
+    await flush()
+  }
+  toString() {
+    return `ExpandOn(${this.name})`
+  }
+}
+
+/** The watch's `changed` for Q arrives while the next read of Q is in flight. */
+class EchoOnNextQRead extends OracleEvent {
+  async perform(_m: Model, w: World) {
+    w.echoOnQRead = changedEvents.get(QUARTER) ?? null
+  }
+  toString() {
+    return 'EchoOnNextQRead'
+  }
+}
+
 /** E9 on a named resource. */
 class RemoteChangeOn extends OracleEvent {
   constructor(readonly resourceId: string) {
@@ -2115,6 +2187,22 @@ const moveAfterRemoteChange = (): Cmd[] => [
   new Submit(1),
   new Rest(),
   new ExpectMoveRefused(),
+]
+
+/**
+ * A rename inside Q: the host re-reads Q and the watch echo of the same write
+ * lands during that read. The keyed single flight keeps the reads sequential (K1).
+ */
+const echoDuringHostRefresh = (): Cmd[] => [
+  new ExpandOn('Quarterly'),
+  new Rest(),
+  new OpenMenuOn('chart.png'),
+  new Rest(),
+  new Choose('rename'),
+  new Rest(),
+  new EchoOnNextQRead(),
+  new Submit(1),
+  new Rest(),
 ]
 
 /** Another client writes `resourceId` just before the next Move PATCH of it arrives. */
@@ -2294,7 +2382,10 @@ async function mountWorld(s: Scheduler): Promise<World> {
     heldGen: null,
     changeBeforeNextMove: null,
     releaseGen: null,
+    qReads: [],
+    triggers: [],
     renderedKeys: '[]',
+    echoOnQRead: null,
     violations: [],
     watch: watchSource.connectRenderer(),
     embed: createPageEmbed(),
@@ -2484,6 +2575,7 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       outcomeWhileMainIsAhead,
       staleAnswerAfterRoundTrip,
       moveAfterRemoteChange,
+      echoDuringHostRefresh,
     ])
     process.stdout.write(
       `gfs action oracle coverage: ${JSON.stringify(Object.fromEntries([...generatedCoverage].sort()))}\n`

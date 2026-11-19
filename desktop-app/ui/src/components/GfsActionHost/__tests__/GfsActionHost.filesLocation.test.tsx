@@ -307,6 +307,9 @@ describe('GfsActionHost — the Files location on screen', () => {
 
     await waitFor(() => expect(crumbs()).toEqual(['Zeta', 'Quarterly']))
     expect(locations[locations.length - 1]).toBe(Q_URI)
+    // The host's refresh and the move's own convergence never re-read Q at once (K1).
+    await settle()
+    expect(w.maxConcurrentQ).toBe(1)
   })
 
   it('S-8: the dialog outlives the tree that opened it', async () => {
