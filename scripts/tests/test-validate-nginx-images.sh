@@ -141,6 +141,7 @@ DOCKERFILE_REL="nginx-egress-proxy/Dockerfile"
 KUSTOMIZE_DIR="deploy/overlays/zz-injected"
 KUSTOMIZE_REL="$KUSTOMIZE_DIR/kustomization.yaml"
 FIXED_PIN="$(sed -n 's/^FROM //p' "$REPO_ROOT/$DOCKERFILE_REL")"
+FIXED_IMAGE="${FIXED_PIN%@*}"
 FIXED_DIGEST="${FIXED_PIN#*@}"
 # Published digest of nginx:1.30.1-alpine; a negative fixture only.
 OLD_DIGEST="sha256:c819f83c54b0361f5557601bf5eb4943d09360e7a7fdf426afc466570f45874d"
@@ -193,9 +194,9 @@ if [ -z "$baseline_refs" ] || [ "$baseline_refs" -eq 0 ]; then
   exit 1
 fi
 
-for family in nginx nginxinc/nginx-unprivileged docker.io/library/nginx; do
-  for tag in 1.30.0 1.30.1 1.30.2 1.30.3 1.30.4 1.30.5 1.30.5-alpine \
-    1.31.0 1.31.1 1.31.2 1.31.3 1.31.4 1.31.5 1.31.6 1.31.6-alpine 1.27.5-alpine 1.29.9; do
+for family in nginx nginx/nginx-unprivileged nginxinc/nginx-unprivileged docker.io/library/nginx; do
+  for tag in 1.30.0 1.30.1 1.30.2 1.30.3 1.30.4 1.30.5 1.30.5-alpine 1.30.6 1.30.6-alpine \
+    1.31.0 1.31.1 1.31.2 1.31.3 1.31.4 1.31.5 1.31.6 1.31.6-alpine 1.31.7 1.31.8 1.31.8-alpine 1.27.5-alpine 1.29.9; do
     image="$family:$tag"
     inject "$SAMPLE_REL" "$image"
     expect_fail_naming "$image in a recipe sample" "$SAMPLE_REL:1: " "$BELOW"
@@ -211,7 +212,7 @@ for family in nginx nginxinc/nginx-unprivileged docker.io/library/nginx; do
     rm -f "$COPY/$SAMPLE_REL"
   done
 
-  for tag in 1.30.6 1.30.6-alpine 1.30.7 1.31.7 1.31.8 1.31.8-alpine 1.30.50 1.30.60 1.31.60 1.32.0 2.0.0; do
+  for tag in 1.30.7 1.30.7-alpine 1.31.9 1.31.9-alpine 1.30.50 1.30.60 1.31.60 1.32.0 2.0.0; do
     image="$family:$tag"
     inject "$SAMPLE_REL" "$image"
     expect_pass "$image in a recipe sample" 1
@@ -259,15 +260,15 @@ for text in $'image: >-\n  nginx' $'image:\n  nginx'; do
 done
 
 # Digests: accepted only next to a fixed tag, and only well formed.
-inject "$SAMPLE_REL" "nginx:1.30.6-alpine@$FIXED_DIGEST"
+inject "$SAMPLE_REL" "$FIXED_PIN"
 expect_pass "fixed tag with a digest" 1
 inject "$SAMPLE_REL" "nginx@$FIXED_DIGEST"
 expect_fail_naming "digest without a tag" "$SAMPLE_REL:1: " "digest without a version tag"
 inject "$SAMPLE_REL" "nginx:1.30.1-alpine@$OLD_DIGEST"
 expect_fail_naming "old tag with its digest" "$SAMPLE_REL:1: " "$BELOW"
-inject "$SAMPLE_REL" "nginx:1.30.6-alpine@sha256:c59d1f8b"
+inject "$SAMPLE_REL" "$FIXED_IMAGE@sha256:c59d1f8b"
 expect_fail_naming "malformed digest" "$SAMPLE_REL:1: " "malformed digest"
-inject "$SAMPLE_REL" "nginx:1.30.6-alpine@"
+inject "$SAMPLE_REL" "$FIXED_IMAGE@"
 expect_fail_naming "fixed tag with an empty digest" "$SAMPLE_REL:1: " "$EMPTY_DIGEST"
 inject "$SAMPLE_REL" "nginx@"
 expect_fail_naming "untagged name with an empty digest" "$SAMPLE_REL:1: " "$EMPTY_DIGEST"
@@ -296,7 +297,7 @@ done
 inject_text "$E2E_REL" $'NAMES=("nginx-egress-proxy")\nNAMES=(\n  nginx-egress-proxy\n)'
 expect_pass "nginx-egress-proxy shell-array elements" 0
 rm -f "$COPY/$E2E_REL"
-inject_text "$SAMPLE_REL" '- {name: gw, image: nginx:1.30.6-alpine}'
+inject_text "$SAMPLE_REL" "- {name: gw, image: $FIXED_IMAGE}"
 expect_pass "fixed tag in a flow map" 1
 rm -f "$COPY/$SAMPLE_REL"
 
@@ -338,6 +339,10 @@ inject_kustomize $'images: [unclosed'
 expect_fail_naming "unparsable kustomization" "yq could not read the images: entries of $KUSTOMIZE_REL"
 inject_kustomize $'images:\n  - name: clerum/gateway\n    newName: docker.io/library/nginx\n    newTag: "1.31.6"'
 expect_fail_naming "kustomize newName to NGINX below the baseline" "$KUSTOMIZE_REL:4: docker.io/library/nginx:1.31.6: " "$BELOW"
+inject_kustomize $'images:\n- name: example/web\n  newName: docker.io/nginx/nginx-unprivileged\n  newTag: 1.30.6-alpine'
+expect_fail_naming "kustomize unprivileged NGINX below the baseline" "$KUSTOMIZE_REL:4: docker.io/nginx/nginx-unprivileged:1.30.6-alpine: " "$BELOW"
+inject_kustomize $'images:\n- name: example/web\n  newName: docker.io/nginx/nginx-unprivileged\n  newTag: 1.30.7-alpine'
+expect_pass "kustomize unprivileged NGINX on the baseline" 1
 inject_kustomize $'images:\n- name: clerum/gateway\n  newName: nginx'
 expect_fail_naming "kustomize newName to NGINX with no newTag" "$KUSTOMIZE_REL:4: nginx:<no newTag>: " "$NOT_FIXED"
 inject_kustomize $'images:\n- name: example/web\n  newName: "ngin\\u0078:1.30.5-alpine"'
@@ -350,11 +355,11 @@ inject_kustomize $'images:\n- name: nginx\n  newTag: stable-alpine'
 expect_fail_naming "kustomize floating newTag" "$KUSTOMIZE_REL:4: nginx:stable-alpine: " "$NOT_FIXED"
 inject_kustomize $'images:\n- name: nginx\n  digest: '"$FIXED_DIGEST"
 expect_fail_naming "kustomize digest without newTag" "$KUSTOMIZE_REL:4: nginx@$FIXED_DIGEST: " "digest without a version tag"
-inject_kustomize $'images:\n- name: nginx\n  newTag: 1.30.6-alpine # fixed baseline'
+inject_kustomize $'images:\n- name: nginx\n  newTag: 1.30.7-alpine # fixed baseline'
 expect_pass "kustomize newTag on the baseline" 1
-inject_kustomize $'images:\n- name: nginx\n  newTag: 1.30.6-alpine  '
+inject_kustomize $'images:\n- name: nginx\n  newTag: 1.30.7-alpine  '
 expect_pass "kustomize unquoted newTag with trailing spaces" 1
-inject_kustomize $'images:\n- name: example/web\n  newName: "ngin\\u0078:1.30.6-alpine"'
+inject_kustomize $'images:\n- name: example/web\n  newName: "ngin\\u0078:1.30.7-alpine"'
 expect_pass "kustomize escaped newName carrying the baseline tag" 1
 inject_kustomize $'images:\n- name: nginx\n  newName: clerum/nginx-egress-proxy\n  newTag: 0.1.0'
 expect_pass "kustomize rewrite of nginx to another image" 0
