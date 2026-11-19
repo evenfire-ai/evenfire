@@ -445,7 +445,7 @@ describe('provider event receipt claims', () => {
     'another audience': [{ ...message, aud: 'fixture-other-audience' }, 'aud'],
     'an audience array': [{ ...message, aud: [PROVIDER_EVENT_RECEIPT_AUDIENCE] }, 'aud'],
     'an issuer claim': [{ ...message, iss: 'fixture-issuer' }, 'keys'],
-    'an empty jti':[{ ...message, jti: '' }, 'jti'],
+    'an empty jti': [{ ...message, jti: '' }, 'jti'],
     'an array': [[message], 'keys'],
     'null': [null, 'keys'],
   }
