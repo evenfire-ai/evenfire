@@ -1,17 +1,28 @@
 import { vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { AppService } from '../../src/appService.js'
 import { config } from '../../src/config.js'
 import type { GfsWatchLogger } from '../../src/gfs/watchClient.js'
 import { decodeJwtPayload } from '../../src/gfs/watchProtocol.js'
+import { requestJson } from '../../src/httpClient.js'
 import type { SessionMe } from '../../src/types.js'
+import { currentTest } from './currentTest.js'
 import { FakeOwner } from './fakeOwner.js'
 import { FakeWatchServer } from './fakeWatchServer.js'
 import { signV1SessionToken } from './sessionTokens.js'
 import { VirtualClock, seededRandom } from './virtualClock.js'
+import { settle, wireLedger } from './wireLedger.js'
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 type Mock = ReturnType<typeof vi.fn>
+
+/**
+ * A session token as a short digest. The settle signature needs only its
+ * identity, and a settle timeout prints the signature.
+ */
+const tokenDigest = (token: string | null): string | null =>
+  token === null ? null : createHash('sha256').update(token).digest('hex').slice(0, 16)
 
 /**
  * `/me` for a session token, as ERA resolves it: the user and team come from
@@ -51,7 +62,9 @@ export type ServiceInternals = AppService & {
  * The real AppService, with its real watch client running the real `fetch`
  * and `requestJson` against a fake watch over HTTP. Mocks stop at the network
  * (the auth client's HTTP calls) and at disk (token store, chat store, upload
- * state). The watch client's timers run on a virtual clock.
+ * state). The watch client's timers run on a virtual clock. `settle()` waits
+ * until no watch request is on the wire and nothing observable moves, and
+ * throws when that does not happen in time.
  */
 export class AppServiceWatchHarness {
   clock = new VirtualClock()
@@ -79,9 +92,11 @@ export class AppServiceWatchHarness {
     this.service = new AppService({
       tokenStore: tokenStore as never,
       onSessionCleared: this.onSessionCleared,
-      // The real fetch, explicitly: the suite-wide default is an inert one.
+      // The real fetch, explicitly: the suite-wide default is an inert one. Both
+      // transports are tagged so `settle()` sees their requests on the wire.
       gfsWatch: {
-        fetch: (input, init) => fetch(input, init),
+        fetch: wireLedger.fetch(currentTest),
+        requestJson: wireLedger.requestJson(currentTest, requestJson),
         clock: this.clock,
         random: seededRandom(7),
         log,
@@ -113,10 +128,13 @@ export class AppServiceWatchHarness {
 
   async stop(): Promise<void> {
     this.service.gfsWatch.dispose()
-    await this.settle()
-    await this.server.stop()
-    config.externalRestApiBaseUrl = this.originalBaseUrl
-    await sleep(5)
+    try {
+      await this.settle()
+    } finally {
+      await this.server.stop()
+      config.externalRestApiBaseUrl = this.originalBaseUrl
+      await sleep(5)
+    }
   }
 
   get client() {
@@ -163,39 +181,33 @@ export class AppServiceWatchHarness {
     this.clock.elapsed = end
   }
 
+  /**
+   * Waits until no watch request is on the wire and nothing observable moves
+   * for a few rounds of real I/O; throws after `maxMs`.
+   */
   async settle(maxMs = 3_000): Promise<void> {
-    const started = Date.now()
-    let last = ''
-    let stable = 0
-    while (Date.now() - started < maxMs) {
-      await new Promise<void>(resolve => setImmediate(resolve))
-      await sleep(2)
-      const st = this.client.inspect()
-      const link = st.link as { kind: string; g?: number }
-      const s = JSON.stringify([
-        link.kind,
-        link.g,
-        st.put?.phase,
-        st.put?.seq,
-        st.sent,
-        this.server.gets.length,
-        this.server.gets.filter(g => g.closed).length,
-        this.server.puts.length,
-        this.server.puts.filter(p => p.closed || p.answered).length,
-        this.server.conns.map(c => [c.alive, c.lastSeq]),
-        [...this.owners.values()].map(o => o.events.length),
-        this.clock.pending().length,
-        this.service.sessionToken,
-        this.onSessionCleared.mock.calls.length,
-        this.service.authClient.getMe?.mock.calls.length,
-      ])
-      if (s === last) {
-        stable += 1
-        if (stable >= 3) return
-      } else {
-        stable = 0
-        last = s
-      }
-    }
+    await settle({ signature: () => this.signature(), maxMs })
+  }
+
+  private signature(): string {
+    const st = this.client.inspect()
+    const link = st.link as { kind: string; g?: number }
+    return JSON.stringify([
+      link.kind,
+      link.g,
+      st.put?.phase,
+      st.put?.seq,
+      st.sent,
+      this.server.gets.length,
+      this.server.gets.filter(g => g.closed).length,
+      this.server.puts.length,
+      this.server.puts.filter(p => p.closed || p.answered).length,
+      this.server.conns.map(c => [c.alive, c.lastSeq]),
+      [...this.owners.values()].map(o => o.events.length),
+      this.clock.pending().length,
+      tokenDigest(this.service.sessionToken),
+      this.onSessionCleared.mock.calls.length,
+      this.service.authClient.getMe?.mock.calls.length,
+    ])
   }
 }

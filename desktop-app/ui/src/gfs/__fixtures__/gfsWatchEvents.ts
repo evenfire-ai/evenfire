@@ -19,6 +19,14 @@ export class GfsWatchEventSource {
     await this.harness.start()
     await this.harness.login(USER_A)
     if (keys.length > 0) await this.harness.subscribe(keys)
+    if (this.harness.client.inspect().link.kind !== 'Ready') {
+      throw new Error('the watch client did not open the stream')
+    }
+    const watched = this.harness.server.current()?.keys ?? new Set<string>()
+    const missing = keys.filter(key => !watched.has(key))
+    if (missing.length > 0) {
+      throw new Error(`the watch stream does not carry ${missing.join(', ')}`)
+    }
     return this
   }
 
@@ -31,25 +39,6 @@ export class GfsWatchEventSource {
     const owner = new ForwardingOwner(2)
     this.harness.owners.set(2, owner)
     return gfsWatchBridgeFor(this.harness.client, owner)
-  }
-
-  /** Waits for the real stream decision, optionally for one window's exact list. */
-  async waitUntilReady(keys: readonly string[] = [], ownerId?: number): Promise<void> {
-    await this.harness.until(() => {
-      const { link, owners, put, sent } = this.harness.client.inspect()
-      const ownerKeys = ownerId === undefined ? undefined : owners.get(ownerId)?.keys
-      return (
-        link.kind === 'Ready' &&
-        put === null &&
-        this.harness.server.current()?.connId === link.connId &&
-        sent.length === link.accepted.size &&
-        sent.length === link.ackedKeys.size &&
-        sent.every(key => link.accepted.has(key) && link.ackedKeys.has(key)) &&
-        keys.every(key => link.accepted.has(key)) &&
-        (ownerId === undefined ||
-          (ownerKeys?.length === keys.length && keys.every(key => ownerKeys.includes(key))))
-      )
-    })
   }
 
   async stop(): Promise<void> {
@@ -70,10 +59,8 @@ export class GfsWatchEventSource {
 
   private async watch(keys: string[]): Promise<void> {
     const sent = new Set(this.harness.client.inspect().sent)
-    if (!keys.every(key => sent.has(key)) || this.harness.server.openStreams().length === 0) {
-      await this.harness.subscribe(keys)
-    }
-    await this.waitUntilReady(keys)
+    if (keys.every(key => sent.has(key)) && this.harness.server.openStreams().length > 0) return
+    await this.harness.subscribe(keys)
   }
 
   /** The stream opens (or reopens) over `keys`: `resync` of them and `accessChanged`. */
@@ -130,7 +117,6 @@ export class GfsWatchEventSource {
     await this.watch(keys)
     return this.capture(async () => {
       this.harness.server.frame({ type: 'stream.closing', reason: 'session_expired' })
-      await this.harness.until(() => this.harness.client.inspect().latch !== null)
       await this.harness.settle()
     })
   }

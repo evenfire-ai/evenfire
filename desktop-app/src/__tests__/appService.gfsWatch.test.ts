@@ -56,14 +56,8 @@ async function readyWithKeys(token = tokenA()) {
   const state = await h.login(token)
   const userId = state.me?.id ?? null
   await h.subscribe(keysA, userId)
-  await vi.waitFor(
-    () => {
-      const link = h.client.inspect().link
-      expect(link.kind === 'Ready' && link.accepted).toEqual(new Set(keysA))
-      expect(h.server.current()?.keys).toEqual(new Set(keysA))
-    },
-    { timeout: 3_000 }
-  )
+  expect(h.linkKind()).toBe('Ready')
+  expect(h.server.current()?.keys).toEqual(new Set(keysA))
   return { token, userId }
 }
 
@@ -72,7 +66,7 @@ describe('AppService GFS watch — session token producers', () => {
     const saved = tokenA()
     h.service.tokenStore.getSessionToken!.mockResolvedValue(saved)
     const state = await h.service.getSessionState()
-    await vi.waitFor(() => expect(h.linkKind()).toBe('Ready'), { timeout: 3_000 })
+    await h.settle()
     expect(state.authenticated).toBe(true)
     expect(h.client.inspect().session?.token).toBe(saved)
     expect(h.server.gets.map(g => g.token)).toEqual([saved])

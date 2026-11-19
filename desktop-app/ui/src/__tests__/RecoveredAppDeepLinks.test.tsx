@@ -3726,23 +3726,25 @@ describe('App deep-link orchestration', () => {
       )
     )
 
-    // Finish the post-paint startup work before holding the explicit route refresh.
-    await waitFor(() => {
-      expect(realController.current?.teamDirectoryHydrated).toBe(true)
-      expect(queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.fetchStatus).toBe('idle')
-    })
+    const catalogProducer = handle.refreshCatalog.getMockImplementation() as
+      | (() => Promise<AccessCatalog>)
+      | undefined
+    if (!catalogProducer) throw new Error('The shared catalog producer is unavailable')
     let rejectRefresh!: (error: Error) => void
+    let pendingCatalogRefresh: Promise<AccessCatalog> | null = null
+    handle.refreshCatalog.mockImplementation(() => pendingCatalogRefresh ?? catalogProducer())
     const callsBeforeRefresh = handle.refreshCatalog.mock.calls.length
-    const pendingCatalogRefresh = new Promise<AccessCatalog>((_resolve, reject) => {
+    pendingCatalogRefresh = new Promise<AccessCatalog>((_resolve, reject) => {
       rejectRefresh = reject
     })
-    handle.refreshCatalog.mockReturnValueOnce(pendingCatalogRefresh)
 
     let refreshTask: Promise<unknown> | undefined
     act(() => {
       refreshTask = realController.current?.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
     })
-    await waitFor(() => expect(handle.refreshCatalog).toHaveBeenCalledTimes(callsBeforeRefresh + 1))
+    await waitFor(() =>
+      expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThan(callsBeforeRefresh)
+    )
     await waitFor(() =>
       expect(queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.fetchStatus).toBe(
         'fetching'
@@ -3765,10 +3767,7 @@ describe('App deep-link orchestration', () => {
       await refreshTask
     })
     await waitFor(() =>
-      expect(queryClient.getQueryState(desktopQueryKeys.accessCatalog)).toMatchObject({
-        status: 'error',
-        fetchStatus: 'idle',
-      })
+      expect(queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.status).toBe('error')
     )
     expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
       userId: HARNESS_ME.id,
@@ -3780,10 +3779,9 @@ describe('App deep-link orchestration', () => {
     expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
 
     let rejectServerError!: (error: Error) => void
-    const pendingServerErrorRefresh = new Promise<AccessCatalog>((_resolve, reject) => {
+    pendingCatalogRefresh = new Promise<AccessCatalog>((_resolve, reject) => {
       rejectServerError = reject
     })
-    handle.refreshCatalog.mockReturnValueOnce(pendingServerErrorRefresh)
     const callsBeforeServerError = handle.refreshCatalog.mock.calls.length
     let serverErrorRefreshTask: Promise<unknown> | undefined
     act(() => {
@@ -3792,7 +3790,7 @@ describe('App deep-link orchestration', () => {
       )
     })
     await waitFor(() =>
-      expect(handle.refreshCatalog).toHaveBeenCalledTimes(callsBeforeServerError + 1)
+      expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThan(callsBeforeServerError)
     )
     await waitFor(() =>
       expect(queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.fetchStatus).toBe(

@@ -1,6 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import {
   __setChatStoreBaseDirForTests,
@@ -14,6 +13,7 @@ import type { HostStatusStreamEvent } from '../src/types.js'
 
 const testState = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
+  const downloadsDir = '/tmp/clerum-test'
   const ipcMainMock = {
     handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
       handlers.set(channel, handler)
@@ -22,7 +22,7 @@ const testState = vi.hoisted(() => {
     // must not depend on them being exercised.
     on: vi.fn(),
   }
-  return { handlers, ipcMainMock, downloadsDir: '' }
+  return { handlers, ipcMainMock, downloadsDir }
 })
 
 vi.mock('electron', () => ({
@@ -163,8 +163,9 @@ describe('ipc host status stream handlers', () => {
   beforeEach(async () => {
     testState.handlers.clear()
     vi.clearAllMocks()
+    await fs.rm(testState.downloadsDir, { recursive: true, force: true })
+    await fs.mkdir(testState.downloadsDir, { recursive: true })
     unbindChatStore()
-    testState.downloadsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-ipc-test-'))
     __setChatStoreBaseDirForTests(path.join(testState.downloadsDir, 'chat-cache'))
     service.getChatDeletionFenceAuthority.mockReturnValue({
       authorityScope: { environmentKey: 'env-1', userId: 'user-1', teamId: 'team-a' },
@@ -175,14 +176,6 @@ describe('ipc host status stream handlers', () => {
       await service.logout()
       return 0
     })
-  })
-
-  afterEach(async () => {
-    unbindChatStore()
-    __setChatStoreBaseDirForTests(null)
-    const downloadsDir = testState.downloadsDir
-    testState.downloadsDir = ''
-    if (downloadsDir) await fs.rm(downloadsDir, { recursive: true, force: true })
   })
 
   it('rejects legacy chat deletion without a binding fence', async () => {

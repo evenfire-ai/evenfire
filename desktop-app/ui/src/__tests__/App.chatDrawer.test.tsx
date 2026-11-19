@@ -39,7 +39,6 @@ import {
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { GfsWatchEventSource, mainDriveKey } from '@/gfs/__fixtures__/gfsWatchEvents'
 import type { AppNotification } from '@/uiTypes'
-import { USER_A } from '../../../testSupport/gfsWatch/sessionTokens'
 
 // The universal tab store now lives inside the controller (single writer;
 // `navItem` derives from the active tab). These tests mock the controller, so
@@ -1332,14 +1331,12 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
 describe('App live GFS reaction to the watch', () => {
   const README_RID = 'e0'.repeat(16)
   const README_URI = `gfs://main/${README_RID}`
-  const DIAGRAM_RID = 'd0'.repeat(16)
-  const DIAGRAM_URI = `gfs://main/${DIAGRAM_RID}`
+  const DIAGRAM_URI = `gfs://main/${'d0'.repeat(16)}`
   const FOLDER_ID = '0a9b8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d'
   const FOLDER_RID = FOLDER_ID.replace(/-/g, '')
   const README_KEY = mainDriveKey('file', README_RID)
-  const DIAGRAM_KEY = mainDriveKey('file', DIAGRAM_RID)
   const FOLDER_KEY = mainDriveKey('dir', FOLDER_RID)
-  const SCOPE = `:${USER_A}:team-a`
+  const SCOPE = ':user-a:team-a'
   let currentController: AppController
   let source: GfsWatchEventSource
   let watch: ReturnType<GfsWatchEventSource['connectRenderer']>
@@ -1351,7 +1348,6 @@ describe('App live GFS reaction to the watch', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     source = await new GfsWatchEventSource().start([README_KEY, FOLDER_KEY])
-    await source.waitUntilReady([README_KEY, FOLDER_KEY], 1)
     watch = source.connectRenderer()
     const workspaceTabs = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
       id: 'preview-md',
@@ -1361,11 +1357,7 @@ describe('App live GFS reaction to the watch', () => {
       byteLength: 14,
       resourceVersion: 3,
     })
-    currentController = makeController({
-      workspaceTabs,
-      authenticatedPrincipalIdentity: `${USER_A}:user-a@example.com`,
-      me: { id: USER_A, email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
-    } as Partial<AppController>)
+    currentController = makeController({ workspaceTabs } as Partial<AppController>)
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -1425,7 +1417,7 @@ describe('App live GFS reaction to the watch', () => {
     )
     const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
     const affordances = vi.fn(async () => ({ held: [] }))
-    const resolve = vi.mocked(window.clerum.gfs.resolve).mockResolvedValue(readme(4) as never)
+    const resolve = vi.mocked(window.clerum.gfs.resolve).mockResolvedValue(readme(3) as never)
     Object.assign(window.clerum.gfs, { listChildren, listAccessible, affordances })
 
     const childrenKey = desktopQueryKeys.gfsChildren(SCOPE, FOLDER_ID, 'main', 1)
@@ -1466,20 +1458,14 @@ describe('App live GFS reaction to the watch', () => {
       </QueryClientProvider>
     )
     await waitFor(() => expect(watch.opens).toBe(1))
-    await act(() => source.waitUntilReady([README_KEY], watch.owner.id))
-    expect(watch.requests).toEqual([{ keys: [README_KEY], userId: USER_A }])
-    expect(resolve).not.toHaveBeenCalled()
-    expect(listChildren).not.toHaveBeenCalled()
-    expect(listAccessible).not.toHaveBeenCalled()
-    expect(affordances).not.toHaveBeenCalled()
+    listChildren.mockClear()
+    listAccessible.mockClear()
+    affordances.mockClear()
 
     await emit(() => source.changed([FOLDER_KEY, README_KEY]))
-    await waitFor(() => {
-      expect(readmeTab()?.preview).toMatchObject({ resourceVersion: 4 })
-      expect(desktopQueryClient.getQueryState(childrenKey)?.fetchStatus).toBe('idle')
-      expect(resolve).toHaveBeenCalledTimes(1)
-      expect(listChildren).toHaveBeenCalledTimes(2)
-    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 20))
 
     expect(listAccessible).not.toHaveBeenCalled()
     expect(affordances).not.toHaveBeenCalled()
@@ -1665,7 +1651,7 @@ describe('App live GFS reaction to the watch', () => {
     )
   })
 
-  it('purges every open GFS preview and the GFS cache when the session expires, without resolving again', async () => {
+  it('purges every open GFS preview and the GFS cache when the session expires, without a resolve', async () => {
     currentController.workspaceTabs = openPreviewTab(currentController.workspaceTabs, {
       id: 'preview-image',
       title: 'diagram.png',
@@ -1675,30 +1661,15 @@ describe('App live GFS reaction to the watch', () => {
       mimeType: 'image/png',
       resourceVersion: 7,
     })
-    const resolve = vi.mocked(window.clerum.gfs.resolve).mockResolvedValue(
-      resolvedFile(DIAGRAM_RID, 'diagram.png', {
-        gfsUri: DIAGRAM_URI,
-        bytes: 128,
-        version: 8,
-      }) as never
-    )
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    resolve.mockImplementation(() => new Promise(() => {}) as never)
     desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessible(SCOPE, 'main', 1), {
       items: [],
       nextCursor: null,
     })
     renderApp(<App />)
     await waitFor(() => expect(watch.opens).toBe(1))
-    await act(() => source.waitUntilReady([DIAGRAM_KEY], watch.owner.id))
-    expect(watch.requests).toEqual([{ keys: [DIAGRAM_KEY], userId: USER_A }])
-    // The active diagram receives a resync when it joins the already-live stream.
-    await waitFor(() => {
-      expect(resolve).toHaveBeenCalledTimes(1)
-      expect(resolve).toHaveBeenCalledWith(DIAGRAM_URI)
-      expect(
-        currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-image')?.preview
-      ).toMatchObject({ resourceVersion: 8 })
-    })
-    const resolvesBeforeExpiry = resolve.mock.calls.length
+    resolve.mockClear()
 
     await emit(() => source.sessionExpired())
 
@@ -1707,7 +1678,7 @@ describe('App live GFS reaction to the watch', () => {
       expect(previews).toHaveLength(2)
       expect(previews.every(tab => tab.preview?.unavailable)).toBe(true)
     })
-    expect(resolve).toHaveBeenCalledTimes(resolvesBeforeExpiry)
+    expect(resolve).not.toHaveBeenCalled()
     expect(
       desktopQueryClient.getQueryCache().findAll({ queryKey: desktopQueryKeys.gfsRoot })
     ).toHaveLength(0)

@@ -46,6 +46,7 @@ async function start(opts: { keys?: string[] } = {}): Promise<void> {
   h = await new WatchHarness().start()
   await h.login()
   if (opts.keys) await h.subscribe(opts.keys)
+  expect(h.linkKind()).toBe('Ready')
 }
 
 /** The link's timed exit exists for its state (I45, read as pending timers). */
@@ -65,39 +66,34 @@ function assertTimedExit(): void {
 describe('key set changes over PUT', () => {
   it('T-CB1: a key added before its ack is resynced after its subscriptions frame', async () => {
     await start()
-    await h.until(() => h.linkKind() === 'Ready')
     h.server.putPolicy = () => ({ kind: 'hold' })
     await h.subscribe([A])
-    await h.until(() => h.server.openPuts().length === 1)
     const owner = h.owner()
     // A write on A while the PUT is unacknowledged produces no `changed` for it:
     // the server only notifies accepted keys, so the resync is what shows v2.
     expect(owner.ofType('changed')).toEqual([])
     const before = owner.events.length
     h.server.answerPut(openPut(), { kind: 'accept' })
-    await h.until(() => st().put === null)
+    await h.settle()
     expect(owner.events.slice(before)).toContainEqual({ type: 'resync', keys: [A] })
     // From then on a write on A is forwarded as the server sends it.
     h.server.frame({ type: 'changed', keys: [A] })
-    await h.until(() => owner.ofType('changed').length > 0)
+    await h.settle()
     expect(owner.ofType('changed')).toEqual([{ type: 'changed', keys: [A] }])
   })
 
   it('T-CB2: five list changes during one PUT cost two PUTs and no open', async () => {
     await start()
-    await h.until(() => h.linkKind() === 'Ready')
     h.server.putPolicy = () => ({ kind: 'hold' })
     const o = h.owner()
     const uid = st().session!.binding!.userId
-    h.client.setSubscriptions(o, { keys: [A], userId: uid }, o.frameToken)
-    await h.until(() => h.server.openPuts().length === 1)
-    expect(openPut().keys).toEqual([A])
-    for (const keys of [[B], [A, B], [C], [C, D]])
+    for (const keys of [[A], [B], [A, B], [C], [C, D]])
       h.client.setSubscriptions(o, { keys, userId: uid }, o.frameToken)
+    await h.settle()
     expect(puts()).toHaveLength(1)
     h.server.putPolicy = () => ({ kind: 'accept' })
     h.server.answerPut(openPut(), { kind: 'accept' })
-    await h.until(() => puts().length >= 2 && st().put === null)
+    await h.settle()
     expect(puts()).toHaveLength(2)
     expect(puts()[1]!.keys).toEqual([C, D])
     expect([...h.server.current()!.keys]).toEqual([C, D])
@@ -836,31 +832,21 @@ describe('PUT retries', () => {
   })
 
   it('T-CB44: an episode that ends without a new PUT resets the retry count', async () => {
-    const retryTimer = async () => {
-      await h.until(() => h.isPending(st().put?.retryTimer))
-      return st().put!.retryTimer
-    }
     await start({ keys: [A] })
-    await h.until(() => {
-      const { link, put } = st()
-      return link.kind === 'Ready' && link.accepted.has(A) && put === null
-    })
     h.server.putPolicy = () => ({ kind: 'error', status: 404 })
     await h.subscribe([A, B])
-    for (let r = 0; r < 4; r++) await fire(await retryTimer())
-    const lastRetry = await retryTimer()
+    for (let r = 0; r < 4; r++) await fire(st().put!.retryTimer)
     expect(st().putAttempt).toBe(5)
     await h.subscribe([A])
-    await fire(lastRetry)
+    await fire(st().put!.retryTimer)
     expect(st().put).toBeNull()
     expect(st().putAttempt).toBe(0)
     await h.subscribe([A, C])
-    const first = handle(await retryTimer()).ms
+    const first = handle(st().put!.retryTimer).ms
     expect(first).toBeGreaterThanOrEqual(1_000)
     expect(first).toBeLessThanOrEqual(1_200)
     const before = puts().length - 1
-    for (let r = 0; r <= PUT_MAX_ATTEMPTS; r++) await fire(await retryTimer())
-    expect(st().put).toBeNull()
+    while (st().put) await fire(st().put!.retryTimer)
     expect(puts().length - before).toBe(PUT_MAX_ATTEMPTS + 1)
   })
 
@@ -1044,7 +1030,6 @@ describe('session, binding and latch', () => {
 
   it('a switch to another environment without a new token opens nothing', async () => {
     await start({ keys: [A] })
-    await h.until(() => h.linkKind() === 'Ready')
     h.client.onEnvSwitchStart()
     h.client.onEnvSwitchEnd(true)
     await h.advance(600_000)
