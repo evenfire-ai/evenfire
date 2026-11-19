@@ -1,4 +1,5 @@
 import { vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { AppService } from '../../src/appService.js'
 import { config } from '../../src/config.js'
 import type { GfsWatchLogger } from '../../src/gfs/watchClient.js'
@@ -15,6 +16,13 @@ import { settle, wireLedger } from './wireLedger.js'
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 type Mock = ReturnType<typeof vi.fn>
+
+/**
+ * A session token as a short digest. The settle signature needs only its
+ * identity, and a settle timeout prints the signature.
+ */
+const tokenDigest = (token: string | null): string | null =>
+  token === null ? null : createHash('sha256').update(token).digest('hex').slice(0, 16)
 
 /**
  * `/me` for a session token, as ERA resolves it: the user and team come from
@@ -197,7 +205,7 @@ export class AppServiceWatchHarness {
       this.server.conns.map(c => [c.alive, c.lastSeq]),
       [...this.owners.values()].map(o => o.events.length),
       this.clock.pending().length,
-      this.service.sessionToken,
+      tokenDigest(this.service.sessionToken),
       this.onSessionCleared.mock.calls.length,
       this.service.authClient.getMe?.mock.calls.length,
     ])

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { AppServiceWatchHarness } from '../../testSupport/gfsWatch/appServiceHarness.js'
 import {
   TEAM_1,
@@ -188,6 +189,30 @@ describe('watch harness settle() waits for I/O in flight', () => {
     // stop() disposes the client, whose abort of the GET leaves nothing on the wire.
     const stopped = watch
     watch = undefined
+    await stopped.stop()
+  })
+
+  it('g: the AppService harness settle timeout names the session token only by its digest', async () => {
+    const stub = slowWatch('getNeverSent')
+    app = await new AppServiceWatchHarness().start()
+    const saved = signV1SessionToken({ userId: USER_A, authGeneration: 1, teamId: TEAM_1 })
+    app.service.tokenStore.getSessionToken!.mockResolvedValue(saved)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    await app.service.getSessionState()
+    const error = await app.settle(100).then(
+      () => null,
+      (e: unknown) => e
+    )
+    expect(error).toBeInstanceOf(Error)
+    const message = (error as Error).message
+    expect(message).toMatch(/not quiet after 100 ms.*last signature: \[/)
+    expect(stub.gets).toBe(1)
+    expect(app.service.sessionToken).toBe(saved)
+    expect(message).not.toContain(saved)
+    expect(message).toContain(createHash('sha256').update(saved).digest('hex').slice(0, 16))
+    const stopped = app
+    app = undefined
     await stopped.stop()
   })
 })
