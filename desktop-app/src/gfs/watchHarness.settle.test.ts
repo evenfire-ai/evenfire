@@ -271,6 +271,7 @@ describe('watch harness settle() waits for I/O in flight', () => {
     await watch.login()
     expect(calls).toBe(1)
     expect(watch.server.gets).toHaveLength(1)
+    expect(watch.server.gets[0]!.closed).toBe(true)
     expect(watch.linkKind()).toBe('Backoff')
     expect(watch.logs).toContainEqual({
       level: 'warn',
