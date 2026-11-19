@@ -482,6 +482,38 @@ describe('origin route', () => {
   it('refuses a channelRef that is not <namespace>/<name>', () => {
     assertChannelRefGrammar(validateOriginRoute, thread, ORIGIN_ERROR)
   })
+
+  it('ties each reply style to its thread root and quoted message, on every combination', () => {
+    // The one accepted shape per style: the state of threadRootId and of quotedMessageId.
+    const ACCEPTED_SHAPE = {
+      thread: { root: 'text', quoted: 'absent' },
+      conversation: { root: 'null', quoted: 'absent' },
+      quote: { root: 'text', quoted: 'text' },
+    }
+    const ROOTS = { null: null, text: '1763460000000' }
+    const QUOTED = { absent: undefined, null: null, text: '1763460300000' }
+    let accepted = 0
+    let refused = 0
+    for (const [replyStyle, shape] of Object.entries(ACCEPTED_SHAPE)) {
+      for (const [rootState, threadRootId] of Object.entries(ROOTS)) {
+        for (const [quotedState, quotedMessageId] of Object.entries(QUOTED)) {
+          const value = { ...thread, threadRootId, replyStyle }
+          if (quotedState !== 'absent') value.quotedMessageId = quotedMessageId
+          const label = `${replyStyle} root=${rootState} quoted=${quotedState}`
+          if (rootState === shape.root && quotedState === shape.quoted) {
+            assert.equal(assertAccepts(validateOriginRoute, value).replyStyle, replyStyle, label)
+            accepted++
+          } else {
+            const field = quotedState === 'null' || quotedState !== shape.quoted ? 'quotedMessageId' : 'threadRootId'
+            assertRejects(validateOriginRoute, value, ORIGIN_ERROR, field, label)
+            refused++
+          }
+        }
+      }
+    }
+    assert.equal(accepted, 3)
+    assert.equal(refused, 15)
+  })
 })
 
 describe('Stage 1 execution principal', () => {

@@ -68,6 +68,7 @@ export type ProviderEventReceiptClaims = {
   readonly exp: number
 }
 
+/** Copied by the producer from a validated receipt; it has no medium, so the per-medium receipt rules are not re-checked here. */
 export type ChannelAdmissionEvent = {
   readonly providerAccountId: string
   readonly deliveryAlias: string | null
@@ -96,15 +97,39 @@ export type ChannelAdmission =
       readonly event: ChannelAdmissionEvent | null
     }
 
-export type OriginRoute = {
-  readonly medium: ChannelMedium
-  readonly channelRef: string
-  readonly conversationId: string
-  readonly conversationKind: ConversationKind
-  readonly threadRootId: string | null
-  readonly replyStyle: 'thread' | 'conversation' | 'quote'
-  readonly quotedMessageId?: string
-}
+/**
+ * Which replyStyle a medium and conversation kind get is decided by the producer of the
+ * route (the Host's origin rules); this contract checks only what each replyStyle carries.
+ * A Teams conversationId is copied from a validated receipt; the route does not re-check it.
+ */
+export type OriginRoute =
+  | {
+      readonly medium: ChannelMedium
+      readonly channelRef: string
+      readonly conversationId: string
+      readonly conversationKind: ConversationKind
+      readonly threadRootId: string
+      readonly replyStyle: 'thread'
+      readonly quotedMessageId?: never
+    }
+  | {
+      readonly medium: ChannelMedium
+      readonly channelRef: string
+      readonly conversationId: string
+      readonly conversationKind: ConversationKind
+      readonly threadRootId: null
+      readonly replyStyle: 'conversation'
+      readonly quotedMessageId?: never
+    }
+  | {
+      readonly medium: ChannelMedium
+      readonly channelRef: string
+      readonly conversationId: string
+      readonly conversationKind: ConversationKind
+      readonly threadRootId: string
+      readonly replyStyle: 'quote'
+      readonly quotedMessageId: string
+    }
 
 export type Stage1ExecutionPrincipal = {
   readonly kind: 'member'

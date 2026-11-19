@@ -273,6 +273,22 @@ function validateChannelAdmission(input) {
 
 const checkOrigin = checker('invalid_origin_route')
 
+// What an origin route carries for each replyStyle:
+//   thread        a thread root, no quoted message
+//   conversation  no thread root, no quoted message
+//   quote         a thread root and a quoted message
+// Sources: the thread root of each style follows the Host origin table of the External
+// Channels stage 1 plan. A quoted message is required for quote because an outbound quote
+// reply sends a quotedReply entity with that message id. It is absent for thread and
+// conversation: decided in this PR from review R1-M2, not in the origin table.
+// Scope: this ties replyStyle to threadRootId and quotedMessageId only. It does not tie
+// replyStyle to medium or conversationKind, and it does not check the Teams conversation id.
+const ORIGIN_REPLY_STYLE_RULES = Object.freeze({
+  thread: Object.freeze({ requiresRoot: true, requiresQuotedId: false }),
+  conversation: Object.freeze({ requiresRoot: false, requiresQuotedId: false }),
+  quote: Object.freeze({ requiresRoot: true, requiresQuotedId: true }),
+})
+
 function validateOriginRoute(input) {
   const value = frozenSnapshot(input, NO_NESTED_RECORDS)
   const keys = isRecord(value) && Object.hasOwn(value, 'quotedMessageId')
@@ -286,6 +302,9 @@ function validateOriginRoute(input) {
   checkOrigin(isTextOrNull(value.threadRootId), 'threadRootId')
   checkOrigin(REPLY_STYLES.includes(value.replyStyle), 'replyStyle')
   if (Object.hasOwn(value, 'quotedMessageId')) checkOrigin(isText(value.quotedMessageId), 'quotedMessageId')
+  const rule = ORIGIN_REPLY_STYLE_RULES[value.replyStyle] // replyStyle is a REPLY_STYLES member here
+  checkOrigin(Object.hasOwn(value, 'quotedMessageId') === rule.requiresQuotedId, 'quotedMessageId')
+  checkOrigin((value.threadRootId !== null) === rule.requiresRoot, 'threadRootId')
   return value
 }
 
