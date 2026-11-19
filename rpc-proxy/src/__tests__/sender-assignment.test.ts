@@ -246,6 +246,57 @@ describe('POST /rpc/hosts/:hostRef/messages — structured file references (#666
   })
 })
 
+describe('POST /rpc/hosts/:hostRef/messages — display capabilities', () => {
+  beforeEach(() => {
+    authTokenMock.verifyRpcToken.mockReturnValue(VALID_CLAIMS)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue(HOST_CONNECTION)
+    serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, status: 'completed' })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  async function forwardedFor(displayCapabilities: unknown) {
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/messages')
+      .set('authorization', 'Bearer token')
+      .send({ content: 'Draw the flow', threadId: 'chat-1', displayCapabilities })
+      .expect(200)
+    const calls = serviceMock.forwardHostMessageToHost.mock.calls
+    return calls[calls.length - 1][1] as Record<string, unknown>
+  }
+
+  it('forwards the capabilities the Desktop declares, outside the identity metadata', async () => {
+    const forwardedBody = await forwardedFor(['mermaid'])
+
+    expect(forwardedBody.displayCapabilities).toEqual(['mermaid'])
+    expect(forwardedBody.metadata).toEqual({ accessScope: 'team', teamId: 'team-1' })
+  })
+
+  it('keeps only known values, once each', async () => {
+    const forwardedBody = await forwardedFor(['html', 'mermaid', 'mermaid', 42, { mermaid: true }])
+
+    expect(forwardedBody.displayCapabilities).toEqual(['mermaid'])
+  })
+
+  it('omits the field when nothing known is declared', async () => {
+    for (const value of [
+      undefined,
+      null,
+      'mermaid',
+      { 0: 'mermaid' },
+      [],
+      ['html'],
+      [['mermaid']],
+    ]) {
+      const forwardedBody = await forwardedFor(value)
+      expect(forwardedBody.content, JSON.stringify(value)).toBe('Draw the flow')
+      expect(forwardedBody, JSON.stringify(value)).not.toHaveProperty('displayCapabilities')
+    }
+  })
+})
+
 describe('POST /rpc/hosts/:hostRef/approvals/approve — userId identity invariant', () => {
   beforeEach(() => {
     authTokenMock.verifyRpcToken.mockReturnValue({

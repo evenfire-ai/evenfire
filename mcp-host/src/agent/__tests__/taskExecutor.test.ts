@@ -12,7 +12,7 @@ import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
 import { executeSingleTool as executeSingleToolDirect } from '../../core/orchestration/toolUseLoopSingleTool'
-import { TOOL_DISCOVERY_TEXT } from '../../core/reasoning/promptBuilder'
+import { MERMAID_DIAGRAMS_GUIDANCE, TOOL_DISCOVERY_TEXT } from '../../core/reasoning/promptBuilder'
 import { registerDesktopTools } from '../../core/tools/desktopTools'
 import { DocumentReadTool } from '../../core/tools/documentRead'
 import {
@@ -2719,6 +2719,87 @@ describe('TaskExecutor Codex presentation wiring', () => {
       expect(JSON.stringify(await executor.maybeGetOrBuildParts(native))).not.toContain(
         TOOL_DISCOVERY_TEXT
       )
+    } finally {
+      appConfig.promptCacheEnabled = previous
+    }
+  })
+
+  it('caches the diagram guidance only for a Desktop that draws Mermaid', async () => {
+    const previous = appConfig.promptCacheEnabled
+    appConfig.promptCacheEnabled = true
+    try {
+      const { executor, deps } = makeExecutor('openai')
+      deps.promptCache = new PromptCache()
+      deps.workspaceService = {
+        readIdentityFiles: vi.fn(async () => ({ identity: '', soul: '', agents: '', user: '' })),
+        snapshotDailyLogs: vi.fn(async () => 'daily snapshot'),
+      } as any
+      executor.conversation.session_key = 'diagram-session'
+      const tools = [{ name: 'shell_exec', description: 'shell', parameters: {} }]
+
+      executor.task.sourceMessage.displayCapabilities = ['mermaid']
+      const drawing = await executor.maybeGetOrBuildParts(tools)
+      expect(drawing.stable).toContain(MERMAID_DIAGRAMS_GUIDANCE)
+      expect(drawing.context).not.toContain(MERMAID_DIAGRAMS_GUIDANCE)
+      expect(await executor.maybeGetOrBuildParts(tools)).toBe(drawing)
+
+      // The same chat continued from a Desktop that shows the code: rebuilt without it.
+      delete executor.task.sourceMessage.displayCapabilities
+      const plain = await executor.maybeGetOrBuildParts(tools)
+      expect(JSON.stringify(plain)).not.toContain('DIAGRAMS:')
+      expect(deps.workspaceService!.snapshotDailyLogs).toHaveBeenCalledTimes(1)
+    } finally {
+      appConfig.promptCacheEnabled = previous
+    }
+  })
+
+  it('never gives the diagram guidance to a channel message', async () => {
+    const previous = appConfig.promptCacheEnabled
+    appConfig.promptCacheEnabled = true
+    try {
+      const { executor, deps } = makeExecutor('openai')
+      deps.promptCache = new PromptCache()
+      deps.workspaceService = {
+        readIdentityFiles: vi.fn(async () => ({ identity: '', soul: '', agents: '', user: '' })),
+        snapshotDailyLogs: vi.fn(async () => 'daily snapshot'),
+      } as any
+      executor.conversation.session_key = 'slack-session'
+      executor.task.sourceMessage.channelType = 'slack'
+      executor.task.sourceMessage.displayCapabilities = ['mermaid']
+
+      const parts = await executor.maybeGetOrBuildParts([])
+
+      expect(parts.stable).not.toContain('DIAGRAMS:')
+    } finally {
+      appConfig.promptCacheEnabled = previous
+    }
+  })
+})
+
+describe('TaskExecutor diagram guidance without the prompt cache', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(runToolUseLoop).mockReset()
+  })
+
+  it('tells only a Desktop that draws Mermaid, as the cached path does', async () => {
+    const previous = appConfig.promptCacheEnabled
+    appConfig.promptCacheEnabled = false
+    try {
+      for (const [capabilities, guided] of [
+        [['mermaid'], true],
+        [undefined, false],
+      ] as const) {
+        vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+        const task = createTask('Draw the release flow')
+        task.sourceMessage!.channelType = 'rpc'
+        if (capabilities) task.sourceMessage!.displayCapabilities = [...capabilities]
+        await new TaskExecutor(task, createDeps()).run()
+
+        const loopConfig = vi.mocked(runToolUseLoop).mock.calls.at(-1)?.[0] as any
+        if (!loopConfig) throw new Error('Expected runToolUseLoop to receive a loop config')
+        expect(loopConfig.systemPromptFor([]).includes(MERMAID_DIAGRAMS_GUIDANCE)).toBe(guided)
+      }
     } finally {
       appConfig.promptCacheEnabled = previous
     }

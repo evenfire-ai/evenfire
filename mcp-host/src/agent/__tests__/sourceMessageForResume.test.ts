@@ -131,6 +131,23 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
     expect(JSON.stringify(resumed)).not.toContain('SENTINEL-666')
   })
 
+  it('keeps that the Desktop draws Mermaid, so the resumed prompt still says so', () => {
+    const resumed = sourceMessageForResume({
+      ...sourceMessage([]),
+      displayCapabilities: ['mermaid', 'SENTINEL-666-unknown'],
+    })
+    expect(resumed?.displayCapabilities).toEqual(['mermaid'])
+    expect(JSON.stringify(resumed)).not.toContain('SENTINEL-666')
+    expect(sourceMessageForResume(sourceMessage([]))).not.toHaveProperty('displayCapabilities')
+    expect(
+      sourceMessageForResume({
+        ...sourceMessage([]),
+        channelType: 'slack',
+        displayCapabilities: ['mermaid'],
+      })
+    ).not.toHaveProperty('displayCapabilities')
+  })
+
   it('drops metadata that carries no team scope', () => {
     const resumed = sourceMessageForResume({
       ...sourceMessage([]),
