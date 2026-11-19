@@ -203,15 +203,16 @@ export function GfsManageAccessDialog({
       readAccessState: deps.readAccessState,
       publishedGeneration: deps.publishedGeneration,
     }
+    // The outcome of a write that already ran is still worth reporting after
+    // the dialog closes, but never into another session: by the time the
+    // write settles, main may run another team the renderer has not published.
+    const outcome = bindGfsActionGuards(session)
+    if (!outcome) return null
     const action = bindGfsActionGuards({
       ...session,
       isCurrent: () => mountedRef.current && isCurrentRef.current(),
     })
-    // The outcome of a write that already ran is still worth reporting after
-    // the dialog closes, but never into another session: by the time the
-    // write settles, main may run another team the renderer has not published.
-    const outcome = action && bindGfsActionGuards(session)
-    if (!action || !outcome) return null
+    if (!action) return null
     const presentOutcome = async (message: string, tone: Tone) => {
       if (!pushToast || !(await outcome.admitEffect())) return
       pushToast(message, tone)
