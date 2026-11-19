@@ -21,6 +21,9 @@ const fake = vi.hoisted(() => {
     startGates: [] as Array<Promise<void> | undefined>,
     // When set, stop() on this store throws.
     throwOnStop: null as FakeStore | null,
+    // When true, onChange() throws, which installConfigStore calls after it
+    // has made the store the one in use.
+    throwOnChange: false,
   }
   return state
 })
@@ -46,6 +49,7 @@ vi.mock('../config/configStore', async importOriginal => {
       this.stopped = true
     }
     onChange(): () => void {
+      if (fake.throwOnChange) throw new Error('fixture onChange failure')
       return () => undefined
     }
     get(): string | undefined {
@@ -122,6 +126,7 @@ describe('main onHostChange ConfigStore staging', () => {
     fake.stores.length = 0
     fake.startGates.length = 0
     fake.throwOnStop = null
+    fake.throwOnChange = false
     // Each test loads a fresh main.ts so its module state starts empty. The
     // metrics it registers live in prom-client's process-wide registry.
     register.clear()
@@ -131,6 +136,7 @@ describe('main onHostChange ConfigStore staging', () => {
 
   afterEach(() => {
     fake.throwOnStop = null
+    fake.throwOnChange = false
   })
 
   it('installs the new failover slots when a later event commits while the slot rebuild is still opening', async () => {
@@ -172,5 +178,41 @@ describe('main onHostChange ConfigStore staging', () => {
     expect(fake.stores).toHaveLength(1)
     expect(liveStores()).toEqual([fake.stores[0]])
     expect(fake.stores[0]!.opts.fallbackCredentialSlots).toContain(FALLBACK_SLOT)
+  })
+
+  it('stops the store it opened when the commit throws before installing it', async () => {
+    await onHostChange(baseHost())
+    const initial = fake.stores[0]!
+    fake.throwOnStop = initial
+    const providerChange: HostCRD = {
+      ...baseHost(),
+      spec: { ...baseHost().spec, model: { provider: 'openai', name: 'gpt-4.1' } },
+    }
+
+    await expect(onHostChange(providerChange)).rejects.toThrow('fixture stop failure')
+
+    expect(fake.stores).toHaveLength(2)
+    const opened = fake.stores[1]!
+    expect(opened.opts.provider).toBe('openai')
+    expect(opened.started).toBe(true)
+    expect(opened.stopped).toBe(true)
+    expect(initial.stopped).toBe(false)
+  })
+
+  it('does not stop a store that became the one in use before the install threw', async () => {
+    await onHostChange(baseHost())
+    const initial = fake.stores[0]!
+    fake.throwOnChange = true
+    const providerChange: HostCRD = {
+      ...baseHost(),
+      spec: { ...baseHost().spec, model: { provider: 'openai', name: 'gpt-4.1' } },
+    }
+
+    await expect(onHostChange(providerChange)).rejects.toThrow('fixture onChange failure')
+
+    const opened = fake.stores[1]!
+    expect(opened.started).toBe(true)
+    expect(initial.stopped).toBe(true)
+    expect(opened.stopped).toBe(false)
   })
 })

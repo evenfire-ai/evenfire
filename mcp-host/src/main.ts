@@ -1615,9 +1615,12 @@ export async function onHostChange(host: HostCRD): Promise<void> {
     },
     commitHost: eventHost => {
       const staged = stagedStores.get(eventHost)
-      stagedStores.delete(eventHost)
-      if (staged) installConfigStore(staged, eventHost)
-      else if (configStore) currentKeys = apiKeysFromConfigStore(configStore)
+      if (staged) {
+        installConfigStore(staged, eventHost)
+        // Only an installed store leaves the map; one whose install threw is
+        // stopped by the cleanup below.
+        stagedStores.delete(eventHost)
+      } else if (configStore) currentKeys = apiKeysFromConfigStore(configStore)
       currentHost = eventHost
       // R5.10 — only a primary credential-surface change may clear a sticky
       // runtime cooldown. A stale completion does not reach this assignment.
@@ -1650,9 +1653,16 @@ export async function onHostChange(host: HostCRD): Promise<void> {
         await applyResolvedGuardrails()
       })
     },
+  }).finally(() => {
+    // Runs on success and on a throw. A store this event opened but never
+    // installed is stopped so its watches do not stay live: a newer event
+    // committed first, or the commit threw before the install finished. The
+    // store in use is never stopped here. The rejection still propagates.
+    for (const abandoned of stagedStores.values()) {
+      if (abandoned.store !== configStore) abandoned.store.stop()
+    }
+    stagedStores.clear()
   })
-  for (const abandoned of stagedStores.values()) abandoned.store.stop()
-  stagedStores.clear()
 }
 
 /**
