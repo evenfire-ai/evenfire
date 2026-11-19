@@ -155,7 +155,6 @@ export function GfsManageAccessDialog({
   isCurrent,
   deps,
   pushToast,
-  mayPresentOutcome,
   onClose,
 }: GfsManageAccessDialogProps) {
   const access = useGfsResourceAccess(target, deps.gate, {
@@ -199,8 +198,6 @@ export function GfsManageAccessDialog({
   }, [])
   const isCurrentRef = useRef(isCurrent)
   isCurrentRef.current = isCurrent
-  const mayPresentOutcomeRef = useRef(mayPresentOutcome)
-  mayPresentOutcomeRef.current = mayPresentOutcome
   const bindGuards = () => {
     const session = {
       readAccessState: deps.readAccessState,
@@ -217,8 +214,6 @@ export function GfsManageAccessDialog({
     if (!action || !outcome) return null
     const presentOutcome = async (message: string, tone: Tone) => {
       if (!pushToast || !(await outcome.admitEffect())) return
-      const ownerGate = mayPresentOutcomeRef.current
-      if (ownerGate && !((await ownerGate()) && outcome.isCurrent())) return
       pushToast(message, tone)
     }
     return { ...action, presentOutcome }
