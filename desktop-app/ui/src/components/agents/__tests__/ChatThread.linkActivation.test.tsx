@@ -137,6 +137,9 @@ describe('ChatThread assistant link activation', () => {
     ])
     expect(fireEvent.click(screen.getByText(/Plain text/))).toBe(true)
     expect(activate).not.toHaveBeenCalled()
+    // Liveness witness: the handler is attached to this message.
+    expect(fireEvent.click(screen.getByRole('link', { name: 'a link' }))).toBe(false)
+    expect(activate.mock.calls).toEqual([[REPORTED_GFS_HREF]])
   })
 
   it('S-12: leaves an anchor in the artifact actions alone', () => {
@@ -154,7 +157,14 @@ describe('ChatThread assistant link activation', () => {
 
   it('ignores an anchor that encloses the container rather than sitting inside it', () => {
     const activate = vi.fn(async (_href: string) => {})
-    messages = [{ id: 'a-0', role: 'assistant', content: 'Plain words', timestamp: 1 }]
+    messages = [
+      {
+        id: 'a-0',
+        role: 'assistant',
+        content: `Plain words and [inner](${REPORTED_GFS_HREF})`,
+        timestamp: 1,
+      },
+    ]
     groupedMessages = [{ role: 'assistant', items: messages }]
     render(
       <ChatLinkActivationContext.Provider value={activate}>
@@ -163,8 +173,12 @@ describe('ChatThread assistant link activation', () => {
         </a>
       </ChatLinkActivationContext.Provider>
     )
-    expect(fireEvent.click(screen.getByText('Plain words'))).toBe(true)
+    expect(fireEvent.click(screen.getByText(/Plain words/))).toBe(true)
     expect(activate).not.toHaveBeenCalled()
+    // Liveness witness: inside the same tree the handler still routes the
+    // message's own link, and with its href rather than the outer anchor's.
+    expect(fireEvent.click(screen.getByRole('link', { name: 'inner' }))).toBe(false)
+    expect(activate.mock.calls).toEqual([[REPORTED_GFS_HREF]])
   })
 
   it('gives the user message no link container', () => {

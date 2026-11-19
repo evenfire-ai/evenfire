@@ -246,10 +246,17 @@ describe('main.ts GFS navigation-generation composition', () => {
     )
   })
 
-  it('blocks every renderer navigation of the packaged main window, even to its own URL', () => {
+  it('blocks every renderer navigation of the packaged main window, even to its own URL', async () => {
     const mainWindow = harness.windows[0]
     const listener = willNavigateListener(mainWindow)
     const currentUrl = mainWindow?.webContents.getURL() as string
+    // Witness that this is the packaged window: it loaded the bundled renderer
+    // from disk, not a dev server.
+    await vi.waitFor(() =>
+      expect(mainWindow?.loadFile).toHaveBeenCalledWith(
+        expect.stringMatching(/[\\/]ui-dist[\\/]index\.html$/)
+      )
+    )
     expect(mainWindow?.loadURL).not.toHaveBeenCalled()
 
     // An `<a href="">` in chat navigates to exactly the current document URL.

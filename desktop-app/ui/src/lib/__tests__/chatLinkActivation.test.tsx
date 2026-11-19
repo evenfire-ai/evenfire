@@ -465,6 +465,9 @@ describe('chat link activation — scenarios', () => {
     expect(h.openUrl).not.toHaveBeenCalled()
     expect(h.resolveCalls).toEqual([])
     expect(h.tabs()).toEqual(['chat'])
+    // Liveness witness: the same activation still routes a supported link.
+    await h.clickWeb('https://evenfire.ai/')
+    expect(h.openUrl.mock.calls).toEqual([['https://evenfire.ai/']])
   })
 
   it('treats the gfs scheme case-insensitively', async () => {
