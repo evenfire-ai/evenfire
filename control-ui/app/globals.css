@@ -9220,6 +9220,7 @@ td.cu-registry-description {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--cu-space-2);
+  margin: var(--cu-space-4) 0 var(--cu-space-6);
 }
 
 .cu-identity-dirty {
