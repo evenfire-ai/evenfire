@@ -335,6 +335,7 @@ describe('HostReconciler Grok Host runtime gating', () => {
         'MCP_HOST_RUNTIME_ACCESS_TOKEN',
         'MCP_HOST_RUNTIME_REFRESH_TOKEN',
         'MCP_HOST_WORKFLOW_CONTROL_TOKEN',
+        'MCP_HOST_RPC_PROXY_EDGE_TOKEN',
         'MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE',
         'MCP_HOST_RUNTIME_AUTH_STATE_DIR',
         'MCP_HOST_GATEWAY_URL',

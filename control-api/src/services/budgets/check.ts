@@ -26,6 +26,7 @@
 import { z } from 'zod'
 import { type DbClient, pool } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
+import { resolveCanonicalBudgetTeamsForContexts } from './contextTeams.js'
 import { type TokenBudget, listBudgets, toNumber } from './definitions.js'
 import { type BudgetScopeDimension, scopeMatches } from './dimensions.js'
 import {
@@ -155,20 +156,7 @@ async function getEnabledBudgetsCached(db: DbClient): Promise<TokenBudget[]> {
  * team than the spend it reads.
  */
 async function resolveTeamForContext(contextRef: string, db: DbClient): Promise<string | null> {
-  const result = await db.query(
-    `SELECT tc.team_id::text AS team_id
-       FROM (
-         SELECT DISTINCT ON (context_id) context_id, team_id
-           FROM team_contexts
-          ORDER BY context_id, created_at ASC, team_id ASC
-       ) tc
-      WHERE tc.context_id = $1
-      LIMIT 1`,
-    [contextRef]
-  )
-  const row = result.rows[0] as { team_id?: unknown } | undefined
-  const teamId = row?.team_id
-  return typeof teamId === 'string' && teamId.length > 0 ? teamId : null
+  return (await resolveCanonicalBudgetTeamsForContexts([contextRef], db)).get(contextRef) ?? null
 }
 
 /** Active price for (provider, model), per 1M tokens, or null if unpriced. */

@@ -7,7 +7,11 @@ import {
   type AllowedModelsConfigMapPublisher,
   LlmAllowedModelsConfigMapWriter,
 } from './services/llmAllowedModelsConfigMap.js'
-import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
+import {
+  type ResourceListPage,
+  ResourceService,
+  mergeAnnotationsForReplace,
+} from './services/resourceService.js'
 import type { SecretConstraintOptions } from './services/secretConstraints.js'
 import type { SecretSnapshot } from './services/secretRepository.js'
 import { type DeleteSecretSummary, SecretService } from './services/secretService.js'
@@ -229,6 +233,28 @@ export class K8sGateway {
 
   async listResource(plural: ClerumResourceType, namespace = '*'): Promise<unknown[]> {
     return this.resources.listResource(plural, namespace)
+  }
+
+  async listResourcePage(
+    plural: ClerumResourceType,
+    namespace: string,
+    options: {
+      limit: number
+      continueToken?: string
+      timeoutSeconds: number
+      signal: AbortSignal
+    }
+  ): Promise<ResourceListPage> {
+    return this.resources.listResourcePage(plural, namespace, options)
+  }
+
+  async getResourceExact(
+    plural: ClerumResourceType,
+    name: string,
+    namespace: string,
+    options: { timeoutSeconds: number; signal: AbortSignal }
+  ): Promise<unknown> {
+    return this.resources.getResourceExact(plural, name, namespace, options)
   }
 
   async getResource(
