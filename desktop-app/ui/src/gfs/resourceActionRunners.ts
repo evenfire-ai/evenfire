@@ -48,11 +48,11 @@ export async function runGfsRename(
 ): Promise<GfsActionRunResult<{ name: string }>> {
   const trimmed = requestedName.trim()
   if (!trimmed) return ABORTED
-  const guards = bindGfsActionGuards(deps)
-  if (!guards) return ABORTED
-  if (!(await deps.freshPermissions(target.resourceId, target.name, ['write']))) return ABORTED
-  if (!guards.isCurrent()) return ABORTED
   try {
+    const guards = bindGfsActionGuards(deps)
+    if (!guards) return ABORTED
+    if (!(await deps.freshPermissions(target.resourceId, target.name, ['write']))) return ABORTED
+    if (!guards.isCurrent()) return ABORTED
     const name = await normalizeGfsResourceName(trimmed)
     if (!guards.isCurrent()) return ABORTED
     if (name === target.name) return { status: 'unchanged' }
@@ -73,12 +73,12 @@ export async function runGfsCreateFolder(
 ): Promise<GfsActionRunResult<{ name: string }>> {
   const trimmed = requestedName.trim()
   if (!trimmed) return ABORTED
-  const guards = bindGfsActionGuards(deps)
-  if (!guards) return ABORTED
-  if (!(await deps.freshPermissions(parent.resourceId, parent.name, ['write']))) return ABORTED
-  if (!guards.isCurrent()) return ABORTED
-  options.onPermitted?.()
   try {
+    const guards = bindGfsActionGuards(deps)
+    if (!guards) return ABORTED
+    if (!(await deps.freshPermissions(parent.resourceId, parent.name, ['write']))) return ABORTED
+    if (!guards.isCurrent()) return ABORTED
+    options.onPermitted?.()
     const name = await normalizeGfsResourceName(trimmed)
     if (!guards.isCurrent()) return ABORTED
     if (!(await deps.freshPermissions(parent.resourceId, parent.name, ['write']))) return ABORTED
@@ -94,11 +94,11 @@ export async function runGfsDelete(
   deps: GfsActionRunnerDeps,
   target: GfsActionResource
 ): Promise<GfsActionRunResult> {
-  const guards = bindGfsActionGuards(deps)
-  if (!guards) return ABORTED
-  if (!(await deps.freshPermissions(target.resourceId, target.name, ['delete']))) return ABORTED
-  if (!(await guards.admitEffect())) return ABORTED
   try {
+    const guards = bindGfsActionGuards(deps)
+    if (!guards) return ABORTED
+    if (!(await deps.freshPermissions(target.resourceId, target.name, ['delete']))) return ABORTED
+    if (!(await guards.admitEffect())) return ABORTED
     await deps.ops.deleteResource(target.resourceId, target.version)
     return { status: 'done', value: undefined }
   } catch (error) {
@@ -118,11 +118,11 @@ export async function runGfsUpload(
   occupiedNames: Set<string>,
   reservations: GfsUploadReservations
 ): Promise<GfsActionRunResult<{ name: string }>> {
-  const guards = bindGfsActionGuards(deps)
-  if (!guards) return ABORTED
-  if (!(await deps.freshPermissions(parent.resourceId, parent.name, ['write']))) return ABORTED
-  if (!guards.isCurrent()) return ABORTED
   try {
+    const guards = bindGfsActionGuards(deps)
+    if (!guards) return ABORTED
+    if (!(await deps.freshPermissions(parent.resourceId, parent.name, ['write']))) return ABORTED
+    if (!guards.isCurrent()) return ABORTED
     assertGfsFileUploadSize(file.size)
     const normalizedName = await normalizeGfsResourceName(file.name)
     if (!guards.isCurrent()) return ABORTED

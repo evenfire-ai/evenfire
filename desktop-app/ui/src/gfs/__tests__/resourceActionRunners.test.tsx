@@ -325,6 +325,15 @@ describe('GFS action runners', () => {
       expect(mutationCalls(h)).toBe(0)
     })
 
+    it(`${label}: reports a failing permission check as failed, with no mutation`, async () => {
+      const h = await harness()
+      const checkError = new Error('permission check crashed')
+      const pending = run({ ...h.deps(), freshPermissions: () => Promise.reject(checkError) })
+
+      await expect(pending).resolves.toEqual({ status: 'failed', error: checkError })
+      expect(mutationCalls(h)).toBe(0)
+    })
+
     it(`${label}: sends no mutation after a logout clears the cache mid-check`, async () => {
       const read = deferred<Affordances>()
       const h = await harness(() => read.promise)
