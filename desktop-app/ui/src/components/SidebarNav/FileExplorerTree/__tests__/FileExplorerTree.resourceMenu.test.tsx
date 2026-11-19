@@ -420,10 +420,16 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
     })
     renderShell()
     const row = await screen.findByRole('button', { name: 'shared.txt' })
+    row.focus()
     fireEvent.keyDown(row, { key: 'ContextMenu' })
     const menu = await screen.findByRole('menu', { name: 'Actions for shared.txt' })
 
-    fireEvent.contextMenu(row)
+    // Chromium raises the key's contextmenu on its keyup, at whatever holds
+    // focus by then: the opened menu, not the row.
+    const focused = document.activeElement as HTMLElement
+    expect(menu.contains(focused)).toBe(true)
+    fireEvent.keyUp(focused, { key: 'ContextMenu' })
+    fireEvent.contextMenu(focused)
     expect(screen.getByRole('menu', { name: 'Actions for shared.txt' })).toBe(menu)
 
     // A right-click after it is a new opening.
