@@ -2,6 +2,10 @@ import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
 import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
+import {
+  sendWorkflowActionDelegationTransportError,
+  workflowActionDelegationHeaders,
+} from '../workflowActionDelegation.js'
 
 /**
  * Read-only end-user access to SharedFileSystems referenced by a Context.
@@ -31,6 +35,11 @@ const PASSTHROUGH_HEADERS = [
   'x-request-id',
 ] as const
 
+function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
+  if (sendWorkflowActionDelegationTransportError(error, res)) return
+  next(error)
+}
+
 export function createContextSharedFilesystemsRouter(): Router {
   const router = Router()
 
@@ -59,7 +68,7 @@ export function createContextSharedFilesystemsRouter(): Router {
         )
         res.status(200).json(data)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -89,6 +98,7 @@ export function createContextSharedFilesystemsRouter(): Router {
           {
             rawQueryString: queryString,
             userSessionToken: sessionToken,
+            extraHeaders: workflowActionDelegationHeaders(req),
             throwOnHttpError: false,
           }
         )
@@ -142,7 +152,7 @@ export function createContextSharedFilesystemsRouter(): Router {
           else res.end()
         }
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )

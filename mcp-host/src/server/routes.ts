@@ -1,14 +1,25 @@
 import type { Request, Response } from 'express'
+import {
+  validateHostActivityLimit,
+  validateHostApprovalRequestId,
+  validateHostModelSelectionRequest,
+} from '@clerum/action-context-contracts'
 import { parseIncomingFileReferences } from '../agent/fileReferenceResolver'
 import { config } from '../config'
 import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
 import { logger } from '../logger'
-import { getRuntimeCallerContext } from './edgeRuntimeAuth'
+import {
+  RuntimeActionAuthorityError,
+  assertRuntimeActionCurrent,
+  authorityBindingFromTrustedEdge,
+} from '../runtime/actionAuthority'
+import { getRuntimeCallerContext, runtimeActionTargetMatches } from './edgeRuntimeAuth'
 import { badRequest, json } from './httpUtils'
 import type {
   ActivitySnapshotHandler,
+  ActivityStreamCheckpointHandler,
   ActivityStreamHandler,
   ApprovalHandler,
   CompactionHandler,
@@ -42,11 +53,7 @@ import type {
 import type { RuntimeCallerContext } from './types'
 import { decodeSessionsCursor, sessionsCursorScope } from './wireProjections'
 
-/** Narrows an untrusted body field to the CAS revision the model routes accept,
- *  so the call site needs no cast to drop `unknown`. */
-function isNonNegativeSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-}
+const MAX_PENDING_ACTIVITY_STREAM_EVENTS = 64
 
 export type RouteHandlers = {
   messageHandler: MessageHandler | null
@@ -62,6 +69,7 @@ export type RouteHandlers = {
   telegramWorkflowApprovalVerificationHandler: TelegramWorkflowApprovalVerificationHandler | null
   activitySnapshotHandler: ActivitySnapshotHandler | null
   activityStreamHandler: ActivityStreamHandler | null
+  activityStreamCheckpointHandler?: ActivityStreamCheckpointHandler | null
   taskResultHandler: TaskResultHandler | null
   cronResultsHandler: CronResultsHandler | null
   cronResultAckHandler: CronResultAckHandler | null
@@ -137,6 +145,16 @@ function channelRuntimeSourceMismatch(
     caller.channelId !== source.channelId ||
     caller.sender !== source.sender
   )
+}
+
+function rejectV2TargetMismatch(
+  req: Request,
+  res: Response,
+  expected: Record<string, string | undefined>
+): boolean {
+  if (runtimeActionTargetMatches(req, expected)) return false
+  json(res, 403, { error: 'Runtime edge action mismatch' })
+  return true
 }
 
 export function runtimeApiInfo() {
@@ -324,8 +342,59 @@ export async function handleMessageRoute(
     if (message?.channelType === 'rpc') {
       const caller = getRuntimeCallerContext(req)
       if (caller?.caller === 'rpc-proxy' && caller.userId) {
+        const metadata =
+          message.metadata && typeof message.metadata === 'object'
+            ? (message.metadata as Record<string, unknown>)
+            : undefined
+        const declaresV2Authority =
+          Object.prototype.hasOwnProperty.call(message, 'authorityV2') ||
+          Boolean(
+            metadata &&
+            ['authorityV2', 'accessPathId', 'authorizationRevision'].some(key =>
+              Object.prototype.hasOwnProperty.call(metadata, key)
+            )
+          )
+        if (!caller.actionContextV2 && declaresV2Authority) {
+          badRequest(res, 'V2 authority requires authenticated V2 runtime context')
+          return
+        }
         message.sender = caller.userId
-        if (caller.teamId) {
+        if (caller.actionContextV2) {
+          const target = caller.actionContextV2.target
+          if (
+            caller.actionContextV2.operationId !== 'chat.message.invoke' ||
+            !target ||
+            target.messageId !== message.messageId ||
+            target.channelType !== message.channelType ||
+            target.channelId !== message.channelId
+          ) {
+            json(res, 403, { error: 'Runtime edge action mismatch' })
+            return
+          }
+          // Authority is server-owned. Metadata stays presentation-only and a
+          // chat-message delegation never authorizes piggyback model changes.
+          message.authorityV2 = authorityBindingFromTrustedEdge(caller.actionContextV2)
+          delete message.model
+          if (message.metadata) {
+            const sanitized = { ...message.metadata }
+            for (const key of [
+              'teamId',
+              'budget',
+              'credentialPolicy',
+              'approvalPolicy',
+              'filesystemScope',
+              'runtime',
+              'provider',
+              'model',
+              'auditOwner',
+              'authorityV2',
+            ]) {
+              delete sanitized[key]
+            }
+            message.metadata = sanitized
+          }
+        } else if (caller.teamId) {
+          // Explicit v1 compatibility adapter. V2 never copies team metadata.
           message.metadata = { ...(message.metadata ?? {}), teamId: caller.teamId }
         }
       } else {
@@ -416,20 +485,47 @@ export async function handleActivityRoute(
   handlers: RouteHandlers
 ): Promise<void> {
   try {
+    const caller = getRuntimeCallerContext(req)
+    const visibility =
+      caller?.actionContextV2?.operationId === 'host.activity.read_all' ? 'host_all' : 'caller_path'
+    if (req.query.visibility === 'host_all' && visibility !== 'host_all') {
+      json(res, 403, { error: 'Host-wide activity requires explicit current path authority' })
+      return
+    }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller?.actionContextV2?.target?.hostRef,
+        visibility,
+      })
+    ) {
+      return
+    }
     if (!handlers.activitySnapshotHandler) {
       json(res, 501, { hostRef: 'unknown', version: '1.0', items: [], nextCursor: null })
       return
     }
-    const limitRaw = String(req.query.limit || '50')
-    const limit = Number(limitRaw)
-    if (!Number.isFinite(limit) || limit <= 0) {
-      badRequest(res, 'limit must be a positive number')
+    const parsedLimit = validateHostActivityLimit(req.query.limit)
+    if (!parsedLimit.ok) {
+      badRequest(res, parsedLimit.error)
       return
     }
+    const limit = parsedLimit.limit
     const sinceEventId =
       typeof req.query.sinceEventId === 'string' ? req.query.sinceEventId : undefined
-    const snapshot = await handlers.activitySnapshotHandler(limit, sinceEventId)
-    json(res, 200, snapshot)
+    const snapshot = await handlers.activitySnapshotHandler(
+      limit,
+      sinceEventId,
+      caller?.actionContextV2?.operationId === 'host.activity.read'
+        ? {
+            userId: caller.actionContextV2.userId,
+            accessPathId: caller.actionContextV2.accessPathId,
+          }
+        : undefined
+    )
+    json(res, 200, {
+      ...snapshot,
+      items: snapshot.items.map(publicActivityEvent),
+    })
   } catch (error) {
     logger.error({ err: error }, '[Server] Error getting activity snapshot')
     json(res, 500, { error: 'Activity unavailable' })
@@ -441,13 +537,60 @@ function writeSseEvent(res: Response, eventName: string, data: unknown): void {
   res.write(`data: ${JSON.stringify(data)}\n\n`)
 }
 
+function writeActivitySsePayload(
+  res: Response,
+  eventName: string,
+  serializedData: string
+): boolean {
+  return res.write(`event: ${eventName}\ndata: ${serializedData}\n\n`)
+}
+
+function writeActivitySseEvent(res: Response, eventName: string, data: unknown): boolean {
+  return writeActivitySsePayload(res, eventName, JSON.stringify(data))
+}
+
+function publicActivityEvent(event: HostActivityEvent): Omit<HostActivityEvent, 'authorityV2'> {
+  const { authorityV2: _internalVisibilityBinding, ...publicEvent } = event
+  return publicEvent
+}
+
 export async function handleActivityStreamRoute(
   req: Request,
   res: Response,
   handlers: RouteHandlers
 ): Promise<void> {
+  const caller = getRuntimeCallerContext(req)
+  const actionContext = caller?.actionContextV2
+  const operationId =
+    actionContext?.operationId === 'host.activity.read' ||
+    actionContext?.operationId === 'host.activity.read_all'
+      ? actionContext.operationId
+      : null
+  if (actionContext && !operationId) {
+    json(res, 403, { error: 'Activity stream requires an explicit activity operation' })
+    return
+  }
+  const visibility = operationId === 'host.activity.read_all' ? 'host_all' : 'caller_path'
+  if (req.query.visibility === 'host_all' && visibility !== 'host_all') {
+    json(res, 403, { error: 'Host-wide activity requires explicit current path authority' })
+    return
+  }
+  if (
+    rejectV2TargetMismatch(req, res, {
+      hostRef: actionContext?.target?.hostRef,
+      visibility,
+    })
+  ) {
+    return
+  }
   if (!handlers.activityStreamHandler) {
     json(res, 501, { error: 'Activity stream unavailable' })
+    return
+  }
+
+  const checkpoint = handlers.activityStreamCheckpointHandler
+  if (operationId && !checkpoint) {
+    json(res, 503, { error: 'Activity authority unavailable' })
     return
   }
 
@@ -456,33 +599,168 @@ export async function handleActivityStreamRoute(
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders()
 
+  const pendingEvents: string[] = []
+  const configuredEventLimit = config.activityMaxEventBytes
+  const maximumEventBytes =
+    Number.isSafeInteger(configuredEventLimit) && configuredEventLimit > 0
+      ? configuredEventLimit
+      : 2_048
   let unsubscribe: (() => void) | null = null
-  const cleanup = (reason: string) => {
-    if (unsubscribe) {
-      unsubscribe()
-      unsubscribe = null
+  let closed = false
+  let draining = false
+  let keepalive: ReturnType<typeof setInterval> | null = null
+  let expiryTimer: ReturnType<typeof setTimeout> | null = null
+  const cleanup = (reason?: string, endResponse = true, emitCloseEvent = true) => {
+    if (closed) return
+    closed = true
+    pendingEvents.length = 0
+    if (keepalive) {
+      clearInterval(keepalive)
+      keepalive = null
     }
-    writeSseEvent(res, 'closed', { reason })
-    res.end()
+    if (expiryTimer) {
+      clearTimeout(expiryTimer)
+      expiryTimer = null
+    }
+    if (unsubscribe) {
+      const stop = unsubscribe
+      unsubscribe = null
+      try {
+        stop()
+      } catch {
+        // A failed unsubscribe must not prevent transport cleanup.
+      }
+    }
+    if (reason && emitCloseEvent && !res.writableEnded) {
+      writeActivitySseEvent(res, 'closed', { reason })
+    }
+    if (endResponse && !res.writableEnded) {
+      res.end()
+    }
+  }
+
+  const closeForCheckpointError = (error: unknown) => {
+    cleanup(
+      error instanceof RuntimeActionAuthorityError && error.code === 'access_path_stale'
+        ? 'authority_denied'
+        : 'authority_unavailable'
+    )
+  }
+
+  const drainPendingEvents = async (): Promise<void> => {
+    if (draining || closed || !operationId || !actionContext || !checkpoint) return
+    draining = true
+    try {
+      const binding = authorityBindingFromTrustedEdge(actionContext)
+      while (!closed && pendingEvents.length > 0) {
+        const serializedEvent = pendingEvents.shift()
+        if (!serializedEvent) continue
+        try {
+          assertRuntimeActionCurrent(actionContext, operationId)
+          const decision = await checkpoint(binding)
+          if (closed) return
+          assertRuntimeActionCurrent(actionContext, operationId)
+          if (decision !== 'allowed') {
+            cleanup(decision === 'denied' ? 'authority_denied' : 'authority_unavailable')
+            return
+          }
+          if (!writeActivitySsePayload(res, 'activity', serializedEvent)) {
+            cleanup('client_backpressure', true, false)
+            return
+          }
+        } catch (error) {
+          if (closed) return
+          closeForCheckpointError(error)
+          return
+        }
+      }
+    } finally {
+      draining = false
+      if (!closed && pendingEvents.length > 0) void drainPendingEvents()
+    }
+  }
+
+  const onActivity = (event: HostActivityEvent) => {
+    if (closed) return
+    if (
+      operationId === 'host.activity.read' &&
+      (event.authorityV2?.userId !== actionContext?.userId ||
+        event.authorityV2?.accessPathId !== actionContext?.accessPathId)
+    ) {
+      return
+    }
+    let serializedEvent: string
+    try {
+      serializedEvent = JSON.stringify(publicActivityEvent(event))
+    } catch {
+      cleanup('stream_overloaded')
+      return
+    }
+    if (Buffer.byteLength(serializedEvent, 'utf8') > maximumEventBytes) {
+      cleanup('stream_overloaded')
+      return
+    }
+    if (!operationId) {
+      if (!writeActivitySsePayload(res, 'activity', serializedEvent)) {
+        cleanup('client_backpressure', true, false)
+      }
+      return
+    }
+    if (pendingEvents.length >= MAX_PENDING_ACTIVITY_STREAM_EVENTS) {
+      cleanup('stream_overloaded')
+      return
+    }
+    pendingEvents.push(serializedEvent)
+    void drainPendingEvents()
   }
 
   try {
-    const registration = handlers.activityStreamHandler((event: HostActivityEvent) => {
-      writeSseEvent(res, 'activity', event)
-    })
-    unsubscribe = registration.unsubscribe
-    writeSseEvent(res, 'open', { hostRef: registration.hostRef, ts: new Date().toISOString() })
+    if (operationId && actionContext) {
+      const expiresAt = Date.parse(actionContext.expiresAt)
+      const expireStream = () => {
+        if (closed) return
+        const remainingMs = expiresAt - Date.now()
+        if (remainingMs <= 0) {
+          cleanup('authority_expired')
+          return
+        }
+        expiryTimer = setTimeout(expireStream, Math.min(remainingMs, 2_147_483_647))
+      }
+      expireStream()
+      if (closed) return
+    }
 
-    const keepalive = setInterval(() => {
-      res.write(': keepalive\n\n')
+    const registration = handlers.activityStreamHandler(onActivity)
+    unsubscribe = registration.unsubscribe
+    if (closed) {
+      unsubscribe()
+      unsubscribe = null
+      return
+    }
+    if (
+      !writeActivitySseEvent(res, 'open', {
+        hostRef: registration.hostRef,
+        ts: new Date().toISOString(),
+      })
+    ) {
+      cleanup('client_backpressure', true, false)
+      return
+    }
+
+    keepalive = setInterval(() => {
+      if (operationId && actionContext && Date.parse(actionContext.expiresAt) <= Date.now()) {
+        cleanup('authority_expired')
+        return
+      }
+      if (!res.write(': keepalive\n\n')) cleanup('client_backpressure', true, false)
     }, 15000)
 
-    req.on('close', () => {
-      clearInterval(keepalive)
-      if (unsubscribe) unsubscribe()
-    })
+    res.on('close', () => cleanup(undefined, false))
   } catch {
-    writeSseEvent(res, 'error', { message: 'Activity stream unavailable' })
+    if (!writeActivitySseEvent(res, 'error', { message: 'Activity stream unavailable' })) {
+      cleanup('client_backpressure', true, false)
+      return
+    }
     cleanup('upstream_unavailable')
   }
 }
@@ -522,10 +800,23 @@ export async function handleApprovalRoute(
     const userId =
       caller?.caller === 'rpc-proxy' ? caller.userId : (parsed.userId as string | undefined)
     const requestId = parsed.requestId as string | undefined
-    if (!userId || !requestId) {
+    const requestIdValidation = validateHostApprovalRequestId(requestId)
+    if (!userId || !requestIdValidation.ok) {
       badRequest(res, 'Missing userId or requestId')
       return
     }
+    const validatedRequestId = requestIdValidation.requestId as string
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller?.actionContextV2?.target?.hostRef,
+        taskId: typeof parsed.taskId === 'string' ? parsed.taskId.trim() : undefined,
+        action: approved ? 'approve' : 'deny',
+        approvalRequestId: validatedRequestId,
+      })
+    ) {
+      return
+    }
+
     let channelType = parsed.channelType as string | undefined
     let channelId = parsed.channelId as string | undefined
     if (caller?.caller === 'rpc-proxy') {
@@ -555,7 +846,7 @@ export async function handleApprovalRoute(
 
     const decision: ApprovalDecision = {
       userId,
-      requestId,
+      requestId: validatedRequestId,
       approved,
       alwaysApprove: approved && alwaysApprove,
       channelType,
@@ -563,7 +854,7 @@ export async function handleApprovalRoute(
     }
 
     logger.info(
-      { detail: approved ? 'Approval' : 'Denial', userId: userId, requestId: requestId },
+      { detail: approved ? 'Approval' : 'Denial', userId, requestId: validatedRequestId },
       '[Server] from for request'
     )
     const result = await handlers.approvalHandler(decision)
@@ -1144,6 +1435,15 @@ export async function handleTaskResultRoute(
   handlers: RouteHandlers
 ): Promise<void> {
   try {
+    const caller = getRuntimeCallerContext(req)
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller?.actionContextV2?.target?.hostRef,
+        taskId,
+      })
+    ) {
+      return
+    }
     if (!handlers.taskResultHandler) {
       json(res, 501, { success: false, error: 'Task result handler not configured' })
       return
@@ -1213,6 +1513,14 @@ export async function handleSessionsListRoute(
       badRequest(res, 'Invalid session agent')
       return
     }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent,
+      })
+    ) {
+      return
+    }
     const cursor = parseSessionsCursorParam(
       req.query.cursor,
       sessionsCursorScope(caller.userId, agent)
@@ -1242,8 +1550,9 @@ export async function handleSessionsListRoute(
 
 /**
  * T3.1 — GET /v1/runtime/sessions/search. Authenticated full-text search over
- * the JWT-derived user's history. `userSub` comes from the verified token;
- * caller-supplied `?user=` is silently ignored.
+ * the trusted-edge user's history. `userSub` comes from rpc-proxy's validated
+ * action context (or its isolated v1 edge adapter); caller-supplied `?user=`
+ * is silently ignored.
  *
  * Status codes:
  *   - 200: results returned (possibly empty).
@@ -1258,13 +1567,20 @@ export async function handleSessionSearchRoute(
   handlers: RouteHandlers
 ): Promise<void> {
   try {
-    const auth = (req as Request & { auth?: { sub: string } }).auth
-    if (!auth?.sub) {
-      json(res, 401, { error: 'Missing token' })
+    const caller = getRuntimeCallerContext(req)
+    if (caller?.caller !== 'rpc-proxy' || !caller.userId) {
+      json(res, 401, { error: 'Missing rpc edge caller context' })
       return
     }
     if (!handlers.sessionSearchHandler) {
       json(res, 501, { error: 'Session search handler not configured' })
+      return
+    }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+      })
+    ) {
       return
     }
 
@@ -1283,7 +1599,7 @@ export async function handleSessionSearchRoute(
     const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 20, 1), 50)
 
     const result = await handlers.sessionSearchHandler({
-      userSub: auth.sub,
+      userSub: caller.userId,
       query: q,
       scope,
       channelType,
@@ -1312,6 +1628,15 @@ export async function handleSessionMessagesRoute(
     const chatId = String(req.params.chatId || '').trim()
     if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
       badRequest(res, 'Invalid agent or chatId')
+      return
+    }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent,
+        chatId,
+      })
+    ) {
       return
     }
     const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
@@ -1433,6 +1758,16 @@ export async function handleModelsListRoute(
       return
     }
     const chatId = typeof req.query.chatId === 'string' ? req.query.chatId.trim() : ''
+    const agent = typeof req.query.agent === 'string' ? req.query.agent.trim() : ''
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent: agent || undefined,
+        chatId: chatId || undefined,
+      })
+    ) {
+      return
+    }
     const result = await handlers.modelsListHandler(
       caller.userId,
       caller.hostRef,
@@ -1467,19 +1802,23 @@ export async function handleSetModelRoute(
       return
     }
     const body = (req.body as Record<string, unknown>) || {}
-    const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : ''
-    const model = typeof body.model === 'string' ? body.model.trim() : ''
-    if (!chatId) {
-      badRequest(res, 'chatId is required')
+    const modelRequest = validateHostModelSelectionRequest(body)
+    if (!modelRequest.ok) {
+      badRequest(res, modelRequest.error)
       return
     }
-    if (!model) {
-      badRequest(res, 'model is required')
-      return
-    }
-    const expectedRevision = body.expectedRevision
-    if (expectedRevision !== undefined && !isNonNegativeSafeInteger(expectedRevision)) {
-      badRequest(res, 'expectedRevision must be a non-negative integer')
+    const { chatId, model, expectedRevision } = modelRequest
+    const agent = typeof body.agent === 'string' ? body.agent.trim() : ''
+    const provider = typeof body.provider === 'string' ? body.provider.trim() : ''
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent: agent || undefined,
+        chatId,
+        provider: provider || undefined,
+        model,
+      })
+    ) {
       return
     }
     const result = await handlers.setModelHandler(
@@ -1543,6 +1882,16 @@ export async function handleSetTitleRoute(
       badRequest(res, 'Invalid agent or chatId')
       return
     }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent,
+        chatId,
+        action: 'rename',
+      })
+    ) {
+      return
+    }
     if (!handlers.setTitleHandler) {
       json(res, 501, { error: 'Set title handler not configured' })
       return
@@ -1573,6 +1922,15 @@ export async function handleProgressStreamRoute(
   taskId: string,
   handlers: RouteHandlers
 ): Promise<void> {
+  const caller = getRuntimeCallerContext(req)
+  if (
+    rejectV2TargetMismatch(req, res, {
+      hostRef: caller?.actionContextV2?.target?.hostRef,
+      taskId,
+    })
+  ) {
+    return
+  }
   if (!handlers.progressStreamHandler) {
     json(res, 501, { error: 'Progress stream unavailable' })
     return
