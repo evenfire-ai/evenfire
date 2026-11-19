@@ -2826,10 +2826,12 @@ export class AppService {
       resource = await this.gfsClient.resolveUri(uri, token)
     } catch (error) {
       if (!stillCurrent()) return { status: 'superseded' }
-      // The renderer shows one generic message for every failure cause.
+      // The renderer shows one generic message for every failure cause. Only
+      // the error class is logged: GfsUriError messages embed the URI the
+      // renderer sent, and a CR/LF in it would forge log lines.
       console.warn(
         '[AppService] GFS navigation resolve failed:',
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.name : typeof error
       )
       return { status: 'unavailable' }
     }

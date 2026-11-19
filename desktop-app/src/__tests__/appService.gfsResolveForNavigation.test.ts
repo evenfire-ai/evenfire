@@ -298,6 +298,36 @@ describe('AppService.resolveGfsUriForNavigation (S-10)', () => {
     expect(requests).toHaveLength(1)
   })
 
+  it('logs a malformed-URI failure without echoing the URI into the log', async () => {
+    const service = activeService()
+    const hostile = 'gfs://main\r\n[AppService] forged line'
+    const { parseGfsUri, GfsUriError } = await import('../gfs/uriHandler.js')
+    // Guards the premise: the real parser rejects this URI with a message that
+    // carries the raw CR/LF, which is what a verbatim log would replay.
+    let parserError: unknown
+    try {
+      parseGfsUri(hostile)
+    } catch (error) {
+      parserError = error
+    }
+    expect(parserError).toBeInstanceOf(GfsUriError)
+    expect((parserError as Error).message).toContain('\r\n[AppService] forged line')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await expect(service.resolveGfsUriForNavigation(hostile)).resolves.toEqual({
+        status: 'unavailable',
+      })
+      expect(warn).toHaveBeenCalledTimes(1)
+      const logged = warn.mock.calls[0]!.map(String).join(' ')
+      expect(logged).toContain('GFS navigation resolve failed')
+      expect(logged).not.toMatch(/[\r\n]/)
+      expect(logged).not.toContain('forged line')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it.each([
     ['me is null (restore in progress)', (s: ServiceState) => (s.me = null)],
     ['GFS dispatch is blocked', (s: ServiceState) => (s.gfsDispatchBlocked = true)],
