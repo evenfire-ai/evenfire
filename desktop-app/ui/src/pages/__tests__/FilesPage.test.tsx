@@ -36,6 +36,65 @@ vi.mock('@hooks/domain/useGfsBrowserController', () => ({
   GFS_UNAVAILABLE_LOCATION_MESSAGE: 'This folder or file is no longer available.',
 }))
 
+// These suites inject a Share dialog's sharing state next to the mocked
+// controller, the way they inject its affordances. The shim ignores which
+// target the writes name; that the dialog passes its own target is covered by
+// the delegation lifecycle suite against the real hook. The access hook reads it
+// from the latest controller mock: the open location's authority for the
+// current resource, the row's otherwise.
+const accessMock = vi.hoisted(() => {
+  type Acl = Record<string, unknown> & {
+    current?: { resourceId: string } | null
+    affordances?: unknown
+    rowAffordancesByResourceId?: Record<string, unknown>
+    rowAffordancesResourceId?: string | null
+    rowAffordances?: unknown
+  }
+  const call = (fn: unknown, ...args: unknown[]) =>
+    typeof fn === 'function' ? (fn as (...rest: unknown[]) => unknown)(...args) : undefined
+  return {
+    useGfsResourceAccess: (target: { resourceId: string } | null) => {
+      const ctrl = (hookMock.useGfsBrowserController.mock.results.at(-1)?.value ?? {}) as Acl
+      const resourceId = target?.resourceId
+      const isCurrent = ctrl.current?.resourceId === resourceId
+      const affordances = isCurrent
+        ? (ctrl.affordances ?? null)
+        : ((resourceId ? ctrl.rowAffordancesByResourceId?.[resourceId] : undefined) ??
+          (ctrl.rowAffordancesResourceId === resourceId ? ctrl.rowAffordances : null) ??
+          null)
+      return {
+        affordances,
+        affordancesError: isCurrent ? (ctrl.affordancesError ?? null) : null,
+        loadingAffordances: isCurrent ? Boolean(ctrl.loadingAffordances) : false,
+        revalidateAffordances: async () => {
+          if (isCurrent) await call(ctrl.revalidateAffordances)
+        },
+        grants: ctrl.grants ?? [],
+        grantsError: ctrl.grantsError ?? null,
+        loadingGrants: Boolean(ctrl.loadingGrants),
+        refreshGrants: async () => call(ctrl.refreshGrants),
+        shares: ctrl.shares ?? [],
+        sharesError: ctrl.sharesError ?? null,
+        loadingShares: Boolean(ctrl.loadingShares),
+        refreshShares: async () => call(ctrl.refreshShares),
+        inheritedAccess: ctrl.inheritedAccess ?? [],
+        inheritedCoverage: ctrl.inheritedCoverage ?? 'complete',
+        loadingInheritedAccess: Boolean(ctrl.loadingInheritedAccess),
+        inheritedAccessError: ctrl.inheritedAccessError ?? null,
+        refreshInheritedAccess: async () => call(ctrl.refreshInheritedAccess),
+        retry: async () => undefined,
+        grant: (_target: unknown, ...args: unknown[]) => call(ctrl.grant, ...args),
+        revokeGrant: (_target: unknown, grantId: string) => call(ctrl.revokeGrant, grantId),
+        revoking: Boolean(ctrl.revoking),
+        revokeShare: (_target: unknown, shareId: string) => call(ctrl.revokeShare, shareId),
+        revokingShare: Boolean(ctrl.revokingShare),
+      }
+    },
+  }
+})
+
+vi.mock('@hooks/domain/useGfsResourceAccess', () => accessMock)
+
 function baseController() {
   return {
     current: null,
@@ -74,30 +133,12 @@ function baseController() {
     openChild: vi.fn(),
     goToCrumb: vi.fn(),
     restoreCrumbs: vi.fn(),
-    grant: vi.fn(),
-    grants: [],
-    grantsError: null,
-    loadingGrants: false,
-    refreshGrants: vi.fn(),
-    inheritedAccess: [],
-    inheritedCoverage: 'complete',
-    loadingInheritedAccess: false,
-    refreshInheritedAccess: vi.fn(),
-    revokeGrant: vi.fn(),
-    revoking: false,
-    shares: [],
-    sharesError: null,
-    loadingShares: false,
-    refreshShares: vi.fn(),
-    revokeShare: vi.fn(),
-    revokingShare: false,
     accessState: 'active',
     readAccessState(this: { accessState: string }) {
       return this.accessState
     },
     retryAccess: vi.fn(),
     handleAuthorityFailure: vi.fn(() => false),
-    createShare: vi.fn(),
     createFolder: vi.fn(),
     createFile: vi.fn(),
     createFileFromPath: vi.fn(),
@@ -109,7 +150,6 @@ function baseController() {
     deleteResource: vi.fn(),
     mutating: false,
     reset: vi.fn(),
-    refreshAffordances: vi.fn(),
     discoveryFailure: null,
     retryDiscovery: vi.fn(),
     authorityPending: false,
@@ -2039,6 +2079,179 @@ describe('FilesPage', () => {
     // controller does not navigate, so it stays on the parent folder).
     expect(screen.getByRole('dialog')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'People with access' })).toBeTruthy()
+  })
+
+  describe('Share across a session change', () => {
+    const SCOPE_A = 'env-1:user-1:team-a'
+    const SCOPE_B = 'env-1:user-1:team-b'
+    const manageAuthority = {
+      held: ['read', 'write', 'manage_acl'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }
+    const folderA: GfsCrumb = {
+      resourceId: 'folder-a',
+      gfsUri: 'gfs://main/folder-a',
+      name: 'Team A folder',
+      kind: 'directory',
+      version: 1,
+      bytes: 0,
+    }
+    const fileRow = {
+      resourceId: 'file-a',
+      rid: 'file-a',
+      gfsUri: 'gfs://main/file-a',
+      drive: 'main',
+      parentResourceId: 'folder-a',
+      name: 'team-a-report.txt',
+      kind: 'file' as const,
+      path: '/Team A folder/team-a-report.txt',
+      version: 3,
+      bytes: 64,
+    }
+    const folderRow = (resourceId: string, name: string) => ({
+      resourceId,
+      rid: resourceId,
+      gfsUri: `gfs://main/${resourceId}`,
+      drive: 'main',
+      parentResourceId: null,
+      name,
+      kind: 'directory' as const,
+      path: `/${name}`,
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read', 'manage_acl'],
+      coversDescendants: true,
+    })
+
+    // The real controller drops its location when the session changes.
+    function sessionController(initialCrumbs: GfsCrumb[], rootRows: unknown[]) {
+      const restoreCrumbs = vi.fn()
+      const session: { switchTo: (scope: string, nextCrumbs?: GfsCrumb[]) => void } = {
+        switchTo: () => undefined,
+      }
+      function useController() {
+        const [crumbs, setCrumbs] = useState<GfsCrumb[]>(initialCrumbs)
+        const [scope, setScope] = useState(SCOPE_A)
+        session.switchTo = (next, nextCrumbs = []) => {
+          setScope(next)
+          setCrumbs(nextCrumbs)
+        }
+        const current = crumbs.at(-1) ?? null
+        return {
+          ...baseController(),
+          sessionScope: scope,
+          current,
+          crumbs,
+          items: current?.resourceId === 'folder-a' ? [fileRow] : [],
+          accessibleResources: current ? [] : rootRows,
+          affordances: current ? manageAuthority : null,
+          rowAffordancesByResourceId: { 'file-a': manageAuthority },
+          openResource: (resource: typeof fileRow) =>
+            setCrumbs(previous => [
+              ...previous,
+              {
+                resourceId: resource.resourceId,
+                gfsUri: resource.gfsUri,
+                name: resource.name,
+                kind: resource.kind,
+                version: resource.version,
+                bytes: resource.bytes,
+              },
+            ]),
+          restoreCrumbs: (next: GfsCrumb[]) => {
+            restoreCrumbs(next)
+            setCrumbs(next)
+          },
+        }
+      }
+      return { useController, restoreCrumbs, session }
+    }
+
+    it('never restores a file Share location of the replaced session', async () => {
+      const { useController, restoreCrumbs, session } = sessionController(
+        [folderA],
+        [folderRow('folder-b', 'Team B folder')]
+      )
+      hookMock.useGfsBrowserController.mockImplementation(useController)
+      renderFilesPage()
+
+      installControllerPermissionQuery()
+      fireEvent.click(await screen.findByRole('button', { name: 'Share team-a-report.txt' }))
+      expect(
+        await screen.findByRole('dialog', { name: 'Share file team-a-report.txt' })
+      ).toBeTruthy()
+
+      await act(async () => session.switchTo(SCOPE_B))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Share Team B folder' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Share folder Team B folder' })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close share dialog' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+      expect(restoreCrumbs).not.toHaveBeenCalled()
+      expect(screen.queryByText('Team A folder')).toBeNull()
+      expect(
+        (screen.getByRole('button', { name: 'Shared with me' }) as HTMLButtonElement).disabled
+      ).toBe(true)
+    })
+
+    it('drops the replaced session Share location before any later dialog can restore it', async () => {
+      const { useController, restoreCrumbs, session } = sessionController(
+        [folderA],
+        [folderRow('folder-b', 'Team B folder')]
+      )
+      hookMock.useGfsBrowserController.mockImplementation(useController)
+      renderFilesPage()
+
+      installControllerPermissionQuery()
+      fireEvent.click(await screen.findByRole('button', { name: 'Share team-a-report.txt' }))
+      expect(
+        await screen.findByRole('dialog', { name: 'Share file team-a-report.txt' })
+      ).toBeTruthy()
+
+      // The new session lands on a folder of its own.
+      await act(async () =>
+        session.switchTo(SCOPE_B, [
+          {
+            ...folderA,
+            resourceId: 'folder-b',
+            gfsUri: 'gfs://main/folder-b',
+            name: 'Team B folder',
+          },
+        ])
+      )
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+      await chooseResourceAction('Team B folder', 'New folder')
+      const newFolderDialog = await screen.findByRole('dialog', { name: 'New folder' })
+      fireEvent.click(within(newFolderDialog).getByRole('button', { name: 'Cancel' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+      expect(restoreCrumbs).not.toHaveBeenCalled()
+      expect(screen.queryByText('Team A folder')).toBeNull()
+    })
+
+    it('closes a folder Share opened under the replaced session', async () => {
+      const { useController, session } = sessionController(
+        [],
+        [folderRow('folder-shared', 'Shared folder')]
+      )
+      hookMock.useGfsBrowserController.mockImplementation(useController)
+      renderFilesPage()
+
+      installControllerPermissionQuery()
+      fireEvent.click(await screen.findByRole('button', { name: 'Share Shared folder' }))
+      expect(await screen.findByRole('dialog', { name: 'Share folder Shared folder' })).toBeTruthy()
+
+      await act(async () => session.switchTo(SCOPE_B))
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      expect(screen.getByRole('button', { name: 'Share Shared folder' })).toBeTruthy()
+    })
   })
 
   it('returns to Shared with me after closing Manage for a file row', async () => {
@@ -4127,7 +4340,7 @@ describe('FilesPage', () => {
         grantableBits: [],
         canCreateShare: false,
       },
-      refreshAffordances,
+      revalidateAffordances: refreshAffordances,
     })
 
     renderFilesPage()
@@ -6734,7 +6947,8 @@ describe('FilesPage', () => {
         name: 'Share',
       })
     )
-    await waitFor(() => expect(openResource).toHaveBeenCalledWith(nestedFolder))
+    expect(await screen.findByRole('dialog', { name: 'Share folder Nested' })).toBeTruthy()
+    expect(openResource).not.toHaveBeenCalled()
   })
 
   it('keeps row folder menus limited to actions available on that folder', async () => {

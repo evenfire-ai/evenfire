@@ -98,7 +98,6 @@ function baseController() {
     deleteResource: vi.fn(),
     mutating: false,
     reset: vi.fn(),
-    refreshAffordances: vi.fn(),
     discoveryFailure: null,
     retryDiscovery: vi.fn(),
     authorityPending: false,

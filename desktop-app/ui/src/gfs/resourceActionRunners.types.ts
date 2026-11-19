@@ -4,7 +4,17 @@ import type { GfsAccessState } from '@lib/gfsSessionAuthority.types'
 
 type GfsResourceOperations = ReturnType<typeof useGfsResourceOperations>
 
-export interface GfsActionRunnerDeps {
+/** What an action needs to decide whether it still belongs to the session it started under. */
+export interface GfsActionGuardDeps {
+  /** Synchronous read of the shared access flag (never a render value). */
+  readAccessState: () => GfsAccessState
+  /** The generation the renderer has published right now. */
+  publishedGeneration: () => number | null
+  /** The owner's own liveness for this action (token, session scope). */
+  isCurrent?: () => boolean
+}
+
+export interface GfsActionRunnerDeps extends GfsActionGuardDeps {
   ops: Pick<
     GfsResourceOperations,
     'renameResource' | 'createFolder' | 'deleteResource' | 'createFileFromPath'
@@ -15,12 +25,15 @@ export interface GfsActionRunnerDeps {
     resourceName: string,
     bits: readonly string[]
   ) => Promise<unknown | null>
-  /** Synchronous read of the shared access flag (never a render value). */
-  readAccessState: () => GfsAccessState
-  /** The generation the renderer has published right now. */
-  publishedGeneration: () => number | null
-  /** The owner's own liveness for this action (token, session scope). */
-  isCurrent?: () => boolean
+}
+
+/**
+ * `isCurrent`: synchronous liveness, checked after every await. `admitEffect`:
+ * the last word before a mutation, confirmed with main.
+ */
+export interface GfsActionGuards {
+  isCurrent: () => boolean
+  admitEffect: () => Promise<boolean>
 }
 
 export interface GfsActionResource {

@@ -6,10 +6,9 @@ import {
   useRef,
   useState,
 } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { createGfsUploadNameReservationBook } from '@clerum/gfs-interaction-policy'
-import { isEditorGfsPermissions, planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
 import {
   Badge,
   Button,
@@ -63,7 +62,6 @@ import {
 import { fetchGfsAuthority, requireFreshGfsPermissions } from '@lib/gfsFreshPermissions'
 import type { GfsFreshPermissionsContext } from '@lib/gfsFreshPermissions.types'
 import {
-  describeGfsGrantError,
   describeGfsReadError,
   isRateLimited,
   parseHttpStatus,
@@ -77,18 +75,6 @@ import { copyGfsDeepLink, copyGfsResourceId } from '@lib/gfsResourceClipboard'
 import { gfsRowActionAvailability } from '@lib/gfsRowActionAvailability'
 import type { GfsRowActionAvailability } from '@lib/gfsRowActionAvailability.types'
 import { formatSharedFileSize } from '@lib/sharedFiles'
-import { GfsGrantList } from '@/gfs/GfsGrantList'
-import type { GfsAccessRole } from '@/gfs/GfsGrantList'
-import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
-import { GfsInheritedAccessDialog } from '@/gfs/GfsInheritedAccessDialog'
-import type { GfsInheritedAccessDialogRequest } from '@/gfs/GfsInheritedAccessDialog/types'
-import {
-  type GfsAgentSubjectOption,
-  GfsDelegationPanel,
-  type GfsDelegationSubjectOption,
-  type GfsGrantListItem,
-} from '@/gfs/delegation'
-import type { GfsInheritedAccessSource, GfsInheritedCoverageState } from '@/gfs/delegation.types'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
 import type { GfsDragSource, GfsDropVerdict } from '@/gfs/dragSession'
@@ -102,6 +88,8 @@ import {
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
 import { GfsFilePicker } from '@/gfs/filePicker'
+import { GfsManageAccessDialog } from '@/gfs/manageAccessDialog'
+import type { GfsManageAccessDeps } from '@/gfs/manageAccessDialog.types'
 import { toastMoveOutcome } from '@/gfs/moveCommit'
 import type {
   MoveCommitExpectedSourceSnapshot,
@@ -119,139 +107,18 @@ import {
   runGfsUpload,
 } from '@/gfs/resourceActionRunners'
 import type { GfsActionRunnerDeps } from '@/gfs/resourceActionRunners.types'
-import type { TeamDirectoryResult } from '../../../src/types'
-import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
+import type { FilesPageProps, GfsDriveResource } from './FilesPage.types'
 
 function hasBit(affordances: { held?: string[] } | null | undefined, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
 }
 
-/** Maps a permission set onto the Share dialog's two roles (Editor > Read). */
-function roleForAccessPermissions(permissions: string[]): GfsAccessRole {
-  return permissions.some(permission => ['write', 'delete', 'manage_acl'].includes(permission))
-    ? 'editor'
-    : 'read'
-}
-/** The permission set a role stands for: hosts cap at read/write. */
-function rolePermissionRequest(subjectType: string, role: GfsAccessRole): string[] {
-  if (subjectType === 'host') return role === 'editor' ? ['read', 'write'] : ['read']
-  return role === 'editor' ? ['read', 'write', 'delete', 'manage_acl', 'share'] : ['read', 'share']
-}
-
-/** ["a", "b", "c"] → "a, b and c" — folder names for honest outcome toasts. */
-function joinFolderNames(names: string[]): string {
-  if (names.length <= 1) return names[0] ?? ''
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
-}
 function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
 }
 
 function hasDraggedGfsResource(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)
-}
-
-const INHERITED_DERIVATION_NOTICE =
-  'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
-// R1-H3 coverage notices (permissions.md T1 / inherited-permissions spec §7):
-// a privacy boundary and an ACL-limited ancestor are normal states, not load
-// failures, so they must not wear the failure notice above — and vice versa.
-const INHERITED_READ_BOUNDARY_NOTICE = 'There may be access from parent folders you cannot see.'
-const INHERITED_READ_BOUNDARY_HINT =
-  'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
-const INHERITED_ACL_LIMITED_NOTICE =
-  'Sharing details on some parent folders are not visible to you.'
-
-/**
- * A role promise is only as good as the coverage it was made under: when the
- * inherited walk did not complete, an ancestor the user cannot see may still
- * grant a stronger role. The success copy then states what was NOT verified
- * instead of promising an effective role the client never proved.
- *
- * The Desktop's role copy carries no trailing period, so the qualifier
- * brings its own.
- */
-function inheritedCoverageCaveat(coverage: GfsInheritedCoverageState | null): string {
-  if (coverage === 'complete') return ''
-  if (coverage === 'read-boundary') {
-    return '. Access through parent folders you cannot see was not verified.'
-  }
-  if (coverage === 'acl-limited') {
-    return '. Access through some parent folders was not verified because their sharing details are not visible to you.'
-  }
-  return '. Inherited access could not be verified, so access through parent folders you cannot see may still be stronger.'
-}
-
-/**
- * Folders whose SHARING entries still grant Editor after a downgrade (R1-M5):
- * a role change rewrites the folder's GRANT row only, so a share row survives
- * it and the member keeps Editor through it. The confirmation discloses these
- * BEFORE the user approves; the post-change toast repeats the disclosure.
- */
-function collectResidualEditorFolderNames(
-  sources: readonly GfsInheritedAccessSource[],
-  directShares: readonly { permissions: string[] }[],
-  directName: string
-): string[] {
-  return [
-    ...new Set([
-      ...sources
-        .filter(source =>
-          source.shareEntries.some(entry => isEditorGfsPermissions(entry.permissions))
-        )
-        .map(source => source.name),
-      ...(directShares.some(share => isEditorGfsPermissions(share.permissions))
-        ? [directName]
-        : []),
-    ]),
-  ]
-}
-
-function delegationSubjectOptions(
-  directory: TeamDirectoryResult | undefined
-): GfsDelegationSubjectOption[] {
-  if (!directory) return []
-  const options = new Map<string, GfsDelegationSubjectOption>()
-  for (const item of directory.items) {
-    options.set(`team:${item.team.id}`, {
-      type: 'team',
-      id: item.team.id,
-      label: item.team.name,
-      description: item.team.role,
-    })
-    for (const member of item.members) {
-      options.set(`user:${member.id}`, {
-        type: 'user',
-        id: member.id,
-        label: member.name || member.email,
-        description: member.email,
-      })
-    }
-  }
-  return [...options.values()].sort((left, right) =>
-    `${left.type}:${left.label}`.localeCompare(`${right.type}:${right.label}`)
-  )
-}
-
-function agentSubjectOptions(agents: MyAgentEntry[] | undefined): GfsAgentSubjectOption[] {
-  if (!agents) return []
-  const options = new Map<string, GfsAgentSubjectOption>()
-  for (const agent of agents) {
-    // Only agents with a canonical host gfsSubject are grantable targets.
-    if (agent.gfsSubject?.type !== 'host' || !agent.gfsSubject.id) continue
-    options.set(agent.gfsSubject.id, { id: agent.gfsSubject.id, name: agent.name })
-  }
-  return [...options.values()].sort((left, right) => left.name.localeCompare(right.name))
-}
-
-function pickErrorMessage(error: unknown): string | null {
-  if (!error) return null
-  return error instanceof Error ? error.message : String(error)
-}
-
-function mergeErrorMessages(...errors: unknown[]): string | null {
-  const messages = errors.map(pickErrorMessage).filter((value): value is string => Boolean(value))
-  return messages.length > 0 ? messages.join(' · ') : null
 }
 
 /** A drop destination the drag pipeline can move INTO: a grid folder row or a
@@ -368,9 +235,6 @@ export function FilesPage({
   const [createFolderParentId, setCreateFolderParentId] = useState<string | null>(null)
   const [createFolderParentName, setCreateFolderParentName] = useState<string | null>(null)
   const [createFolderError, setCreateFolderError] = useState<string | null>(null)
-  const [renameName, setRenameName] = useState('')
-  const [renameOpen, setRenameOpen] = useState(false)
-  const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<GfsActionTarget | null>(null)
   const [moveTarget, setMoveTarget] = useState<GfsActionTarget | null>(null)
   const moveDialogGenerationRef = useRef(0)
@@ -403,31 +267,14 @@ export function FilesPage({
     cleanupVersion: number
   } | null>(null)
   const [refreshingCurrent, setRefreshingCurrent] = useState(false)
-  const [manageOpen, setManageOpen] = useState(false)
-  const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
-  const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
-  // Pending parent-folder confirmation (role change or removal) for a member
-  // whose file access is inherited from ancestor folders. change-role carries
-  // the split plan's affected grant-backed folders (R1-M5: each rewritten
-  // with its OWN scope flag; share rows never touched), each with the bits
-  // the pre-flight validated on that folder itself, plus the share-only
-  // editor sources (residual access) and any unknown-scope folders skipped
-  // rather than written with a defaulted scope.
-  const [parentUpdate, setParentUpdate] = useState<
-    | {
-        row: GfsMergedAccessRow
-        label: string
-        mode: 'change-role'
-        nextRole: GfsAccessRole
-        updates: Array<{ source: GfsInheritedAccessSource; bits: string[] }>
-        residualSources: GfsInheritedAccessSource[]
-        skippedFolderNames: string[]
-        /** Folders whose sharing entries still grant Editor after the change. */
-        residualEditorFolderNames: string[]
-      }
-    | { row: GfsMergedAccessRow; label: string; mode: 'remove' }
-    | null
-  >(null)
+  // The resource the Share dialog is about, and the session it was opened
+  // under: the open location (titlebar) or a listing row, which is shared in
+  // place without navigating to it.
+  const [manageTarget, setManageTarget] = useState<{
+    resource: 'current' | GfsDriveResource
+    sessionScope: string
+    sessionGeneration: number | null
+  } | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
   // BUG-175 — live folder-zip job for the progress strip; null when idle. One
@@ -494,7 +341,7 @@ export function FilesPage({
   const uploadNameReservationsRef = useRef(createGfsUploadNameReservationBook())
   const handledRouteDialogRequestIdRef = useRef(0)
   const queryClient = useQueryClient()
-  const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  const ctrl = useGfsBrowserController()
   const seedPendingRef = useRef(false)
   const beginExplicitFilesNavigation = useCallback(() => {
     seedPendingRef.current = false
@@ -521,7 +368,6 @@ export function FilesPage({
     error,
     openError,
     resolving,
-    refreshAffordances,
   } = ctrl
   const accessibleRootResourceIds = useMemo(
     () => new Set(accessibleResources.map(resource => resource.resourceId)),
@@ -714,49 +560,8 @@ export function FilesPage({
     )
   }, [ctrl.sessionGeneration, items, queryClient, sessionScope])
 
-  const teamDirectoryQuery = useQuery({
-    queryKey: desktopQueryKeys.teamsDirectory,
-    queryFn: () => window.clerum.team.directory(),
-    enabled: Boolean(affordances?.canDelegate),
-  })
-  const delegationSubjects = useMemo(
-    () => delegationSubjectOptions(teamDirectoryQuery.data),
-    [teamDirectoryQuery.data]
-  )
-  // MY agents (with canonical gfsSubject) load when the Manage dialog opens:
-  // they feed both the agent grant section and grant-list label resolution.
-  const myAgentsQuery = useQuery({
-    queryKey: desktopQueryKeys.myAgents,
-    queryFn: () => window.clerum.agents.listMine(),
-    enabled: manageOpen,
-  })
-  const agentSubjects = useMemo(() => agentSubjectOptions(myAgentsQuery.data), [myAgentsQuery.data])
-  // Unified grant-subject list: people + teams (team directory) and the caller's
-  // own agents (canonical host subjects). Agents are badge-labelled and capped to
-  // read/write inside GfsDelegationPanel when present in the selection.
-  const grantSubjectOptions = useMemo<GfsDelegationSubjectOption[]>(
-    () => [
-      ...delegationSubjects,
-      ...agentSubjects.map(agent => ({
-        type: 'host' as const,
-        id: agent.id,
-        label: agent.name,
-        description: 'Agent',
-        badge: 'Agent',
-      })),
-    ],
-    [agentSubjects, delegationSubjects]
-  )
-  const grantsError = useMemo(
-    () => (ctrl.grantsError ? describeGfsGrantError(ctrl.grantsError) : null),
-    [ctrl.grantsError]
-  )
-  const sharesError = useMemo(
-    () => (ctrl.sharesError ? describeGfsGrantError(ctrl.sharesError) : null),
-    [ctrl.sharesError]
-  )
   const closeManage = useCallback(() => {
-    setManageOpen(false)
+    setManageTarget(null)
     const returnCrumbs = manageReturnCrumbsRef.current
     manageReturnCrumbsRef.current = null
     if (returnCrumbs) ctrl.restoreCrumbs(returnCrumbs)
@@ -774,10 +579,7 @@ export function FilesPage({
     setCreateFolderError(null)
     setCreateFolderParentId(parentResourceId)
     setCreateFolderParentName(parentName)
-    setRenameOpen(false)
-    setDeleteOpen(false)
-    setShareDetailsOpen(false)
-    setManageOpen(false)
+    setManageTarget(null)
     setCreateFolderOpen(true)
   }, [])
 
@@ -801,14 +603,12 @@ export function FilesPage({
     uploadTargetRef.current = null
     setCreateFolderParentId(null)
     setCreateFolderParentName(null)
-    setManageOpen(false)
+    setManageTarget(null)
     closeMoveDialog()
     setRenameTarget(null)
     setDeleteTarget(null)
     setOpenLinkOpen(false)
     setCreateFolderOpen(false)
-    setRenameOpen(false)
-    setDeleteOpen(false)
   }, [accessRevoked])
   /** Central imperative boundary: route any non-query GFS failure through the
    *  controller's authority classifier before toasting. Returns true when the
@@ -980,24 +780,6 @@ export function FilesPage({
   )
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
-  // An incomplete inherited derivation becomes a quiet notice in the Share
-  // dialog: an empty derived list alone would silently read as "no one else
-  // has access" (R1-M3). R1-H3: rows folded before a walk stop are still
-  // rendered — the notice only discloses what is missing, choosing accurate
-  // copy per coverage state (boundary states are not load failures).
-  const inheritedAccessNotice = ctrl.inheritedAccessError
-    ? INHERITED_DERIVATION_NOTICE
-    : ctrl.inheritedCoverage === 'read-boundary'
-      ? INHERITED_READ_BOUNDARY_NOTICE
-      : ctrl.inheritedCoverage === 'acl-limited'
-        ? INHERITED_ACL_LIMITED_NOTICE
-        : ctrl.inheritedCoverage === 'unavailable'
-          ? INHERITED_DERIVATION_NOTICE
-          : null
-  const inheritedAccessNoticeHint =
-    !ctrl.inheritedAccessError && ctrl.inheritedCoverage === 'read-boundary'
-      ? INHERITED_READ_BOUNDARY_HINT
-      : null
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
   const droppedUploadRestriction = useMemo(() => {
     if (!current) {
@@ -1021,11 +803,6 @@ export function FilesPage({
     return null
   }, [affordances, affordancesError, canWriteCurrent, current, currentIsFolder, loadingAffordances])
 
-  useEffect(() => {
-    if (!manageOpen || !current?.resourceId) return
-    void refreshAffordances()
-  }, [current?.resourceId, manageOpen, refreshAffordances])
-
   // Open (or focus) a preview TAB for a previewable file (spec 18 §3.B.4). The
   // preview no longer renders in a modal here: resolve the kind via the shared
   // helper and hand the descriptor to the tab store. Returns true when the file
@@ -1042,421 +819,20 @@ export function FilesPage({
   }
 
   useEffect(() => {
-    if (!manageOpen && !openLinkOpen && !moveTarget && !renameTarget && !pendingFolderMove) return
+    if (!openLinkOpen && !moveTarget && !renameTarget && !pendingFolderMove) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
-      // The parent-folder confirmation is the top-most dialog: Escape cancels
-      // it alone and leaves the Share dialog open.
-      if (parentUpdate) {
-        setParentUpdate(null)
-        return
-      }
       if (pendingFolderMove) {
         setPendingFolderMove(null)
         return
       }
-      closeManage()
       setOpenLinkOpen(false)
       closeMoveDialog()
       setRenameTarget(null)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [
-    closeManage,
-    manageOpen,
-    openLinkOpen,
-    moveTarget,
-    parentUpdate,
-    pendingFolderMove,
-    renameTarget,
-  ])
-
-  // One atomic bulk grant for every selected subject — the server grants all or
-  // none (a `subjects_invalid` rejects the whole request), so there is no
-  // partial-success outcome. People, teams, and agents share a single picker;
-  // agents are capped to read/write inside the panel. Inherit is honored for
-  // directories (default ON) and forced false for files.
-  const handleGrant = async (
-    subjectKeys: string[],
-    bits: string[],
-    inherit: boolean,
-    isDraftCurrent: () => boolean
-  ) => {
-    if (
-      !current ||
-      !(await requireFreshRowPermissions(
-        current.resourceId,
-        current.name,
-        ['manage_acl'],
-        GFS_DRIVE_MAIN,
-        bits
-      )) ||
-      !isDraftCurrent()
-    ) {
-      return
-    }
-    try {
-      await ctrl.grant(subjectKeys, bits, inherit)
-    } catch (grantError) {
-      if (failClosedOnAuthorizationError(grantError)) return
-      throw grantError
-    }
-    if (isDraftCurrent()) {
-      pushToast?.(
-        `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
-        'success'
-      )
-    }
-    // The grant PUT returns no ids — list-after-write is the revoke-id source.
-    await ctrl.refreshGrants()
-  }
-
-  const handleRevokeGrant = async (grantId: string, label: string) => {
-    if (
-      !current ||
-      !(await requireFreshRowPermissions(current.resourceId, current.name, ['manage_acl']))
-    ) {
-      return
-    }
-    try {
-      await ctrl.revokeGrant(grantId)
-      pushToast?.(`Access revoked for ${label}`, 'success')
-    } catch (revokeError) {
-      if (failClosedOnAuthorizationError(revokeError)) return
-      pushToast?.(describeGfsGrantError(revokeError).message, 'error')
-    }
-  }
-
-  const handleRevokeShare = async (shareId: string, label: string) => {
-    if (
-      !current ||
-      !(await requireFreshRowPermissions(current.resourceId, current.name, ['manage_acl']))
-    ) {
-      return
-    }
-    try {
-      await ctrl.revokeShare(shareId)
-      pushToast?.(`Shared access revoked for ${label}`, 'success')
-    } catch (revokeError) {
-      if (failClosedOnAuthorizationError(revokeError)) return
-      pushToast?.(describeGfsGrantError(revokeError).message, 'error')
-    }
-  }
-
-  const handleAccessRoleChange = async (
-    item: GfsGrantListItem,
-    label: string,
-    role: GfsAccessRole
-  ) => {
-    if (!current) return
-    const freshAuthority = await fetchRowAuthority(current.resourceId, current.name, GFS_DRIVE_MAIN)
-    if (!freshAuthority) return
-    if (!hasBit(freshAuthority, 'manage_acl')) {
-      pushToast?.(`You do not have manage access to ${current.name}.`, 'error')
-      return
-    }
-    const bits = rolePermissionRequest(item.subject.type, role).filter(bit =>
-      freshAuthority.grantableBits.includes(bit)
-    )
-    const subjectKey = item.subject.id
-      ? `${item.subject.type}:${item.subject.id}`
-      : item.subject.type
-    setUpdatingAccessRole(true)
-    try {
-      await ctrl.grant([subjectKey], bits, item.inherit)
-      pushToast?.(
-        `${label} is now ${role === 'editor' ? 'an Editor' : 'Read-only'}${inheritedCoverageCaveat(
-          ctrl.inheritedCoverage
-        )}`,
-        'success'
-      )
-      await Promise.all([ctrl.refreshGrants(), ctrl.refreshShares()])
-    } catch (roleError) {
-      if (failClosedOnAuthorizationError(roleError)) return
-      pushToast?.(describeGfsGrantError(roleError).message, 'error')
-    } finally {
-      setUpdatingAccessRole(false)
-    }
-  }
-
-  // A merged row whose access comes from parent folders: any edit (upgrade,
-  // downgrade, or removal — no exceptions) is confirmed against the affected
-  // folders before anything is sent. Cancel reverts the dropdown untouched.
-  const handleInheritedRoleChange = async (
-    row: GfsMergedAccessRow,
-    label: string,
-    role: GfsAccessRole
-  ) => {
-    const inherited = row.inherited
-    if (!inherited) return
-    const subject = inherited.subject
-    // N1: the dropdown displays the MERGED effective role (direct ⊔
-    // inherited). Re-selecting the already-displayed role is a no-op —
-    // comparing it against the inherited-only floor instead would open the
-    // parent-update modal and escalate the parent folder for a non-change.
-    if (role === roleForAccessPermissions(row.permissions)) return
-    // R1-M5 split plan: grant-backed folders are rewritten with their OWN
-    // scope flag; share-only sources are never converted into grants or
-    // deleted (residual access survives and is disclosed). Folders whose own
-    // scope flag is unknown are never written with a defaulted scope.
-    const plan = planGfsInheritedRoleChange(inherited, role === 'editor')
-    const writable = plan.grantSources.filter(source => typeof source.grantInherit === 'boolean')
-    const skippedFolderNames = plan.grantSources
-      .filter(source => typeof source.grantInherit !== 'boolean')
-      .map(source => source.name)
-    if (writable.length === 0) {
-      if (row.grant) {
-        // Direct-grant-only alignment keeps the existing confirmation path.
-        setParentUpdate({
-          row,
-          label,
-          mode: 'change-role',
-          nextRole: role,
-          updates: [],
-          residualSources: plan.shareOnlySources,
-          skippedFolderNames,
-          residualEditorFolderNames:
-            role === 'read'
-              ? collectResidualEditorFolderNames(
-                  plan.shareOnlySources,
-                  row.shares,
-                  current?.name ?? 'this file'
-                )
-              : [],
-        })
-        return
-      }
-      if (skippedFolderNames.length > 0) {
-        pushToast?.(
-          `Sharing details on ${joinFolderNames(skippedFolderNames)} could not be verified; existing access was kept.`,
-          'error'
-        )
-        return
-      }
-      // Nothing writable anywhere: explain the surviving share access.
-      if (plan.shareOnlySources.length > 0 || row.shares.length > 0) {
-        pushToast?.(
-          `${label} still has ${roleForAccessPermissions(row.permissions) === 'editor' ? 'Editor' : 'Read-only'} access from sharing entries that can't be edited here.`,
-          'info'
-        )
-      }
-      return
-    }
-    // Pre-flight: every affected folder's grant is judged by THAT folder's
-    // own grantable bits, never by the open file's affordances (which may be
-    // missing or narrower). A role a folder cannot grant fails loudly here —
-    // the confirmation never opens with a promise it cannot keep.
-    const updates: Array<{ source: GfsInheritedAccessSource; bits: string[] }> = []
-    for (const source of writable) {
-      let folderAffordances: { canDelegate: boolean; grantableBits: string[] }
-      try {
-        folderAffordances = await window.clerum.gfs.affordances(source.resourceId, GFS_DRIVE_MAIN)
-      } catch (affordancesError) {
-        if (failClosedOnAuthorizationError(affordancesError)) return
-        pushToast?.(describeGfsGrantError(affordancesError).message, 'error')
-        return
-      }
-      const bits = rolePermissionRequest(subject.type, role).filter(bit =>
-        folderAffordances.grantableBits.includes(bit)
-      )
-      const expressesRole =
-        role === 'editor' ? bits.includes('read') && bits.includes('write') : bits.includes('read')
-      if (!folderAffordances.canDelegate || !expressesRole) {
-        pushToast?.(
-          `Your access on ${source.name} does not allow making ${label} ${role === 'editor' ? 'an Editor' : 'Read-only'}.`,
-          'error'
-        )
-        return
-      }
-      updates.push({ source, bits })
-    }
-    setParentUpdate({
-      row,
-      label,
-      mode: 'change-role',
-      nextRole: role,
-      updates,
-      residualSources: plan.shareOnlySources,
-      skippedFolderNames,
-      // The surviving Editor shares are disclosed IN the confirmation, before
-      // the user approves a role that will not remove them.
-      residualEditorFolderNames:
-        role === 'read'
-          ? collectResidualEditorFolderNames(
-              [...plan.shareOnlySources, ...writable],
-              row.shares,
-              current?.name ?? 'this file'
-            )
-          : [],
-    })
-  }
-
-  const handleInheritedRemove = (row: GfsMergedAccessRow, label: string) => {
-    setParentUpdate({ row, label, mode: 'remove' })
-  }
-
-  const confirmParentUpdate = async () => {
-    const request = parentUpdate
-    const inherited = request?.row.inherited
-    if (!request || !inherited) {
-      setParentUpdate(null)
-      return
-    }
-    const sources = inherited.sources
-    const [firstSource] = sources
-    const subject = inherited.subject
-    const subjectKey = subject.id ? `${subject.type}:${subject.id}` : subject.type
-    const label = request.label
-    setParentUpdate(null)
-    setUpdatingAccessRole(true)
-    // Partial-failure honesty (R1-H1): the confirm issues several sequential
-    // calls; the first failure stops the run, refreshes both lists so the
-    // dialog shows the TRUE partial state, and the toast says exactly how far
-    // the change got. Full success is never claimed on partial completion.
-    const failPartially = async (updateError: unknown, summary: string) => {
-      if (failClosedOnAuthorizationError(updateError)) return
-      pushToast?.(`${summary} (${describeGfsGrantError(updateError).message})`, 'error')
-      await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess(), ctrl.refreshShares()])
-    }
-    try {
-      if (request.mode === 'remove') {
-        let removed = 0
-        for (const source of sources) {
-          try {
-            if (source.grantId) await ctrl.revokeGrant(source.grantId)
-            for (const shareId of source.shareIds) await ctrl.revokeShare(shareId)
-            removed += 1
-          } catch (updateError) {
-            await failPartially(
-              updateError,
-              `Removed from ${removed} of ${sources.length} folders — ${source.name} still grants access`
-            )
-            return
-          }
-        }
-        // The file's own direct rows are aligned with the removal.
-        if (request.row.grant || request.row.shares.length > 0) {
-          try {
-            if (request.row.grant) await ctrl.revokeGrant(request.row.grant.id)
-            for (const share of request.row.shares) await ctrl.revokeShare(share.id)
-          } catch (updateError) {
-            await failPartially(
-              updateError,
-              `Removed from ${sources.length} of ${sources.length} folders — direct access on ${current?.name ?? 'this file'} could not be removed`
-            )
-            return
-          }
-        }
-        pushToast?.(
-          sources.length === 1
-            ? `Access removed on ${firstSource?.name ?? current?.name ?? 'this file'} and everything inside it`
-            : `Access removed on ${sources.length} folders and everything inside them`,
-          'success'
-        )
-        await Promise.all([
-          ctrl.refreshGrants(),
-          ctrl.refreshInheritedAccess(),
-          ctrl.refreshShares(),
-        ])
-        return
-      }
-      const updates = request.updates
-      const affectedNames = updates.map(update => update.source.name)
-      let updated = 0
-      for (const { source, bits } of updates) {
-        try {
-          // Each affected folder's grant is updated with the bits the
-          // pre-flight validated on that folder, preserving the GRANT ROW'S
-          // OWN scope flag (R1-M5 — the pre-flight guaranteed a known
-          // boolean). The folder's share rows are never touched by a role
-          // change; they survive as residual access and are disclosed below.
-          await window.clerum.gfs.grant(
-            source.resourceId,
-            [subjectKey],
-            bits,
-            GFS_DRIVE_MAIN,
-            source.grantInherit === true
-          )
-          updated += 1
-        } catch (updateError) {
-          await failPartially(
-            updateError,
-            `Updated ${updated} of ${updates.length} folders — ${source.name} still grants access`
-          )
-          return
-        }
-      }
-      const partialMessages: string[] = []
-      if (request.skippedFolderNames.length > 0) {
-        partialMessages.push(
-          `Updated ${updated} of ${updates.length + request.skippedFolderNames.length} folders. Sharing details on ${joinFolderNames(request.skippedFolderNames)} could not be verified; existing access was kept.`
-        )
-      }
-      // The file's own direct GRANT is aligned so it cannot mask the
-      // confirmed role (R1-M5: a share-only direct row never gains a grant,
-      // direct shares survive role edits, and unknown/empty direct authority
-      // keeps the direct grant with an honest partial copy).
-      if (request.row.grant) {
-        try {
-          const fileBits = rolePermissionRequest(subject.type, request.nextRole).filter(bit =>
-            affordances?.grantableBits.includes(bit)
-          )
-          const expressesRole =
-            fileBits.includes('read') && (request.nextRole === 'read' || fileBits.includes('write'))
-          if (expressesRole) {
-            await ctrl.grant([subjectKey], fileBits, request.row.grant.inherit)
-          } else {
-            // N2 (R1-M5): an empty bit set means the file's affordances are
-            // unavailable (or grant nothing) — keep the direct grant AND its
-            // shares and say so; removing rights on an authority guess was
-            // the defect.
-            partialMessages.push(
-              `Updated ${updated} of ${updates.length} folders — direct access on ${current?.name ?? 'this file'} could not be fully aligned`
-            )
-          }
-        } catch (updateError) {
-          await failPartially(
-            updateError,
-            `Updated ${updates.length} of ${updates.length} folders — direct access on ${current?.name ?? 'this file'} could not be fully aligned`
-          )
-          return
-        }
-      }
-      // Residual honesty (R1-M5): a downgrade never claims effective
-      // Read-only while a surviving share entry still grants Editor.
-      const residualNames =
-        request.nextRole === 'read'
-          ? collectResidualEditorFolderNames(
-              [...request.residualSources, ...updates.map(update => update.source)],
-              request.row.shares,
-              current?.name ?? 'this item'
-            )
-          : []
-      const residualMessage =
-        residualNames.length > 0
-          ? `Sharing entries on ${joinFolderNames(residualNames)} still grant Editor access.`
-          : ''
-      if (partialMessages.length > 0) {
-        pushToast?.([...partialMessages, residualMessage].filter(Boolean).join(' '), 'error')
-      } else if (residualMessage) {
-        pushToast?.(
-          `Changed grant access to ${request.nextRole === 'editor' ? 'Editor' : 'Read-only'} on ${affectedNames.length > 0 ? joinFolderNames(affectedNames) : (current?.name ?? 'this item')}. ${residualMessage}`,
-          'info'
-        )
-      } else {
-        pushToast?.(
-          affectedNames.length > 0
-            ? `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}${inheritedCoverageCaveat(ctrl.inheritedCoverage)}`
-            : `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${current?.name ?? 'this file'}${inheritedCoverageCaveat(ctrl.inheritedCoverage)}`,
-          'success'
-        )
-      }
-      await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess(), ctrl.refreshShares()])
-    } finally {
-      setUpdatingAccessRole(false)
-    }
-  }
+  }, [openLinkOpen, moveTarget, pendingFolderMove, renameTarget])
 
   const handleDownload = async (uri: string, name: string) => {
     try {
@@ -2358,39 +1734,6 @@ export function FilesPage({
     }
   }
 
-  const handleRenameCurrent = async () => {
-    if (!current) return
-    const result = await runGfsRename(actionRunnerDeps(), current, renameName)
-    if (result.status === 'unchanged') {
-      setRenameOpen(false)
-    } else if (result.status === 'done') {
-      setRenameOpen(false)
-      pushToast?.(`Renamed to ${result.value.name}`, 'success')
-    } else if (result.status === 'failed') {
-      if (failClosedOnAuthorizationError(result.error)) return
-      pushToast?.(
-        result.error instanceof Error ? result.error.message : String(result.error),
-        'error'
-      )
-    }
-  }
-
-  const handleDeleteCurrent = async () => {
-    if (!current) return
-    const result = await runGfsDelete(actionRunnerDeps(), current)
-    if (result.status === 'done') {
-      setDeleteOpen(false)
-      closeManage()
-      pushToast?.(`Deleted ${current.name}`, 'success')
-    } else if (result.status === 'failed') {
-      if (failClosedOnAuthorizationError(result.error)) return
-      pushToast?.(
-        result.error instanceof Error ? result.error.message : String(result.error),
-        'error'
-      )
-    }
-  }
-
   const handleDeleteResource = async (resource: GfsActionTarget) => {
     const result = await runGfsDelete(actionRunnerDeps(), resource)
     setDeleteTarget(null)
@@ -2895,6 +2238,39 @@ export function FilesPage({
   const hasMoreVisible = currentIsFolder ? ctrl.hasMore : !current && ctrl.hasMoreAccessible
   const loadingMoreVisible = currentIsFolder ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
 
+  // A dialog opened under another session has nothing left to show, and the
+  // location it would return to belongs to that session too: it is dropped,
+  // never restored into the session that replaced it.
+  const manageTargetSessionCurrent =
+    manageTarget !== null &&
+    manageTarget.sessionScope === sessionScope &&
+    manageTarget.sessionGeneration === ctrl.sessionGeneration
+  const manageDialogTarget =
+    manageTarget && manageTargetSessionCurrent
+      ? manageTarget.resource === 'current'
+        ? current
+        : manageTarget.resource
+      : null
+  useEffect(() => {
+    if (!manageTarget || manageTargetSessionCurrent) return
+    manageReturnCrumbsRef.current = null
+    setManageTarget(null)
+  }, [manageTarget, manageTargetSessionCurrent])
+  const manageAccessDeps: GfsManageAccessDeps = {
+    gate: ctrl.authorityPending || accessRevoked,
+    handleAuthorityFailure: ctrl.handleAuthorityFailure,
+    failClosed: error => failClosedOnAuthorizationError(error),
+    freshPermissions: (resourceId, resourceName, bits, grantableBits) =>
+      requireFreshRowPermissions(resourceId, resourceName, bits, GFS_DRIVE_MAIN, grantableBits),
+    fetchAuthority: (resourceId, resourceName) =>
+      fetchRowAuthority(resourceId, resourceName, GFS_DRIVE_MAIN),
+    readAccessState: () => ctrl.readAccessState(),
+    publishedGeneration: () => moveWorkspaceRef.current.sessionGeneration,
+  }
+
+  // A folder row is shared in place: the browser keeps its location. A file
+  // row still opens the file first, because the open file is the only way
+  // into the current-file view (Replace, preview, download from the title).
   const openManage = (resource: GfsDriveResource) => {
     void runWithFreshResourcePermissions(
       resource,
@@ -2902,18 +2278,24 @@ export function FilesPage({
       resource.name,
       ['manage_acl'],
       () => {
+        setCreateFolderOpen(false)
+        if (resource.kind === 'directory') {
+          manageReturnCrumbsRef.current = null
+          setManageTarget({ resource, sessionScope, sessionGeneration: ctrl.sessionGeneration })
+          return
+        }
         if (resource.resourceId !== current?.resourceId) {
           beginExplicitFilesNavigation()
           manageReturnCrumbsRef.current = [...crumbs]
           ctrl.openResource(resource)
         } else {
-          manageReturnCrumbsRef.current = resource.kind === 'file' ? crumbs.slice(0, -1) : null
+          manageReturnCrumbsRef.current = crumbs.slice(0, -1)
         }
-        setCreateFolderOpen(false)
-        setRenameOpen(false)
-        setDeleteOpen(false)
-        setShareDetailsOpen(false)
-        setManageOpen(true)
+        setManageTarget({
+          resource: 'current',
+          sessionScope,
+          sessionGeneration: ctrl.sessionGeneration,
+        })
       }
     )
   }
@@ -2928,10 +2310,11 @@ export function FilesPage({
       () => {
         manageReturnCrumbsRef.current = currentIsFile ? crumbs.slice(0, -1) : null
         setCreateFolderOpen(false)
-        setRenameOpen(false)
-        setDeleteOpen(false)
-        setShareDetailsOpen(false)
-        setManageOpen(true)
+        setManageTarget({
+          resource: 'current',
+          sessionScope,
+          sessionGeneration: ctrl.sessionGeneration,
+        })
       }
     )
   }
@@ -3106,7 +2489,7 @@ export function FilesPage({
                   onClick={() => {
                     beginExplicitFilesNavigation()
                     manageReturnCrumbsRef.current = null
-                    setManageOpen(false)
+                    setManageTarget(null)
                     ctrl.reset()
                   }}
                   variant="text"
@@ -3702,203 +3085,25 @@ export function FilesPage({
         </div>
       ) : null}
 
-      {manageOpen && current ? (
-        <div
-          className="da-gfs-manage-modal"
-          role="presentation"
-          onMouseDown={event => {
-            if (event.target === event.currentTarget) closeManage()
-          }}
-        >
-          <section
-            className="da-gfs-manage-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-label={`Share ${currentIsFolder ? 'folder' : 'file'} ${current.name}`}
-          >
-            <header className="da-gfs-manage-dialog__header">
-              <span
-                className={`da-gfs-manage-dialog__icon${currentIsFolder ? ' da-gfs-manage-dialog__icon--folder' : ''}`}
-                aria-hidden="true"
-              >
-                {currentIsFolder ? <IconContexts /> : <GfsFileIcon name={current.name} />}
-              </span>
-              <span className="da-gfs-manage-dialog__heading">
-                {renameOpen ? (
-                  <form
-                    className="da-gfs-manage-dialog__title-edit"
-                    aria-label="Rename resource"
-                    onSubmit={event => {
-                      event.preventDefault()
-                      void handleRenameCurrent()
-                    }}
-                  >
-                    <TextInput
-                      aria-label="New name"
-                      autoFocus
-                      value={renameName}
-                      onChange={event => setRenameName(event.currentTarget.value)}
-                    />
-                    <Button loading={ctrl.mutating} size="sm" type="submit">
-                      Save
-                    </Button>
-                    <Button
-                      onClick={() => setRenameOpen(false)}
-                      size="sm"
-                      type="button"
-                      variant="ghost"
-                    >
-                      Cancel
-                    </Button>
-                  </form>
-                ) : (
-                  <h3>Share “{current.name}”</h3>
-                )}
-              </span>
-              <span className="da-gfs-manage-dialog__top-actions">
-                <IconButton
-                  autoFocus
-                  label="Close share dialog"
-                  onClick={closeManage}
-                  size="sm"
-                  variant="ghost"
-                >
-                  <IconClose />
-                </IconButton>
-              </span>
-            </header>
-
-            <div className="da-gfs-manage-dialog__body">
-              {canDeleteCurrent && deleteOpen ? (
-                <div className="da-gfs-inline-form" role="alertdialog" aria-label="Delete resource">
-                  <span className="da-gfs-inline-form__copy">Delete {current.name}?</span>
-                  <Button
-                    color="danger"
-                    loading={ctrl.mutating}
-                    onClick={() => void handleDeleteCurrent()}
-                    size="sm"
-                  >
-                    Delete
-                  </Button>
-                  <Button
-                    onClick={() => setDeleteOpen(false)}
-                    size="sm"
-                    type="button"
-                    variant="ghost"
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              ) : null}
-
-              <section className="da-gfs-manage-section da-gfs-manage-section--access">
-                <div className="da-gfs-manage-section__header">
-                  <div>
-                    <h4>Add people, teams, agents, or workflows</h4>
-                  </div>
-                </div>
-                {affordancesError ? <StatusBanner tone="error" text={affordancesError} /> : null}
-                {affordances ? (
-                  <GfsDelegationPanel
-                    affordances={affordances}
-                    permissionPending={loadingAffordances}
-                    permissionCheckPending={loadingAffordances}
-                    permissionCheckFailed={Boolean(affordancesError)}
-                    subjectOptions={grantSubjectOptions}
-                    subjectOptionsLoading={
-                      teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
-                    }
-                    subjectOptionsError={mergeErrorMessages(
-                      teamDirectoryQuery.error,
-                      myAgentsQuery.error
-                    )}
-                    isDirectory={currentIsFolder}
-                    onGrant={handleGrant}
-                    onDetailViewChange={setShareDetailsOpen}
-                  />
-                ) : loadingAffordances ? (
-                  <p className="muted" role="status">
-                    Refreshing permissions…
-                  </p>
-                ) : null}
-              </section>
-
-              {!shareDetailsOpen ? (
-                <section className="da-gfs-manage-section da-gfs-manage-section--grants">
-                  <div className="da-gfs-manage-section__header">
-                    <div>
-                      <h4>People with access</h4>
-                    </div>
-                  </div>
-                  <GfsGrantList
-                    agents={agentSubjects}
-                    derivationNotice={inheritedAccessNotice}
-                    derivationNoticeHint={inheritedAccessNoticeHint}
-                    error={grantsError}
-                    inheritedItems={ctrl.inheritedAccess}
-                    items={ctrl.grants}
-                    loading={
-                      ctrl.loadingGrants || ctrl.loadingShares || ctrl.loadingInheritedAccess
-                    }
-                    // FILES AND FOLDERS merge inherited rows (the reported
-                    // folder bug); the dialog itself only opens with a target.
-                    mergeInherited
-                    onChangeInheritedRole={handleInheritedRoleChange}
-                    onChangeRole={affordances?.canDelegate ? handleAccessRoleChange : undefined}
-                    onRemoveInherited={handleInheritedRemove}
-                    onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
-                    onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
-                    revoking={ctrl.revoking}
-                    revokingShare={ctrl.revokingShare}
-                    shareError={sharesError}
-                    shares={ctrl.shares}
-                    subjects={delegationSubjects}
-                    updatingRole={updatingAccessRole}
-                  />
-                </section>
-              ) : null}
-            </div>
-          </section>
-        </div>
+      {manageDialogTarget ? (
+        <GfsManageAccessDialog
+          key={manageDialogTarget.resourceId}
+          target={manageDialogTarget}
+          isCurrent={() =>
+            pageActiveRef.current &&
+            manageTarget !== null &&
+            isGfsSessionAuthorityCurrent(
+              manageTarget.sessionScope,
+              manageTarget.sessionGeneration,
+              moveWorkspaceRef.current.sessionScope,
+              moveWorkspaceRef.current.sessionGeneration
+            )
+          }
+          deps={manageAccessDeps}
+          pushToast={pushToast}
+          onClose={closeManage}
+        />
       ) : null}
-
-      <GfsInheritedAccessDialog
-        busy={updatingAccessRole}
-        request={
-          parentUpdate?.row.inherited
-            ? {
-                mode: parentUpdate.mode,
-                memberLabel: parentUpdate.label,
-                fileName: current?.name ?? '',
-                // Removal touches every contributing folder; a role change
-                // touches only the R1-H1 plan's affected folders.
-                folders:
-                  parentUpdate.mode === 'remove'
-                    ? parentUpdate.row.inherited.sources.map(source => ({
-                        resourceId: source.resourceId,
-                        name: source.name,
-                        currentRole: roleForAccessPermissions(source.permissions),
-                      }))
-                    : parentUpdate.updates.map(update => ({
-                        resourceId: update.source.resourceId,
-                        name: update.source.name,
-                        currentRole: roleForAccessPermissions(update.source.permissions),
-                      })),
-                fileCurrentRole: roleForAccessPermissions(parentUpdate.row.permissions),
-                nextRole: parentUpdate.mode === 'change-role' ? parentUpdate.nextRole : undefined,
-                // The surviving Editor shares are disclosed BEFORE the user
-                // approves: the effective role this dialog shows is not the
-                // whole truth, and only the post-change toast used to say so.
-                ...(parentUpdate.mode === 'change-role' &&
-                parentUpdate.residualEditorFolderNames.length > 0
-                  ? { residualEditorFolderNames: parentUpdate.residualEditorFolderNames }
-                  : {}),
-              }
-            : null
-        }
-        onCancel={() => setParentUpdate(null)}
-        onConfirm={() => void confirmParentUpdate()}
-      />
 
       {createFolderOpen && createFolderParentId && createFolderParentName ? (
         <GfsNameDialog

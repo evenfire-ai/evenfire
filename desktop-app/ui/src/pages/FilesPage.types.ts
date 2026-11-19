@@ -70,15 +70,3 @@ export interface FilesPageProps {
   routeDialogRequestId?: number
   onRouteDialogRequestHandled?: (requestId: number) => void
 }
-
-/**
- * Structural shape of one `window.clerum.agents.listMine()` entry (the wire
- * type is `AgentWithMcpServers` in `desktop-app/src/types.ts`). Only entries
- * with a valid `host` gfsSubject are delegation targets.
- */
-export interface MyAgentEntry {
-  name: string
-  /** Visible name (Agent CRD `spec.host`) surfaced on the wire; may be absent on older builds. */
-  displayName?: string
-  gfsSubject?: { type: string; id: string }
-}

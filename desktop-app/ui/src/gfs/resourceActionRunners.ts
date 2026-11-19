@@ -9,17 +9,14 @@ import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import { isGfsSessionGenerationConfirmed } from '@lib/gfsSessionAuthority'
 import type {
   GfsActionFolder,
+  GfsActionGuardDeps,
+  GfsActionGuards,
   GfsActionResource,
   GfsActionRunResult,
   GfsActionRunnerDeps,
   GfsCreateFolderRunOptions,
   GfsUploadReservations,
 } from './resourceActionRunners.types'
-
-interface RunGuards {
-  isCurrent: () => boolean
-  admitEffect: () => Promise<boolean>
-}
 
 /**
  * Guards for one run, bound to the generation published when it started.
@@ -28,7 +25,7 @@ interface RunGuards {
  * may not have rendered yet. Main switches generation before the renderer
  * publishes it, so the last word before a mutation is main's.
  */
-function bindGuards(deps: GfsActionRunnerDeps): RunGuards | null {
+export function bindGfsActionGuards(deps: GfsActionGuardDeps): GfsActionGuards | null {
   const originGen = deps.publishedGeneration()
   if (!isGfsSessionGeneration(originGen)) return null
   const isCurrent = () =>
@@ -51,7 +48,7 @@ export async function runGfsRename(
 ): Promise<GfsActionRunResult<{ name: string }>> {
   const trimmed = requestedName.trim()
   if (!trimmed) return ABORTED
-  const guards = bindGuards(deps)
+  const guards = bindGfsActionGuards(deps)
   if (!guards) return ABORTED
   if (!(await deps.freshPermissions(target.resourceId, target.name, ['write']))) return ABORTED
   if (!guards.isCurrent()) return ABORTED
@@ -76,7 +73,7 @@ export async function runGfsCreateFolder(
 ): Promise<GfsActionRunResult<{ name: string }>> {
   const trimmed = requestedName.trim()
   if (!trimmed) return ABORTED
-  const guards = bindGuards(deps)
+  const guards = bindGfsActionGuards(deps)
   if (!guards) return ABORTED
   if (!(await deps.freshPermissions(parent.resourceId, parent.name, ['write']))) return ABORTED
   if (!guards.isCurrent()) return ABORTED
@@ -97,7 +94,7 @@ export async function runGfsDelete(
   deps: GfsActionRunnerDeps,
   target: GfsActionResource
 ): Promise<GfsActionRunResult> {
-  const guards = bindGuards(deps)
+  const guards = bindGfsActionGuards(deps)
   if (!guards) return ABORTED
   if (!(await deps.freshPermissions(target.resourceId, target.name, ['delete']))) return ABORTED
   if (!(await guards.admitEffect())) return ABORTED
@@ -121,7 +118,7 @@ export async function runGfsUpload(
   occupiedNames: Set<string>,
   reservations: GfsUploadReservations
 ): Promise<GfsActionRunResult<{ name: string }>> {
-  const guards = bindGuards(deps)
+  const guards = bindGfsActionGuards(deps)
   if (!guards) return ABORTED
   if (!(await deps.freshPermissions(parent.resourceId, parent.name, ['write']))) return ABORTED
   if (!guards.isCurrent()) return ABORTED
