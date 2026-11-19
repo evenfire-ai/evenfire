@@ -1533,7 +1533,10 @@ async function applyResolvedGuardrails(): Promise<void> {
   agent.setGuardrailsConfig(withResolvedHookDescriptors(hostGuardrails, resolved))
 }
 
-async function onHostChange(host: HostCRD): Promise<void> {
+/**
+ * Host watch handler. Exported so tests drive this handler, not a copy of it.
+ */
+export async function onHostChange(host: HostCRD): Promise<void> {
   logger.info({ name: host.name }, '[Main] Host configuration changed:')
 
   const contextChanged =
