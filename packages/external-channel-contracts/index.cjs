@@ -58,7 +58,6 @@ const MEDIUMS = Object.freeze(['slack', 'teams'])
 const EVENT_KINDS = Object.freeze(['message', 'action'])
 const ATTESTING_COMPONENTS = Object.freeze(['control-api', 'approval-reader'])
 const AUDIENCE_MODES = Object.freeze(['members', 'workspace'])
-const REFUSAL_NOTICES = Object.freeze(['private', 'origin_generic', 'none'])
 const REPLY_STYLES = Object.freeze(['thread', 'conversation', 'quote'])
 const CHANNEL_REF_PATTERN = /^[^/\s]+\/[^/\s]+$/
 const TEAMS_MESSAGE_ID_SUFFIX = ';messageid='
@@ -240,6 +239,24 @@ function validateProviderEventReceiptClaims(input) {
 
 const checkAdmission = checker('invalid_channel_admission')
 
+// The notice a refusal carries, fixed by its reason.
+// Scope: reason -> notice only. The text of a notice and where it is sent are not part of this contract.
+const REFUSAL_NOTICE_BY_REASON = Object.freeze({
+  receipt_invalid: 'none',
+  no_match: 'private',
+  identity_quarantined: 'private',
+  excluded: 'private',
+  not_eligible_guest: 'private',
+  not_eligible_external: 'private',
+  not_eligible_deactivated: 'private',
+  not_eligible_bot: 'none',
+  lookup_permission_missing: 'origin_generic',
+  eligibility_unavailable: 'origin_generic',
+  audience_not_ready: 'origin_generic',
+  missing_agent_grant: 'private',
+  missing_channel_grant: 'private',
+})
+
 function checkAdmissionEvent(event) {
   checkAdmission(hasExactKeys(event, ADMISSION_EVENT_KEYS), 'event')
   checkEventFields(event, (condition, field) => checkAdmission(condition, `event.${field}`))
@@ -258,7 +275,7 @@ function validateChannelAdmission(input) {
   } else if (value.outcome === 'refused') {
     checkAdmission(hasExactKeys(value, REFUSED_KEYS), 'keys')
     checkAdmission(ADMISSION_REFUSAL_REASONS.includes(value.reason), 'reason')
-    checkAdmission(REFUSAL_NOTICES.includes(value.notice), 'notice')
+    checkAdmission(value.notice === REFUSAL_NOTICE_BY_REASON[value.reason], 'notice')
     // The event block is null only when the receipt itself did not verify.
     if (value.reason === 'receipt_invalid') {
       checkAdmission(value.event === null, 'event')

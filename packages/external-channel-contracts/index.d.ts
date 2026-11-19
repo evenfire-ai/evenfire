@@ -92,6 +92,7 @@ export type ChannelAdmission =
   | {
       readonly outcome: 'refused'
       readonly reason: AdmissionRefusalReason
+      /** fixed by reason: 'none' for receipt_invalid and not_eligible_bot; 'origin_generic' for lookup_permission_missing, eligibility_unavailable, audience_not_ready; 'private' otherwise */
       readonly notice: 'private' | 'origin_generic' | 'none'
       /** null only for 'receipt_invalid' */
       readonly event: ChannelAdmissionEvent | null

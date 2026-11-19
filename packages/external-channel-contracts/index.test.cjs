@@ -218,16 +218,41 @@ describe('fixtures', () => {
     }
   })
 
-  it('refusal fixtures carry the notice pinned for their reason', () => {
-    // The validator accepts any notice with any reason (index.cjs checks the two vocabularies independently); this table pins the notice each fixture carries, not a rule the validator enforces.
-    const notice = {
-      receipt_invalid: 'none', not_eligible_bot: 'none',
-      lookup_permission_missing: 'origin_generic', eligibility_unavailable: 'origin_generic',
+  it('accepts each refusal reason with its own notice only', () => {
+    const NOTICE_BY_REASON = {
+      receipt_invalid: 'none',
+      no_match: 'private',
+      identity_quarantined: 'private',
+      excluded: 'private',
+      not_eligible_guest: 'private',
+      not_eligible_external: 'private',
+      not_eligible_deactivated: 'private',
+      not_eligible_bot: 'none',
+      lookup_permission_missing: 'origin_generic',
+      eligibility_unavailable: 'origin_generic',
       audience_not_ready: 'origin_generic',
+      missing_agent_grant: 'private',
+      missing_channel_grant: 'private',
     }
+    assert.deepEqual(Object.keys(NOTICE_BY_REASON).sort(), [...ADMISSION_REFUSAL_REASONS].sort())
+    let accepted = 0
+    let refused = 0
     for (const reason of ADMISSION_REFUSAL_REASONS) {
-      assert.equal(load(`admission.refused.${reason}.json`).notice, notice[reason] ?? 'private', reason)
+      const fixture = load(`admission.refused.${reason}.json`)
+      for (const notice of ['private', 'origin_generic', 'none', 'public']) {
+        const value = { ...fixture, notice }
+        const label = `${reason} notice=${notice}`
+        if (notice === NOTICE_BY_REASON[reason]) {
+          assert.equal(assertAccepts(validateChannelAdmission, value).notice, notice, label)
+          accepted++
+        } else {
+          assertRejects(validateChannelAdmission, value, ADMISSION_ERROR, 'notice', label)
+          refused++
+        }
+      }
     }
+    assert.equal(accepted, 13)
+    assert.equal(refused, 39)
   })
 
   it('0-U3 action fixtures cover exactly PAUSE_ACTION_DECISIONS and parse back to their decision', () => {
