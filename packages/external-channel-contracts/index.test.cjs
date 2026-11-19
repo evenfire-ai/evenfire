@@ -145,6 +145,56 @@ it('keeps runtime exports aligned with the declaration file', () => {
   assert.deepEqual(Object.keys(contracts).sort(), declared)
 })
 
+// No TypeScript run compiles index.d.ts, so this test compares its text with the runtime.
+// Scope: string-literal vocabularies and literal constants only. Not covered: nullability,
+// optionality, field names, parameter and return types, declaration syntax.
+it('keeps the literal vocabularies and constants of the declaration file aligned with the runtime', () => {
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const source = fs.readFileSync(path.join(__dirname, 'index.cjs'), 'utf8')
+  const literals = text => Array.from(text.matchAll(/'([^']*)'/g), match => match[1])
+  const allMatches = (text, pattern) => Array.from(text.matchAll(pattern), match => literals(match[1]))
+  const declaredType = name =>
+    allMatches(declarations, new RegExp(`export type ${name} =([^\\n]*(?:\\n\\s+\\|[^\\n]*)*)`, 'g'))
+  const declaredField = name => allMatches(declarations, new RegExp(`readonly ${name}\\??:([^\\n]*)`, 'g'))
+  const declaredConst = name => allMatches(declarations, new RegExp(`export declare const ${name}: ([^\\n]*)`, 'g'))
+  const declaredNumber = name =>
+    Array.from(declarations.matchAll(new RegExp(`export declare const ${name}: (\\d+)\\n`, 'g')), match => [Number(match[1])])
+  const sourceConst = name => allMatches(source, new RegExp(`const ${name} = Object\\.freeze\\(([\\s\\S]*?)\\)\\n`, 'g'))
+  const sourceConstMembers = name => {
+    const occurrences = sourceConst(name)
+    assert.equal(occurrences.length, 1, `index.cjs const ${name}: occurrence count`)
+    return occurrences[0]
+  }
+  const errorCodes = Array.from(source.matchAll(/(?:checker|contractError)\('([^']+)'/g), match => match[1])
+  // [label, declared occurrences, expected occurrence count, runtime members]
+  const rows = [
+    ['AdmissionRefusalReason', declaredType('AdmissionRefusalReason'), 1, ADMISSION_REFUSAL_REASONS],
+    ['PauseOutcome', declaredType('PauseOutcome'), 1, PAUSE_OUTCOMES],
+    ['CallbackRefusal', declaredType('CallbackRefusal'), 1, CALLBACK_REFUSALS],
+    ['ConversationKind', declaredType('ConversationKind'), 1, CONVERSATION_KINDS],
+    ['PauseActionDecision', declaredType('PauseActionDecision'), 1, PAUSE_ACTION_DECISIONS],
+    ['ExecutionPrincipalKind', declaredType('ExecutionPrincipalKind'), 1, EXECUTION_PRINCIPAL_KINDS],
+    ['PROVIDER_EVENT_RECEIPT_AUDIENCE', declaredConst('PROVIDER_EVENT_RECEIPT_AUDIENCE'), 1, [PROVIDER_EVENT_RECEIPT_AUDIENCE]],
+    ['PROVIDER_EVENT_RECEIPT_HEADER_TYPE', declaredConst('PROVIDER_EVENT_RECEIPT_HEADER_TYPE'), 1, [PROVIDER_EVENT_RECEIPT_HEADER_TYPE]],
+    ['PROVIDER_EVENT_RECEIPT_TTL_SECONDS', declaredNumber('PROVIDER_EVENT_RECEIPT_TTL_SECONDS'), 1, [PROVIDER_EVENT_RECEIPT_TTL_SECONDS]],
+    ['aud', declaredField('aud'), 1, [PROVIDER_EVENT_RECEIPT_AUDIENCE]],
+    ['ChannelMedium', declaredType('ChannelMedium'), 1, sourceConstMembers('MEDIUMS')],
+    ['eventKind', declaredField('eventKind'), 2, sourceConstMembers('EVENT_KINDS')],
+    ['attestedBy', declaredField('attestedBy'), 1, sourceConstMembers('ATTESTING_COMPONENTS')],
+    ['audienceMode', declaredField('audienceMode'), 1, sourceConstMembers('AUDIENCE_MODES')],
+    ['replyStyle', declaredField('replyStyle'), 3, sourceConstMembers('REPLY_STYLES')],
+    // The lookup's keys are unquoted identifiers, so its quoted literals are the notices.
+    ['notice', declaredField('notice'), 1, sourceConstMembers('REFUSAL_NOTICE_BY_REASON')],
+    ['ContractErrorCode', declaredType('ContractErrorCode'), 1, errorCodes],
+  ]
+  const sortedSet = values => [...new Set(values)].sort()
+  for (const [label, occurrences, count, runtime] of rows) {
+    assert.equal(occurrences.length, count, `${label}: occurrence count in index.d.ts`)
+    assert.ok(runtime.length > 0, `${label}: no runtime members`)
+    assert.deepEqual(sortedSet(occurrences.flat()), sortedSet(runtime), label)
+  }
+})
+
 describe('constants', () => {
   it('ships the section 4 vocabularies as frozen arrays', () => {
     assert.deepEqual(ADMISSION_REFUSAL_REASONS, [
