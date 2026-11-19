@@ -140,26 +140,6 @@ rescue IPAddr::InvalidAddressError
   false
 end
 
-def private_ip_host?(host)
-  normalized = host.delete_prefix('[').delete_suffix(']').downcase
-  ip = IPAddr.new(normalized)
-  if ip.ipv4?
-    ranges = %w[
-      0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16
-      172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.88.99.0/24 192.168.0.0/16
-      198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4
-    ].map { |range| IPAddr.new(range) }
-    return ranges.any? { |range| range.include?(ip) }
-  end
-
-  ipv6_ranges = %w[::/128 fc00::/7 fe80::/10 fec0::/10 ff00::/8].map { |range| IPAddr.new(range) }
-  mapped = ip.ipv4_mapped?
-  ipv6_ranges.any? { |range| range.include?(ip) } ||
-    (mapped && private_ip_host?(ip.native.to_s))
-rescue IPAddr::InvalidAddressError
-  false
-end
-
 def validate_profile_origin(profile_value, rest_value, label)
   profile = parsed_url(profile_value, label, 'Profile UI', origin_only: true)
   rest = parsed_url(rest_value, label, 'External REST')
@@ -174,9 +154,6 @@ def validate_profile_origin(profile_value, rest_value, label)
   end
   if profile_loopback && !rest_loopback
     raise "#{label}: loopback Profile UI origin is paired with remote External REST"
-  end
-  if !profile_loopback && private_ip_host?(profile_host)
-    raise "#{label}: private Profile UI IP origin is not permitted"
   end
   if profile['scheme'] == 'http' && !(profile_loopback && rest_loopback)
     raise "#{label}: HTTP Profile UI origin requires paired loopback services"
@@ -713,6 +690,48 @@ YAML
   echo "PASS invalid $case_name rejected by Control API and External REST: $expected_error"
 }
 
+# A valid HTTPS IP origin is projected as the same canonical operator value
+# into both service Deployments; K3 does not classify private/reserved addresses.
+IP_ORIGIN_OVERLAY="$DEPLOY/overlays/profile-ui-https-ip-origin-regression"
+mkdir -p "$IP_ORIGIN_OVERLAY"
+cat > "$IP_ORIGIN_OVERLAY/control-api-config.patch.yaml" <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: control-api-config
+  namespace: control-plane
+data:
+  CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: https://10.0.0.5
+  CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL: https://api.example.test
+YAML
+cat > "$IP_ORIGIN_OVERLAY/external-rest-deployment.patch.yaml" <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-rest-api
+  namespace: profiles
+spec:
+  template:
+    spec:
+      containers:
+        - name: external-rest-api
+          env:
+            - name: EXTERNAL_REST_API_PUBLIC_BASE_URL
+              value: https://api.example.test
+YAML
+cat > "$IP_ORIGIN_OVERLAY/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - path: control-api-config.patch.yaml
+  - path: external-rest-deployment.patch.yaml
+YAML
+kubectl kustomize "$IP_ORIGIN_OVERLAY" > "$FIXTURE_ROOT/https-ip-origin.yaml"
+verify_projection "$FIXTURE_ROOT/https-ip-origin.yaml" \
+  'https://10.0.0.5' 'HTTPS IP origin remains supported'
+
 # REST endpoint paths and queries are part of the full selected endpoint
 # identity. They are not subject to Profile UI's origin-only restriction.
 REST_PATH_OVERLAY="$DEPLOY/overlays/profile-ui-rest-path-regression"
@@ -773,18 +792,6 @@ expect_projection_rejection remote-http 'http://profile.example.test' \
   'HTTP Profile UI origin requires paired loopback services' 'https://api.example.test'
 expect_projection_rejection remote-rest-loopback-ui 'http://127.0.0.1:3001' \
   'loopback Profile UI origin is paired with remote External REST' 'https://api.example.test'
-expect_projection_rejection private-ip 'https://10.0.0.5' \
-  'private Profile UI IP origin is not permitted'
-expect_projection_rejection mapped-private-ip 'https://[::ffff:10.0.0.5]' \
-  'private Profile UI IP origin is not permitted'
-expect_projection_rejection ipv6-multicast 'https://[ff02::1]' \
-  'private Profile UI IP origin is not permitted'
-expect_projection_rejection ipv6-multicast-site 'https://[ff05::1]' \
-  'private Profile UI IP origin is not permitted'
 expect_projection_rejection decimal-loopback 'https://2130706433' \
   'loopback Profile UI origin is paired with remote External REST' \
   'https://api.example.test'
-expect_projection_rejection hexadecimal-private-ip 'https://0x0a000005' \
-  'private Profile UI IP origin is not permitted'
-expect_projection_rejection percent-encoded-private-ip 'https://%31%30.0.0.5' \
-  'private Profile UI IP origin is not permitted'
