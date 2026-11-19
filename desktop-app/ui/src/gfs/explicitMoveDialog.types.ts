@@ -2,7 +2,7 @@ import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserContr
 import type { useGfsResourceOperations } from '@hooks/domain/useGfsResourceOperations'
 import type { Tone } from '@/uiTypes'
 import type { GfsDragSource } from './dragSession.types'
-import type { MoveCommitOutcome } from './moveCommit'
+import type { MoveCommitExpectedSourceSnapshot, MoveCommitOutcome } from './moveCommit'
 
 type GfsResourceOperations = ReturnType<typeof useGfsResourceOperations>
 
@@ -25,6 +25,11 @@ export interface GfsExplicitMoveCommitOptions {
   reportOutcomes?: boolean
   /** Main's session generation, captured before the commit. */
   authoritativeSessionGeneration?: number
+  /**
+   * The source as the user saw it when choosing the action. A resolve that
+   * finds another version or parent stops the move instead of retargeting it.
+   */
+  expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
 }
 
 export type GfsExplicitMoveCommit = (

@@ -36,6 +36,7 @@ export function commitGfsExplicitMove(
     isPresentationCurrent,
     reportOutcomes = true,
     authoritativeSessionGeneration,
+    expectedSourceSnapshot,
   }: GfsExplicitMoveCommitOptions
 ): Promise<MoveCommitOutcome> {
   return runGfsMoveCommit(
@@ -78,6 +79,7 @@ export function commitGfsExplicitMove(
       ...(authoritativeSessionGeneration !== undefined
         ? { sessionGeneration: authoritativeSessionGeneration }
         : {}),
+      ...(expectedSourceSnapshot ? { expectedSourceSnapshot } : {}),
       ...(isCurrent ? { isCurrent } : {}),
     }
   )

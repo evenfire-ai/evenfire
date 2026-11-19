@@ -805,6 +805,30 @@ describe('GfsActionHost — review round', () => {
     expect(h.host().hostMovingResourceId).toBeNull()
   })
 
+  it('S5: a source that changed since it was chosen stops the move with a visible error', async () => {
+    const h = await harness()
+    // The row carried version 3; the server now holds version 4.
+    h.bridge.resolve.mockImplementation(async () =>
+      resolveResource(
+        resolvedFile('file-t', 'notes.txt', { parentResourceId: 'folder-p', version: 4 })
+      )
+    )
+    h.bridge.moveResource.mockImplementation(async () =>
+      moveResourceReceipt('file-t', 'folder-q', 5)
+    )
+
+    h.open(await moveTarget(), 'move')
+    const moveDialog = await screen.findByRole('dialog', { name: /move/i })
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (Archive)' }))
+
+    await waitFor(() =>
+      expect(within(moveDialog).getByText(/changed while you were moving it/)).toBeTruthy()
+    )
+    expect(h.bridge.moveResource).not.toHaveBeenCalled()
+    expect(dialog()).toBe(moveDialog)
+    expect(h.host().hostMovingResourceId).toBeNull()
+  })
+
   it('S1: a revocation in the same tick as "Move here" sends no move', async () => {
     const h = await harness()
     h.bridge.resolve.mockImplementation(async () => resolvedSource())

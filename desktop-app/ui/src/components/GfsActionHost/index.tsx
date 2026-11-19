@@ -647,6 +647,13 @@ export function GfsActionHost({
             ...options,
             // Revoking access keeps the generation, so main's check alone misses it.
             isCurrent: () => options.isCurrent?.() !== false && isActionCurrent(running),
+            // The row the user chose, as it was then: a resolve that finds
+            // another version or parent stops the move, it never retargets it.
+            expectedSourceSnapshot: {
+              resourceId: running.target.resourceId,
+              version: running.target.version,
+              parentResourceId: running.target.parentResourceId ?? null,
+            },
           }
         )
         // The move's convergence relocates caches and open-location entries,
