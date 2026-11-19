@@ -209,6 +209,7 @@ interface MutationCall {
   at: number
   settled: boolean
   settledAt?: number
+  rejected?: boolean
   submission: Submission | null
 }
 
@@ -281,7 +282,11 @@ interface GenCall {
   at: number
   answer: number
   host: boolean
+  /** Which kind of host action asked, read from the stack (see `askingFamily`). */
+  family: ActionFamily | null
 }
+
+type ActionFamily = 'move' | 'upload' | 'dialog'
 
 interface AccessEvent {
   at: number
@@ -389,6 +394,23 @@ const askedByHost = (stack: string | undefined) => {
     .filter(line => !line.includes('lib/gfsSessionAuthority'))
   return Boolean(frames[0] && HOST_CODE.test(frames[0]))
 }
+
+/**
+ * Which host action a generation check belongs to, by the code on its stack:
+ * the Move pipeline and its dialog, the upload loop, or the one dialog action
+ * (rename, delete, new folder) the host runs at a time. Same file-name
+ * dependence as `askedByHost`.
+ */
+function askingFamily(stack: string | undefined): ActionFamily | null {
+  if (!askedByHost(stack)) return null
+  const text = stack ?? ''
+  if (/explicitMoveDialog|moveCommit|useGfsResourceOperations/.test(text)) return 'move'
+  if (/runGfsUpload|runUpload/.test(text)) return 'upload'
+  return 'dialog'
+}
+
+const familyOf = (op: MutationOp): ActionFamily =>
+  op === 'moveResource' ? 'move' : op === 'createFileFromPath' ? 'upload' : 'dialog'
 
 /** Every IPC answer the oracle orders: the scheduler decides when it lands. */
 function scheduled<A extends unknown[], R>(
@@ -500,6 +522,7 @@ function settleWhenAnswered<T>(w: World, call: MutationCall, promise: Promise<T>
     },
     error => {
       call.settled = true
+      call.rejected = true
       call.settledAt = tick(w)
       // A rejected request's own message is what the host shows for it.
       call.submission?.outcomes.add(error instanceof Error ? error.message : String(error))
@@ -699,6 +722,7 @@ function installBridge(w: World) {
               at: tick(w),
               answer: generation,
               host: askedByHost(stack),
+              family: askingFamily(stack),
             })
             return generation
           })
@@ -710,7 +734,12 @@ function installBridge(w: World) {
             // Main answers now; the renderer receives it when the example says.
             w.heldGen = null
             const generation = w.model.mainGen
-            w.genCalls.push({ at: tick(w), answer: generation, host: askedByHost(stack) })
+            w.genCalls.push({
+              at: tick(w),
+              answer: generation,
+              host: askedByHost(stack),
+              family: askingFamily(stack),
+            })
             return held.promise.then(() => generation)
           }
         })(),
@@ -1117,41 +1146,39 @@ function checkAtRest(w: World) {
       )
     }
   }
-  // K1, per submission: one generation check per operation and one before
-  // its outcome (a Move: its pipeline's checks and one). Each host check is
-  // charged to the submission with the latest activity before it that still
-  // has budget; a check none can take is over budget.
-  const budget = new Map(
-    w.submissions.map(s => [
-      s,
-      (s.op === 'moveResource' ? MOVE_PIPELINE_CHECKS : s.calls.length) + 1,
-    ])
-  )
+  // K1, per submission and without lending: each host check is charged to
+  // the submission that asked, found by the kind of action on its stack and
+  // the latest activity of that kind before it. Its bound is exact for the
+  // route it took: one per operation and one before the outcome, or, for a
+  // Move, the measured count of the pipeline path it ended on.
+  const routeBudget = (s: Submission) => {
+    if (s.op !== 'moveResource') return s.calls.length + 1
+    const call = s.calls[0]
+    if (!call) return MOVE_REFUSED_CHECKS
+    return call.rejected ? MOVE_VERIFIED_CHECKS : MOVE_COMMITTED_CHECKS
+  }
+  const charged = new Map<Submission, number>()
   const lastActivityBefore = (s: Submission, at: number) =>
     Math.max(
       ...[s.at, ...s.calls.flatMap(call => [call.at, call.settledAt ?? -1])].filter(t => t < at),
       -1
     )
   for (const check of w.genCalls.filter(call => call.host)) {
-    const payer = w.submissions
-      .filter(s => s.at < check.at && (budget.get(s) ?? 0) > 0)
+    const asker = w.submissions
+      .filter(s => familyOf(s.op) === check.family && s.at < check.at)
       .sort((a, b) => lastActivityBefore(b, check.at) - lastActivityBefore(a, check.at))[0]
-    if (!payer) {
-      violations.push(
-        `K1: a host generation check at ${check.at} exceeds every submission's budget ${JSON.stringify(
-          {
-            checks: w.genCalls.filter(call => call.host).map(call => call.at),
-            submissions: w.submissions.map(s => ({
-              op: s.op,
-              at: s.at,
-              calls: s.calls.map(c => c.at),
-            })),
-          }
-        )}`
-      )
-      break
+    if (!asker) {
+      violations.push(`K1: a ${check.family} generation check at ${check.at} has no submission`)
+      continue
     }
-    budget.set(payer, budget.get(payer)! - 1)
+    charged.set(asker, (charged.get(asker) ?? 0) + 1)
+  }
+  for (const [s, count] of charged) {
+    if (count > routeBudget(s)) {
+      violations.push(
+        `K1: ${s.op} #${s.id} asked main ${count} times for a bound of ${routeBudget(s)}`
+      )
+    }
   }
 
   // K1 for the location on screen: after a mutation lands, the background
@@ -2237,6 +2264,27 @@ const moveVerifiedAfterRejection = (): Cmd[] => [
   new Rest(),
 ]
 
+/**
+ * A committed Move, then a rename: each is held to its own bound, so the
+ * Move's unused checks never cover an extra one in the rename (K1).
+ */
+const moveThenRename = (): Cmd[] => [
+  new OpenMenuOn('notes.txt'),
+  new Rest(),
+  new Choose('move'),
+  new Rest(),
+  new Submit(1),
+  new Rest(),
+  new OpenMenuOn('readme.md'),
+  new Rest(),
+  new OpenMenuOn('Quarterly'),
+  new Rest(),
+  new Choose('rename'),
+  new Rest(),
+  new Submit(2),
+  new Rest(),
+]
+
 /** One committed host Move and nothing else, to measure its generation checks. */
 const oneCommittedMove = (): Cmd[] => [
   new OpenMenuOn('notes.txt'),
@@ -2251,13 +2299,16 @@ const oneCommittedMove = (): Cmd[] => [
  * A host Move runs the commit pipeline it shares with the tree's drag, which
  * asks main for the generation before and after each of its steps (the
  * dialog's pre-check, source resolve, dispatch, convergence) rather than once
- * per operation. This is a measured count, pinned as a regression check, not
- * an invariant derived from the spec: the longest path measured (a PATCH
- * rejected and verified by identity afterwards) takes 10; a committed Move
- * takes 8 plus the host's own outcome check. The tests below fail when either
- * count changes, and the number is then re-measured, not reasoned about.
+ * per operation. These are measured counts per pipeline path, pinned as a
+ * regression check, not invariants derived from the spec: the test below
+ * fails when any of them changes, and the numbers are then re-measured, not
+ * reasoned about. A committed Move's count includes the host's outcome check.
  */
-const MOVE_PIPELINE_CHECKS = 10
+const MOVE_COMMITTED_CHECKS = 9
+/** A PATCH rejected and verified by identity afterwards, the longest path. */
+const MOVE_VERIFIED_CHECKS = 10
+/** No PATCH sent; the longest such path refuses a source changed since it was chosen. */
+const MOVE_REFUSED_CHECKS = 5
 
 const exampleScheduler = () => fc.sample(fc.scheduler(), { seed: 2611, numRuns: 1 })[0]!
 
@@ -2580,6 +2631,7 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       staleAnswerAfterRoundTrip,
       moveAfterRemoteChange,
       echoDuringHostRefresh,
+      moveThenRename,
     ])
     process.stdout.write(
       `gfs action oracle coverage: ${JSON.stringify(Object.fromEntries([...generatedCoverage].sort()))}\n`
@@ -2624,8 +2676,7 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       checkAtRest(w)
       expect(w.calls.filter(call => call.op === 'moveResource')).toHaveLength(1)
       expect(w.toasts.map(toast => toast.tone)).toEqual(['success'])
-      // A committed Move: eight pipeline checks and the host's outcome check.
-      expect(w.genCalls.filter(call => call.host)).toHaveLength(9)
+      expect(w.genCalls.filter(call => call.host)).toHaveLength(MOVE_COMMITTED_CHECKS)
     } finally {
       await unmountWorld(w)
     }
@@ -2638,9 +2689,22 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       await rest(verified)
       checkAtRest(verified)
       expect(verified.calls.filter(call => call.op === 'moveResource')).toHaveLength(1)
-      expect(verified.genCalls.filter(call => call.host)).toHaveLength(MOVE_PIPELINE_CHECKS)
+      expect(verified.genCalls.filter(call => call.host)).toHaveLength(MOVE_VERIFIED_CHECKS)
     } finally {
       await unmountWorld(verified)
+    }
+    const refused = await mountWorld(exampleScheduler())
+    try {
+      await fc.asyncModelRun(
+        () => ({ model: refused.model, real: refused }),
+        moveAfterRemoteChange()
+      )
+      await rest(refused)
+      checkAtRest(refused)
+      expect(refused.calls.filter(call => call.op === 'moveResource')).toHaveLength(0)
+      expect(refused.genCalls.filter(call => call.host)).toHaveLength(MOVE_REFUSED_CHECKS)
+    } finally {
+      await unmountWorld(refused)
     }
   }, 60_000)
 })
