@@ -32,6 +32,7 @@ export default defineConfig({
       path.resolve(__dirname, '../scripts/testing/bind-loopback-in-tests.mjs'),
       // Keeps every AppService that a test builds from opening a real GFS watch.
       path.resolve(__dirname, 'testSupport/gfsWatch/inertWatchTransport.ts'),
+      path.resolve(__dirname, 'testSupport/testingLibraryAsyncTimeout.ts'),
     ],
     // Owns the temporary root of the renderer chat fixture's real ChatStore
     // directories and removes it once every test file has finished.
