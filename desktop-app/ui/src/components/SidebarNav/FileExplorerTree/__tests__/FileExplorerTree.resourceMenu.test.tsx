@@ -466,6 +466,58 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
   )
 })
 
+describe('FileExplorerTree row resource menu focus', () => {
+  afterEach(() => {
+    delete (navigator as { clipboard?: unknown }).clipboard
+  })
+
+  it.each([
+    ['Preview', false],
+    ['Download', false],
+    ['Copy file ID', true],
+  ] as const)(
+    'returns focus to the row after %s chosen from the keyboard',
+    async (label, inShareFlyout) => {
+      installClerum({
+        listAccessible: vi.fn(async () =>
+          listAccessiblePage([
+            accessibleResource('file-s', 'shared.txt', 'file', { permissions: ['read'] }),
+          ])
+        ),
+      })
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn(async () => undefined) },
+      })
+      renderShell()
+      const row = await screen.findByRole('button', { name: 'shared.txt' })
+      row.focus()
+      fireEvent.keyDown(row, { key: 'F10', shiftKey: true })
+      const menu = await screen.findByRole('menu', { name: 'Actions for shared.txt' })
+      let list: HTMLElement = menu
+      if (inShareFlyout) {
+        const share = menuItem(menu, 'Share')!
+        share.focus()
+        fireEvent.keyDown(share, { key: 'ArrowRight' })
+        list = await screen.findByRole('menu', { name: 'Share options for shared.txt' })
+      }
+      const item = await waitFor(() => {
+        const found = menuItem(list, label)
+        expect(found?.disabled).toBe(false)
+        return found!
+      })
+      item.focus()
+      // A keyboard activation of a button is a click on the focused item.
+      fireEvent.click(item)
+
+      await waitFor(() =>
+        expect(screen.queryByRole('menu', { name: 'Actions for shared.txt' })).toBeNull()
+      )
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'shared.txt' }))
+    }
+  )
+})
+
 async function openMenuOn(name: string) {
   fireEvent.contextMenu(await screen.findByRole('button', { name }), { clientX: 10, clientY: 10 })
   return screen.findByRole('menu', { name: `Actions for ${name}` })

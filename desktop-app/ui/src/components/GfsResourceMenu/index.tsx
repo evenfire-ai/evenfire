@@ -390,6 +390,11 @@ export function GfsResourceMenu({
 
   const runAction = (action: () => void) => {
     dismissMenu()
+    // An anchored menu unmounts with the item that had focus, which drops it
+    // to <body> for an action that opens nothing of its own (Preview,
+    // Download, a copy). Returning it first also makes the anchor the opener
+    // a dialog the action mounts will hand focus back to.
+    if (anchorMode) returnFocusRef.current?.focus()
     action()
   }
 
