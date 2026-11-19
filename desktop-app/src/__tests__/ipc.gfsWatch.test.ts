@@ -34,6 +34,7 @@ beforeEach(async () => {
   const { registerIpcHandlers } = await import('../ipc.js')
   registerIpcHandlers({ gfsWatch: h.client } as unknown as AppService, async () => 0)
   await h.login(USER_A)
+  expect(h.linkKind()).toBe('Ready')
 })
 
 afterEach(async () => {
