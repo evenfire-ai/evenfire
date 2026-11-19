@@ -193,6 +193,9 @@ describe('chat link policy (S-9)', () => {
     const hexId = fc.stringMatching(/^[0-9a-fA-F]{32}$/)
     // Hostile characters a recipient must never smuggle into a rendered link:
     // bidi overrides, zero-width joiners/spaces, Cyrillic homoglyphs, `%`.
+    // The markdown parser percent-encodes non-ASCII before the policy runs, so
+    // here they are rejected by the `%` rule; the ASCII-only rule for raw
+    // recipients is covered by the openUrl tests.
     const hostileLocal = fc
       .array(
         fc.constantFrom('a', 'b', '.', '%', '+', '\u202E', '\u200B', '\u200D', '\u0430', '\u043E'),
