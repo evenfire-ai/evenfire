@@ -127,6 +127,16 @@ expect_out "tag below the floor" "release $OLD is below"
 run_case "reference without a digest" 1 0 "$(image_index "$V" "$V")" "nginx:$TAG"
 expect_out "reference without a digest" "nginx:$TAG has no digest to verify"
 
+unprivileged_tag="nginx/nginx-unprivileged:$TAG"
+NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "recipe tag goes to Docker Hub" 0 1 "$(image_index "$V" "$V")" --tags "$unprivileged_tag"
+expect_call "recipe tag goes to Docker Hub" "buildx imagetools inspect $unprivileged_tag --format {{json .Image}}"
+
+run_case "recipe tag missing arm64" 1 1 "{\"linux/amd64\":{\"config\":{\"Env\":[\"NGINX_VERSION=$V\"]}}}" --tags "$unprivileged_tag"
+expect_out "recipe tag missing arm64" "$unprivileged_tag has no linux/arm64 manifest"
+
+run_case "empty recipe tag selection" 1 0 "" --tags
+expect_out "empty recipe tag selection" "no tagged NGINX references to verify"
+
 # No arguments: the references come from the validator. A copy of the two
 # scripts and the policy, with a validator that lists nothing, must fail.
 mkdir -p "$WORK/empty/scripts"
@@ -144,9 +154,13 @@ NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror" 0 1 "$(image_index "$V" "$
 expect_call "mirror" "buildx imagetools inspect mirror.gcr.io/library/nginx@$DIGEST --format {{json .Image}}"
 expect_out "mirror" "ok: mirror.gcr.io/library/nginx@$DIGEST linux/amd64 NGINX_VERSION=$V (for $REF)"
 
-NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror, unprivileged image" 0 1 "$(image_index "$V" "$V")" \
+NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror, current unprivileged image" 0 1 "$(image_index "$V" "$V")" \
+  "docker.io/nginx/nginx-unprivileged:$TAG@$DIGEST"
+expect_call "mirror, current unprivileged image" "buildx imagetools inspect mirror.gcr.io/nginx/nginx-unprivileged@$DIGEST --format {{json .Image}}"
+
+NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror, legacy unprivileged image" 0 1 "$(image_index "$V" "$V")" \
   "docker.io/nginxinc/nginx-unprivileged:$TAG@$DIGEST"
-expect_call "mirror, unprivileged image" "buildx imagetools inspect mirror.gcr.io/nginxinc/nginx-unprivileged@$DIGEST --format {{json .Image}}"
+expect_call "mirror, legacy unprivileged image" "buildx imagetools inspect mirror.gcr.io/nginxinc/nginx-unprivileged@$DIGEST --format {{json .Image}}"
 
 NGINX_REGISTRY_MIRROR=mirror.gcr.io FAKE_DOCKER_FAIL=1 run_case "mirror inspect failure" 1 1 "" "$REF"
 expect_call "mirror inspect failure" "buildx imagetools inspect mirror.gcr.io/library/nginx@$DIGEST --format {{json .Image}}"
