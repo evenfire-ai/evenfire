@@ -511,6 +511,78 @@ describe('runtimeEdgeGuard v2', () => {
     expect(response.status).toBe(403)
   })
 
+  function v2EnvelopeHeaders(hostRef: string, actionContext: string): Record<string, string> {
+    return {
+      'x-clerum-edge-caller': 'rpc-proxy',
+      'x-clerum-edge-host-ref': hostRef,
+      'x-service-token': 'rpc-proxy',
+      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
+      'x-clerum-edge-action-context': actionContext,
+    }
+  }
+
+  it('rejects a V2 envelope bound to another Host name with the action host mismatch', async () => {
+    const header = await realRpcProxyHeader()
+    // Liveness witness: the receiving Host as configured admits the envelope.
+    const admitted = await runRuntimeGuard(
+      ['chat.message.invoke'],
+      v2EnvelopeHeaders('chatllm', header)
+    )
+    expect(admitted.status).toBe(200)
+    expect(admitted.body).toMatchObject({
+      actionContextV2: { target: { hostRef: 'mcp-host/chatllm' } },
+    })
+
+    const { config: runtimeConfig } = await import('../../config')
+    const configuredHostName = runtimeConfig.hostName
+    ;(runtimeConfig as { hostName: string }).hostName = 'other-host'
+    try {
+      // The legacy header names the receiving Host, so only the V2 target
+      // binding can reject this request.
+      const rejected = await runRuntimeGuard(
+        ['chat.message.invoke'],
+        v2EnvelopeHeaders('other-host', header)
+      )
+      expect(rejected).toEqual({
+        status: 403,
+        body: { error: 'Runtime edge action host mismatch' },
+      })
+    } finally {
+      ;(runtimeConfig as { hostName: string }).hostName = configuredHostName
+    }
+  })
+
+  it('rejects a V2 envelope bound to another namespace with the action host mismatch', async () => {
+    const header = await realRpcProxyHeader()
+    // Liveness witness: the receiving Host as configured admits the envelope.
+    const admitted = await runRuntimeGuard(
+      ['chat.message.invoke'],
+      v2EnvelopeHeaders('chatllm', header)
+    )
+    expect(admitted.status).toBe(200)
+    expect(admitted.body).toMatchObject({
+      actionContextV2: { target: { hostRef: 'mcp-host/chatllm' } },
+    })
+
+    const { config: runtimeConfig } = await import('../../config')
+    const configuredNamespace = runtimeConfig.namespace
+    ;(runtimeConfig as { namespace: string }).namespace = 'other-namespace'
+    try {
+      // Same Host name, other namespace: the legacy check compares the name
+      // only, so only the V2 target binding sees the namespace.
+      const rejected = await runRuntimeGuard(
+        ['chat.message.invoke'],
+        v2EnvelopeHeaders('chatllm', header)
+      )
+      expect(rejected).toEqual({
+        status: 403,
+        body: { error: 'Runtime edge action host mismatch' },
+      })
+    } finally {
+      ;(runtimeConfig as { namespace: string }).namespace = configuredNamespace
+    }
+  })
+
   it('proves the old/new producer-consumer compatibility matrix from source fixtures', async () => {
     const oldProxyHeaders = legacyRpcProxyHostProducer({ userId, hostRef: 'chatllm' })
     const newProxyHeaders = await (async () => {
