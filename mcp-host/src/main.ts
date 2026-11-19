@@ -3884,6 +3884,21 @@ async function main(): Promise<void> {
 // Run main only when this module is the executable entry point. Keeping imports
 // side-effect free allows the authoritative initialization contract to be
 // regression-tested without starting the service.
+/**
+ * Test seams for main's own RPC wiring. A suite installs the agent and starts
+ * the RPC server main wires, so it exercises main's handlers instead of copies
+ * of them. Production never calls these.
+ */
+export const mainRpcTestSeams = {
+  setAgent(next: AgentStateMachine | null): void {
+    agent = next
+  },
+  async startRPCServer(): Promise<RPCServer> {
+    await startRPCServer()
+    return rpcServer!
+  },
+}
+
 if (require.main === module) {
   // Global crash guards (defense-in-depth): a throw that escapes a stray event
   // listener (e.g. a transport listener) must be LOGGED, not a silent process
