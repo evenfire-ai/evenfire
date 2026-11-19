@@ -40,7 +40,7 @@ const authValue = {
   runtimeConfigState: { envKey: 'test-environment' },
 } as unknown as AuthContextValue
 
-async function mountWithRowEditor() {
+async function mountRows(pushToast?: (message: string, tone: string) => void) {
   const folder = await resolveResource(
     resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
   )
@@ -71,11 +71,16 @@ async function mountWithRowEditor() {
       <QueryClientProvider client={client}>{node}</QueryClientProvider>
     </AuthContext.Provider>
   )
-  render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper })
+  render(<FilesPage pendingGfsUri={FOLDER_URI} pushToast={pushToast} />, { wrapper })
   await screen.findByText('report.txt')
   await waitFor(() =>
     expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
   )
+  return { client, renameResource }
+}
+
+async function mountWithRowEditor() {
+  const { client, renameResource } = await mountRows()
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Rename report.txt' }))
   })
@@ -110,6 +115,27 @@ describe('FilesPage submits through the shared action runners', () => {
       await new Promise(resolve => setTimeout(resolve, 20))
     })
     expect(renameResource).not.toHaveBeenCalled()
+    client.clear()
+  })
+
+  it('shows no permission-verification toast for an action opened in the revoking tick', async () => {
+    const pushToast = vi.fn()
+    const { client } = await mountRows(pushToast)
+    const rename = screen.getByRole('button', { name: 'Rename report.txt' })
+    // Revoked in the cache; the page has not re-rendered when Rename runs its
+    // permission check, so the revoked session must stay silent on its own.
+    revokeGfsSessionAccess(client, SCOPE, 0)
+    fireEvent.click(rename)
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+
+    expect(screen.queryByRole('textbox', { name: 'New name' })).toBeNull()
+    expect(pushToast).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not verify permissions'),
+      expect.anything()
+    )
+    expect(pushToast).not.toHaveBeenCalled()
     client.clear()
   })
 })
