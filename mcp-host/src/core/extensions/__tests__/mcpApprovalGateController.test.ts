@@ -10,6 +10,7 @@ import {
   UnifiedApprovalGateController,
   isMcpToolName,
 } from '../mcpApprovalGateController'
+import { NudgeController } from '../nudgeController'
 
 /** Mock ToolRegistry that can be configured with tools that requireApproval */
 function makeMockRegistry(tools?: Record<string, { requiresApproval: boolean }>): ToolRegistry {
@@ -343,13 +344,21 @@ describe('ApprovalController + UnifiedApprovalGateController chain', () => {
     const gate = new UnifiedApprovalGateController(makeMockRegistry())
     const controller = new ApprovalController(conv, gate)
 
-    // First call: matches pending_approval → proceed (one-shot)
-    const result1 = controller.beforeTool('mongodb-server__insert-many', { collection: 'test' })
+    // First call: same id and arguments → proceed (one-shot)
+    const result1 = controller.beforeTool(
+      'mongodb-server__insert-many',
+      { collection: 'test' },
+      'call-1'
+    )
     expect(result1).toBe('proceed')
     expect(conv.pending_approval).toBeUndefined()
 
     // Second call: pending_approval consumed → should suspend again
-    const result2 = controller.beforeTool('mongodb-server__insert-many', { collection: 'test' })
+    const result2 = controller.beforeTool(
+      'mongodb-server__insert-many',
+      { collection: 'test' },
+      'call-1'
+    )
     expect(typeof result2).toBe('object')
     expect((result2 as any).type).toBe('suspend')
   })
@@ -375,19 +384,34 @@ describe('ApprovalController + UnifiedApprovalGateController chain', () => {
     expect(conv.pending_approval).toBeDefined() // NOT consumed
   })
 
-  it('bypasses gate when server prefix is in auto_approved_tools', () => {
+  it('suspends MCP tools when only the server prefix is in auto_approved_tools', () => {
     const conv = makeConversation({
-      auto_approved_tools: new Set(['mongodb-server']),
+      auto_approved_tools: new Set(['mongodb-server', 'airtable-server']),
     })
     const gate = new UnifiedApprovalGateController(makeMockRegistry())
     const controller = new ApprovalController(conv, gate)
 
-    expect(controller.beforeTool('mongodb-server__find', {})).toBe('proceed')
-    expect(controller.beforeTool('mongodb-server__insert-many', {})).toBe('proceed')
-    // Different server should still suspend
-    const result = controller.beforeTool('airtable-server__list_records', {})
-    expect(typeof result).toBe('object')
-    expect((result as any).type).toBe('suspend')
+    const find = controller.beforeTool('mongodb-server__find', {})
+    expect(typeof find).toBe('object')
+    expect((find as any).type).toBe('suspend')
+
+    const deleted = controller.beforeTool('airtable-server__delete_records', {})
+    expect(typeof deleted).toBe('object')
+    expect((deleted as any).type).toBe('suspend')
+
+    const exact = makeConversation({
+      auto_approved_tools: new Set(['shell_exec']),
+    })
+    const exactGate = new UnifiedApprovalGateController(
+      makeMockRegistry({
+        shell_exec: { requiresApproval: true },
+      })
+    )
+    const exactController = new ApprovalController(exact, exactGate)
+    expect(exactController.beforeTool('shell_exec', { command: 'ls' })).toBe('proceed')
+    const other = exactController.beforeTool('airtable-server__delete_records', {})
+    expect(typeof other).toBe('object')
+    expect((other as any).type).toBe('suspend')
   })
 })
 
@@ -414,7 +438,66 @@ describe('UnifiedApprovalGateController — cron×stateless forced gate', () => 
       expect((result as any).approval.tool_name).toBe('cron_manage')
       expect((result as any).approval.parameters).toEqual({ action })
       expect((result as any).approval.description).toBe(STATELESS_CRON_APPROVAL_PROMPT)
+      expect((result as any).approval.authorization_scope).toBe('exact_invocation')
     }
+  })
+
+  it.each<[{ statelessLifecycle: boolean; cronManageGateOnly?: boolean }]>([
+    [{ statelessLifecycle: true }],
+    [{ statelessLifecycle: true, cronManageGateOnly: true }],
+  ])(
+    'an "Always approve" allowlist entry does not waive the forced create/enable gate (%j)',
+    options => {
+      const conv = makeConversation({ auto_approved_tools: new Set(['cron_manage']) })
+      const gate = new UnifiedApprovalGateController(
+        makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+        waivingConfig,
+        undefined,
+        options
+      )
+      const controller = new ApprovalController(conv, gate, {
+        honorDenials: options.cronManageGateOnly !== true,
+        forcedApprovalGate: gate,
+      })
+
+      for (const action of ['create', 'enable']) {
+        const result = controller.beforeTool('cron_manage', { action }, 'tc-new')
+        expect((result as any).type).toBe('suspend')
+        expect((result as any).approval.description).toBe(STATELESS_CRON_APPROVAL_PROMPT)
+      }
+      // Reads still follow the allowlist.
+      expect(controller.beforeTool('cron_manage', { action: 'list' }, 'tc-list')).toBe('proceed')
+      // The approved forced call runs directly on resume, so even a matching
+      // one-shot never lets the gate proceed for another forced call.
+      conv.pending_approval = {
+        request_id: 'req-1',
+        tool_name: 'cron_manage',
+        tool_call_id: 'tc-approved',
+        parameters: { action: 'create' },
+        description: STATELESS_CRON_APPROVAL_PROMPT,
+        context_snapshot: [],
+      }
+      expect(
+        (controller.beforeTool('cron_manage', { action: 'create' }, 'tc-approved') as any).type
+      ).toBe('suspend')
+    }
+  )
+
+  it('keeps the forced gate forced when a decorator sits between it and the allowlist', () => {
+    const conv = makeConversation({ auto_approved_tools: new Set(['cron_manage']) })
+    const gate = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+      waivingConfig,
+      undefined,
+      { statelessLifecycle: true }
+    )
+    const controller = new ApprovalController(conv, new NudgeController(gate), {
+      forcedApprovalGate: gate,
+    })
+
+    expect((controller.beforeTool('cron_manage', { action: 'create' }, 'tc-1') as any).type).toBe(
+      'suspend'
+    )
   })
 
   it('pins the exact user-facing consequence prompt', () => {

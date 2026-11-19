@@ -1,11 +1,14 @@
 'use client'
 
-import { createContext, useContext } from 'react'
+import { createContext, useContext, useSyncExternalStore } from 'react'
 import { useAuth } from '@components/AuthContext'
 import { LoginPanel } from '@components/LoginPanel'
 import type { AuthGateProps } from './types'
 
 const AuthGateContext = createContext(false)
+const subscribeToHydration = () => () => {}
+const clientHydrationSnapshot = () => true
+const serverHydrationSnapshot = () => false
 
 export function AuthGate({ children }: AuthGateProps) {
   const isInsideAuthGate = useContext(AuthGateContext)
@@ -16,8 +19,15 @@ export function AuthGate({ children }: AuthGateProps) {
 
 function AuthGateBoundary({ children }: AuthGateProps) {
   const { authState } = useAuth()
+  // Auth can resolve above a deferred Suspense boundary before it hydrates.
+  // Preserve the server loading shell for that first hydration render.
+  const hydrated = useSyncExternalStore(
+    subscribeToHydration,
+    clientHydrationSnapshot,
+    serverHydrationSnapshot
+  )
 
-  if (authState.isLoading) {
+  if (!hydrated || authState.isLoading) {
     return (
       <main className="cu-app cu-app--auth">
         <div className="cu-card cu-card--auth">

@@ -47,6 +47,7 @@ export function SidebarNav({
   onSettingsMenuOpenChange,
   onSelect,
   onOpenFilesSection,
+  onVisibleExpandedFoldersChange,
   onOpenPreviewSection,
   pushToast,
   toggleRequestId = 0,
@@ -692,6 +693,7 @@ export function SidebarNav({
                     closeCompactMenu()
                   }}
                   pushToast={pushToast}
+                  onVisibleExpandedFoldersChange={onVisibleExpandedFoldersChange}
                 />
               </div>
             )}

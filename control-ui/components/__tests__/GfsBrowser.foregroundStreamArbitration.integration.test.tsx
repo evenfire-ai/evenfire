@@ -19,7 +19,6 @@ const producerConfig = vi.hoisted(() => ({
   entityChangeStreamHeartbeatMs: 20_000,
   entityChangeStreamMaxLifetimeMs: 600_000,
   entityChangeStreamPollMs: 250,
-  entityChangeUserVisibilityRefreshMs: 4_000,
   entityChangeStreamMaxConnections: 256,
   entityChangeStreamMaxConnectionsPerPrincipal: 32,
 }))
@@ -201,7 +200,6 @@ describe('GfsBrowser foreground/stream arbitration integration', () => {
       producerResponse as never,
       CURSOR,
       async () => true,
-      'operator',
       'control-ui-foreground-race'
     )
     await waitFor(() => expect(producerResponse?.headersSent).toBe(true))
@@ -363,7 +361,6 @@ describe('GfsBrowser foreground/stream arbitration integration', () => {
       producerResponse as never,
       CURSOR,
       async () => true,
-      'operator',
       'control-ui-root-identity'
     )
     await waitFor(() => expect(producerResponse?.headersSent).toBe(true))

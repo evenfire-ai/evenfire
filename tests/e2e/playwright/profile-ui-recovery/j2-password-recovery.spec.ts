@@ -16,10 +16,9 @@ test('J2 recovery link clears the logout fence, revokes the prior session, and l
   // E2E_GUARDIAN_NAVIGATION: root-entry — the ordinary login that owns the prior session
   await page.goto('/')
   await signInThroughUi(page, RECOVERY_MEMBER.email, RECOVERY_MEMBER.password)
-  await expectBrowserRoute(page, { pathname: '/' })
-  await expect(
-    page.getByRole('heading', { name: 'Welcome, Synthetic Recovery Member' })
-  ).toBeVisible()
+  await expect(page).toHaveURL(/\/channels\/telegram$/)
+  await expectBrowserRoute(page, { pathname: '/channels/telegram' })
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toBeVisible()
 
   const priorSession = await sessionCookieValue(page)
   expect(priorSession).toBeTruthy()
@@ -87,13 +86,9 @@ test('J2 recovery link clears the logout fence, revokes the prior session, and l
   await expect(page.getByLabel('Email', { exact: true })).toHaveValue(RECOVERY_MEMBER.email)
   await signInThroughUi(page, RECOVERY_MEMBER.email, RECOVERY_MEMBER.replacementPassword)
 
-  await expectBrowserRoute(page, {
-    pathname: '/',
-    query: { email: RECOVERY_MEMBER.email },
-  })
-  await expect(
-    page.getByRole('heading', { name: 'Welcome, Synthetic Recovery Member' })
-  ).toBeVisible()
+  await expect(page).toHaveURL(/\/channels\/telegram$/)
+  await expectBrowserRoute(page, { pathname: '/channels/telegram' })
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toBeVisible()
   const freshSession = await sessionCookieValue(page)
   expect(freshSession).toBeTruthy()
   if (!freshSession) throw new Error('fresh login did not set a profile session')
@@ -117,10 +112,9 @@ test('J2 a redeemed recovery link keeps the logout fence over a live session', a
   // E2E_GUARDIAN_NAVIGATION: root-entry — the ordinary login that owns the live session
   await page.goto('/')
   await signInThroughUi(page, LOGOUT_MEMBER.email, LOGOUT_MEMBER.password)
-  await expectBrowserRoute(page, { pathname: '/' })
-  await expect(
-    page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })
-  ).toBeVisible()
+  await expect(page).toHaveURL(/\/channels\/telegram$/)
+  await expectBrowserRoute(page, { pathname: '/channels/telegram' })
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toBeVisible()
 
   const liveSession = await sessionCookieValue(page)
   expect(liveSession).toBeTruthy()
@@ -153,9 +147,7 @@ test('J2 a redeemed recovery link keeps the logout fence over a live session', a
   await page.goto('/')
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
   await expectBrowserRoute(page, { pathname: '/' })
-  await expect(page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })).toHaveCount(
-    0
-  )
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toHaveCount(0)
   expect(await readLogoutFence(page)).toBe('true')
 
   // A current pending preview is still only a page view. It must not release

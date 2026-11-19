@@ -36,6 +36,22 @@ function deferred<T = void>(): {
   return { promise, resolve, reject }
 }
 
+type LoggedLine = {
+  level?: string
+  svc?: string
+  msg?: string
+  err?: { name?: string; message?: string }
+  [field: string]: unknown
+}
+
+/** Parse the structured hccLogger lines a console spy received (one JSON object per call). */
+function loggedLines(spy: { mock: { calls: unknown[][] } }): LoggedLine[] {
+  return spy.mock.calls
+    .map(call => call[0])
+    .filter((line): line is string => typeof line === 'string' && line.startsWith('{'))
+    .map(line => JSON.parse(line) as LoggedLine)
+}
+
 async function flushMicrotasks(turns = 8): Promise<void> {
   for (let turn = 0; turn < turns; turn += 1) {
     await Promise.resolve()
@@ -381,6 +397,13 @@ vi.mock('./reconciler', () => ({
     hasSecretChangeEvidence() {
       return false
     }
+    namesAwaitingExternalChange() {
+      return []
+    }
+    rolloutObservationRequiresReconcile() {
+      return false
+    }
+    probeSecretAccess = vi.fn()
     recordSecretChangeEvidence = vi.fn()
     fullReconcile = mocks.serverFullReconcile
     reconcile = vi.fn()
@@ -1266,8 +1289,11 @@ describe('McpServerWatcher startup', () => {
       expect(hostReconciler.reconcile).not.toHaveBeenCalled()
       expect(hostReconciler.patchChannelReaderRevisionAnnotation).not.toHaveBeenCalled()
       expect(hostReconciler.reconcileChannelReaderRevision).not.toHaveBeenCalled()
-      expect(warnSpy).toHaveBeenCalledWith(
-        '[K8s] Deferring CommunicationChannel Secret "channels/bootstrap-channel-secret" Host convergence; CommunicationChannel cache is not authoritative'
+      expect(loggedLines(warnSpy)).toContainEqual(
+        expect.objectContaining({
+          level: 'warn',
+          msg: '[K8s] Deferring CommunicationChannel Secret "channels/bootstrap-channel-secret" Host convergence; CommunicationChannel cache is not authoritative',
+        })
       )
       expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
     } finally {
@@ -1421,9 +1447,15 @@ describe('McpServerWatcher startup', () => {
       try {
         await expect(watcher.start()).resolves.toBeUndefined()
 
-        expect(errorSpy).toHaveBeenCalledWith(
-          `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
-          expect.objectContaining({ message: `${failingPlural} inventory unavailable` })
+        expect(loggedLines(errorSpy)).toContainEqual(
+          expect.objectContaining({
+            level: 'error',
+            msg: `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
+            err: expect.objectContaining({
+              name: 'Error',
+              message: `${failingPlural} inventory unavailable`,
+            }),
+          })
         )
         expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
         expect((watcher as any)[recoveryTimerField]).not.toBeNull()
@@ -1459,9 +1491,15 @@ describe('McpServerWatcher startup', () => {
       try {
         await expect(watcher.start()).resolves.toBeUndefined()
 
-        expect(errorSpy).toHaveBeenCalledWith(
-          `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
-          expect.objectContaining({ message: `${kind} snapshot missing resourceVersion` })
+        expect(loggedLines(errorSpy)).toContainEqual(
+          expect.objectContaining({
+            level: 'error',
+            msg: `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
+            err: expect.objectContaining({
+              name: 'Error',
+              message: `${kind} snapshot missing resourceVersion`,
+            }),
+          })
         )
         expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
         expect((watcher as any)[recoveryTimerField]).not.toBeNull()
@@ -4725,6 +4763,88 @@ describe('McpServerWatcher startup', () => {
     await watcher.stop()
   })
 
+  /** The four series a non-exception pass end can move (#1494). */
+  async function passEndCounts() {
+    const swallowed = (sink: string) =>
+      readLabeledConvergenceMetric('clerum_hcc_initial_convergence_swallowed_total', {
+        lane: 'NetworkPolicy',
+        sink,
+      })
+    const result = (name: string) =>
+      readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: name,
+      })
+    return {
+      authorityLost: await swallowed('authority-lost'),
+      inventoryChanged: await swallowed('inventory-changed'),
+      abortedAuthority: await result('aborted-authority'),
+      abortedBump: await result('aborted-bump'),
+    }
+  }
+
+  it('T5.4 #1494 a pass with an unsynced cache and a moved revision is aborted-bump', async () => {
+    const firstPassStarted = deferred()
+    const releaseFirstPass = deferred()
+    const watcher = new McpServerWatcher()
+    seedNetworkPolicyPassInventory(watcher)
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
+    const counts = await passEndCounts()
+    mocks.netPolFullReconcile.mockImplementation(async (_contexts, _servers, options) => {
+      firstPassStarted.resolve(undefined)
+      await releaseFirstPass.promise
+      options.onAuthoritativeRevocationComplete?.()
+    })
+
+    const pass = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
+    await firstPassStarted.promise
+    ;(watcher as any).mcpServerCacheSynced = false
+    ;(watcher as any).contextDesiredRevision += 1
+    releaseFirstPass.resolve(undefined)
+    await pass
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[K8s] pass ended without certifying: desired inventory changed',
+      expect.objectContaining({ contextMoved: true, mcpServerCacheSynced: false })
+    )
+    expect(await passEndCounts()).toEqual({
+      ...counts,
+      inventoryChanged: counts.inventoryChanged + 1,
+      abortedBump: counts.abortedBump + 1,
+    })
+    warnSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it('T5.5 #1494 the pass-result log line of a moved pass carries aborted-bump', async () => {
+    const firstPassStarted = deferred()
+    const releaseFirstPass = deferred()
+    const watcher = new McpServerWatcher()
+    seedNetworkPolicyPassInventory(watcher)
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
+    const infoSpy = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+    mocks.netPolFullReconcile.mockImplementation(async (_contexts, _servers, options) => {
+      firstPassStarted.resolve(undefined)
+      await releaseFirstPass.promise
+      options.onAuthoritativeRevocationComplete?.()
+    })
+
+    const pass = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
+    await firstPassStarted.promise
+    ;(watcher as any).mcpServerDesiredRevision += 1
+    releaseFirstPass.resolve(undefined)
+    await pass
+
+    const results = [...infoSpy.mock.calls, ...warnSpy.mock.calls]
+      .map(call => call[1] as { event?: string; result?: string } | undefined)
+      .filter(fields => fields?.event === 'networkpolicy-pass-result')
+    expect(results).toHaveLength(1)
+    expect(results[0]?.result).toBe('aborted-bump')
+    warnSpy.mockRestore()
+    infoSpy.mockRestore()
+    await watcher.stop()
+  })
+
   it('G2: aborts a NetworkPolicy pass when contextDesiredRevision advances mid-flight', async () => {
     const firstPassStarted = deferred()
     const releaseFirstPass = deferred()
@@ -4736,14 +4856,7 @@ describe('McpServerWatcher startup', () => {
       'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
       'NetworkPolicy'
     )
-    const swallowedBefore = await readLabeledConvergenceMetric(
-      'clerum_hcc_initial_convergence_swallowed_total',
-      { lane: 'NetworkPolicy', sink: 'authority-lost' }
-    )
-    const abortedBefore = await readLabeledConvergenceMetric(
-      'clerum_hcc_initial_convergence_pass_results_total',
-      { lane: 'NetworkPolicy', result: 'aborted-authority' }
-    )
+    const counts = await passEndCounts()
     mocks.netPolFullReconcile.mockImplementation(async (_contexts, _servers, options) => {
       firstPassStarted.resolve(undefined)
       await releaseFirstPass.promise
@@ -4758,14 +4871,19 @@ describe('McpServerWatcher startup', () => {
     releaseFirstPass.resolve(undefined)
     await pass
 
+    // #1494: a moved desired inventory is aborted-bump, not a lost authority.
     expect(warnSpy).toHaveBeenCalledWith(
-      '[K8s] pass ended without certifying: inventory authority lost',
+      '[K8s] pass ended without certifying: desired inventory changed',
       expect.objectContaining({
         contextMoved: true,
         serverMoved: false,
         contextCacheSynced: true,
         mcpServerCacheSynced: true,
       })
+    )
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      '[K8s] pass ended without certifying: inventory authority lost',
+      expect.anything()
     )
     expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(5)
     expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
@@ -4775,18 +4893,11 @@ describe('McpServerWatcher startup', () => {
         'NetworkPolicy'
       )
     ).toBe(successTimestampBefore)
-    expect(
-      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_swallowed_total', {
-        lane: 'NetworkPolicy',
-        sink: 'authority-lost',
-      })
-    ).toBe(swallowedBefore + 1)
-    expect(
-      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
-        lane: 'NetworkPolicy',
-        result: 'aborted-authority',
-      })
-    ).toBe(abortedBefore + 1)
+    expect(await passEndCounts()).toEqual({
+      ...counts,
+      inventoryChanged: counts.inventoryChanged + 1,
+      abortedBump: counts.abortedBump + 1,
+    })
     warnSpy.mockRestore()
     await watcher.stop()
   })
@@ -4802,14 +4913,7 @@ describe('McpServerWatcher startup', () => {
       'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
       'NetworkPolicy'
     )
-    const swallowedBefore = await readLabeledConvergenceMetric(
-      'clerum_hcc_initial_convergence_swallowed_total',
-      { lane: 'NetworkPolicy', sink: 'authority-lost' }
-    )
-    const abortedBefore = await readLabeledConvergenceMetric(
-      'clerum_hcc_initial_convergence_pass_results_total',
-      { lane: 'NetworkPolicy', result: 'aborted-authority' }
-    )
+    const counts = await passEndCounts()
     mocks.netPolFullReconcile.mockImplementation(async (_contexts, _servers, options) => {
       firstPassStarted.resolve(undefined)
       await releaseFirstPass.promise
@@ -4824,14 +4928,19 @@ describe('McpServerWatcher startup', () => {
     releaseFirstPass.resolve(undefined)
     await pass
 
+    // #1494: a moved desired inventory is aborted-bump, not a lost authority.
     expect(warnSpy).toHaveBeenCalledWith(
-      '[K8s] pass ended without certifying: inventory authority lost',
+      '[K8s] pass ended without certifying: desired inventory changed',
       expect.objectContaining({
         contextMoved: false,
         serverMoved: true,
         contextCacheSynced: true,
         mcpServerCacheSynced: true,
       })
+    )
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      '[K8s] pass ended without certifying: inventory authority lost',
+      expect.anything()
     )
     expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(5)
     expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
@@ -4841,18 +4950,11 @@ describe('McpServerWatcher startup', () => {
         'NetworkPolicy'
       )
     ).toBe(successTimestampBefore)
-    expect(
-      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_swallowed_total', {
-        lane: 'NetworkPolicy',
-        sink: 'authority-lost',
-      })
-    ).toBe(swallowedBefore + 1)
-    expect(
-      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
-        lane: 'NetworkPolicy',
-        result: 'aborted-authority',
-      })
-    ).toBe(abortedBefore + 1)
+    expect(await passEndCounts()).toEqual({
+      ...counts,
+      inventoryChanged: counts.inventoryChanged + 1,
+      abortedBump: counts.abortedBump + 1,
+    })
     warnSpy.mockRestore()
     await watcher.stop()
   })
@@ -6009,9 +6111,12 @@ describe('McpServerWatcher startup', () => {
       await expect(watcher.start()).resolves.toBeUndefined()
       await vi.advanceTimersByTimeAsync(0)
 
-      expect(errorSpy).toHaveBeenCalledWith(
-        `[K8s] ${kind} background watch failed to start:`,
-        failure
+      expect(loggedLines(errorSpy)).toContainEqual(
+        expect.objectContaining({
+          level: 'error',
+          msg: `[K8s] ${kind} background watch failed to start:`,
+          err: expect.objectContaining({ name: 'Error', message: failure.message }),
+        })
       )
       expect(rejectedWatch).toHaveBeenCalledOnce()
       expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
@@ -6219,6 +6324,53 @@ describe('McpServerWatcher startup', () => {
     watcher.stop()
     errorSpy.mockRestore()
     warnSpy.mockRestore()
+  })
+})
+
+describe('k8sClient.ts logs through the service logger (repository logging standard)', () => {
+  it('prints the Host inventory LIST and its failure as structured JSON lines', async () => {
+    const failure = Object.assign(new Error('hosts LIST rejected by the apiserver'), {
+      name: 'HostListRejected',
+    })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'hosts') throw failure
+      return { items: [] }
+    })
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      await expect(listAllHosts()).rejects.toBe(failure)
+
+      // Every line the call printed is one JSON object.
+      const printed = [...logSpy.mock.calls, ...errorSpy.mock.calls].map(call => call[0])
+      expect(printed.length).toBeGreaterThan(0)
+      for (const line of printed) {
+        expect(typeof line).toBe('string')
+        expect(() => JSON.parse(line as string)).not.toThrow()
+      }
+      expect(loggedLines(logSpy)).toContainEqual(
+        expect.objectContaining({
+          level: 'info',
+          svc: 'host-context-controller',
+          msg: '[K8s] Listing all Hosts in namespace mcp-host',
+        })
+      )
+      const failureLines = loggedLines(errorSpy).filter(
+        line => line.msg === '[K8s] Failed to list Hosts:'
+      )
+      expect(failureLines).toHaveLength(1)
+      expect(failureLines[0]).toMatchObject({ level: 'error', svc: 'host-context-controller' })
+      expect(failureLines[0].err).toEqual(
+        expect.objectContaining({
+          name: 'HostListRejected',
+          message: 'hosts LIST rejected by the apiserver',
+        })
+      )
+    } finally {
+      logSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
   })
 })
 
@@ -7525,10 +7677,14 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
     await expect(watcher.start()).resolves.toBeUndefined()
     expect(ccWatchSpy).toHaveBeenCalledTimes(1)
     expect(watcher.isCommunicationChannelCacheSynced()).toBe(false)
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
-        '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
-      expect.any(Error)
+    expect(loggedLines(errorSpy)).toContainEqual(
+      expect.objectContaining({
+        level: 'error',
+        msg:
+          '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
+          '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
+        err: expect.objectContaining({ name: 'Error', message: 'CC list failed' }),
+      })
     )
 
     errorSpy.mockRestore()
@@ -7609,6 +7765,105 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     )
 
     watcher.stop()
+  })
+
+  /** Capture the structured lines hccLogger prints through console.log, parsed. */
+  function captureInfoLines(): {
+    lines: Array<Record<string, unknown>>
+    restore: () => void
+  } {
+    const lines: Array<Record<string, unknown>> = []
+    const spy = vi.spyOn(console, 'log').mockImplementation((line?: unknown) => {
+      if (typeof line === 'string' && line.startsWith('{')) lines.push(JSON.parse(line))
+    })
+    return { lines, restore: () => spy.mockRestore() }
+  }
+
+  function seedSyncedHost(watcher: McpServerWatcher): void {
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).hosts.set('stateless-host', {
+      name: 'stateless-host',
+      namespace: 'mcp-host',
+      spec: { host: 'stateless-host', contextRef: 'context1', secretRef: 'agent-secret' },
+    })
+  }
+
+  it('G-K1 the Context-recovery pass that applies the recovered channel lifecycle logs its generation and mode', async () => {
+    resetMocks()
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'communicationchannels') {
+        return {
+          metadata: { resourceVersion: '201' },
+          items: [
+            {
+              metadata: { name: 'current-channel', namespace: 'channels' },
+              spec: { hostRef: 'stateless-host' },
+            },
+          ],
+        }
+      }
+      if (plural === 'contexts') return { metadata: { resourceVersion: '301' }, items: [] }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    seedSyncedHost(watcher)
+    ;(watcher as any).contextCacheSynced = false
+    const capture = captureInfoLines()
+    try {
+      // The channel cache recovers while the Context cache is not synced: its
+      // lifecycle pass returns without a line, and the Context recovery applies
+      // the pending generation under its own label.
+      await expect((watcher as any).recoverCommunicationChannelCache()).resolves.toBe(true)
+      await (watcher as any).recoverContextInventoryAndWatch()
+      await vi.waitFor(() =>
+        expect(
+          capture.lines.some(
+            line => line.msg === '[K8s] Completed Host reconciliation after Context cache recovery'
+          )
+        ).toBe(true)
+      )
+
+      const recovered = capture.lines.find(line =>
+        String(line.msg).startsWith('[K8s] Recovered 1 CommunicationChannel(s) into cache')
+      )
+      const completed = capture.lines.find(
+        line => line.msg === '[K8s] Completed Host reconciliation after Context cache recovery'
+      )
+      expect(recovered?.ccLifecycleGeneration).toEqual(expect.any(Number))
+      expect(recovered?.ccLifecycleGeneration).toBe((watcher as any).ccLifecycleGeneration)
+      expect(completed).toMatchObject({
+        mode: 'full',
+        ccLifecycleGeneration: recovered?.ccLifecycleGeneration,
+      })
+      // Witness: that pass is the one that applied the recovered generation.
+      expect((watcher as any).ccAppliedLifecycleGeneration).toBe(recovered?.ccLifecycleGeneration)
+      expect(mocks.hostReconcileHosts).not.toHaveBeenCalled()
+      expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+    } finally {
+      capture.restore()
+      await watcher.stop()
+    }
+  })
+
+  it('G-K2 a Periodic resync completion carries its mode and no channel lifecycle generation', async () => {
+    resetMocks()
+    const watcher = newContextAuthoritativeWatcher()
+    seedSyncedHost(watcher)
+    const capture = captureInfoLines()
+    try {
+      await (watcher as any).requestHostFleetReconcile('Periodic resync', undefined, 'full')
+
+      const completed = capture.lines.find(
+        line => line.msg === '[K8s] Completed Host reconciliation after Periodic resync'
+      )
+      // Witness: the pass ran and printed its completion line.
+      expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+      expect(completed).toMatchObject({ mode: 'full' })
+      expect(completed).not.toHaveProperty('ccLifecycleGeneration')
+    } finally {
+      capture.restore()
+      await watcher.stop()
+    }
   })
 
   it('keeps a partial cache fail-closed when the recovery list fails', async () => {
@@ -7757,9 +8012,12 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       await vi.advanceTimersByTimeAsync(1)
       expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2)
 
-      expect(errorSpy).toHaveBeenCalledWith(
-        '[K8s] Host reconciliation after CommunicationChannel watch interruption failed:',
-        fleetFailure
+      expect(loggedLines(errorSpy)).toContainEqual(
+        expect.objectContaining({
+          level: 'error',
+          msg: '[K8s] Host reconciliation after CommunicationChannel watch interruption failed:',
+          err: expect.objectContaining({ name: 'Error', message: fleetFailure.message }),
+        })
       )
       await vi.advanceTimersByTimeAsync(300000)
       expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2)
@@ -9704,9 +9962,15 @@ describe('McpServerWatcher Host watch generation', () => {
     expect(mocks.watch).not.toHaveBeenCalled()
     expect((watcher as any).hostCacheSynced).toBe(false)
     expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[K8s] Host reconciliation after Periodic resync failed:',
-      expect.objectContaining({ message: 'Host snapshot missing resourceVersion' })
+    expect(loggedLines(errorSpy)).toContainEqual(
+      expect.objectContaining({
+        level: 'error',
+        msg: '[K8s] Host reconciliation after Periodic resync failed:',
+        err: expect.objectContaining({
+          name: 'Error',
+          message: 'Host snapshot missing resourceVersion',
+        }),
+      })
     )
 
     errorSpy.mockRestore()

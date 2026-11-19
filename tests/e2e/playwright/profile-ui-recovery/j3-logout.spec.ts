@@ -12,10 +12,9 @@ test('J3 logout returns to login and the previous session is rejected', async ({
   // E2E_GUARDIAN_NAVIGATION: root-entry — the ordinary login that owns the session
   await page.goto('/')
   await signInThroughUi(page, LOGOUT_MEMBER.email, LOGOUT_MEMBER.password)
-  await expectBrowserRoute(page, { pathname: '/' })
-  await expect(
-    page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })
-  ).toBeVisible()
+  await expect(page).toHaveURL(/\/channels\/telegram$/)
+  await expectBrowserRoute(page, { pathname: '/channels/telegram' })
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toBeVisible()
 
   const priorSession = await sessionCookieValue(page)
   expect(priorSession).toBeTruthy()
@@ -38,9 +37,7 @@ test('J3 logout returns to login and the previous session is rejected', async ({
   await expect(page).toHaveURL(/\/$/)
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
   await expectBrowserRoute(page, { pathname: '/' })
-  await expect(page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })).toHaveCount(
-    0
-  )
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toHaveCount(0)
   expect(await sessionCookieValue(page)).toBeNull()
 
   const oldSession = await fetchMeWithCookie(page, priorSession)
@@ -49,9 +46,7 @@ test('J3 logout returns to login and the previous session is rejected', async ({
   await page.goto('/')
   await expectBrowserRoute(page, { pathname: '/' })
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })).toHaveCount(
-    0
-  )
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toHaveCount(0)
 
   const metrics = await readControlApiMetrics(page)
   expect(metrics.logoutRequests).toContainEqual({ hasToken: true })

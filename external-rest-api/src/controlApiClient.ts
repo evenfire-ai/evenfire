@@ -43,6 +43,26 @@ export class ControlApiError extends Error {
 }
 
 /**
+ * The 502 this client answers when an upstream body does not parse as JSON. A
+ * 502 control-api itself sends parses, so callers that give a meaning to the
+ * status can tell the two apart; `upstreamStatus` is the status that came back.
+ */
+export class ControlApiNonJsonResponseError extends ControlApiError {
+  constructor(
+    message: string,
+    readonly upstreamStatus: number,
+    responseHeaders: Record<string, string>
+  ) {
+    super(
+      message,
+      502,
+      { error: 'Upstream returned non-JSON body', status: upstreamStatus },
+      responseHeaders
+    )
+  }
+}
+
+/**
  * control-api sends the public `401 {error:{code:'invalid_session'}}` envelope from
  * `/external/users/:id/me` and the `/external/auth/*` session routes; `/external/auth/verify`
  * is the exception and answers a bare 401. Every route behind
@@ -153,6 +173,9 @@ const FORWARDABLE_RESPONSE_HEADERS = [
   'x-ratelimit-remaining',
   'x-ratelimit-reset',
   'x-request-id',
+  // Only the GFS watch routes emit it; their client picks its reaction from it
+  // without reading the body.
+  'x-watch-error',
 ] as const
 
 function forwardableResponseHeaders(headers: Headers, status: number): Record<string, string> {
@@ -170,11 +193,13 @@ function forwardableResponseHeaders(headers: Headers, status: number): Record<st
   return result
 }
 
-function buildUrl(
-  path: string,
-  query?: Record<string, string | undefined>,
-  rawQueryString?: string
-): string {
+/**
+ * A list value is sent as one parameter per element, in order, so a repeated
+ * query key reaches control-api with every value.
+ */
+export type ControlApiQuery = Record<string, string | readonly string[] | undefined>
+
+function buildUrl(path: string, query?: ControlApiQuery, rawQueryString?: string): string {
   assertControlApiPathAllowed(path)
   if (rawQueryString !== undefined) assertControlApiRawQueryAllowed(rawQueryString)
   if (query !== undefined && rawQueryString !== undefined) {
@@ -185,8 +210,10 @@ function buildUrl(
   const url = new URL(`${base}${normalizedPath}`)
   if (query) {
     for (const [key, value] of Object.entries(query)) {
-      if (value !== undefined && value !== '') {
-        url.searchParams.set(key, value)
+      if (Array.isArray(value)) {
+        for (const item of value) url.searchParams.append(key, String(item))
+      } else if (value !== undefined && value !== '') {
+        url.searchParams.set(key, String(value))
       }
     }
   }
@@ -214,11 +241,12 @@ export async function controlApiRequestWithStatus<T>(
   method: RequestMethod,
   path: string,
   options?: {
-    query?: Record<string, string | undefined>
+    query?: ControlApiQuery
     body?: unknown
     userSessionToken?: string
     extraHeaders?: Record<string, string>
     signal?: AbortSignal
+    redirect?: RequestRedirect
   }
 ): Promise<ControlApiResponse<T>> {
   // Build and validate the URL before any credential enters a request object.
@@ -241,7 +269,13 @@ export async function controlApiRequestWithStatus<T>(
     method === 'GET' || method === 'HEAD' ? 'read' : 'mutation'
   let response: Response
   try {
-    response = await fetch(url, { method, headers, body, signal: options?.signal })
+    response = await fetch(url, {
+      method,
+      headers,
+      body,
+      signal: options?.signal,
+      ...(options?.redirect ? { redirect: options.redirect } : {}),
+    })
   } catch {
     throw new ControlApiTransportError(operation, 'dispatch')
   }
@@ -268,10 +302,9 @@ export async function controlApiRequestWithStatus<T>(
   }
 
   if (parseError) {
-    throw new ControlApiError(
+    throw new ControlApiNonJsonResponseError(
       `Control API ${method} ${path} returned non-JSON body (status=${response.status})`,
-      502,
-      { error: 'Upstream returned non-JSON body', status: response.status },
+      response.status,
       forwardableResponseHeaders(response.headers, 502)
     )
   }
@@ -296,7 +329,7 @@ export async function controlApiRequest<T>(
   method: RequestMethod,
   path: string,
   options?: {
-    query?: Record<string, string | undefined>
+    query?: ControlApiQuery
     body?: unknown
     userSessionToken?: string
     extraHeaders?: Record<string, string>
@@ -310,7 +343,7 @@ export async function controlApiBinaryRequestWithStatus(
   method: 'GET',
   path: string,
   options?: {
-    query?: Record<string, string | undefined>
+    query?: ControlApiQuery
     userSessionToken?: string
     extraHeaders?: Record<string, string>
   }
@@ -365,13 +398,14 @@ export async function controlApiStreamRequest(
   method: RequestMethod,
   path: string,
   options?: {
-    query?: Record<string, string | undefined>
+    query?: ControlApiQuery
     rawQueryString?: string
     userSessionToken?: string
     extraHeaders?: Record<string, string>
     signal?: AbortSignal
     body?: unknown
     throwOnHttpError?: boolean
+    redirect?: RequestRedirect
   }
 ): Promise<Response> {
   // Build and validate the URL before any credential enters a request object.
@@ -393,6 +427,7 @@ export async function controlApiStreamRequest(
     headers,
     signal: options?.signal,
     body: options?.body as BodyInit | null | undefined,
+    ...(options?.redirect ? { redirect: options.redirect } : {}),
   }
   if (options?.body && typeof options.body === 'object' && Symbol.asyncIterator in options.body) {
     fetchInit.duplex = 'half'

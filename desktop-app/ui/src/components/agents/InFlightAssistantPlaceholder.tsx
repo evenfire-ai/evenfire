@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { type TaskState, makeTaskKey, useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
-import type { ApprovalDecisionTarget } from '@hooks/domain/approvalDecision'
+import type {
+  ApprovalDecisionSettlement,
+  ApprovalDecisionTarget,
+} from '@hooks/domain/approvalDecision'
 import { trackerStateToTaskProgress } from '@hooks/domain/trackerToProgress'
 import type { ApprovalInputPreview } from '@/uiTypes'
 import type { AccessCatalog } from '../../../../src/types'
@@ -14,7 +17,7 @@ interface Props {
   localMessageIds: Set<string>
   onCancelTask?: (taskId: string) => void
   /** §4.7.4: central approval decider (in-flight placeholder = surface d). */
-  decideApproval: (target: ApprovalDecisionTarget) => Promise<void>
+  decideApproval: (target: ApprovalDecisionTarget) => Promise<ApprovalDecisionSettlement>
   /**
    * §8-R2 optimistic paint: the FSM projection's pending approval for this chat.
    * `seedSuspended` is gone, so on a rejoin the approve/deny gate is driven by the
@@ -30,6 +33,7 @@ interface Props {
     // suspended replays.
     reason?: string
     mcpServerName?: string
+    alwaysApproveAllowed?: false
     inputPreview?: ApprovalInputPreview
   }
   agentContextByName?: AccessCatalog['agentContextByName']
@@ -91,7 +95,7 @@ export function InFlightAssistantPlaceholder({
             si
               ? () => {
                   // Surface (d), §4.7.4: funnel through the central decider.
-                  void decideApproval({
+                  return decideApproval({
                     agentRef,
                     chatId,
                     taskId,
@@ -102,10 +106,26 @@ export function InFlightAssistantPlaceholder({
                 }
               : undefined
           }
+          onAlwaysApprove={
+            // The host may refuse to allowlist this call (`alwaysApproveAllowed: false`).
+            si && si.alwaysApproveAllowed !== false
+              ? () => {
+                  return decideApproval({
+                    agentRef,
+                    chatId,
+                    taskId,
+                    requestId: si.requestId,
+                    decision: 'approve',
+                    alwaysApprove: true,
+                    source: 'placeholder',
+                  })
+                }
+              : undefined
+          }
           onDeny={
             si
               ? () => {
-                  void decideApproval({
+                  return decideApproval({
                     agentRef,
                     chatId,
                     taskId,

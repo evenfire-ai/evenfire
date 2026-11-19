@@ -10,10 +10,8 @@ import { IconLogout } from './icons'
 import type { ProfileRouteKey, ProfileSidebarItem, SidebarProps } from './types'
 
 export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: SidebarProps) {
-  const { approvalTargets, approvalTargetsLoading, canManageMembers, manageableTeamsLoading } =
-    useProfileAccess()
+  const { canManageMembers, manageableTeamsLoading } = useProfileAccess()
   const { releaseId } = useReleaseIdentity()
-  const hasExternalChannelAccess = approvalTargets.length > 0
 
   const navigationItems = (
     Object.entries(PROFILE_SIDEBAR_ITEMS) as Array<[ProfileRouteKey, ProfileSidebarItem]>
@@ -21,7 +19,7 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
     .filter(([routeKey]) => routeKey !== 'settings')
     .sort(
       ([firstRouteKey, first], [secondRouteKey, second]) =>
-        Number(secondRouteKey === 'home') - Number(firstRouteKey === 'home') ||
+        Number(secondRouteKey === 'socialChannels') - Number(firstRouteKey === 'socialChannels') ||
         first.label.localeCompare(second.label)
     )
   const settings = PROFILE_SIDEBAR_ITEMS.settings
@@ -33,26 +31,25 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
     >
       <div className="cu-sidebar__brand" title={formatReleaseTitle(releaseId)}>
         <Image
-          className="cu-sidebar__brand-mark"
-          src="/brand/logo.svg"
-          alt=""
-          width={44}
+          className="cu-sidebar__brand-mark cu-sidebar__brand-mark--light"
+          src="/brand/logotype-light.svg"
+          alt="Evenfire"
+          width={184}
           height={44}
-          aria-hidden="true"
         />
-        <div className="cu-sidebar__brand-copy">
-          <h1 className="cu-sidebar__title">Evenfire</h1>
-          <p className="cu-sidebar__subtitle">Profile Portal</p>
-        </div>
+        <Image
+          className="cu-sidebar__brand-mark cu-sidebar__brand-mark--dark"
+          src="/brand/logotype-dark.svg"
+          alt="Evenfire"
+          width={184}
+          height={44}
+        />
       </div>
       <nav className="cu-sidebar__nav" aria-label="Main sections">
         {navigationItems.map(([routeKey, item]) => {
           const accessLoading =
-            (routeKey === 'members' && manageableTeamsLoading && !canManageMembers) ||
-            (routeKey === 'approvalChannels' && approvalTargetsLoading && !hasExternalChannelAccess)
-          const accessDenied =
-            (routeKey === 'members' && !canManageMembers) ||
-            (routeKey === 'approvalChannels' && !hasExternalChannelAccess)
+            routeKey === 'members' && manageableTeamsLoading && !canManageMembers
+          const accessDenied = routeKey === 'members' && !canManageMembers
 
           if (accessLoading) {
             return (

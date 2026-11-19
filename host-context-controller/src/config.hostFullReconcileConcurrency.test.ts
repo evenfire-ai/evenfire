@@ -25,8 +25,8 @@ describe('HCC_HOST_FULL_RECONCILE_CONCURRENCY', () => {
     expect(config.hostFullReconcileConcurrency).toBe(2)
   })
 
-  it('defaults to 2 for a blank value', async () => {
-    const { config } = await loadConfig('   ')
+  it('defaults to 2 for an empty string', async () => {
+    const { config } = await loadConfig('')
 
     expect(config.hostFullReconcileConcurrency).toBe(2)
   })
@@ -42,11 +42,11 @@ describe('HCC_HOST_FULL_RECONCILE_CONCURRENCY', () => {
     expect(config.hostFullReconcileConcurrency).toBe(expected)
   })
 
-  it.each(['0', '9', '-1', '1.5', '2x', 'NaN', 'Infinity'])(
+  it.each(['0', '9', '-1', '1.5', '2x', 'NaN', 'Infinity', '   '])(
     "fails configuration validation for the explicit value '%s'",
     async raw => {
       await expect(loadConfig(raw)).rejects.toThrow(
-        `HCC_HOST_FULL_RECONCILE_CONCURRENCY must be an integer from 1 through 8, got '${raw}'`
+        `HCC_HOST_FULL_RECONCILE_CONCURRENCY must be an integer from 1 through 8 in plain digits, got '${raw}'`
       )
     }
   )

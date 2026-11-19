@@ -69,9 +69,9 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     const lastDev = '0136_llm_catalog_dismissed_backfill'
     const task106 = ['0137_user_access_foundation', '0138_legacy_password_security_epoch_backfill']
     const oidc = [
-      '0141_oidc_protocol_attempts',
-      '0142_oidc_protocol_attempt_expiry_index',
-      '0143_oidc_protocol_attempt_browser_binding',
+      '0148_oidc_protocol_attempts',
+      '0149_oidc_protocol_attempt_expiry_index',
+      '0150_oidc_protocol_attempt_browser_binding',
     ]
 
     expect(
@@ -85,8 +85,24 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
     expect(
-      versions.slice(versions.indexOf(task106.at(-1)!) + 1, versions.indexOf(task106.at(-1)!) + 3)
-    ).toEqual(['0139_llm_catalog_prune_columns', '0140_llm_catalog_prune_episodes'])
+      versions.slice(versions.indexOf(task106.at(-1)!) + 1, versions.indexOf(task106.at(-1)!) + 4)
+    ).toEqual([
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
+      '0141_gfs_resource_changed_notify',
+    ])
+    const watchTriggers = [
+      '0142_gfs_authz_grants_notify',
+      '0143_gfs_authz_shares_notify',
+      '0144_gfs_authz_operator_links_notify',
+      '0145_gfs_authz_control_admins_notify',
+      '0146_gfs_authz_team_members_notify',
+      '0147_gfs_watch_session_users_notify',
+    ]
+    const afterResourceNotify = versions.indexOf('0141_gfs_resource_changed_notify') + 1
+    expect(versions.slice(afterResourceNotify, afterResourceNotify + watchTriggers.length)).toEqual(
+      watchTriggers
+    )
     expect(versions.slice(-3)).toEqual(oidc)
     expect(versions.at(-1)).toBe(oidc.at(-1))
   })

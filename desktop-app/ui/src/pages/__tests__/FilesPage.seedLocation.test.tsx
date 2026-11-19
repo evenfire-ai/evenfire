@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
@@ -107,7 +107,7 @@ const INACTIVE_URI = 'gfs://main/inactive-files-tab'
 
 /** App's files render seam, reduced to the tab-persistence contract under test. */
 function FilesTabHarness({
-  remoteGfsChangeEpoch = 0,
+  currentFolderChange = 0,
   pendingGfsDeepLink,
   pendingGfsUri,
   isPendingGfsDeepLinkCurrent,
@@ -117,7 +117,8 @@ function FilesTabHarness({
   onOpenPendingGfsPreview,
   includeInactiveTab = false,
 }: {
-  remoteGfsChangeEpoch?: number
+  /** Bumped when the watch reports a change of the open folder. */
+  currentFolderChange?: number
   pendingGfsDeepLink?: { id: number; uri: string } | null
   pendingGfsUri?: string | null
   isPendingGfsDeepLinkCurrent?: () => boolean
@@ -156,13 +157,23 @@ function FilesTabHarness({
   // Seed captured once per active tab id (App uses a ref; here the id is stable).
   const seedPath = activeFilesTab?.files?.path ?? null
 
+  // App's reaction to a watched change of the open folder: re-read its
+  // listings and re-resolve the location through the page's registered refresh.
+  const locationRefreshRef = useRef<(() => Promise<unknown>) | null>(null)
+  const registerLocationRefresh = useCallback((refresh: () => Promise<unknown>) => {
+    locationRefreshRef.current = refresh
+    return () => {
+      if (locationRefreshRef.current === refresh) locationRefreshRef.current = null
+    }
+  }, [])
   useEffect(() => {
-    if (remoteGfsChangeEpoch === 0) return
+    if (currentFolderChange === 0) return
     void queryClient.invalidateQueries({
       queryKey: desktopQueryKeys.gfsRoot,
       refetchType: 'active',
     })
-  }, [queryClient, remoteGfsChangeEpoch])
+    void locationRefreshRef.current?.()
+  }, [queryClient, currentFolderChange])
 
   const handleLocationChange = (gfsUri: string | null, name: string | null) => {
     const id = activeIdRef.current
@@ -190,7 +201,7 @@ function FilesTabHarness({
           onOpenPreview={onOpenPreview}
           onOpenPendingGfsPreview={onOpenPendingGfsPreview}
           onLocationChange={handleLocationChange}
-          {...({ remoteGfsChangeEpoch } as Record<string, number>)}
+          registerLocationRefresh={registerLocationRefresh}
         />
       )}
     </>
@@ -664,8 +675,11 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     await waitFor(() => expect(reportCalls).toBe(2))
     await waitFor(() => expect(childFolderCalls).toBe(2))
     await waitFor(() => {
-      expect(screen.getByText('Checking permissions for report.txt…')).toBeTruthy()
-      expect(screen.getByText('Checking permissions for Child folder…')).toBeTruthy()
+      expect(client.getQueryState(reportKey)?.fetchStatus).toBe('fetching')
+      expect(client.getQueryState(folderKey)?.fetchStatus).toBe('fetching')
+      expect(screen.queryByText('Checking permissions for report.txt…')).toBeNull()
+      expect(screen.queryByText('Checking permissions for Child folder…')).toBeNull()
+      expect(document.querySelector('.da-gfs-drive__grid .da-permission-status-slot')).toBeNull()
     })
     expectFolderRowMutationMenu('Child folder', true)
 
@@ -894,7 +908,9 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       screen.getByRole('menu', { name: 'Share options for Reports' })
     )
     expect(folderShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
-    expect(screen.getByText('Checking permissions for Reports…')).toBeTruthy()
+    const status = screen.getByRole('status', { name: 'Checking permissions for Reports' })
+    expect(status.closest('.da-permission-status-slot')).toBeTruthy()
+    expect(screen.queryByText('Checking permissions for Reports…')).toBeNull()
 
     await act(async () => {
       rejectRefresh(new Error(rateLimitMessage))
@@ -1007,7 +1023,9 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       screen.getByRole('menu', { name: 'Share options for notes.bin' })
     )
     expect(fileShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
-    expect(screen.getByText('Checking permissions for notes.bin…')).toBeTruthy()
+    const status = screen.getByRole('status', { name: 'Checking permissions for notes.bin' })
+    expect(status.closest('.da-permission-status-slot')).toBeTruthy()
+    expect(screen.queryByText('Checking permissions for notes.bin…')).toBeNull()
 
     await act(async () => {
       rejectRefresh(new Error(rateLimitMessage))
@@ -1528,7 +1546,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       rerender(
         <AuthContext.Provider value={authValue()}>
           <QueryClientProvider client={client}>
-            <FilesTabHarness remoteGfsChangeEpoch={1} />
+            <FilesTabHarness currentFolderChange={1} />
           </QueryClientProvider>
         </AuthContext.Provider>
       )
@@ -1602,7 +1620,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       rerender(
         <AuthContext.Provider value={authValue()}>
           <QueryClientProvider client={client}>
-            <FilesTabHarness remoteGfsChangeEpoch={1} />
+            <FilesTabHarness currentFolderChange={1} />
           </QueryClientProvider>
         </AuthContext.Provider>
       )

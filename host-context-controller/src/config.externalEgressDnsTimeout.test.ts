@@ -19,7 +19,7 @@ afterEach(() => {
 })
 
 describe('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS', () => {
-  it.each([undefined, '', '   '])('defaults to 5000 for %s', async raw => {
+  it.each([undefined, ''])('defaults to 5000 for %s', async raw => {
     const { config } = await loadConfig(raw)
 
     expect(config.externalEgressDnsResolveTimeoutMs).toBe(5_000)
@@ -35,7 +35,7 @@ describe('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS', () => {
     expect(config.externalEgressDnsResolveTimeoutMs).toBe(expected)
   })
 
-  it.each(['0', '-1', '1.5', '5000junk', 'NaN', 'Infinity', '2147483648'])(
+  it.each(['0', '-1', '1.5', '5000junk', 'NaN', 'Infinity', '2147483648', '   '])(
     "fails configuration validation for '%s'",
     async raw => {
       await expect(loadConfig(raw)).rejects.toThrow(

@@ -157,6 +157,7 @@ describe('ipc host status stream handlers', () => {
     findInActiveSandboxUi: vi.fn().mockResolvedValue(9),
     stopActiveSandboxUiFind: vi.fn().mockResolvedValue(undefined),
     focusActiveSandboxUi: vi.fn().mockResolvedValue(true),
+    approveToolCall: vi.fn(),
   }
 
   beforeEach(async () => {
@@ -571,6 +572,57 @@ describe('ipc host status stream handlers', () => {
     expect(result).toEqual({ ok: true })
   })
 
+  it('forwards Always approve to approveToolCall as alwaysApprove:true', async () => {
+    service.approveToolCall.mockResolvedValue({ success: true })
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:approveToolCall')
+    const result = await Promise.resolve(
+      handler?.(event, {
+        hostRef: 'agent-x',
+        taskId: 'task-1',
+        toolCallId: 'req-1',
+        hostRefs: ['agent-x'],
+        teamId: 'team-a',
+        alwaysApprove: true,
+      })
+    )
+    expect(service.approveToolCall).toHaveBeenCalledWith(
+      'agent-x',
+      'task-1',
+      'req-1',
+      ['agent-x'],
+      {
+        teamId: 'team-a',
+        alwaysApprove: true,
+      }
+    )
+    expect(result).toEqual({ success: true })
+  })
+
+  it.each([[undefined], [false], ['true'], [1]])(
+    'coerces a non-true alwaysApprove (%s) to false for rpc:approveToolCall',
+    async alwaysApprove => {
+      service.approveToolCall.mockResolvedValue({ success: true })
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:approveToolCall')
+      await Promise.resolve(
+        handler?.(event, {
+          hostRef: 'agent-x',
+          taskId: 'task-1',
+          toolCallId: 'req-1',
+          alwaysApprove,
+        })
+      )
+      expect(service.approveToolCall).toHaveBeenCalledWith(
+        'agent-x',
+        'task-1',
+        'req-1',
+        undefined,
+        { teamId: undefined, alwaysApprove: false }
+      )
+    }
+  )
+
   it('routes host message submit through invokeHostMessage handler', async () => {
     service.invokeHostMessage.mockResolvedValue({ success: true, response: 'hello' })
     const { event } = makeTrustedEvent()
@@ -712,7 +764,7 @@ describe('ipc host status stream handlers', () => {
 
   it('opens the canonical Profile UI social route through the auth handler', async () => {
     service.openProfileSettings.mockResolvedValue({
-      profileUiUrl: 'http://localhost:3001/settings/social/telegram',
+      profileUiUrl: 'http://localhost:3001/channels/telegram',
     })
     const { event } = makeTrustedEvent()
     const handler = testState.handlers.get('auth:openProfileSettings')
