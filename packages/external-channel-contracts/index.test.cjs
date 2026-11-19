@@ -379,10 +379,21 @@ describe('provider event receipt claims', () => {
 
   it('refuses a Teams conversation id that carries a messageid parameter in any spelling', () => {
     assert.equal(assertAccepts(validateProviderEventReceiptClaims, teams).conversationId, teams.conversationId)
-    for (const suffix of [';messageid=1', ';messageId=1', ';MESSAGEID=1', '?messageid=1', '&messageid=1', ';messageid=']) {
+    // post-1 and root-post-1 are the ids channel-reader's tests use (src/__tests__/main.test.ts);
+    // a parameter after the value is what its rootTeamsConversationId strips with `.*`.
+    const suffixes = [
+      ';messageid=1', ';messageId=1', ';MESSAGEID=1', '?messageid=1', '&messageid=1', ';messageid=',
+      ';messageid=post-1', ';messageid=root-post-1', ';messageid=post-1;tenantId=fixture',
+    ]
+    for (const suffix of suffixes) {
       const value = { ...teams, conversationId: `${teams.conversationId}${suffix}` }
       assertRejects(validateProviderEventReceiptClaims, value, RECEIPT_ERROR, 'conversationId', suffix)
     }
+    // The rule holds for every event kind: an action receipt is refused too.
+    const teamsAction = load('receipt.teams.action.json')
+    assert.equal(assertAccepts(validateProviderEventReceiptClaims, teamsAction).eventKind, 'action')
+    const actionValue = { ...teamsAction, conversationId: `${teamsAction.conversationId};messageid=post-1` }
+    assertRejects(validateProviderEventReceiptClaims, actionValue, RECEIPT_ERROR, 'conversationId', 'action')
     const noSeparator = { ...teams, conversationId: '19:messageid=fixture@thread.v2' }
     assert.equal(assertAccepts(validateProviderEventReceiptClaims, noSeparator).conversationId, noSeparator.conversationId)
     // The rule is Teams-only: a Slack conversation id is not checked for it.
