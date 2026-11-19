@@ -307,8 +307,10 @@ export interface CallbackDeps {
     mcpServerName: string
   ) => Promise<boolean>
   /**
-   * Whether some Context the user reaches (directly, or through an agent
-   * assigned to them) still enables the server through its `spec.mcpServers`
+   * Whether some Context the user reaches (directly (`user_contexts`) or
+   * through an agent assigned to the user directly or through an active team,
+   * `getUserReachableAgents`) still enables the server through its
+   * `spec.mcpServers`
    * allowlist. Required ONLY for the per-user mcp path
    * (`grantScope='user'`), re-checked before the code exchange so a user who
    * lost that access after the authorize URL was minted cannot finish creating
@@ -413,8 +415,9 @@ export type CallbackResult =
    *   - `grantScope='context'`: the signed Context no longer exists, no longer
    *     allowlists the server, or the user no longer reaches it (a shared grant
    *     lends a Context-wide credential);
-   *   - `grantScope='user'`: no Context the user reaches (directly or through an
-   *     assigned agent) still lists the server in its `spec.mcpServers` allowlist.
+   *   - `grantScope='user'`: no Context the user reaches (directly (`user_contexts`) or
+   *     through an agent assigned to the user directly or through an active team,
+   *     `getUserReachableAgents`) still lists the server in its `spec.mcpServers` allowlist.
    * Also returned when the reader for that flavor is not wired. Fail closed →
    * 403, no code exchange, no persist.
    */
@@ -577,8 +580,9 @@ export async function handleOAuthCallback(
  * recovered fresh from the CR (authoritative), NOT from the state or any body.
  *
  * Access is re-checked BEFORE the code exchange, by flavor:
- *   - `grantScope='user'`    → some Context the signed user reaches (directly or
- *     through an assigned agent) must still allowlist the server
+ *   - `grantScope='user'`    → some Context the signed user reaches (directly (`user_contexts`)
+ *     or through an agent assigned to the user directly or through an active
+ *     team, `getUserReachableAgents`) must still allowlist the server
  *     (`userServerAccessReader`).
  *   - `grantScope='context'` → the Context signed into the state must still be
  *     live, allowlist the server and be reached by the signed user

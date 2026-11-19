@@ -12,13 +12,14 @@ import { MockGateway } from './mockGateway.js'
 /**
  * The per-user (`grantScope: user`) consent callback re-checks access through the
  * PRODUCTION wiring of `userServerAccessReader` in `createOAuthCallbackRouter`:
- * some Context the signed user reaches — directly or through an assigned
- * agent's Host — must allowlist the server. The server's own `spec.contextRef`
+ * some Context the signed user reaches — directly (`user_contexts`) or
+ * through an agent assigned to the user directly or through an active team
+ * (`getUserReachableAgents`) — must allowlist the server. The server's own `spec.contextRef`
  * is deliberately a Context the user is NOT a member of, so only the allowlist
  * rule can decide the outcome.
  *
  * Contexts are written through the real allowlist writer, membership is the
- * `user_contexts` / `user_agents` reads on the mocked pool (the same stand-in
+ * `user_contexts` / `user_agents` / team reads on the mocked pool (the same stand-in
  * the sibling suites use), Host CRs are hand-written, and the state is signed
  * by the real signer. The provider token endpoint is the only network edge:
  * `globalThis.fetch`, which the route wires as its baked-lane transport.
@@ -33,7 +34,8 @@ const MCP_NS = config.mcpServersNamespace
 const SERVER = 'gdrive'
 const OAUTH_CLIENT_ID = 'google-drive'
 const OWNER_CONTEXT = 'ctx-owner'
-const USER_ID = 'user-7'
+const USER_ID = '77777777-7777-4777-8777-777777777777'
+const OTHER = '88888888-8888-4888-8888-888888888888'
 
 async function seedUserScopedOauthServer(gateway: MockGateway): Promise<void> {
   await gateway.createResource(
@@ -177,6 +179,48 @@ describe('GET /api/v1/oauth-callback/:oauthClientId — per-user access re-check
     const [sql, params] = writes[0] as [string, unknown[]]
     expect(sql).toContain('INSERT INTO oauth_grants')
     expect(params.slice(0, 5)).toEqual(['mcpserver', MCP_NS, SERVER, USER_ID, OAUTH_CLIENT_ID])
+  })
+
+  it('200 when the user reaches an allowlisting Context only through a team agent; exchanges and writes the user grant', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-team', [SERVER])
+    await seedAgentHost(gateway, 'host-team', 'ctx-team')
+    membership(mockPoolQuery, {
+      contexts: { [USER_ID]: [] },
+      teamAgents: { [USER_ID]: ['host-team'] },
+    })
+    await editContextAllowlist(
+      gateway as never,
+      { name: OWNER_CONTEXT, namespace: MCP_NS },
+      servers => servers.filter(name => name !== SERVER)
+    )
+
+    const res = await callback()
+
+    expect(res.status).toBe(200)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    const writes = grantWrites()
+    expect(writes).toHaveLength(1)
+    const [sql, params] = writes[0] as [string, unknown[]]
+    expect(sql).toContain('INSERT INTO oauth_grants')
+    expect(params.slice(0, 5)).toEqual(['mcpserver', MCP_NS, SERVER, USER_ID, OAUTH_CLIENT_ID])
+  })
+
+  it('403 when only another user reaches the Context through a team; no exchange, no grant', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-team', [SERVER])
+    await seedAgentHost(gateway, 'host-team', 'ctx-team')
+    membership(mockPoolQuery, { teamAgents: { [OTHER]: ['host-team'] } })
+    await editContextAllowlist(
+      gateway as never,
+      { name: OWNER_CONTEXT, namespace: MCP_NS },
+      servers => servers.filter(name => name !== SERVER)
+    )
+
+    const res = await callback()
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'context_membership_denied' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(grantWrites()).toHaveLength(0)
   })
 
   it('500 when listing Contexts fails; no exchange, no grant', async () => {

@@ -330,9 +330,10 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         //   - `user`: the grant is keyed by (user, server) and serves every
         //     Context that enables the server, so the user must reach at least
         //     one Context whose `spec.mcpServers` allowlist names it — directly
-        //     (`user_contexts`) or through an assigned agent's Host — which is
-        //     every Context the flat catalog or the connectors panel resolves
-        //     for them.
+        //     (`user_contexts`) or through an agent assigned to the user
+        //     directly or through an active team (`getUserReachableAgents`) —
+        //     a superset of what the flat catalog or the connectors panel
+        //     resolves for them.
         // Either way, connect shares the `mcp:server:invoke` scope with invoke,
         // so without this gate any user could start consent for (and enumerate)
         // integrations none of their Contexts expose.

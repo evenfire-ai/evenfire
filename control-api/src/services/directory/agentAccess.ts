@@ -1,6 +1,7 @@
 import type { DbClient } from '../../db.js'
 import { pool } from '../../db.js'
 import { bulkSetLinkedItems } from '../../shared/generics.js'
+import { isCanonicalUuid } from '../../utils/canonicalUuid.js'
 import {
   type ControlApiPermissionSubject,
   appendControlApiPermissionEventsInTransaction,
@@ -94,6 +95,39 @@ export async function getUserAgents(userId: string, db: Pick<DbClient, 'query'> 
     userId,
     agentNames: result.rows.map(row => String((row as { agent_name: string }).agent_name)),
   }
+}
+
+/**
+ * Agents a user reaches directly or through an active team membership.
+ * A non-canonical id is a plain denial: no query is issued.
+ */
+export async function getUserReachableAgents(
+  userId: string,
+  db: Pick<DbClient, 'query'> = pool
+): Promise<{ agentNames: string[] }> {
+  if (!isCanonicalUuid(userId)) return { agentNames: [] }
+  const result = await db.query(
+    `SELECT agent_name
+       FROM (
+         SELECT ua.agent_name
+           FROM user_agents ua
+           JOIN users u ON u.id = ua.user_id
+          WHERE ua.user_id = $1::uuid
+            AND u.lifecycle_state = 'active'
+         UNION
+         SELECT ta.agent_name
+           FROM team_members tm
+           JOIN team_agents ta ON ta.team_id = tm.team_id
+           JOIN users u ON u.id = tm.user_id
+          WHERE tm.user_id = $1::uuid
+            AND tm.status = 'active'
+            AND u.lifecycle_state = 'active'
+       ) reachable
+      ORDER BY agent_name ASC`,
+    [userId]
+  )
+  const names = result.rows.map(row => String((row as { agent_name: string }).agent_name))
+  return { agentNames: Array.from(new Set(names)).sort() }
 }
 
 export async function listUsersByAgent(agentName: string) {

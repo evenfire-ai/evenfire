@@ -46,6 +46,7 @@ const SHARED = 'shared-drive'
 const PERSONAL = 'personal-drive'
 const MEMBER = '11111111-1111-4111-8111-111111111111'
 const AGENT_USER = '22222222-2222-4222-8222-222222222222'
+const TEAM_USER = '44444444-4444-4444-8444-444444444444'
 const STRANGER = '33333333-3333-4333-8333-333333333333'
 
 async function seedServer(
@@ -164,6 +165,7 @@ describe('context-scope consent and disconnect gate', () => {
     membership(mockPoolQuery, {
       contexts: { [MEMBER]: ['c1', 'c2'] },
       agents: { [AGENT_USER]: ['h1'] },
+      teamAgents: { [TEAM_USER]: ['h1'] },
     })
   })
 
@@ -208,6 +210,14 @@ describe('context-scope consent and disconnect gate', () => {
       const res = await mint(app, { mcpServerName: SHARED, userId: AGENT_USER, contextId: 'c1' })
       expect(res.status).toBe(200)
       expect(signedContextIdOf(res.body.authorizeUrl)).toBe('c1')
+    })
+
+    it('a user who reaches the Context Host only through a team is denied: shared grants do not follow team reach', async () => {
+      const res = await mint(app, { mcpServerName: SHARED, userId: TEAM_USER, contextId: 'c1' })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ error: 'context_membership_denied' })
+      const sqls = mockPoolQuery.mock.calls.map(([sql]) => String(sql))
+      expect(sqls.some(sql => sql.includes('UNION'))).toBe(false) // getUserAgents, not getUserReachableAgents
     })
 
     const denials: Array<[string, () => Promise<Record<string, unknown>>]> = [

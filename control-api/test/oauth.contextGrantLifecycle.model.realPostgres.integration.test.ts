@@ -310,7 +310,9 @@ function classify(text: string): StatementClass {
   if (/UPDATE oauth_grants/.test(sql)) return 'otherGrantWrite'
   if (/SELECT now\(\)::text AS tick_start/.test(sql)) return 'clock'
   if (/FROM user_contexts/.test(sql)) return 'readUserContexts'
-  if (/FROM user_agents/.test(sql) && !/team_agents/.test(sql)) return 'readUserAgents'
+  if (/FROM user_agents/.test(sql) && (/\bUNION\b/.test(sql) || !/team_agents/.test(sql))) {
+    return 'readUserAgents'
+  }
   if (/FROM oauth_grants/.test(sql)) return 'readGrants'
   return 'other'
 }

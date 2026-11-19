@@ -52,24 +52,29 @@ export async function seedAgentHost(
 /**
  * Who belongs to what, keyed by user id. `contexts` answers the
  * `getUserContexts` read (`FROM user_contexts`), `agents` the `getUserAgents`
- * read (`FROM user_agents`). A user not listed has no rows.
+ * read (`FROM user_agents`). `teamAgents` lists the agents a user reaches
+ * through an active team membership; together with `agents` it answers the
+ * `getUserReachableAgents` statement. The stand-in models the rows that
+ * statement returns, so a not-active membership or a retired user is simply
+ * not listed. A user not listed has no rows.
  */
 export interface Membership {
   contexts?: Record<string, string[]>
   agents?: Record<string, string[]>
+  teamAgents?: Record<string, string[]>
 }
 
 type QueryResult = { rows: unknown[]; rowCount: number }
 
 /**
- * Unit stand-in for the two membership reads: answers by the queried user id
+ * Unit stand-in for the membership reads: answers by the queried user id
  * (`values[0]`), so a reader that asks for the wrong user gets that user's
  * (usually empty) rows instead of the intended ones. Returns `null` for any
  * other SQL so a suite with its own pool fake can delegate the rest.
  *
  * Hand-written by necessity (the readers' SQL runs, the table does not); the
- * real-table contract (`lifecycle_state`, team tables not counting) belongs
- * to suites that run against a real Postgres.
+ * real-table contract (`lifecycle_state`, `team_members.status`) belongs to
+ * suites that run against a real Postgres.
  */
 export function membershipResult(
   sql: unknown,
@@ -78,6 +83,18 @@ export function membershipResult(
 ): QueryResult | null {
   const text = typeof sql === 'string' ? sql : ''
   const userId = Array.isArray(values) ? String(values[0]) : ''
+  // The reachable-agents statement (direct UNION team agents) names
+  // `lifecycle_state`, `team_agents` and `user_agents` too, so it is matched
+  // first. Rows are the sorted distinct union of both lists.
+  if (text.includes('UNION') && text.includes('team_agents')) {
+    const names = [
+      ...new Set([
+        ...(membership.agents?.[userId] ?? []),
+        ...(membership.teamAgents?.[userId] ?? []),
+      ]),
+    ].sort()
+    return { rows: names.map(agent_name => ({ agent_name })), rowCount: names.length }
+  }
   // The broker's Host-entry read (`hostAccessForUser`) also names user_agents in
   // a subquery, so it is matched first. Unit stand-in: direct agent rows only;
   // lifecycle_state and team membership are covered against real Postgres.
@@ -117,8 +134,9 @@ export function membership(
  * Real-Postgres seed: an active user whose direct Context and agent access is
  * written by the production writers (`setUserContexts`, `setUserAgents`), so
  * the readers the gates use run against the rows production writes. Only the
- * two direct tables are touched: a seed that also wrote team_contexts /
- * team_agents would hide a reader that wrongly counted team access.
+ * two direct tables are touched. Team rows are written explicitly by the
+ * suites that assert them (`createTeamForUser` + `setTeamAgents`), so a reader
+ * that must not count team access (`userReachesContext`) is still caught.
  *
  * Requires the suite's db mock to route `pool` and `withTransaction` to the
  * test database. Returns the user id.
