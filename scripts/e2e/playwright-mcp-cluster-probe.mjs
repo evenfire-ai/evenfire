@@ -19,15 +19,15 @@ import { fileURLToPath } from 'node:url'
 
 const root = realpathSync(fileURLToPath(new URL('../..', import.meta.url)))
 const image =
-  'ghcr.io/evenfire-ai/playwright-server@sha256:fc603bbc05d216ca9394940463e5e216d0a48732c24555fb9b67d20775fccf73'
+  'ghcr.io/evenfire-ai/playwright-server@sha256:2e5ef0183d6dda21e0797ef32f1cbba2e07e38ec93b67bd3675079c5729ffa74'
 const imageDigests = {
   amd64: [
-    'sha256:aaf77f4dcbb3d2cb71680f5608145cacaa2a75aa645f84f65cd179f364d5e710',
-    'sha256:c92230dc8f4237be978b4ec0894af6f98a8e8a95272121e7550f995512f211a6',
+    'sha256:408686cc898d21ec1ef7d50679735e24fbac87637f75e7d575101685b834c5e0',
+    'sha256:6f362310e582daf0fc95c2a5c7df70af8852609d70cd517f1e46224c941fb129',
   ],
   arm64: [
-    'sha256:6402f88ad9f26102e910f5412cf5f09c5cfdc6bc7ff2eb277d334f43a4f457e0',
-    'sha256:54af073f37a176bd1f1dbb2fb496d669221c7e39f98e234a1cc57b0290f9f225',
+    'sha256:f09fd84358ddd593f4b7cf99d319e8aa4176d93743f1d09bd41743d59178484e',
+    'sha256:bf61668c302b90a159aa5d2c5bdd110a2a01877c02b38ca457e12599695c5691',
   ],
 }
 const kinds = { McpServer: 'mcpservers' }
@@ -363,8 +363,8 @@ export function runtimeReport(raw) {
   }
   if (
     report?.status !== 'PASS' ||
-    report.nodeVersion !== '24.22.1' ||
-    !/^(?:HeadlessChrome|Chrome)\/[0-9]+(?:\.[0-9]+)+$/.test(report.browserVersion ?? '') ||
+    report.nodeVersion !== '24.22.3' ||
+    !/^(?:HeadlessChrome|Chrome)\/157(?:\.[0-9]+){3}$/.test(report.browserVersion ?? '') ||
     report.navigation !== true ||
     report.realClick !== true ||
     !Number.isInteger(report.screenshotBytes) ||
@@ -536,7 +536,7 @@ async function inspectPod(kubectl, server, manifest, serverUid, shouldStop) {
       '--version',
     ])
   ).trim()
-  if (version !== 'v24.22.1') fail('POD_NODE_INVALID')
+  if (version !== 'v24.22.3') fail('POD_NODE_INVALID')
   return { podName, architecture, digest, version }
 }
 

@@ -19,7 +19,7 @@ export function MobileHeader({ menuOpen, onLogout, onMenuToggle }: MobileHeaderP
         <IconMenu />
       </button>
       <Link
-        href={PROFILE_ROUTES.home}
+        href={PROFILE_ROUTES.root}
         className="cu-mobile-header__brand"
         aria-label="Evenfire home"
       >

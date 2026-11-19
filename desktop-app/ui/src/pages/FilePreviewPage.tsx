@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Button, EmptyState, StatusBanner } from '@components/Common'
+import { Button, EmptyState, PermissionStatusIndicator, StatusBanner } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
@@ -39,8 +39,9 @@ function isPerResourceAccessDenial(message: string): boolean {
  * design: it mounts the `Gfs*PreviewBody` matching the tab's `fileKind` (each
  * body owns its own fetch + size-guard) and wires the fail-closed behavior.
  *
- * Reload hookpoint (§3.B.3): `reloadToken` is the single lever that re-fetches
- * the body (via a `key` bump → remount). The change watcher (spec 02) is
+ * Reload hookpoint (§3.B.3): `reloadToken` re-fetches the body from scratch (via
+ * a `key` bump → remount); a newer server version (`reloadVersion`) is instead
+ * re-downloaded in place by the body. The change watcher (spec 02) is
  * deferred, so it stays INERT with respect to file changes — but it is already
  * CONNECTED to the authority signal for the R-4 security requirement (§3.B.5):
  * this tab does NOT close when access is revoked; instead the authority
@@ -347,9 +348,15 @@ export function FilePreviewPage({
     return () => window.removeEventListener('focus', onFocus)
   }, [revalidateAccess])
 
-  // Remounting the body on a reload bump discards any stale bytes and re-runs the
-  // fetch from scratch — the simplest correct "re-dispatch the fetch" (§3.B.3).
-  const bodyKey = `${gfsUri}:${reloadToken}:${reloadVersion ?? 0}`
+  // A manual refresh or a revoke remounts the body so no stale bytes survive
+  // (fail-closed); an unavailable verdict needs no key of its own, because the
+  // empty state below replaces the body and unmounts it. A newer server version
+  // only changes `contentVersion`, which the body re-downloads in place.
+  const bodyKey = `${gfsUri}:${reloadToken}`
+  const permissionLabel = previewResourceActions.pendingPermissionLabel
+  const permissionProgress = (
+    <PermissionStatusIndicator active={permissionLabel !== null} label={permissionLabel ?? ''} />
+  )
 
   return (
     <section className="page">
@@ -364,10 +371,11 @@ export function FilePreviewPage({
       />
       <div className="da-gfs-preview-page">
         {previewResourceActions.dialogs}
-        {previewResourceActions.permissionNotices.map(notice => (
-          <div key={notice.id} role={notice.pending ? 'status' : 'alert'}>
-            <StatusBanner tone={notice.pending ? 'info' : 'error'} text={notice.message} />
-            {!notice.pending ? (
+        {previewResourceActions.permissionNotices
+          .filter(notice => !notice.pending)
+          .map(notice => (
+            <div key={notice.id} role="alert">
+              <StatusBanner tone="error" text={notice.message} />
               <Button
                 onClick={() =>
                   void Promise.resolve()
@@ -379,9 +387,8 @@ export function FilePreviewPage({
               >
                 Retry permission check
               </Button>
-            ) : null}
-          </div>
-        ))}
+            </div>
+          ))}
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <>
@@ -394,12 +401,14 @@ export function FilePreviewPage({
                 <GfsImagePreviewBody
                   key={bodyKey}
                   byteLength={byteLength}
+                  contentVersion={reloadVersion}
                   fileName={fileName}
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
+                  permissionProgress={permissionProgress}
                   headingLevel={2}
                 />
               ) : null}
@@ -407,11 +416,13 @@ export function FilePreviewPage({
                 <GfsMarkdownPreviewBody
                   key={bodyKey}
                   byteLength={byteLength}
+                  contentVersion={reloadVersion}
                   fileName={fileName}
                   gfsUri={gfsUri}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
+                  permissionProgress={permissionProgress}
                   headingLevel={2}
                 />
               ) : null}
@@ -419,11 +430,13 @@ export function FilePreviewPage({
                 <GfsVideoPreviewBody
                   key={bodyKey}
                   byteLength={byteLength}
+                  contentVersion={reloadVersion}
                   fileName={fileName}
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
                   titleActions={fileActionsMenu}
+                  permissionProgress={permissionProgress}
                   headingLevel={2}
                 />
               ) : null}

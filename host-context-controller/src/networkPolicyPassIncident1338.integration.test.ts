@@ -22,11 +22,18 @@
  * and, for the one lost LIST, never answers unless that signal aborts, which is
  * how node-fetch behaves on a connection that stops answering.
  *
- * The second test fails unless the Host inventory route is back to 200 before the
- * mcp-host staleness bound, i.e. before any Host would revoke its fleet.
+ * The second test fails unless the Host inventory route is back to 200 within
+ * the outage a Host tolerates (derived from mcp-host's constants below), i.e.
+ * before any Host would revoke its fleet.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { resolve } from 'node:path'
 import { Readable } from 'node:stream'
+import {
+  exportedNumericConst,
+  readSourceFile,
+  stringLiteralDefaultFor,
+} from './__tests__/sourceConstants'
 import { K8S_REQUEST_TIMEOUT_CODE } from './k8s/k8sRequestDeadline'
 import { McpServerWatcher } from './k8sClient'
 import type { McpApiAuthenticator, VerifiedMcpHostPrincipal } from './mcpApiAuthentication'
@@ -44,9 +51,36 @@ import {
 } from './readinessGate'
 import { ContextMapperServer } from './server'
 
-// mcp-host revokes its published fleet after this long without a successful
-// inventory poll (HCC_AUTHORITY_MAX_STALENESS_MS default, mcp-host/src/config.ts).
-const MCP_HOST_AUTHORITY_STALENESS_MS = 180_000
+// #1490: what a Host tolerates, read from mcp-host's source rather than copied.
+// mcp-host revokes its published fleet after S without a successful inventory
+// poll. Its last success can be as much as one poll interval I before the first
+// refused request. After inventory is served again, the next poll can start up
+// to one more interval I later and lasts up to the request timeout T, with the
+// scheduling allowance J on top. So Hosts keep their fleet only if inventory is
+// served again within S - 2I - T - J of the change. The values are mcp-host's
+// source defaults, not the effective values of a deployment.
+const MCP_HOST_CONFIG = resolve(__dirname, '../../mcp-host/src/config.ts')
+const mcpHostConfig = readSourceFile(MCP_HOST_CONFIG)
+const MCP_HOST_AUTHORITY_STALENESS_MS = exportedNumericConst(
+  mcpHostConfig,
+  'HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS'
+)
+const MCP_HOST_POLL_INTERVAL_MS = Number(
+  stringLiteralDefaultFor(mcpHostConfig, 'CLERUM_CONTEXT_MAPPER_POLL_INTERVAL')
+)
+const MCP_HOST_REQUEST_TIMEOUT_MS = exportedNumericConst(
+  mcpHostConfig,
+  'CONTEXT_MAPPER_REQUEST_TIMEOUT_MS'
+)
+const MCP_HOST_SCHEDULING_ALLOWANCE_MS = exportedNumericConst(
+  mcpHostConfig,
+  'HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS'
+)
+const HOST_TOLERATED_OUTAGE_MS =
+  MCP_HOST_AUTHORITY_STALENESS_MS -
+  2 * MCP_HOST_POLL_INTERVAL_MS -
+  MCP_HOST_REQUEST_TIMEOUT_MS -
+  MCP_HOST_SCHEDULING_ALLOWANCE_MS
 // Production default of HCC_K8S_REQUEST_TIMEOUT_MS (host-context-controller/src/config.ts).
 const K8S_REQUEST_TIMEOUT_MS = 30_000
 
@@ -456,7 +490,7 @@ describe('#1338: a lost request, then a Context change', () => {
 
     // Time runs; Hosts poll every 30 s. Record when their inventory is served again.
     let reopenedAtMs: number | undefined
-    while (Date.now() - deployPatchAtMs < MCP_HOST_AUTHORITY_STALENESS_MS) {
+    while (Date.now() - deployPatchAtMs < HOST_TOLERATED_OUTAGE_MS) {
       await vi.advanceTimersByTimeAsync(1_000)
       if ((await status(server, '/api/v2/hosts/self/mcpservers')) === 200) {
         reopenedAtMs = Date.now()
@@ -464,8 +498,12 @@ describe('#1338: a lost request, then a Context change', () => {
       }
     }
     // Asserted before awaiting the pass: without a deadline the pass never settles.
-    expect(reopenedAtMs, 'Host inventory still 503 at the mcp-host staleness bound').toBeDefined()
-    expect(reopenedAtMs! - deployPatchAtMs).toBeLessThan(MCP_HOST_AUTHORITY_STALENESS_MS)
+    expect(HOST_TOLERATED_OUTAGE_MS).toBeGreaterThan(0)
+    expect(
+      reopenedAtMs,
+      `Host inventory still 503 after the ${HOST_TOLERATED_OUTAGE_MS} ms a Host tolerates`
+    ).toBeDefined()
+    expect(reopenedAtMs! - deployPatchAtMs).toBeLessThan(HOST_TOLERATED_OUTAGE_MS)
     await hourlyPass
     // The lost request ended at its deadline, the pass failed, and the retry certified.
     expect(passResults(logs)).toEqual([

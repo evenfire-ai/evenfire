@@ -11,16 +11,16 @@
 //    "timed out" instead of the diagnosis that was about to arrive.
 //  - When a rollout is merely SLOW (a loaded cluster, a long image pull), the
 //    HCC exhausts its 120s budget and writes RolloutIncomplete before the pod
-//    goes Ready. The HCC does not re-poll on its own after that verdict: only a
-//    later reconcile of the McpServer (a Secret event, a desired-state change,
-//    a NetworkPolicy pass or a retry; reconciler.ts, performReconcile) arms one
-//    more window, which CORRECTS the condition to True/ReplicasAvailable if
-//    the Deployment has converged. The ~60s this timeout outlives the HCC
-//    budget is the observation slack in which such a correction can land.
-//    Latching failure the moment RolloutIncomplete appears would throw that
-//    slack away (issue #223). Without such a reconcile, a rotation converging
-//    between 120s and 180s still ends as a failure; the HCC README lists this
-//    under its known limits.
+//    goes Ready — and then HCC CORRECTS the condition to True/ReplicasAvailable
+//    when its Deployment informer reports the converged rollout, or at its next
+//    periodic re-read of the Deployment (every 60 s). The ~60s this timeout
+//    outlives the HCC budget is precisely the observation slack in which that
+//    correction lands. While that informer is down, the condition stays False
+//    until HCC's next re-read (every 60 s), so a correction that lands after
+//    this timeout reports a failure for a rotation that succeeded. Latching
+//    failure the moment RolloutIncomplete appears would throw that slack away
+//    and report a deterministic false negative for any rotation converging
+//    between 120s and 180s (issue #223).
 //
 // Exported so the tests drive fake timers off THESE values instead of keeping
 // their own copy: a duplicated budget silently stops testing the real one the
@@ -30,9 +30,9 @@ export const POLL_TIMEOUT_MS = 180_000
 
 // The `reason` the HCC stamps on DeploymentReady=False when ITS readiness poll
 // has exhausted its budget. Terminal for that poll window — but NOT
-// irreversible: a later HCC reconcile of the McpServer arms a new poll window
-// and rewrites the condition to True/ReplicasAvailable if the Deployment has
-// converged by then.
+// irreversible: HCC rewrites the condition to True/ReplicasAvailable if the
+// Deployment converges later, when its Deployment informer reports the change
+// or at its next periodic re-read (every 60 s).
 // For this UI it therefore means "keep the diagnostic, keep polling until OUR
 // budget expires", never "stop and declare failure". Every other False
 // (notably `WaitingForReplicas`) is a transitory rollout state with no

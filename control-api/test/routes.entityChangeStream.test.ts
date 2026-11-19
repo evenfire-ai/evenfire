@@ -19,7 +19,6 @@ const configMock = vi.hoisted(() => ({
   entityChangeStreamHeartbeatMs: 20_000,
   entityChangeStreamMaxLifetimeMs: 600_000,
   entityChangeStreamPollMs: 250,
-  entityChangeUserVisibilityRefreshMs: 4_000,
   entityChangeStreamMaxConnections: 100,
   entityChangeStreamMaxConnectionsPerPrincipal: 8,
 }))
@@ -96,22 +95,24 @@ describe('routes/entityChangeStream', () => {
       res as unknown as Response,
       null,
       async () => false,
-      'user'
+      'operator-1'
     )
     await vi.waitFor(() => expect(res.statusCode).toBe(401))
     expect(res.headersSent).toBe(false)
     expect(res.frames).toEqual([])
   })
 
-  it("answers dev's fixed 500 when the initial authority read is unavailable", async () => {
+  it('answers the fixed 500 when the initial authority read rejects', async () => {
     const req = new FakeRequest()
     const res = new FakeResponse()
     streamEntityChanges(
       req as unknown as Request,
       res as unknown as Response,
       null,
-      async () => ({ status: 'unavailable', error: new Error('database unavailable') }),
-      'user'
+      async () => {
+        throw new Error('database unavailable')
+      },
+      'operator-1'
     )
     await vi.waitFor(() => expect(res.statusCode).toBe(500))
     expect(res.jsonBody).toEqual({ error: 'Entity change stream unavailable' })
@@ -131,7 +132,7 @@ describe('routes/entityChangeStream', () => {
       res as unknown as Response,
       null,
       () => authorization,
-      'user'
+      'operator-1'
     )
     req.emit('aborted')
     finishAuthorization(true)
@@ -156,21 +157,20 @@ describe('routes/entityChangeStream', () => {
         res as unknown as Response,
         null,
         async () => true,
-        'user',
         principalId
       )
       return { req, res }
     }
 
-    const first = start('user-1')
+    const first = start('operator:op-1')
     await vi.waitFor(() => expect(first.res.headersSent).toBe(true))
-    const samePrincipal = start('user-1')
+    const samePrincipal = start('operator:op-1')
     await vi.waitFor(() => expect(samePrincipal.res.statusCode).toBe(429))
     expect(samePrincipal.res.headersSent).toBe(false)
 
-    const secondPrincipal = start('user-2')
+    const secondPrincipal = start('operator:op-2')
     await vi.waitFor(() => expect(secondPrincipal.res.headersSent).toBe(true))
-    const overProcessLimit = start('user-3')
+    const overProcessLimit = start('operator:op-3')
     await vi.waitFor(() => expect(overProcessLimit.res.statusCode).toBe(429))
     expect(overProcessLimit.res.headersSent).toBe(false)
     closeActiveEntityChangeStreams()
@@ -196,7 +196,7 @@ describe('routes/entityChangeStream', () => {
         authorizationChecks += 1
         return true
       },
-      'operator'
+      'operator-1'
     )
     await vi.waitFor(() => expect(res.frames.length).toBeGreaterThan(0))
     closeActiveEntityChangeStreams()
@@ -206,250 +206,6 @@ describe('routes/entityChangeStream', () => {
     expect(res.frames.join('')).not.toContain('resource-id')
     expect(authorizationChecks).toBeGreaterThanOrEqual(2)
     expect(serviceMock.subscribeEntityChangeFeedWake).toHaveBeenCalledOnce()
-  })
-
-  it('keeps user checkpoints independent of hidden mutations and refreshes on a fixed cadence', async () => {
-    vi.useFakeTimers()
-    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
-      resyncRequired: false,
-      cursor: CURSOR,
-      scopes: ['gfs', 'authorization'],
-    })
-    const req = new FakeRequest()
-    const res = new FakeResponse()
-    const start = Date.now()
-    streamEntityChanges(
-      req as unknown as Request,
-      res as unknown as Response,
-      CURSOR,
-      async () => true,
-      'user',
-      'user-1'
-    )
-    await vi.advanceTimersByTimeAsync(0)
-
-    expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
-      {
-        schemaVersion: 1,
-        type: 'resync_required',
-        cursor: '00000000-0000-0000-0000-000000000000',
-        scopes: ['gfs', 'authorization'],
-      },
-    ])
-    expect(serviceMock.readEntityChangeCheckpoint).not.toHaveBeenCalled()
-    expect(serviceMock.subscribeEntityChangeFeedWake).not.toHaveBeenCalled()
-
-    const expectedPeriodicFrame = {
-      schemaVersion: 1,
-      type: 'scope.invalidated',
-      cursor: '00000000-0000-0000-0000-000000000000',
-      scopes: ['gfs', 'authorization'],
-    }
-    const checkpointScenarios = [
-      { resyncRequired: false, cursor: CURSOR, scopes: ['gfs'] },
-      {
-        resyncRequired: false,
-        cursor: '0f961d2e-4c95-4ea7-a47d-79f8d4b0da07',
-        scopes: ['authorization'],
-      },
-      { resyncRequired: true, cursor: CURSOR, scopes: ['gfs', 'authorization'] },
-    ]
-    for (const checkpoint of checkpointScenarios) {
-      serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
-        ...checkpoint,
-      })
-      await vi.advanceTimersByTimeAsync(configMock.entityChangeUserVisibilityRefreshMs)
-      expect(JSON.parse(res.frames.at(-1)!)).toEqual(expectedPeriodicFrame)
-    }
-    expect(Date.now() - start).toBe(configMock.entityChangeUserVisibilityRefreshMs * 3)
-    expect(serviceMock.readEntityChangeCheckpoint).not.toHaveBeenCalled()
-    closeActiveEntityChangeStreams()
-    await vi.advanceTimersByTimeAsync(0)
-
-    const reconnectReq = new FakeRequest()
-    const reconnectRes = new FakeResponse()
-    streamEntityChanges(
-      reconnectReq as unknown as Request,
-      reconnectRes as unknown as Response,
-      CURSOR,
-      async () => true,
-      'user',
-      'user-1'
-    )
-    await vi.advanceTimersByTimeAsync(0)
-    expect(JSON.parse(reconnectRes.frames[0]!)).toEqual({
-      schemaVersion: 1,
-      type: 'resync_required',
-      cursor: '00000000-0000-0000-0000-000000000000',
-      scopes: ['gfs', 'authorization'],
-    })
-    expect(serviceMock.readEntityChangeCheckpoint).not.toHaveBeenCalled()
-    closeActiveEntityChangeStreams()
-    await vi.advanceTimersByTimeAsync(0)
-    vi.useRealTimers()
-  })
-
-  it('closes an established user stream when post-frame currentness is revoked', async () => {
-    vi.useFakeTimers()
-    const req = new FakeRequest()
-    const res = new FakeResponse()
-    const isAuthorized = vi
-      .fn()
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false)
-
-    streamEntityChanges(
-      req as unknown as Request,
-      res as unknown as Response,
-      CURSOR,
-      isAuthorized,
-      'user',
-      'user-1'
-    )
-    await vi.advanceTimersByTimeAsync(0)
-    expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
-      {
-        schemaVersion: 1,
-        type: 'resync_required',
-        cursor: '00000000-0000-0000-0000-000000000000',
-        scopes: ['gfs', 'authorization'],
-      },
-      {
-        schemaVersion: 1,
-        type: 'stream.closing',
-        cursor: '00000000-0000-0000-0000-000000000000',
-        reason: 'session_expired',
-      },
-    ])
-    expect(res.writableEnded).toBe(true)
-    expect(isAuthorized).toHaveBeenCalledTimes(3)
-    expect(serviceMock.readEntityChangeCheckpoint).not.toHaveBeenCalled()
-    vi.useRealTimers()
-  })
-
-  it('rechecks user currentness after a backpressure wait before allowing the poll to continue', async () => {
-    vi.useFakeTimers()
-    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
-      resyncRequired: false,
-      cursor: CURSOR,
-      scopes: ['gfs'],
-    })
-    const req = new FakeRequest()
-    const res = new FakeResponse()
-    res.writeReturns = false
-    const isAuthorized = vi
-      .fn()
-      .mockResolvedValueOnce({ status: 'current' })
-      .mockResolvedValueOnce({ status: 'current' })
-      .mockResolvedValueOnce({ status: 'denied', reason: 'revoked' })
-
-    streamEntityChanges(
-      req as unknown as Request,
-      res as unknown as Response,
-      CURSOR,
-      isAuthorized,
-      'user',
-      'user-backpressure'
-    )
-    try {
-      await vi.advanceTimersByTimeAsync(0)
-      expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
-        {
-          schemaVersion: 1,
-          type: 'resync_required',
-          cursor: '00000000-0000-0000-0000-000000000000',
-          scopes: ['gfs', 'authorization'],
-        },
-      ])
-      res.once('drain', () => {
-        res.writeReturns = true
-      })
-      res.emit('drain')
-      await vi.advanceTimersByTimeAsync(0)
-
-      expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
-        {
-          schemaVersion: 1,
-          type: 'resync_required',
-          cursor: '00000000-0000-0000-0000-000000000000',
-          scopes: ['gfs', 'authorization'],
-        },
-        {
-          schemaVersion: 1,
-          type: 'stream.closing',
-          cursor: '00000000-0000-0000-0000-000000000000',
-          reason: 'session_expired',
-        },
-      ])
-      expect(res.writableEnded).toBe(true)
-      expect(isAuthorized).toHaveBeenCalledTimes(3)
-    } finally {
-      closeActiveEntityChangeStreams()
-      await vi.advanceTimersByTimeAsync(0)
-      vi.useRealTimers()
-    }
-  })
-
-  it('holds the user cursor during authority outage after backpressure and resumes after recovery', async () => {
-    vi.useFakeTimers()
-    const req = new FakeRequest()
-    const res = new FakeResponse()
-    res.writeReturns = false
-    const isAuthorized = vi
-      .fn()
-      .mockResolvedValueOnce({ status: 'current' })
-      .mockResolvedValueOnce({ status: 'current' })
-      .mockResolvedValueOnce({ status: 'unavailable', error: new Error('database unavailable') })
-      .mockResolvedValue({ status: 'current' })
-
-    streamEntityChanges(
-      req as unknown as Request,
-      res as unknown as Response,
-      CURSOR,
-      isAuthorized,
-      'user',
-      'user-outage'
-    )
-    try {
-      await vi.advanceTimersByTimeAsync(0)
-      expect(res.frames).toHaveLength(1)
-      res.once('drain', () => {
-        res.writeReturns = true
-      })
-      res.emit('drain')
-      await vi.advanceTimersByTimeAsync(0)
-
-      expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
-        {
-          schemaVersion: 1,
-          type: 'resync_required',
-          cursor: '00000000-0000-0000-0000-000000000000',
-          scopes: ['gfs', 'authorization'],
-        },
-      ])
-      await vi.advanceTimersByTimeAsync(configMock.entityChangeUserVisibilityRefreshMs)
-      expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
-        {
-          schemaVersion: 1,
-          type: 'resync_required',
-          cursor: '00000000-0000-0000-0000-000000000000',
-          scopes: ['gfs', 'authorization'],
-        },
-        {
-          schemaVersion: 1,
-          type: 'resync_required',
-          cursor: '00000000-0000-0000-0000-000000000000',
-          scopes: ['gfs', 'authorization'],
-        },
-      ])
-      expect(res.frames.join('')).not.toContain(CURSOR)
-      expect(res.writableEnded).toBe(false)
-    } finally {
-      closeActiveEntityChangeStreams()
-      await vi.advanceTimersByTimeAsync(0)
-      vi.useRealTimers()
-    }
   })
 
   it('rechecks authorization before delivering an established operator invalidation', async () => {
@@ -468,7 +224,7 @@ describe('routes/entityChangeStream', () => {
       res as unknown as Response,
       CURSOR,
       isAuthorized,
-      'operator'
+      'operator-1'
     )
     await vi.advanceTimersByTimeAsync(0)
 
@@ -511,7 +267,7 @@ describe('routes/entityChangeStream', () => {
       res as unknown as Response,
       CURSOR,
       isAuthorized,
-      'operator'
+      'operator-1'
     )
     await vi.advanceTimersByTimeAsync(0)
     expect(res.frames).toEqual([])
@@ -554,7 +310,6 @@ describe('routes/entityChangeStream', () => {
         res as unknown as Response,
         CURSOR,
         async () => true,
-        'operator',
         'operator-1'
       )
       return { req, res }
@@ -599,7 +354,6 @@ describe('routes/entityChangeStream', () => {
       res as unknown as Response,
       CURSOR,
       async () => true,
-      'operator',
       'operator-buffer-limit'
     )
 
@@ -627,7 +381,6 @@ describe('routes/entityChangeStream', () => {
       res as unknown as Response,
       CURSOR,
       async () => true,
-      'operator',
       'operator-heartbeat'
     )
 
@@ -678,7 +431,6 @@ describe('routes/entityChangeStream', () => {
         res as unknown as Response,
         CURSOR,
         async () => true,
-        'operator',
         'operator-socket'
       )
     })

@@ -241,6 +241,11 @@ describe('FilePreviewPage move permission contract', () => {
         expect(resourceReads).toBe(2)
         expect(sourceReads).toBe(2)
       })
+      const progress = await screen.findByRole('status', { name: 'Checking file permissions' })
+      expect(progress.closest('.da-gfs-preview-title-row')).toBeTruthy()
+      expect(screen.queryByRole('status', { name: 'Checking move permissions' })).toBeNull()
+      expect(screen.queryByText('Checking file permissions…')).toBeNull()
+      expect(screen.queryByText('Checking move permissions…')).toBeNull()
 
       const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
       expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()

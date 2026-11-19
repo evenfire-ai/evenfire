@@ -1,0 +1,754 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import fc from 'fast-check'
+import { randomUUID } from 'node:crypto'
+import { Pool } from 'pg'
+import type { GfsKey, Uuid } from '../src/services/gfsWatch/keys.js'
+import type { WatchConnection, WatchOpenOutcome } from '../src/services/gfsWatch/registry.js'
+import { registryTestDatabase } from './helpers/gfsWatchRegistryEnv.js'
+import type {
+  BuiltRegistry,
+  FakeSocket,
+  GfscDecision,
+  RegistryHarness,
+  TestUser,
+} from './helpers/gfsWatchRegistryHarness.js'
+import { type Loaded, loadHelpers } from './helpers/gfsWatchRegistryLoad.js'
+import './realPostgres.requirement.ts'
+
+// src/db.ts reads its connection string when first evaluated, and the
+// harness and clock reach it through their static imports. They are loaded
+// only after the static import of the env helper above has pointed the core
+// pool at this suite's database; a static import would let the import sorter
+// place them ahead of it.
+let flushMicrotasks!: Loaded['flushMicrotasks'],
+  createRegistryHarness!: Loaded['createRegistryHarness'],
+  nextEv!: Loaded['nextEv'],
+  quoteIdent!: Loaded['quoteIdent'],
+  restInvariantViolations!: Loaded['restInvariantViolations'],
+  sleep!: Loaded['sleep'],
+  waitForListenerReady!: Loaded['waitForListenerReady']
+
+// Model-based test of the GFS watch registry (§2–§3) on the real stack: real
+// Postgres with the dedicated LISTEN and the real resource trigger, real
+// sessions, mint and readGfsc, and a stand-in gfsc that answers with gfsc's
+// own envelope. fc.scheduler decides the order in which the ancestry query,
+// every mint and every gfsc read are let through; fc.commands interleaves
+// opens, routed commands (valid, duplicated, out of order, forged), moves,
+// renames, decision changes, client departures, T_auth, query failures and
+// listener losses with them.
+//
+// Reference model, deliberately trivial: a key may be `accepted` only if the
+// op that accepted it read its resource as a 2xx under an `allow` decision,
+// the key is of its resource's kind, and no ancestry change of its chain
+// landed within the six seconds before that op started or while it ran. It is
+// checked on every decision a stream wrote, closed streams included.
+// Everything else is checked as an invariant at rest.
+//
+// Delivery safety is judged on what the client receives, not on registry
+// state: every key of a `changed` frame must be `accepted` in the newest
+// decision frame (`ready` or `subscriptions`) the client had received on that
+// stream. A key added by a command whose decision has not arrived is not in
+// that set, so the same check covers keys of the op in flight. Keys accepted
+// by that decision and later denied by gfsc still count: nothing revokes a
+// standing acceptance mid-stream, the reopen decides again.
+
+const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
+const describeRealPostgres = adminUrl ? describe : describe.skip
+
+type ConnModel = {
+  user: TestUser
+  socket: FakeSocket
+  outcome: WatchOpenOutcome | null
+  conn: WatchConnection | undefined
+  openKeys: GfsKey[]
+  /** seq → keys and request id of every legitimate command sent. */
+  puts: Map<number, { keys: GfsKey[]; r: string }>
+  openRequestId: string
+  maxSeq: number
+  lastSeqSeen: number
+  /**
+   * Decision frames with their event number and the instant their op started:
+   * a delta queued behind an op in flight, or an open still authenticating,
+   * starts later than the test asked for it.
+   */
+  decisions: { frame: Record<string, unknown>; ev: number; opStartVt: number | null }[]
+  /** `accepted` of the newest decision frame received, or null before `ready`. */
+  lastAccepted: Set<GfsKey> | null
+}
+
+type Real = {
+  b: BuiltRegistry
+  s: fc.Scheduler
+  users: TestUser[]
+  conns: ConnModel[]
+  moves: { rid32: string; ev: number; vt: number }[]
+  fixture: Fixture
+  failures: string[]
+  pParent: string
+}
+
+type Fixture = {
+  p: string
+  q: string
+  f1: string
+  f2: string
+  g: string
+  denied: string
+  keys: GfsKey[]
+  kindOf: Map<string, 'file' | 'dir'>
+}
+
+describeRealPostgres('GFS watch registry model (T-M2)', () => {
+  let adminPool: Pool | undefined
+  let h: RegistryHarness
+  let users: TestUser[]
+  let unhandled: unknown[] = []
+  const onUnhandled = (e: unknown) => unhandled.push(e)
+
+  beforeAll(async () => {
+    ;({
+      flushMicrotasks,
+      createRegistryHarness,
+      nextEv,
+      quoteIdent,
+      restInvariantViolations,
+      sleep,
+      waitForListenerReady,
+    } = await loadHelpers())
+    adminPool = new Pool({ connectionString: adminUrl })
+    await adminPool.query(`CREATE DATABASE ${quoteIdent(registryTestDatabase)}`)
+    h = await createRegistryHarness(adminUrl!)
+    users = [await h.createUser(), await h.createUser()]
+    process.on('unhandledRejection', onUnhandled)
+    process.on('uncaughtException', onUnhandled)
+  }, 120_000)
+
+  afterAll(async () => {
+    try {
+      process.off('unhandledRejection', onUnhandled)
+      process.off('uncaughtException', onUnhandled)
+      await h?.teardown()
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [registryTestDatabase]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(registryTestDatabase)}`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
+  })
+
+  async function fixture(): Promise<Fixture> {
+    const p = await h.tree.add('directory')
+    const q = await h.tree.add('directory')
+    const f1 = await h.tree.add('file', p)
+    const f2 = await h.tree.add('file', p)
+    const g = await h.tree.add('file')
+    const denied = await h.tree.add('file', p)
+    const missing = randomUUID()
+    const kindOf = new Map<string, 'file' | 'dir'>([
+      [h.toRid(p), 'dir'],
+      [h.toRid(q), 'dir'],
+      [h.toRid(f1), 'file'],
+      [h.toRid(f2), 'file'],
+      [h.toRid(g), 'file'],
+      [h.toRid(denied), 'file'],
+    ])
+    return {
+      p,
+      q,
+      f1,
+      f2,
+      g,
+      denied,
+      kindOf,
+      keys: [
+        h.key('dir', p),
+        h.key('file', f1),
+        h.key('file', f2),
+        h.key('file', g),
+        h.key('file', denied),
+        h.key('file', missing),
+        h.key('file', p),
+        h.key('dir', q),
+      ],
+    }
+  }
+
+  const pick = (fx: Fixture, idx: number[]) => [
+    ...new Set(idx.map(i => fx.keys[i % fx.keys.length]!)),
+  ]
+
+  function track(real: Real, m: ConnModel): void {
+    const deniedKey = h.key('file', real.fixture.denied)
+    m.socket.onFrame = (frame, ev) => {
+      if (frame.type === 'ready' || frame.type === 'subscriptions') {
+        // The decision is written before its op ends, so the op is still the connection's.
+        const op = m.socket.conn?.op
+        const opStartVt =
+          frame.type === 'ready'
+            ? m.socket.admittedVt
+            : op?.kind === 'delta'
+              ? op.srvDeadline - h.modules.registry.GFS_WATCH_DELTA_SERVER_DEADLINE_MS
+              : null
+        m.decisions.push({ frame, ev, opStartVt })
+        m.lastAccepted = new Set(frame.accepted as GfsKey[])
+      }
+      if (frame.type !== 'changed') return
+      for (const k of frame.keys as GfsKey[]) {
+        if (k === deniedKey) real.failures.push(`S1: changed for denied ${k}`)
+        if (!m.lastAccepted?.has(k)) {
+          const d = m.decisions.at(-1)
+          const seq = d ? (d.frame.type === 'ready' ? 0 : d.frame.seq) : 'none'
+          real.failures.push(`S1: changed for ${k} not accepted by decision seq ${seq}`)
+        }
+      }
+    }
+  }
+
+  async function settleScheduler(real: Real, rounds = 400): Promise<void> {
+    for (let i = 0; i < rounds; i += 1) {
+      if (real.s.count() > 0) await real.s.waitAll()
+      await sleep(3)
+      await flushMicrotasks()
+      const opening = real.conns.some(c => c.outcome === null)
+      if (real.s.count() === 0 && real.b.registry.state.opsInFlight.size === 0 && !opening) {
+        await sleep(5)
+        if (real.s.count() === 0 && real.b.registry.state.opsInFlight.size === 0) return
+      }
+    }
+    throw new Error('model run did not reach rest')
+  }
+
+  class OpenCmd implements fc.AsyncCommand<object, Real> {
+    constructor(
+      readonly user: number,
+      readonly keys: number[]
+    ) {}
+    check = () => true
+    async run(_m: object, real: Real) {
+      const requestId = randomUUID()
+      const o = real.b.open(real.users[this.user]!, pick(real.fixture, this.keys), { requestId })
+      const m: ConnModel = {
+        user: real.users[this.user]!,
+        socket: o.socket,
+        outcome: null,
+        conn: undefined,
+        openKeys: pick(real.fixture, this.keys),
+        puts: new Map(),
+        openRequestId: requestId,
+        maxSeq: 0,
+        lastSeqSeen: 0,
+        decisions: [],
+        lastAccepted: null,
+      }
+      track(real, m)
+      real.conns.push(m)
+      void o.outcome.then(out => {
+        m.outcome = out
+        m.conn = real.b.connOf(o.socket)
+      })
+      await sleep(2)
+      m.conn = real.b.connOf(o.socket)
+    }
+    toString = () => `Open(u${this.user}, ${this.keys})`
+  }
+
+  function connAt(real: Real, i: number): ConnModel | undefined {
+    const ready = real.conns.filter(c => c.conn?.phase === 'ready')
+    return ready.length ? ready[i % ready.length] : undefined
+  }
+
+  class PutCmd implements fc.AsyncCommand<object, Real> {
+    constructor(
+      readonly conn: number,
+      readonly keys: number[],
+      readonly variant: 'next' | 'dup' | 'older' | 'jump' | 'foreign' | 'gen'
+    ) {}
+    check = () => true
+    async run(_m: object, real: Real) {
+      const c = connAt(real, this.conn)
+      if (!c?.conn) return
+      const keys = pick(real.fixture, this.keys)
+      const r = randomUUID()
+      let s = c.maxSeq + 1
+      let u = c.conn.binding.userId
+      let g = c.conn.binding.authGeneration
+      let legit = true
+      if (this.variant === 'dup') s = Math.max(1, c.maxSeq)
+      if (this.variant === 'older') s = Math.max(1, c.maxSeq - 1)
+      if (this.variant === 'jump') s = c.maxSeq + 2_000
+      if (this.variant === 'foreign') u = real.users.find(x => x.userId !== u)!.userId
+      if (this.variant === 'gen') g += 1
+      if (this.variant !== 'next') legit = this.variant === 'dup' || this.variant === 'older'
+      if (legit) c.maxSeq = Math.max(c.maxSeq, s)
+      if (legit && !c.puts.has(s)) c.puts.set(s, { keys, r })
+      await h.notifyCmd({ c: c.conn.connId, s, u, g, r: r as Uuid, keys: new Set(keys) })
+      if (c.conn.lastSeq < c.lastSeqSeen)
+        real.failures.push(`I40: lastSeq decreased on ${c.conn.connId}`)
+      c.lastSeqSeen = c.conn.lastSeq
+      if (c.conn.lastSeq > c.maxSeq)
+        real.failures.push(`I19/I40: lastSeq ${c.conn.lastSeq} beyond ${c.maxSeq}`)
+    }
+    toString = () => `Put(c${this.conn}, ${this.variant}, ${this.keys})`
+  }
+
+  class MoveCmd implements fc.AsyncCommand<object, Real> {
+    constructor(readonly toQ: boolean) {}
+    check = () => true
+    async run(_m: object, real: Real) {
+      const { p, q } = real.fixture
+      const target = this.toQ ? q : h.tree.root
+      await h.tree.move(p, target)
+      await h.barrier()
+      // Same parent: the trigger reports no ancestry change (a = 0).
+      if (real.pParent !== target) {
+        real.moves.push({ rid32: h.toRid(p), ev: nextEv(), vt: real.b.clock.now() })
+      }
+      real.pParent = target
+    }
+    toString = () => `Move(P → ${this.toQ ? 'Q' : 'root'})`
+  }
+
+  class RenameCmd implements fc.AsyncCommand<object, Real> {
+    constructor(readonly which: number) {}
+    check = () => true
+    async run(_m: object, real: Real) {
+      const fx = real.fixture
+      const target = [fx.f1, fx.f2, fx.g, fx.p, fx.denied][this.which % 5]!
+      await h.tree.rename(target)
+      await h.barrier()
+      // A denied key is indexed between its ancestry query and its read, so a
+      // change landing in that window queues it for the next flush.
+      const deniedKey = h.key('file', fx.denied)
+      if (
+        target === fx.denied &&
+        real.conns.some(c => real.b.connOf(c.socket)?.pending.has(deniedKey))
+      )
+        coverage.deniedChangeQueued += 1
+    }
+    toString = () => `Rename(${this.which})`
+  }
+
+  class DecisionCmd implements fc.AsyncCommand<object, Real> {
+    constructor(
+      readonly which: number,
+      readonly decision: GfscDecision
+    ) {}
+    check = () => true
+    async run(_m: object, real: Real) {
+      const fx = real.fixture
+      h.decisions.set(h.toRid([fx.f1, fx.g, fx.p][this.which % 3]!), this.decision)
+    }
+    toString = () => `Decision(${this.which}, ${this.decision})`
+  }
+
+  class GoneCmd implements fc.AsyncCommand<object, Real> {
+    constructor(readonly conn: number) {}
+    check = () => true
+    async run(_m: object, real: Real) {
+      const c = real.conns.length ? real.conns[this.conn % real.conns.length] : undefined
+      c?.socket.emitGone()
+    }
+    toString = () => `Gone(${this.conn})`
+  }
+
+  class StepCmd implements fc.AsyncCommand<object, Real> {
+    constructor(readonly n: number) {}
+    check = () => true
+    async run(_m: object, real: Real) {
+      for (let i = 0; i < this.n; i += 1) {
+        if (real.s.count() > 0) await real.s.waitOne()
+        await sleep(4)
+      }
+    }
+    toString = () => `Step(${this.n})`
+  }
+
+  /** Waits until a boundary call is parked, so a fixed example steps it deterministically. */
+  class ParkedCmd implements fc.AsyncCommand<object, Real> {
+    check = () => true
+    async run(_m: object, real: Real) {
+      for (let i = 0; i < 200 && real.s.count() === 0; i += 1) await sleep(5)
+    }
+    toString = () => 'Parked'
+  }
+
+  class SettleCmd implements fc.AsyncCommand<object, Real> {
+    check = () => true
+    async run(_m: object, real: Real) {
+      for (let i = 0; i < 50; i += 1) {
+        if (real.s.count() > 0) await real.s.waitAll()
+        await sleep(4)
+        if (real.s.count() === 0 && real.b.registry.state.opsInFlight.size === 0) break
+      }
+    }
+    toString = () => 'Settle'
+  }
+
+  class AdvanceCmd implements fc.AsyncCommand<object, Real> {
+    constructor(readonly ms: number) {}
+    check = () => true
+    async run(_m: object, real: Real) {
+      // The flush about to fire holds a change for a key its op already
+      // accepted but has not yet announced in a decision frame.
+      const early = real.conns.some(c => {
+        const conn = real.b.connOf(c.socket)
+        if (!conn?.op) return false
+        return [...conn.pending].some(
+          k => conn.op!.added.has(k) && conn.keys.get(k)?.state === 'accepted'
+        )
+      })
+      if (early && this.ms >= 250) coverage.inFlightChangeQueued += 1
+      await real.b.advance(this.ms)
+    }
+    toString = () => `Advance(${this.ms})`
+  }
+
+  class CteFailCmd implements fc.AsyncCommand<object, Real> {
+    check = () => true
+    async run(_m: object, real: Real) {
+      const gate = real.b.gates.cte
+      gate.failWith = () => {
+        gate.mode = 'pass'
+        return new Error('Connection terminated unexpectedly')
+      }
+      gate.mode = 'fail'
+    }
+    toString = () => 'CteFail'
+  }
+
+  class ListenerLostCmd implements fc.AsyncCommand<object, Real> {
+    check = () => true
+    async run(_m: object, real: Real) {
+      const terminated = await h.terminateListener()
+      for (let i = 0; i < 400 && real.b.registry.listenerReady(); i += 1) await sleep(5)
+      if (terminated !== 1 || real.b.registry.listenerReady()) {
+        real.failures.push(`harness: listener loss not induced (${terminated} backends ended)`)
+        return
+      }
+      coverage.listenerLost += 1
+      real.b.clock.advance(1_200)
+      await waitForListenerReady(() => real.b.registry.listenerReady())
+    }
+    toString = () => 'ListenerLost'
+  }
+
+  const keyIdx = fc.array(fc.nat(7), { maxLength: 5 })
+  const commands = [
+    fc.tuple(fc.nat(1), keyIdx).map(([u, k]) => new OpenCmd(u, k)),
+    fc.tuple(fc.nat(1), keyIdx).map(([u, k]) => new OpenCmd(u, k)),
+    fc.constant(new SettleCmd()),
+    fc.constant(new SettleCmd()),
+    fc
+      .tuple(
+        fc.nat(3),
+        keyIdx,
+        fc.constantFrom('next', 'next', 'next', 'dup', 'older', 'jump', 'foreign', 'gen')
+      )
+      .map(([c, k, v]) => new PutCmd(c, k, v as PutCmd['variant'])),
+    fc.boolean().map(b => new MoveCmd(b)),
+    fc.nat(4).map(w => new RenameCmd(w)),
+    fc
+      .tuple(fc.nat(2), fc.constantFrom<GfscDecision>('allow', 'deny', 'unavailable'))
+      .map(([w, d]) => new DecisionCmd(w, d)),
+    fc.nat(3).map(c => new GoneCmd(c)),
+    fc.integer({ min: 1, max: 6 }).map(n => new StepCmd(n)),
+    fc.constantFrom(250, 6_000).map(ms => new AdvanceCmd(ms)),
+    fc.constant(new CteFailCmd()),
+    fc.constant(new ListenerLostCmd()),
+  ]
+
+  function checkModel(real: Real): string[] {
+    const v: string[] = []
+    for (const m of real.conns) {
+      const conn = m.conn
+      if (m.outcome === null) v.push('I30: open did not resolve')
+      if (
+        m.outcome &&
+        m.outcome.kind !== 'stream' &&
+        conn &&
+        real.b.registry.state.byConnId.get(conn.connId) === conn
+      ) {
+        v.push(`I30: ${m.outcome.kind} outcome but still admitted`)
+      }
+      if (!conn || conn.phase !== 'ready') continue
+      // The effective set is a subset of the newest applied command's keys.
+      const base = conn.lastSeq === 0 ? m.openKeys : m.puts.get(conn.lastSeq)?.keys
+      if (!base) v.push(`I19: lastSeq ${conn.lastSeq} never sent legitimately`)
+      for (const k of conn.keys.keys())
+        if (base && !base.includes(k)) v.push(`I21: ${k} not in set ${conn.lastSeq}`)
+      // Accepted at rest without being in the last decision frame: accepted
+      // by no decision the client saw. What each frame decided is checked
+      // over every connection in decisionViolations.
+      const last = m.decisions.at(-1)?.frame.accepted as string[] | undefined
+      for (const [k, rec] of conn.keys) {
+        if (rec.state === 'accepted' && !last?.includes(k))
+          v.push(`I6: ${k} accepted without a decision frame`)
+      }
+    }
+    v.push(...decisionViolations(real))
+    return v
+  }
+
+  /**
+   * Each key a frame accepts that the previous frame of its connection did
+   * not, with the op that decided it: keys are only accepted by the op that
+   * added them, and every op that ends on an open stream writes a frame (a
+   * retained user's delta writes none, but in this model retention only
+   * ends by closing the stream, so no later frame can surface its keys).
+   * Every connection counts, closed ones included: a stream that closes
+   * afterwards (a listener loss, a reauthorize, the client leaving) does not
+   * make a decision it streamed any less wrong.
+   */
+  function* newlyAccepted(real: Real) {
+    for (const m of real.conns) {
+      let previous = new Set<string>()
+      for (const d of m.decisions) {
+        const accepted = d.frame.accepted as string[]
+        const seq = d.frame.type === 'ready' ? 0 : (d.frame.seq as number)
+        for (const k of accepted) if (!previous.has(k)) yield { m, d, seq, k }
+        previous = new Set(accepted)
+      }
+    }
+  }
+
+  /**
+   * I6, I11 and S4 over every decision of every connection. Only P moves, so
+   * a key's chain holds P exactly when its resource is P or under it; the
+   * indexed chain is gone once the connection closes.
+   */
+  function decisionViolations(real: Real): string[] {
+    const fx = real.fixture
+    const underP = new Set<string>([fx.p, fx.f1, fx.f2, fx.denied].map(x => h.toRid(x)))
+    const v: string[] = []
+    for (const { m, d, seq, k } of newlyAccepted(real)) {
+      const r32 = k.slice(k.lastIndexOf('/') + 1)
+      const expectedKind = fx.kindOf.get(r32)
+      if (expectedKind === undefined || !k.startsWith(`${expectedKind}:`))
+        v.push(`I6/I11: ${k} accepted with wrong kind or missing`)
+      // gfsc sees the resource, not the key, so an op holding both kinds of
+      // a key (dir:P and file:P) reads it twice, and a decision change
+      // between the two reads is legitimate: one read of each kind decides
+      // its own key. Which one decided k is not observable, so one of them
+      // must be a 2xx under `allow`; with a single read, that read.
+      const opRequestId = seq === 0 ? m.openRequestId : m.puts.get(seq)?.r
+      const reads = h.reads.filter(
+        r => r.rid32 === r32 && r.requestId === opRequestId && r.seq < d.ev
+      )
+      if (!reads.some(r => r.status === 200 && r.decision === 'allow'))
+        v.push(`I6: ${k} accepted at frame ev ${d.ev} after reads ${JSON.stringify(reads)}`)
+      // Anchored where the op takes its snapshot of recent ancestry changes:
+      // when it starts, not when the test sent its command. Without that
+      // instant the window cannot be judged, and falling back to the
+      // command's instant would judge it against the wrong one in silence.
+      const vt = d.opStartVt
+      if (vt === null) v.push(`oracle: ${String(d.frame.type)} ${seq} has no op start instant`)
+      if (!underP.has(r32)) continue
+      for (const mv of real.moves) {
+        if (mv.ev < d.ev && vt !== null && mv.vt > vt - 6_000) {
+          v.push(`I6/S4: ${k} accepted despite move ev ${mv.ev} before frame ev ${d.ev}`)
+        }
+      }
+    }
+    return v
+  }
+
+  const coverage = {
+    accepted: 0,
+    rejected: 0,
+    deferred: 0,
+    suspect: 0,
+    subscriptions: 0,
+    closedReady: 0,
+    listenerLost: 0,
+    changed: 0,
+    deniedChangeQueued: 0,
+    inFlightChangeQueued: 0,
+  }
+
+  function recordCoverage(real: Real): void {
+    for (const m of real.conns) {
+      for (const d of m.decisions) {
+        coverage.accepted += (d.frame.accepted as unknown[]).length
+        coverage.rejected += (d.frame.rejected as unknown[]).length
+        coverage.deferred += (d.frame.deferred as unknown[]).length
+        if ((d.frame.retryAfterMs as number) >= 6_000) coverage.suspect += 1
+        if (d.frame.type === 'subscriptions') coverage.subscriptions += 1
+      }
+      if (m.socket.framesOf('stream.closing').length > 0) coverage.closedReady += 1
+      coverage.changed += m.socket.framesOf('changed').length
+    }
+  }
+
+  const seeded = () => fc.sample(fc.scheduler(), { seed: 1, numRuns: 1 })[0]!
+  const asCmds = (cmds: fc.AsyncCommand<object, Real>[]) =>
+    cmds as unknown as Iterable<fc.AsyncCommand<object, Real>>
+  // Fixed sequences that reach every decision and delivery path, so the
+  // coverage check below does not depend on what the random runs happen to draw.
+  const examples: [fc.Scheduler, Iterable<fc.AsyncCommand<object, Real>>][] = [
+    // An ancestor moves while the open is parked in front of its ancestry
+    // query, a delta follows, and the listener is lost with a stream open.
+    [
+      seeded(),
+      asCmds([
+        new OpenCmd(0, [1, 4]),
+        new MoveCmd(true),
+        new SettleCmd(),
+        new PutCmd(0, [1, 3], 'next'),
+        new SettleCmd(),
+        new ListenerLostCmd(),
+      ]),
+    ],
+    // The denied file is renamed after its ancestry query indexed it and
+    // before gfsc refuses it: the flush that follows holds a change for a key
+    // that ends rejected.
+    [
+      seeded(),
+      asCmds([
+        new OpenCmd(0, [1, 4]),
+        new ParkedCmd(),
+        new StepCmd(1),
+        new ParkedCmd(),
+        new RenameCmd(4),
+        new SettleCmd(),
+        new AdvanceCmd(250),
+        new SettleCmd(),
+      ]),
+    ],
+    // A delta adds two files; after the first read accepts one, both are
+    // renamed and the flush window elapses before the second read answers.
+    [
+      seeded(),
+      asCmds([
+        new OpenCmd(0, [1]),
+        new SettleCmd(),
+        new PutCmd(0, [2, 3], 'next'),
+        new ParkedCmd(),
+        new StepCmd(1),
+        new ParkedCmd(),
+        new StepCmd(1),
+        new ParkedCmd(),
+        new StepCmd(1),
+        new RenameCmd(1),
+        new RenameCmd(2),
+        new AdvanceCmd(250),
+        new SettleCmd(),
+        new RenameCmd(1),
+        new AdvanceCmd(250),
+        new SettleCmd(),
+      ]),
+    ],
+    // A listener that has already pinged: its backend's last statement
+    // is the ping, no longer the LISTEN.
+    [
+      fc.sample(fc.scheduler(), { seed: 2, numRuns: 1 })[0]!,
+      asCmds([
+        new OpenCmd(0, [1]),
+        new SettleCmd(),
+        new AdvanceCmd(6_000),
+        new AdvanceCmd(6_000),
+        new ListenerLostCmd(),
+        new OpenCmd(1, [3]),
+        new SettleCmd(),
+      ]),
+    ],
+    // One delta reads P twice, for dir:P and for file:P, and P's
+    // decision turns to deny between the two reads: dir:P is rightly
+    // accepted although the op's last read of P was a deny.
+    [
+      fc.sample(fc.scheduler(), { seed: 11, numRuns: 1 })[0]!,
+      asCmds([
+        new OpenCmd(0, [1]),
+        new SettleCmd(),
+        new PutCmd(0, [0, 6], 'next'),
+        new StepCmd(1),
+        new StepCmd(1),
+        new StepCmd(1),
+        new DecisionCmd(2, 'deny'),
+        new SettleCmd(),
+      ]),
+    ],
+  ]
+
+  it('keeps I4, I6, I11, I17, I19, I20, I23–I26, I30, I40 and I42 under scheduled interleavings', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands(commands, { maxCommands: 24, size: 'large' }),
+        async (s, cmds) => {
+          h.decisions.clear()
+          const b = await h.build()
+          const fx = await fixture()
+          h.decisions.set(h.toRid(fx.denied), 'deny')
+          const hook = (label: string) => s.schedule(Promise.resolve(label)).then(() => undefined)
+          b.gates.cte.hook = hook
+          b.gates.read.hook = hook
+          b.gates.mint.hook = hook
+          const real: Real = {
+            b,
+            s,
+            users,
+            conns: [],
+            moves: [],
+            fixture: fx,
+            failures: [],
+            pParent: h.tree.root,
+          }
+          let stopped = false
+          const stop = async () => {
+            if (stopped) return
+            stopped = true
+            b.gates.cte.hook = b.gates.read.hook = b.gates.mint.hook = null
+            await b.stop()
+          }
+          try {
+            await fc.asyncModelRun(() => ({ model: {}, real }), cmds)
+            b.gates.cte.mode = 'pass'
+            await settleScheduler(real)
+            await b.advance(7_000)
+            await settleScheduler(real)
+            b.clock.advance(300)
+            await settleScheduler(real)
+            const closed = real.conns.flatMap(c =>
+              c.conn && c.conn.phase === 'closed' ? [c.conn] : []
+            )
+            // The rest state and the model are read before stop, which closes
+            // every stream; the socket checks after it, so its writes count.
+            const atRest = [
+              ...real.failures,
+              ...restInvariantViolations(b, closed),
+              ...checkModel(real),
+            ]
+            recordCoverage(real)
+            await stop()
+            const violations = [
+              ...atRest,
+              ...b.violations(),
+              ...unhandled.map(e => `unhandled: ${String(e)}`),
+            ]
+            unhandled = []
+            expect(violations).toEqual([])
+          } finally {
+            await stop()
+          }
+        }
+      ),
+      {
+        // fast-check counts the examples inside numRuns; add them back so the
+        // number of random runs is the one requested.
+        numRuns: Number(process.env.GFS_WATCH_MODEL_RUNS ?? 25) + examples.length,
+        endOnFailure: true,
+        verbose: 1,
+        examples,
+      }
+    )
+    // Every decision path must have been exercised, or a green run proves little.
+    // The fixed examples alone reach all of them, so this guards the harness
+    // and the examples, not how widely the random runs happened to explore.
+    expect(Object.entries(coverage).filter(([, n]) => n === 0)).toEqual([])
+  }, 900_000)
+})
