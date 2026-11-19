@@ -833,21 +833,31 @@ describe('PUT retries', () => {
   })
 
   it('T-CB44: an episode that ends without a new PUT resets the retry count', async () => {
+    const retryTimer = async () => {
+      await h.until(() => h.isPending(st().put?.retryTimer))
+      return st().put!.retryTimer
+    }
     await start({ keys: [A] })
+    await h.until(() => {
+      const { link, put } = st()
+      return link.kind === 'Ready' && link.accepted.has(A) && put === null
+    })
     h.server.putPolicy = () => ({ kind: 'error', status: 404 })
     await h.subscribe([A, B])
-    for (let r = 0; r < 4; r++) await fire(st().put!.retryTimer)
+    for (let r = 0; r < 4; r++) await fire(await retryTimer())
+    const lastRetry = await retryTimer()
     expect(st().putAttempt).toBe(5)
     await h.subscribe([A])
-    await fire(st().put!.retryTimer)
+    await fire(lastRetry)
     expect(st().put).toBeNull()
     expect(st().putAttempt).toBe(0)
     await h.subscribe([A, C])
-    const first = handle(st().put!.retryTimer).ms
+    const first = handle(await retryTimer()).ms
     expect(first).toBeGreaterThanOrEqual(1_000)
     expect(first).toBeLessThanOrEqual(1_200)
     const before = puts().length - 1
-    while (st().put) await fire(st().put!.retryTimer)
+    for (let r = 0; r <= PUT_MAX_ATTEMPTS; r++) await fire(await retryTimer())
+    expect(st().put).toBeNull()
     expect(puts().length - before).toBe(PUT_MAX_ATTEMPTS + 1)
   })
 
