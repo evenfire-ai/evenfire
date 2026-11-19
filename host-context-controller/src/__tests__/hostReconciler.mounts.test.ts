@@ -3,7 +3,12 @@ import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'crypto'
 import { makeStubKc } from '../../test/__fixtures__/testMocks'
 import { config as hccConfig } from '../config'
-import { HostReconciler, type ResolvedSfsMount } from '../hostReconciler'
+import {
+  HostReconciler,
+  RPC_PROXY_EDGE_PROTOCOL_LABEL,
+  RPC_PROXY_EDGE_PROTOCOL_V1,
+  type ResolvedSfsMount,
+} from '../hostReconciler'
 import { issueMcpHostRuntimeTokens } from '../mcpHostRuntimeTokenIssuerClient'
 import type { HostCRD } from '../types'
 
@@ -987,9 +992,52 @@ describe('HostReconciler.buildDeployment — SharedFileSystem mounts', () => {
     expect(envNames).not.toContain('CLERUM_CONTEXT_FILES_MOUNTS')
     expect(envNames).toContain('MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE')
     expect(envNames).toContain('MCP_HOST_RUNTIME_AUTH_STATE_DIR')
+    const rpcProxyEdgeToken = container.env?.find(
+      entry => entry.name === 'MCP_HOST_RPC_PROXY_EDGE_TOKEN'
+    )
+    expect(rpcProxyEdgeToken?.valueFrom?.secretKeyRef).toEqual({
+      name: 'rpc-proxy-edge-credentials',
+      key: 'RPC_PROXY_MCP_HOST_EDGE_TOKEN',
+      optional: true,
+    })
     // Only the built-in runtime volumes — no context-files volumes.
     const volNames = (podSpec.volumes ?? []).map(v => v.name).sort()
     expect(volNames).toEqual(['mcp-host-runtime-tokens', 'tmp', 'workflow-auth-state', 'workspace'])
+  })
+
+  it('keeps new Host images on legacy protocol until V2 is explicitly selected', () => {
+    const mutableConfig = hccConfig as unknown as {
+      hostRpcProxyEdgeProtocol: 'legacy-headers' | 'dedicated-header-v1'
+      hostImage: string
+    }
+    const previousProtocol = mutableConfig.hostRpcProxyEdgeProtocol
+    const previousImage = mutableConfig.hostImage
+    try {
+      expect(previousProtocol).toBe('legacy-headers')
+      mutableConfig.hostRpcProxyEdgeProtocol = 'legacy-headers'
+      mutableConfig.hostImage = 'clerum/mcp-host:pr2-new-image'
+      const legacy = new HostReconciler(makeStubKc()).buildDeployment(makeHost())
+      const legacyContainer = legacy.spec!.template!.spec!.containers![0]!
+      expect(legacyContainer.image).toBe('clerum/mcp-host:pr2-new-image')
+      expect(legacy.spec!.template!.metadata!.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL]).toBe(
+        'legacy-headers'
+      )
+      expect(
+        legacyContainer.env?.find(entry => entry.name === 'MCP_HOST_RPC_PROXY_EDGE_TOKEN')
+          ?.valueFrom?.secretKeyRef?.optional
+      ).toBe(true)
+
+      mutableConfig.hostRpcProxyEdgeProtocol = RPC_PROXY_EDGE_PROTOCOL_V1
+      const strict = new HostReconciler(makeStubKc()).buildDeployment(makeHost())
+      const strictContainer = strict.spec!.template!.spec!.containers![0]!
+      expect(
+        strictContainer.env?.find(entry => entry.name === 'MCP_HOST_RPC_PROXY_EDGE_TOKEN')
+          ?.valueFrom?.secretKeyRef?.optional
+      ).toBe(false)
+    } finally {
+      mutableConfig.hostRpcProxyEdgeProtocol = previousProtocol
+      mutableConfig.hostImage = previousImage
+    }
   })
 
   it('adds a pod-template runtime token revision annotation when HCC rotates tokens', () => {
@@ -1281,6 +1329,16 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
       isCommunicationChannelCacheSynced: () => true,
       // Stub APIs to capture the Deployment body and ack everything.
       coreApi: {
+        listNamespacedPod: vi.fn(async () => ({
+          items: [
+            {
+              metadata: {
+                labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 },
+              },
+              status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+            },
+          ],
+        })),
         readNamespacedSecret: readSecretWithChannelReaderRuntimeAuthLabels(),
         createNamespacedServiceAccount: vi.fn(),
         readNamespacedServiceAccount: vi.fn(async ({ name, namespace }) => ({
@@ -1384,19 +1442,39 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
           }
           return {}
         }),
-        readNamespacedDeployment: vi.fn(async ({ name, namespace }) => ({
-          metadata: {
-            name,
-            namespace,
-            uid: `uid-${name}`,
-            resourceVersion: '1',
-            labels: {
-              'clerum.io/host': 'team-mission',
-              'clerum.io/managed-by': 'host-context-controller',
-            },
-          },
-          status: { readyReplicas: 1 },
-        })),
+        readNamespacedDeployment: vi.fn(async ({ name, namespace }) =>
+          name === 'rpc-proxy'
+            ? {
+                metadata: { name, namespace, generation: 1 },
+                spec: {
+                  replicas: 1,
+                  template: {
+                    metadata: {
+                      labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 },
+                    },
+                  },
+                },
+                status: {
+                  observedGeneration: 1,
+                  updatedReplicas: 1,
+                  readyReplicas: 1,
+                  availableReplicas: 1,
+                },
+              }
+            : {
+                metadata: {
+                  name,
+                  namespace,
+                  uid: `uid-${name}`,
+                  resourceVersion: '1',
+                  labels: {
+                    'clerum.io/host': 'team-mission',
+                    'clerum.io/managed-by': 'host-context-controller',
+                  },
+                },
+                status: { readyReplicas: 1 },
+              }
+        ),
       } as unknown as k8s.AppsV1Api,
     })
     await reconciler.reconcile(makeHost())
