@@ -107,6 +107,176 @@ function pickAuto(utils: ReturnType<typeof render>): void {
   fireEvent.click(utils.getByTestId('approval-mode-option-auto'))
 }
 
+describe('ApprovalModePicker state — save errors (A3 rows)', () => {
+  it('R4: A→B→A with A’s save still in flight shows A’s failed save on A', async () => {
+    const write = deferred<ApprovalModeResult>()
+    setApprovalMode.mockReturnValueOnce(write.promise)
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+    utils.rerender(<ApprovalModePicker agentRef="agent-x" chatId="chat-2" />)
+    utils.rerender(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
+
+    write.reject(patchFailure(500))
+    await flush()
+
+    expect(utils.getByTestId('approval-mode-picker').textContent).toBe('Manual')
+    expect(utils.queryByTestId('approval-mode-write-error')?.textContent).toBe(SAVE_ERROR)
+  })
+
+  it('R5: a save that fails while another chat is on screen shows only when its chat returns', async () => {
+    const write = deferred<ApprovalModeResult>()
+    setApprovalMode.mockReturnValueOnce(write.promise)
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+    utils.rerender(<ApprovalModePicker agentRef="agent-x" chatId="chat-2" />)
+
+    write.reject(patchFailure(500))
+    await flush()
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+
+    utils.rerender(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
+    expect(utils.queryByTestId('approval-mode-write-error')?.textContent).toBe(SAVE_ERROR)
+  })
+
+  it('R6: a newer save for the same chat wins over an older failure that settles later', async () => {
+    const older = deferred<ApprovalModeResult>()
+    const newer = deferred<ApprovalModeResult>()
+    setApprovalMode.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise)
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    fireEvent.click(utils.getByTestId('approval-mode-option-manual'))
+    expect(setApprovalMode).toHaveBeenCalledTimes(2)
+
+    newer.resolve(patchSuccess('manual'))
+    await flush()
+    older.reject(patchFailure(500))
+    await flush()
+
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+
+  it('R9: a save that fails while the chat is unmounted shows when the chat mounts again', async () => {
+    const write = deferred<ApprovalModeResult>()
+    setApprovalMode.mockReturnValueOnce(write.promise)
+    const first = renderPicker('chat-1')
+    pickAuto(first)
+    first.unmount()
+
+    write.reject(patchFailure(500))
+    await flush()
+
+    const again = renderPicker('chat-1')
+    expect(again.queryByTestId('approval-mode-write-error')?.textContent).toBe(SAVE_ERROR)
+  })
+
+  it('R14: an error that arrives while the menu is open shows once the chip closes the menu', async () => {
+    const write = deferred<ApprovalModeResult>()
+    setApprovalMode.mockReturnValueOnce(write.promise)
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+
+    write.reject(patchFailure(500))
+    await flush()
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    expect(utils.queryByTestId('approval-mode-write-error')?.textContent).toBe(SAVE_ERROR)
+  })
+
+  it('R16: a failed response for a save the Host did commit shows no error', async () => {
+    const write = deferred<ApprovalModeResult>()
+    setApprovalMode.mockReturnValueOnce(write.promise)
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+
+    server['chat-1'] = 'auto'
+    write.reject(patchFailure(502))
+    await flush()
+
+    expect(utils.getByTestId('approval-mode-picker').textContent).toBe('Auto-approve')
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+
+  it('R17: a later session read that shows the requested mode clears the error', async () => {
+    setApprovalMode.mockRejectedValueOnce(patchFailure(500))
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+    await flush()
+    expect(utils.queryByTestId('approval-mode-write-error')).not.toBeNull()
+
+    act(() => {
+      noteHostApprovalModeFromSession('agent-x', 'chat-1', sessionApproval('auto'))
+    })
+
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+
+  it('R17: once a read proves the save, a later change elsewhere does not bring the error back', async () => {
+    setApprovalMode.mockRejectedValueOnce(patchFailure(401))
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+    await flush()
+    expect(utils.queryByTestId('approval-mode-write-error')).not.toBeNull()
+
+    act(() => {
+      noteHostApprovalModeFromSession('agent-x', 'chat-1', sessionApproval('auto'))
+    })
+    act(() => {
+      // Another client sets the chat back to manual.
+      noteHostApprovalModeFromSession('agent-x', 'chat-1', sessionApproval('manual'))
+    })
+
+    expect(utils.getByTestId('approval-mode-picker').textContent).toBe('Manual')
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+
+  it('R18: a store scope reset drops the error from a picker that stays mounted', async () => {
+    setApprovalMode.mockRejectedValueOnce(patchFailure(500))
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+    await flush()
+    expect(utils.queryByTestId('approval-mode-write-error')).not.toBeNull()
+
+    act(() => {
+      resetHostApprovalModeStore()
+    })
+    // The parent re-renders on the scope change; the same ids now name another scope's chat.
+    utils.rerender(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
+
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+
+  it('R18: a save in flight across a store scope reset cannot raise an error in the new scope', async () => {
+    const write = deferred<ApprovalModeResult>()
+    setApprovalMode.mockReturnValueOnce(write.promise)
+    const utils = renderPicker('chat-1')
+    pickAuto(utils)
+
+    act(() => {
+      resetHostApprovalModeStore()
+    })
+    utils.rerender(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
+    write.reject(patchFailure(500))
+    await flush()
+
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+
+  it('R25: a failed re-pick of the mode already stored shows no error', async () => {
+    setApprovalMode.mockRejectedValueOnce(patchFailure(401))
+    const utils = renderPicker('chat-1')
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    fireEvent.click(utils.getByTestId('approval-mode-option-manual'))
+    await flush()
+
+    expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1', 'manual')
+    expect(utils.getByTestId('approval-mode-picker').textContent).toBe('Manual')
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+})
+
 describe('ApprovalModePicker state — chat switch (C1)', () => {
   it('R1: never commits the previous chat’s confirmation under the next chat', () => {
     const committed: Array<{ chatId: string; confirmInDom: boolean }> = []
@@ -233,5 +403,295 @@ describe('ApprovalModePicker state — chat switch (C1)', () => {
       container.remove()
       actEnvironment.IS_REACT_ACT_ENVIRONMENT = true
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A6 — independent oracle: a trivial reference model of the A4 invariants.
+// ---------------------------------------------------------------------------
+
+/** ok: saved. fail: not saved. dropped: saved by the Host, response lost. */
+type Outcome = 'ok' | 'fail' | 'dropped'
+interface ModelWrite {
+  id: number
+  chat: ChatKey
+  mode: ApprovalMode
+  outcome: Outcome
+  settled: boolean
+}
+interface Model {
+  screen: ChatKey
+  menuOpen: boolean
+  confirming: boolean
+  writes: ModelWrite[]
+  stored: Record<ChatKey, ApprovalMode>
+  errorFor: Record<ChatKey, boolean>
+  expectedCalls: ChatKey[]
+}
+interface Real {
+  scheduler: fc.Scheduler
+  utils: ReturnType<typeof render>
+  pendingOutcomes: Outcome[]
+  settledIds: number[]
+  nextWriteId: number
+}
+
+function closeMenu(model: Model): void {
+  model.menuOpen = false
+  model.confirming = false
+}
+
+function startWrite(model: Model, mode: ApprovalMode, outcome: Outcome, real: Real): void {
+  model.writes.push({
+    id: model.writes.length + 1,
+    chat: model.screen,
+    mode,
+    outcome,
+    settled: false,
+  })
+  model.expectedCalls.push(model.screen)
+  real.pendingOutcomes.push(outcome)
+}
+
+function assertInvariants(model: Model, real: Real): void {
+  const { queryByTestId } = real.utils
+  // L2 + menu shape
+  expect(queryByTestId('approval-mode-option-manual') !== null).toBe(
+    model.menuOpen && !model.confirming
+  )
+  expect(queryByTestId('approval-mode-confirm-allow-all') !== null).toBe(
+    model.menuOpen && model.confirming
+  )
+  // S2 + L1: the error shows exactly for the chat on screen with the menu closed.
+  expect(queryByTestId('approval-mode-write-error') !== null).toBe(
+    model.errorFor[model.screen] && !model.menuOpen
+  )
+  // S1 + C1: every PATCH targeted the chat on screen at the click.
+  expect(setApprovalMode.mock.calls.map(call => call[2])).toEqual(model.expectedCalls)
+}
+
+class SwitchChat implements fc.AsyncCommand<Model, Real> {
+  constructor(readonly target: ChatKey) {}
+  check(model: Readonly<Model>) {
+    return model.screen !== this.target
+  }
+  async run(model: Model, real: Real) {
+    model.screen = this.target
+    closeMenu(model)
+    real.utils.rerender(<ApprovalModePicker agentRef="agent-x" chatId={this.target} />)
+    assertInvariants(model, real)
+  }
+  toString() {
+    return `SwitchChat(${this.target})`
+  }
+}
+
+class Remount implements fc.AsyncCommand<Model, Real> {
+  check() {
+    return true
+  }
+  async run(model: Model, real: Real) {
+    closeMenu(model)
+    real.utils.unmount()
+    real.utils = render(<ApprovalModePicker agentRef="agent-x" chatId={model.screen} />)
+    assertInvariants(model, real)
+  }
+  toString() {
+    return 'Remount'
+  }
+}
+
+class ToggleMenu implements fc.AsyncCommand<Model, Real> {
+  check() {
+    return true
+  }
+  async run(model: Model, real: Real) {
+    if (model.menuOpen) {
+      closeMenu(model)
+    } else {
+      model.menuOpen = true
+      model.errorFor[model.screen] = false
+    }
+    fireEvent.click(real.utils.getByTestId('approval-mode-picker'))
+    assertInvariants(model, real)
+  }
+  toString() {
+    return 'ToggleMenu'
+  }
+}
+
+class Pick implements fc.AsyncCommand<Model, Real> {
+  constructor(
+    readonly mode: 'manual' | 'auto',
+    readonly outcome: Outcome
+  ) {}
+  check(model: Readonly<Model>) {
+    return model.menuOpen && !model.confirming
+  }
+  async run(model: Model, real: Real) {
+    closeMenu(model)
+    startWrite(model, this.mode, this.outcome, real)
+    fireEvent.click(real.utils.getByTestId(`approval-mode-option-${this.mode}`))
+    assertInvariants(model, real)
+  }
+  toString() {
+    return `Pick(${this.mode}, ${this.outcome})`
+  }
+}
+
+class PickAllowAll implements fc.AsyncCommand<Model, Real> {
+  check(model: Readonly<Model>) {
+    return model.menuOpen && !model.confirming
+  }
+  async run(model: Model, real: Real) {
+    model.confirming = true
+    fireEvent.click(real.utils.getByTestId('approval-mode-option-allow-all'))
+    assertInvariants(model, real)
+  }
+  toString() {
+    return 'PickAllowAll'
+  }
+}
+
+class Confirm implements fc.AsyncCommand<Model, Real> {
+  constructor(readonly outcome: Outcome) {}
+  check(model: Readonly<Model>) {
+    return model.menuOpen && model.confirming
+  }
+  async run(model: Model, real: Real) {
+    closeMenu(model)
+    startWrite(model, 'allow_all', this.outcome, real)
+    fireEvent.click(real.utils.getByTestId('approval-mode-confirm-allow-all'))
+    assertInvariants(model, real)
+  }
+  toString() {
+    return `Confirm(${this.outcome})`
+  }
+}
+
+class Dismiss implements fc.AsyncCommand<Model, Real> {
+  constructor(readonly how: 'cancel' | 'escape' | 'outside') {}
+  check(model: Readonly<Model>) {
+    if (!model.menuOpen) return false
+    return this.how !== 'cancel' || model.confirming
+  }
+  async run(model: Model, real: Real) {
+    closeMenu(model)
+    if (this.how === 'cancel') {
+      fireEvent.click(real.utils.getByTestId('approval-mode-cancel-allow-all'))
+    } else if (this.how === 'escape') {
+      fireEvent.keyDown(window, { key: 'Escape' })
+    } else {
+      fireEvent.mouseDown(document.body)
+    }
+    assertInvariants(model, real)
+  }
+  toString() {
+    return `Dismiss(${this.how})`
+  }
+}
+
+class Settle implements fc.AsyncCommand<Model, Real> {
+  check(model: Readonly<Model>) {
+    return model.writes.some(write => !write.settled)
+  }
+  async run(model: Model, real: Real) {
+    const before = real.settledIds.length
+    await act(async () => {
+      await real.scheduler.waitOne()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    const write = model.writes.find(entry => entry.id === real.settledIds[before])
+    if (!write) throw new Error(`settled unknown write ${real.settledIds[before]}`)
+    write.settled = true
+    if (write.outcome !== 'fail') model.stored[write.chat] = write.mode
+    // S3: only the latest write for its chat decides that chat's error, and a
+    // lost response is not an error when the Host shows the requested mode.
+    const latest = [...model.writes].reverse().find(entry => entry.chat === write.chat)
+    if (latest?.id === write.id) {
+      model.errorFor[write.chat] = write.outcome !== 'ok' && model.stored[write.chat] !== write.mode
+    }
+    assertInvariants(model, real)
+  }
+  toString() {
+    return 'Settle'
+  }
+}
+
+const outcomes = fc.constantFrom<Outcome>('ok', 'fail', 'dropped')
+const switchChat = fc.constantFrom(...CHATS).map(target => new SwitchChat(target))
+const toggleMenu = fc.constant(new ToggleMenu())
+const pick = fc
+  .tuple(fc.constantFrom('manual' as const, 'auto' as const), outcomes)
+  .map(([mode, outcome]) => new Pick(mode, outcome))
+const settle = fc.constant(new Settle())
+// Weighted by repetition: the interleavings that matter (A3 R3-R9, R14, R16)
+// need open → pick → switch/remount → settle chains.
+const commandArbitraries = [
+  switchChat,
+  switchChat,
+  fc.constant(new Remount()),
+  toggleMenu,
+  toggleMenu,
+  toggleMenu,
+  pick,
+  pick,
+  pick,
+  fc.constant(new PickAllowAll()),
+  outcomes.map(outcome => new Confirm(outcome)),
+  fc
+    .constantFrom('cancel' as const, 'escape' as const, 'outside' as const)
+    .map(how => new Dismiss(how)),
+  settle,
+  settle,
+  settle,
+]
+
+describe('ApprovalModePicker state — A6 command model', () => {
+  it('keeps S1–S3, L1, L2 and C1 for any event order and settlement order', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands(commandArbitraries, { maxCommands: 24 }),
+        async (scheduler, commands) => {
+          cleanup()
+          resetWorld()
+          const real: Real = {
+            scheduler,
+            utils: undefined as unknown as Real['utils'],
+            pendingOutcomes: [],
+            settledIds: [],
+            nextWriteId: 1,
+          }
+          setApprovalMode.mockImplementation(
+            (_agent: string, _host: string, chatId: string, mode: ApprovalMode) => {
+              const id = real.nextWriteId++
+              const outcome = real.pendingOutcomes.shift()
+              return scheduler.schedule(Promise.resolve(id), `write-${id}`).then(() => {
+                real.settledIds.push(id)
+                if (outcome !== 'fail') server[chatId] = mode
+                if (outcome !== 'ok') throw patchFailure(500)
+                return patchSuccess(mode)
+              })
+            }
+          )
+          real.utils = render(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
+          const model: Model = {
+            screen: 'chat-1',
+            menuOpen: false,
+            confirming: false,
+            writes: [],
+            stored: { 'chat-1': 'manual', 'chat-2': 'manual' },
+            errorFor: { 'chat-1': false, 'chat-2': false },
+            expectedCalls: [],
+          }
+          await fc.asyncModelRun(() => ({ model, real }), commands)
+          // Quiescence: settle everything still pending, then re-check.
+          while (model.writes.some(write => !write.settled)) await new Settle().run(model, real)
+          assertInvariants(model, real)
+        }
+      ),
+      { numRuns: Number(process.env.PICKER_MODEL_RUNS ?? 500) }
+    )
   })
 })

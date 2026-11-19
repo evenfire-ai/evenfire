@@ -25,29 +25,42 @@ const MODE_OPTIONS: ReadonlyArray<{ mode: ApprovalMode; label: string; testId: s
  * Session approval-mode control, sat next to the model selector in the
  * composer. It reuses the model selector's chip and upward popover so the two
  * controls read as one pair.
+ *
  * "Allow all" asks before it writes; the confirmation replaces the menu inside
  * the popover.
+ *
+ * The composer mounts the picker without a key, so a chat switch only changes
+ * its props. The menu and the confirmation reset during that render, so nothing
+ * opened for one chat ever shows or acts on the next. The same happens when the
+ * chat's first send starts: the store refuses a change in that window.
+ *
+ * Whether the chat's latest pick was not saved lives in the approval-mode
+ * store, per chat, so the error follows the chat across switches and remounts.
+ * Opening the menu again clears it.
+ *
  * When the session's model cannot run the shell classifier and the mode is
  * auto, the chip turns warning-toned and says so in its tooltip and to screen
- * readers; the open menu says it too. Nothing is added to the composer row.
- * While the chat's first send is in flight the chip is disabled and an open
- * menu or confirmation closes: the store refuses the change in that window.
- * A chat switch closes them too, in the same render.
+ * readers; the open menu says it too.
  */
 export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps) {
   const selectionChatId = chatId || null
-  const { label, effectiveMode, shellClassifierAvailable, firstSendInFlight, selectMode } =
-    useHostApprovalMode(agentRef, selectionChatId)
+  const {
+    label,
+    effectiveMode,
+    shellClassifierAvailable,
+    firstSendInFlight,
+    saveFailed,
+    selectMode,
+    clearSaveFailure,
+  } = useHostApprovalMode(agentRef, selectionChatId)
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
-  const [writeError, setWriteError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const classifierNoteId = useId()
 
   // Reset during render, not in an effect: a passive effect would commit the
   // previous chat's menu under the next chat first, and could undo a click
-  // that lands before it runs. The same reset runs when the chat's first send
-  // starts, so a released lock does not bring the menu back.
+  // that lands before it runs.
   const scopeKey = `${agentRef}::${selectionChatId ?? ''}`
   const [renderedFor, setRenderedFor] = useState({ scopeKey, locked: firstSendInFlight })
   if (renderedFor.scopeKey !== scopeKey || renderedFor.locked !== firstSendInFlight) {
@@ -79,22 +92,9 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [menuOpen, close])
 
-  // The composer mounts the picker un-keyed, so a chat or tab switch only
-  // changes its props. Drop the save error so it does not show on the next
-  // chat. A write still in flight for the old chat must not report here either.
-  const chatScope = useRef(0)
-  useEffect(() => {
-    chatScope.current += 1
-    setWriteError(null)
-  }, [agentRef, chatId])
-
   const choose = (mode: ApprovalMode) => {
     close()
-    const scope = chatScope.current
-    void selectMode(mode).then(ok => {
-      if (scope !== chatScope.current) return
-      setWriteError(ok ? null : WRITE_ERROR)
-    })
+    void selectMode(mode)
   }
 
   return (
@@ -120,7 +120,7 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
         }
         onClick={() => {
           if (firstSendInFlight) return
-          setWriteError(null)
+          if (!open) clearSaveFailure()
           setConfirming(false)
           setOpen(current => !current)
         }}
@@ -151,13 +151,13 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
         </span>
       ) : null}
 
-      {writeError && !menuOpen ? (
+      {saveFailed && !menuOpen ? (
         <span
           className="approval-mode-picker-error"
           data-testid="approval-mode-write-error"
           role="alert"
         >
-          {writeError}
+          {WRITE_ERROR}
         </span>
       ) : null}
 

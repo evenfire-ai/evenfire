@@ -9,6 +9,12 @@
  * Host before the send creates the row. Any other failure is not proof of the
  * stored mode: the next session read paints the label, including a write the
  * server committed before the response was dropped.
+ *
+ * Each existing chat also remembers whether its latest pick was not saved
+ * (`saveFailed`), so the picker can say so after a chat switch or a remount.
+ * Only the chat's latest write sets or clears it. A failed pick of the mode the
+ * chat already stores is not a failure, and a read that shows the requested
+ * mode clears it.
  */
 import type { ApprovalMode } from '../../../src/types'
 
@@ -35,6 +41,8 @@ export interface HostApprovalModeView {
    * row. The mode cannot change until the send is acknowledged or fails.
    */
   firstSendInFlight: boolean
+  /** The chat's latest pick was not saved, and the stored mode is still not that pick. */
+  saveFailed: boolean
 }
 
 export interface HostApprovalModeTransport {
@@ -69,12 +77,18 @@ interface Entry {
    * may have been answered before the write landed.
    */
   lastWriteSeq: number
+  /** Mode of the latest pick that was not saved. Null when it was saved or nothing failed. */
+  failedMode: ApprovalMode | null
+  /** Id of the latest write for this chat. Only that write may set or clear `failedMode`. */
+  latestWriteId: number
   listeners: Set<() => void>
   view: HostApprovalModeView | null
 }
 
 const entries = new Map<string, Entry>()
 let scopeGeneration = 0
+/** Write ids, store-wide and monotonic, so an id never repeats across scopes. */
+let writeIdSeq = 0
 /**
  * Bumps when a mode write starts and again when a PATCH completes, for every
  * chat. Reads capture this before they start.
@@ -123,6 +137,9 @@ function buildView(entry: Entry): HostApprovalModeView {
     shellClassifierAvailable: entry.shellClassifierAvailable,
     firstSendMode: entry.persisted ? null : entry.heldForFirstSend,
     firstSendInFlight: entry.firstSendsInFlight > 0,
+    // Derived, so a writer that sets the stored mode without applySnapshot
+    // (the 404 hold, migrateHeldApprovalMode) cannot show an error for it.
+    saveFailed: entry.failedMode !== null && entry.failedMode !== entry.storedMode,
   }
 }
 
@@ -150,6 +167,8 @@ function getEntry(agentRef: string, chatId: string | null): Entry {
       firstSendsInFlight: 0,
       firstSendsBegun: 0,
       lastWriteSeq: 0,
+      failedMode: null,
+      latestWriteId: 0,
       listeners: entry?.scopeGeneration === scopeGeneration ? entry.listeners : new Set(),
       view: null,
     }
@@ -173,6 +192,9 @@ function applySnapshot(entry: Entry, snapshot: SessionApprovalSnapshot): void {
   }
   entry.heldForFirstSend = null
   entry.persisted = true
+  // A read that shows the requested mode proves the save, whichever write or
+  // read carried it.
+  if (entry.failedMode === entry.storedMode) entry.failedMode = null
 }
 
 export function snapshotFromSessionRead(
@@ -339,9 +361,22 @@ export async function selectHostApprovalMode(
 ): Promise<boolean> {
   if (!agentRef || !isMode(mode)) return false
   const entry = getEntry(agentRef, chatId)
+  // Every pick on an existing chat is a write for the save-failure flag, the
+  // refusal below included. The id gates only `failedMode`: labels, `writing`,
+  // `lastWriteSeq` and the return value behave as before.
+  const writeId = chatId ? ++writeIdSeq : 0
+  if (chatId) entry.latestWriteId = writeId
+  const settleSaveFailure = (failed: boolean) => {
+    if (!chatId || !current(entry) || entry.latestWriteId !== writeId) return
+    entry.failedMode = failed && mode !== entry.storedMode ? mode : null
+  }
   // Refused before the write is stamped, so a read that starts now still
   // paints the label. The picker is disabled for the same window.
-  if (chatId && entry.firstSendsInFlight > 0) return false
+  if (chatId && entry.firstSendsInFlight > 0) {
+    settleSaveFailure(true)
+    notify(entry)
+    return false
+  }
   writeSeq += 1
   entry.lastWriteSeq = writeSeq
   if (!chatId) {
@@ -360,6 +395,7 @@ export async function selectHostApprovalMode(
     const result = await transport.setApprovalMode(agentRef, chatId, mode)
     if (!current(entry)) return false
     applySnapshot(entry, result)
+    settleSaveFailure(false)
     return true
   } catch (error) {
     if (!current(entry)) return false
@@ -367,16 +403,23 @@ export async function selectHostApprovalMode(
       // A first send began after this PATCH left. The 404 only says the row
       // did not exist yet; the send creates it with the mode it carried, which
       // the label still shows. Holding this mode would paint a mode the
-      // session never stores.
-      if (entry.firstSendsBegun !== firstSendsBegunAtStart) return false
+      // session never stores, so the pick counts as not saved.
+      if (entry.firstSendsBegun !== firstSendsBegunAtStart) {
+        settleSaveFailure(true)
+        return false
+      }
       entry.storedMode = mode
       entry.effectiveMode = mode
       entry.heldForFirstSend = mode === 'manual' ? null : mode
       entry.persisted = false
+      settleSaveFailure(false)
       notify(entry)
       return true
     }
-    if (isDefiniteRejection(error)) return false
+    if (isDefiniteRejection(error)) {
+      settleSaveFailure(true)
+      return false
+    }
     try {
       const read = await transport.readSessionApproval(agentRef, chatId)
       if (!current(entry)) return false
@@ -384,6 +427,9 @@ export async function selectHostApprovalMode(
     } catch (readError) {
       console.warn('[hostApprovalModeStore] session re-read failed:', readError)
     }
+    // Decided after the re-read: a read that shows the requested mode means
+    // the Host saved it and only the response was lost.
+    settleSaveFailure(true)
     return false
   } finally {
     // A read captured while the PATCH was in flight holds the start stamp, and
@@ -396,6 +442,15 @@ export async function selectHostApprovalMode(
       notify(entry)
     }
   }
+}
+
+/** The user opened the picker again: the earlier failed pick has been seen. */
+export function clearHostApprovalModeSaveFailure(agentRef: string, chatId: string | null): void {
+  if (!agentRef || !chatId) return
+  const entry = entries.get(keyFor(agentRef, chatId))
+  if (!entry || !current(entry) || entry.failedMode === null) return
+  entry.failedMode = null
+  notify(entry)
 }
 
 export function resetHostApprovalModeStore(): void {
