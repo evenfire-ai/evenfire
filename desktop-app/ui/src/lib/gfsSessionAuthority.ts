@@ -51,14 +51,17 @@ export function readGfsAccessState(
  * gates its queries off, and the session's cached responses are dropped so no
  * metadata outlives the access that produced it. The flag lives outside
  * `gfsRoot`, so the purge below cannot clear the decision it just recorded.
+ * Without a scope there is no session to revoke: `readGfsAccessState` already
+ * reads a missing scope as revoked.
  */
 export function revokeGfsSessionAccess(
   queryClient: QueryClient,
   scope: string | null,
   generation: number | null
 ): void {
+  if (!scope) return
   queryClient.setQueryData<GfsAccessState>(
-    desktopQueryKeys.gfsAccessState(scope ?? 'anonymous', generation),
+    desktopQueryKeys.gfsAccessState(scope, generation),
     'revoked'
   )
   queryClient.removeQueries({
