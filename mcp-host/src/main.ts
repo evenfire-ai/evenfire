@@ -3912,6 +3912,12 @@ export const mainRpcTestSeams = {
   setAgent(next: AgentStateMachine | null): void {
     agent = next
   },
+  setMessageQueue(next: MessageQueue | null): void {
+    messageQueue = next
+  },
+  failoverEngine(): FailoverEngine | null {
+    return failoverEngine
+  },
   async startRPCServer(): Promise<RPCServer> {
     await startRPCServer()
     return rpcServer!
