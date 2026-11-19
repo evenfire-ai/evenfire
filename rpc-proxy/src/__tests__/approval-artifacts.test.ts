@@ -38,6 +38,15 @@ const serviceMock = vi.hoisted(() => ({
 }))
 
 const controlApiMock = vi.hoisted(() => ({
+  ControlApiHostAccessRejectedError: class extends Error {
+    constructor(
+      readonly status: number,
+      readonly denialCode: string | null = null
+    ) {
+      super(`Control API rejected host access (${status})`)
+      this.name = 'ControlApiHostAccessRejectedError'
+    }
+  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
   // Stage 5 wake-and-hold consults the control-api wake endpoint whenever an
@@ -296,6 +305,29 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve', () => {
     const parsed = JSON.parse(capturedBody!)
     expect(parsed.requestId).toBe('req-99')
   })
+
+  // mcp-host compares the exact key set of a V2 task.manage target, which always
+  // binds taskId: the upstream body must carry the caller's taskId.
+  it('forwards taskId in the exact upstream body', async () => {
+    let capturedBody: string | undefined
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = init.body as string
+      return mockFetchResponse(200, JSON.stringify({ ok: true }))
+    })
+
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/approvals/approve')
+      .set('authorization', 'Bearer token')
+      .send({ taskId: 'task-1', toolCallId: 'tc-1' })
+      .expect(200)
+
+    expect(JSON.parse(capturedBody!)).toEqual({
+      userId: VALID_CLAIMS.sub,
+      taskId: 'task-1',
+      requestId: 'tc-1',
+      alwaysApprove: false,
+    })
+  })
 })
 
 describe('POST /rpc/hosts/:hostRef/approvals/deny', () => {
@@ -316,6 +348,27 @@ describe('POST /rpc/hosts/:hostRef/approvals/deny', () => {
     const parsed = JSON.parse(capturedBody!)
     expect(parsed.requestId).toBe('tc-deny-7')
     expect(parsed).not.toHaveProperty('toolCallId')
+  })
+
+  // Same exact-key-set contract as approve, without alwaysApprove.
+  it('forwards taskId in the exact upstream body', async () => {
+    let capturedBody: string | undefined
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = init.body as string
+      return mockFetchResponse(200, JSON.stringify({ ok: true }))
+    })
+
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/approvals/deny')
+      .set('authorization', 'Bearer token')
+      .send({ taskId: 'task-1', toolCallId: 'tc-1' })
+      .expect(200)
+
+    expect(JSON.parse(capturedBody!)).toEqual({
+      userId: VALID_CLAIMS.sub,
+      taskId: 'task-1',
+      requestId: 'tc-1',
+    })
   })
 
   it('sets userId to auth.sub', async () => {
@@ -665,6 +718,11 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
       .post('/rpc/hosts/chatllm/tasks/abc/cancel')
       .set('authorization', 'Bearer token')
       .expect(404)
+    // P-1 parity (merge-plan Addendum M-1): both task routes answer dev's 404
+    // on a Host denial instead of the coded 403, so the live witness is that
+    // resolution ran and no upstream call happened.
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledOnce()
+    expect(serviceMock.forwardCancelToHost).not.toHaveBeenCalled()
   })
 
   it('returns 502 when upstream fetch rejects and the host is not stateless', async () => {

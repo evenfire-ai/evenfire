@@ -33,24 +33,29 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
   let pool: Pool
 
   function probeAs(client: PoolClient) {
+    const probeListeners: Array<(err: Error) => void> = []
     return createPermissionStoreProbe({
-      pool: {
-        connect: async () => {
-          const pingClient = await pool.connect()
-          return {
-            query: (sql: string) => pingClient.query(sql),
-            release: (error?: Error) => pingClient.release(error),
-          }
-        },
-      },
+      // The real pg Pool, as gfsReaderRole passes it: its PoolClient carries
+      // the `error` event surface (ErrorEventSource) the ping holds a listener on.
+      pool,
       connectionString,
       intervalMs: 0,
       storageRole: 'writer',
       connectTimeoutMs: 2_000,
+      // The role-switched client stands in for the probe's fresh connection.
+      // The test owns it, so `end()` only removes the listeners the probe added.
       clientFactory: () => ({
         connect: async () => undefined,
         query: (sql: string) => client.query(sql),
-        end: async () => undefined,
+        end: async () => {
+          for (const listener of probeListeners.splice(0)) client.removeListener('error', listener)
+        },
+        on: (_event: 'error', listener: (err: Error) => void) => {
+          probeListeners.push(listener)
+          return client.on('error', listener)
+        },
+        removeListener: (_event: 'error', listener: (err: Error) => void) =>
+          client.removeListener('error', listener),
       }),
     })
   }
