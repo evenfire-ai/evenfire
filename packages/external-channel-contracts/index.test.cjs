@@ -2,6 +2,7 @@
 
 const { describe, it } = require('node:test')
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const { randomUUID } = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -269,6 +270,30 @@ describe('provider event receipt claims', () => {
     assertRejects(validateProviderEventReceiptClaims, load('receipt.invalid.message-with-action.json'), RECEIPT_ERROR, 'action')
   })
 
+  it('accepts the payload of a signed receipt token as its verifier decodes it', () => {
+    const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
+    const b64 = value => Buffer.from(JSON.stringify(value)).toString('base64url')
+    const iat = Math.floor(Date.now() / 1000)
+    const claims = {
+      ...load('receipt.slack.message.json'),
+      aud: PROVIDER_EVENT_RECEIPT_AUDIENCE,
+      jti: randomUUID(),
+      iat,
+      exp: iat + PROVIDER_EVENT_RECEIPT_TTL_SECONDS,
+    }
+    const signingInput = `${b64({ alg: 'RS256', typ: PROVIDER_EVENT_RECEIPT_HEADER_TYPE })}.${b64(claims)}`
+    const token = `${signingInput}.${crypto.sign('RSA-SHA256', Buffer.from(signingInput), privateKey).toString('base64url')}`
+    const [header, payload, signature] = token.split('.')
+    const verify = sig =>
+      crypto.verify('RSA-SHA256', Buffer.from(`${header}.${payload}`), publicKey, Buffer.from(sig, 'base64url'))
+    assert.equal(verify(signature), true)
+    // The verify call can fail: a forged signature does not verify.
+    assert.equal(verify(Buffer.from('fixture-not-a-signature').toString('base64url')), false)
+    assert.equal(JSON.parse(Buffer.from(header, 'base64url')).typ, PROVIDER_EVENT_RECEIPT_HEADER_TYPE)
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    assert.equal(assertAccepts(validateProviderEventReceiptClaims, decoded).aud, PROVIDER_EVENT_RECEIPT_AUDIENCE)
+  })
+
   it('accepts an action receipt whose clicked value is not a pause action', () => {
     assert.equal(assertAccepts(validateProviderEventReceiptClaims, load('receipt.slack.action.other.json')).action, null)
   })
@@ -320,7 +345,11 @@ describe('provider event receipt claims', () => {
       { ...teams, conversationId: `${teams.conversationId};messageid=1763460300000` }, 'conversationId',
     ],
     'an unknown attesting component': [{ ...message, attestedBy: 'channel-reader' }, 'attestedBy'],
-    'an empty jti': [{ ...message, jti: '' }, 'jti'],
+    'a receipt without an audience': [(({ aud, ...rest }) => rest)(message), 'keys'],
+    'another audience': [{ ...message, aud: 'fixture-other-audience' }, 'aud'],
+    'an audience array': [{ ...message, aud: [PROVIDER_EVENT_RECEIPT_AUDIENCE] }, 'aud'],
+    'an issuer claim': [{ ...message, iss: 'fixture-issuer' }, 'keys'],
+    'an empty jti':[{ ...message, jti: '' }, 'jti'],
     'an array': [[message], 'keys'],
     'null': [null, 'keys'],
   }

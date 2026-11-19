@@ -81,6 +81,7 @@ const RECEIPT_KEYS = Object.freeze([
   'eventKind',
   'action',
   'attestedBy',
+  'aud',
   'jti',
   'iat',
   'exp',
@@ -229,6 +230,8 @@ function validateProviderEventReceiptClaims(input) {
   }
   checkReceipt(isText(value.eventId), 'eventId')
   checkReceipt(ATTESTING_COMPONENTS.includes(value.attestedBy), 'attestedBy')
+  // A single string, equal to the audience constant: an array of audiences is refused.
+  checkReceipt(value.aud === PROVIDER_EVENT_RECEIPT_AUDIENCE, 'aud')
   checkReceipt(isText(value.jti), 'jti')
   checkReceipt(isPositiveInteger(value.iat), 'iat')
   checkReceipt(isPositiveInteger(value.exp) && value.exp - value.iat === PROVIDER_EVENT_RECEIPT_TTL_SECONDS, 'exp')

@@ -60,6 +60,8 @@ export type ProviderEventReceiptClaims = {
   /** always null on 'message'; on 'action', null when the clicked value is not a pause action value */
   readonly action: PauseAction | null
   readonly attestedBy: 'control-api' | 'approval-reader'
+  /** always PROVIDER_EVENT_RECEIPT_AUDIENCE, as one string; the only registered claims are aud, jti, iat and exp */
+  readonly aud: 'evenfire-provider-event'
   readonly jti: string
   readonly iat: number
   /** exp - iat = PROVIDER_EVENT_RECEIPT_TTL_SECONDS */

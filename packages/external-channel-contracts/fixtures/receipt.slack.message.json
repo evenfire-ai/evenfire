@@ -16,6 +16,7 @@
   "eventKind": "message",
   "action": null,
   "attestedBy": "control-api",
+  "aud": "evenfire-provider-event",
   "jti": "fixture-jti-slack-message",
   "iat": 1763460000,
   "exp": 1763460600

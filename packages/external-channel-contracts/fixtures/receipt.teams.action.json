@@ -19,6 +19,7 @@
     "token": "fixture-teams-pause-0001"
   },
   "attestedBy": "approval-reader",
+  "aud": "evenfire-provider-event",
   "jti": "fixture-jti-teams-action",
   "iat": 1763460000,
   "exp": 1763460600

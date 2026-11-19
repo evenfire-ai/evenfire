@@ -16,6 +16,7 @@
   "eventKind": "message",
   "action": null,
   "attestedBy": "approval-reader",
+  "aud": "evenfire-provider-event",
   "jti": "fixture-jti-teams-message",
   "iat": 1763460000,
   "exp": 1763460600
