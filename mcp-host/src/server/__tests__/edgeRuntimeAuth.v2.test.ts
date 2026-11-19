@@ -583,6 +583,40 @@ describe('runtimeEdgeGuard v2', () => {
     }
   })
 
+  it('rejects a producer-built V2 envelope at and after its expiresAt', async () => {
+    // The envelope is not edited: an edited expiresAt is either rejected
+    // against checkedAt or is no longer the producer's envelope. Only the
+    // clock the guard reads moves.
+    const header = await realRpcProxyHeader()
+    const { expiresAt } = JSON.parse(Buffer.from(header, 'base64url').toString('utf8')) as {
+      expiresAt: string
+    }
+    const expiresAtMs = Date.parse(expiresAt)
+    expect(Number.isFinite(expiresAtMs)).toBe(true)
+    const headers = v2EnvelopeHeaders('chatllm', header)
+
+    // Liveness witness: with the real clock the guard admits the envelope.
+    const current = await runRuntimeGuard(['chat.message.invoke'], headers)
+    expect(current.status).toBe(200)
+    expect(current.body).toMatchObject({ actionContextV2: { expiresAt } })
+
+    const clock = vi.spyOn(Date, 'now')
+    clock.mockReturnValue(expiresAtMs - 1)
+    expect((await runRuntimeGuard(['chat.message.invoke'], headers)).status).toBe(200)
+
+    clock.mockReturnValue(expiresAtMs)
+    expect(await runRuntimeGuard(['chat.message.invoke'], headers)).toEqual({
+      status: 401,
+      body: { error: 'Missing runtime edge caller context' },
+    })
+
+    clock.mockReturnValue(expiresAtMs + 60_000)
+    expect(await runRuntimeGuard(['chat.message.invoke'], headers)).toEqual({
+      status: 401,
+      body: { error: 'Missing runtime edge caller context' },
+    })
+  })
+
   it('proves the old/new producer-consumer compatibility matrix from source fixtures', async () => {
     const oldProxyHeaders = legacyRpcProxyHostProducer({ userId, hostRef: 'chatllm' })
     const newProxyHeaders = await (async () => {
