@@ -8,7 +8,7 @@ import {
   signV1SessionToken,
 } from '../../testSupport/gfsWatch/sessionTokens.js'
 import { WatchHarness } from '../../testSupport/gfsWatch/watchHarness.js'
-import { wireLedger } from '../../testSupport/gfsWatch/wireLedger.js'
+import { settle, wireLedger } from '../../testSupport/gfsWatch/wireLedger.js'
 
 // `settle()` of both watch harnesses waits for I/O still on the wire. Each case
 // slows one step of the watch transport with a stub of the global `fetch` (the
@@ -300,5 +300,21 @@ describe('watch harness settle() waits for I/O in flight', () => {
     expect(stub.delayedCloses).toBe(1)
     expect(watch.server.gets).toHaveLength(1)
     expect(watch.server.gets[0]!.closed).toBe(true)
+  })
+
+  it('m: a response that never reached a fake server is swept once the client is done', async () => {
+    let calls = 0
+    const stubbed = wireLedger.fetch(
+      () => 'case m',
+      async () => {
+        calls += 1
+        return new Response('{"x":1}\n')
+      }
+    )
+    const res = await stubbed('http://watch.test/api/v1/me/gfs/watch')
+    expect(await res.text()).toBe('{"x":1}\n')
+    expect(calls).toBe(1)
+    await settle({ signature: () => 'constant', maxMs: 150 })
+    expect(wireLedger.inTransit()).toEqual([])
   })
 })

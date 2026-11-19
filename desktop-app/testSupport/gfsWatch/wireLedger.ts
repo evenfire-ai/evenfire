@@ -22,6 +22,8 @@ type WireEntry = {
   path: string
   /** The test that sent the request, so a leftover names its owner. */
   owner: string
+  /** The request reached a tapped server, which will report its response's close. */
+  tapped: boolean
   /** The server's handler took the request (GET: on arrival; PUT: once its body is read). */
   received: boolean
   /** The server wrote the status line. */
@@ -60,6 +62,7 @@ class WireLedger {
       method,
       path: new URL(url).pathname,
       owner,
+      tapped: false,
       received: false,
       headersOut: false,
       responded: false,
@@ -72,10 +75,13 @@ class WireLedger {
     return entry
   }
 
-  /** Removes an entry once both ends are done with it. */
+  /**
+   * Removes an entry once both ends are done with it: the client, and the
+   * server when the request reached a tapped one. A response that never went
+   * through `tapServer` (a stubbed `fetch`) has no server end to wait for.
+   */
   private sweep(entry: WireEntry): void {
-    const serverSaw = entry.received || entry.headersOut || entry.responded
-    if (entry.clientDone && (!serverSaw || entry.serverClosed)) this.entries.delete(entry.id)
+    if (entry.clientDone && (!entry.tapped || entry.serverClosed)) this.entries.delete(entry.id)
   }
 
   private clientDone(entry: WireEntry): void {
@@ -197,6 +203,7 @@ class WireLedger {
     const id = req.headers[WIRE_HEADER]
     const entry = typeof id === 'string' ? this.entries.get(id) : undefined
     if (!entry) return undefined
+    entry.tapped = true
     const byteLength = (chunk: unknown): number =>
       typeof chunk === 'string'
         ? Buffer.byteLength(chunk)
