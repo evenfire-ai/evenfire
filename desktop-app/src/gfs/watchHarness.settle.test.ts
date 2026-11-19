@@ -236,4 +236,23 @@ describe('watch harness settle() waits for I/O in flight', () => {
     await watch.settle(300)
     expect(wireLedger.inTransit()).toEqual([])
   })
+
+  it('j: a beforeGetResponse hook that throws leaves nothing on the wire', async () => {
+    watch = await new WatchHarness().start()
+    let calls = 0
+    watch.beforeGetResponse = () => {
+      calls += 1
+      throw new Error('hook failed in case j')
+    }
+    await watch.login()
+    expect(calls).toBe(1)
+    expect(watch.server.gets).toHaveLength(1)
+    expect(watch.linkKind()).toBe('Backoff')
+    expect(watch.logs).toContainEqual({
+      level: 'warn',
+      message: 'watch open failed',
+      meta: { err: 'Error', message: 'hook failed in case j' },
+    })
+    expect(wireLedger.inTransit()).toEqual([])
+  })
 })

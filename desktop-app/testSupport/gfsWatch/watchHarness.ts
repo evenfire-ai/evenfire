@@ -50,10 +50,17 @@ export class WatchHarness {
     this.client = createGfsWatchClient({
       baseUrl: () => this.server.baseUrl,
       fetch: (input, init) =>
-        get(input, init).then(res => {
+        get(input, init).then(async res => {
           const hook = this.beforeGetResponse
           this.beforeGetResponse = null
-          hook?.()
+          try {
+            hook?.()
+          } catch (error) {
+            // The client never gets this response: release its body so the server sees the
+            // close. A rejected cancel replaces the hook's error; the client logs either one.
+            await res.body?.cancel(error)
+            throw error
+          }
           return res
         }),
       requestJson: (method, url, options) => {
