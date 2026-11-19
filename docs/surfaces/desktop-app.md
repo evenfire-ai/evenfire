@@ -160,7 +160,8 @@ process handlers before any privileged call runs.
 Diagrams in the chat are drawn by Mermaid in a hidden, sandboxed window the
 main process opens on the first diagram: no preload, an in-memory session that
 refuses every request outside the app's own files, and a page policy that
-allows only the app's scripts and inline images. The main process sends one
+allows only the app's scripts, inline styles and inline images. The main
+process sends one
 diagram at a time and ends that window's process when a drawing takes more
 than 10 seconds; code that times out, or whose drawing ends that process
 twice, is not drawn again in the session. The window also closes after two
