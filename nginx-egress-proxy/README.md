@@ -160,7 +160,7 @@ The generated template requires an image that provides:
 - the base image's `15-local-resolvers.envsh`, which exports the pod's local
   nameservers as `NGINX_LOCAL_RESOLVERS` for the generated `resolver` line.
 
-The pinned `nginx:1.30.6-alpine` base in the [Dockerfile](./Dockerfile)
+The pinned `nginx:1.30.7-alpine` base in the [Dockerfile](./Dockerfile)
 provides both, so the image built here satisfies the requirement. The release
 floor in [scripts/nginx-image-policy.sh](../scripts/nginx-image-policy.sh) is
 already above 1.27.3, so a platform-accepted official `nginx` release does not
