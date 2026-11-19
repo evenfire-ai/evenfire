@@ -1,4 +1,4 @@
-FROM nginx:1.30.6-alpine@sha256:c59d1f8b1e0e42da75be973424cd72e23f7f8adfb54e982f4d1cd0216a5a5576
+FROM nginx:1.30.7-alpine@sha256:bef154735288bc38d99fac41ae63730684bcc661503673a04a0f9bc526ba8598
 
 # Clerum remote MCP egress proxy image.
 # The upstream nginx image provides the /etc/nginx/templates envsubst entrypoint

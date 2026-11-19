@@ -4,12 +4,13 @@
 # Source it; it defines data and functions only.
 #
 # NGINX_RELEASE_FLOORS holds, per release line, the first release that fixes
+# the November 2026 advisories, including CVE-2026-123634, as well as
 # CVE-2026-15176, CVE-2026-93479, CVE-2026-95101, CVE-2026-97629 and
 # CVE-2026-97205 (and the older CVE-2026-42945). A release on a listed line
 # must be at or above that line's floor; a line newer than the last entry is
 # accepted; any other line is rejected. Raise a floor here when a new CVE
 # requires it.
-NGINX_RELEASE_FLOORS=(1.30.6 1.31.7 1.32.0)
+NGINX_RELEASE_FLOORS=(1.30.7 1.31.9 1.32.0)
 
 BASELINE_TEXT=""
 for _floor in "${NGINX_RELEASE_FLOORS[@]}"; do
@@ -78,11 +79,12 @@ nginx_ref_problem() {
   nginx_tag_problem "$ref_tag"
 }
 
-# Any image named nginx or nginxinc/nginx-unprivileged, under any registry
-# path, is treated as upstream NGINX and held to the floors.
+# Apply the floors to nginx and both official nginx-unprivileged names under
+# any registry path.
 is_nginx_name() {
   case "$1" in
-    nginx | */nginx | nginxinc/nginx-unprivileged | */nginxinc/nginx-unprivileged) return 0 ;;
+    nginx | */nginx | nginx/nginx-unprivileged | */nginx/nginx-unprivileged | \
+      nginxinc/nginx-unprivileged | */nginxinc/nginx-unprivileged) return 0 ;;
   esac
   return 1
 }
