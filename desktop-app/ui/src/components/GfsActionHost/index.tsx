@@ -237,13 +237,11 @@ export function GfsActionHost({
       finish(action.token)
       return
     }
-    const allowed =
-      authority.kind === 'none' ||
-      (await freshPermissions(action, () => isActionCurrent(action))(
-        authority.resourceId,
-        authority.resourceName,
-        authority.bits
-      ))
+    const allowed = await freshPermissions(action, () => isActionCurrent(action))(
+      authority.resourceId,
+      authority.resourceName,
+      authority.bits
+    )
     if (!allowed || !isActionCurrent(action)) {
       finish(action.token)
       return

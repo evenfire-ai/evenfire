@@ -38,8 +38,9 @@ vi.mock('@contexts/NavigationContext', () => ({
   }),
 }))
 
-// The tree's real menu owner is not wired yet; this row stands in for it and
-// mounts the real anchored menu inside the real compact drawer.
+// This row stands in for the tree, without its GFS data, and mounts the real
+// anchored menu inside the real compact drawer. The real tree runs in
+// App.sidebarGfsMenu.test.tsx.
 vi.mock('../SidebarNav/FileExplorerTree', () => ({
   FileExplorerTree: function FileExplorerTreeStandIn() {
     const [menuKey, setMenuKey] = useState<number | null>(null)

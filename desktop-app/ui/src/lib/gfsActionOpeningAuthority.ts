@@ -48,7 +48,9 @@ export function gfsActionOpeningAuthority(
             bits: ['write', 'delete'],
           }
         : { kind: 'unverifiable', message: 'Could not verify the source folder for this move.' }
+    // An action this table does not know opens nothing: without a row here
+    // no one has said which authority its editor needs.
     default:
-      return { kind: 'none' }
+      return { kind: 'unverifiable', message: 'Could not verify permissions for this action.' }
   }
 }

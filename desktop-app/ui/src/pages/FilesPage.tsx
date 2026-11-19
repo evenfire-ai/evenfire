@@ -756,10 +756,6 @@ export function FilesPage({
       pushToast?.(authority.message, 'error')
       return
     }
-    if (authority.kind === 'none') {
-      action()
-      return
-    }
     void runWithFreshResourcePermissions(
       target,
       authority.resourceId,
