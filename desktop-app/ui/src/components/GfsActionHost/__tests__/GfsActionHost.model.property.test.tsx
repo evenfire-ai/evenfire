@@ -968,8 +968,13 @@ async function flush() {
 }
 
 /** Rest: no IPC answer pending and nothing left for React or the timers to do. */
+// Far below the test timeout, so a run that never settles fails here, with
+// its own message, instead of being cut by the timeout.
+const REST_DEADLINE_MS = 20_000
+
 async function rest(w: World, { awaitWatchDebounce = true } = {}) {
-  for (let pass = 0; pass < 2000; pass += 1) {
+  const deadline = performance.now() + REST_DEADLINE_MS
+  for (let pass = 0; pass < 2000 && performance.now() < deadline; pass += 1) {
     // One answer at a time, letting the unscheduled work it starts (listing
     // refetches, React commits) run before the next: draining all at once
     // would always land a pending session publish before slow follow-ups.
@@ -1260,6 +1265,17 @@ function checkAtRest(w: World) {
 
 const COPY_TOASTS = /^Shareable EvenDrive link|^Shareable EvenDrive links are unavailable/
 
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** A Move outcome toast for `name`, in one of the forms the commit pipeline writes. */
+function isMoveToastFor(name: string, message: string): boolean {
+  const source = escapeRegExp(name)
+  return (
+    new RegExp(`^Moved ${source} to .+$`).test(message) ||
+    new RegExp(`^${source} → .+: .+$`).test(message)
+  )
+}
+
 /**
  * S4, judged when the toast is pushed. Each toast is attributed to the
  * submission whose outcome it is (its success text, or the rejection its own
@@ -1270,12 +1286,17 @@ const COPY_TOASTS = /^Shareable EvenDrive link|^Shareable EvenDrive links are un
 function judgeToast(w: World, toast: Toast) {
   const live = w.model.session
   const current = (origin: Session) => sameSession(origin, live) && accessActive(w, live)
-  const source = [...w.submissions].reverse().find(
-    s =>
-      s.outcomes.has(toast.message) ||
-      // A Move's outcome toast always names its source; its texts vary by outcome.
-      (s.op === 'moveResource' && toast.message.includes(s.name))
-  )
+  // The server's rejections read the same for every request: one is only
+  // another submission's if it ran in the session the toast is shown in.
+  const shared = Object.values(failures).includes(toast.message)
+  const source = [...w.submissions]
+    .reverse()
+    .find(
+      s =>
+        (!shared || sameSession(s.origin, toast.session)) &&
+        (s.outcomes.has(toast.message) ||
+          (s.op === 'moveResource' && isMoveToastFor(s.name, toast.message)))
+    )
   if (source) {
     source.toasted = true
     toast.legal =
