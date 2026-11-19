@@ -1472,18 +1472,22 @@ describe('workflow approval request reader server', () => {
       )
     }
 
-    function teamsAction(eventId: string): string {
+    function teamsAction(
+      eventId: string,
+      options: { decision?: 'approve' | 'deny'; user?: string } = {}
+    ): string {
+      const decision = options.decision ?? 'approve'
       return JSON.stringify({
         type: 'message',
         id: eventId,
-        text: 'Approve',
+        text: decision === 'deny' ? 'Deny' : 'Approve',
         value: {
           action:
-            `approve:${APPROVAL_ID}:sandbox-recipes/research-summary-workflow:` +
+            `${decision}:${APPROVAL_ID}:sandbox-recipes/research-summary-workflow:` +
             '0123456789abcdef',
         },
         serviceUrl: 'https://smba.trafficmanager.net/amer/',
-        from: { id: 'teams-user-1' },
+        from: { id: options.user ?? 'teams-user-1' },
         conversation: {
           id: '19:channel-1@thread.tacv2;messageid=root-post-1',
           conversationType: 'channel',
@@ -1653,6 +1657,67 @@ describe('workflow approval request reader server', () => {
       expect(teamsSendTexts()).toEqual([text])
       expect(updateTeamsTargetMessage).not.toHaveBeenCalled()
     })
+
+    const denyClicks = [
+      { medium: 'slack' as const, user: 'U123' },
+      { medium: 'teams' as const, user: 'teams-user-1' },
+    ]
+
+    async function clickDeny(medium: 'slack' | 'teams', eventId: string): Promise<void> {
+      if (medium === 'slack') await postSlack(slackAction({ eventId, decision: 'deny' }))
+      else await postTeams(teamsAction(eventId, { decision: 'deny' }))
+      await settle()
+    }
+
+    it.each(denyClicks)(
+      'rewrites the approval message as denied when the Host records a Deny ($medium)',
+      async ({ medium, user }) => {
+        await clickDeny(medium, `${medium}-deny-recorded`)
+
+        expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+        expect(vi.mocked(submitMcpHostDecision).mock.calls[0][1]).toMatchObject({
+          providerUserId: user,
+          decision: 'deny',
+        })
+        if (medium === 'slack') {
+          expect(slackUpdateTexts()).toEqual(['Denied. Workflow approval recorded.'])
+          expect(sendSlackTargetMessage).not.toHaveBeenCalled()
+        } else {
+          expect(teamsUpdateTexts()).toEqual(['Denied. Workflow approval recorded.'])
+          expect(sendTeamsTargetMessage).not.toHaveBeenCalled()
+        }
+      }
+    )
+
+    it.each(denyClicks)(
+      'reports a refused Deny with the deny wording and keeps the approval message ($medium)',
+      async ({ medium, user }) => {
+        vi.mocked(submitMcpHostDecision).mockResolvedValueOnce({
+          ok: false,
+          status: 409,
+          error: 'approval_requester_mismatch',
+        })
+
+        await clickDeny(medium, `${medium}-deny-refused`)
+
+        expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+        expect(vi.mocked(submitMcpHostDecision).mock.calls[0][1]).toMatchObject({
+          providerUserId: user,
+          decision: 'deny',
+        })
+        if (medium === 'slack') {
+          expect(threadTexts()).toEqual([
+            '<@U123> I could not deny this workflow approval. Try again in a moment.',
+          ])
+          expect(slackUpdateTexts()).toEqual([])
+        } else {
+          expect(teamsSendTexts()).toEqual([
+            'I could not deny this workflow approval. Try again in a moment.',
+          ])
+          expect(teamsUpdateTexts()).toEqual([])
+        }
+      }
+    )
 
     describe('Slack notice placement follows the reply-in-threads setting', () => {
       const placements = [
