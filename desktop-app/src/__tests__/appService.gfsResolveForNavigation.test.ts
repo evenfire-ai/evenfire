@@ -134,7 +134,10 @@ afterEach(async () => {
 /** Signed in on team-a, with the GFS scope activated by the real activation step. */
 function activeService(): TestService {
   const service = new AppService() as unknown as TestService
-  // Keychain and the upload-state file are the only edges replaced.
+  // Keychain and the upload-state file are the only edges replaced. The
+  // signed-in session is seeded by writing `sessionToken` and `me` directly,
+  // as a completed login would leave them, instead of running the login flow;
+  // the GFS scope is then opened by the real activation step.
   service.tokenStore = {
     setSessionToken: vi.fn().mockResolvedValue(undefined),
     clearSessionToken: vi.fn().mockResolvedValue(undefined),
