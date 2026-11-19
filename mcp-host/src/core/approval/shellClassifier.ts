@@ -9,8 +9,12 @@ import type { ChatMessage, TokenUsage, UsageContext } from '../types'
 export type ShellVerdict = 'APPROVE' | 'ESCALATE' | 'CANCELLED'
 
 /**
- * The pair the classifier judges. A live failover pair wins over the Host
- * primary, so a fallback the table would refuse cannot skip the card.
+ * The pair the classifier judges. A live failover pair wins over the primary,
+ * so a fallback the table would refuse cannot skip the card. The primary is the
+ * pair a task for the session runs with: the session's model on the Host
+ * provider, or the boot fallback while one serves because the Host primary
+ * cannot be built. The executor and the session read both call this, so the
+ * session's `shellClassifierAvailable` matches what admission does.
  */
 export function classifierServingPair(input: {
   primaryProvider: string

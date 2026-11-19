@@ -654,6 +654,33 @@ function buildProviderForModel(model: string): SingleTurnProvider | null {
 }
 
 /**
+ * The `(provider, model)` pair a task for these selections runs with, without
+ * building a provider. The task model resolver and the session read both use
+ * it, so a session view reports the pair admission judges.
+ *
+ * R5.10 — boot fallback: the primary is inconstructible, so the boot fallback
+ * pair serves (cross-provider → ignore the session selection, R5.4). Otherwise
+ * the session's model on the Host provider, resolved against the global
+ * allowlist view like every task.
+ */
+function taskModelPair(
+  selections: Record<string, string> | undefined
+): { provider: string; model: string } | null {
+  const modelCfg = currentHost?.spec.model
+  if (!modelCfg?.provider || !modelCfg.name) return null
+  if (bootFallbackEntry && currentProvider) {
+    return { provider: bootFallbackEntry.provider, model: bootFallbackEntry.model }
+  }
+  const { model } = resolveSessionModel(
+    allowlistView(),
+    modelCfg.provider,
+    modelCfg.name,
+    selections
+  )
+  return { provider: modelCfg.provider, model }
+}
+
+/**
  * R2 — the per-task model resolver injected into the agent. Turns a session's
  * saved `{ provider → model }` selection into the concrete provider instance +
  * effective model + context window for the task. Falls back to the Host default
@@ -663,24 +690,15 @@ function resolveTaskModel(
   selections: Record<string, string> | undefined
 ): ResolvedTaskModel | null {
   const modelCfg = currentHost?.spec.model
-  if (!modelCfg?.provider || !modelCfg.name) return null
-  const view = allowlistView()
-  // R5.10 — boot fallback: the primary is inconstructible, so serve the boot
-  // fallback pair (cross-provider → ignore the session selection, R5.4). The
-  // runtime failover engine (currentFailoverSupport) still advances from here.
+  const pair = taskModelPair(selections)
+  if (!modelCfg || !pair) return null
+  const { model } = pair
+  const contextWindowTokens = contextWindowForModel(allowlistView(), pair.provider, model)
+  // R5.10 — the boot fallback pair serves on the boot provider. The runtime
+  // failover engine (currentFailoverSupport) still advances from here.
   if (bootFallbackEntry && currentProvider) {
-    return {
-      provider: currentProvider,
-      model: bootFallbackEntry.model,
-      contextWindowTokens: contextWindowForModel(
-        view,
-        bootFallbackEntry.provider,
-        bootFallbackEntry.model
-      ),
-    }
+    return { provider: currentProvider, model, contextWindowTokens }
   }
-  const { model } = resolveSessionModel(view, modelCfg.provider, modelCfg.name, selections)
-  const contextWindowTokens = contextWindowForModel(view, modelCfg.provider, model)
   // Hot-path short-circuit (review nit): when the resolution lands on the Host
   // default, reuse the process provider instead of constructing a fresh
   // instance per task. Rotation-safe: onChange rebuilds currentProvider too.
@@ -2892,10 +2910,11 @@ async function startRPCServer(): Promise<void> {
     redactTitle,
     approvalSnapshot: () => agent!.approvalSnapshot(),
     sessionModel: selections => {
-      const provider = currentHost?.spec.model?.provider ?? 'unknown'
-      const hostDefault = currentHost?.spec.model?.name ?? 'unknown'
-      const resolved = resolveSessionModel(hostAllowlistView(), provider, hostDefault, selections)
-      return { providerType: provider, modelName: resolved.model }
+      const pair = taskModelPair(selections)
+      // No Host model means no task can run; 'unknown' reads as "no classifier".
+      return pair
+        ? { providerType: pair.provider, modelName: pair.model }
+        : { providerType: 'unknown', modelName: 'unknown' }
     },
     servedModel: () => failoverEngine?.servedBy() ?? null,
   })

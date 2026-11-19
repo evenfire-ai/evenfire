@@ -5,7 +5,7 @@ import {
   readChannelCap,
   readModeCeiling,
 } from '../core/approval/approvalMode'
-import { classifierAvailable } from '../core/approval/shellClassifier'
+import { classifierAvailable, classifierServingPair } from '../core/approval/shellClassifier'
 import type { ConversationManager } from '../core/conversation/conversation'
 import type {
   ConversationSessionMessages,
@@ -49,8 +49,10 @@ export interface SessionRouteHandlerDeps {
    */
   approvalSnapshot?: () => ApprovalConfigSnapshot
   /**
-   * Provider id and model name for the session's saved selection. The caller
-   * resolves the model; this handler does not construct a provider per session.
+   * Provider id and model name a task for this session runs with: the saved
+   * selection on the Host provider, or the boot fallback while it serves. The
+   * caller resolves it the same way as the task model; this handler does not
+   * construct a provider per session.
    */
   sessionModel?: (selections: Record<string, string> | undefined) => {
     providerType: string
@@ -91,10 +93,11 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     const cap = readChannelCap(snapshot, channelType)
     const approvalMode = normalizeApprovalMode(stored)
     const model = sessionModel(selections)
-    const served = deps.servedModel?.() ?? null
-    const classifierModel = served?.fallback
-      ? { providerType: served.provider, modelName: served.model }
-      : model
+    const classifierModel = classifierServingPair({
+      primaryProvider: model.providerType,
+      primaryModel: model.modelName,
+      served: deps.servedModel?.(),
+    })
     return {
       approvalMode,
       modeCeiling: ceiling,

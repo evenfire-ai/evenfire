@@ -14,6 +14,7 @@ import { makeFakeConversation } from '../../core/conversation/__testing__/makeFa
 import { ConversationManager } from '../../core/conversation/conversation'
 import type { StoreHandle } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/testHelpers'
+import { LlmErrorCode } from '../../core/errors'
 import type { ApprovalConfig } from '../../core/extensions/approvalTypes'
 import type { GuardrailsConfig } from '../../core/guardrails'
 import { requestPinned } from '../../core/net/ssrf'
@@ -22,6 +23,8 @@ import { admitToolCall } from '../../core/orchestration/toolCallPolicy'
 import type { ChatMessage, PendingApproval, ToolCall } from '../../core/types'
 import { FinishReason } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { FailoverEngine } from '../../llm/failover/engine'
+import type { FallbackEntry, LlmPolicy } from '../../llm/failover/types'
 import type { SingleTurnProvider } from '../../llm/types'
 import { logger } from '../../logger'
 import { MessageQueue } from '../../queue'
@@ -29,6 +32,7 @@ import type { Task, TaskError } from '../../queue/types'
 import { STATELESS_ALLOW_CRON_MANAGE_ENV } from '../../statelessCronPolicy'
 import { CronScheduler } from '../cronScheduler'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
+import type { ExecutorFailoverSupport } from '../types'
 
 vi.mock('../../core/net/ssrf', async importOriginal => {
   const actual = await importOriginal<typeof import('../../core/net/ssrf')>()
@@ -114,6 +118,13 @@ interface DriveOptions {
   cron?: boolean
   stateless?: boolean
   gfs?: boolean
+  /** Provider type of the primary the task is built with. Default claude. */
+  primaryType?: ProviderType
+  /**
+   * Failover support for the executor. Gets the primary, whose tool-turn
+   * script a fallback can reuse to serve the turn.
+   */
+  failover?: (primary: SingleTurnProvider) => ExecutorFailoverSupport
 }
 
 interface DriveResult {
@@ -175,7 +186,7 @@ async function drive(options: DriveOptions): Promise<DriveResult> {
   const messages: ChatMessage[][] = []
   const verdict = options.verdict ?? 'APPROVE'
   const provider: SingleTurnProvider = {
-    getProviderType: () => 'claude',
+    getProviderType: () => options.primaryType ?? 'claude',
     classifyError: () => {
       throw new Error('fixture classification is unused')
     },
@@ -226,6 +237,7 @@ async function drive(options: DriveOptions): Promise<DriveResult> {
     onApprovalNeeded: vi.fn(),
     onComplete: vi.fn(),
     onFail,
+    ...(options.failover ? { failover: options.failover(provider) } : {}),
   }
   const executor = new TaskExecutor(task, deps)
   await executor.run()
@@ -242,6 +254,8 @@ async function drive(options: DriveOptions): Promise<DriveResult> {
     holder,
   }
 }
+
+type ProviderType = ReturnType<SingleTurnProvider['getProviderType']>
 
 function shell(id: string, command: string): ToolCall {
   return { id, name: 'shell_exec', arguments: { command } }
@@ -1103,6 +1117,163 @@ describe('grant memory through admission', () => {
     } finally {
       info.mockRestore()
     }
+  })
+})
+
+describe('classifier pair while failover serves a fallback', () => {
+  /**
+   * A fallback provider that serves the tool turn with the primary's script
+   * and answers classify calls itself.
+   */
+  function fallbackProvider(
+    type: ProviderType,
+    primary: SingleTurnProvider,
+    onTurn?: () => void
+  ): SingleTurnProvider & { classifyCalls: () => number } {
+    let calls = 0
+    return {
+      getProviderType: () => type,
+      classifyError: () => {
+        throw new Error('fixture classification is unused')
+      },
+      completeSingleTurn: vi.fn(async () => {
+        calls += 1
+        return { content: 'APPROVE', usage, finish_reason: FinishReason.Stop }
+      }),
+      completeSingleTurnWithTools: vi.fn(
+        async (...args: Parameters<SingleTurnProvider['completeSingleTurnWithTools']>) => {
+          const response = await primary.completeSingleTurnWithTools(...args)
+          onTurn?.()
+          return response
+        }
+      ),
+      classifyCalls: () => calls,
+    }
+  }
+
+  /**
+   * The primary failed and is cooling down, so the engine serves the first
+   * fallback entry that can be built, and keeps serving it for the task.
+   */
+  async function engineServingFallback(
+    policy: LlmPolicy,
+    buildable: (provider: string) => boolean = () => true
+  ): Promise<FailoverEngine> {
+    const engine = new FailoverEngine(policy, { metricInc: () => {} })
+    await engine.run(
+      { provider: 'primary', model: 'claude-test' },
+      target =>
+        target.kind === 'primary'
+          ? async () => {
+              throw new Error('rate limit fixture')
+            }
+          : buildable(target.provider)
+            ? async () => 'warmed'
+            : null,
+      () => ({ code: LlmErrorCode.RateLimited, retryable: true })
+    )
+    return engine
+  }
+
+  it('judges and calls the serving fallback, not the primary or another fallback entry', async () => {
+    const policy: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['rate_limited'],
+      fallbacks: [
+        { provider: 'gemini', model: 'gemini-fixture' },
+        { provider: 'openai', model: 'gpt-4.1' },
+      ],
+    }
+    // Only the openai entry can be built, so the second entry serves.
+    const engine = await engineServingFallback(policy, provider => provider === 'openai')
+    expect(engine.servedBy()).toEqual({ provider: 'openai', model: 'gpt-4.1', fallback: true })
+    let openai: ReturnType<typeof fallbackProvider> | undefined
+    const builds: FallbackEntry[] = []
+    const result = await drive({
+      mode: 'auto',
+      calls: [shell('sh-fallback', 'printf admission-ok')],
+      failover: primary => {
+        openai = fallbackProvider('openai', primary)
+        return {
+          engine,
+          policy,
+          buildProvider: entry => {
+            builds.push(entry)
+            return entry.provider === 'openai' ? openai! : null
+          },
+        }
+      },
+    })
+
+    expect(result.approval).toBeUndefined()
+    expect(result.completed).toBe(true)
+    expect(openai!.classifyCalls()).toBe(1)
+    expect(result.classifyCalls).toBe(0)
+    expect(builds).toContainEqual({ provider: 'openai', model: 'gpt-4.1' })
+  })
+
+  it('shows the shell card when the serving fallback is one the table refuses, though the primary is eligible', async () => {
+    const policy: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['rate_limited'],
+      fallbacks: [{ provider: 'zai', model: 'glm-4.6' }],
+    }
+    const engine = await engineServingFallback(policy)
+    expect(engine.servedBy()).toEqual({ provider: 'zai', model: 'glm-4.6', fallback: true })
+    let zai: ReturnType<typeof fallbackProvider> | undefined
+    const result = await drive({
+      mode: 'auto',
+      calls: [shell('sh-refused', 'printf admission-ok')],
+      failover: primary => {
+        zai = fallbackProvider('zai', primary)
+        return { engine, policy, buildProvider: () => zai! }
+      },
+    })
+
+    expect(result.approval).toMatchObject({
+      tool_name: 'shell_exec',
+      authorization_scope: 'exact_invocation',
+      shellCard: { channelCommandOffered: true, desktopCommandOffered: true },
+    })
+    expect(vi.mocked(zai!.completeSingleTurnWithTools)).toHaveBeenCalledTimes(1)
+    expect(zai!.classifyCalls()).toBe(0)
+    expect(result.classifyCalls).toBe(0)
+  })
+
+  it('shows the shell card when the serving fallback can no longer be built for the classifier', async () => {
+    const policy: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['rate_limited'],
+      fallbacks: [{ provider: 'claude', model: 'claude-fallback' }],
+    }
+    const engine = await engineServingFallback(policy)
+    // Its credential is removed after it served the turn and before admission.
+    let credentialPresent = true
+    let claude: ReturnType<typeof fallbackProvider> | undefined
+    const result = await drive({
+      mode: 'auto',
+      primaryType: 'zai',
+      calls: [shell('sh-unbuilt', 'printf admission-ok')],
+      failover: primary => {
+        claude = fallbackProvider('claude', primary, () => {
+          credentialPresent = false
+        })
+        return { engine, policy, buildProvider: () => (credentialPresent ? claude! : null) }
+      },
+    })
+
+    expect(result.approval).toMatchObject({
+      tool_name: 'shell_exec',
+      shellCard: { channelCommandOffered: true, desktopCommandOffered: true },
+    })
+    expect(claude!.classifyCalls()).toBe(0)
+    expect(result.classifyCalls).toBe(0)
+    expect(vi.mocked(claude!.completeSingleTurnWithTools)).toHaveBeenCalledTimes(1)
+    expect(engine.servedBy()).toEqual({
+      provider: 'claude',
+      model: 'claude-fallback',
+      fallback: true,
+    })
   })
 })
 
