@@ -321,6 +321,43 @@ describe('GfsActionHost — opening an action', () => {
   })
 })
 
+describe('GfsActionHost — copy', () => {
+  afterEach(() => {
+    delete (navigator as { clipboard?: unknown }).clipboard
+  })
+
+  function deferClipboard() {
+    const written = deferred<void>()
+    const writeText = vi.fn(() => written.promise)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    return { written, writeText }
+  }
+
+  it('a copy that lands after a session switch shows no toast in the new session', async () => {
+    const h = await harness()
+    const { written, writeText } = deferClipboard()
+
+    h.open(await listedRow('file-t', 'notes.txt', 'file'), 'copy-route')
+    expect(writeText).toHaveBeenCalledWith('gfs://main/file-t')
+    h.main.generation = 2
+    h.publish(2)
+    await act(async () => written.resolve())
+    await act(async () => {})
+
+    expect(h.toasts).toEqual([])
+  })
+
+  it('(control) the same copy in the same session toasts it', async () => {
+    const h = await harness()
+    const { written } = deferClipboard()
+
+    h.open(await listedRow('file-t', 'notes.txt', 'file'), 'copy-route')
+    await act(async () => written.resolve())
+
+    await waitFor(() => expect(toastMessages(h)).toEqual(['File ID copied']))
+  })
+})
+
 describe('GfsActionHost — submitting', () => {
   it('renames the chosen target, refreshes the Files location and toasts once (K1)', async () => {
     const h = await harness()

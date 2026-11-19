@@ -288,7 +288,7 @@ interface GenCall {
   family: ActionFamily | null
 }
 
-type ActionFamily = 'move' | 'upload' | 'dialog'
+type ActionFamily = 'move' | 'upload' | 'dialog' | 'copy'
 
 interface AccessEvent {
   at: number
@@ -402,7 +402,7 @@ const askedByHost = (stack: string | undefined) => {
 
 /**
  * Which host action a generation check belongs to, by the code on its stack:
- * the Move pipeline and its dialog, the upload loop, or the one dialog action
+ * the Move pipeline and its dialog, the upload loop, a copy's toast, or the one dialog action
  * (rename, delete, new folder) the host runs at a time. Same file-name
  * dependence as `askedByHost`.
  */
@@ -411,6 +411,7 @@ function askingFamily(stack: string | undefined): ActionFamily | null {
   const text = stack ?? ''
   if (/explicitMoveDialog|moveCommit|useGfsResourceOperations/.test(text)) return 'move'
   if (/runGfsUpload|runUpload/.test(text)) return 'upload'
+  if (/gfsResourceClipboard/.test(text)) return 'copy'
   return 'dialog'
 }
 
@@ -1182,7 +1183,12 @@ function checkAtRest(w: World) {
       ...[s.at, ...s.calls.flatMap(call => [call.at, call.settledAt ?? -1])].filter(t => t < at),
       -1
     )
-  for (const check of w.genCalls.filter(call => call.host)) {
+  // A copy is no submission: it asks main once, before its toast.
+  const copyChecks = w.genCalls.filter(call => call.host && call.family === 'copy').length
+  if (copyChecks > w.openings.length) {
+    violations.push(`K1: ${copyChecks} copy generation checks for ${w.openings.length} copies`)
+  }
+  for (const check of w.genCalls.filter(call => call.host && call.family !== 'copy')) {
     const asker = w.submissions
       .filter(s => familyOf(s.op) === check.family && s.at < check.at)
       .sort((a, b) => lastActivityBefore(b, check.at) - lastActivityBefore(a, check.at))[0]
@@ -1307,9 +1313,10 @@ function judgeToast(w: World, toast: Toast) {
     }
     return
   }
-  // A copy's feedback comes straight from the gesture, in the rendered session.
+  // A copy opens no dialog, but its toast is an outcome like any other: the
+  // session it was chosen in must still be the rendered one and main's.
   if (COPY_TOASTS.test(toast.message)) {
-    toast.legal = w.openings.some(o => current(o.origin))
+    toast.legal = w.openings.some(o => current(o.origin) && mainAdmits(w, o.origin.gen, o.at))
     if (!toast.legal) toast.why = 'copy feedback outside the session it was chosen in'
     return
   }
@@ -1461,7 +1468,7 @@ class Choose extends OracleEvent {
     const opened = m.menu
     const at = tick(w)
     const live = sameSession(opened.origin, m.session) && accessActive(w, m.session)
-    // Only a copy toasts straight from the gesture; every other toast is an outcome.
+    // A copy opens no action: its toast is judged against the opening itself.
     if (live && this.actionId === 'copy-link') w.openings.push({ origin: opened.origin, at })
     if (live && this.actionId !== 'copy-link') {
       m.action = {
