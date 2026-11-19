@@ -1133,12 +1133,12 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       await waitFor(() => expect(resolve).toHaveBeenCalledOnce())
 
       await act(async () => {
-        focusManager.setFocused(false)
-        focusManager.setFocused(true)
+        window.dispatchEvent(new Event('focus'))
       })
       await waitFor(() =>
         expect(queryClient.getQueryData(previewResourceKey)).toMatchObject({ version: 8 })
       )
+      expect(resolve).toHaveBeenCalledTimes(2)
       await act(async () => {
         releaseCommitResolve(resolvedAtGesture)
         for (let index = 0; index < 10; index += 1) await Promise.resolve()
