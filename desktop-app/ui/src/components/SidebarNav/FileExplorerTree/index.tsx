@@ -1143,20 +1143,25 @@ export function FileExplorerTree({
         parentResourceId,
         ancestorCrumbs: [...ancestorCrumbs],
       }
+      const needsRowRead = listing === 'folder'
+      // A root with no parent has nothing left to read: its bits are the
+      // listing's and Move is never offered, so its menu opens settled instead
+      // of painting every action inert first.
+      const settled = !needsRowRead && !parentResourceId
       setRowMenu({
         token,
         target,
         listing,
         anchor,
         authority: { scope: sessionScope, generation },
-        bits: 'pending',
+        bits: settled ? 'ok' : 'pending',
         rowAffordances: null,
         parentAffordances: null,
       })
-      const rowRead =
-        listing === 'folder'
-          ? readMenuAffordances(scope, generation, node.resourceId, node.name)
-          : null
+      if (settled) return
+      const rowRead = needsRowRead
+        ? readMenuAffordances(scope, generation, node.resourceId, node.name)
+        : null
       const parentRead = parentResourceId
         ? readMenuAffordances(scope, generation, parentResourceId, 'the source folder')
         : null

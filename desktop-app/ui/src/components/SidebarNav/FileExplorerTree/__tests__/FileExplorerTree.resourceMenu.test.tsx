@@ -466,6 +466,40 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
   )
 })
 
+describe('FileExplorerTree forest-root resource menu', () => {
+  it('paints its final actions on the first render when no read is needed', async () => {
+    const affordances = vi.fn()
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('file-s', 'shared.txt', 'file', { permissions: ['read', 'write'] }),
+        ])
+      ),
+      affordances,
+    })
+    renderShell()
+    const row = await screen.findByRole('button', { name: 'shared.txt' })
+
+    fireEvent.contextMenu(row, { clientX: 10, clientY: 10 })
+    const menu = screen.getByRole('menu', { name: 'Actions for shared.txt' })
+    const firstPaint = {
+      rename: menuItem(menu, 'Rename')?.disabled,
+      delete: menuItem(menu, 'Delete')?.disabled,
+    }
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    // The listing grants write and not delete; no parent means no Move.
+    expect(firstPaint).toEqual({ rename: false, delete: undefined })
+    expect({
+      rename: menuItem(menu, 'Rename')?.disabled,
+      delete: menuItem(menu, 'Delete')?.disabled,
+    }).toEqual(firstPaint)
+    expect(affordances).not.toHaveBeenCalled()
+  })
+})
+
 describe('FileExplorerTree row resource menu focus', () => {
   afterEach(() => {
     delete (navigator as { clipboard?: unknown }).clipboard
