@@ -19,7 +19,7 @@ import {
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 
 // The real navigation controller and the real activation core; only the main
-// process bridge (resolve, user-navigation generation, openUrl, sandboxUi) is
+// process bridge (resolve, user-navigation generation, openUrl) is
 // faked. The resolve fake applies main's fence rule: the result is `superseded`
 // when the session `(epoch, me.id)` changed between the call and the return.
 
@@ -119,7 +119,6 @@ function createHarness(gate: Gate) {
   const resolveCalls: string[] = []
   const completions: number[] = []
   const pushToast = vi.fn()
-  const setVisible = vi.fn()
   const openUrl = vi.fn((url: string): Promise<void> => {
     // A missing bridge method throws before any promise exists.
     if (nextOpenUrlThrowsSync) throw new TypeError('window.clerum.app.openUrl is not a function')
@@ -153,7 +152,6 @@ function createHarness(gate: Gate) {
         resolveForNavigation,
       },
       app: { openUrl },
-      sandboxUi: { setVisible },
     } as unknown as Window['clerum'],
   })
 
@@ -174,7 +172,6 @@ function createHarness(gate: Gate) {
     resolveCalls,
     completions,
     pushToast,
-    setVisible,
     openUrl,
     warn,
     nav,
@@ -270,7 +267,6 @@ describe('chat link activation — scenarios', () => {
     await release(3)
     expect(h.activeKey()).toBe('files:gfs://main/bin0')
     expect(h.pushToast).not.toHaveBeenCalled()
-    expect(h.setVisible).not.toHaveBeenCalled()
   })
 
   it('routes to the gfsUri the resolve returned, not the clicked href', async () => {
@@ -543,7 +539,6 @@ function assertAtRest(model: RefModel, real: Harness) {
   }
   expect(real.resolveCalls).toHaveLength(model.gfsClicks)
   expect(real.openUrl.mock.calls.map(([url]) => url)).toEqual(model.openUrls)
-  expect(real.setVisible).not.toHaveBeenCalled()
   expect(activationRejections).toEqual([])
 }
 
