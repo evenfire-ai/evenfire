@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { ERROR_TOAST_DURATION_MS } from '@constants/toasts'
 import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
 import { App } from '@/App'
@@ -313,6 +314,7 @@ describe('App sidebar GFS resource menu', () => {
   })
 
   afterEach(async () => {
+    vi.useRealTimers()
     cleanup()
     await new Promise(resolve => window.setTimeout(resolve, 0))
     vi.restoreAllMocks()
@@ -396,6 +398,14 @@ describe('App sidebar GFS resource menu', () => {
 
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: SIGNED_IN_USER.email } })
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'test-password' } })
+    // Only the toast expiry needs a jump. The clock keeps advancing with real
+    // time so every other setTimeout (query notifications, waitFor) runs as
+    // before, and clearing the session-end toast's native timer still works.
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout'],
+      shouldAdvanceTime: true,
+      shouldClearNativeTimers: true,
+    })
     fireEvent.submit(screen.getByLabelText('Password').closest('form')!)
     await waitForShell()
     expect(bridge.auth.passwordLogin).toHaveBeenCalledOnce()
@@ -409,10 +419,15 @@ describe('App sidebar GFS resource menu', () => {
     await flushFrames()
     await waitFor(() => expect(bridge.sandboxUi.open).toHaveBeenCalled())
     await waitFor(() => expect(bridge.sandboxUi.setVisible).toHaveBeenCalled())
-    // The session-end and sign-in toasts also cover the view; each expires on its own timer.
-    await waitFor(() => expect(document.querySelector('.toast-stack')).toBeNull(), {
-      timeout: 20_000,
-    })
+    // The session-end and sign-in toasts also cover the view; each expires on its
+    // own timer, and only the newest one is armed at a time.
+    for (let pass = 0; pass < 3 && document.querySelector('.toast-stack'); pass += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ERROR_TOAST_DURATION_MS)
+      })
+    }
+    vi.useRealTimers()
+    await waitFor(() => expect(document.querySelector('.toast-stack')).toBeNull())
     await flushFrames()
     await waitFor(() => expect(lastVisibility(bridge)).toBe(true))
   })
