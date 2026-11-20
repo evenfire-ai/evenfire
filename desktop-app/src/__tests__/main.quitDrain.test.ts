@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type MainEvent = {
   senderFrame: { url: string }
@@ -61,6 +61,7 @@ const harness = vi.hoisted(() => {
   }
   return state
 })
+const hostPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
 
 vi.mock('keytar', () => ({
   getPassword: harness.nativeGet,
@@ -181,64 +182,93 @@ vi.mock('../clerumDeepLink.js', () => ({
   routeClerumOauthCompleted: vi.fn(() => ({ kind: 'ignore' })),
 }))
 
-describe('planned W reopen cancellation assertion', () => {
-  beforeAll(async () => {
+describe('macOS Quit drain', () => {
+  let originalPlatformDescriptor: PropertyDescriptor | undefined
+
+  beforeEach(async () => {
+    originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+    if (!originalPlatformDescriptor)
+      throw new Error('Node process.platform descriptor is unavailable')
+    Object.defineProperty(process, 'platform', { ...originalPlatformDescriptor, value: 'darwin' })
+    vi.resetModules()
+    harness.appListeners.clear()
+    harness.onHandlers.clear()
+    harness.handleHandlers.clear()
+    harness.windows.length = 0
+    harness.readyResolver = null
+    harness.initialize.mockReset().mockResolvedValue(undefined)
+    harness.nativeSet.mockReset().mockResolvedValue(undefined)
+    harness.nativeGet.mockReset().mockResolvedValue(null)
+    harness.nativeDelete.mockReset().mockResolvedValue(true)
+  })
+
+  async function startMain(): Promise<void> {
     await import('../main.ts')
     harness.readyResolver?.()
     await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
-  })
-  it.skipIf(process.platform !== 'darwin')(
-    'reopens admission and cancels the stale retry when a window is requested during drain',
-    async () => {
-      harness.nativeSet.mockReset()
-      const releases: Array<() => void> = []
-      harness.nativeSet.mockImplementation(
-        () => new Promise<void>(resolve => releases.push(resolve))
-      )
-      const { TokenStore } = await import('../tokenStore.ts')
-      const { app } = await import('electron')
-      const quit = vi.mocked(app.quit)
-      quit.mockClear()
-      const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
-      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
-      let second: Promise<void> | undefined
-      try {
-        const closed = harness.windows[0].on.mock.calls.find(
-          (c: unknown[]) => c[0] === 'closed'
-        )?.[1]
-        expect(closed).toBeTypeOf('function')
-        closed()
-        harness.windows.splice(0)
-        let veto = false
-        const event = {
-          defaultPrevented: false,
-          preventDefault() {
-            this.defaultPrevented = true
-            veto = true
-          },
-        }
-        harness.appListeners.get('will-quit')?.(event)
-        expect(veto).toBe(true)
-        second = new TokenStore().setSessionToken('synthetic-second', 'second-aaaaaaaaaaaa')
-        await new Promise(resolve => setImmediate(resolve))
-        expect(harness.nativeSet).toHaveBeenCalledTimes(1)
-        const activate = harness.appListeners.get('activate')
-        expect(activate).toBeTypeOf('function')
-        activate?.()
-        await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
-        await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(2))
-        releases[0]()
-        await first
-        releases[1]()
-        await second
-        await new Promise(resolve => setImmediate(resolve))
-        expect(quit).not.toHaveBeenCalled()
-        expect(harness.windows).toHaveLength(1)
-      } finally {
-        for (const release of releases) release()
-        await first
-        if (second && releases.length > 1) await second
+  }
+
+  afterEach(async () => {
+    try {
+      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      openTokenStoreAdmission()
+    } finally {
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, 'platform', originalPlatformDescriptor)
       }
     }
-  )
+  })
+
+  afterAll(() => {
+    expect(Object.getOwnPropertyDescriptor(process, 'platform')).toEqual(hostPlatformDescriptor)
+  })
+
+  it('reopens admission and cancels the stale retry when a window is requested during drain', async () => {
+    await startMain()
+    harness.nativeSet.mockReset()
+    const releases: Array<() => void> = []
+    harness.nativeSet.mockImplementation(() => new Promise<void>(resolve => releases.push(resolve)))
+    const { TokenStore } = await import('../tokenStore.ts')
+    const { app } = await import('electron')
+    const quit = vi.mocked(app.quit)
+    quit.mockClear()
+    const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
+    await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
+    let second: Promise<void> | undefined
+    try {
+      const closed = harness.windows[0].on.mock.calls.find((c: unknown[]) => c[0] === 'closed')?.[1]
+      expect(closed).toBeTypeOf('function')
+      closed()
+      harness.windows.splice(0)
+      let veto = false
+      const event = {
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true
+          veto = true
+        },
+      }
+      harness.appListeners.get('will-quit')?.(event)
+      expect(veto).toBe(true)
+      second = new TokenStore().setSessionToken('synthetic-second', 'second-aaaaaaaaaaaa')
+      await new Promise(resolve => setImmediate(resolve))
+      expect(harness.nativeSet).toHaveBeenCalledTimes(1)
+      const activate = harness.appListeners.get('activate')
+      expect(activate).toBeTypeOf('function')
+      activate?.()
+      await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(2))
+      releases[0]()
+      await first
+      releases[1]()
+      await second
+      await new Promise(resolve => setImmediate(resolve))
+      expect(quit).not.toHaveBeenCalled()
+      expect(harness.windows).toHaveLength(1)
+    } finally {
+      for (const release of releases) release()
+      await first
+      if (second && releases.length > 1) await second
+    }
+  })
 })
