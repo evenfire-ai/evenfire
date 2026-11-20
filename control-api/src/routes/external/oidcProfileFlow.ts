@@ -18,7 +18,7 @@ import { OIDC_OPERATION_DEADLINE_MS } from '../../oidc/protocolTransport.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import { selectExternalSessionRepresentation } from '../../services/auth/externalSessionIssuance.js'
 import {
-  type OidcMemberSignInResult,
+  type OidcVerifiedMemberSignInResult,
   signInOidcVerifiedMember,
 } from '../../services/auth/oidcMemberSignIn.js'
 
@@ -33,7 +33,7 @@ type Engine = Pick<
   'beginIdentityProofAttempt' | 'completeIdentityProofAttempt' | 'cancelIdentityProofAttempt'
 >
 
-type SignInMember = (proof: VerifiedOidcIdentityProof) => Promise<OidcMemberSignInResult>
+type SignInMember = (proof: VerifiedOidcIdentityProof) => Promise<OidcVerifiedMemberSignInResult>
 
 export type ExternalOidcProfileFlowDependencies = Readonly<{
   getProvider?: () => Provider | undefined
@@ -61,7 +61,7 @@ function defaultEngine(provider: Provider): OidcProtocolEngine {
  */
 async function defaultSignInMember(
   proof: VerifiedOidcIdentityProof
-): Promise<OidcMemberSignInResult> {
+): Promise<OidcVerifiedMemberSignInResult> {
   const policy = await resolveEffectiveUserAccessPolicy()
   const selection = selectExternalSessionRepresentation({}, policy)
   if (selection.status !== 'selected') {
@@ -239,7 +239,7 @@ export function createExternalOidcProfileFlowRouter(
       subjectFingerprint: subjectFingerprint(proof),
       requestId: req.get('x-request-id'),
     }
-    let result: OidcMemberSignInResult
+    let result: OidcVerifiedMemberSignInResult
     try {
       result = await signInMember(proof)
     } catch (error) {
