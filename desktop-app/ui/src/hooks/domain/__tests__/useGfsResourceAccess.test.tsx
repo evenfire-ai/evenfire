@@ -21,6 +21,7 @@ import {
   sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { GfsWatchEventSource, mainDriveKey } from '@/gfs/__fixtures__/gfsWatchEvents'
+import type { GfsShareListItem } from '@/gfs/delegation.types'
 import { refetchGfsAccess } from '@/lib/gfsWatchReaction'
 import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
@@ -672,69 +673,6 @@ describe('useGfsResourceAccess — grants list / revoke / inherit (#826)', () =>
     expect(screen.getByTestId('inherited-error').textContent).toBe('none')
   })
 
-  // An 'unavailable' coverage is a FAILED walk, not an observation. Caching it
-  // under the app's Infinity staleTime would keep the failure on screen as if
-  // it were authoritative; reopening Share must retry the walk.
-  it('retries an unavailable inherited derivation when Share is reopened', async () => {
-    const resolve = vi.fn(async (uri: string) => {
-      // The navigation resolve succeeds; every later resolve (the derivation's
-      // own walk) fails transiently.
-      if (uri.endsWith('/root')) {
-        return {
-          resourceId: 'file-1',
-          parentResourceId: 'folder-1',
-          gfsUri: 'gfs://main/file-1',
-          name: 'report.txt',
-          kind: 'file',
-          version: 1,
-        }
-      }
-      throw new Error('Error: 500 resolve_failed')
-    })
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: {
-        gfs: {
-          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
-          resolve,
-          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
-          affordances: vi.fn(async () => ({
-            held: ['read', 'manage_acl'],
-            canDelegate: true,
-            grantableBits: ['read'],
-            canCreateShare: false,
-          })),
-          listGrants: vi.fn(async () => []),
-          listShares: vi.fn(async () => []),
-        },
-      },
-    })
-
-    render(<ManageProbe />, { wrapper: Harness })
-
-    await act(async () => {
-      screen.getByRole('button', { name: 'open root' }).click()
-    })
-    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('file-1'))
-    await act(async () => {
-      screen.getByRole('button', { name: 'open manage' }).click()
-    })
-    await waitFor(() =>
-      expect(screen.getByTestId('inherited-coverage').textContent).toBe('unavailable')
-    )
-
-    await act(async () => {
-      screen.getByRole('button', { name: 'close manage' }).click()
-    })
-    const before = resolve.mock.calls.length
-    await act(async () => {
-      screen.getByRole('button', { name: 'open manage' }).click()
-    })
-
-    // The failed walk is retried on reopen instead of being served from cache.
-    await waitFor(() => expect(resolve.mock.calls.length).toBeGreaterThan(before))
-  })
-
   // A move changes the ANCESTRY of the open resource, and the open
   // Share/Manage dialog shows rows derived from that ancestry. The dialog must
   // re-read them: keeping the pre-move observation would present inherited
@@ -1378,6 +1316,223 @@ function RevalidateProbe() {
     </>
   )
 }
+
+// Files mounts the Share dialog only while Share is open, so every open is a
+// fresh mount of the access hook under the app's query defaults.
+function ProductionHarness({ children }: { children: ReactNode }) {
+  return <Harness productionQueryDefaults>{children}</Harness>
+}
+
+function ShareAccessPanel({ ctrl }: { ctrl: ReturnType<typeof useGfsBrowserController> }) {
+  const access = useGfsResourceAccess(
+    { resourceId: 'root' },
+    ctrl.authorityPending || ctrl.accessState === 'revoked',
+    { handleAuthorityFailure: ctrl.handleAuthorityFailure }
+  )
+  return (
+    <>
+      <div data-testid="grants-count">{access.grants.length}</div>
+      <div data-testid="shares-count">{access.shares.length}</div>
+      <div data-testid="inherited-coverage">{access.inheritedCoverage ?? 'none'}</div>
+    </>
+  )
+}
+
+function ReopenedShareProbe() {
+  const ctrl = useGfsBrowserController()
+  const queryClient = lastHarnessQueryClient!
+  const [shareOpen, setShareOpen] = useState(true)
+  useGfsWatchSubscription({
+    keys: [],
+    userId: null,
+    sessionKey: 'session',
+    onEvent: event => {
+      if (event.type === 'accessChanged') {
+        void refetchGfsAccess(queryClient, { scope: SCOPE_A, generation: 1 })
+      }
+    },
+  })
+  return (
+    <>
+      {shareOpen ? <ShareAccessPanel ctrl={ctrl} /> : <div data-testid="share-closed" />}
+      <button type="button" onClick={() => setShareOpen(true)}>
+        open share
+      </button>
+      <button type="button" onClick={() => setShareOpen(false)}>
+        close share
+      </button>
+    </>
+  )
+}
+
+function bobShare(): GfsShareListItem {
+  return {
+    id: 'share-42',
+    drive: 'main',
+    resourceId: 'root',
+    subject: { type: 'user', id: 'bob' },
+    permissions: ['read'],
+    includeDescendants: false,
+  }
+}
+
+describe('useGfsResourceAccess — reopening Share', () => {
+  afterEach(() => {
+    cleanup()
+    lastHarnessQueryClient = null
+    vi.restoreAllMocks()
+  })
+
+  async function reopenShare() {
+    await act(async () => {
+      screen.getByRole('button', { name: 'close share' }).click()
+    })
+    expect(screen.getByTestId('share-closed')).toBeTruthy()
+    await act(async () => {
+      screen.getByRole('button', { name: 'open share' }).click()
+    })
+  }
+
+  it('re-reads the grants and shares an access change invalidated while Share was closed', async () => {
+    const source = await new GfsWatchEventSource().start()
+    try {
+      const watch = source.connectRenderer()
+      let grantRows = (await directGrant()).slice()
+      let shareRows = await sharesListPage([])
+      const listGrants = vi.fn(async () => grantRows)
+      const listShares = vi.fn(async () => shareRows)
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfsWatch: watch.bridge,
+          gfs: {
+            listAccessible: vi.fn(async () => listAccessiblePage([])),
+            resolve: vi.fn(async () => rootDirectory()),
+            listChildren: vi.fn(async () => listChildrenPage([])),
+            affordances: vi.fn(async () =>
+              affordancesResult(heldAffordances(['read', 'manage_acl']))
+            ),
+            listGrants,
+            listShares,
+          },
+        },
+      })
+
+      render(<ReopenedShareProbe />, { wrapper: ProductionHarness })
+      await waitFor(() => expect(screen.getByTestId('grants-count').textContent).toBe('1'))
+      expect(screen.getByTestId('shares-count').textContent).toBe('0')
+      await waitFor(() => expect(watch.opens).toBe(1))
+
+      await act(async () => {
+        screen.getByRole('button', { name: 'close share' }).click()
+      })
+      // Another client changes the sharing of the target while Share is closed.
+      grantRows = await grantsListPage([
+        ...grantRows,
+        {
+          id: 'grant-43',
+          drive: 'main',
+          resourceId: 'root',
+          subject: { type: 'team', id: 'qa' },
+          permissions: ['read'],
+          inherit: true,
+        },
+      ])
+      shareRows = await sharesListPage([bobShare()])
+      let events: Awaited<ReturnType<typeof source.reauthorize>> = []
+      await act(async () => {
+        events = await source.reauthorize([mainDriveKey('dir', 'root')])
+      })
+      expect(events.some(event => event.type === 'accessChanged')).toBe(true)
+
+      await act(async () => {
+        screen.getByRole('button', { name: 'open share' }).click()
+      })
+
+      await waitFor(() => expect(screen.getByTestId('grants-count').textContent).toBe('2'))
+      await waitFor(() => expect(screen.getByTestId('shares-count').textContent).toBe('1'))
+    } finally {
+      await source.stop()
+    }
+  })
+
+  // An 'unavailable' coverage is a FAILED walk, not an observation: reopening
+  // Share must retry it instead of keeping the failure on screen.
+  it('retries an unavailable inherited derivation when Share is reopened', async () => {
+    const walkFailure = await gfsRouteFailureMessage(
+      client => client.resolveUri('gfs://main/root', 'fixture-session-token'),
+      500,
+      { code: 'internal', message: 'resolve failed' }
+    )
+    let walkFails = true
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => listAccessiblePage([])),
+          resolve: vi.fn(async () => {
+            if (walkFails) throw new Error(walkFailure)
+            return rootDirectory()
+          }),
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances: vi.fn(async () =>
+            affordancesResult(heldAffordances(['read', 'manage_acl']))
+          ),
+          listGrants: vi.fn(async () => grantsListPage([])),
+          listShares: vi.fn(async () => sharesListPage([])),
+        },
+      },
+    })
+
+    render(<ReopenedShareProbe />, { wrapper: ProductionHarness })
+    await waitFor(() =>
+      expect(screen.getByTestId('inherited-coverage').textContent).toBe('unavailable')
+    )
+
+    walkFails = false
+    await reopenShare()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('inherited-coverage').textContent).toBe('complete')
+    )
+  })
+
+  // Re-reading on every open would multiply the ancestor walk; a list nothing
+  // invalidated is served from cache.
+  it('serves ACL lists nothing invalidated from cache when Share is reopened', async () => {
+    const listGrants = vi.fn(async () => directGrant())
+    const listShares = vi.fn(async () => sharesListPage([]))
+    const resolve = vi.fn(async () => rootDirectory())
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => listAccessiblePage([])),
+          resolve,
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances: vi.fn(async () =>
+            affordancesResult(heldAffordances(['read', 'manage_acl']))
+          ),
+          listGrants,
+          listShares,
+        },
+      },
+    })
+
+    render(<ReopenedShareProbe />, { wrapper: ProductionHarness })
+    await waitFor(() =>
+      expect(screen.getByTestId('inherited-coverage').textContent).toBe('complete')
+    )
+    expect(screen.getByTestId('grants-count').textContent).toBe('1')
+    const reads = [listGrants, listShares, resolve].map(fn => fn.mock.calls.length)
+
+    await reopenShare()
+
+    expect(screen.getByTestId('grants-count').textContent).toBe('1')
+    expect(screen.getByTestId('inherited-coverage').textContent).toBe('complete')
+    expect([listGrants, listShares, resolve].map(fn => fn.mock.calls.length)).toEqual(reads)
+  })
+})
 
 describe('useGfsResourceAccess — target authority', () => {
   afterEach(() => {

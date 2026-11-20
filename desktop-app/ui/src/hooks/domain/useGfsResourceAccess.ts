@@ -94,12 +94,17 @@ export function useGfsResourceAccess(
     ...gfsAuthorityQueryPolicy,
     refetchOnMount: false,
   })
+  // The ACL lists mount each time Share opens. Under the app default
+  // (`refetchOnMount: false`) a list the watch or a write invalidated while
+  // Share was closed would reopen from cache; `true` re-reads only what is
+  // stale, so a list nothing invalidated is not read again on every open.
   // The grants listing is the revoke-id source (the grant PUT returns no ids),
   // so writes must refetch it.
   const grantsQuery = useQuery({
     queryKey: keyFor(desktopQueryKeys.gfsGrants),
     queryFn: () => window.clerum.gfs.listGrants(resourceId!, DRIVE),
     enabled,
+    refetchOnMount: true,
   })
   // Direct URI shares are a separate server surface ("this route is never
   // inferred from grants"), so the revoke-id source for shares is this list.
@@ -107,6 +112,7 @@ export function useGfsResourceAccess(
     queryKey: keyFor(desktopQueryKeys.gfsShares),
     queryFn: () => window.clerum.gfs.listShares(resourceId!, DRIVE),
     enabled,
+    refetchOnMount: true,
   })
   // Inherited access is derived client-side because the grants/shares GETs
   // list only direct rows. A walk stop is reported as coverage; only a raw
@@ -115,9 +121,10 @@ export function useGfsResourceAccess(
     queryKey: keyFor(desktopQueryKeys.gfsInheritedAccess),
     queryFn: () => deriveGfsInheritedAccess(resourceId!, DRIVE),
     enabled,
-    // An 'unavailable' coverage is a FAILED walk, not an observation: cached
-    // under the app's Infinity staleTime, reopening Share would keep showing
-    // the failure as if it were authoritative.
+    refetchOnMount: true,
+    // An 'unavailable' coverage is a FAILED walk, not an observation: it is
+    // stale at once, so reopening Share retries it instead of showing the
+    // failure as if it were authoritative.
     staleTime: query =>
       (query.state.data as GfsInheritedAccessResult | undefined)?.coverage === 'unavailable'
         ? 0
