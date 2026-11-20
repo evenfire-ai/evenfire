@@ -142,7 +142,7 @@ An `allow_all` ceiling accepts, among other things: shell that can read the
 process environment, the runtime-token Secret, and the Host GFS token; HTTP to
 any public host on ports 80 and 443 when the allowlist is empty; MCP servers
 running under the user's own OAuth identity; and edits to shared identity files.
-`cron_manage` still asks. In `auto`, `http_request` runs with no card unless
+`cron_manage` still asks, and a guardrail `ask` still shows its card. In `auto`, `http_request` runs with no card unless
 `tools.http_request` is `true`, which keeps the card.
 
 ### Channel cap
@@ -177,9 +177,17 @@ An explicit `defaultPolicy` also limits who can raise the mode from a
 messaging channel: under `cli_only` no channel sender can, and under
 `designated_approvers` only a sender listed in that channel's `approvers`
 can, unless that channel block sets `enabled: false`. An entry must equal the
-ID the channel reports: the Telegram user ID, the Slack user ID, the Teams `from.id`
-of the Bot Framework activity, or the email From address, case included. A
-refused raise leaves the stored mode unchanged, and the reply says why;
+ID the channel reports:
+
+- Telegram: the Telegram user ID.
+- Slack: the Slack user ID.
+- Microsoft Teams: the `from.id` of the Bot Framework activity. Under
+  `designated_approvers`, a Host with no `teams.approvers` list refuses every
+  Teams raise.
+- Email: the From address, compared case-sensitively, so
+  `Ana@example.com` and `ana@example.com` are different entries.
+
+A refused raise leaves the stored mode unchanged, and the reply says why;
 lowering the mode is always allowed. An unset
 policy or `channel_users` adds no check, and any other value refuses every
 raise and logs `approval_config_invalid` for `defaultPolicy`.

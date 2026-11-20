@@ -288,6 +288,10 @@ spec:
                         cli_only: Only HTTP /approve /deny endpoints.
                         channel_users: Any authorized channel user.
                         designated_approvers: Only users in approvers list.
+                        An explicit cli_only or designated_approvers also
+                        governs approval-mode raises from Telegram, email,
+                        Slack and Teams: cli_only refuses them, and
+                        designated_approvers allows only a listed approver.
                     modeCeiling:
                       type: string
                       enum:
