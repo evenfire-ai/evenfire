@@ -9,7 +9,7 @@ import {
   parseCallbackParameters,
   postOidcProfileFlow,
   readSingleCookie,
-  requestMatchesCallback,
+  requestPathMatchesCallback,
   responseForFlowError,
 } from '../_flow'
 
@@ -28,7 +28,7 @@ export async function GET(request: Request): Promise<Response> {
   } catch (error) {
     return responseForFlowError(error)
   }
-  if (!requestMatchesCallback(request, configuration.redirectUri)) {
+  if (!requestPathMatchesCallback(request, configuration.redirectUri)) {
     return noStoreText('Request rejected.', 403)
   }
 
