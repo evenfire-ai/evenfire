@@ -321,7 +321,7 @@ describe('App sidebar GFS resource menu', () => {
     await cleanupNativeCommitTestHarness()
   })
 
-  it('S-7b: crossing the compact threshold with the menu open keeps the native view hidden', async () => {
+  it('crossing the compact threshold with the menu open keeps the native view hidden', async () => {
     const { bridge } = installBridge()
     renderApp()
     await waitForShell()
@@ -345,7 +345,7 @@ describe('App sidebar GFS resource menu', () => {
     await waitFor(() => expect(lastVisibility(bridge)).toBe(true))
   })
 
-  it('S-7c: unmounting the tree with the menu open uncovers the native view', async () => {
+  it('unmounting the tree with the menu open uncovers the native view', async () => {
     const { bridge } = installBridge()
     renderApp()
     await waitForShell()
@@ -417,7 +417,7 @@ describe('App sidebar GFS resource menu', () => {
     await waitFor(() => expect(lastVisibility(bridge)).toBe(true))
   })
 
-  it('S-12: Escape in the compact drawer closes the menu first, then the drawer', async () => {
+  it('Escape in the compact drawer closes the menu first, then the drawer', async () => {
     compact = true
     const { bridge } = installBridge()
     renderApp()
@@ -446,7 +446,7 @@ describe('App sidebar GFS resource menu', () => {
     // The Move dialog has no Escape of its own: the drawer still leaves it alone.
     { action: 'Move to', row: 'notes.txt', dialog: 'Move file notes.txt', escapeCloses: false },
   ])(
-    'S-12b: Escape in the compact drawer with the host $action dialog open leaves the drawer open',
+    'Escape in the compact drawer with the host $action dialog open leaves the drawer open',
     async ({ action, row, dialog: dialogName, escapeCloses }) => {
       compact = true
       const { bridge } = installBridge()
@@ -523,7 +523,7 @@ describe('App sidebar GFS resource menu', () => {
     { action: 'Rename', row: 'notes.txt', dialog: 'Rename file' },
     { action: 'New folder', row: 'Reports', dialog: 'New folder' },
   ])(
-    'S-12b: Escape in the compact drawer while the host $action is still checking closes the drawer',
+    'Escape in the compact drawer while the host $action is still checking closes the drawer',
     async ({ action, row, dialog: dialogName }) => {
       compact = true
       const { bridge } = installBridge()
@@ -654,7 +654,7 @@ describe('App sidebar GFS resource menu', () => {
     expect(bridge.gfs.resolve.mock.calls.length).toBeGreaterThan(resolvesBefore)
   })
 
-  it('S-8: in-place actions on another resource leave the Files tab, its location and its crumbs alone', async () => {
+  it('in-place actions on another resource leave the Files tab, its location and its crumbs alone', async () => {
     const { bridge } = installBridge()
     renderApp()
     await waitForShell()

@@ -2969,8 +2969,8 @@ async function checkGenerated(
 
 const EXAMPLE_RUNS = new WeakSet<object>()
 
-describe('GfsActionHost — model-based oracle (A6)', () => {
-  it('keeps S1–S6, L1, L2 and K1 at rest under generated events and IPC orders', async () => {
+describe('GfsActionHost — model-based oracle', () => {
+  it('keeps every safety, liveness and cost invariant at rest under generated events and IPC orders', async () => {
     generatedCoverage.clear()
     await checkGenerated(allEvents, RUNS, 36, [
       outcomeWhileMainIsAhead,
@@ -3025,7 +3025,7 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
     expect(coverage.get('call:moveResource') ?? 0).toBeGreaterThan(0)
   }, 300_000)
 
-  it('measures the generation checks of the host Move paths (K1 bound for Move)', async () => {
+  it('measures the generation checks of the host Move paths (their cost bound)', async () => {
     const w = await mountWorld(exampleScheduler())
     try {
       await fc.asyncModelRun(() => ({ model: w.model, real: w }), oneCommittedMove())

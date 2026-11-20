@@ -227,7 +227,7 @@ afterEach(async () => {
 })
 
 describe('GfsActionHost — native app view gate', () => {
-  it('S-7: menu → checking → dialog → close hides the view once and shows it once, a relaunch in between', async () => {
+  it('menu → checking → dialog → close hides the view once and shows it once, a relaunch in between', async () => {
     const { embed } = await mountShell()
 
     act(() => openMenu())
@@ -253,7 +253,7 @@ describe('GfsActionHost — native app view gate', () => {
     expect(visibility.filter(visible => visible)).toEqual([true])
   })
 
-  it('S-7c: the tree unmounting with its menu open releases the gate', async () => {
+  it('the tree unmounting with its menu open releases the gate', async () => {
     await mountShell()
 
     act(() => openMenu())
@@ -263,7 +263,7 @@ describe('GfsActionHost — native app view gate', () => {
     await waitFor(() => expect(visibility).toEqual([false, true]))
   })
 
-  it('S2: once the file is chosen the view shows again while the upload runs', async () => {
+  it('once the file is chosen the view shows again while the upload runs', async () => {
     await mountShell()
     const folder = (await listChildrenPage([childView('folder-d', 'Docs', 'directory')]))
       .items[0] as GfsHostActionTarget

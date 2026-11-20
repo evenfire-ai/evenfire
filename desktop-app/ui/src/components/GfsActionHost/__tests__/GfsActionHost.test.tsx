@@ -262,7 +262,7 @@ afterEach(() => {
 })
 
 describe('GfsActionHost — opening an action', () => {
-  it('S-2: a revocation during the opening check opens no dialog and runs nothing', async () => {
+  it('a revocation during the opening check opens no dialog and runs nothing', async () => {
     const check = deferred<Affordances>()
     const h = await harness({ affordances: () => check.promise })
     const target = await listedRow('file-t', 'notes.txt', 'file')
@@ -280,7 +280,7 @@ describe('GfsActionHost — opening an action', () => {
     expect(h.toasts).toEqual([])
   })
 
-  it('S-2 (denial): the opening check toasts the missing permission and opens nothing', async () => {
+  it('denial: the opening check toasts the missing permission and opens nothing', async () => {
     const h = await harness({ affordances: async () => readOnly() })
     const target = await listedRow('file-t', 'notes.txt', 'file')
 
@@ -293,7 +293,7 @@ describe('GfsActionHost — opening an action', () => {
     expect(overlayOpen(h)).toBe(false)
   })
 
-  it('S-13: an action chosen during the opening check replaces it; the first opens nothing', async () => {
+  it('an action chosen during the opening check replaces it; the first opens nothing', async () => {
     const first = deferred<Affordances>()
     const second = deferred<Affordances>()
     const h = await harness({
@@ -369,7 +369,7 @@ describe('GfsActionHost — copy', () => {
 })
 
 describe('GfsActionHost — submitting', () => {
-  it('renames the chosen target, refreshes the Files location and toasts once (K1)', async () => {
+  it('renames the chosen target, refreshes the Files location and toasts once', async () => {
     const h = await harness()
     const target = await listedRow('file-t', 'notes.txt', 'file')
     await openRename(h, target)
@@ -391,7 +391,7 @@ describe('GfsActionHost — submitting', () => {
   })
 
   for (const event of ['revocation', 'team switch in main', 'logout'] as const) {
-    it(`S-3: a ${event} during the submit's permission read starts no mutation`, async () => {
+    it(`a ${event} during the submit's permission read starts no mutation`, async () => {
       const h = await harness()
       const target = await listedRow('file-t', 'notes.txt', 'file')
       await openRename(h, target)
@@ -416,7 +416,7 @@ describe('GfsActionHost — submitting', () => {
     })
   }
 
-  it('S-3 (control): the same submit with no event renames', async () => {
+  it('control: the same submit with no event renames', async () => {
     const h = await harness()
     const target = await listedRow('file-t', 'notes.txt', 'file')
     await openRename(h, target)
@@ -432,7 +432,7 @@ describe('GfsActionHost — submitting', () => {
     await waitFor(() => expect(h.bridge.renameResource).toHaveBeenCalledTimes(1))
   })
 
-  it('S-3b: a revocation in the same tick as the submit, before any effect runs, starts nothing', async () => {
+  it('a revocation in the same tick as the submit, before any effect runs, starts nothing', async () => {
     const h = await harness()
     const target = await listedRow('file-t', 'notes.txt', 'file')
     await openRename(h, target)
@@ -448,7 +448,7 @@ describe('GfsActionHost — submitting', () => {
     expect(mutationCalls(h)).toBe(0)
   })
 
-  it('S-3c: main on a new generation while the renderer still publishes the old one starts nothing', async () => {
+  it('main on a new generation while the renderer still publishes the old one starts nothing', async () => {
     const h = await harness()
     const target = await listedRow('file-t', 'notes.txt', 'file')
     await openRename(h, target)
@@ -462,7 +462,7 @@ describe('GfsActionHost — submitting', () => {
     expect(mutationCalls(h)).toBe(0)
   })
 
-  it('S-4: a mutation that lands after a session switch shows no toast in the new session', async () => {
+  it('a mutation that lands after a session switch shows no toast in the new session', async () => {
     const h = await harness()
     const target = await listedRow('file-t', 'notes.txt', 'file')
     await openRename(h, target)
@@ -479,7 +479,7 @@ describe('GfsActionHost — submitting', () => {
     expect(h.toasts).toEqual([])
   })
 
-  it('S-4: an answer main gave before a switch shows no toast once the renderer publishes the new generation', async () => {
+  it('an answer main gave before a switch shows no toast once the renderer publishes the new generation', async () => {
     const h = await harness()
     const target = await listedRow('file-t', 'notes.txt', 'file')
     await openRename(h, target)
@@ -503,7 +503,7 @@ describe('GfsActionHost — submitting', () => {
     expect(h.toasts).toEqual([])
   })
 
-  it('S-4 (control): the same mutation in the same session toasts its success', async () => {
+  it('control: the same mutation in the same session toasts its success', async () => {
     const h = await harness()
     const target = await listedRow('file-t', 'notes.txt', 'file')
     await openRename(h, target)
@@ -518,7 +518,7 @@ describe('GfsActionHost — submitting', () => {
     await waitFor(() => expect(toastMessages(h)).toEqual(['Renamed to renamed.txt']))
   })
 
-  it('S-5: a 412 is shown in the dialog with the captured version, and never retried', async () => {
+  it('a 412 is shown in the dialog with the captured version, and never retried', async () => {
     const stale = await gfsRouteFailureMessage(
       client =>
         client.renameResource(
@@ -573,7 +573,7 @@ describe('GfsActionHost — submitting', () => {
 })
 
 describe('GfsActionHost — revocation of an open action', () => {
-  it('S-3d: a real sessionExpired from the watch closes an open dialog; nothing runs', async () => {
+  it('a real sessionExpired from the watch closes an open dialog; nothing runs', async () => {
     const source = await new GfsWatchEventSource().start()
     try {
       const watch = source.connectRenderer()
@@ -594,7 +594,7 @@ describe('GfsActionHost — revocation of an open action', () => {
     }
   })
 
-  it('S-3d: a sessionExpired during the submit permission read stops the mutation', async () => {
+  it('a sessionExpired during the submit permission read stops the mutation', async () => {
     const source = await new GfsWatchEventSource().start()
     try {
       const watch = source.connectRenderer()
@@ -640,7 +640,7 @@ describe('GfsActionHost — upload', () => {
       target: { files: selected ? [selected] : [] },
     })
 
-  it('S-6 (positive): opens the picker inside the gesture and uploads into the folder', async () => {
+  it('positive: opens the picker inside the gesture and uploads into the folder', async () => {
     const h = await harness()
     const folder = await listedRow('folder-d', 'Docs', 'directory')
     const click = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
@@ -661,7 +661,7 @@ describe('GfsActionHost — upload', () => {
     click.mockRestore()
   })
 
-  it('S-6: a revocation with the picker open closes the action; the chosen file is dropped', async () => {
+  it('a revocation with the picker open closes the action; the chosen file is dropped', async () => {
     const h = await harness()
     const folder = await listedRow('folder-d', 'Docs', 'directory')
     const click = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
@@ -677,7 +677,7 @@ describe('GfsActionHost — upload', () => {
     click.mockRestore()
   })
 
-  it('S-6: a revocation between name retries stops the next create', async () => {
+  it('a revocation between name retries stops the next create', async () => {
     const conflict = await gfsRouteFailureMessage(
       client =>
         client.createResource(
@@ -721,7 +721,7 @@ describe('GfsActionHost — upload', () => {
 })
 
 describe('GfsActionHost — move', () => {
-  it('S-10: with the move running, Escape, the backdrop and Cancel are ignored and the moving id stays until it settles', async () => {
+  it('with the move running, Escape, the backdrop and Cancel are ignored and the moving id stays until it settles', async () => {
     const h = await harness()
     const target: GfsHostActionTarget = {
       ...(await listedRow('file-t', 'notes.txt', 'file', 'folder-p')),
@@ -823,7 +823,7 @@ describe('GfsActionHost — share', () => {
   const resolveShared = () =>
     resolveResource(resolvedDirectory('folder-s', 'Shared', { parentResourceId: null }))
 
-  it('S-15: a 429 on listGrants shows an error with Retry, never an empty access list', async () => {
+  it('a 429 on listGrants shows an error with Retry, never an empty access list', async () => {
     const limited = await listGrantsFailureMessage(429, {
       code: 'rate_limited',
       message: 'too many requests',
@@ -845,7 +845,7 @@ describe('GfsActionHost — share', () => {
     ).toEqual([])
   })
 
-  it('S-19: an accessChanged from the watch re-reads the open dialog ACLs', async () => {
+  it('an accessChanged from the watch re-reads the open dialog ACLs', async () => {
     const source = await new GfsWatchEventSource().start()
     try {
       const watch = source.connectRenderer()
@@ -898,7 +898,7 @@ describe('GfsActionHost — review round', () => {
       resolvedFile('file-t', 'notes.txt', { parentResourceId: 'folder-p', version: 3 })
     )
 
-  it('B1: a revocation seen while the move runs closes the action once it stops running', async () => {
+  it('a revocation seen while the move runs closes the action once it stops running', async () => {
     const h = await harness()
     h.bridge.resolve.mockImplementation(async () => resolvedSource())
     const landed = deferred<Awaited<ReturnType<typeof moveResourceReceipt>>>()
@@ -933,7 +933,7 @@ describe('GfsActionHost — review round', () => {
     expect(h.host().hostMovingResourceId).toBeNull()
   })
 
-  it('S5: a source that changed since it was chosen stops the move with a visible error', async () => {
+  it('a source that changed since it was chosen stops the move with a visible error', async () => {
     const h = await harness()
     // The row carried version 3; the server now holds version 4.
     h.bridge.resolve.mockImplementation(async () =>
@@ -957,7 +957,7 @@ describe('GfsActionHost — review round', () => {
     expect(h.host().hostMovingResourceId).toBeNull()
   })
 
-  it('S1: a revocation in the same tick as "Move here" sends no move', async () => {
+  it('a revocation in the same tick as "Move here" sends no move', async () => {
     const h = await harness()
     h.bridge.resolve.mockImplementation(async () => resolvedSource())
     h.bridge.moveResource.mockImplementation(async () =>
@@ -980,7 +980,7 @@ describe('GfsActionHost — review round', () => {
     expect(h.bridge.moveResource).not.toHaveBeenCalled()
   })
 
-  it('S2: a second upload starts while the first is still in flight', async () => {
+  it('a second upload starts while the first is still in flight', async () => {
     const h = await harness()
     const first = deferred<Awaited<ReturnType<typeof createFolderResult>>>()
     h.bridge.createFileFromPath.mockImplementationOnce(() => first.promise)
@@ -1010,7 +1010,7 @@ describe('GfsActionHost — review round', () => {
     click.mockRestore()
   })
 
-  it('S2: an upload that lands after a session switch shows no toast', async () => {
+  it('an upload that lands after a session switch shows no toast', async () => {
     const h = await harness()
     const landed = deferred<Awaited<ReturnType<typeof createFolderResult>>>()
     h.bridge.createFileFromPath.mockImplementationOnce(() => landed.promise)
@@ -1030,7 +1030,7 @@ describe('GfsActionHost — review round', () => {
     click.mockRestore()
   })
 
-  it('S2: a revocation ends an upload in flight even if access is restored before its retry', async () => {
+  it('a revocation ends an upload in flight even if access is restored before its retry', async () => {
     const conflict = await gfsRouteFailureMessage(
       client =>
         client.createResource(
@@ -1066,7 +1066,7 @@ describe('GfsActionHost — review round', () => {
     click.mockRestore()
   })
 
-  it('L3: a download that lands after a session switch shows no toast', async () => {
+  it('a download that lands after a session switch shows no toast', async () => {
     const h = await harness()
     const createObjectURL = vi.fn(() => 'blob:fixture')
     Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() })
@@ -1086,7 +1086,7 @@ describe('GfsActionHost — review round', () => {
     anchorClick.mockRestore()
   })
 
-  it('L3 (control): a download in the same session toasts', async () => {
+  it('control: a download in the same session toasts', async () => {
     const h = await harness()
     Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:fixture'), revokeObjectURL: vi.fn() })
     const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
@@ -1138,7 +1138,7 @@ describe('GfsActionHost — review round', () => {
     expect(readGfsAccessState(h.client, SCOPE, 1)).toBe('active')
   })
 
-  describe('S-9: granting from the host Share', () => {
+  describe('granting from the host Share', () => {
     const agent = {
       name: 'chatllm',
       contextRef: 'ctx-1',

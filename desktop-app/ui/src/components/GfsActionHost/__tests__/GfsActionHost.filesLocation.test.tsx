@@ -266,7 +266,7 @@ describe('GfsActionHost — the Files location on screen', () => {
     maxConcurrentQ: 0,
   })
 
-  it('S-8: an action on a resource outside Q keeps the Files location and its crumbs', async () => {
+  it('an action on a resource outside Q keeps the Files location and its crumbs', async () => {
     const w = world()
     const { locations } = await mount(w)
     const before = [...locations]
@@ -279,7 +279,7 @@ describe('GfsActionHost — the Files location on screen', () => {
     expect(locations[locations.length - 1]).toBe(Q_URI)
   })
 
-  it('S-8 (L2): renaming an ancestor of Q shows the new crumbs at rest', async () => {
+  it('renaming an ancestor of Q shows the new crumbs at rest', async () => {
     const w = world()
     const { locations } = await mount(w)
 
@@ -289,7 +289,7 @@ describe('GfsActionHost — the Files location on screen', () => {
     expect(locations[locations.length - 1]).toBe(Q_URI)
   })
 
-  it('L2: moving Q into another folder shows its new crumbs at rest', async () => {
+  it('moving Q into another folder shows its new crumbs at rest', async () => {
     const w = { ...world(), names: { ...world().names, [Z]: 'Zeta' } }
     const { bridge, locations } = await mount(w)
     const quarterly: GfsHostActionTarget = {
@@ -312,7 +312,7 @@ describe('GfsActionHost — the Files location on screen', () => {
     expect(w.maxConcurrentQ).toBe(1)
   })
 
-  it('S-8: the dialog outlives the tree that opened it', async () => {
+  it('the dialog outlives the tree that opened it', async () => {
     const w = world()
     await mount(w)
     const item = await target(T, 'notes.txt', 'file', A)
@@ -325,7 +325,7 @@ describe('GfsActionHost — the Files location on screen', () => {
     expect(screen.getByRole('dialog', { name: /rename file/i })).toBeTruthy()
   })
 
-  it('K1: a host change inside Q and the watch echo re-read Q at most twice, never at once', async () => {
+  it('a host change inside Q and the watch echo re-read Q at most twice, never at once', async () => {
     const source = await new GfsWatchEventSource().start([Q_KEY])
     try {
       const watch = source.connectRenderer()

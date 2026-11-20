@@ -94,7 +94,7 @@ async function finishRun(page: ParentUpdatePage, mode: (typeof modes)[number]) {
 }
 
 describe('GfsActionHost — parent-folder pre-flight', () => {
-  it('S-1 shows nothing once the renderer publishes another session mid pre-flight', async () => {
+  it('shows nothing once the renderer publishes another session mid pre-flight', async () => {
     const page = await mount()
     page.holdAffordancesOf(PARENT_ONE)
     await page.startDowngrade()
@@ -112,7 +112,7 @@ describe('GfsActionHost — parent-folder pre-flight', () => {
     expect(overlayCovered(page)).toBe(false)
   })
 
-  it('S-1b shows nothing once the session is revoked mid pre-flight', async () => {
+  it('shows nothing once the session is revoked mid pre-flight', async () => {
     const page = await mount()
     page.holdAffordancesOf(PARENT_ONE)
     await page.startDowngrade()
@@ -128,7 +128,7 @@ describe('GfsActionHost — parent-folder pre-flight', () => {
     expect(page.pushToast).not.toHaveBeenCalled()
   })
 
-  it('S-1c reports a pre-flight refusal only while the Share dialog is still open', async () => {
+  it('reports a pre-flight refusal only while the Share dialog is still open', async () => {
     const open = await mount()
     open.holdAffordancesOf(PARENT_ONE)
     await open.startDowngrade()
@@ -150,7 +150,7 @@ describe('GfsActionHost — parent-folder pre-flight', () => {
     expect(closed.pushToast).not.toHaveBeenCalled()
   })
 
-  it('S-1c reports a pre-flight read failure only while the Share dialog is still open', async () => {
+  it('reports a pre-flight read failure only while the Share dialog is still open', async () => {
     const open = await mount()
     const failure = await open.affordancesFailure(500)
     const message = describeGfsGrantError(new Error(failure)).message
@@ -176,7 +176,7 @@ describe('GfsActionHost — parent-folder pre-flight', () => {
     expect(closed.accessState()).toBe('active')
   })
 
-  it('S-1d revokes on a pre-flight 401 even after the Share dialog closed', async () => {
+  it('revokes on a pre-flight 401 even after the Share dialog closed', async () => {
     const page = await mount()
     const unauthorized = await page.affordancesFailure(401)
     page.holdAffordancesOf(PARENT_ONE)
@@ -196,7 +196,7 @@ describe('GfsActionHost — parent-folder pre-flight', () => {
 
 describe('GfsActionHost — parent-folder confirmation run', () => {
   for (const mode of modes) {
-    it(`S-2 writes nothing when main switched before the ${mode.name} confirmation`, async () => {
+    it(`writes nothing when main switched before the ${mode.name} confirmation`, async () => {
       const page = await mount()
       await mode.open(page)
       await screen.findByRole('alertdialog')
@@ -228,7 +228,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
       expect(page.closeButton().disabled).toBe(false)
     })
 
-    it(`S-3c skips the direct alignment of a ${mode.name} run when main switches after the folders`, async () => {
+    it(`skips the direct alignment of a ${mode.name} run when main switches after the folders`, async () => {
       const page = await mount()
       await startHeldRun(page, mode)
       await releaseWrite(page, mode, 0)
@@ -241,7 +241,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
       expect(page.pushToast).not.toHaveBeenCalled()
     })
 
-    it(`S-7 shows no ${mode.name} outcome when main switches after the last write`, async () => {
+    it(`shows no ${mode.name} outcome when main switches after the last write`, async () => {
       const page = await mount()
       await startHeldRun(page, mode)
       await releaseWrite(page, mode, 0)
@@ -259,7 +259,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
     })
   }
 
-  it('S-3b stops the run once the session is revoked between writes', async () => {
+  it('stops the run once the session is revoked between writes', async () => {
     const page = await mount()
     await startHeldRun(page, modes[0])
     page.revoke()
@@ -273,7 +273,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
   })
 
   for (const revocation of ['revokeGfsSessionAccess', 'purgeGfsSessionCache'] as const) {
-    it(`S-3d stays stopped after ${revocation} and a retry that restores access mid-write`, async () => {
+    it(`stays stopped after ${revocation} and a retry that restores access mid-write`, async () => {
       const page = await mount()
       await startHeldRun(page, modes[0])
       if (revocation === 'revokeGfsSessionAccess') page.revoke()
@@ -289,7 +289,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
     })
   }
 
-  it('S-5 keeps Share open while the run writes, then completes it and frees the dialog', async () => {
+  it('keeps Share open while the run writes, then completes it and frees the dialog', async () => {
     const page = await mount()
     const confirmations = page.getSessionGeneration.mock.calls.length
     await startHeldRun(page, modes[0])
@@ -317,7 +317,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
     expect(overlayCovered(page)).toBe(false)
   })
 
-  it('S-5b writes nothing when the host replaces Share before the first write is admitted', async () => {
+  it('writes nothing when the host replaces Share before the first write is admitted', async () => {
     const page = await mount()
     const admission = deferred<number>()
     await page.openRemovePlan()
@@ -347,7 +347,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
     expect(writeTargets(kept.writes)).toEqual(REMOVE_WRITES)
   })
 
-  it('S-5c keeps Share open until the run ends, not until a direct role change ends', async () => {
+  it('keeps Share open until the run ends, not until a direct role change ends', async () => {
     const page = await mount({ agentGrant: true })
     page.revokeGrant.hold()
     page.holdAffordancesOf(TARGET_ID)
@@ -381,7 +381,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
     await waitFor(() => expect(page.closeButton().disabled).toBe(false))
   })
 
-  it('S-5d never starts a second confirmation while one runs', async () => {
+  it('never starts a second confirmation while one runs', async () => {
     const page = await mount({ agentGrant: true })
     page.revokeGrant.hold()
     page.holdAffordancesOf(TARGET_ID)
@@ -410,7 +410,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
     await waitFor(() => expect(memberRole.disabled).toBe(false))
   })
 
-  it('S-6 reports how far a run got after an ordinary failure and refreshes the lists', async () => {
+  it('reports how far a run got after an ordinary failure and refreshes the lists', async () => {
     const page = await mount()
     const failure = await page.failureMessage(500)
     await startHeldRun(page, modes[0])
@@ -433,7 +433,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
     await waitFor(() => expect(ancestorReads(page)).toBeGreaterThan(walks))
   })
 
-  it('S-8 stops without a toast or refresh when main cannot confirm the session', async () => {
+  it('stops without a toast or refresh when main cannot confirm the session', async () => {
     const page = await mount()
     await startHeldRun(page, modes[0])
     const walks = ancestorReads(page)
@@ -449,7 +449,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
     expect(page.closeButton().disabled).toBe(false)
   })
 
-  it('S-10 sends every write while the renderer is offline instead of pausing it', async () => {
+  it('sends every write while the renderer is offline instead of pausing it', async () => {
     const page = await mount()
     await page.openRemovePlan()
     await screen.findByRole('alertdialog')
@@ -466,7 +466,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
 })
 
 describe('GfsActionHost — session failures of the dialog’s direct IPC', () => {
-  it('S-9 revokes access on a 401 from a folder grant of the change-role run', async () => {
+  it('revokes access on a 401 from a folder grant of the change-role run', async () => {
     const page = await mount()
     const unauthorized = await page.grantFailureMessage(401)
     await startHeldRun(page, modes[1])
@@ -481,7 +481,7 @@ describe('GfsActionHost — session failures of the dialog’s direct IPC', () =
     expect(page.pushToast).not.toHaveBeenCalled()
   })
 
-  it('S-9 revokes only the session a folder grant 401 was issued under', async () => {
+  it('revokes only the session a folder grant 401 was issued under', async () => {
     // Positive: the same 401 in its own session revokes it.
     const same = await mount()
     const unauthorized = await same.grantFailureMessage(401)
@@ -508,7 +508,7 @@ describe('GfsActionHost — session failures of the dialog’s direct IPC', () =
     expect(page.pushToast).not.toHaveBeenCalled()
   })
 
-  it('S-9 keeps access and reports an ordinary folder grant failure', async () => {
+  it('keeps access and reports an ordinary folder grant failure', async () => {
     const page = await mount()
     const failure = await page.grantFailureMessage(500)
     await startHeldRun(page, modes[1])
@@ -522,7 +522,7 @@ describe('GfsActionHost — session failures of the dialog’s direct IPC', () =
     expect(page.pushToast.mock.calls[0]![1]).toBe('error')
   })
 
-  it('S-9 revokes access on a 401 from the pre-flight affordances read', async () => {
+  it('revokes access on a 401 from the pre-flight affordances read', async () => {
     const page = await mount()
     const unauthorized = await page.affordancesFailure(401)
     page.holdAffordancesOf(PARENT_ONE)
@@ -539,7 +539,7 @@ describe('GfsActionHost — session failures of the dialog’s direct IPC', () =
     expect(page.pushToast).not.toHaveBeenCalled()
   })
 
-  it('S-9 opens the downgrade plan when the pre-flight reads succeed', async () => {
+  it('opens the downgrade plan when the pre-flight reads succeed', async () => {
     const page = await mount()
     await page.startDowngrade()
 

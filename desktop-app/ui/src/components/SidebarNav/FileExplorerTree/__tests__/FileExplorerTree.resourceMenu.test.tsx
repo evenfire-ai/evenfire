@@ -148,7 +148,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('FileExplorerTree row resource menu (S-1)', () => {
+describe('FileExplorerTree row resource menu', () => {
   async function folderWithTwoFiles() {
     const bits = deferredAffordances()
     installClerum({
@@ -686,7 +686,7 @@ async function openMenuOn(name: string) {
   return screen.findByRole('menu', { name: `Actions for ${name}` })
 }
 
-describe('FileExplorerTree drag during a host Move (S-10)', () => {
+describe('FileExplorerTree drag during a host Move', () => {
   it('disables closing while the host Move runs and refuses to drag the resource it moves', async () => {
     let finishMove!: () => void
     const moveGate = new Promise<void>(resolve => {
