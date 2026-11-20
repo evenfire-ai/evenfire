@@ -6,13 +6,21 @@ import {
 } from './boundedPgPool.js'
 import { config } from './config.js'
 import { SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG } from './data/llmCatalogLegacySeeds.js'
+import {
+  GOVERNED_TRACE_RETENTION_MIGRATION,
+  applyGovernedTraceRetention,
+} from './migrations/governedTraceRetention.js'
+import {
+  GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
+  applyGovernedTraceRetentionHardening,
+} from './migrations/governedTraceRetentionHardening.js'
 import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
 import {
   LAST_DEV_MIGRATION_VERSION,
   applyPendingPr1Migrations,
 } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
-import { applyOidcMemberLinkSchema } from './oidc/memberLinkSchema.js'
+import { OIDC_MEMBER_LINK_MIGRATION, applyOidcMemberLinkSchema } from './oidc/memberLinkSchema.js'
 import {
   applyOidcProtocolAttemptBrowserBindingSchema,
   applyOidcProtocolAttemptExpiryIndexMigration,
@@ -6771,7 +6779,17 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyWorkflowRunAuthorizationPauseSchema,
   },
   {
-    version: '0157_oidc_member_links',
+    version: GOVERNED_TRACE_RETENTION_MIGRATION,
+    legacyVersions: ['0151_governed_trace_retention_indexed'],
+    apply: applyGovernedTraceRetention,
+  },
+  {
+    version: GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
+    legacyVersions: ['0153_governed_trace_retention_hardening'],
+    apply: applyGovernedTraceRetentionHardening,
+  },
+  {
+    version: OIDC_MEMBER_LINK_MIGRATION,
     apply: applyOidcMemberLinkSchema,
     lockRetries: 2,
   },

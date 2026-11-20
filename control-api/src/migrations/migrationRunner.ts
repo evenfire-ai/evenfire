@@ -1,5 +1,8 @@
 import type { DbClient } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { OIDC_MEMBER_LINK_MIGRATION } from '../oidc/memberLinkSchema.js'
+import { GOVERNED_TRACE_RETENTION_MIGRATION } from './governedTraceRetention.js'
+import { GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION } from './governedTraceRetentionHardening.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { hasPostSchemaWork, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
@@ -22,12 +25,8 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
 
 // The one bound between initDb's single dev batch and this runner: every migration
 // up to and including this version runs in the dev batch (db.ts imports it), and
-// this runner owns only the PR1 and PR2 versions that follow it. Until this change merges,
-// a dev merge that brings new migrations moves this bound to dev's last version and
-// renumbers PR1_MIGRATION_VERSIONS above it, and every dev merge moves the latestDev
-// producer in tests/contracts/certification-inputs.json to dev's tip. After it merges
-// the bound stays: a later migration adds its version to the list this runner
-// applies, or initDb throws "Unclassified post-dev migrations".
+// this runner owns the versions that follow it. Keep the bound stable and add
+// later migrations to RUNNER_MIGRATION_VERSIONS so initDb can classify them.
 export const LAST_DEV_MIGRATION_VERSION = '0136_llm_catalog_dismissed_backfill'
 
 // Migration names that earlier heads of this change recorded under other
@@ -72,12 +71,14 @@ export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '0154_pr2_runtime_privileges',
   '0155_workflow_run_failure_reason',
   '0156_workflow_authorization_pause',
-  '0157_oidc_member_links',
 ])
 
 export const RUNNER_MIGRATION_VERSIONS = Object.freeze([
   ...PR1_MIGRATION_VERSIONS,
   ...PR2_MIGRATION_VERSIONS,
+  GOVERNED_TRACE_RETENTION_MIGRATION,
+  GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
+  OIDC_MEMBER_LINK_MIGRATION,
 ] as const)
 
 export type MigrationDescriptor = {

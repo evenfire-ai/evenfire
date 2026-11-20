@@ -1,5 +1,7 @@
 import type { DbClient } from '../db.js'
 
+export const OIDC_MEMBER_LINK_MIGRATION = '0159_oidc_member_links'
+
 /**
  * OIDC member sign-in tables. `oidc_connections` records which issuer and
  * client a link was made under; `user_oidc_links` binds a provider subject to

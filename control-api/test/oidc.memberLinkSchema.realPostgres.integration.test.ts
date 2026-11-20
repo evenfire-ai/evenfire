@@ -62,8 +62,8 @@ describeRealPostgres('OIDC member link schema on real PostgreSQL', () => {
     return id
   }
 
-  it('registers 0157 and creates both tables with the contracted columns', async () => {
-    expect(CONTROL_API_MIGRATIONS.map(m => m.version)).toContain('0157_oidc_member_links')
+  it('registers 0159 and creates both tables with the contracted columns', async () => {
+    expect(CONTROL_API_MIGRATIONS.map(m => m.version)).toContain('0159_oidc_member_links')
     const columns = await pool!.query<{
       table_name: string
       column_name: string
