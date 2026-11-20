@@ -12,6 +12,7 @@ import {
   applyPendingPr1Migrations,
 } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
+import { applyOidcMemberLinkSchema } from './oidc/memberLinkSchema.js'
 import {
   applyOidcProtocolAttemptBrowserBindingSchema,
   applyOidcProtocolAttemptExpiryIndexMigration,
@@ -6768,6 +6769,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0156_workflow_authorization_pause',
     apply: applyWorkflowRunAuthorizationPauseSchema,
+  },
+  {
+    version: '0157_oidc_member_links',
+    apply: applyOidcMemberLinkSchema,
+    lockRetries: 2,
   },
 ]
 

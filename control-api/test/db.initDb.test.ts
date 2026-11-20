@@ -69,14 +69,14 @@ describe('db.initDb', () => {
     expect(sqls).not.toContain('ROLLBACK')
     // The committed password-admission rollout fence, one dev batch through
     // 0136_llm_catalog_dismissed_backfill (as in dev), then one transaction per
-    // post-dev version, then the six PR2 versions: 18 transactions, because a
+    // post-dev version, then the seven PR2 versions: 19 transactions, because a
     // version with post-schema work commits its schema, then each constraint
     // validation, then its receipt (0151: 1 + 4 + 1, 0152: 1 + 1 + 1,
-    // 0153-0154: 1 each, 0155: 1 + 1 + 1, 0156: 1 + 2 + 1).
+    // 0153-0154: 1 each, 0155: 1 + 1 + 1, 0156: 1 + 2 + 1, 0157: 1).
     const { PR1_MIGRATION_VERSIONS } = await import('../src/migrations/migrationRunner.js')
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length + 18)
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length + 19)
     expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(
-      2 + PR1_MIGRATION_VERSIONS.length + 18
+      2 + PR1_MIGRATION_VERSIONS.length + 19
     )
     expect(sqls.filter(sql => /^ALTER TABLE \w+ VALIDATE CONSTRAINT \w+$/.test(sql))).toHaveLength(
       8

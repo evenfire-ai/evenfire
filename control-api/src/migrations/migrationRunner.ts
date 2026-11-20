@@ -72,6 +72,7 @@ export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '0154_pr2_runtime_privileges',
   '0155_workflow_run_failure_reason',
   '0156_workflow_authorization_pause',
+  '0157_oidc_member_links',
 ])
 
 export const RUNNER_MIGRATION_VERSIONS = Object.freeze([

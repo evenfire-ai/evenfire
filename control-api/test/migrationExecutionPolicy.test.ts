@@ -83,6 +83,7 @@ describe('D34 migration execution policy', () => {
       '0154_pr2_runtime_privileges',
       '0155_workflow_run_failure_reason',
       '0156_workflow_authorization_pause',
+      '0157_oidc_member_links',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -440,8 +441,8 @@ describe('D34 PR1 migration runner', () => {
     // One transaction per version without post-schema work (0137-0150,
     // 0153-0154); a version with it commits its schema, each validation and
     // its receipt separately: 0151 1 + 4 + 1, 0152 1 + 1 + 1, 0155 1 + 1 + 1,
-    // 0156 1 + 2 + 1.
-    const transactions = 16 + 6 + 3 + 3 + 4
+    // 0156 1 + 2 + 1, 0157 1.
+    const transactions = 16 + 6 + 3 + 3 + 4 + 1
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
@@ -728,7 +729,7 @@ describe('D34 PR1 migration runner', () => {
     }
   })
 
-  it('registers lock retries only on the users and team_members trigger migrations', async () => {
+  it('registers lock retries only on the migrations that take a lock on users or team_members', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const withRetries = CONTROL_API_MIGRATIONS.filter(
       migration => (migration as { lockRetries?: number }).lockRetries !== undefined
@@ -736,6 +737,8 @@ describe('D34 PR1 migration runner', () => {
     expect(withRetries).toEqual([
       ['0146_gfs_authz_team_members_notify', 2],
       ['0147_gfs_watch_session_users_notify', 2],
+      // 0157 adds a foreign key to users, which needs a lock on it.
+      ['0157_oidc_member_links', 2],
     ])
   })
 

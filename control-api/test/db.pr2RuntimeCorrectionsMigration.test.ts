@@ -35,6 +35,7 @@ describe('PR2 runtime correction migrations', () => {
       '0154_pr2_runtime_privileges',
       '0155_workflow_run_failure_reason',
       '0156_workflow_authorization_pause',
+      '0157_oidc_member_links',
     ])
     const sql: string[] = []
     for (const version of pr2Versions) {
