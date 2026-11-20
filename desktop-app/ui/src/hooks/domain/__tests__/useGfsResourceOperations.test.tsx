@@ -278,6 +278,57 @@ describe('useGfsResourceOperations', () => {
     client.clear()
   })
 
+  it('sends no tree refresh for a session that was replaced while the commit reaction ran', async () => {
+    const created = childView('new-folder', 'New folder', 'directory', {
+      parentResourceId: 'parent',
+    })
+    const listChildren = vi.fn(async () => listChildrenPage([]))
+    installClerum({
+      listChildren,
+      createFolder: vi.fn(async () => createFolderResult('parent', created)),
+    })
+    let releaseReaction!: () => void
+    const onCommitted = vi.fn(
+      () =>
+        new Promise<void>(resolve => {
+          releaseReaction = resolve
+        })
+    )
+    let ops!: ReturnType<typeof useGfsResourceOperations>
+    function CommitProbe() {
+      ops = useGfsResourceOperations({ onCommitted })
+      return null
+    }
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    // The tree keeps observing the folder listing of the session the write ran in.
+    const view = (me: Me, generation: number) => (
+      <AuthContext.Provider value={sessionAuth(me, generation)}>
+        <QueryClientProvider client={client}>
+          <TreeFolderProbe folderId="parent" scope={scopeA} generation={1} />
+          <CommitProbe />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    const rendered = render(view(userA, 1))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+
+    let createdFolder!: Promise<unknown>
+    await act(async () => {
+      createdFolder = ops.createFolder('parent', 'New folder')
+    })
+    await waitFor(() => expect(onCommitted).toHaveBeenCalledTimes(1))
+    rendered.rerender(view(userB, 2))
+    await act(async () => {
+      releaseReaction()
+      await createdFolder
+    })
+
+    // The commit settled through its reaction; only the refresh was withheld.
+    expect(onCommitted).toHaveBeenCalledWith(expect.objectContaining({ op: 'createFolder' }))
+    expect(listChildren).toHaveBeenCalledTimes(1)
+    client.clear()
+  })
+
   it('relocates the shared open-location registry after a move from an instance with no controller', async () => {
     const receipt = await moveResourceReceipt('moved', 'new-parent', 5)
     installClerum({ moveResource: vi.fn(async () => receipt) })
