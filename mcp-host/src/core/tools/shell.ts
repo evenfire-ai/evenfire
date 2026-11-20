@@ -28,9 +28,10 @@ const STATE_DB_COMMAND_PATTERN = /(^|[^A-Za-z0-9_.-])state\.db|\.clerum-state(\/
 // does not parse the shell. Not a sandbox or a security boundary.
 //
 // It runs on the Host event loop, so every check is linear in the command
-// length: split into segments once, find the first `rm`/`dd` per segment, and
-// test its whitespace-split arguments with plain string checks. A lookahead
-// that rescans to the segment end from every `rm` start is quadratic.
+// length: each pass splits into segments once, finds the first `rm`/`dd` per
+// segment, and tests its whitespace-split arguments with plain string checks.
+// There are at most two passes. A lookahead that rescans to the segment end
+// from every `rm` start is quadratic.
 const SHELL_UX_LINE_CONTINUATION = /\\\r?\n/g
 const SHELL_UX_SEGMENT_SEPARATOR = /[;&|\n]/
 const SHELL_UX_RM = /(?:^|[^A-Za-z0-9_.-])rm(?=\s)/
@@ -62,12 +63,7 @@ function shellUxRecursiveRootDelete(args: string[]): boolean {
   )
 }
 
-function shellUxBlocked(rawCommand: string): boolean {
-  // sh removes a backslash-newline before it splits words, so `-r\<newline>f`
-  // reads as `-rf`. Remove it the same way. A bare newline does end the
-  // command. A backslash before CRLF is removed too, although sh keeps the CR
-  // and ends the command there; that can only add a block.
-  const command = rawCommand.replace(SHELL_UX_LINE_CONTINUATION, '')
+function shellUxMatches(command: string): boolean {
   if (SHELL_UX_FORK_BOMB.test(command) || SHELL_UX_DEVICE_REDIRECT.test(command)) return true
   for (const segment of command.split(SHELL_UX_SEGMENT_SEPARATOR)) {
     const rmArgs = shellUxArguments(segment, SHELL_UX_RM)
@@ -76,6 +72,20 @@ function shellUxBlocked(rawCommand: string): boolean {
     if (ddArgs?.some(arg => SHELL_UX_DD_DEVICE_TARGET.test(arg))) return true
   }
   return false
+}
+
+function shellUxBlocked(rawCommand: string): boolean {
+  // sh removes a backslash-newline before it splits words, so `-r\<newline>f`
+  // reads as `-rf`. The joined text is checked for that. A bare newline does
+  // end the command.
+  // sh does not join every backslash-newline. Inside a `#` comment or single
+  // quotes the backslash stays literal, and `\<CR><LF>` escapes the CR, so the
+  // LF still ends the command. In those cases the next line runs as its own
+  // command, but joining glues it to the line before. The raw text, split at
+  // its own newlines, is checked too. Either match blocks.
+  const joined = rawCommand.replace(SHELL_UX_LINE_CONTINUATION, '')
+  if (shellUxMatches(joined)) return true
+  return joined !== rawCommand && shellUxMatches(rawCommand)
 }
 
 // Node/libuv error codes (E2BIG, ENOMEM, ERR_INVALID_ARG_VALUE) are fixed
