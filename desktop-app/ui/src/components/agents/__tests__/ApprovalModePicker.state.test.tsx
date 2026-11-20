@@ -661,6 +661,8 @@ interface ModelWrite {
   mode: ApprovalMode
   outcome: Outcome
   settled: boolean
+  /** `requestSeq` when its PATCH started. */
+  startedAt: number
 }
 interface Model {
   screen: Screen
@@ -677,6 +679,10 @@ interface Model {
   limit: Record<ChatKey, ApprovalMode>
   /** Desktop's Host-wide ceiling (D2), the blank chat's limit. Null: unknown. */
   hostCeiling: ApprovalMode | null
+  /** Bumps as each request that answers with the ceiling starts: a refresh, a PATCH, a re-read. */
+  requestSeq: number
+  /** `requestSeq` of the request whose answer set `hostCeiling`; 0 for the seeds' passive fill. */
+  hostCeilingSeq: number
   /** The blank chat's held pick. */
   held: ApprovalMode
 }
@@ -698,7 +704,15 @@ function closeMenu(model: Model): void {
 }
 
 function startWrite(model: Model, chat: ChatKey, mode: ApprovalMode, outcome: Outcome, real: Real) {
-  model.writes.push({ id: model.writes.length + 1, chat, mode, outcome, settled: false })
+  model.requestSeq += 1
+  model.writes.push({
+    id: model.writes.length + 1,
+    chat,
+    mode,
+    outcome,
+    settled: false,
+    startedAt: model.requestSeq,
+  })
   model.expectedCalls.push(chat)
   real.pendingOutcomes.push(outcome)
 }
@@ -752,10 +766,20 @@ function dropConfirmationAboveLimit(model: Model): void {
   }
 }
 
-/** Desktop applied a fresh snapshot of `chat` taken now: its limit and the Host ceiling move. */
-function freshSnapshot(model: Model, chat: ChatKey): void {
+/**
+ * Desktop applied a fresh answer for `chat` taken now, from a request that
+ * started at `requestSeq`. The chat's limit moves. The Host ceiling moves
+ * unless a request that started later already answered (D2).
+ */
+function freshSnapshot(model: Model, chat: ChatKey, requestSeq: number): void {
   model.limit[chat] = model.ceiling
+  freshHostCeiling(model, requestSeq)
+}
+
+function freshHostCeiling(model: Model, requestSeq: number): void {
+  if (model.hostCeilingSeq > requestSeq) return
   model.hostCeiling = model.ceiling
+  model.hostCeilingSeq = requestSeq
 }
 
 function assertInvariants(model: Model, real: Real): void {
@@ -844,11 +868,12 @@ class ToggleMenu implements fc.AsyncCommand<Model, Real> {
       model.menuOpen = true
       // D4: opening re-reads the limit: the chat's own session, or for the
       // blank chat the Host ceiling from the catalog.
+      model.requestSeq += 1
       if (model.screen === 'blank') {
-        model.hostCeiling = model.ceiling
+        freshHostCeiling(model, model.requestSeq)
       } else {
         model.failedRequest[model.screen] = null
-        freshSnapshot(model, model.screen)
+        freshSnapshot(model, model.screen, model.requestSeq)
       }
     }
     // A busy chip ignores the click: the menu stays closed and the error stays.
@@ -1002,8 +1027,14 @@ class Settle implements fc.AsyncCommand<Model, Real> {
     write.settled = true
     if (write.outcome === 'ok' || write.outcome === 'dropped') model.stored[write.chat] = write.mode
     // The PATCH answer (ok) or the re-read after a failure carries the Host's
-    // ceiling now. A 404 for a seen chat carries nothing.
-    if (write.outcome !== 'gone') freshSnapshot(model, write.chat)
+    // ceiling now. The answer's request started with the PATCH; the re-read
+    // starts now. A 404 for a seen chat carries nothing.
+    if (write.outcome === 'ok') {
+      freshSnapshot(model, write.chat, write.startedAt)
+    } else if (write.outcome !== 'gone') {
+      model.requestSeq += 1
+      freshSnapshot(model, write.chat, model.requestSeq)
+    }
     // The Host ceiling is the blank chat's limit, so its confirmation can close here.
     dropConfirmationAboveLimit(model)
     // S3: only the latest write for its chat decides that chat's error.
@@ -1099,6 +1130,8 @@ describe('ApprovalModePicker state — A6 command model', () => {
             // The seeds were read under ceiling allow_all; the first filled the Host ceiling.
             limit: { 'chat-1': 'allow_all', 'chat-2': 'allow_all' },
             hostCeiling: 'allow_all',
+            requestSeq: 0,
+            hostCeilingSeq: 0,
             held: 'manual',
           }
           await fc.asyncModelRun(() => ({ model, real }), commands)

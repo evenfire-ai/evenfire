@@ -404,19 +404,75 @@ describe('hostApprovalModeStore — Host limit', () => {
     const read = deferred<SessionApprovalSnapshot>()
     const { client, readSessionApproval, setApprovalMode } = transport()
     readSessionApproval.mockReturnValueOnce(read.promise)
-    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'auto' }))
 
     // The menu opens and its read leaves; the user picks before it returns.
     const refresh = refreshHostApprovalModeLimit(client, AGENT, CHAT)
-    setApprovalMode.mockResolvedValueOnce(snapshot('auto'))
+    // An admin raises the ceiling between the two reads, so the PATCH answer carries the newer one.
+    setApprovalMode.mockResolvedValueOnce(snapshot('auto', { modeCeiling: 'allow_all' }))
     await expect(selectHostApprovalMode(client, AGENT, CHAT, 'auto')).resolves.toBe(true)
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('allow_all')
     // The Host answered the read before the PATCH landed.
-    read.resolve(snapshot('manual'))
+    read.resolve(snapshot('manual', { modeCeiling: 'auto' }))
     await refresh
 
     expect(readSessionApproval).toHaveBeenCalledTimes(1)
     expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('auto')
     expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Auto-approve')
+    expect(readHostApprovalMode(AGENT, CHAT).modeLimit).toBe('allow_all')
+    // The Host-wide ceiling keeps the PATCH's answer: that request started after the read.
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('allow_all')
+  })
+
+  it('keeps the ceiling of the refresh that started last when an earlier one lands after it', async () => {
+    const chatRead = deferred<SessionApprovalSnapshot>()
+    const catalogRead = deferred<'allow_all'>()
+    const readHostModeCeiling = vi.fn(() => catalogRead.promise)
+    const { client, readSessionApproval } = transport({ readHostModeCeiling })
+    readSessionApproval.mockReturnValueOnce(chatRead.promise)
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'auto' }))
+
+    // The menu opens on the chat, then on the blank chat; no write happens in between.
+    const chatRefresh = refreshHostApprovalModeLimit(client, AGENT, CHAT)
+    const blankRefresh = refreshHostApprovalModeLimit(client, AGENT, null)
+    catalogRead.resolve('allow_all')
+    await blankRefresh
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('allow_all')
+    // The chat's read was answered before the admin raised the ceiling.
+    chatRead.resolve(snapshot('manual', { modeCeiling: 'auto' }))
+    await chatRefresh
+
+    expect(readSessionApproval).toHaveBeenCalledTimes(1)
+    // The chat's own snapshot still applies to the chat.
+    expect(readHostApprovalMode(AGENT, CHAT).modeLimit).toBe('auto')
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('allow_all')
+  })
+
+  it('a newer answer with the same ceiling still outranks an older one that lands later', async () => {
+    const answers = [
+      deferred<SessionApprovalSnapshot['modeCeiling']>(),
+      deferred<SessionApprovalSnapshot['modeCeiling']>(),
+    ]
+    const readHostModeCeiling = vi
+      .fn<() => Promise<SessionApprovalSnapshot['modeCeiling']>>()
+      .mockResolvedValueOnce('auto')
+      .mockReturnValueOnce(answers[0]!.promise)
+      .mockReturnValueOnce(answers[1]!.promise)
+    const { client } = transport({ readHostModeCeiling })
+    await refreshHostApprovalModeLimit(client, AGENT, null)
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+
+    // Two chats the Host has no row for read the ceiling from the catalog.
+    const older = refreshHostApprovalModeLimit(client, AGENT, null)
+    const newer = refreshHostApprovalModeLimit(client, AGENT, 'chat-new')
+    answers[1]!.resolve('auto')
+    await newer
+    // Answered before an admin lowered the ceiling back to auto.
+    answers[0]!.resolve('allow_all')
+    await older
+
+    expect(readHostModeCeiling).toHaveBeenCalledTimes(3)
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
   })
 
   it('shares one read between refreshes of the same chat that overlap', async () => {
