@@ -216,8 +216,9 @@ startup.
 
 The classifier approves only commands that read, list or search inside the workspace, read-only git commands, and commands that compute a result without writing files, reading secrets or using the network. Deletes, installs, network calls, secrets, identity and memory files, scheduling, privilege changes and hidden commands show the card. So does a command that argues for its own approval. An approval is a model's judgment, not a security boundary: in auto, `http_request` still runs with no card.
 
-When the Host has an OpenAI credential, auto judges shell with
-`spec.approval.shellClassifierModel`. Absent or blank means `gpt-5.5`. That
+When the Host's model provider (`spec.model.provider`) is `openai`, auto
+judges shell with `spec.approval.shellClassifierModel`, using the Host's
+OpenAI key. Absent or blank means `gpt-5.5`. That
 call does not follow the chat model: a `gpt-5.4-mini` chat, and a failover
 pair, are still judged by the shell classifier model. The call asks for
 reasoning effort `none`, so the short reply is not spent on hidden reasoning.
@@ -229,11 +230,14 @@ The OpenAI models the classifier may call are an allowlist. It contains
 `gpt-4.1`, `gpt-4.1-mini`, and `gpt-5.4-mini` show the shell card. Pinning
 `shellClassifierModel` to one of those shows the card too.
 
-With no OpenAI credential, auto judges shell on Claude and on Bedrock
+On any other provider, an `openai-api-key` in the Host's Secret does not
+enable the classifier model, because mcp-host reads only the credentials of
+the Host's own provider. Auto then judges shell on Claude and on Bedrock
 Anthropic models, using the model serving the turn. When failover is serving
 a fallback, that pair is the one checked and called. A pair the table refuses
 shows the card. Azure, the subscription providers, and Vertex and Gemini show
-the card. `http_request` still runs with no card.
+the card. `http_request` still runs with no card. In dev mode, which reads keys
+from the environment, any `OPENAI_API_KEY` enables the classifier model.
 
 An explicit `tools.shell_exec: true` keeps a card on every shell call in auto,
 with no classifier and no shell memory. Remove the line if auto should judge

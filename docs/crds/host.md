@@ -29,7 +29,7 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 | `spec.approval` | object | no | Tool approval configuration -- controls who can approve tool executions, the approval-mode ceiling, and which channels may change the mode. |
 | `spec.approval.defaultPolicy` | string | no | Who can approve tool calls. One of: `cli_only` (HTTP endpoints only), `channel_users` (any authorized channel user), `designated_approvers` (only users in approvers list). An explicit `cli_only` or `designated_approvers` also governs approval-mode raises from Telegram, email, Slack and Teams: `cli_only` refuses them, and `designated_approvers` allows only a listed approver. See [Configure approvals](../how-to/configure-approvals.md#channel-cap). |
 | `spec.approval.modeCeiling` | string | no | Highest interactive approval mode sessions on this Host may run: `manual`, `auto`, or `allow_all`. Absent means `manual`. Read from this CR only. See [Approval mode ceiling](#approval-mode-ceiling). |
-| `spec.approval.shellClassifierModel` | string | no | Model the shell classifier calls when this Host has an OpenAI credential. Absent means `gpt-5.5`. A model the classifier does not allow shows the shell card. With no OpenAI credential, auto keeps the model serving the turn. |
+| `spec.approval.shellClassifierModel` | string | no | Model the shell classifier calls when this Host's model provider is `openai`. Absent means `gpt-5.5`. A model the classifier does not allow shows the shell card. On any other provider, auto keeps the model serving the turn. |
 | `spec.approval.channels` | object | no | Per-channel-type approval settings for `telegram`, `email`, `slack`, and `teams`. |
 | `spec.approval.channels.telegram` | object | no | Telegram approval config. |
 | `spec.approval.channels.telegram.enabled` | boolean | no | Whether Telegram users can approve. |
@@ -144,7 +144,7 @@ A Host whose approval policy comes only from the ConfigMap has ceiling `manual`,
 
 An explicit `shell_exec: true`, including the example above, keeps a card on every `shell_exec` in auto, with no classifier and no shell memory. Remove that line if auto should judge shell. Allow-all runs it with no card. A guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules) keeps its card in every interactive mode, allow-all included.
 
-`spec.approval.shellClassifierModel` is the model that judges shell when the Host has an OpenAI credential. Absent means `gpt-5.5`. An older CRD prunes the field, which is the same as absent. With no OpenAI credential, auto keeps the model serving the turn. See [Configure approvals](../how-to/configure-approvals.md#classifier-coverage).
+`spec.approval.shellClassifierModel` is the model that judges shell when the Host's model provider (`spec.model.provider`) is `openai`. mcp-host reads only the credentials of the Host's own provider, so on any other provider an `openai-api-key` in the Secret does not enable it, and auto keeps the model serving the turn. Absent means `gpt-5.5`. An older CRD prunes the field, which is the same as absent. See [Configure approvals](../how-to/configure-approvals.md#classifier-coverage).
 
 Apply this CRD before any component writes `modeCeiling` or `allowModeChange`. Until it is applied, the API server prunes the new fields and the ceiling stays manual. An `allowModeChange: false` written before the CRD is lost; write it again after the CRD is applied, before raising the ceiling.
 
