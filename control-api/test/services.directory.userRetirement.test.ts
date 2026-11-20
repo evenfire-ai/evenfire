@@ -86,7 +86,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
@@ -150,7 +150,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
@@ -247,7 +247,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: false }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: false }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: USER_ID }], rowCount: 1 })
@@ -278,7 +278,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
@@ -323,7 +323,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
     mocks.retireParentInTransaction.mockRejectedValueOnce(new Error('audit unavailable'))
 
     await expect(
@@ -346,7 +346,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser(7))
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
@@ -386,7 +386,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: false }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: false }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })

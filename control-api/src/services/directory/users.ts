@@ -361,10 +361,10 @@ async function disableWorkflowApprovalMedium(db: DbClient, userId: string): Prom
 /**
  * Retire a Desktop user under one caller-owned transaction.
  *
- * A user with operator-link history is retained as a lifecycle tombstone. The
- * legacy physical delete remains available only when no such history exists,
- * and its durable operation row makes retries safe even after the user row is
- * gone. Every non-terminal failure throws so the transaction rolls back the
+ * A user with operator-link or OIDC-link history is retained as a lifecycle
+ * tombstone. The legacy physical delete remains available only when no such
+ * history exists, and its durable operation row makes retries safe even after
+ * the user row is gone. Every non-terminal failure throws so the transaction rolls back the
  * pending operation, governed events, link state, and user mutation together.
  */
 export async function retireDesktopUser(
@@ -502,7 +502,7 @@ export async function retireDesktopUser(
          SELECT 1
            FROM gfs_desktop_operator_links
           WHERE user_id = $1::uuid
-       ) AS has_link_history,
+       ) AS has_operator_link_history,
        EXISTS(
          SELECT 1
            FROM user_oidc_links
@@ -511,9 +511,9 @@ export async function retireDesktopUser(
       [targetUserId]
     )
     const historyRow = history.rows[0] as
-      | { has_link_history?: unknown; has_oidc_link?: unknown }
+      | { has_operator_link_history?: unknown; has_oidc_link?: unknown }
       | undefined
-    const hasOperatorLinkHistory = historyRow?.has_link_history === true
+    const hasOperatorLinkHistory = historyRow?.has_operator_link_history === true
     // An OIDC link is identity history (user_oidc_links.user_id is ON DELETE
     // RESTRICT): the member is retained as a retired row, never purged.
     const hasLinkHistory = hasOperatorLinkHistory || historyRow?.has_oidc_link === true
@@ -657,8 +657,8 @@ export type RetireDesktopUserInTransactionInput = {
   idempotencyKey: string
   requestId: string | null
   /**
-   * Always leave a `retired` tombstone, even without operator-link history
-   * (where retireDesktopUser hard-deletes). A hand-over needs the tombstone and
+   * Always leave a `retired` tombstone, even without operator-link or OIDC-link
+   * history (where retireDesktopUser hard-deletes). A hand-over needs the tombstone and
    * must not fail on FKs that a hard delete could hit.
    */
   retainWithoutLinkHistory?: boolean
@@ -682,7 +682,8 @@ export async function retireDesktopUserInTransaction(
 /**
  * Retire a user account through the existing account-management contract.
  * Teams are retained even when this leaves them with zero active members.
- * Accounts with retained operator-link history are intentionally not purged.
+ * Accounts with retained operator-link or OIDC-link history are intentionally
+ * not purged.
  */
 export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserResult> {
   return withTransaction(async db => {
@@ -708,7 +709,8 @@ export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserRe
     }
 
     // An OIDC link is identity history: user_oidc_links.user_id is ON DELETE
-    // RESTRICT, so a linked member is retired (retained row), never purged.
+    // RESTRICT. Refuse the hard delete; a linked member can only be retired
+    // through retireDesktopUser, which keeps the row.
     const oidcLink = await db.query(
       `SELECT 1
          FROM user_oidc_links
