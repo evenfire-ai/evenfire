@@ -233,6 +233,9 @@ describe('oidcEmailState', () => {
         ['two @', 'member@other@example.test'],
         ['no dot in the domain', 'member@example'],
         ['more than 320 characters', `${'a'.repeat(308)}@example.test`],
+        ['a dotted capital I (U+0130) in the domain', 'member@\u0130nfo.example.test'],
+        ['a Kelvin sign (U+212A) in the domain', 'member@\u212Aelvin.example.test'],
+        ['a non-ASCII local part', 'jos\u00e9@example.test'],
       ] as const
     ).map(
       ([shape, email]) =>

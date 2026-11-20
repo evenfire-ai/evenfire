@@ -562,6 +562,42 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     expect(await watchedTables()).toEqual(before)
   })
 
+  it('a non-ASCII claim that lower() folds onto an existing address refuses with email_claim_missing and writes nothing', async () => {
+    // PostgreSQL lower() folds U+0130 to 'i' and U+212A (Kelvin sign) to 'k'.
+    const fake = entraFake('fake-entra-non-ascii-email')
+    const local = uniqueLabel('folded')
+    const folded = [
+      [`${local}@info.fixture.test`, `${local}@\u0130nfo.fixture.test`],
+      [`${local}@kelvin.fixture.test`, `${local}@\u212Aelvin.fixture.test`],
+    ] as const
+    for (const [existing, claim] of folded) {
+      await seedUser(existing)
+      const lowered = await testPool.query<{ lowered: string }>(`SELECT lower($1) AS lowered`, [
+        claim,
+      ])
+      expect(lowered.rows).toEqual([{ lowered: existing }])
+    }
+    const before = await watchedTables()
+
+    for (const [, claim] of folded) {
+      const subject = uniqueLabel('folded-subject')
+      const proof = await fake.signIn({
+        sub: subject,
+        tid: ENTRA_TENANT_ID,
+        email: claim,
+        email_verified: true,
+      })
+      expect(proof.attributes.email).toBe(claim)
+      expect(await resolve(fake, proof)).toEqual({
+        status: 'refused',
+        reason: 'email_claim_missing',
+      })
+      expect(await linksFor(subject)).toEqual([])
+    }
+
+    expect(await watchedTables()).toEqual(before)
+  })
+
   it('email_unverified when email_verified is false', async () => {
     const email = `${uniqueLabel('unverified')}@fixture.test`
     await seedUser(email)

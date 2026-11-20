@@ -12,18 +12,21 @@ const NOT_ELIGIBLE: OidcEligibility = Object.freeze({ eligible: false, reason: '
 
 const MAX_EMAIL_LENGTH = 320
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/
+/** Printable ASCII without space: no whitespace, control or non-ASCII characters. */
+const PRINTABLE_ASCII = /^[\x21-\x7e]+$/
 
 /**
- * A plausible address: one '@', a dot in the domain, no whitespace or control
- * characters, at most 320 characters. It is not trimmed: surrounding
- * whitespace makes the claim malformed.
+ * A plausible address: printable ASCII only, one '@', a dot in the domain, at
+ * most 320 characters. It is not trimmed: surrounding whitespace makes the
+ * claim malformed. Non-ASCII is refused because PostgreSQL lower() folds some
+ * non-ASCII letters to ASCII (U+0130 to 'i', U+212A to 'k'), so a claim for a
+ * different mailbox could match another account's lowercased address.
  */
 function isPlausibleEmail(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     value.length <= MAX_EMAIL_LENGTH &&
-    !CONTROL_CHARACTERS.test(value) &&
+    PRINTABLE_ASCII.test(value) &&
     EMAIL_SHAPE.test(value)
   )
 }
