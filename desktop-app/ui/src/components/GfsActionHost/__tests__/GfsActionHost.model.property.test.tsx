@@ -1791,9 +1791,17 @@ class DismissDialog extends OracleEvent {
     })[0]
     if (!close) return
     const action = m.action
+    // Only the host's `running` phase locks the close. Share writes run inside
+    // its own dialog, which may close mid-write: the outcome is still reported
+    // (L1) and still gated by session (S4).
     const running =
       action !== null &&
-      w.submissions.some(s => s.actionToken === action.token && s.calls.some(call => !call.settled))
+      w.submissions.some(
+        s =>
+          s.actionToken === action.token &&
+          familyOf(s.op) !== 'share' &&
+          s.calls.some(call => !call.settled)
+      )
     if (action) action.dismissedAt = tick(w)
     fireEvent.click(close)
     await flush()
@@ -2304,6 +2312,34 @@ const shareOutcomeAfterSwitch = (): Cmd[] => [
   new Rest(),
   new Submit(1),
   new StepUntilSent('revokeGrant'),
+  new SwitchTeam(),
+  new Rest(),
+]
+
+/**
+ * Closing the Share dialog while its removal is in flight is allowed: Share
+ * never enters the host's `running` phase. The outcome is still owed (L1).
+ */
+const closeDuringShareRemoval = (): Cmd[] => [
+  new OpenMenuOn('Docs'),
+  new Rest(),
+  new Choose('share'),
+  new Rest(),
+  new Submit(1),
+  new StepUntilSent('revokeGrant'),
+  new DismissDialog(),
+  new Rest(),
+]
+
+/** The same close, then main switches session: the late outcome is not shown (S4). */
+const shareOutcomeAfterCloseAndSwitch = (): Cmd[] => [
+  new OpenMenuOn('Docs'),
+  new Rest(),
+  new Choose('share'),
+  new Rest(),
+  new Submit(1),
+  new StepUntilSent('revokeGrant'),
+  new DismissDialog(),
   new SwitchTeam(),
   new Rest(),
 ]
@@ -2925,6 +2961,8 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       echoDuringHostRefresh,
       moveThenRename,
       shareOutcomeAfterSwitch,
+      closeDuringShareRemoval,
+      shareOutcomeAfterCloseAndSwitch,
       choiceReplacesOpeningCheck,
       downloadAfterSwitch,
     ])
