@@ -678,6 +678,69 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     })
   })
 
+  it('an Entra guest with the required role creates an account, and without the role is not_eligible', async () => {
+    const fake = entraFake('fake-entra-guest-creation', {
+      CONTROL_API_OIDC_REQUIRED_ROLE: MEMBER_ROLE,
+      CONTROL_API_OIDC_ALLOW_GUESTS: 'true',
+      CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: newMemberTeamId,
+    })
+    const subject = uniqueLabel('guest-create-subject')
+    const local = uniqueLabel('guest.create')
+    const storedEmail = `${local}@guest.fixture.test`
+    const guestClaims = {
+      sub: subject,
+      tid: ENTRA_TENANT_ID,
+      acct: 1,
+      email: `${local}@Guest.Fixture.Test`,
+      email_verified: true,
+      name: 'Created Guest',
+    }
+
+    const before = await watchedTables()
+    const withoutRole = await resolve(fake, await fake.signIn(guestClaims))
+    expect(withoutRole).toEqual({ status: 'refused', reason: 'not_eligible' })
+    expect(await watchedTables()).toEqual(before)
+
+    const result = await resolve(fake, await fake.signIn({ ...guestClaims, roles: [MEMBER_ROLE] }))
+
+    expect(result.status).toBe('resolved')
+    if (result.status !== 'resolved') return
+    const userId = result.account.userId
+    expect(result).toEqual({
+      status: 'resolved',
+      account: {
+        userId,
+        email: storedEmail,
+        lifecycleState: 'active',
+        lifecycleVersion: '1',
+        created: { account: true, link: true },
+      },
+      guest: true,
+    })
+    expect(await usersWithEmail(storedEmail)).toEqual([
+      { id: userId, email: storedEmail, name: 'Created Guest', lifecycle_state: 'active' },
+    ])
+    expect(await linksFor(subject)).toEqual([
+      {
+        connection_id: 'fake-entra-guest-creation',
+        issuer: ENTRA_ISSUER,
+        subject,
+        user_id: userId,
+      },
+    ])
+    const profile = await testPool.query(`SELECT 1 FROM profiles WHERE user_id = $1::uuid`, [
+      userId,
+    ])
+    expect(profile.rowCount).toBe(1)
+    const memberships = await testPool.query(
+      `SELECT team_id::text AS team_id, role, status FROM team_members WHERE user_id = $1::uuid`,
+      [userId]
+    )
+    expect(memberships.rows).toEqual([
+      { team_id: newMemberTeamId, role: 'member', status: 'active' },
+    ])
+  })
+
   it('an unknown new-member team refuses with provider_configuration and creates no user', async () => {
     const fake = entraFake('fake-entra-unknown-team', {
       CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: randomUUID(),
