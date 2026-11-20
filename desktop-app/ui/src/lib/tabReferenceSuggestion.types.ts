@@ -1,3 +1,5 @@
+import type { PreviewTabPayload } from './workspaceTabs.types'
+
 /**
  * The location a Files page has resolved: its leaf `gfsUri` and whether it is
  * a file or a folder. `null` at the virtual root or once the page unmounts.
@@ -19,3 +21,8 @@ export type TabReferenceTarget = {
  * value it had before a change, even after visiting other targets.
  */
 export type TabReferenceRevision = number
+
+/** What the active tab shows from GFS while its own route is on screen. */
+export type ShownTabLocation =
+  | { kind: 'preview'; preview: PreviewTabPayload }
+  | { kind: 'files'; location: NonNullable<FilesResolvedLocation> }

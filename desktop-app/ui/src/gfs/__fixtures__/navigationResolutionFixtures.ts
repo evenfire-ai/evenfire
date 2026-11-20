@@ -32,6 +32,7 @@ export type GfscResourceRecord = {
   bytes: number
   kind?: 'file' | 'directory'
   drive?: string
+  parentResourceId?: string | null
   pathCache?: string | null
 }
 
@@ -71,7 +72,7 @@ export async function gfscResourceView(record: GfscResourceRecord): Promise<GfsR
   return toView({
     resourceId: record.resourceId,
     drive: record.drive ?? 'main',
-    parentResourceId: null,
+    parentResourceId: record.parentResourceId ?? null,
     name: record.name,
     kind: record.kind ?? 'file',
     pathCache: record.pathCache ?? `/${record.name}`,

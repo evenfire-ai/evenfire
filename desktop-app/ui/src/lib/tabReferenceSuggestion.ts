@@ -1,20 +1,45 @@
 import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { DESKTOP_ROUTES } from '@constants/navigation'
-import type { NavItem } from '@/uiTypes'
+import type { ComposerReferenceAttachment, NavItem } from '@/uiTypes'
 import type { GfsWatchEvent } from '../../../src/types'
 import { parseGfsWatchKey } from './gfsWatchKeys'
 import type {
   FilesResolvedLocation,
+  ShownTabLocation,
   TabReferenceRevision,
   TabReferenceTarget,
 } from './tabReferenceSuggestion.types'
 import type { WorkspaceTab } from './workspaceTabs.types'
 
 /**
+ * What the active tab shows from GFS right now: a preview, or the location
+ * Files has resolved at its path. The active tab only counts while its own
+ * route is shown: an overlay route such as the apps picker keeps the tab active
+ * without showing its file. The watch and the suggested reference both read
+ * this, so the file the chat offers is always one the window is watching.
+ */
+export function shownTabLocation(
+  activeTab: WorkspaceTab | null | undefined,
+  navItem: NavItem,
+  filesResolvedLocation: FilesResolvedLocation
+): ShownTabLocation | null {
+  if (activeTab?.kind === 'preview' && navItem === DESKTOP_ROUTES.preview) {
+    return activeTab.preview ? { kind: 'preview', preview: activeTab.preview } : null
+  }
+  if (activeTab?.kind === 'files' && navItem === DESKTOP_ROUTES.files) {
+    const path = activeTab.files?.path ?? null
+    // The resolved location lags the tab's path by a commit while Files
+    // navigates; until they agree, it describes the previous location.
+    if (filesResolvedLocation === null || filesResolvedLocation.gfsUri !== path) return null
+    return { kind: 'files', location: filesResolvedLocation }
+  }
+  return null
+}
+
+/**
  * The file the active tab offers as a chat reference, or `null` when it offers
- * none (no file in view, an unavailable preview, or a URI without a stable rid).
- * The active tab only counts while its own route is shown: an overlay route
- * such as the apps picker keeps the tab active without showing its file.
+ * none (no file in view, an unavailable preview, a folder, or a URI without a
+ * stable rid).
  */
 export function deriveTabReferenceTarget(
   activeTab: WorkspaceTab | null | undefined,
@@ -22,9 +47,10 @@ export function deriveTabReferenceTarget(
   filesResolvedLocation: FilesResolvedLocation,
   revision: TabReferenceRevision
 ): TabReferenceTarget | null {
-  if (activeTab?.kind === 'preview' && navItem === DESKTOP_ROUTES.preview) {
-    const preview = activeTab.preview
-    if (!preview || preview.unavailable) return null
+  const shown = shownTabLocation(activeTab, navItem, filesResolvedLocation)
+  if (shown?.kind === 'preview') {
+    const preview = shown.preview
+    if (preview.unavailable) return null
     const gfsUri = normalizeGfsResourceUri(preview.gfsUri)
     if (!gfsUri) return null
     // A preview already re-keys on every observed change through
@@ -34,22 +60,37 @@ export function deriveTabReferenceTarget(
       prefetchKey: `${gfsUri}#${preview.reloadVersion ?? 0}#${preview.resourceVersion ?? ''}`,
     }
   }
-  if (activeTab?.kind === 'files' && navItem === DESKTOP_ROUTES.files) {
-    const path = activeTab.files?.path ?? null
-    // The resolved location lags the tab's path by a commit while Files
-    // navigates; until they agree, its kind describes the previous location.
-    if (
-      filesResolvedLocation === null ||
-      filesResolvedLocation.gfsUri !== path ||
-      filesResolvedLocation.kind !== 'file'
-    ) {
-      return null
-    }
-    const gfsUri = normalizeGfsResourceUri(filesResolvedLocation.gfsUri)
+  if (shown?.kind === 'files') {
+    if (shown.location.kind !== 'file') return null
+    const gfsUri = normalizeGfsResourceUri(shown.location.gfsUri)
     if (!gfsUri) return null
     return { gfsUri, prefetchKey: `${gfsUri}#r${revision}` }
   }
   return null
+}
+
+/**
+ * Whether the composer already references the file at `gfsUri`. Files are told
+ * apart by their normalized URI, never by the reference id: the picker and a
+ * resend build different ids for the same file.
+ */
+export function isGlobalFileReferenced(
+  references: readonly ComposerReferenceAttachment[],
+  gfsUri: string
+): boolean {
+  const target = normalizeGfsResourceUri(gfsUri)
+  if (target === null) return false
+  return references.some(
+    reference =>
+      reference.type === 'global_file' && normalizeGfsResourceUri(reference.gfsUri) === target
+  )
+}
+
+/** The Global Files references a message would carry, the kind the file cap counts. */
+export function countGlobalFileReferences(
+  references: readonly ComposerReferenceAttachment[]
+): number {
+  return references.filter(reference => reference.type === 'global_file').length
 }
 
 /**
