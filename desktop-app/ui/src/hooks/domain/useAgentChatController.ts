@@ -1794,6 +1794,11 @@ export function useAgentChatController({
     tracker,
   ])
 
+  // Only chat-vs-not matters to the selection effect; keying it on the exact
+  // route would re-run (and reset the drawer's chat) when moving between two
+  // non-chat tabs such as Files and Preview.
+  const isChatRoute = navItem === DESKTOP_ROUTES.chat
+
   // Agent selection → load chats
   useEffect(() => {
     if (!selectedAgent || isHostAccessBlocked(selectedAgent)) {
@@ -1937,7 +1942,7 @@ export function useAgentChatController({
         await switchForEffect(requestedSelection.chatId)
         return
       }
-      if (navItem === DESKTOP_ROUTES.chat) {
+      if (isChatRoute) {
         const latest = merged[0]
         if (latest) {
           autoSelectedChatIdRef.current = latest.id
@@ -1956,7 +1961,7 @@ export function useAgentChatController({
     beginSelectionIntent,
     cancelOlderMessagesLoad,
     currentTeamId,
-    navItem,
+    isChatRoute,
     selectedAgent,
     isHostAccessBlocked,
     settleChatMessagesLoading,

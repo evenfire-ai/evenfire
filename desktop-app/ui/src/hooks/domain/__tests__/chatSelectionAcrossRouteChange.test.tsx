@@ -3,8 +3,9 @@
  * Regression tests for opening a chat session while coming from ANOTHER route
  * (the Apps embed, the agent workspace, settings…).
  *
- * The agent-selection effect in `useAgentChatController` depends on `navItem`
- * (deps `[currentTeamId, navItem, selectedAgent]`), so a route change re-runs it.
+ * The agent-selection effect in `useAgentChatController` depends on whether the
+ * route is chat (deps `[currentTeamId, isChatRoute, selectedAgent]`), so a route
+ * change that enters or leaves chat re-runs it.
  * When it re-runs with no pending selection it takes its reset branch
  * (`activeChatId -> null`, messages cleared, spinner off) — which `AgentWorkspace`
  * renders as the "New chat with <agent>" empty state — and then auto-selects
@@ -233,7 +234,7 @@ describe('selecting a chat session across a route change', () => {
   it('characterization: an imperative switch alone does NOT survive a route change', async () => {
     // Why the selector must not use `switchToChat` when arriving from another
     // route. This pins the effect behaviour the fix routes around — if the effect
-    // ever stops resetting on a bare route change, revisit the guard in
+    // ever stops resetting when the route enters chat, revisit the guard in
     // `useAppController.handleSelectChatAgent` (the fast path could widen again).
     clerum.chat.getIndex.mockResolvedValue(indexWith(TWO_CHATS))
     const { result, rerender } = renderController({ navItem: 'chat' })
