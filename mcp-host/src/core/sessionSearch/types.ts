@@ -2,9 +2,9 @@
  * T3.1 — shared types for `clerum__session_search` (tool + REST endpoint).
  *
  * The same backend handler serves both surfaces; the only difference is how
- * `userId` is derived (sourceMessage.sender vs. JWT `auth.sub`). Both call
- * sites land in `SessionSearchService.search` with the user already resolved
- * server-side.
+ * `userId` is derived (sourceMessage.sender vs. rpc-proxy's trusted edge).
+ * Both call sites land in `SessionSearchService.search` with the user already
+ * resolved server-side.
  */
 
 export interface SessionSearchArgs {
@@ -17,7 +17,7 @@ export interface SessionSearchArgs {
   /**
    * Authenticated user identifier. ALWAYS derived server-side. The tool
    * resolves it from `sourceMessage.sender`; the REST handler resolves it
-   * from the verified JWT `auth.sub`. Never from caller input.
+   * from rpc-proxy's validated edge context. Never from caller input.
    */
   userId: string
   /**

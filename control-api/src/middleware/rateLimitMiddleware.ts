@@ -6,6 +6,7 @@ import { rateLimitHitsTotal } from '../observability/metrics.js'
 import { boundedBucketKey } from '../services/rateLimitBucketKey.js'
 import {
   RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
+  type RateLimitCheck as RateLimitCount,
   checkAndIncrement,
 } from '../services/rateLimiterService.js'
 import { ProcessMemoryRateLimiter } from './processMemoryRateLimiter.js'
@@ -26,6 +27,12 @@ export type RateLimitEnforcerOptions = {
   maxPerMinute: number
   onBackendUnavailable: RateLimitBackendUnavailableMode
   onLimited?: (req: Request, res: Response, retryAfterSeconds: number) => void
+  /**
+   * The request's deadline, for a limiter inside a deadline-bound authority
+   * prefix. When it aborts before Postgres answers, the request is treated
+   * as one the backend could not count: `onBackendUnavailable` decides.
+   */
+  deadlineSignal?: (req: Request) => AbortSignal | undefined
 }
 
 /**
@@ -103,6 +110,11 @@ function writeRateLimitHeaders(
  *         per minute while Postgres is unavailable.
  *   - A 503 carries no `X-RateLimit-*` headers, including ones an earlier
  *     limiter on the same route set, because no count backs them.
+ *   - With `deadlineSignal`, a request whose deadline aborts before Postgres
+ *     answers is handled as `backendAvailable: false` (the same
+ *     `onBackendUnavailable` policy). The statement still finishes on the
+ *     limiter pool; a late count it commits is counted by both backends,
+ *     which only denies sooner.
  */
 export function rateLimitMiddleware(
   opts: RateLimitEnforcerOptions & { getBucketKey: (req: Request) => string | null }
@@ -124,6 +136,33 @@ export function rateLimitMiddleware(
       }
     })()
   }
+}
+
+/**
+ * The limiter's answer, or `'deadline'` when `signal` aborts first. A late
+ * answer is dropped and a late rejection observed, so neither escapes.
+ */
+function countBeforeDeadline(
+  counted: Promise<RateLimitCount>,
+  signal: AbortSignal | undefined
+): Promise<RateLimitCount | 'deadline'> {
+  if (!signal) return counted
+  counted.then(undefined, () => undefined)
+  if (signal.aborted) return Promise.resolve('deadline')
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve('deadline')
+    signal.addEventListener('abort', onAbort, { once: true })
+    counted.then(
+      result => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(result)
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      }
+    )
+  })
 }
 
 /** Remove every quota family when no authoritative count may be advertised. */
@@ -148,11 +187,17 @@ export type RateLimitDecision =
  * Charges one request to `key` and returns the decision without touching any
  * response, so a handler that owns its response can decide when (and whether)
  * the limiter's headers are written. Metrics and the warn lines are emitted
- * here because they describe the decision, not the response.
+ * here because they describe the decision, not the response. When
+ * `deadline` aborts before Postgres answers, the request is decided as one the
+ * backend could not count (the `onBackendUnavailable` policy).
  */
-export type RateLimitCheck = (key: string, log?: Logger) => Promise<RateLimitDecision>
+export type RateLimitCheck = (
+  key: string,
+  log?: Logger,
+  deadline?: AbortSignal
+) => Promise<RateLimitDecision>
 
-export type RateLimitCheckOptions = Omit<RateLimitEnforcerOptions, 'onLimited'>
+export type RateLimitCheckOptions = Omit<RateLimitEnforcerOptions, 'onLimited' | 'deadlineSignal'>
 
 /**
  * Builds the pure half of the limiter. Create it once per route set, not per
@@ -209,10 +254,14 @@ export function createRateLimitCheck(opts: RateLimitCheckOptions): RateLimitChec
     }
   }
 
-  return async function check(rawKey: string, log?: Logger): Promise<RateLimitDecision> {
+  return async function check(
+    rawKey: string,
+    log?: Logger,
+    deadline?: AbortSignal
+  ): Promise<RateLimitDecision> {
     const key = boundedBucketKey(rawKey)
-    const result = await checkAndIncrement(key, opts.maxPerMinute)
-    if (!result.backendAvailable) {
+    const result = await countBeforeDeadline(checkAndIncrement(key, opts.maxPerMinute), deadline)
+    if (result === 'deadline' || !result.backendAvailable) {
       if (processMemory === null) return unavailable(log)
       const decision = await processMemory.hit(key)
       if (decision.outcome === 'key_cap_reached') return unavailable(log)
@@ -276,7 +325,7 @@ export function writeRateLimitDecisionHeaders(res: Response, decision: RateLimit
 export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLimitEnforcer {
   const check = createRateLimitCheck(opts)
   return async function enforce(req: Request, res: Response, rawKey: string): Promise<boolean> {
-    const decision = await check(rawKey, req.log)
+    const decision = await check(rawKey, req.log, opts.deadlineSignal?.(req))
     writeRateLimitDecisionHeaders(res, decision)
     if (decision.outcome === 'allowed') return true
     if (decision.outcome === 'unavailable') {

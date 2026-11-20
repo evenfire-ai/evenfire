@@ -4,6 +4,7 @@ import {
   AgentActivityProvider,
   AgentChatProviders,
   AuthContext,
+  ChatLinkActivationContext,
   DesktopStateProvider,
   McpRuntimeProvider,
   NavigationContext,
@@ -52,6 +53,7 @@ import { useEmbedOwnership } from '@hooks/useEmbedOwnership'
 import { useGfsWatchKeyReactions } from '@hooks/useGfsWatchKeyReactions'
 import { useSidebarResize } from '@hooks/useSidebarResize'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
+import { createChatLinkActivation } from '@lib/chatLinkActivation'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import { releaseComposerDraftForWorkspaceTab } from '@lib/composerDraftStore'
@@ -65,7 +67,7 @@ import {
   expireGfsPreviewTabs,
   markPluginGfsPreviewUnavailable,
 } from '@lib/gfsEntityChangeState'
-import { resolveGfsPreview } from '@lib/gfsPreview'
+import { gfsResourceOpenTarget, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
 import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
@@ -1264,19 +1266,9 @@ export function App() {
 
   React.useEffect(() => {
     const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
-      // One detection rule for "previewable, and as what" (spec 18 §3.B.2), the
-      // same one Files uses. Only a file can be previewable; a folder always
-      // opens in the browser.
-      const preview =
-        resource.kind === 'file'
-          ? resolveGfsPreview({
-              gfsUri: resource.gfsUri,
-              name: resource.name,
-              bytes: resource.bytes ?? 0,
-              version: resource.version,
-            })
-          : null
-      if (preview?.kind === 'image') {
+      const target = gfsResourceOpenTarget(resource)
+      if (target.kind === 'preview' && target.preview.kind === 'image') {
+        const preview = target.preview
         // An image opens as an overlay OVER the plugin, keeping the user in the
         // plugin's context (the intended modal). The embed's WebContentsView
         // paints above renderer DOM, so it has to be hidden for the overlay to
@@ -1292,19 +1284,19 @@ export function App() {
         })
         return
       }
-      if (preview) {
+      if (target.kind === 'preview') {
         // Other previewable kinds (markdown, video, …) open directly as a
         // workspace preview tab. Routing them through openFilesSection would seed
         // a files tab that immediately re-previews and unmounts, leaving a tab
         // that jumps back to the preview whenever it is selected (R1-H3).
-        vm.openPreviewSection(preview)
+        vm.openPreviewSection(target.preview)
         return
       }
       // Folders and non-previewable files belong in the full browser, where the
       // user gets breadcrumbs, download, and sharing. Open (or focus) a files tab
       // AT this gfsUri — dedupe by path focuses the tab already showing it, or
       // spawns a new instance (mini-spec 06 §3).
-      vm.openFilesSection(resource.gfsUri)
+      vm.openFilesSection(target.gfsUri)
     })
     return () => off?.()
   }, [vm.openFilesSection, vm.openPreviewSection])
@@ -4085,6 +4077,27 @@ export function App() {
     ]
   )
 
+  const chatLinkActivation = React.useMemo(
+    () =>
+      createChatLinkActivation({
+        beginUserNavigationIntent: vm.beginUserNavigationIntent,
+        isNavigationIntentCurrent: vm.isNavigationIntentCurrent,
+        openPreviewSection: vm.openPreviewSection,
+        openFilesSection: vm.openFilesSection,
+        pushToast: vm.pushToast,
+        // Read the bridge per click: it is installed by preload and may be absent in tests.
+        resolveForNavigation: uri => window.clerum.gfs.resolveForNavigation(uri),
+        openUrl: url => window.clerum.app.openUrl(url),
+      }),
+    [
+      vm.beginUserNavigationIntent,
+      vm.isNavigationIntentCurrent,
+      vm.openFilesSection,
+      vm.openPreviewSection,
+      vm.pushToast,
+    ]
+  )
+
   const navValue = React.useMemo(
     () => ({
       navItem: vm.navItem,
@@ -4484,321 +4497,329 @@ export function App() {
         <div className="app-root" inert={bootSplashLoading || undefined}>
           {vm.isAuthenticated ? (
             <NavigationContext.Provider value={navValue}>
-              <NotificationsContext.Provider value={notifValue}>
-                <WorkspaceActionsProvider value={workspaceActionsValue}>
-                  <AgentActivityProvider value={agentActivityValue}>
-                    <AgentChatProviders
-                      actions={agentChatActionsValue}
-                      chatList={chatListValue}
-                      composerState={chatComposerStateValue}
-                      threadState={chatThreadStateValue}
-                    >
-                      <McpRuntimeProvider value={mcpRuntimeValue}>
-                        <DesktopStateProvider value={desktopStateValue}>
-                          <GfsDragSessionProvider>
-                            <GfsActionHost
-                              pushToast={vm.pushToast}
-                              refreshFilesLocation={refreshFilesLocation}
-                              onActionOpenChange={gfsActionOverlay.onActionOpenChange}
-                            >
-                              <main className="app-shell">
-                                <SidebarNav
-                                  navItem={vm.navItem}
-                                  activeSandboxUiApp={activeSandboxUiApp}
-                                  availableSandboxUiApps={availableSandboxUiApps}
-                                  collapsed={sidebarCollapsed}
-                                  compactMode={compactNavigation}
-                                  compactMenuOpen={compactSidebarOpen}
-                                  onCompactMenuOpenChange={handleCompactSidebarOpenChange}
-                                  resize={sidebarResize}
-                                  onCollapsedChange={handleSidebarCollapsedChange}
-                                  onGfsMenuOpenChange={gfsActionOverlay.onGfsMenuOpenChange}
-                                  onNewChat={handleNewWorkspaceChatTab}
-                                  onOpenSandboxUiApp={handleOpenSandboxUiApp}
-                                  onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
-                                  onSelect={handleSidebarNavSelect}
-                                  onOpenFilesSection={vm.openFilesSection}
-                                  onOpenPreviewSection={vm.openPreviewSection}
-                                  onVisibleExpandedFoldersChange={setSidebarWatchedFolderUris}
-                                  pushToast={vm.pushToast}
-                                  toggleRequestId={sidebarToggleRequestId}
-                                />
-                                <section
-                                  className="workspace-layout"
-                                  inert={compactSidebarOpen || undefined}
-                                >
+              <ChatLinkActivationContext.Provider value={chatLinkActivation}>
+                <NotificationsContext.Provider value={notifValue}>
+                  <WorkspaceActionsProvider value={workspaceActionsValue}>
+                    <AgentActivityProvider value={agentActivityValue}>
+                      <AgentChatProviders
+                        actions={agentChatActionsValue}
+                        chatList={chatListValue}
+                        composerState={chatComposerStateValue}
+                        threadState={chatThreadStateValue}
+                      >
+                        <McpRuntimeProvider value={mcpRuntimeValue}>
+                          <DesktopStateProvider value={desktopStateValue}>
+                            <GfsDragSessionProvider>
+                              <GfsActionHost
+                                pushToast={vm.pushToast}
+                                refreshFilesLocation={refreshFilesLocation}
+                                onActionOpenChange={gfsActionOverlay.onActionOpenChange}
+                              >
+                                <main className="app-shell">
+                                  <SidebarNav
+                                    navItem={vm.navItem}
+                                    activeSandboxUiApp={activeSandboxUiApp}
+                                    availableSandboxUiApps={availableSandboxUiApps}
+                                    collapsed={sidebarCollapsed}
+                                    compactMode={compactNavigation}
+                                    compactMenuOpen={compactSidebarOpen}
+                                    onCompactMenuOpenChange={handleCompactSidebarOpenChange}
+                                    resize={sidebarResize}
+                                    onCollapsedChange={handleSidebarCollapsedChange}
+                                    onGfsMenuOpenChange={gfsActionOverlay.onGfsMenuOpenChange}
+                                    onNewChat={handleNewWorkspaceChatTab}
+                                    onOpenSandboxUiApp={handleOpenSandboxUiApp}
+                                    onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
+                                    onSelect={handleSidebarNavSelect}
+                                    onOpenFilesSection={vm.openFilesSection}
+                                    onOpenPreviewSection={vm.openPreviewSection}
+                                    onVisibleExpandedFoldersChange={setSidebarWatchedFolderUris}
+                                    pushToast={vm.pushToast}
+                                    toggleRequestId={sidebarToggleRequestId}
+                                  />
                                   <section
-                                    ref={contentPanelRef}
-                                    className={`content-panel glass-card${
-                                      isAgentChatView ? ' content-panel--agent-chat' : ''
-                                    }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''} content-panel--titlebar-actions${
-                                      appNotificationDrawerOpen
-                                        ? ' content-panel--app-notification-drawer-open'
-                                        : ''
-                                    }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
-                                    style={
-                                      chatDrawerVisible
-                                        ? // Only `--chat-drawer-width` lives here now: it feeds the
-                                          // universal tab-area gutter (`--app-header-utilities-width`).
-                                          // The rail's top/width are published by the RightRailShell
-                                          // itself (`--rail-*`), not inherited from the panel.
-                                          { '--chat-drawer-width': `${chatDrawerResize.width}px` }
-                                        : undefined
-                                    }
+                                    className="workspace-layout"
+                                    inert={compactSidebarOpen || undefined}
                                   >
-                                    {/* Every route mounts the command-center header in the
+                                    <section
+                                      ref={contentPanelRef}
+                                      className={`content-panel glass-card${
+                                        isAgentChatView ? ' content-panel--agent-chat' : ''
+                                      }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''} content-panel--titlebar-actions${
+                                        appNotificationDrawerOpen
+                                          ? ' content-panel--app-notification-drawer-open'
+                                          : ''
+                                      }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
+                                      style={
+                                        chatDrawerVisible
+                                          ? // Only `--chat-drawer-width` lives here now: it feeds the
+                                            // universal tab-area gutter (`--app-header-utilities-width`).
+                                            // The rail's top/width are published by the RightRailShell
+                                            // itself (`--rail-*`), not inherited from the panel.
+                                            { '--chat-drawer-width': `${chatDrawerResize.width}px` }
+                                          : undefined
+                                      }
+                                    >
+                                      {/* Every route mounts the command-center header in the
                                     window title bar via the same portal — the search
                                     pill and notification bell live in the title bar on
                                     all routes, never floating inline over the panel. */}
-                                    <TitlebarActionsPortal container={titlebarLeadingRoot}>
-                                      <IconButton
-                                        ref={compactSidebarTriggerRef}
-                                        className="compact-navigation-toggle"
-                                        data-testid="compact-navigation-toggle"
-                                        label="Open navigation"
-                                        aria-controls="desktop-sidebar-navigation"
-                                        aria-expanded={compactSidebarOpen}
-                                        onClick={() =>
-                                          handleCompactSidebarOpenChange(!compactSidebarOpen)
-                                        }
-                                      >
-                                        <svg viewBox="0 0 16 16" aria-hidden="true">
-                                          <path d="M2 4h12M2 8h12M2 12h12" />
-                                        </svg>
-                                      </IconButton>
-                                    </TitlebarActionsPortal>
-                                    <TitlebarActionsPortal container={titlebarActionsRoot}>
-                                      <AppHeader
-                                        placement="titlebar"
-                                        searchFocusRequestId={globalSearchFocusRequestId}
-                                        notificationOpenRequestId={notificationOpenRequestId}
-                                        notificationTrayMode={
-                                          notificationTrayUsesDrawer ? 'drawer' : 'overlay'
-                                        }
-                                        notificationTrayReady={notificationDrawerReady}
-                                        notificationTrayLeft={
-                                          notificationTrayUsesDrawer ? notificationTrayLeft : null
-                                        }
-                                        onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
-                                        onShellOverlayOpenChange={setHeaderShellOverlayOpen}
-                                        drawerAvailable={drawerAvailable}
-                                        chatDrawerOpen={chatDrawerVisible}
-                                        onToggleChatDrawer={toggleChatDrawer}
-                                      />
-                                    </TitlebarActionsPortal>
-                                    <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
-                                    {sessionInvalidation && sessionInvalidationReadFailed ? (
-                                      <div
-                                        data-testid="sandbox-ui-session-revalidation-pending"
-                                        role="status"
-                                        aria-live="polite"
-                                      >
-                                        <StatusBanner tone="warn">
-                                          <span>
-                                            Could not verify pending links. Retry to check this
-                                            session.
-                                          </span>
-                                          <Button
-                                            color="neutral"
-                                            onClick={() => {
-                                              setSessionInvalidationReadFailed(false)
-                                              setSessionInvalidationRetryTick(value => value + 1)
-                                            }}
-                                            size="xs"
-                                            variant="outline"
-                                          >
-                                            Retry verification
-                                          </Button>
-                                        </StatusBanner>
-                                      </div>
-                                    ) : null}
-                                    {pendingSandboxUiDeepLinkRollback ? (
-                                      <div
-                                        className="app-link-rollback-pending"
-                                        data-testid="sandbox-ui-deep-link-rollback-pending"
-                                        role="status"
-                                        aria-live="polite"
-                                      >
-                                        <StatusBanner
-                                          tone="info"
-                                          text="This app link is waiting for the previous team restore to finish. It remains queued and cannot be retried yet."
+                                      <TitlebarActionsPortal container={titlebarLeadingRoot}>
+                                        <IconButton
+                                          ref={compactSidebarTriggerRef}
+                                          className="compact-navigation-toggle"
+                                          data-testid="compact-navigation-toggle"
+                                          label="Open navigation"
+                                          aria-controls="desktop-sidebar-navigation"
+                                          aria-expanded={compactSidebarOpen}
+                                          onClick={() =>
+                                            handleCompactSidebarOpenChange(!compactSidebarOpen)
+                                          }
+                                        >
+                                          <svg viewBox="0 0 16 16" aria-hidden="true">
+                                            <path d="M2 4h12M2 8h12M2 12h12" />
+                                          </svg>
+                                        </IconButton>
+                                      </TitlebarActionsPortal>
+                                      <TitlebarActionsPortal container={titlebarActionsRoot}>
+                                        <AppHeader
+                                          placement="titlebar"
+                                          searchFocusRequestId={globalSearchFocusRequestId}
+                                          notificationOpenRequestId={notificationOpenRequestId}
+                                          notificationTrayMode={
+                                            notificationTrayUsesDrawer ? 'drawer' : 'overlay'
+                                          }
+                                          notificationTrayReady={notificationDrawerReady}
+                                          notificationTrayLeft={
+                                            notificationTrayUsesDrawer ? notificationTrayLeft : null
+                                          }
+                                          onNotificationTrayOpenChange={
+                                            setHeaderNotificationTrayOpen
+                                          }
+                                          onShellOverlayOpenChange={setHeaderShellOverlayOpen}
+                                          drawerAvailable={drawerAvailable}
+                                          chatDrawerOpen={chatDrawerVisible}
+                                          onToggleChatDrawer={toggleChatDrawer}
                                         />
-                                      </div>
-                                    ) : null}
-                                    {/* Single global strip: driven by the universal
+                                      </TitlebarActionsPortal>
+                                      <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
+                                      {sessionInvalidation && sessionInvalidationReadFailed ? (
+                                        <div
+                                          data-testid="sandbox-ui-session-revalidation-pending"
+                                          role="status"
+                                          aria-live="polite"
+                                        >
+                                          <StatusBanner tone="warn">
+                                            <span>
+                                              Could not verify pending links. Retry to check this
+                                              session.
+                                            </span>
+                                            <Button
+                                              color="neutral"
+                                              onClick={() => {
+                                                setSessionInvalidationReadFailed(false)
+                                                setSessionInvalidationRetryTick(value => value + 1)
+                                              }}
+                                              size="xs"
+                                              variant="outline"
+                                            >
+                                              Retry verification
+                                            </Button>
+                                          </StatusBanner>
+                                        </div>
+                                      ) : null}
+                                      {pendingSandboxUiDeepLinkRollback ? (
+                                        <div
+                                          className="app-link-rollback-pending"
+                                          data-testid="sandbox-ui-deep-link-rollback-pending"
+                                          role="status"
+                                          aria-live="polite"
+                                        >
+                                          <StatusBanner
+                                            tone="info"
+                                            text="This app link is waiting for the previous team restore to finish. It remains queued and cannot be retried yet."
+                                          />
+                                        </div>
+                                      ) : null}
+                                      {/* Single global strip: driven by the universal
                                     store, visible on every route above the
                                     per-kind seam so any tab is reachable from any
                                     tab. Hidden only when the workspace is empty. */}
-                                    {workspaceTabs.tabs.length > 0 && (
-                                      <WorkspaceTabStrip
-                                        tabs={visibleWorkspaceTabs}
-                                        activeTabId={
-                                          vm.appsPickerActive ? null : workspaceTabs.activeTabId
-                                        }
-                                        onClose={handleCloseWorkspaceTab}
-                                        onReorder={handleReorderWorkspaceTab}
-                                        onSelect={handleSelectWorkspaceTab}
-                                        panelId={
-                                          vm.navItem === DESKTOP_ROUTES.chat
-                                            ? 'chat-view-panel'
-                                            : undefined
-                                        }
-                                      />
-                                    )}
-                                    {vm.navItem === DESKTOP_ROUTES.chat &&
-                                      (workspaceTabs.tabs.length === 0 ? (
-                                        <section className="chat-view-workspace" aria-label="Home">
-                                          <div className="chat-view-surface">
-                                            <div className="workspace-home-empty">
-                                              <h2>Nothing open</h2>
-                                              <Button onClick={handleNewWorkspaceChatTab}>
-                                                New chat
-                                              </Button>
-                                              <p className="muted">
-                                                or open something from the sidebar
-                                              </p>
-                                            </div>
-                                          </div>
-                                        </section>
-                                      ) : (
-                                        <ChatViewWorkspace
-                                          localSearch={
-                                            chatLocalSearchOpen ? (
-                                              <ChatLocalSearch
-                                                models={chatSemanticModels}
-                                                onClose={closeChatLocalSearch}
-                                                onSearchStateChange={
-                                                  handleChatLocalSearchStateChange
-                                                }
-                                              />
-                                            ) : null
+                                      {workspaceTabs.tabs.length > 0 && (
+                                        <WorkspaceTabStrip
+                                          tabs={visibleWorkspaceTabs}
+                                          activeTabId={
+                                            vm.appsPickerActive ? null : workspaceTabs.activeTabId
                                           }
-                                          surfaceId="chat-view-panel"
-                                        >
-                                          <ChatPage scrollContainerRef={contentPanelRef} />
-                                        </ChatViewWorkspace>
-                                      ))}
-                                    {vm.navItem === DESKTOP_ROUTES.agents && (
-                                      <AgentsPage scrollContainerRef={contentPanelRef} />
-                                    )}
-                                    {vm.navItem === DESKTOP_ROUTES.files && (
-                                      <FilesPage
-                                        key={activeFilesTabId ?? 'files'}
-                                        pushToast={vm.pushToast}
-                                        titlebarLeadingTarget={titlebarLeadingRoot}
-                                        workspaceTabId={activeFilesTabId ?? undefined}
-                                        pendingGfsUri={filesSeedPath}
-                                        pendingGfsDeepLink={
-                                          activeGfsDeepLinkForFiles
-                                            ? {
-                                                id: activeGfsDeepLinkForFiles.id,
-                                                uri: activeGfsDeepLinkForFiles.uri,
-                                              }
-                                            : null
-                                        }
-                                        pendingGfsDeepLinkOwnerTabId={
-                                          activeGfsDeepLinkForFiles?.ownerTabId
-                                        }
-                                        isPendingGfsDeepLinkCurrent={isActiveGfsDeepLinkCurrent}
-                                        onExplicitNavigationIntent={vm.beginUserNavigationIntent}
-                                        onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
-                                        registerLocationRefresh={registerFilesLocationRefresh}
-                                        onResolvedLocationChange={setFilesResolvedLocation}
-                                        onLocationChange={handleActiveFilesLocationChange}
-                                        onOpenPreview={vm.openPreviewSection}
-                                        onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
-                                        routeDialogRequestId={gfsRouteDialogRequestId}
-                                        onRouteDialogRequestHandled={
-                                          handleGfsRouteDialogRequestHandled
-                                        }
-                                      />
-                                    )}
-                                    {vm.navItem === DESKTOP_ROUTES.preview &&
-                                      activePreviewPayload && (
-                                        <FilePreviewPage
-                                          key={activePreviewTabId ?? 'preview'}
-                                          gfsUri={activePreviewPayload.gfsUri}
-                                          fileName={activePreviewTab?.title ?? 'Preview'}
-                                          fileKind={activePreviewPayload.fileKind}
-                                          mimeType={activePreviewPayload.mimeType}
-                                          byteLength={activePreviewPayload.byteLength}
-                                          reloadVersion={activePreviewPayload.reloadVersion}
-                                          unavailable={activePreviewPayload.unavailable}
-                                          pushToast={vm.pushToast}
-                                          onOpenRoute={handleOpenGfsRoute}
-                                          onRenameCommitted={renamedUri => {
-                                            void refreshOpenPreview(renamedUri)
-                                          }}
-                                          titlebarLeadingTarget={titlebarLeadingRoot}
+                                          onClose={handleCloseWorkspaceTab}
+                                          onReorder={handleReorderWorkspaceTab}
+                                          onSelect={handleSelectWorkspaceTab}
+                                          panelId={
+                                            vm.navItem === DESKTOP_ROUTES.chat
+                                              ? 'chat-view-panel'
+                                              : undefined
+                                          }
                                         />
                                       )}
-                                    {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
-                                    {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
-                                    {vm.navItem === DESKTOP_ROUTES.apps && (
-                                      <SandboxUiPage
-                                        embed={embed}
-                                        activeAppRef={activeTabAppRef}
-                                        refreshError={embedRefreshError}
-                                        boundsRefreshKey={sandboxUiBoundsRefreshKey}
-                                        currentTeamId={vm.currentTeamId}
-                                        headerShellOverlayOpen={
-                                          headerShellOverlayOpen || commandPaletteOpen
-                                        }
-                                        sidebarShellOverlayOpen={
-                                          sidebarSettingsMenuOpen ||
-                                          compactSidebarOpen ||
-                                          gfsActionOverlay.overlayOpen
-                                        }
-                                        toastShellOverlayOpen={vm.toasts.length > 0}
-                                        deepLinkShellOverlayOpen={
-                                          sandboxUiDeepLinkDialog !== null ||
-                                          gfsDeepLinkDialog !== null
-                                        }
-                                        appRootOverlayOpen={appRootOverlayOpen}
-                                        localSearchRequestId={sandboxLocalSearchRequestId}
-                                        titlebarLeadingContainer={titlebarLeadingRoot}
-                                        onLaunchApp={handleOpenSandboxUiApp}
-                                        onRefresh={refreshActiveApp}
-                                        onRelaunch={relaunchActiveApp}
-                                        onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
-                                        onEmbedSlotTopChange={setChatDrawerEmbedTop}
-                                        onEmbedSlotRightChange={setNotificationTrayLeft}
-                                        onNotify={vm.pushToast}
-                                      />
-                                    )}
-                                    {vm.navItem === DESKTOP_ROUTES.settings && (
-                                      <SettingsPage
-                                        shortcutsFocusRequestId={settingsShortcutsRequestId}
-                                        notificationSettings={vm.notificationSettings}
-                                        desktopNotificationPermission={
-                                          vm.desktopNotificationPermission
-                                        }
-                                        themeMode={themeMode}
-                                        onNotify={vm.pushToast}
-                                        onThemeModeChange={setThemeMode}
-                                        onNotificationSoundVolumeChange={
-                                          vm.setNotificationSoundVolume
-                                        }
-                                        onPlayNotificationSoundPreview={
-                                          vm.playNotificationSoundPreview
-                                        }
-                                        onSaveNotificationSettings={vm.saveNotificationSettings}
-                                        channelNotificationPreferences={
-                                          vm.channelNotificationPreferences
-                                        }
-                                        channelNotificationPreferencesLoading={
-                                          vm.channelNotificationPreferencesLoading
-                                        }
-                                        channelNotificationPreferencesSaving={
-                                          vm.channelNotificationPreferencesSaving
-                                        }
-                                        onSaveChannelNotificationPreferences={
-                                          vm.saveChannelNotificationPreferences
-                                        }
-                                      />
-                                    )}
-                                  </section>
-                                  {/* Universal chat drawer (mini-spec 04a §B/§D):
+                                      {vm.navItem === DESKTOP_ROUTES.chat &&
+                                        (workspaceTabs.tabs.length === 0 ? (
+                                          <section
+                                            className="chat-view-workspace"
+                                            aria-label="Home"
+                                          >
+                                            <div className="chat-view-surface">
+                                              <div className="workspace-home-empty">
+                                                <h2>Nothing open</h2>
+                                                <Button onClick={handleNewWorkspaceChatTab}>
+                                                  New chat
+                                                </Button>
+                                                <p className="muted">
+                                                  or open something from the sidebar
+                                                </p>
+                                              </div>
+                                            </div>
+                                          </section>
+                                        ) : (
+                                          <ChatViewWorkspace
+                                            localSearch={
+                                              chatLocalSearchOpen ? (
+                                                <ChatLocalSearch
+                                                  models={chatSemanticModels}
+                                                  onClose={closeChatLocalSearch}
+                                                  onSearchStateChange={
+                                                    handleChatLocalSearchStateChange
+                                                  }
+                                                />
+                                              ) : null
+                                            }
+                                            surfaceId="chat-view-panel"
+                                          >
+                                            <ChatPage scrollContainerRef={contentPanelRef} />
+                                          </ChatViewWorkspace>
+                                        ))}
+                                      {vm.navItem === DESKTOP_ROUTES.agents && (
+                                        <AgentsPage scrollContainerRef={contentPanelRef} />
+                                      )}
+                                      {vm.navItem === DESKTOP_ROUTES.files && (
+                                        <FilesPage
+                                          key={activeFilesTabId ?? 'files'}
+                                          pushToast={vm.pushToast}
+                                          titlebarLeadingTarget={titlebarLeadingRoot}
+                                          workspaceTabId={activeFilesTabId ?? undefined}
+                                          pendingGfsUri={filesSeedPath}
+                                          pendingGfsDeepLink={
+                                            activeGfsDeepLinkForFiles
+                                              ? {
+                                                  id: activeGfsDeepLinkForFiles.id,
+                                                  uri: activeGfsDeepLinkForFiles.uri,
+                                                }
+                                              : null
+                                          }
+                                          pendingGfsDeepLinkOwnerTabId={
+                                            activeGfsDeepLinkForFiles?.ownerTabId
+                                          }
+                                          isPendingGfsDeepLinkCurrent={isActiveGfsDeepLinkCurrent}
+                                          onExplicitNavigationIntent={vm.beginUserNavigationIntent}
+                                          onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
+                                          registerLocationRefresh={registerFilesLocationRefresh}
+                                          onResolvedLocationChange={setFilesResolvedLocation}
+                                          onLocationChange={handleActiveFilesLocationChange}
+                                          onOpenPreview={vm.openPreviewSection}
+                                          onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
+                                          routeDialogRequestId={gfsRouteDialogRequestId}
+                                          onRouteDialogRequestHandled={
+                                            handleGfsRouteDialogRequestHandled
+                                          }
+                                        />
+                                      )}
+                                      {vm.navItem === DESKTOP_ROUTES.preview &&
+                                        activePreviewPayload && (
+                                          <FilePreviewPage
+                                            key={activePreviewTabId ?? 'preview'}
+                                            gfsUri={activePreviewPayload.gfsUri}
+                                            fileName={activePreviewTab?.title ?? 'Preview'}
+                                            fileKind={activePreviewPayload.fileKind}
+                                            mimeType={activePreviewPayload.mimeType}
+                                            byteLength={activePreviewPayload.byteLength}
+                                            reloadVersion={activePreviewPayload.reloadVersion}
+                                            unavailable={activePreviewPayload.unavailable}
+                                            pushToast={vm.pushToast}
+                                            onOpenRoute={handleOpenGfsRoute}
+                                            onRenameCommitted={renamedUri => {
+                                              void refreshOpenPreview(renamedUri)
+                                            }}
+                                            titlebarLeadingTarget={titlebarLeadingRoot}
+                                          />
+                                        )}
+                                      {vm.navItem === DESKTOP_ROUTES.connectors && (
+                                        <McpServersPage />
+                                      )}
+                                      {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
+                                      {vm.navItem === DESKTOP_ROUTES.apps && (
+                                        <SandboxUiPage
+                                          embed={embed}
+                                          activeAppRef={activeTabAppRef}
+                                          refreshError={embedRefreshError}
+                                          boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                          currentTeamId={vm.currentTeamId}
+                                          headerShellOverlayOpen={
+                                            headerShellOverlayOpen || commandPaletteOpen
+                                          }
+                                          sidebarShellOverlayOpen={
+                                            sidebarSettingsMenuOpen ||
+                                            compactSidebarOpen ||
+                                            gfsActionOverlay.overlayOpen
+                                          }
+                                          toastShellOverlayOpen={vm.toasts.length > 0}
+                                          deepLinkShellOverlayOpen={
+                                            sandboxUiDeepLinkDialog !== null ||
+                                            gfsDeepLinkDialog !== null
+                                          }
+                                          appRootOverlayOpen={appRootOverlayOpen}
+                                          localSearchRequestId={sandboxLocalSearchRequestId}
+                                          titlebarLeadingContainer={titlebarLeadingRoot}
+                                          onLaunchApp={handleOpenSandboxUiApp}
+                                          onRefresh={refreshActiveApp}
+                                          onRelaunch={relaunchActiveApp}
+                                          onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
+                                          onEmbedSlotTopChange={setChatDrawerEmbedTop}
+                                          onEmbedSlotRightChange={setNotificationTrayLeft}
+                                          onNotify={vm.pushToast}
+                                        />
+                                      )}
+                                      {vm.navItem === DESKTOP_ROUTES.settings && (
+                                        <SettingsPage
+                                          shortcutsFocusRequestId={settingsShortcutsRequestId}
+                                          notificationSettings={vm.notificationSettings}
+                                          desktopNotificationPermission={
+                                            vm.desktopNotificationPermission
+                                          }
+                                          themeMode={themeMode}
+                                          onNotify={vm.pushToast}
+                                          onThemeModeChange={setThemeMode}
+                                          onNotificationSoundVolumeChange={
+                                            vm.setNotificationSoundVolume
+                                          }
+                                          onPlayNotificationSoundPreview={
+                                            vm.playNotificationSoundPreview
+                                          }
+                                          onSaveNotificationSettings={vm.saveNotificationSettings}
+                                          channelNotificationPreferences={
+                                            vm.channelNotificationPreferences
+                                          }
+                                          channelNotificationPreferencesLoading={
+                                            vm.channelNotificationPreferencesLoading
+                                          }
+                                          channelNotificationPreferencesSaving={
+                                            vm.channelNotificationPreferencesSaving
+                                          }
+                                          onSaveChannelNotificationPreferences={
+                                            vm.saveChannelNotificationPreferences
+                                          }
+                                        />
+                                      )}
+                                    </section>
+                                    {/* Universal chat drawer (mini-spec 04a §B/§D):
                                   mounted at the workspace-layout level (a sibling
                                   of the content panel), not inside the apps block,
                                   so it persists across ANY non-chat tab (R5). It
@@ -4807,85 +4828,86 @@ export function App() {
                                   universal gutter. Single global <ChatPage>/
                                   ChatSwitcher — no duplicated tab state or
                                   streams. */}
-                                  {chatDrawerVisible && (
-                                    <RightRailShell
-                                      occupant="chat-drawer"
-                                      width={chatDrawerResize.width}
-                                      top={drawerRailTop}
-                                    >
-                                      <ChatDrawer
-                                        header={
-                                          <ChatSwitcher
-                                            tabs={chatWorkspaceTabs}
-                                            activeTabId={drawerActiveChatTabId}
-                                            onSelect={handleSelectDrawerChatTab}
-                                            onNewChat={handleNewWorkspaceChatTab}
-                                            focusRequestId={chatSwitcherFocusRequestId}
-                                          />
-                                        }
-                                        onNewChat={handleNewWorkspaceChatTab}
-                                        onExpandFullScreen={expandChatDrawerToFullScreen}
-                                        onToggle={toggleChatDrawer}
-                                        containerRef={chatDrawerRef}
-                                        ready={drawerReady}
-                                        onResizeHandleMouseDown={
-                                          chatDrawerResize.onResizeHandleMouseDown
-                                        }
-                                        onResizeHandleKeyDown={
-                                          chatDrawerResize.onResizeHandleKeyDown
-                                        }
+                                    {chatDrawerVisible && (
+                                      <RightRailShell
+                                        occupant="chat-drawer"
                                         width={chatDrawerResize.width}
-                                        resizing={chatDrawerResize.isResizing}
+                                        top={drawerRailTop}
                                       >
-                                        <ChatPage scrollContainerRef={chatDrawerRef} />
-                                      </ChatDrawer>
-                                    </RightRailShell>
-                                  )}
-                                </section>
-                              </main>
-                              {commandPaletteOpen ? (
-                                <CommandPalette
-                                  platform={platformFromNavigator(navigator.platform)}
-                                  isEligible={isCommandEligible}
-                                  onClose={closeCommandPalette}
-                                  onExecute={commandId =>
-                                    executeDesktopCommand(commandId, 'palette')
-                                  }
-                                  restorePreviousFocus={!commandPaletteReturnToSandbox}
-                                />
-                              ) : null}
-                              {desktopUpdateRequiredDialog}
-                              {environmentSetupConfirmationDialog}
-                              {environmentSwitchConfirmationDialog}
-                              {environmentSetupSuccessDialog}
-                              {sandboxUiDeepLinkDialog}
-                              {gfsDeepLinkDialog}
-                              {pluginConsentPrompt ? (
-                                <PluginConsentModal
-                                  request={pluginConsentPrompt}
-                                  onResolve={resolvePluginConsent}
-                                />
-                              ) : null}
-                              {pluginGfsPreview ? (
-                                <GfsImagePreview
-                                  key={pluginGfsPreview.gfsUri}
-                                  byteLength={pluginGfsPreview.bytes}
-                                  fileName={pluginGfsPreview.name}
-                                  gfsUri={pluginGfsPreview.gfsUri}
-                                  mimeType={pluginGfsPreview.mimeType}
-                                  reloadVersion={pluginGfsPreview.reloadVersion}
-                                  unavailable={pluginGfsPreview.unavailable}
-                                  onClose={closePluginGfsPreview}
-                                />
-                              ) : null}
-                            </GfsActionHost>
-                          </GfsDragSessionProvider>
-                        </DesktopStateProvider>
-                      </McpRuntimeProvider>
-                    </AgentChatProviders>
-                  </AgentActivityProvider>
-                </WorkspaceActionsProvider>
-              </NotificationsContext.Provider>
+                                        <ChatDrawer
+                                          header={
+                                            <ChatSwitcher
+                                              tabs={chatWorkspaceTabs}
+                                              activeTabId={drawerActiveChatTabId}
+                                              onSelect={handleSelectDrawerChatTab}
+                                              onNewChat={handleNewWorkspaceChatTab}
+                                              focusRequestId={chatSwitcherFocusRequestId}
+                                            />
+                                          }
+                                          onNewChat={handleNewWorkspaceChatTab}
+                                          onExpandFullScreen={expandChatDrawerToFullScreen}
+                                          onToggle={toggleChatDrawer}
+                                          containerRef={chatDrawerRef}
+                                          ready={drawerReady}
+                                          onResizeHandleMouseDown={
+                                            chatDrawerResize.onResizeHandleMouseDown
+                                          }
+                                          onResizeHandleKeyDown={
+                                            chatDrawerResize.onResizeHandleKeyDown
+                                          }
+                                          width={chatDrawerResize.width}
+                                          resizing={chatDrawerResize.isResizing}
+                                        >
+                                          <ChatPage scrollContainerRef={chatDrawerRef} />
+                                        </ChatDrawer>
+                                      </RightRailShell>
+                                    )}
+                                  </section>
+                                </main>
+                                {commandPaletteOpen ? (
+                                  <CommandPalette
+                                    platform={platformFromNavigator(navigator.platform)}
+                                    isEligible={isCommandEligible}
+                                    onClose={closeCommandPalette}
+                                    onExecute={commandId =>
+                                      executeDesktopCommand(commandId, 'palette')
+                                    }
+                                    restorePreviousFocus={!commandPaletteReturnToSandbox}
+                                  />
+                                ) : null}
+                                {desktopUpdateRequiredDialog}
+                                {environmentSetupConfirmationDialog}
+                                {environmentSwitchConfirmationDialog}
+                                {environmentSetupSuccessDialog}
+                                {sandboxUiDeepLinkDialog}
+                                {gfsDeepLinkDialog}
+                                {pluginConsentPrompt ? (
+                                  <PluginConsentModal
+                                    request={pluginConsentPrompt}
+                                    onResolve={resolvePluginConsent}
+                                  />
+                                ) : null}
+                                {pluginGfsPreview ? (
+                                  <GfsImagePreview
+                                    key={pluginGfsPreview.gfsUri}
+                                    byteLength={pluginGfsPreview.bytes}
+                                    fileName={pluginGfsPreview.name}
+                                    gfsUri={pluginGfsPreview.gfsUri}
+                                    mimeType={pluginGfsPreview.mimeType}
+                                    reloadVersion={pluginGfsPreview.reloadVersion}
+                                    unavailable={pluginGfsPreview.unavailable}
+                                    onClose={closePluginGfsPreview}
+                                  />
+                                ) : null}
+                              </GfsActionHost>
+                            </GfsDragSessionProvider>
+                          </DesktopStateProvider>
+                        </McpRuntimeProvider>
+                      </AgentChatProviders>
+                    </AgentActivityProvider>
+                  </WorkspaceActionsProvider>
+                </NotificationsContext.Provider>
+              </ChatLinkActivationContext.Provider>
             </NavigationContext.Provider>
           ) : (
             <>
