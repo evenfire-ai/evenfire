@@ -5642,9 +5642,11 @@ export class AppService {
 
   /**
    * Stores the session approval mode. The token is scoped to this one host and
-   * carries session-write plus wake, because the route wakes like approve.
-   * A 400, 401 or 404 leaves the stored mode unchanged; the renderer keeps the
-   * old label. Any other failure is reconciled from the next session read.
+   * carries approve's scopes, approval-write plus wake, because the route
+   * wakes like approve. A 400, 401 or 404 leaves the stored mode unchanged.
+   * The renderer keeps the old label, except that a 404 for a chat whose
+   * session row it has not seen holds the pick for the first send. Any other
+   * failure is reconciled from the next session read.
    */
   async setApprovalMode(
     hostRef: string,
