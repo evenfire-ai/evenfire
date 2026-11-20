@@ -365,7 +365,7 @@ export function App() {
   const [sandboxUiConversationOrigin, setSandboxUiConversationOrigin] =
     React.useState<SandboxUiConversationOrigin | null>(null)
   const [sidebarSettingsMenuOpen, setSidebarSettingsMenuOpen] = React.useState(false)
-  const gfsActionOverlay = useGfsActionOverlay()
+  const gfsActionOverlay = useGfsActionOverlay(vm.isAuthenticated)
   const [headerShellOverlayOpen, setHeaderShellOverlayOpen] = React.useState(false)
   const [headerNotificationTrayOpen, setHeaderNotificationTrayOpen] = React.useState(false)
   const [notificationDrawerReady, setNotificationDrawerReady] = React.useState(false)

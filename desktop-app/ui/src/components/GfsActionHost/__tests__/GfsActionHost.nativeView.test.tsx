@@ -100,7 +100,7 @@ function HostProbe() {
 let setTreeMounted: (mounted: boolean) => void = () => {}
 
 function Shell({ embed, target }: { embed: EmbedOwnershipMachine; target: GfsHostActionTarget }) {
-  const overlay = useGfsActionOverlay()
+  const overlay = useGfsActionOverlay(true)
   const [menuKey, setMenuKey] = useState<number | null>(null)
   const [treeMounted, setMounted] = useState(true)
   openMenu = () => setMenuKey(key => (key ?? 0) + 1)

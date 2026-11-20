@@ -76,7 +76,7 @@ const overlayHistory: boolean[] = []
 const previewsOpened: unknown[] = []
 
 function Shell() {
-  const overlay = useGfsActionOverlay()
+  const overlay = useGfsActionOverlay(true)
   overlayHistory.push(overlay.overlayOpen)
   return (
     <GfsActionHost

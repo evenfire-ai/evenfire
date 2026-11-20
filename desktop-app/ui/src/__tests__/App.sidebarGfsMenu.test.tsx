@@ -22,6 +22,10 @@ import {
   heldPermissionResponse,
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { GfsClient } from '../../../src/gfs/uriHandler.js'
+import {
+  cleanupNativeCommitTestHarness,
+  createNativeCommitTestHarness,
+} from '../../../testSupport/appService.nativeCommitTestHarness'
 
 // The real App: real SidebarNav, FileExplorerTree, GfsActionHost, FilesPage
 // and SandboxUiPage. Only `window.clerum.*` is stubbed.
@@ -105,8 +109,11 @@ async function flushFrames() {
   }
 }
 
-function installBridge() {
-  const { handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
+function installBridge(desktopEnvironmentHandoffProducer?: any) {
+  const { handle } = installAppControllerClerum({
+    agentNames: ['agent-x'],
+    desktopEnvironmentHandoffProducer,
+  })
   // Main's generation is the one its session state publishes.
   const sessionState = handle.getSessionState as () => Promise<{ sessionGeneration: number }>
   handle.getSessionGeneration.mockImplementation(
@@ -122,7 +129,13 @@ function installBridge() {
   bridge.rpc.getHostModels = vi.fn().mockResolvedValue({ models: [] })
   bridge.rpc.loadSessionMessages = vi.fn(() => new Promise(() => undefined))
   bridge.app = { rendererReady: vi.fn().mockResolvedValue(undefined) }
-  bridge.shortcuts = { onCommand: vi.fn(() => vi.fn()) }
+  let shortcutListener: ((commandId: string, source: string) => void) | null = null
+  bridge.shortcuts = {
+    onCommand: vi.fn((listener: (commandId: string, source: string) => void) => {
+      shortcutListener = listener
+      return vi.fn()
+    }),
+  }
   bridge.sandboxUi = {
     listApps: vi.fn().mockResolvedValue({
       apps: [
@@ -185,7 +198,34 @@ function installBridge() {
     ),
     downloadPreview: vi.fn(() => new Promise(() => undefined)),
   }
-  return { bridge }
+  const runCommand = (commandId: string) => {
+    if (!shortcutListener) throw new Error('the App did not subscribe to desktop commands')
+    shortcutListener(commandId, 'host')
+  }
+  return { bridge, runCommand }
+}
+
+const SIGNED_IN_USER = {
+  id: 'user-1',
+  email: 'test@clerum.io',
+  name: 'Test User',
+  picture: null,
+  teamId: 'team-1',
+  teamName: 'Team 1',
+  role: 'member',
+}
+
+/** Main's real AppService, signed in, so logout and login run its own session state. */
+async function signedInMainSession() {
+  const native = await createNativeCommitTestHarness()
+  const service = native.service as any
+  service.authClient = {
+    googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me: SIGNED_IN_USER }),
+    passwordLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-b', me: SIGNED_IN_USER }),
+  }
+  service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {})
+  await service.googleLogin('synthetic-google-token')
+  return service
 }
 
 function renderApp() {
@@ -278,6 +318,7 @@ describe('App sidebar GFS resource menu', () => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     uninstallMockClerum()
+    await cleanupNativeCommitTestHarness()
   })
 
   it('S-7b: crossing the compact threshold with the menu open keeps the native view hidden', async () => {
@@ -317,6 +358,61 @@ describe('App sidebar GFS resource menu', () => {
     // A click alone (no mousedown) takes the tree away without dismissing the menu first.
     fireEvent.click(screen.getByTestId('nav-files-explorer-toggle'))
     expect(screen.queryByRole('menu', { name: 'Actions for notes.txt' })).toBeNull()
+    await flushFrames()
+    await waitFor(() => expect(lastVisibility(bridge)).toBe(true))
+  })
+
+  it('a session that ends with a host dialog open leaves the native view visible after the next sign-in', async () => {
+    const main = await signedInMainSession()
+    const { bridge } = installBridge(main)
+    let notifySessionCleared: (() => void) | null = null
+    bridge.auth.onSessionCleared = vi.fn((listener: () => void) => {
+      notifySessionCleared = listener
+      return vi.fn()
+    })
+    main.onSessionCleared = () => notifySessionCleared?.()
+    bridge.auth.passwordLogin = vi.fn((email: string, password: string) =>
+      main.passwordLogin(email, password)
+    )
+    renderApp()
+    await waitForShell()
+    await launchAlpha(bridge)
+    openExplorer()
+
+    const menu = await openRowMenu('notes.txt')
+    const rename = await within(menu).findByRole('menuitem', { name: 'Rename' })
+    await waitFor(() => expect((rename as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(rename)
+    expect(await screen.findByRole('dialog', { name: 'Rename file' })).toBeTruthy()
+    await flushFrames()
+    expect(lastVisibility(bridge)).toBe(false)
+
+    // Main ends the committed session (control-api rejected it) and tells the window.
+    await act(async () => {
+      await main.endCommittedSession()
+    })
+    await waitFor(() => expect(screen.queryByTestId('nav-files')).toBeNull())
+    expect(await main.getSessionState()).toMatchObject({ authenticated: false })
+
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: SIGNED_IN_USER.email } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'test-password' } })
+    fireEvent.submit(screen.getByLabelText('Password').closest('form')!)
+    await waitForShell()
+    expect(bridge.auth.passwordLogin).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
+    expect(screen.queryByRole('menu')).toBeNull()
+
+    bridge.sandboxUi.open.mockClear()
+    bridge.sandboxUi.setVisible.mockClear()
+    fireEvent.click(screen.getByTestId('nav-sandbox-ui'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Alpha' }))
+    await flushFrames()
+    await waitFor(() => expect(bridge.sandboxUi.open).toHaveBeenCalled())
+    await waitFor(() => expect(bridge.sandboxUi.setVisible).toHaveBeenCalled())
+    // The session-end and sign-in toasts also cover the view; each expires on its own timer.
+    await waitFor(() => expect(document.querySelector('.toast-stack')).toBeNull(), {
+      timeout: 20_000,
+    })
     await flushFrames()
     await waitFor(() => expect(lastVisibility(bridge)).toBe(true))
   })

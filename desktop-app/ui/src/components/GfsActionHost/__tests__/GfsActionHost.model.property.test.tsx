@@ -919,7 +919,7 @@ function Composition({ world, session }: { world: World; session: Session }) {
   const scope = scopeOf(session.team)
   const authorityRef = useRef({ scope, generation: session.gen })
   authorityRef.current = { scope, generation: session.gen }
-  const overlay = useGfsActionOverlay()
+  const overlay = useGfsActionOverlay(true)
   const [watchedFolders, setWatchedFolders] = useState<string[]>([])
   const [resolved, setResolved] = useState<{ gfsUri: string; kind: 'file' | 'directory' } | null>(
     null
