@@ -1,4 +1,5 @@
 import { GfsError } from "../api/errors";
+import { holdClientErrorListener, type ErrorEventSource } from "./pool";
 
 export interface DeadlineBudget {
   deadlineAtMs: number;
@@ -6,7 +7,7 @@ export interface DeadlineBudget {
   now?: () => number;
 }
 
-export interface DeadlineClient {
+export interface DeadlineClient extends ErrorEventSource {
   query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
   release(error?: Error | boolean): void;
 }
@@ -121,6 +122,9 @@ export async function withDeadlineTransaction<T>(
 ): Promise<T> {
   if (!pool.connect) throw new Error("deadline-bounded database operation requires a checked-out client");
   const client = await acquireBeforeDeadline(() => pool.connect!(), budget);
+  // A connection error while checked out fails the in-flight or next statement
+  // (pg marks the client not queryable) and destroys the client on release.
+  const checkoutError = holdClientErrorListener(client);
   let commitSent = false;
   let poison: Error | undefined;
   try {
@@ -148,6 +152,7 @@ export async function withDeadlineTransaction<T>(
     }
     throw error;
   } finally {
-    client.release(poison);
+    checkoutError.detach();
+    client.release(poison ?? checkoutError.error);
   }
 }

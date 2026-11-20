@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { WorkflowAuthorizationPausedError, WorkflowRunStateUnavailableError } from '../../src/errors'
 import { createStaticRuntimeTokenProvider } from '../../src/runtime-token-provider/provider'
 import { AUTH_RETRY_DELAY_MS } from '../../src/status-reporter/authRetry'
 import { StatusReporter } from '../../src/status-reporter/client'
@@ -617,5 +618,139 @@ describe('StatusReporter with byte-heavy tool calls', () => {
     expect(body.outputTruncated).toBe(false)
     expect(body.output).toBe(output)
     expect(body.toolsCalled.slice(50)).toEqual(toolsCalled.slice(50))
+  })
+})
+
+describe('StatusReporter run-store unavailable answers', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  const runStateUnavailable = () => ({
+    status: 503,
+    ok: false,
+    text: async () => JSON.stringify({ code: 'workflow_run_state_unavailable' }),
+  })
+  const plain503 = () => ({
+    status: 503,
+    ok: false,
+    text: async () => JSON.stringify({ error: 'Service Unavailable' }),
+  })
+
+  function reporter(): StatusReporter {
+    return new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+  }
+
+  async function settle(promise: Promise<void>): Promise<unknown> {
+    return promise.then(
+      () => 'resolved',
+      (error: unknown) => error
+    )
+  }
+
+  it('throws WorkflowAuthorizationPausedError on a 423 pause answer without retrying', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 423,
+      ok: false,
+      text: async () => JSON.stringify({ code: 'workflow_authorization_paused' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(failure).toBeInstanceOf(WorkflowAuthorizationPausedError)
+  })
+
+  it('treats a 423 without the pause code as a non-retryable rejection', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 423,
+      ok: false,
+      text: async () => JSON.stringify({ error: 'Locked' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(failure).not.toBeInstanceOf(WorkflowAuthorizationPausedError)
+    expect((failure as Error).message).toBe('WRC rejected step status with HTTP 423: Locked')
+  })
+
+  it('throws WorkflowRunStateUnavailableError after three 503 run-store answers', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi.fn().mockImplementation(async () => runStateUnavailable())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(failure).toBeInstanceOf(WorkflowRunStateUnavailableError)
+    expect((failure as Error).message).toBe(
+      'Failed to report step status after 3 attempts: HTTP 503'
+    )
+  })
+
+  it('throws a plain Error after three 503 answers without the run-store code', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi.fn().mockImplementation(async () => plain503())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure).not.toBeInstanceOf(WorkflowRunStateUnavailableError)
+    expect((failure as Error).message).toBe(
+      'Failed to report step status after 3 attempts: HTTP 503'
+    )
+  })
+
+  it('resolves when a 503 run-store answer is followed by 200', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(runStateUnavailable())
+      .mockResolvedValueOnce({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(reporter().reportStepStatus('s1', 'running')).resolves.toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('lets the last attempt decide: code, code, then a plain 503 is a plain Error', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(runStateUnavailable())
+      .mockResolvedValueOnce(runStateUnavailable())
+      .mockResolvedValueOnce(plain503())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure).not.toBeInstanceOf(WorkflowRunStateUnavailableError)
+  })
+
+  it('lets the last attempt decide: plain, plain, then the code is the typed error', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(plain503())
+      .mockResolvedValueOnce(plain503())
+      .mockResolvedValueOnce(runStateUnavailable())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(failure).toBeInstanceOf(WorkflowRunStateUnavailableError)
   })
 })

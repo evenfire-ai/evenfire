@@ -40,14 +40,20 @@ function numberClaim(payload: Record<string, unknown>, key: string): number | nu
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) end -= 1
+  return value.slice(0, end)
+}
+
 function normalizedServiceUrl(value: string): string {
   try {
     const url = new URL(value.trim())
     url.hash = ''
     url.search = ''
-    return url.toString().replace(/\/+$/, '')
+    return withoutTrailingSlashes(url.toString())
   } catch {
-    return value.trim().replace(/\/+$/, '')
+    return withoutTrailingSlashes(value.trim())
   }
 }
 

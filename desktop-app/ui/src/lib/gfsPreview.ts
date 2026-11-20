@@ -69,3 +69,32 @@ export function isGfsPreviewFile(fileName: string): boolean {
     gfsVideoPreviewMimeType(fileName) !== null
   )
 }
+
+export type GfsResourceOpenTarget =
+  | { kind: 'preview'; preview: GfsPreviewResource }
+  | { kind: 'files'; gfsUri: string }
+
+/**
+ * Where a resolved GFS resource opens inside the app: previewable files in a
+ * preview, everything else (folders, non-previewable files) in the files
+ * browser at the resolved `gfsUri`.
+ */
+export function gfsResourceOpenTarget(resource: {
+  gfsUri: string
+  name: string
+  kind: string
+  bytes?: number | null
+  version?: number
+}): GfsResourceOpenTarget {
+  // Only a file can be previewable: a folder named `notes.md` still opens in the browser.
+  const preview =
+    resource.kind === 'file'
+      ? resolveGfsPreview({
+          gfsUri: resource.gfsUri,
+          name: resource.name,
+          bytes: resource.bytes ?? 0,
+          version: resource.version,
+        })
+      : null
+  return preview ? { kind: 'preview', preview } : { kind: 'files', gfsUri: resource.gfsUri }
+}
