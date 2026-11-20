@@ -217,7 +217,14 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
               variant="solid"
               color="primary"
               data-testid="approval-mode-confirm-allow-all"
-              onClick={() => choose('allow_all')}
+              onClick={event => {
+                // The confirmation opens where the menu was, and this button
+                // sits under the right end of the "Allow all" row. The second
+                // click of a double-click on that row lands here, so only a
+                // single click or a key press (detail 0) confirms.
+                if (event.detail > 1) return
+                choose('allow_all')
+              }}
             >
               Allow all
             </Button>

@@ -122,6 +122,34 @@ describe('ApprovalModePicker — model selector look', () => {
     expect(setApprovalMode).not.toHaveBeenCalled()
   })
 
+  it('does not confirm Allow all on the second click of a double-click on its row', async () => {
+    setApprovalMode.mockResolvedValue({
+      approvalMode: 'allow_all',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'allow_all',
+    })
+    seed('chat-1', 'manual')
+    const { getByTestId } = render(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
+
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    // The confirmation opens where the menu was, with Allow all under the right
+    // end of the row. A double-click's second click (detail 2) lands on it.
+    fireEvent.click(getByTestId('approval-mode-option-allow-all'), { detail: 1 })
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-mode-confirm-allow-all'), { detail: 2 })
+    })
+    expect(setApprovalMode).not.toHaveBeenCalled()
+    expect(getByTestId('approval-mode-confirm-allow-all')).not.toBeNull()
+
+    // A single click still confirms.
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-mode-confirm-allow-all'), { detail: 1 })
+    })
+    expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1', 'allow_all')
+    expect(getByTestId('approval-mode-label').textContent).toBe('Allow all')
+  })
+
   it('keeps the classifier note off the composer row: tooltip, screen-reader text and a warning tint', () => {
     seed('chat-1', 'auto', false)
     const { getByTestId } = render(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
