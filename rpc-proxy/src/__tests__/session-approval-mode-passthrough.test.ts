@@ -201,6 +201,49 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
+  it('returns the rename 403 when the host cannot be resolved, without calling it', async () => {
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'auto' })
+      .expect(403)
+
+    expect(res.body).toEqual({ error: 'Forbidden: user cannot access this host' })
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('resolves the host with the same edge context as rename', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      accessScope: 'user' as const,
+      teamId: undefined,
+      scopes: ['host:approval:write', 'host:session:write'],
+    })
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { approvalMode: 'auto' })) as unknown as typeof fetch
+
+    await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'auto' })
+      .expect(200)
+    await request(makeApp())
+      .patch('/rpc/hosts/chatllm/sessions/chatllm/c1/name')
+      .set('authorization', 'Bearer user-token')
+      .send({ title: 'Renamed' })
+      .expect(200)
+
+    const [modeCall, renameCall] = serviceMock.resolveHostConnectionForUser.mock.calls
+    expect(modeCall).toEqual(renameCall)
+    expect(modeCall?.[3]).toEqual({ teamId: null })
+  })
+
   it('refuses a rename-only host:session:write token that rename still accepts', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
       ...VALID_CLAIMS,

@@ -1412,11 +1412,18 @@ export function createRpcRouter(): Router {
           return
         }
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1460,6 +1467,7 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
+            ...wakeAndHoldV2Options(req, host),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
