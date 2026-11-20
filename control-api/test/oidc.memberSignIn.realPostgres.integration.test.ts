@@ -349,27 +349,43 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
   /**
    * Races two sign-ins: the first finishes its work, then holds its transaction
    * open until the second waits on a lock behind it, and only then commits.
+   *
+   * Each sign-in must finish in exactly one transaction attempt. The locks in
+   * account resolution, not the unique-key retry, must decide the race: if
+   * they did not, the second attempt would hit 23505 and the retry would hide it.
    */
   async function raceSignIns(
     fake: OidcMemberSignInFakeProvider,
     firstProof: VerifiedOidcIdentityProof,
     secondProof: VerifiedOidcIdentityProof
   ): Promise<[OidcMemberSignInResult, OidcMemberSignInResult]> {
+    const attempts = { first: 0, second: 0 }
     let second: Promise<PromiseSettledResult<OidcMemberSignInResult>> | undefined
-    const gated: TransactionRunner = work =>
-      withTransaction(async db => {
+    const gated: TransactionRunner = work => {
+      attempts.first += 1
+      return withTransaction(async db => {
         const result = await work(db)
         if (!second) {
-          second = settle(signIn(fake, secondProof))
+          second = settle(
+            signIn(fake, secondProof, {
+              transaction: secondWork => {
+                attempts.second += 1
+                return committed(secondWork)
+              },
+            })
+          )
           await waitForLockWaiter()
         }
         return result
       }, testPool)
+    }
     const first = await settle(signIn(fake, firstProof, { transaction: gated }))
     const secondOutcome = second ? await second : undefined
     const firstResult = valueOf(first)
     if (!secondOutcome) throw new Error('the second sign-in never started')
-    return [firstResult, valueOf(secondOutcome)]
+    const secondResult = valueOf(secondOutcome)
+    expect(attempts).toEqual({ first: 1, second: 1 })
+    return [firstResult, secondResult]
   }
 
   beforeAll(async () => {
