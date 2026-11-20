@@ -264,7 +264,9 @@ describe('Control API OIDC member sign-in completion', () => {
   })
 
   it('switch off never calls signInMember and returns the exact proof body', async () => {
-    const signInMember = vi.fn()
+    // Answers like the real sign-in, so a missing switch check fails on the
+    // assertions below rather than on an undefined result.
+    const signInMember = vi.fn().mockResolvedValue({ status: 'refused', reason: 'no_account' })
     const completeIdentityProofAttempt = vi.fn().mockResolvedValue(proof)
     const app = appFor({ completeIdentityProofAttempt }, { signInMember })
 
