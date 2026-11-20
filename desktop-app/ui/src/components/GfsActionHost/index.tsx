@@ -634,6 +634,7 @@ export function GfsActionHost({
       ),
     readAccessState: () => readGfsAccessState(queryClient, action.originScope, action.originGen),
     publishedGeneration: () => liveRef.current.generation,
+    originScope: () => action.originScope,
   })
 
   const commitMove =
