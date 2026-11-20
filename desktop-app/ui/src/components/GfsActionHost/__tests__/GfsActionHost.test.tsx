@@ -1243,3 +1243,57 @@ describe('GfsActionHost — review round', () => {
     })
   })
 })
+
+describe('GfsActionHost — Share role dropdown layering', () => {
+  it('mounts the role menu inside the Share dialog and a choice still applies', async () => {
+    const agentGrant = await grantsListPage([
+      {
+        id: '43434343-4343-4343-4343-434343434343',
+        drive: 'main',
+        resourceId: 'folder-s',
+        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        inherit: true,
+      },
+    ])
+    const h = await harness({
+      myAgents: [
+        {
+          name: 'chatllm',
+          contextRef: 'ctx-1',
+          mcpServers: [],
+          gfsSubject: { type: 'host' as const, id: '1st:mcp-host/chatllm' },
+        },
+      ],
+    })
+    h.bridge.listGrants.mockImplementation(async () => agentGrant)
+    h.bridge.resolve.mockImplementation(async () =>
+      resolveResource(resolvedDirectory('folder-s', 'Shared', { parentResourceId: null }))
+    )
+    h.open(await listedRow('folder-s', 'Shared', 'directory', null), 'share')
+    const share = await screen.findByRole('dialog', { name: /shared/i })
+    const trigger = await within(share).findByRole('button', { name: 'Access role for chatllm' })
+    await waitFor(() => expect(trigger.hasAttribute('disabled')).toBe(false))
+
+    fireEvent.click(trigger)
+    const menu = await screen.findByRole('listbox', { name: 'Access role for chatllm' })
+    // A menu at document.body paints under the window-level dialog layer.
+    expect(menu.parentElement).not.toBe(document.body)
+    expect(share.contains(menu)).toBe(true)
+
+    const editorOption = within(menu).getByRole('option', { name: 'Editor' })
+    fireEvent.mouseDown(editorOption)
+    fireEvent.click(editorOption)
+
+    await waitFor(() =>
+      expect(h.bridge.grant).toHaveBeenCalledWith(
+        'folder-s',
+        ['host:1st:mcp-host/chatllm'],
+        ['read', 'write'],
+        'main',
+        true
+      )
+    )
+    expect(screen.queryByRole('listbox')).toBeNull()
+  })
+})

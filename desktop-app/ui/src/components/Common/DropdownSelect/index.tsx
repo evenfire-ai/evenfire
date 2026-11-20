@@ -14,6 +14,7 @@ export function DropdownSelect({
   options,
   placeholder,
   portal = false,
+  portalContainer = null,
   value,
 }: DropdownSelectProps) {
   const [open, setOpen] = useState(false)
@@ -62,8 +63,21 @@ export function DropdownSelect({
       Math.max(viewportPadding, rect.left),
       Math.max(viewportPadding, window.innerWidth - width - viewportPadding)
     )
-    setPortalPosition({ left, top, width })
-  }, [options.length])
+    // A custom container can sit under a transform/filter ancestor that turns
+    // `position: fixed` into positioning against that ancestor (which may also
+    // be scrolled). The offset between where the menu is drawn and its own
+    // left/top is that block's viewport origin; the clamped viewport position
+    // is translated by it. document.body has no such ancestor, so it is skipped.
+    const menu = menuRef.current
+    let originLeft = 0
+    let originTop = 0
+    if (portalContainer && menu) {
+      const menuRect = menu.getBoundingClientRect()
+      originLeft = menuRect.left - (parseFloat(menu.style.left) || 0)
+      originTop = menuRect.top - (parseFloat(menu.style.top) || 0)
+    }
+    setPortalPosition({ left: left - originLeft, top: top - originTop, width })
+  }, [options.length, portalContainer])
 
   useLayoutEffect(() => {
     if (!portal || !open) return
@@ -177,7 +191,7 @@ export function DropdownSelect({
         </span>
         <span className="ui-dropdown-select__chevron" aria-hidden="true" />
       </Button>
-      {portal && menu ? createPortal(menu, document.body) : menu}
+      {portal && menu ? createPortal(menu, portalContainer ?? document.body) : menu}
     </div>
   )
 }

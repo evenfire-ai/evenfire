@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { DropdownSelect, StatusBanner } from '@components/Common'
 import {
   IconAgents,
@@ -204,6 +204,16 @@ export function GfsGrantList({
     if (!loading) setStableNotice(noticeText)
   }, [loading, noticeText])
 
+  // Role menus mount inside the hosting dialog, not at document.body: a
+  // window-level Share dialog sits above the dropdown layer, so a body menu
+  // paints under it. Inside the dialog, the backdrop-filtered (and scrollable)
+  // modal around it becomes the menu's fixed containing block; DropdownSelect
+  // compensates for that block's origin when it places the menu.
+  const [rolePortalContainer, setRolePortalContainer] = useState<HTMLElement | null>(null)
+  const resolveRolePortalContainer = useCallback((list: HTMLUListElement | null) => {
+    setRolePortalContainer(list?.closest<HTMLElement>('[role="dialog"]') ?? null)
+  }, [])
+
   return (
     <>
       {stableNotice ? (
@@ -232,7 +242,11 @@ export function GfsGrantList({
         </div>
       ) : null}
       {hasRows ? (
-        <ul className="da-gfs-grant-list" aria-label="Resource access">
+        <ul
+          className="da-gfs-grant-list"
+          aria-label="Resource access"
+          ref={resolveRolePortalContainer}
+        >
           {showGrantRows
             ? visibleItems.map(item => {
                 if (mergedByKey.has(subjectKey(item.subject))) return null
@@ -263,6 +277,7 @@ export function GfsGrantList({
                         options={ROLE_OPTIONS}
                         placeholder="Role"
                         portal
+                        portalContainer={rolePortalContainer}
                         value={roleForPermissions(item.permissions)}
                       />
                     </span>
@@ -309,6 +324,7 @@ export function GfsGrantList({
                         options={ROLE_OPTIONS}
                         placeholder="Role"
                         portal
+                        portalContainer={rolePortalContainer}
                         value={roleForPermissions(row.permissions)}
                       />
                     </span>
