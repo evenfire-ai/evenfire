@@ -162,6 +162,8 @@ async function signInResolvedMember(
   // so far is the new-member team), land in the team of the most recently
   // created applied invitation; otherwise in their first active team, which
   // for a new account is the new-member team; otherwise they are teamless.
+  // currentMemberMembership's email-keyed healing is deliberately not used:
+  // OIDC sign-in never restores teams from accepted invitations by email.
   const before = account.created.account
     ? undefined
     : ((await findFirstActiveMembership(db, account.userId)).rows[0] as SessionTeam | undefined)
