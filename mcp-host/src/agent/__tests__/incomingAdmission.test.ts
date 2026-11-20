@@ -1056,50 +1056,6 @@ describe('approval mode writers at admission', () => {
     ).toBe('manual')
   })
 
-  it('keeps a Slack sender matched only by username at manual', async () => {
-    const manager = new ConversationManager()
-    const { admit, spies } = admitWith(manager, OPEN_CEILING)
-    const byUsername = await admit(
-      message({
-        channelType: 'slack',
-        channelId: 'C1',
-        sender: 'slack-legacy',
-        messageId: 'msg-legacy',
-        content: 'approval-mode allow-all',
-        senderMatch: 'username',
-      })
-    )
-    const byUserId = await admit(
-      message({
-        channelType: 'slack',
-        channelId: 'C1',
-        sender: 'slack-user',
-        messageId: 'msg-user-id',
-        content: 'approval-mode allow-all',
-      })
-    )
-    expect(spies.dispatch).not.toHaveBeenCalled()
-    expect(byUsername).toMatchObject({
-      success: true,
-      response:
-        'Approval mode is manual. Effective mode is manual. Only an allowlisted Slack user ID can raise the mode.',
-    })
-    expect(byUserId).toMatchObject({
-      success: true,
-      response: 'Approval mode is allow_all. Effective mode is allow_all.',
-    })
-    expect(
-      manager.getSessionByKey(
-        serializeSessionKey({
-          userId: 'slack-legacy',
-          channelType: 'slack',
-          channelId: 'C1',
-          threadId: 'chat-1',
-        })
-      )?.approval_mode
-    ).toBe('manual')
-  })
-
   it('reads the cap from the stored channel type, never from the key', async () => {
     const manager = new ConversationManager()
     const key = serializeSessionKey({

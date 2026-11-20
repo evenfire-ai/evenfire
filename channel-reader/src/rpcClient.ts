@@ -25,8 +25,6 @@ export interface OutgoingMessage {
   threadId?: string
   metadata?: Record<string, unknown>
   providerIdentity?: ProviderIdentity
-  /** See `Message.senderMatch`: mcp-host refuses an approval-mode raise. */
-  senderMatch?: 'username'
   traceContext?: TraceContextV1
 }
 
@@ -206,7 +204,6 @@ export class RPCClient {
       threadId: message.threadId,
       metadata: message.rawData,
       ...(message.providerIdentity ? { providerIdentity: message.providerIdentity } : {}),
-      ...(message.senderMatch ? { senderMatch: message.senderMatch } : {}),
       ...(options?.traceContext ? { traceContext: options.traceContext } : {}),
     }
 

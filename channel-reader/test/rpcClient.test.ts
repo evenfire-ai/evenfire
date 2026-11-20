@@ -117,22 +117,6 @@ describe('RPCClient - sendMessage()', () => {
     })
   })
 
-  it('forwards a username-only sender match so mcp-host refuses a mode raise', async () => {
-    mockFetch.mockReturnValue(
-      mockOkResponse({ success: true, status: 'completed', model: 'gpt-4' })
-    )
-
-    const client = new RPCClient('http://mcp-host:8080')
-    await client.sendMessage(makeMessage({ channelType: 'slack', senderMatch: 'username' }))
-    await client.sendMessage(makeMessage({ channelType: 'slack' }))
-
-    const bodies = mockFetch.mock.calls.map(call =>
-      JSON.parse((call[1] as RequestInit).body as string)
-    )
-    expect(bodies[0].senderMatch).toBe('username')
-    expect(bodies[1]).not.toHaveProperty('senderMatch')
-  })
-
   it('returns success response from mcp-host', async () => {
     mockFetch.mockReturnValueOnce(
       mockOkResponse({ success: true, status: 'completed', response: 'Hi back', model: 'gpt-4' })

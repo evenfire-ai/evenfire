@@ -42,7 +42,7 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 | `spec.approval.channels.slack` | object | no | Slack approval config. |
 | `spec.approval.channels.slack.enabled` | boolean | no | Whether Slack users can approve. |
 | `spec.approval.channels.slack.approvers` | string[] | no | List of Slack user IDs allowed to approve. |
-| `spec.approval.channels.slack.allowModeChange` | boolean | no | Default `true`. When `true` or absent, a Slack session may store `auto` or `allow_all`, up to `modeCeiling`. Only `false` caps that channel at `manual`. A sender who matched only a legacy username allowlist entry cannot raise the mode; allowlist the Slack user ID. |
+| `spec.approval.channels.slack.allowModeChange` | boolean | no | Default `true`. When `true` or absent, a Slack session may store `auto` or `allow_all`, up to `modeCeiling`. Only `false` caps that channel at `manual`. |
 | `spec.approval.channels.teams` | object | no | Microsoft Teams approval config. |
 | `spec.approval.channels.teams.enabled` | boolean | no | Whether Teams users can approve. |
 | `spec.approval.channels.teams.approvers` | string[] | no | List of Teams user IDs allowed to approve. |
