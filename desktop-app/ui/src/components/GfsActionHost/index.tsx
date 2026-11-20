@@ -117,10 +117,11 @@ export function GfsActionHost({
   const finish = (token: number) => {
     if (ownsToken(token)) writeAction(null)
   }
-  // Dismissal while the mutation runs is ignored: the mutation cannot be
-  // recalled, and closing would let a drag of the same resource start. Each
-  // dialog also disables its close paths while running, so this guard is
-  // never the user's only feedback.
+  // Dismissal while the action runs is ignored, even before its write is
+  // sent: closing would let a drag of the same resource start while the
+  // submitted action can still write. Every dialog that enters
+  // `running` disables its own close paths, so this guard is never the
+  // user's only feedback.
   const dismiss = (token: number) => {
     const action = activeActionRef.current
     if (!action || action.token !== token || action.phase === 'running') return
