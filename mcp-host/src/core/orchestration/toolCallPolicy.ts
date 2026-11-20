@@ -386,25 +386,47 @@ async function applyApprovalMode(
   return materialize(decision, call, config, cause, approval, toolIdentity)
 }
 
+/**
+ * The post_tool_use transform for one call, or undefined when no post hook is
+ * installed. It runs inside executeSingleTool so a tool's finalizeResult fence
+ * measures and publishes the transformed content, not the raw output.
+ */
+function guardrailResultTransform(
+  config: LoopConfig,
+  call: ToolCall,
+  toolIdentity: ToolIdentity | undefined
+): ((result: ToolResult) => Promise<ToolResult>) | undefined {
+  const { guardrails } = config
+  if (!guardrails?.transformResult || !toolIdentity) return undefined
+  return async (result: ToolResult): Promise<ToolResult> => {
+    const view = await guardrails.transformResult!(toolIdentity, call.arguments, {
+      content: result.content,
+      isError: result.is_error,
+    })
+    return view.content === result.content ? result : { ...result, content: view.content }
+  }
+}
+
 export async function executeAdmittedTool(
   admission: Extract<ToolCallAdmission, { kind: 'execute' }>,
   config: LoopConfig,
   iteration: number,
   requestImages?: RequestImageUsage
 ): Promise<ToolResult> {
-  const { guardrails } = config
-  const { toolIdentity } = admission
-  // The transform runs inside executeSingleTool so a tool's finalizeResult
-  // fence measures and publishes the transformed content, not the raw output.
-  const transformResult =
-    guardrails?.transformResult && toolIdentity
-      ? async (result: ToolResult): Promise<ToolResult> => {
-          const view = await guardrails.transformResult!(toolIdentity, admission.call.arguments, {
-            content: result.content,
-            isError: result.is_error,
-          })
-          return view.content === result.content ? result : { ...result, content: view.content }
-        }
-      : undefined
+  const transformResult = guardrailResultTransform(config, admission.call, admission.toolIdentity)
   return executeSingleTool(admission.call, config, iteration, transformResult, requestImages)
+}
+
+/**
+ * The same post_tool_use transform for a call a person approved, which the
+ * resume path runs outside the loop, in every approval mode.
+ */
+export function approvedToolResultTransform(
+  call: ToolCall,
+  config: LoopConfig
+): ((result: ToolResult) => Promise<ToolResult>) | undefined {
+  const toolIdentity = config.guardrails
+    ? resolveToolIdentityFromRegistry(call.name, config.toolRegistry, call.arguments)
+    : undefined
+  return guardrailResultTransform(config, call, toolIdentity)
 }
