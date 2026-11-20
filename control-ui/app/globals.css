@@ -9379,6 +9379,14 @@ td.cu-registry-description {
     box-shadow 0.15s;
 }
 
+.cu-markdown-editor[data-color-mode='dark'] {
+  color-scheme: dark;
+}
+
+.cu-markdown-editor[data-color-mode='light'] {
+  color-scheme: light;
+}
+
 .cu-markdown-editor--invalid {
   border-color: var(--cu-danger);
   box-shadow: 0 0 0 3px rgba(var(--cu-danger-rgb), 0.16);
