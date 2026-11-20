@@ -105,7 +105,7 @@ function teamlessMemberMembership(): MembershipRow {
   }
 }
 
-export async function currentMemberMembership(
+async function currentMemberMembership(
   db: Pick<DbTransactionClient, 'query'>,
   user: { id: string; email: string }
 ): Promise<MembershipRow> {
