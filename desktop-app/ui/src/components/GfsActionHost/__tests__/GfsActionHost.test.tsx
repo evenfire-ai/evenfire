@@ -1337,4 +1337,81 @@ describe('GfsActionHost — Share role dropdown layering', () => {
     await waitFor(() => expect(h.bridge.revokeGrant).toHaveBeenCalledWith(grantId))
     expect(screen.queryByRole('menu', { name: 'Actions for chatllm' })).toBeNull()
   })
+
+  const chatllm = {
+    name: 'chatllm',
+    contextRef: 'ctx-1',
+    mcpServers: [],
+    gfsSubject: { type: 'host' as const, id: '1st:mcp-host/chatllm' },
+  }
+
+  /** Opens the row's actions menu, pins it inside the Share dialog, and closes it with Escape. */
+  async function expectRowMenuInsideShare(rowTestId: string) {
+    const share = await screen.findByRole('dialog', { name: /^Share folder/ })
+    const row = await within(share).findByTestId(rowTestId)
+    const trigger = within(row).getByRole('button', { name: 'Actions for chatllm' })
+    await waitFor(() => expect(trigger.hasAttribute('disabled')).toBe(false))
+
+    fireEvent.click(trigger)
+    const menu = await screen.findByRole('menu', { name: 'Actions for chatllm' })
+    expect(menu.parentElement).not.toBe(document.body)
+    expect(share.contains(menu)).toBe(true)
+    expect(within(menu).getByRole('menuitem', { name: 'Remove access' })).toBeTruthy()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() =>
+      expect(screen.queryByRole('menu', { name: 'Actions for chatllm' })).toBeNull()
+    )
+  }
+
+  it('mounts an inherited row actions menu inside the Share dialog', async () => {
+    // The row is derived by the real ancestor walk: folder-c has no grant of
+    // its own and inherits chatllm from its parent folder-s.
+    const parentGrant = await grantsListPage([
+      {
+        id: '45454545-4545-4545-4545-454545454545',
+        drive: 'main',
+        resourceId: 'folder-s',
+        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        inherit: true,
+      },
+    ])
+    const noGrants = await grantsListPage([])
+    const h = await harness({ myAgents: [chatllm] })
+    h.bridge.listGrants.mockImplementation(async (resourceId: string) =>
+      resourceId === 'folder-s' ? parentGrant : noGrants
+    )
+    // The walk resolves `gfs://<drive>/<rid>`, where the rid drops the dashes.
+    h.bridge.resolve.mockImplementation(async (uri: string) =>
+      uri.endsWith('/folders')
+        ? resolveResource(resolvedDirectory('folder-s', 'Shared', { parentResourceId: null }))
+        : resolveResource(resolvedDirectory('folder-c', 'Child', { parentResourceId: 'folder-s' }))
+    )
+    h.open(await listedRow('folder-c', 'Child', 'directory', 'folder-s'), 'share')
+
+    await expectRowMenuInsideShare('gfs-access-row-inherited-host:1st:mcp-host/chatllm')
+  })
+
+  it('mounts a share row actions menu inside the Share dialog', async () => {
+    const shareId = '46464646-4646-4646-4646-464646464646'
+    const directShare = await sharesListPage([
+      {
+        id: shareId,
+        drive: 'main',
+        resourceId: 'folder-s',
+        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        includeDescendants: true,
+      },
+    ])
+    const h = await harness({ myAgents: [chatllm] })
+    h.bridge.listShares.mockImplementation(async () => directShare)
+    h.bridge.resolve.mockImplementation(async () =>
+      resolveResource(resolvedDirectory('folder-s', 'Shared', { parentResourceId: null }))
+    )
+    h.open(await listedRow('folder-s', 'Shared', 'directory', null), 'share')
+
+    await expectRowMenuInsideShare(`gfs-access-row-share-${shareId}`)
+  })
 })
