@@ -232,9 +232,10 @@ The OpenAI models the classifier may call are an allowlist. It contains
 `gpt-4.1`, `gpt-4.1-mini`, and `gpt-5.4-mini` show the shell card. Pinning
 `shellClassifierModel` to one of those shows the card too.
 
-On any other provider, an `openai-api-key` in the Host's Secret does not
-enable the classifier model, because mcp-host reads only the credentials of
-the Host's own provider. Auto then judges shell on Claude and on Bedrock
+On any other provider, the classifier model is not used: mcp-host builds it
+only from the credentials of the Host's own provider, so neither an
+`openai-api-key` in the Host's Secret nor an OpenAI fallback's key enables it.
+Auto then judges shell on Claude and on Bedrock
 Anthropic models, using the model serving the turn. When failover is serving
 a fallback, that pair is the one checked and called. A pair the table refuses
 shows the card. Azure, the subscription providers, and Vertex and Gemini show
