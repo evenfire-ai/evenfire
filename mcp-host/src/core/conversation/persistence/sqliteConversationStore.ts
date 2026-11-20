@@ -316,6 +316,18 @@ export class SqliteConversationStore implements ConversationStore {
       rehydrationDurationHistogram?.labels('miss').observe(seconds)
       return undefined
     }
+    // Another caller can miss the cache for this key while this load is
+    // queued, for example a turn start and an approval-mode PATCH after a
+    // restart. Its load can cache an object first. Return that object: a
+    // second copy would replace it, and a later write through one copy would
+    // not reach the other. Returning before the counters are set keeps the
+    // cached object's ordinals.
+    const raced = this.cache.get(sessionKey)
+    if (raced) {
+      const seconds = Number(process.hrtime.bigint() - start) / 1e9
+      rehydrationDurationHistogram?.labels('hit').observe(seconds)
+      return raced
+    }
     const { conversation, highestOrdinal, highestTurnNumber } = reconstructConversation(persisted)
     const pinned = conversation.state !== 'idle' || conversation.pending_approval !== undefined
     try {
