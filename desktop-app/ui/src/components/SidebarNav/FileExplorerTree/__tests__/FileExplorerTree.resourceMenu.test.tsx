@@ -6,6 +6,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GfsActionHost } from '@components/GfsActionHost'
 import { useGfsActionOverlay } from '@components/GfsActionHost/overlay'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { gfsSessionScope } from '@lib/gfsSessionAuthority'
 import {
   accessibleResource,
   affordancesFailureMessage,
@@ -23,12 +25,12 @@ import {
 import { GfsDragSessionProvider } from '@/gfs/dragSession'
 import { FileExplorerTree } from '..'
 
-const authFor = (teamId: string) =>
+const authFor = (teamId: string, sessionGeneration = 7) =>
   ({
     isAuthenticated: true,
     me: { id: 'user-1', teamId },
     runtimeConfigState: { envKey: 'test' },
-    sessionGeneration: 7,
+    sessionGeneration,
   }) as unknown as AuthContextValue
 
 type Deferred = { resourceId: string; release: (held: string[]) => void }
@@ -95,34 +97,41 @@ function Shell() {
 }
 
 /**
- * Runs `onTeamChange` in the layout phase of the commit that publishes a new
- * team: after every render of that commit, before any passive effect.
+ * Runs `onSessionChange` in the layout phase of the commit that publishes a new
+ * team or session generation: after every render of that commit, before any
+ * passive effect.
  */
-function TeamChangeProbe({ onTeamChange }: { onTeamChange?: () => void }) {
-  const teamId = (useAuthContext().me as { teamId?: string } | null)?.teamId
-  const previous = useRef(teamId)
+function SessionChangeProbe({ onSessionChange }: { onSessionChange?: () => void }) {
+  const auth = useAuthContext()
+  const session = `${(auth.me as { teamId?: string } | null)?.teamId}:${auth.sessionGeneration}`
+  const previous = useRef(session)
   useLayoutEffect(() => {
-    if (previous.current === teamId) return
-    previous.current = teamId
-    onTeamChange?.()
-  }, [onTeamChange, teamId])
+    if (previous.current === session) return
+    previous.current = session
+    onSessionChange?.()
+  }, [onSessionChange, session])
   return null
 }
 
-function renderShell(onTeamChange?: () => void) {
+function renderShell(onSessionChange?: () => void) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const tree = (teamId: string) => (
-    <AuthContext.Provider value={authFor(teamId)}>
+  const tree = (teamId: string, sessionGeneration?: number) => (
+    <AuthContext.Provider value={authFor(teamId, sessionGeneration)}>
       <QueryClientProvider client={queryClient}>
         <GfsDragSessionProvider>
           <Shell />
-          <TeamChangeProbe onTeamChange={onTeamChange} />
+          <SessionChangeProbe onSessionChange={onSessionChange} />
         </GfsDragSessionProvider>
       </QueryClientProvider>
     </AuthContext.Provider>
   )
   const rendered = render(tree('team-1'))
-  return { queryClient, switchTeam: (teamId: string) => rendered.rerender(tree(teamId)) }
+  return {
+    queryClient,
+    switchTeam: (teamId: string) => rendered.rerender(tree(teamId)),
+    switchGeneration: (sessionGeneration: number) =>
+      rendered.rerender(tree('team-1', sessionGeneration)),
+  }
 }
 
 function menuItem(menu: HTMLElement, name: string) {
@@ -403,6 +412,41 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
     await waitFor(() => expect(menuItem(menu, 'Rename')?.disabled).toBe(false))
 
     act(() => switchTeam('team-2'))
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+
+    expect(chosen).toBe(true)
+    expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
+    expect(affordances).not.toHaveBeenCalled()
+  })
+
+  it('drops a choice made in a menu opened under the previous session generation of the same team', async () => {
+    const affordances = vi.fn(
+      appServiceAffordanceProducer(async () => heldPermissionResponse(['read', 'write']))
+    )
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('file-s', 'shared.txt', 'file', { permissions: ['read', 'write'] }),
+        ])
+      ),
+      affordances,
+    })
+    let chosen = false
+    const { queryClient, switchGeneration } = renderShell(() => {
+      const rename = document.querySelector<HTMLButtonElement>('[data-gfs-action="rename"]')
+      if (!rename || rename.disabled) return
+      chosen = true
+      rename.click()
+    })
+    const menu = await openMenuOn('shared.txt')
+    await waitFor(() => expect(menuItem(menu, 'Rename')?.disabled).toBe(false))
+    // The next generation is already active, so only the menu's own check can refuse.
+    const scope = gfsSessionScope(authFor('team-1', 8))!
+    queryClient.setQueryData(desktopQueryKeys.gfsAccessState(scope, 8), 'active')
+
+    act(() => switchGeneration(8))
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 20))
     })

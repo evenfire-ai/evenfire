@@ -598,6 +598,62 @@ describe('App sidebar GFS resource menu', () => {
     }
   )
 
+  it('a host rename of the folder the Files tab shows re-reads its location on the page', async () => {
+    const { bridge } = installBridge()
+    const reports = { name: 'Reports', version: 1 }
+    bridge.gfs.listAccessible = vi.fn(async () =>
+      listAccessiblePage([
+        accessibleResource(REPORTS_ID, reports.name, 'directory', {
+          version: reports.version,
+          permissions: ['read', 'write'],
+        }),
+      ])
+    )
+    bridge.gfs.resolve = vi.fn(async (uri: string) => {
+      if (uri === REPORTS.gfsUri) {
+        return resolveResource(
+          resolvedDirectory(REPORTS_ID, reports.name, { version: reports.version })
+        )
+      }
+      throw new Error(`unexpected resolve of ${uri}`)
+    })
+    bridge.gfs.renameResource = vi.fn(async (resourceId: string, name: string) => {
+      const receipt = await renameResourceResult(resourceId, name, reports.version + 1)
+      reports.name = name
+      reports.version = receipt.version
+      return receipt
+    })
+    renderApp()
+    await waitForShell()
+    openExplorer()
+
+    fireEvent.doubleClick(await screen.findByRole('button', { name: 'Reports' }))
+    await waitFor(() => expect(fileLocation()).toContain('Reports'))
+    const resolvesBefore = bridge.gfs.resolve.mock.calls.length
+
+    const tree = screen.getByRole('tree', { name: 'Shared files' })
+    fireEvent.contextMenu(within(tree).getByRole('button', { name: 'Reports' }), {
+      clientX: 20,
+      clientY: 20,
+    })
+    const menu = await screen.findByRole('menu', { name: 'Actions for Reports' })
+    const rename = await within(menu).findByRole('menuitem', { name: 'Rename' })
+    await waitFor(() => expect((rename as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(rename)
+    const renameDialog = await screen.findByRole('dialog', { name: 'Rename folder' })
+    fireEvent.change(within(renameDialog).getByLabelText('Name'), {
+      target: { value: 'Reports 2026' },
+    })
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(bridge.gfs.renameResource).toHaveBeenCalledWith(REPORTS_ID, 'Reports 2026', 'main', 1)
+    )
+    await waitFor(() => expect(renameDialog.isConnected).toBe(false))
+
+    await waitFor(() => expect(fileLocation()).toContain('Reports 2026'))
+    expect(bridge.gfs.resolve.mock.calls.length).toBeGreaterThan(resolvesBefore)
+  })
+
   it('S-8: in-place actions on another resource leave the Files tab, its location and its crumbs alone', async () => {
     const { bridge } = installBridge()
     renderApp()
