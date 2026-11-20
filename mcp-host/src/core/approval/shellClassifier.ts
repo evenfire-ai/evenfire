@@ -186,6 +186,33 @@ function enqueueUsage(input: ClassifyInput, usage: TokenUsage | undefined): void
 }
 
 /**
+ * Logs a classifier failure that turns into ESCALATE. Only the error's class
+ * name, a numeric HTTP status and timeout vs error are logged. The message,
+ * the command, the prompt and any response text are not.
+ */
+function logClassifierFailure(
+  input: Pick<ClassifyInput, 'providerType' | 'modelName' | 'sessionLogId'>,
+  error: unknown,
+  timedOut: boolean
+): void {
+  const errorClass = error instanceof Error ? error.constructor.name : typeof error
+  const fields = error as { status?: unknown; httpStatus?: unknown } | null | undefined
+  const status = typeof fields?.status === 'number' ? fields.status : fields?.httpStatus
+  logger.warn(
+    {
+      event: 'shell_classifier_failed',
+      session: input.sessionLogId,
+      providerType: input.providerType,
+      modelName: input.modelName,
+      errorClass,
+      ...(typeof status === 'number' ? { httpStatus: status } : {}),
+      reason: timedOut ? 'timeout' : 'error',
+    },
+    'Shell classifier call failed; the shell card is shown'
+  )
+}
+
+/**
  * One direct completion. A task abort is CANCELLED. A 10s timeout, a throw,
  * or any text other than APPROVE is ESCALATE. The call does not move session counters.
  */
@@ -220,8 +247,11 @@ async function judge(input: ClassifyInput): Promise<ShellVerdict> {
     if (input.taskSignal.aborted) return 'CANCELLED'
     if (timeout.signal.aborted) return 'ESCALATE'
     return verdictFromContent(response.content)
-  } catch {
+  } catch (error) {
+    // A task abort ends the task; it is not a classifier failure, so it is
+    // not logged here. L3 still records CANCELLED.
     if (input.taskSignal.aborted) return 'CANCELLED'
+    logClassifierFailure(input, error, timeout.signal.aborted)
     return 'ESCALATE'
   } finally {
     clearTimeout(timer)
@@ -252,8 +282,11 @@ export async function classifyToolCall(input: {
   let verdict: ShellVerdict = 'ESCALATE'
   try {
     verdict = await judge(input)
-  } catch {
+  } catch (error) {
+    // judge catches the provider call itself. This catches a throw before
+    // that call. A task abort is not logged, as in judge.
     verdict = input.taskSignal.aborted ? 'CANCELLED' : 'ESCALATE'
+    if (verdict === 'ESCALATE') logClassifierFailure(input, error, false)
   } finally {
     logger.info(
       {
