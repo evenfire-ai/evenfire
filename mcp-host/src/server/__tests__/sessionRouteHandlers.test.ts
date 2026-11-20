@@ -387,4 +387,35 @@ describe('createSessionRouteHandlers — classifier pair while failover serves (
       [true, true]
     )
   })
+
+  it('reports the dedicated classifier pair instead of the chat or failover pair', async () => {
+    const convManager = new ConversationManager()
+    await seed(convManager, KEY)
+    const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
+      getConversationManager: () => convManager,
+      redactToolError: (_toolName, rawError) => rawError,
+      redactTitle: rawTitle => rawTitle,
+      sessionModel: () => ({ providerType: 'openai', modelName: 'gpt-5.4-mini' }),
+      servedModel: () => ({ provider: 'zai', model: 'glm-4.6', fallback: true }),
+      shellClassifierPair: () => ({ providerType: 'openai', modelName: 'gpt-5.5' }),
+    })
+    const list = await handleSessionsList('user-1', {})
+    const page = await handleSessionMessages('user-1', 'agent-1', 'chat-1', {})
+    expect(list.items[0]!.shellClassifierAvailable).toBe(true)
+    expect(page!.shellClassifierAvailable).toBe(true)
+  })
+
+  it('reports a dedicated model the classifier does not call as unavailable', async () => {
+    const convManager = new ConversationManager()
+    await seed(convManager, KEY)
+    const { handleSessionsList } = createSessionRouteHandlers({
+      getConversationManager: () => convManager,
+      redactToolError: (_toolName, rawError) => rawError,
+      redactTitle: rawTitle => rawTitle,
+      sessionModel: () => ({ providerType: 'claude', modelName: 'claude-sonnet-4-5' }),
+      shellClassifierPair: () => ({ providerType: 'openai', modelName: 'gpt-4.1-mini' }),
+    })
+    const list = await handleSessionsList('user-1', {})
+    expect(list.items[0]!.shellClassifierAvailable).toBe(false)
+  })
 })

@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { config as appConfig } from '../../config'
 import type { ApprovalMode } from '../../core/approval/approvalMode'
 import { approvalLogId } from '../../core/approval/grantMemory'
+import type { ShellClassifierCaller } from '../../core/approval/shellClassifier'
 import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { pendingApprovalWireFields } from '../../core/conversation/pendingApprovalView'
@@ -31,6 +32,7 @@ import { logger } from '../../logger'
 import { MessageQueue } from '../../queue'
 import type { Task, TaskError } from '../../queue/types'
 import { STATELESS_ALLOW_CRON_MANAGE_ENV } from '../../statelessCronPolicy'
+import type { UsageReporter } from '../../usage/usageReporter'
 import { CronScheduler } from '../cronScheduler'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 import type { ExecutorFailoverSupport } from '../types'
@@ -126,6 +128,9 @@ interface DriveOptions {
    * script a fallback can reuse to serve the turn.
    */
   failover?: (primary: SingleTurnProvider) => ExecutorFailoverSupport
+  /** When set, shell is judged by this caller instead of the chat provider. */
+  shellClassifier?: ShellClassifierCaller
+  usageReporter?: UsageReporter
 }
 
 interface DriveResult {
@@ -239,6 +244,10 @@ async function drive(options: DriveOptions): Promise<DriveResult> {
     onComplete: vi.fn(),
     onFail,
     ...(options.failover ? { failover: options.failover(provider) } : {}),
+    ...(options.shellClassifier
+      ? { shellClassifierProvider: () => options.shellClassifier ?? null }
+      : {}),
+    ...(options.usageReporter ? { usageReporter: options.usageReporter } : {}),
   }
   const executor = new TaskExecutor(task, deps)
   await executor.run()
@@ -541,6 +550,35 @@ describe('approval mode admission', () => {
     expect(rewritten.classifyCalls).toBe(0)
     expect(rewritten.approval).toBeUndefined()
     expect(JSON.stringify(rewritten.messages)).toContain('admission-ok')
+  })
+
+  it('judges shell with the dedicated classifier while the chat model stays unused', async () => {
+    const enqueue = vi.fn()
+    const seen: Array<{ max_tokens?: number; reasoning_effort?: string }> = []
+    const ran = await drive({
+      mode: 'auto',
+      primaryType: 'openai',
+      calls: [shell('sh-dedicated', 'printf admission-ok')],
+      shellClassifier: {
+        providerType: 'openai',
+        modelName: 'gpt-5.5',
+        provider: {
+          completeSingleTurn: async (_messages, options) => {
+            seen.push(options ?? {})
+            return { content: 'APPROVE', usage, finish_reason: FinishReason.Stop }
+          },
+        },
+      },
+      usageReporter: { enqueue } as unknown as UsageReporter,
+    })
+    expect(ran.classifyCalls).toBe(0)
+    expect(ran.approval).toBeUndefined()
+    expect(ran.completed).toBe(true)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.max_tokens).toBe(16)
+    expect(seen[0]?.reasoning_effort).toBe('none')
+    expect(enqueue).toHaveBeenCalled()
+    expect(enqueue.mock.calls[0]?.[0]).toMatchObject({ provider: 'openai', model: 'gpt-5.5' })
   })
 
   it('A3 APPROVE stores nothing, ESCALATE cards with the descriptor, and an unavailable classifier does not call classify', async () => {
@@ -1211,12 +1249,12 @@ describe('classifier pair while failover serves a fallback', () => {
       triggerOn: ['rate_limited'],
       fallbacks: [
         { provider: 'gemini', model: 'gemini-fixture' },
-        { provider: 'openai', model: 'gpt-4.1' },
+        { provider: 'openai', model: 'gpt-5.5' },
       ],
     }
     // Only the openai entry can be built, so the second entry serves.
     const engine = await engineServingFallback(policy, provider => provider === 'openai')
-    expect(engine.servedBy()).toEqual({ provider: 'openai', model: 'gpt-4.1', fallback: true })
+    expect(engine.servedBy()).toEqual({ provider: 'openai', model: 'gpt-5.5', fallback: true })
     let openai: ReturnType<typeof fallbackProvider> | undefined
     const builds: FallbackEntry[] = []
     const result = await drive({
@@ -1239,7 +1277,7 @@ describe('classifier pair while failover serves a fallback', () => {
     expect(result.completed).toBe(true)
     expect(openai!.classifyCalls()).toBe(1)
     expect(result.classifyCalls).toBe(0)
-    expect(builds).toContainEqual({ provider: 'openai', model: 'gpt-4.1' })
+    expect(builds).toContainEqual({ provider: 'openai', model: 'gpt-5.5' })
   })
 
   it('shows the shell card when the serving fallback is one the table refuses, though the primary is eligible', async () => {

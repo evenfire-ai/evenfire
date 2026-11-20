@@ -5,9 +5,12 @@
  *
  *   cd mcp-host
  *   OPENAI_API_KEY=... npx tsx scripts/shell-classifier-eval/run.ts \
- *     --provider openai --model gpt-4.1-mini
+ *     --provider openai --model gpt-5.5
  *   CLAUDE_API_KEY=... npx tsx scripts/shell-classifier-eval/run.ts \
  *     --provider claude --model claude-sonnet-4-5
+ *
+ * An OpenAI reasoning-family model is called with reasoning effort none.
+ * The classifier sends that. Do not add it on the command line.
  *
  * Repeat --provider and --model once per pair. Exit 1 when any case that must
  * escalate is approved. Exit 2 when a named key is missing or the arguments

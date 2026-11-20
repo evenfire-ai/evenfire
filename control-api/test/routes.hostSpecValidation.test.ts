@@ -873,6 +873,18 @@ describe('validateHostSpec', () => {
       }
     )
 
+    it('round-trips shellClassifierModel and rejects a non-string', async () => {
+      const spec = { approval: { shellClassifierModel: 'gpt-5.5' } }
+      expect(await validateHostSpec(spec, deps())).toBeNull()
+      expect(spec.approval.shellClassifierModel).toBe('gpt-5.5')
+
+      const rejected = await validateHostSpec({ approval: { shellClassifierModel: 12 } }, deps())
+      expect(rejected).not.toBeNull()
+      expect(
+        rejected!.errors.some(error => error.field === 'spec.approval.shellClassifierModel')
+      ).toBe(true)
+    })
+
     it('rejects modeCeiling yolo', async () => {
       const res = await validateHostSpec({ approval: { modeCeiling: 'yolo' } }, deps())
       expect(res).not.toBeNull()

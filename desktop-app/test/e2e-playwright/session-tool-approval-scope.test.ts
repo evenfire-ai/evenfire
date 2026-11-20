@@ -28,8 +28,10 @@
  * Each mode row raises the ceiling on the chatllm Host for itself, waits until
  * mcp-host reports it in a session read, and restores it afterwards. The patch runs under the T2
  * mutation lease and tests the live `spec.approval`, so it never overwrites a
- * concurrent change. No classifier-APPROVE row: the branch profile allowlists
- * only gpt-5.4 family models, on which the shell classifier never runs.
+ * concurrent change. No classifier-APPROVE row. The auto row pins
+ * spec.approval.shellClassifierModel to a model the classifier does not call,
+ * so the shell card still appears. With no pin, a Host that has an OpenAI
+ * credential judges shell with the Host's shell classifier model.
  *
  * Dedicated, explicitly opted-in lane against a real chatllm Host and its
  * configured LLM; nothing is mocked. Run from desktop-app/ with the branch
@@ -374,7 +376,7 @@ function patchHost(operations: unknown[]): void {
  * instead of being taken as the original. `restore` removes the ceiling again
  * and refuses to overwrite a different value.
  */
-function modeCeilingFixture(ceiling: ApprovalMode) {
+function modeCeilingFixture(ceiling: ApprovalMode, extra: Record<string, string> = {}) {
   const context = process.env.E2E_K8S_CONTEXT
   if (!context || process.env.MINIKUBE_PROFILE !== context) {
     throw new Error(
@@ -389,7 +391,7 @@ function modeCeilingFixture(ceiling: ApprovalMode) {
       )}; the canonical overlay sets none, so an interrupted run left it. Remove it before rerunning.`
     )
   }
-  const raised = { ...original.approval, modeCeiling: ceiling }
+  const raised = { ...original.approval, modeCeiling: ceiling, ...extra }
   return {
     /** The ceiling mcp-host reports once `restore` has run: absent reads manual. */
     restoredCeiling: 'manual' as ApprovalMode,
@@ -398,6 +400,11 @@ function modeCeilingFixture(ceiling: ApprovalMode) {
         { op: 'test', path: '/metadata/uid', value: original.uid },
         { op: 'test', path: '/spec/approval', value: original.approval },
         { op: 'add', path: '/spec/approval/modeCeiling', value: ceiling },
+        ...Object.entries(extra).map(([key, value]) => ({
+          op: 'add',
+          path: `/spec/approval/${key}`,
+          value,
+        })),
       ])
       expect(readHostApproval().approval).toEqual(raised)
       test.info().annotations.push({ type: 'mode-ceiling', description: ceiling })
@@ -412,6 +419,10 @@ function modeCeilingFixture(ceiling: ApprovalMode) {
         { op: 'test', path: '/metadata/uid', value: original.uid },
         { op: 'test', path: '/spec/approval', value: raised },
         { op: 'remove', path: '/spec/approval/modeCeiling' },
+        ...Object.keys(extra).map(key => ({
+          op: 'remove',
+          path: `/spec/approval/${key}`,
+        })),
       ])
       expect(readHostApproval().approval).toEqual(original.approval)
     },
@@ -631,7 +642,7 @@ test.describe.serial('per-task tool approval scope', () => {
     appPage,
   }, testInfo) => {
     const marker = markerFor(testInfo, 'CMD')
-    const ceiling = modeCeilingFixture('auto')
+    const ceiling = modeCeilingFixture('auto', { shellClassifierModel: 'gpt-4.1-mini' })
     let rowFailure: unknown
     try {
       await test.step('an admin raises the Host ceiling to auto', async () => {

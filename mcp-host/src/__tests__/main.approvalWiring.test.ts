@@ -171,7 +171,7 @@ afterEach(async () => {
 })
 
 describe('main session reads: classifier pair', () => {
-  it('reports the saved model a task runs, even when the Host subset hides it from selection', async () => {
+  it('reports the dedicated shell classifier when the Host has an OpenAI credential', async () => {
     fake.primaryKeySlot = 'openai-api-key'
     fake.allowlist = new Map([['openai', [{ model: 'gpt-4.1' }, { model: 'gpt-5.4-mini' }]]])
     const loaded = await loadMain()
@@ -189,15 +189,55 @@ describe('main session reads: classifier pair', () => {
       .getSessionByKey(
         serializeSessionKey({ userId: USER, channelType: 'rpc', channelId: HOST, threadId: CHAT })
       )
-    // Saved before the subset narrowed. Tasks resolve against the global
-    // allowlist, so they still run gpt-5.4-mini, which the classifier refuses.
+    // Saved before the subset narrowed. The task still runs gpt-5.4-mini.
+    // The shell classifier is the dedicated default, not that chat model.
     conv!.modelSelections = { openai: 'gpt-5.4-mini' }
 
     const item = await listedSession(harness)
 
     expect(item.modeCeiling).toBe('auto')
+    expect(item.shellClassifierAvailable).toBe(true)
+  }, 20_000)
+
+  it('reports the classifier unavailable when the Host pins a model it does not call', async () => {
+    fake.primaryKeySlot = 'openai-api-key'
+    const loaded = await loadMain()
+    await loaded.main.onHostChange(
+      host({
+        model: { provider: 'openai', name: 'gpt-5.4-mini' },
+        approval: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          modeCeiling: 'auto',
+          shellClassifierModel: 'gpt-4.1-mini',
+        },
+      })
+    )
+    const harness = await startServer(loaded)
+    await seedRpcSession(loaded.agent)
+
+    const item = await listedSession(harness)
+
     expect(item.shellClassifierAvailable).toBe(false)
-  })
+  }, 20_000)
+
+  it('keeps the dedicated classifier while failover serves another provider', async () => {
+    fake.primaryKeySlot = 'openai-api-key'
+    const loaded = await loadMain()
+    await loaded.main.onHostChange(
+      host({
+        model: { provider: 'openai', name: 'gpt-5.4-mini' },
+        llmPolicy: { fallbacks: [{ provider: 'zai', model: 'glm-4.6' }] },
+      })
+    )
+    const harness = await startServer(loaded)
+    await seedRpcSession(loaded.agent)
+    const engine = loaded.main.mainRpcTestSeams.failoverEngine()
+    expect(engine).not.toBeNull()
+    engine!.noteServedFallback({ provider: 'zai', model: 'glm-4.6' })
+
+    expect((await listedSession(harness)).shellClassifierAvailable).toBe(true)
+  }, 20_000)
 
   it('reports the boot fallback pair, not the inconstructible Host primary', async () => {
     const loaded = await loadMain()

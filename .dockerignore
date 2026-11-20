@@ -3,7 +3,8 @@
 # Several images build from the REPO ROOT context (`docker build -f <svc>/Dockerfile .`)
 # because they COPY shared packages/ alongside the service: workflow-recipes,
 # control-api, control-ui, profile-ui, host-context-controller,
-# packages/workflow-sdk and (since R4/B2) mcp-host. Docker only honors the
+# packages/workflow-sdk, (since R4/B2) mcp-host, and gfs-controller and
+# workspace-files-controller (packages/action-context-contracts). Docker only honors the
 # .dockerignore at the CONTEXT root, so the per-service .dockerignore files are
 # inert for those builds — this file restores their exclusions globally. Keep
 # it in sync with the per-service files (which still apply to any image built

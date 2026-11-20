@@ -12,6 +12,7 @@
  *
  * Phase 6: Added approval handler wiring and approval config propagation.
  */
+import { createHash } from 'node:crypto'
 import * as path from 'node:path'
 import { HostActivityHub } from './activityHub'
 import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
@@ -43,6 +44,10 @@ import {
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
 import { applyHostChange } from './core/approval/hostChange'
 import { createHostEventGate } from './core/approval/hostEventGate'
+import {
+  type ShellClassifierCaller,
+  configuredShellClassifierModel,
+} from './core/approval/shellClassifier'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -144,10 +149,17 @@ import { sanitizeError } from './progress/intentExtraction'
 import { progressReporterRegistry } from './progress/sseProgressReporter'
 import { MessageQueue, Task } from './queue'
 import { ResultStore } from './resultStore'
+import {
+  checkpointMcpHostActionAuthority,
+  checkpointMcpHostActivityStreamAuthority,
+  runtimeActionCheckpointDecision,
+} from './runtime/actionAuthorityCheckpointClient'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
+import { startPr2ReadinessReporter } from './runtime/pr2ReadinessReporter'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
 import { dispatchMcpHostRuntime } from './runtimeDispatch'
 import {
+  ActivitySnapshotVisibility,
   HostActivityEvent,
   HostActivitySnapshotResponse,
   IncomingMessage,
@@ -285,6 +297,7 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 // consumer (UsageReporter, WorkflowService) so refresh-on-401 propagates.
 // Null when env is absent (dev mode without HCC/WRC).
 let runtimeAuth: McpHostRuntimeAuth | null = null
+let stopPr2ReadinessReporter: (() => void) | null = null
 setCodexPlatformJwtReader(() =>
   (runtimeAuth?.accessToken || config.mcpHostRuntimeAccessToken || '').trim()
 )
@@ -365,6 +378,7 @@ function publishActivity(input: {
     title: input.title,
     severity: input.severity || 'info',
     meta: input.meta,
+    authorityV2: input.task?.sourceMessage?.authorityV2,
   })
 }
 
@@ -633,6 +647,49 @@ const resolveImageInput: ImageInputResolver = (provider, model) => {
  */
 function hostAllowlistView(): AllowlistView {
   return hostSubsetAllowlistView(allowlistView(), currentHost?.spec.allowedModels)
+}
+
+let shellClassifierCache: {
+  fingerprint: string
+  model: string
+  caller: ShellClassifierCaller
+} | null = null
+
+/**
+ * Dedicated shell classifier for a Host that holds an OpenAI credential.
+ * The chat model is not the judge. No credential, or a provider that cannot
+ * be built, returns null and admission keeps the chat or failover pair.
+ * The credential is hashed only as a cache key and is never logged.
+ */
+function shellClassifierCaller(): ShellClassifierCaller | null {
+  const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
+  const credential = keys.openai?.['openai-api-key']
+  if (typeof credential !== 'string' || credential.length === 0) {
+    shellClassifierCache = null
+    return null
+  }
+  const model = configuredShellClassifierModel(currentHost?.spec.approval?.shellClassifierModel)
+  const fingerprint = createHash('sha256').update(credential).digest('hex')
+  if (shellClassifierCache?.fingerprint === fingerprint && shellClassifierCache.model === model) {
+    return shellClassifierCache.caller
+  }
+  const provider = createLLMProvider(
+    keys,
+    { provider: 'openai', name: model },
+    { env: hostProviderEnv('openai') }
+  )
+  if (!provider) {
+    // createLLMProvider already logged the construction failure.
+    shellClassifierCache = null
+    return null
+  }
+  const caller: ShellClassifierCaller = {
+    provider,
+    providerType: provider.getProviderType(),
+    modelName: model,
+  }
+  shellClassifierCache = { fingerprint, model, caller }
+  return caller
 }
 
 /**
@@ -1919,6 +1976,7 @@ async function initializeAgent(): Promise<void> {
   // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
   // reads the live policy + sticky failover state. Null when no policy.
   agent.setFailoverSupport(currentFailoverSupport)
+  agent.setShellClassifierProvider(shellClassifierCaller)
 
   // Phase 6: publish approval once. Host changes publish again from onHostChange,
   // before credential reconciliation. initializeProvider does not.
@@ -1954,6 +2012,12 @@ async function initializeAgent(): Promise<void> {
   // print the value gets it redacted before it leaves mcp-host.
   agent.setDynamicEnvProvider(() => agentToolEnvProvider(configStore))
   agent.setSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
+  agent.setActionAuthorityCheckpoint(async binding => {
+    const auth = runtimeAuth
+    if (!auth) return 'unavailable'
+    const result = await checkpointMcpHostActionAuthority(binding, auth)
+    return runtimeActionCheckpointDecision(result)
+  })
 
   const gfsRuntime = await bootstrapGfsRuntime(config.nativeTool.workspacePath)
   gfsWorkspaceProvider = gfsRuntime.workspaceProvider
@@ -2821,13 +2885,14 @@ function computeDegradedReason(): StatusResponse['degraded'] {
 
 async function getActivitySnapshot(
   limit: number,
-  sinceEventId?: string
+  sinceEventId?: string,
+  visibility?: ActivitySnapshotVisibility
 ): Promise<HostActivitySnapshotResponse> {
   const hostRef = resolveHostRef()
   if (!activityHub) {
     return { hostRef, version: '1.0', items: [], nextCursor: null }
   }
-  return activityHub.snapshot(hostRef, limit, sinceEventId)
+  return activityHub.snapshot(hostRef, limit, sinceEventId, visibility)
 }
 
 function subscribeActivity(onEvent: (event: HostActivityEvent) => void): {
@@ -2917,6 +2982,10 @@ async function startRPCServer(): Promise<void> {
         : { providerType: 'unknown', modelName: 'unknown' }
     },
     servedModel: () => failoverEngine?.servedBy() ?? null,
+    shellClassifierPair: () => {
+      const caller = shellClassifierCaller()
+      return caller ? { providerType: caller.providerType, modelName: caller.modelName } : null
+    },
   })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {
@@ -3037,6 +3106,17 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onStatus(getStatus)
   rpcServer.onActivitySnapshot(getActivitySnapshot)
   rpcServer.onActivityStream(subscribeActivity)
+  rpcServer.onActivityStreamCheckpoint(async binding => {
+    const auth = runtimeAuth
+    if (!auth) return 'unavailable'
+    try {
+      return runtimeActionCheckpointDecision(
+        await checkpointMcpHostActivityStreamAuthority(binding, auth)
+      )
+    } catch {
+      return 'unavailable'
+    }
+  })
   rpcServer.onApproval(handleApprovalDecision)
   wireWorkflowApprovalRuntimeRoutes(rpcServer, {
     providerMessageAuthorization: handleProviderMessageAuthorization,
@@ -3323,6 +3403,7 @@ async function shutdown(signal: string): Promise<void> {
 
   // Stop components in order
   stopRuntimeAuthProactiveRefresh()
+  stopPr2ReadinessReporter?.()
   hostWatcher?.stop()
   llmHookWatcher?.stop()
   configStore?.stop()
@@ -3898,6 +3979,7 @@ async function main(): Promise<void> {
       }
     },
   })
+  if (runtimeAuth) stopPr2ReadinessReporter = startPr2ReadinessReporter(runtimeAuth)
 }
 
 // Run main only when this module is the executable entry point. Keeping imports

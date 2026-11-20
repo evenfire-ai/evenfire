@@ -25,6 +25,7 @@ import {
 } from '../core/approval/approvalMode'
 import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
 import type { ShellAction } from '../core/approval/shellCard'
+import type { ShellClassifierCaller } from '../core/approval/shellClassifier'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
 import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
@@ -60,6 +61,7 @@ import { McpManager } from '../mcp'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
 import type { TaskError } from '../queue/types'
+import type { RuntimeActionCheckpoint } from '../runtime/actionAuthority'
 import { SessionProcessor, serializeSessionKey } from '../session'
 import { parseSessionKey } from '../session/types'
 import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClient.js'
@@ -249,6 +251,7 @@ export class AgentStateMachine extends EventEmitter {
   // engine + policy + provider factory, or null when no policy is configured.
   // Null in dev/tests → no failover (byte-identical to today).
   private failoverSupportProvider: FailoverSupportProvider | null = null
+  private shellClassifierProvider: (() => ShellClassifierCaller | null) | null = null
 
   // #654 — live-catalog image-input capability resolver (provider, model →
   // evidence + policy admission). Null in dev/tests/unwired hosts → images
@@ -282,6 +285,7 @@ export class AgentStateMachine extends EventEmitter {
   // feature flag `CLERUM_SESSION_SEARCH_ENABLED` is false; populated from
   // main.ts and forwarded into each TaskExecutor.
   private sessionSearchService: SessionSearchService | undefined
+  private actionAuthorityCheckpoint: RuntimeActionCheckpoint | undefined
 
   // ConfigStore snapshot getter, merged into shell-tool spawn env
   private dynamicEnvProvider: (() => Record<string, string>) | undefined
@@ -369,6 +373,14 @@ export class AgentStateMachine extends EventEmitter {
   setFailoverSupport(provider: FailoverSupportProvider): void {
     this.failoverSupportProvider = provider
     logger.info({ component: 'Agent' }, 'Failover support provider set')
+  }
+
+  /**
+   * Dedicated shell classifier. Read on each shell decision, so a credential
+   * or Host setting change applies to the next call. Absent keeps the chat pair.
+   */
+  setShellClassifierProvider(provider: () => ShellClassifierCaller | null): void {
+    this.shellClassifierProvider = provider
   }
 
   /**
@@ -498,6 +510,10 @@ export class AgentStateMachine extends EventEmitter {
   setSessionSearchService(service: SessionSearchService | undefined): void {
     this.sessionSearchService = service
     logger.info({ configured: Boolean(service) }, 'Session search configured')
+  }
+
+  setActionAuthorityCheckpoint(checkpoint: RuntimeActionCheckpoint): void {
+    this.actionAuthorityCheckpoint = checkpoint
   }
 
   /**
@@ -1633,9 +1649,11 @@ export class AgentStateMachine extends EventEmitter {
       spilloverStorage: this.spilloverStorage,
       promptCache: this.promptCache,
       sessionSearchService: this.sessionSearchService,
+      actionAuthorityCheckpoint: this.actionAuthorityCheckpoint,
       // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
       // no failover.
       failover: this.failoverSupportProvider?.() ?? undefined,
+      shellClassifierProvider: () => this.shellClassifierProvider?.() ?? null,
       imageInput: this.imageInputResolver ?? undefined,
       onApprovalNeeded: (requestId, taskId, approval) => {
         this.registerApproval(requestId, taskId, task, approval)

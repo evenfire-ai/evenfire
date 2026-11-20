@@ -3165,6 +3165,7 @@ export class WorkflowReconciler {
         'pending',
         'initializing',
         'running',
+        'authorization_paused',
         'completed',
         'failed',
         'recovering',
@@ -3178,8 +3179,13 @@ export class WorkflowReconciler {
       // "completed" → "active" (infrastructure still exists, execution done)
       // "failed"    → "failed" (surfaces failure in CRD status)
       let recipePhase = 'deploying'
-      if (workflowPhase === 'running' || workflowPhase === 'completed') recipePhase = 'active'
-      else if (workflowPhase === 'failed' || workflowPhase === 'cancelled') recipePhase = 'failed'
+      if (
+        workflowPhase === 'running' ||
+        workflowPhase === 'authorization_paused' ||
+        workflowPhase === 'completed'
+      ) {
+        recipePhase = 'active'
+      } else if (workflowPhase === 'failed' || workflowPhase === 'cancelled') recipePhase = 'failed'
 
       return withWorkflowConditions({
         phase: recipePhase,
@@ -4490,10 +4496,26 @@ export class WorkflowReconciler {
       // swallowed: stranding the CRD finalizer over a transient DB blip
       // is worse than an orphaned grant row that a human can DELETE by
       // hand if needed.
+      //
+      // Lock order: the approval rows are cancelled before any grant row is
+      // deleted. The global order is approval rows before grant rows, and the
+      // control-api approval decision and consume use the same order (approval
+      // row `FOR UPDATE`, then the bound grant rows `FOR SHARE`), so this
+      // cleanup and a concurrent decision cannot wait on each other in a cycle.
       try {
         const client = await this.deps.pgPool.connect()
         try {
           await client.query('BEGIN')
+          await client.query(
+            `UPDATE workflow_approval_requests
+                SET status = 'cancelled',
+                    cancelled_at = COALESCE(cancelled_at, NOW()),
+                    cancelled_by = COALESCE(cancelled_by, 'workflow-recipe-delete')
+              WHERE recipe_namespace = $1
+                AND recipe_name = $2
+                AND status IN ('pending', 'approved')`,
+            [recipeNamespace, recipeName]
+          )
           await client.query(
             `DELETE FROM user_workflow_triggers
               WHERE recipe_namespace = $1 AND recipe_name = $2`,
@@ -4522,16 +4544,6 @@ export class WorkflowReconciler {
               [recipeNamespace, recipeName]
             )
           }
-          await client.query(
-            `UPDATE workflow_approval_requests
-                SET status = 'cancelled',
-                    cancelled_at = COALESCE(cancelled_at, NOW()),
-                    cancelled_by = COALESCE(cancelled_by, 'workflow-recipe-delete')
-              WHERE recipe_namespace = $1
-                AND recipe_name = $2
-                AND status IN ('pending', 'approved')`,
-            [recipeNamespace, recipeName]
-          )
           await client.query('COMMIT')
         } catch (err) {
           await client.query('ROLLBACK').catch(rollbackErr => {

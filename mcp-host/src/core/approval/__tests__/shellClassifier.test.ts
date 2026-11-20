@@ -16,6 +16,8 @@ import {
   classifierAvailable,
   classifierServingPair,
   classifyToolCall,
+  configuredShellClassifierModel,
+  shellClassifierCallOptions,
 } from '../shellClassifier'
 
 const SENDER = 'sender-sentinel@example.test'
@@ -59,7 +61,12 @@ const MODEL_USAGE = {
 }
 
 type Provider = Pick<SingleTurnProvider, 'completeSingleTurn'>
-type CallOptions = { max_tokens?: number; temperature?: number; signal?: AbortSignal }
+type CallOptions = {
+  max_tokens?: number
+  temperature?: number
+  signal?: AbortSignal
+  reasoning_effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh'
+}
 
 afterEach(() => {
   vi.useRealTimers()
@@ -207,6 +214,20 @@ async function histogramCounts(): Promise<[number, number, number]> {
   ]
 }
 
+describe('configuredShellClassifierModel', () => {
+  it('uses gpt-5.5 when the Host sets nothing or a blank string', () => {
+    expect(configuredShellClassifierModel(undefined)).toBe('gpt-5.5')
+    expect(configuredShellClassifierModel(null)).toBe('gpt-5.5')
+    expect(configuredShellClassifierModel('')).toBe('gpt-5.5')
+    expect(configuredShellClassifierModel('   ')).toBe('gpt-5.5')
+    expect(configuredShellClassifierModel(12)).toBe('gpt-5.5')
+  })
+
+  it('keeps a configured model name', () => {
+    expect(configuredShellClassifierModel(' gpt-4.1-mini ')).toBe('gpt-4.1-mini')
+  })
+})
+
 describe('classifierServingPair', () => {
   it('uses the Host primary when failover is not serving a fallback', () => {
     expect(
@@ -263,8 +284,12 @@ describe('shell classifier', () => {
         {}
       )
     ).toBe(false)
-    expect(classifierAvailable('openai', 'gpt-4o', {})).toBe(true) // not in OPENAI_RESPONSES_REASONING_FAMILY
+    expect(classifierAvailable('openai', 'gpt-5.5', {})).toBe(true)
+    expect(classifierAvailable('openai', 'gpt-4o', {})).toBe(false)
+    expect(classifierAvailable('openai', 'gpt-4.1', {})).toBe(false)
+    expect(classifierAvailable('openai', 'gpt-4.1-mini', {})).toBe(false)
     expect(classifierAvailable('openai', 'gpt-5.4-mini', {})).toBe(false)
+    expect(classifierAvailable('openai', 'gpt-5.5-mini', {})).toBe(false)
     expect(classifierAvailable('azure', 'my-deployment', {})).toBe(false)
     for (const provider of [
       'codex-subscription',
@@ -302,6 +327,7 @@ describe('shell classifier', () => {
     for (const call of seen) {
       expect(call.options?.max_tokens).toBe(16)
       expect(call.options).not.toHaveProperty('temperature')
+      expect(call.options).not.toHaveProperty('reasoning_effort')
       const system = systemText(call.messages)
       const user = userText(call.messages)
       expect(system).not.toContain(COMMAND)
@@ -329,6 +355,54 @@ describe('shell classifier', () => {
       expect(user).toContain('shell_exec')
     }
     expect(systemText(seen[0].messages)).toBe(systemText(seen[1].messages))
+  })
+
+  it('asks an OpenAI reasoning-family model for effort none and leaves other pairs alone', () => {
+    const signal = new AbortController().signal
+    const reasoning = shellClassifierCallOptions('openai', 'gpt-5.5', signal)
+    expect(reasoning.max_tokens).toBe(16)
+    expect(reasoning.signal).toBe(signal)
+    expect(reasoning.reasoning_effort).toBe('none')
+
+    const established = shellClassifierCallOptions('openai', 'gpt-4o', signal)
+    expect(established.max_tokens).toBe(16)
+    expect(established.signal).toBe(signal)
+    expect(established).not.toHaveProperty('reasoning_effort')
+
+    const claude = shellClassifierCallOptions('claude', 'claude-sonnet', signal)
+    expect(claude.max_tokens).toBe(16)
+    expect(claude).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('calls gpt-5.5 with effort none and does not call other OpenAI models', async () => {
+    async function callsFor(model: string) {
+      const seen: CallOptions[] = []
+      const verdict = await classifyToolCall(
+        baseInput({
+          providerType: 'openai',
+          modelName: model,
+          provider: {
+            completeSingleTurn: async (_messages, options) => {
+              seen.push(options ?? {})
+              return modelResponse('APPROVE')
+            },
+          },
+        })
+      )
+      return { verdict, seen }
+    }
+
+    const allowed = await callsFor('gpt-5.5')
+    expect(allowed.seen).toHaveLength(1)
+    expect(allowed.seen[0]?.max_tokens).toBe(16)
+    expect(allowed.seen[0]?.reasoning_effort).toBe('none')
+    expect(allowed.verdict).toBe('APPROVE')
+
+    for (const model of ['gpt-4o', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-5.4-mini']) {
+      const refused = await callsFor(model)
+      expect(refused.seen).toHaveLength(0)
+      expect(refused.verdict).toBe('ESCALATE')
+    }
   })
 
   it('calls the model at the argument limit and skips the call over it', async () => {

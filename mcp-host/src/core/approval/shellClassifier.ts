@@ -8,13 +8,27 @@ import type { ChatMessage, TokenUsage, UsageContext } from '../types'
 
 export type ShellVerdict = 'APPROVE' | 'ESCALATE' | 'CANCELLED'
 
+/** Model used when spec.approval.shellClassifierModel is absent or blank. */
+export const DEFAULT_SHELL_CLASSIFIER_MODEL = 'gpt-5.5'
+
+export function configuredShellClassifierModel(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_SHELL_CLASSIFIER_MODEL
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : DEFAULT_SHELL_CLASSIFIER_MODEL
+}
+
+export interface ShellClassifierCaller {
+  provider: Pick<SingleTurnProvider, 'completeSingleTurn'>
+  providerType: string
+  modelName: string
+}
+
 /**
- * The pair the classifier judges. A live failover pair wins over the primary,
- * so a fallback the table would refuse cannot skip the card. The primary is the
- * pair a task for the session runs with: the session's model on the Host
- * provider, or the boot fallback while one serves because the Host primary
- * cannot be built. The executor and the session read both call this, so the
- * session's `shellClassifierAvailable` matches what admission does.
+ * The chat pair judged when the Host has no dedicated shell classifier. A live
+ * failover pair wins over the primary, so a fallback the table would refuse
+ * cannot skip the card. The primary is the pair a task for the session runs
+ * with. The executor and the session read both use this only in that case, so
+ * `shellClassifierAvailable` matches admission.
  */
 export function classifierServingPair(input: {
   primaryProvider: string
@@ -32,6 +46,12 @@ const ARGUMENT_CHAR_LIMIT = 8_192
 
 /** A foundation-model ARN does not match, so Bedrock fails closed on one. */
 const BEDROCK_ANTHROPIC_MODEL = /(^|\.)anthropic\./
+
+/**
+ * OpenAI models the shell classifier may call. Anything else, including
+ * gpt-4.1 and gpt-5.4-mini, shows the shell card.
+ */
+const OPENAI_SHELL_CLASSIFIER_MODELS = new Set([DEFAULT_SHELL_CLASSIFIER_MODEL])
 
 const SYSTEM_PROMPT = `You review one shell command before it runs on a shared server, with no person watching.
 
@@ -84,10 +104,35 @@ function argumentJson(args: Record<string, unknown>): string | undefined {
   }
 }
 
+/**
+ * 16 output tokens. OpenAI reasoning-family models also get effort `none`,
+ * or those tokens are spent on hidden reasoning and the reply is empty.
+ * Other pairs must not receive the field: gpt-4.1 answers 400.
+ */
+export function shellClassifierCallOptions(
+  providerType: string,
+  modelName: string,
+  signal: AbortSignal
+): {
+  max_tokens: number
+  signal: AbortSignal
+  reasoning_effort?: 'none'
+} {
+  const options: {
+    max_tokens: number
+    signal: AbortSignal
+    reasoning_effort?: 'none'
+  } = { max_tokens: 16, signal }
+  if (providerType === 'openai' && OPENAI_RESPONSES_REASONING_FAMILY.test(modelName)) {
+    options.reasoning_effort = 'none'
+  }
+  return options
+}
+
 function providerSupportsClassifier(providerType: string, modelName: string): boolean {
   if (providerType === 'claude') return true
   if (providerType === 'bedrock') return BEDROCK_ANTHROPIC_MODEL.test(modelName)
-  if (providerType === 'openai') return !OPENAI_RESPONSES_REASONING_FAMILY.test(modelName)
+  if (providerType === 'openai') return OPENAI_SHELL_CLASSIFIER_MODELS.has(modelName)
   return false
 }
 
@@ -167,10 +212,10 @@ async function judge(input: ClassifyInput): Promise<ShellVerdict> {
   timeout.signal.addEventListener('abort', abortLinked, { once: true })
 
   try {
-    const response = await input.provider.completeSingleTurn(messages, {
-      max_tokens: 16,
-      signal: linked.signal,
-    })
+    const response = await input.provider.completeSingleTurn(
+      messages,
+      shellClassifierCallOptions(input.providerType, input.modelName, linked.signal)
+    )
     enqueueUsage(input, response.usage)
     if (input.taskSignal.aborted) return 'CANCELLED'
     if (timeout.signal.aborted) return 'ESCALATE'

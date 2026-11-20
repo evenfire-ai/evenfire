@@ -304,6 +304,15 @@ spec:
                         manual. mcp-host reads this from the Host CR only (dev
                         mode reads CLERUM_APPROVAL_CONFIG). An older CRD prunes
                         an unknown value, which fails safe to manual.
+                    shellClassifierModel:
+                      type: string
+                      description: >-
+                        Model the shell classifier calls when this Host has an
+                        OpenAI credential. Absent means gpt-5.5. A model the
+                        classifier does not allow shows the shell card. With
+                        no OpenAI credential, auto keeps judging shell with the
+                        model serving the turn. An older CRD prunes this field,
+                        which is the same as absent.
                     channels:
                       type: object
                       description: Per-channel-type approval settings.

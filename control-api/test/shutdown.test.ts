@@ -23,6 +23,7 @@ describe('Control API shutdown', () => {
 
     expect(names.indexOf('entity-change-dispatcher')).toBeGreaterThanOrEqual(0)
     expect(corePoolIndex).toBeGreaterThan(names.indexOf('entity-change-dispatcher'))
+    expect(corePoolIndex).toBeGreaterThan(names.indexOf('pr2-runtime-evidence'))
   })
 
   it('stops the shared OAuth grant sweep before database pools close', () => {
