@@ -13,6 +13,7 @@ import {
   heldAffordances,
   listAccessiblePage,
   listChildrenPage,
+  listSharesFailureMessage,
   resolveResource,
   resolvedDirectory,
   resolvedFile,
@@ -221,6 +222,54 @@ describe('FilesPage Share target', () => {
     // The cached authority may predate a permission change: reopening reads
     // it again even though the cache already holds a result.
     await waitFor(() => expect(authorityReads()).toBeGreaterThan(afterFirstOpen))
+  })
+
+  it('reads a failed sharing list again when Retry is clicked', async () => {
+    const team = { current: 'team-a' }
+    const gfs = await installBridge(
+      {
+        roots: { 'team-a': await listAccessiblePage([folderRoot('folder-a', 'Folder A')]) },
+        children: {},
+        resolved: {
+          'folder-a': await resolveResource(resolvedDirectory('folder-a', 'Folder A')),
+        },
+      },
+      team
+    )
+    const outage = await listSharesFailureMessage(503, {
+      code: 'unavailable',
+      message: 'shares are temporarily unavailable',
+    })
+    const recovered = await sharesListPage([
+      {
+        id: 'share-1',
+        drive: 'main',
+        resourceId: 'folder-a',
+        // The caller's own agent: a person outside the team directory is hidden.
+        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        includeDescendants: true,
+      },
+    ])
+    let sharesDown = true
+    gfs.listShares.mockImplementation(async () => {
+      if (sharesDown) throw new Error(outage)
+      return recovered
+    })
+    renderPage(team)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Share Folder A' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Share folder Folder A' })
+    const retry = await within(dialog).findByRole('button', { name: 'Retry' })
+    expect(within(dialog).getByTestId('gfs-access-list-error')).toBeTruthy()
+    expect(within(dialog).queryByTestId('gfs-access-row-share-share-1')).toBeNull()
+
+    sharesDown = false
+    fireEvent.click(retry)
+
+    expect(await within(dialog).findByTestId('gfs-access-row-share-share-1')).toBeTruthy()
+    await waitFor(() => expect(within(dialog).queryByRole('button', { name: 'Retry' })).toBeNull())
+    expect(within(dialog).queryByTestId('gfs-access-list-error')).toBeNull()
   })
 
   describe('across a session change', () => {
