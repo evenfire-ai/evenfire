@@ -1802,6 +1802,7 @@ class DismissDialog extends OracleEvent {
           familyOf(s.op) !== 'share' &&
           s.calls.some(call => !call.settled)
       )
+    const closeEnabled = !(close as HTMLButtonElement).disabled
     if (action) action.dismissedAt = tick(w)
     fireEvent.click(close)
     await flush()
@@ -1809,6 +1810,10 @@ class DismissDialog extends OracleEvent {
     // A mutation cannot be recalled: closing is ignored while it runs.
     if (running && hostDialogs().length === 0) {
       w.violations.push(`H4/H18: closing the ${action!.actionId} dialog took effect while it ran`)
+    }
+    // Share may close mid-write, so an enabled Close that leaves it open is a lie.
+    if (action?.actionId === 'share' && closeEnabled && hostDialogs().length !== 0) {
+      w.violations.push('L1: the enabled Close of the share dialog left it open')
     }
   }
   toString() {
