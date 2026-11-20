@@ -221,9 +221,14 @@ export function useGfsResourceAccess(
     )
   }
 
+  // The ACL writes never wait for the renderer's online flag: main owns the
+  // network, and a write paused offline would run later, after its caller's
+  // session check, possibly under another session (or never settle once a
+  // logout clears the mutation cache).
   // `inherit` omitted defaults to `true` on the wire, so user/team grants
   // cover folder contents; a contents-excluding grant passes `false`.
   const grantMutation = useMutation({
+    networkMode: 'always',
     mutationFn: (
       input: GfsAccessMutationAuthority & {
         subjectKeys: string[]
@@ -241,6 +246,7 @@ export function useGfsResourceAccess(
     onError: failClosedOnMutationError,
   })
   const revokeGrantMutation = useMutation({
+    networkMode: 'always',
     mutationFn: (input: GfsAccessMutationAuthority & { grantId: string }) =>
       window.clerum.gfs.revokeGrant(input.grantId),
     onSuccess: (_result, input) =>
@@ -253,6 +259,7 @@ export function useGfsResourceAccess(
     onError: failClosedOnMutationError,
   })
   const revokeShareMutation = useMutation({
+    networkMode: 'always',
     mutationFn: (input: GfsAccessMutationAuthority & { shareId: string }) =>
       window.clerum.gfs.revokeShare(input.shareId),
     onSuccess: (_result, input) =>

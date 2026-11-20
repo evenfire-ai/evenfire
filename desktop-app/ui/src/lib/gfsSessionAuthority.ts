@@ -1,4 +1,4 @@
-import type { QueryClient } from '@tanstack/react-query'
+import { type QueryClient, hashKey } from '@tanstack/react-query'
 import {
   desktopQueryKeys,
   hasGfsSessionGeneration,
@@ -7,6 +7,7 @@ import {
 } from '@hooks/domain/queryKeys'
 import { isGfsSessionAuthorityFailure } from './gfsGrantErrors'
 import type {
+  GfsAccessRevocationWatch,
   GfsAccessState,
   GfsAuthorityFailureOutcome,
   GfsAuthoritySurface,
@@ -111,4 +112,30 @@ export function handleGfsAuthorityFailure(
   }
   revokeGfsSessionAccess(queryClient, capturedScope, capturedGeneration)
   return 'revoked'
+}
+
+/**
+ * Sticky observer of one session's access flag for the length of a multi-step
+ * write. A retry flips the flag back to active without minting a new session,
+ * so a synchronous read of the flag cannot tell "never revoked" from "revoked
+ * and retried" — the run needs to remember that a revocation happened at all.
+ * A removed flag (logout clears the cache) counts as a revocation, like
+ * `readGfsAccessState` reads a missing entry.
+ */
+export function watchGfsAccessRevocation(
+  queryClient: QueryClient,
+  originScope: string | null,
+  originGen: number | null
+): GfsAccessRevocationWatch {
+  if (!originScope || !isGfsSessionGeneration(originGen)) {
+    return { revoked: () => true, stop: () => {} }
+  }
+  const key = desktopQueryKeys.gfsAccessState(originScope, originGen)
+  const keyHash = hashKey(key)
+  let revoked = queryClient.getQueryData<GfsAccessState>(key) !== 'active'
+  const unsubscribe = queryClient.getQueryCache().subscribe(event => {
+    if (revoked || event.query.queryHash !== keyHash) return
+    if (event.type === 'removed' || event.query.state.data !== 'active') revoked = true
+  })
+  return { revoked: () => revoked, stop: unsubscribe }
 }

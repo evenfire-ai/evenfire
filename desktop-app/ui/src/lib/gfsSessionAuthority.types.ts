@@ -20,3 +20,9 @@ export interface GfsSessionScopeSource {
   me: { id: string; teamId?: string | null } | null
   runtimeConfigState: { envKey: string } | null | undefined
 }
+
+/** A run-scoped revocation latch: once `revoked()` is true it stays true. */
+export interface GfsAccessRevocationWatch {
+  revoked: () => boolean
+  stop: () => void
+}
