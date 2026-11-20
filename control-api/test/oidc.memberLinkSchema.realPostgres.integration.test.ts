@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.js'
+import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -34,11 +35,9 @@ describeRealPostgres('OIDC member link schema on real PostgreSQL', () => {
   afterAll(async () => {
     try {
       await endPoolAndWaitForClients(pool)
-      if (adminPool) {
-        await adminPool
-          .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-          .catch(() => undefined)
-      }
+      if (!adminPool) return
+      await waitForDatabaseConnectionsToClose(adminPool, database)
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
     } finally {
       await adminPool?.end()
     }
