@@ -2593,6 +2593,22 @@ const moveThenRename = (): Cmd[] => [
   new Rest(),
 ]
 
+/** A delete and a new folder, so the fixed examples alone reach the operations floor. */
+const deleteThenNewFolder = (): Cmd[] => [
+  new OpenMenuOn('notes.txt'),
+  new Rest(),
+  new Choose('delete'),
+  new Rest(),
+  new Submit(1),
+  new Rest(),
+  new OpenMenuOn('Quarterly'),
+  new Rest(),
+  new Choose('new-folder'),
+  new Rest(),
+  new Submit(2),
+  new Rest(),
+]
+
 /** One committed host Move and nothing else, to measure its generation checks. */
 const oneCommittedMove = (): Cmd[] => [
   new OpenMenuOn('notes.txt'),
@@ -2935,7 +2951,9 @@ async function checkGenerated(
       }
     ),
     {
-      numRuns,
+      // fast-check counts the examples inside numRuns: add them so `numRuns`
+      // stays the number of generated runs.
+      numRuns: numRuns + examples.length,
       seed: SEED,
       endOnFailure: Boolean(process.env.CI),
       interruptAfterTimeLimit: PROPERTY_TIME_LIMIT_MS,
@@ -2965,6 +2983,7 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       shareOutcomeAfterCloseAndSwitch,
       choiceReplacesOpeningCheck,
       downloadAfterSwitch,
+      deleteThenNewFolder,
     ])
     // What the generated runs reached is reported, not asserted: it depends
     // on how the draws fall, and any new awaited IPC reorders them. The fixed
