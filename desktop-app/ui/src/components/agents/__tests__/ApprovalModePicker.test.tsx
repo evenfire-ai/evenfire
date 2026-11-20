@@ -211,6 +211,34 @@ describe('ApprovalModePicker — model selector look', () => {
   })
 })
 
+describe('ApprovalModePicker — PATCH answer', () => {
+  it('shows the effective mode the answer reports, not the stored one', async () => {
+    seed('chat-1', 'manual')
+    // The Host stored Auto and runs Manual under its ceiling.
+    setApprovalMode.mockResolvedValueOnce({
+      approvalMode: 'auto',
+      modeCeiling: 'manual',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'manual',
+    })
+    const { getByTestId, queryByTestId } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-1" />
+    )
+
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-mode-option-auto'))
+    })
+
+    expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1', 'auto')
+    expect(getByTestId('approval-mode-picker').textContent).toBe('Manual')
+    expect(getByTestId('approval-mode-picker').getAttribute('aria-label')).toBe(
+      'Approval mode — Manual'
+    )
+    expect(queryByTestId('approval-mode-label')).toBeNull()
+  })
+})
+
 describe('ApprovalModePicker — Host limit', () => {
   type Snapshot = {
     approvalMode: ApprovalMode
