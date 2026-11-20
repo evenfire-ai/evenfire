@@ -3,12 +3,17 @@
  *
  * A blank chat has no chatId, so the pick is held locally and the first send
  * carries it. After the session exists, a change is a PATCH. A 400 or 401
- * leaves the painted label alone. A 404 before the first send holds the mode
- * for that send. While the first send of a chat whose session row the store
- * has not seen is in flight, the mode cannot change: a PATCH would reach the
- * Host before the send creates the row. Any other failure is not proof of the
- * stored mode: the next session read paints the label, including a write the
- * server committed before the response was dropped.
+ * leaves the painted label alone. A 404 for a chat whose session row the store
+ * has not seen holds the mode for the first send. A 404 for a chat the store
+ * has seen on the Host is a failed save: the row is gone or belongs to someone
+ * else, and the label keeps the last mode the Host reported. Only mcp-host's
+ * own "session not found" answer arrives as a 404 here; the main process
+ * reports any other 404 as a plain failure. While the first send of a chat
+ * whose session row the store has not seen is in flight, the mode cannot
+ * change: a PATCH would reach the Host before the send creates the row. Any
+ * other failure is not proof of the stored mode: the next session read paints
+ * the label, including a write the server committed before the response was
+ * dropped.
  *
  * Each existing chat also remembers whether its latest pick was not saved
  * (`saveFailed`), so the picker can say so after a chat switch or a remount.
@@ -400,11 +405,15 @@ export async function selectHostApprovalMode(
   } catch (error) {
     if (!current(entry)) return false
     if (isNotFound(error)) {
+      // The store has seen this chat's row on the Host, so the 404 does not
+      // mean "no row yet": holding the pick would paint a mode the Host does
+      // not run. The pick counts as not saved and the label stays.
+      //
       // A first send began after this PATCH left. The 404 only says the row
       // did not exist yet; the send creates it with the mode it carried, which
       // the label still shows. Holding this mode would paint a mode the
       // session never stores, so the pick counts as not saved.
-      if (entry.firstSendsBegun !== firstSendsBegunAtStart) {
+      if (entry.persisted || entry.firstSendsBegun !== firstSendsBegunAtStart) {
         settleSaveFailure(true)
         return false
       }

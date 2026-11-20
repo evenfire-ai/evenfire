@@ -503,8 +503,11 @@ describe('ApprovalModePicker state — focus (F1)', () => {
 // A6 — independent oracle: a trivial reference model of the A4 invariants.
 // ---------------------------------------------------------------------------
 
-/** ok: saved. fail: not saved. dropped: saved by the Host, response lost. */
-type Outcome = 'ok' | 'fail' | 'dropped'
+/**
+ * ok: saved. fail: not saved. dropped: saved by the Host, response lost.
+ * gone: mcp-host answers 404 for a chat the store has seen (C5): not saved.
+ */
+type Outcome = 'ok' | 'fail' | 'dropped' | 'gone'
 interface ModelWrite {
   id: number
   chat: ChatKey
@@ -698,7 +701,7 @@ class Settle implements fc.AsyncCommand<Model, Real> {
     const write = model.writes.find(entry => entry.id === real.settledIds[before])
     if (!write) throw new Error(`settled unknown write ${real.settledIds[before]}`)
     write.settled = true
-    if (write.outcome !== 'fail') model.stored[write.chat] = write.mode
+    if (write.outcome === 'ok' || write.outcome === 'dropped') model.stored[write.chat] = write.mode
     // S3: only the latest write for its chat decides that chat's error.
     const latest = [...model.writes].reverse().find(entry => entry.chat === write.chat)
     if (latest?.id === write.id) {
@@ -716,7 +719,7 @@ class Settle implements fc.AsyncCommand<Model, Real> {
   }
 }
 
-const outcomes = fc.constantFrom<Outcome>('ok', 'fail', 'dropped')
+const outcomes = fc.constantFrom<Outcome>('ok', 'fail', 'dropped', 'gone')
 const switchChat = fc.constantFrom(...CHATS).map(target => new SwitchChat(target))
 const toggleMenu = fc.constant(new ToggleMenu())
 const pick = fc
@@ -767,7 +770,8 @@ describe('ApprovalModePicker state — A6 command model', () => {
               const outcome = real.pendingOutcomes.shift()
               return scheduler.schedule(Promise.resolve(id), `write-${id}`).then(() => {
                 real.settledIds.push(id)
-                if (outcome !== 'fail') server[chatId] = mode
+                if (outcome === 'ok' || outcome === 'dropped') server[chatId] = mode
+                if (outcome === 'gone') throw patchFailure(404)
                 if (outcome !== 'ok') throw patchFailure(500)
                 return patchSuccess(mode)
               })

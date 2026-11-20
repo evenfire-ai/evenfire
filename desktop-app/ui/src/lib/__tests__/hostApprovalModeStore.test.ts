@@ -83,9 +83,9 @@ describe('hostApprovalModeStore', () => {
     expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('allow_all')
   })
 
-  it('a 404 holds the mode for the first send', async () => {
+  it('a 404 for a chat the store has not seen on the Host holds the mode for the first send', async () => {
     const { client, setApprovalMode, readSessionApproval } = transport()
-    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+    // No session read for CHAT: its row may not exist yet.
     setApprovalMode.mockRejectedValue(new Error('Set approval mode failed (404)'))
 
     await expect(selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')).resolves.toBe(true)
@@ -93,6 +93,44 @@ describe('hostApprovalModeStore', () => {
     expect(readSessionApproval).not.toHaveBeenCalled()
     expect(approvalModeForFirstSend(AGENT, CHAT)).toBe('allow_all')
     expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Allow all')
+  })
+
+  it('a 404 for a chat the Host already reported keeps its label and counts as not saved', async () => {
+    const { client, setApprovalMode, readSessionApproval } = transport()
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('allow_all'))
+    setApprovalMode.mockRejectedValue(new Error('Set approval mode failed (404)'))
+
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'manual')).resolves.toBe(false)
+
+    expect(setApprovalMode).toHaveBeenCalledWith(AGENT, CHAT, 'manual')
+    expect(readSessionApproval).not.toHaveBeenCalled()
+    const view = readHostApprovalMode(AGENT, CHAT)
+    expect(view.label).toBe('Allow all')
+    expect(view.effectiveMode).toBe('allow_all')
+    expect(view.saveFailed).toBe(true)
+    expect(view.firstSendMode).toBeNull()
+    // Not a hold: the next send neither carries a mode nor locks the picker.
+    const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    expect(send.mode).toBeNull()
+    expect(readHostApprovalMode(AGENT, CHAT).firstSendInFlight).toBe(false)
+    send.release()
+  })
+
+  it('a 404 that is not the session answer is a failed save, not a hold', async () => {
+    const { client, setApprovalMode, readSessionApproval } = transport()
+    // The main process's message for a 404 without mcp-host's "session not
+    // found" body (rpcProxyClient.setApprovalMode).
+    setApprovalMode.mockRejectedValue(
+      new Error('Set approval mode failed (404, not a session answer)')
+    )
+    readSessionApproval.mockRejectedValue(new Error('Load session messages failed (404)'))
+
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'auto')).resolves.toBe(false)
+
+    expect(setApprovalMode).toHaveBeenCalledWith(AGENT, CHAT, 'auto')
+    expect(approvalModeForFirstSend(AGENT, CHAT)).toBeNull()
+    expect(readHostApprovalMode(AGENT, CHAT).label).toBeNull()
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
   })
 
   it('refuses a change while the first send is in flight, and PATCHes once it is acknowledged', async () => {
@@ -287,7 +325,7 @@ describe('hostApprovalModeStore — save failure flag (picker spec C2)', () => {
 
   it('a 404 hold before any first send is not a failure', async () => {
     const { client, setApprovalMode } = transport()
-    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+    // No session read for CHAT: its row may not exist yet.
     setApprovalMode.mockRejectedValue(new Error('Set approval mode failed (404)'))
 
     await expect(selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')).resolves.toBe(true)

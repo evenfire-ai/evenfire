@@ -194,11 +194,29 @@ describe('RpcProxyClient — setApprovalMode()', () => {
     })
   })
 
-  it('keeps a 404 in the error message and does not treat it as success', async () => {
-    fetchSpy.mockResolvedValueOnce(errorResponse(404, 'missing'))
-    await expect(
-      client.setApprovalMode('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'auto')
-    ).rejects.toThrow('Set approval mode failed (404)')
+  it('keeps a 404 in the error message for the Host’s missing-session answer', async () => {
+    // mcp-host's body for a missing or foreign session (handleSetApprovalModeRoute).
+    fetchSpy.mockResolvedValueOnce(
+      errorResponse(404, JSON.stringify({ error: 'session not found' }))
+    )
+    const failure = client.setApprovalMode('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'auto')
+    await expect(failure).rejects.toThrow(/^Set approval mode failed \(404\)$/)
+    await expect(failure).rejects.toMatchObject({ status: 404 })
+  })
+
+  it.each([
+    // rpc-proxy's fallback for a route it does not have (app.ts).
+    ['a route rpc-proxy lacks', JSON.stringify({ error: 'Not Found' })],
+    // rpc-proxy's answer when the Host is gone (wakeAndHold.ts).
+    ['a Host that is gone', JSON.stringify({ error: 'Host not found or not accessible' })],
+    ['a body that is not JSON', 'missing'],
+  ])('does not report a 404 for %s as a missing session', async (_case, body) => {
+    fetchSpy.mockResolvedValueOnce(errorResponse(404, body))
+    const failure = client.setApprovalMode('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'auto')
+    await expect(failure).rejects.toThrow(
+      /^Set approval mode failed \(404, not a session answer\)$/
+    )
+    await expect(failure).rejects.toMatchObject({ status: 404 })
   })
 })
 
