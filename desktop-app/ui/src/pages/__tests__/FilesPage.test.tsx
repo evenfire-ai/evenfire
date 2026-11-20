@@ -36,12 +36,15 @@ vi.mock('@hooks/domain/useGfsBrowserController', () => ({
   GFS_UNAVAILABLE_LOCATION_MESSAGE: 'This folder or file is no longer available.',
 }))
 
-// These suites inject a Share dialog's sharing state next to the mocked
-// controller, the way they inject its affordances. The shim ignores which
-// target the writes name; that the dialog passes its own target is covered by
-// the delegation lifecycle suite against the real hook. The access hook reads it
-// from the latest controller mock: the open location's authority for the
-// current resource, the row's otherwise.
+// The Share dialog's sharing state is injected apart from the controller,
+// which carries none, through `mockSharePage`. Writes receive the target the
+// dialog passes, so assertions can name the resource each write is about. The
+// authority comes from the latest controller mock, standing for the
+// affordances query the real hook shares with the browser: the open
+// location's for the current resource, the row's otherwise. Which resource
+// the page shares, the open revalidation and the session drop are pinned
+// against the real hook, with only the bridge mocked, in
+// FilesPage.shareTarget.test.tsx.
 const accessMock = vi.hoisted(() => {
   type Acl = Record<string, unknown> & {
     current?: { resourceId: string } | null
@@ -50,9 +53,15 @@ const accessMock = vi.hoisted(() => {
     rowAffordancesResourceId?: string | null
     rowAffordances?: unknown
   }
+  type Access = Record<string, unknown>
   const call = (fn: unknown, ...args: unknown[]) =>
     typeof fn === 'function' ? (fn as (...rest: unknown[]) => unknown)(...args) : undefined
+  let useInjectedAccess: () => Access = () => ({})
   return {
+    /** A plain state, or a hook when the injected state changes during the test. */
+    inject(access: Access | (() => Access)) {
+      useInjectedAccess = typeof access === 'function' ? access : () => access
+    },
     useGfsResourceAccess: (target: { resourceId: string } | null) => {
       const ctrl = (hookMock.useGfsBrowserController.mock.results.at(-1)?.value ?? {}) as Acl
       // Like the real hook, every mount seeds its session's shared access flag.
@@ -67,6 +76,7 @@ const accessMock = vi.hoisted(() => {
         gcTime: Infinity,
         staleTime: Infinity,
       })
+      const access = useInjectedAccess()
       const resourceId = target?.resourceId
       const isCurrent = ctrl.current?.resourceId === resourceId
       const affordances = isCurrent
@@ -74,38 +84,63 @@ const accessMock = vi.hoisted(() => {
         : ((resourceId ? ctrl.rowAffordancesByResourceId?.[resourceId] : undefined) ??
           (ctrl.rowAffordancesResourceId === resourceId ? ctrl.rowAffordances : null) ??
           null)
+      const refreshGrants = async () => {
+        await call(access.refreshGrants)
+      }
+      const refreshShares = async () => {
+        await call(access.refreshShares)
+      }
+      const refreshInheritedAccess = async () => {
+        await call(access.refreshInheritedAccess)
+      }
       return {
         affordances,
         affordancesError: isCurrent ? (ctrl.affordancesError ?? null) : null,
         loadingAffordances: isCurrent ? Boolean(ctrl.loadingAffordances) : false,
-        revalidateAffordances: async () => {
-          if (isCurrent) await call(ctrl.revalidateAffordances)
-        },
-        grants: ctrl.grants ?? [],
-        grantsError: ctrl.grantsError ?? null,
-        loadingGrants: Boolean(ctrl.loadingGrants),
-        refreshGrants: async () => call(ctrl.refreshGrants),
-        shares: ctrl.shares ?? [],
-        sharesError: ctrl.sharesError ?? null,
-        loadingShares: Boolean(ctrl.loadingShares),
-        refreshShares: async () => call(ctrl.refreshShares),
-        inheritedAccess: ctrl.inheritedAccess ?? [],
-        inheritedCoverage: ctrl.inheritedCoverage ?? 'complete',
-        loadingInheritedAccess: Boolean(ctrl.loadingInheritedAccess),
-        inheritedAccessError: ctrl.inheritedAccessError ?? null,
-        refreshInheritedAccess: async () => call(ctrl.refreshInheritedAccess),
-        retry: async () => undefined,
-        grant: (_target: unknown, ...args: unknown[]) => call(ctrl.grant, ...args),
-        revokeGrant: (_target: unknown, grantId: string) => call(ctrl.revokeGrant, grantId),
-        revoking: Boolean(ctrl.revoking),
-        revokeShare: (_target: unknown, shareId: string) => call(ctrl.revokeShare, shareId),
-        revokingShare: Boolean(ctrl.revokingShare),
+        revalidateAffordances: async () => undefined,
+        grants: access.grants ?? [],
+        grantsError: access.grantsError ?? null,
+        loadingGrants: Boolean(access.loadingGrants),
+        refreshGrants,
+        shares: access.shares ?? [],
+        sharesError: access.sharesError ?? null,
+        loadingShares: Boolean(access.loadingShares),
+        refreshShares,
+        inheritedAccess: access.inheritedAccess ?? [],
+        // Unloaded, like the real hook; an injected walk states its coverage.
+        inheritedCoverage: access.inheritedCoverage ?? null,
+        loadingInheritedAccess: Boolean(access.loadingInheritedAccess),
+        inheritedAccessError: access.inheritedAccessError ?? null,
+        refreshInheritedAccess,
+        retry: () =>
+          Promise.all([refreshGrants(), refreshShares(), refreshInheritedAccess()]).then(() => {}),
+        grant: (aclTarget: unknown, ...args: unknown[]) => call(access.grant, aclTarget, ...args),
+        revokeGrant: (aclTarget: unknown, grantId: string) =>
+          call(access.revokeGrant, aclTarget, grantId),
+        revoking: Boolean(access.revoking),
+        revokeShare: (aclTarget: unknown, shareId: string) =>
+          call(access.revokeShare, aclTarget, shareId),
+        revokingShare: Boolean(access.revokingShare),
       }
     },
   }
 })
 
 vi.mock('@hooks/domain/useGfsResourceAccess', () => accessMock)
+
+function mockSharePage(controller: object, access: Record<string, unknown> = {}) {
+  hookMock.useGfsBrowserController.mockReturnValue(controller)
+  accessMock.inject(access)
+}
+
+beforeEach(() => {
+  accessMock.inject({})
+})
+
+/** The target a write names, as the dialog passes it. */
+function aclTarget(resourceId: string) {
+  return expect.objectContaining({ resourceId })
+}
 
 function baseController() {
   return {
@@ -2093,179 +2128,6 @@ describe('FilesPage', () => {
     expect(screen.getByRole('heading', { name: 'People with access' })).toBeTruthy()
   })
 
-  describe('Share across a session change', () => {
-    const SCOPE_A = 'env-1:user-1:team-a'
-    const SCOPE_B = 'env-1:user-1:team-b'
-    const manageAuthority = {
-      held: ['read', 'write', 'manage_acl'],
-      canDelegate: false,
-      grantableBits: [],
-      canCreateShare: false,
-    }
-    const folderA: GfsCrumb = {
-      resourceId: 'folder-a',
-      gfsUri: 'gfs://main/folder-a',
-      name: 'Team A folder',
-      kind: 'directory',
-      version: 1,
-      bytes: 0,
-    }
-    const fileRow = {
-      resourceId: 'file-a',
-      rid: 'file-a',
-      gfsUri: 'gfs://main/file-a',
-      drive: 'main',
-      parentResourceId: 'folder-a',
-      name: 'team-a-report.txt',
-      kind: 'file' as const,
-      path: '/Team A folder/team-a-report.txt',
-      version: 3,
-      bytes: 64,
-    }
-    const folderRow = (resourceId: string, name: string) => ({
-      resourceId,
-      rid: resourceId,
-      gfsUri: `gfs://main/${resourceId}`,
-      drive: 'main',
-      parentResourceId: null,
-      name,
-      kind: 'directory' as const,
-      path: `/${name}`,
-      version: 1,
-      bytes: 0,
-      sources: ['grant'],
-      permissions: ['read', 'manage_acl'],
-      coversDescendants: true,
-    })
-
-    // The real controller drops its location when the session changes.
-    function sessionController(initialCrumbs: GfsCrumb[], rootRows: unknown[]) {
-      const restoreCrumbs = vi.fn()
-      const session: { switchTo: (scope: string, nextCrumbs?: GfsCrumb[]) => void } = {
-        switchTo: () => undefined,
-      }
-      function useController() {
-        const [crumbs, setCrumbs] = useState<GfsCrumb[]>(initialCrumbs)
-        const [scope, setScope] = useState(SCOPE_A)
-        session.switchTo = (next, nextCrumbs = []) => {
-          setScope(next)
-          setCrumbs(nextCrumbs)
-        }
-        const current = crumbs.at(-1) ?? null
-        return {
-          ...baseController(),
-          sessionScope: scope,
-          current,
-          crumbs,
-          items: current?.resourceId === 'folder-a' ? [fileRow] : [],
-          accessibleResources: current ? [] : rootRows,
-          affordances: current ? manageAuthority : null,
-          rowAffordancesByResourceId: { 'file-a': manageAuthority },
-          openResource: (resource: typeof fileRow) =>
-            setCrumbs(previous => [
-              ...previous,
-              {
-                resourceId: resource.resourceId,
-                gfsUri: resource.gfsUri,
-                name: resource.name,
-                kind: resource.kind,
-                version: resource.version,
-                bytes: resource.bytes,
-              },
-            ]),
-          restoreCrumbs: (next: GfsCrumb[]) => {
-            restoreCrumbs(next)
-            setCrumbs(next)
-          },
-        }
-      }
-      return { useController, restoreCrumbs, session }
-    }
-
-    it('never restores a file Share location of the replaced session', async () => {
-      const { useController, restoreCrumbs, session } = sessionController(
-        [folderA],
-        [folderRow('folder-b', 'Team B folder')]
-      )
-      hookMock.useGfsBrowserController.mockImplementation(useController)
-      renderFilesPage()
-
-      installControllerPermissionQuery()
-      fireEvent.click(await screen.findByRole('button', { name: 'Share team-a-report.txt' }))
-      expect(
-        await screen.findByRole('dialog', { name: 'Share file team-a-report.txt' })
-      ).toBeTruthy()
-
-      await act(async () => session.switchTo(SCOPE_B))
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-
-      fireEvent.click(await screen.findByRole('button', { name: 'Share Team B folder' }))
-      const dialog = await screen.findByRole('dialog', { name: 'Share folder Team B folder' })
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Close share dialog' }))
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-
-      expect(restoreCrumbs).not.toHaveBeenCalled()
-      expect(screen.queryByText('Team A folder')).toBeNull()
-      expect(
-        (screen.getByRole('button', { name: 'Shared with me' }) as HTMLButtonElement).disabled
-      ).toBe(true)
-    })
-
-    it('drops the replaced session Share location before any later dialog can restore it', async () => {
-      const { useController, restoreCrumbs, session } = sessionController(
-        [folderA],
-        [folderRow('folder-b', 'Team B folder')]
-      )
-      hookMock.useGfsBrowserController.mockImplementation(useController)
-      renderFilesPage()
-
-      installControllerPermissionQuery()
-      fireEvent.click(await screen.findByRole('button', { name: 'Share team-a-report.txt' }))
-      expect(
-        await screen.findByRole('dialog', { name: 'Share file team-a-report.txt' })
-      ).toBeTruthy()
-
-      // The new session lands on a folder of its own.
-      await act(async () =>
-        session.switchTo(SCOPE_B, [
-          {
-            ...folderA,
-            resourceId: 'folder-b',
-            gfsUri: 'gfs://main/folder-b',
-            name: 'Team B folder',
-          },
-        ])
-      )
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-
-      await chooseResourceAction('Team B folder', 'New folder')
-      const newFolderDialog = await screen.findByRole('dialog', { name: 'New folder' })
-      fireEvent.click(within(newFolderDialog).getByRole('button', { name: 'Cancel' }))
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-
-      expect(restoreCrumbs).not.toHaveBeenCalled()
-      expect(screen.queryByText('Team A folder')).toBeNull()
-    })
-
-    it('closes a folder Share opened under the replaced session', async () => {
-      const { useController, session } = sessionController(
-        [],
-        [folderRow('folder-shared', 'Shared folder')]
-      )
-      hookMock.useGfsBrowserController.mockImplementation(useController)
-      renderFilesPage()
-
-      installControllerPermissionQuery()
-      fireEvent.click(await screen.findByRole('button', { name: 'Share Shared folder' }))
-      expect(await screen.findByRole('dialog', { name: 'Share folder Shared folder' })).toBeTruthy()
-
-      await act(async () => session.switchTo(SCOPE_B))
-
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-      expect(screen.getByRole('button', { name: 'Share Shared folder' })).toBeTruthy()
-    })
-  })
-
   it('returns to Shared with me after closing Manage for a file row', async () => {
     const managedFile = {
       resourceId: 'file-1',
@@ -2496,23 +2358,27 @@ describe('FilesPage', () => {
     const grant = vi.fn(async () => undefined)
     const refreshGrants = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Team folder',
-        kind: 'directory',
+    mockSharePage(
+      {
+        ...baseController(),
+        current: {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder',
+          name: 'Team folder',
+          kind: 'directory',
+        },
+        affordances: {
+          held: ['read', 'write', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read', 'write'],
+          canCreateShare: false,
+        },
       },
-      affordances: {
-        held: ['read', 'write', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read', 'write'],
-        canCreateShare: false,
-      },
-      grant,
-      refreshGrants,
-    })
+      {
+        grant,
+        refreshGrants,
+      }
+    )
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
@@ -2527,7 +2393,12 @@ describe('FilesPage', () => {
     )
 
     await waitFor(() =>
-      expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read'], true)
+      expect(grant).toHaveBeenCalledWith(
+        aclTarget('folder-1'),
+        ['host:1st:mcp-host/chatllm'],
+        ['read'],
+        true
+      )
     )
     await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
@@ -2564,23 +2435,27 @@ describe('FilesPage', () => {
     const grant = vi.fn(async () => undefined)
     const refreshGrants = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Team folder',
-        kind: 'directory',
+    mockSharePage(
+      {
+        ...baseController(),
+        current: {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder',
+          name: 'Team folder',
+          kind: 'directory',
+        },
+        affordances: {
+          held: ['read', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read'],
+          canCreateShare: false,
+        },
       },
-      affordances: {
-        held: ['read', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read'],
-        canCreateShare: false,
-      },
-      grant,
-      refreshGrants,
-    })
+      {
+        grant,
+        refreshGrants,
+      }
+    )
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
@@ -2598,60 +2473,71 @@ describe('FilesPage', () => {
 
     // handleGrant issues the grant then MUST list-after-write (the grant PUT
     // returns no ids). Deleting `await ctrl.refreshGrants()` must fail here.
-    await waitFor(() => expect(grant).toHaveBeenCalledWith(['user:user-2'], ['read'], true))
+    await waitFor(() =>
+      expect(grant).toHaveBeenCalledWith(aclTarget('folder-1'), ['user:user-2'], ['read'], true)
+    )
     await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
   })
 
   // TASK-243 — inherited access on a FILE: one normal toggleable row per
   // member; any edit confirms against the parent folder and applies there.
-  function inheritedFileController(overrides: Record<string, unknown> = {}) {
-    return {
-      ...baseController(),
-      current: {
-        resourceId: 'file-1',
-        gfsUri: 'gfs://main/file-1',
-        name: 'report.txt',
-        kind: 'file' as const,
-        version: 3,
-      },
-      affordances: {
-        held: ['read', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read', 'share', 'write'],
-        canCreateShare: false,
-      },
-      grants: [
-        {
-          id: 'grant-1',
-          drive: 'main',
+  function inheritedFileShare(
+    access: Record<string, unknown> = {},
+    controller: Record<string, unknown> = {}
+  ): [object, Record<string, unknown>] {
+    return [
+      {
+        ...baseController(),
+        current: {
           resourceId: 'file-1',
-          subject: { type: 'user', id: 'user-2' },
-          permissions: ['read', 'share'],
-          inherit: false,
+          gfsUri: 'gfs://main/file-1',
+          name: 'report.txt',
+          kind: 'file' as const,
+          version: 3,
         },
-      ],
-      inheritedAccess: [
-        {
-          subject: { type: 'user', id: 'user-2' },
-          permissions: ['read', 'write'],
-          inheritedFrom: ['Team folder'],
-          sources: [
-            {
-              resourceId: 'folder-1',
-              name: 'Team folder',
-              permissions: ['read', 'write'],
-              grantId: 'parent-grant-1',
-              shareIds: [],
-              grantPermissions: ['read', 'write'],
-              grantInherit: true,
-              shareEntries: [],
-            },
-          ],
+        affordances: {
+          held: ['read', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read', 'share', 'write'],
+          canCreateShare: false,
         },
-      ],
-      ...overrides,
-    }
+        ...controller,
+      },
+      {
+        grants: [
+          {
+            id: 'grant-1',
+            drive: 'main',
+            resourceId: 'file-1',
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read', 'share'],
+            inherit: false,
+          },
+        ],
+        inheritedAccess: [
+          {
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read', 'write'],
+            inheritedFrom: ['Team folder'],
+            sources: [
+              {
+                resourceId: 'folder-1',
+                name: 'Team folder',
+                permissions: ['read', 'write'],
+                grantId: 'parent-grant-1',
+                shareIds: [],
+                grantPermissions: ['read', 'write'],
+                grantInherit: true,
+                shareEntries: [],
+              },
+            ],
+          },
+        ],
+        inheritedCoverage: 'complete',
+        ...access,
+      },
+    ]
   }
 
   function installInheritedDirectoryMocks() {
@@ -2696,7 +2582,7 @@ describe('FilesPage', () => {
 
   it('shows one normal toggleable row per member with inherited access on a file', async () => {
     installInheritedDirectoryMocks()
-    hookMock.useGfsBrowserController.mockReturnValue(inheritedFileController())
+    mockSharePage(...inheritedFileShare())
 
     renderFilesPage()
     await openManageDialog('report.txt')
@@ -2715,36 +2601,40 @@ describe('FilesPage', () => {
 
   it('shows inherited members in a FOLDER manage dialog too', async () => {
     installInheritedDirectoryMocks()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
-        current: {
-          resourceId: 'folder-1',
-          gfsUri: 'gfs://main/folder-1',
-          name: 'Team folder',
-          kind: 'directory' as const,
-          version: 2,
+    mockSharePage(
+      ...inheritedFileShare(
+        {
+          grants: [],
+          inheritedAccess: [
+            {
+              subject: { type: 'user', id: 'user-2' },
+              permissions: ['read', 'write'],
+              inheritedFrom: ['main'],
+              sources: [
+                {
+                  resourceId: 'root-1',
+                  name: 'main',
+                  permissions: ['read', 'write'],
+                  grantId: 'root-grant-1',
+                  shareIds: [],
+                  grantPermissions: ['read', 'write'],
+                  grantInherit: true,
+                  shareEntries: [],
+                },
+              ],
+            },
+          ],
         },
-        grants: [],
-        inheritedAccess: [
-          {
-            subject: { type: 'user', id: 'user-2' },
-            permissions: ['read', 'write'],
-            inheritedFrom: ['main'],
-            sources: [
-              {
-                resourceId: 'root-1',
-                name: 'main',
-                permissions: ['read', 'write'],
-                grantId: 'root-grant-1',
-                shareIds: [],
-                grantPermissions: ['read', 'write'],
-                grantInherit: true,
-                shareEntries: [],
-              },
-            ],
+        {
+          current: {
+            resourceId: 'folder-1',
+            gfsUri: 'gfs://main/folder-1',
+            name: 'Team folder',
+            kind: 'directory' as const,
+            version: 2,
           },
-        ],
-      })
+        }
+      )
     )
 
     renderFilesPage()
@@ -2764,8 +2654,8 @@ describe('FilesPage', () => {
   // boundary notice — not the load-failure copy — on the existing banner.
   it('renders retained inherited rows alongside the read-boundary notice', async () => {
     installInheritedDirectoryMocks()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
+    mockSharePage(
+      ...inheritedFileShare({
         inheritedCoverage: 'read-boundary',
         inheritedAccessError: null,
       })
@@ -2797,8 +2687,8 @@ describe('FilesPage', () => {
 
   it('renders the acl-limited notice without hiding known rows', async () => {
     installInheritedDirectoryMocks()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
+    mockSharePage(
+      ...inheritedFileShare({
         inheritedCoverage: 'acl-limited',
         inheritedAccessError: null,
       })
@@ -2818,8 +2708,8 @@ describe('FilesPage', () => {
 
   it('renders the load-failure notice for unavailable coverage', async () => {
     installInheritedDirectoryMocks()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
+    mockSharePage(
+      ...inheritedFileShare({
         inheritedCoverage: 'unavailable',
         inheritedAccessError: null,
       })
@@ -2840,8 +2730,8 @@ describe('FilesPage', () => {
     // also say what survives, BEFORE the operator approves.
     installInheritedDirectoryMocks()
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
+    mockSharePage(
+      ...inheritedFileShare({
         inheritedAccess: [
           {
             subject: { type: 'user', id: 'user-2' },
@@ -2897,8 +2787,8 @@ describe('FilesPage', () => {
     const refreshInheritedAccess = vi.fn(async () => undefined)
     const fileGrant = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({ refreshGrants, refreshInheritedAccess, grant: fileGrant })
+    mockSharePage(
+      ...inheritedFileShare({ refreshGrants, refreshInheritedAccess, grant: fileGrant })
     )
 
     renderFilesPage(pushToast)
@@ -2951,7 +2841,12 @@ describe('FilesPage', () => {
     )
     // …then aligns the file's own direct grant so it cannot mask the role.
     await waitFor(() =>
-      expect(fileGrant).toHaveBeenCalledWith(['user:user-2'], ['read', 'share'], false)
+      expect(fileGrant).toHaveBeenCalledWith(
+        aclTarget('file-1'),
+        ['user:user-2'],
+        ['read', 'share'],
+        false
+      )
     )
     await waitFor(() => expect(refreshGrants).toHaveBeenCalled())
     await waitFor(() => expect(refreshInheritedAccess).toHaveBeenCalled())
@@ -3006,7 +2901,14 @@ describe('FilesPage', () => {
         })
     )
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockImplementation(() => {
+    const [controller, access] = inheritedFileShare({
+      grants: [],
+      shares: [directShare],
+      revokeShare,
+      refreshShares,
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller)
+    accessMock.inject(() => {
       const [inheritedAccess, setInheritedAccess] = useState([inheritedEditor])
       downgradeInherited = () =>
         setInheritedAccess([
@@ -3016,13 +2918,7 @@ describe('FilesPage', () => {
             sources: [{ ...inheritedSource, permissions: ['read'] }],
           },
         ])
-      return inheritedFileController({
-        grants: [],
-        shares: [directShare],
-        inheritedAccess,
-        revokeShare,
-        refreshShares,
-      })
+      return { ...access, inheritedAccess }
     })
 
     renderFilesPage(pushToast)
@@ -3103,8 +2999,8 @@ describe('FilesPage', () => {
     const refreshShares = vi.fn(async () => undefined)
     const pushToast = vi.fn()
     parentGrant.mockRejectedValueOnce(new Error('403 Forbidden: escalation_rejected'))
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
+    mockSharePage(
+      ...inheritedFileShare({
         grants: [],
         inheritedAccess: [inheritedEditor],
         revokeShare,
@@ -3162,15 +3058,18 @@ describe('FilesPage', () => {
     const pushToast = vi.fn()
     // The file's grantable bits came back empty (failed/narrow probe) — the
     // legacy path built the parent bits from these and confirmed a [] grant.
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
-        affordances: {
-          held: ['read', 'write', 'share', 'manage_acl'],
-          canDelegate: true,
-          grantableBits: [],
-          canCreateShare: false,
-        },
-      })
+    mockSharePage(
+      ...inheritedFileShare(
+        {},
+        {
+          affordances: {
+            held: ['read', 'write', 'share', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: [],
+            canCreateShare: false,
+          },
+        }
+      )
     )
 
     renderFilesPage(pushToast)
@@ -3239,8 +3138,8 @@ describe('FilesPage', () => {
     }
     const revokeShare = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
+    mockSharePage(
+      ...inheritedFileShare({
         grants: [],
         inheritedAccess: [inheritedEditor],
         revokeShare,
@@ -3282,8 +3181,8 @@ describe('FilesPage', () => {
     const pushToast = vi.fn()
     // Read-only inherited floor: upgrading to Editor must be judged against
     // the folder, which cannot grant write.
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
+    mockSharePage(
+      ...inheritedFileShare({
         inheritedAccess: [
           {
             subject: { type: 'user', id: 'user-2' },
@@ -3336,8 +3235,8 @@ describe('FilesPage', () => {
   // R1-M3 — a total derivation failure must not silently read as "no one".
   it('shows a quiet notice instead of the empty claim when the derivation fails', async () => {
     installInheritedDirectoryMocks()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
+    mockSharePage(
+      ...inheritedFileShare({
         grants: [],
         inheritedAccess: [],
         inheritedAccessError: 'Error invoking remote method: 500',
@@ -3360,7 +3259,7 @@ describe('FilesPage', () => {
     installInheritedDirectoryMocks()
     const revokeGrant = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue(inheritedFileController({ revokeGrant }))
+    mockSharePage(...inheritedFileShare({ revokeGrant }))
 
     renderFilesPage(pushToast)
     await openManageDialog('report.txt')
@@ -3382,7 +3281,9 @@ describe('FilesPage', () => {
       fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
     })
 
-    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('parent-grant-1'))
+    await waitFor(() =>
+      expect(revokeGrant).toHaveBeenCalledWith(aclTarget('file-1'), 'parent-grant-1')
+    )
   })
 
   // R1-H1 — Drive-aligned multi-ancestor semantics. Reference scenario:
@@ -3410,12 +3311,12 @@ describe('FilesPage', () => {
     }
     const EDITOR_PERMISSIONS = ['read', 'write', 'delete', 'manage_acl', 'share']
 
-    function multiSourceController(
+    function multiSourceShare(
       sources: Array<typeof CAMPAIGNS>,
       overrides: Record<string, unknown> = {}
     ) {
       const permissions = [...new Set(sources.flatMap(source => source.permissions))]
-      return inheritedFileController({
+      return inheritedFileShare({
         grants: [],
         inheritedAccess: [
           {
@@ -3453,8 +3354,8 @@ describe('FilesPage', () => {
         permissions: ['read', 'write'],
         includeDescendants: false,
       }
-      hookMock.useGfsBrowserController.mockReturnValue(
-        multiSourceController([CAMPAIGNS, MARKETING], {
+      mockSharePage(
+        ...multiSourceShare([CAMPAIGNS, MARKETING], {
           revokeGrant,
           revokeShare,
           shares: [directShare],
@@ -3480,10 +3381,16 @@ describe('FilesPage', () => {
       })
 
       // Both ancestors' grants are revoked…
-      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('cmp-grant-1'))
-      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('mkt-grant-1'))
+      await waitFor(() =>
+        expect(revokeGrant).toHaveBeenCalledWith(aclTarget('file-1'), 'cmp-grant-1')
+      )
+      await waitFor(() =>
+        expect(revokeGrant).toHaveBeenCalledWith(aclTarget('file-1'), 'mkt-grant-1')
+      )
       // …and the file's own direct share is aligned with the removal.
-      await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('file-share-1'))
+      await waitFor(() =>
+        expect(revokeShare).toHaveBeenCalledWith(aclTarget('file-1'), 'file-share-1')
+      )
       await waitFor(() =>
         expect(pushToast).toHaveBeenCalledWith(
           'Access removed on 2 folders and everything inside them',
@@ -3498,9 +3405,7 @@ describe('FilesPage', () => {
         .grant
       const pushToast = vi.fn()
       // Marketing is already at Read; Campaigns sits above the target.
-      hookMock.useGfsBrowserController.mockReturnValue(
-        multiSourceController([CAMPAIGNS, MARKETING])
-      )
+      mockSharePage(...multiSourceShare([CAMPAIGNS, MARKETING]))
 
       const row = await openMultiSourceRow([CAMPAIGNS, MARKETING], pushToast)
       await act(async () => {
@@ -3541,9 +3446,7 @@ describe('FilesPage', () => {
         .grant
       const readCampaigns = { ...CAMPAIGNS, permissions: ['read', 'share'] }
       const readMarketing = { ...MARKETING }
-      hookMock.useGfsBrowserController.mockReturnValue(
-        multiSourceController([readCampaigns, readMarketing])
-      )
+      mockSharePage(...multiSourceShare([readCampaigns, readMarketing]))
 
       const row = await openMultiSourceRow([readCampaigns, readMarketing])
       await act(async () => {
@@ -3584,8 +3487,8 @@ describe('FilesPage', () => {
       const pushToast = vi.fn()
       // Direct Editor grant on the file + inherited Read floor: the row
       // displays Editor even though the inherited-only role is Read.
-      hookMock.useGfsBrowserController.mockReturnValue(
-        inheritedFileController({
+      mockSharePage(
+        ...inheritedFileShare({
           grants: [
             {
               id: 'grant-1',
@@ -3689,7 +3592,26 @@ describe('FilesPage', () => {
       const refreshInheritedAccess = vi.fn(async () => undefined)
       const refreshShares = vi.fn(async () => undefined)
       const pushToast = vi.fn()
-      hookMock.useGfsBrowserController.mockImplementation(() => {
+      const [controller, access] = inheritedFileShare(
+        {
+          grants: [editorGrant],
+          grant: fileGrant,
+          revokeGrant,
+          refreshGrants,
+          refreshInheritedAccess,
+          refreshShares,
+        },
+        {
+          affordances: {
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: [],
+            canCreateShare: false,
+          },
+        }
+      )
+      hookMock.useGfsBrowserController.mockReturnValue(controller)
+      accessMock.inject(() => {
         const [inheritedAccess, setInheritedAccess] = useState([inheritedEditor])
         downgradeInherited = () =>
           setInheritedAccess([
@@ -3699,21 +3621,7 @@ describe('FilesPage', () => {
               sources: [{ ...inheritedEditor.sources[0]!, permissions: ['read'] }],
             },
           ])
-        return inheritedFileController({
-          grants: [editorGrant],
-          inheritedAccess,
-          affordances: {
-            held: ['read', 'manage_acl'],
-            canDelegate: true,
-            grantableBits: [],
-            canCreateShare: false,
-          },
-          grant: fileGrant,
-          revokeGrant,
-          refreshGrants,
-          refreshInheritedAccess,
-          refreshShares,
-        })
+        return { ...access, inheritedAccess }
       })
 
       renderFilesPage(pushToast)
@@ -3766,7 +3674,7 @@ describe('FilesPage', () => {
 
     it('states the true partial outcome when a folder removal fails mid-run', async () => {
       installInheritedDirectoryMocks()
-      const revokeGrant = vi.fn(async (grantId: string) => {
+      const revokeGrant = vi.fn(async (_target: unknown, grantId: string) => {
         if (grantId === 'mkt-grant-1') {
           throw new Error('403 Forbidden: escalation_rejected')
         }
@@ -3774,8 +3682,8 @@ describe('FilesPage', () => {
       const refreshGrants = vi.fn(async () => undefined)
       const refreshInheritedAccess = vi.fn(async () => undefined)
       const pushToast = vi.fn()
-      hookMock.useGfsBrowserController.mockReturnValue(
-        multiSourceController([CAMPAIGNS, MARKETING], {
+      mockSharePage(
+        ...multiSourceShare([CAMPAIGNS, MARKETING], {
           revokeGrant,
           refreshGrants,
           refreshInheritedAccess,
@@ -3905,23 +3813,27 @@ describe('FilesPage', () => {
     const grant = vi.fn().mockRejectedValue(new Error('400 Bad Request: subjects_invalid'))
     const refreshGrants = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Team folder',
-        kind: 'directory',
+    mockSharePage(
+      {
+        ...baseController(),
+        current: {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder',
+          name: 'Team folder',
+          kind: 'directory',
+        },
+        affordances: {
+          held: ['read', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read'],
+          canCreateShare: false,
+        },
       },
-      affordances: {
-        held: ['read', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read'],
-        canCreateShare: false,
-      },
-      grant,
-      refreshGrants,
-    })
+      {
+        grant,
+        refreshGrants,
+      }
+    )
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
@@ -3939,7 +3851,12 @@ describe('FilesPage', () => {
     )
 
     await waitFor(() =>
-      expect(grant).toHaveBeenCalledWith(['user:user-2', 'user:user-3'], ['read'], true)
+      expect(grant).toHaveBeenCalledWith(
+        aclTarget('folder-1'),
+        ['user:user-2', 'user:user-3'],
+        ['read'],
+        true
+      )
     )
     expect(grant).toHaveBeenCalledTimes(1)
     // The panel maps the verdict; no partial-success toast, no list-after-write.
@@ -3967,32 +3884,36 @@ describe('FilesPage', () => {
     })
     const revokeGrant = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Team folder',
-        kind: 'directory',
-      },
-      affordances: {
-        held: ['read', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read'],
-        canCreateShare: false,
-      },
-      grants: [
-        {
-          id: 'grant-1',
-          drive: 'main',
+    mockSharePage(
+      {
+        ...baseController(),
+        current: {
           resourceId: 'folder-1',
-          subject: { type: 'host', id: '1st:mcp-host/chatllm' },
-          permissions: ['read'],
-          inherit: true,
+          gfsUri: 'gfs://main/folder',
+          name: 'Team folder',
+          kind: 'directory',
         },
-      ],
-      revokeGrant,
-    })
+        affordances: {
+          held: ['read', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read'],
+          canCreateShare: false,
+        },
+      },
+      {
+        grants: [
+          {
+            id: 'grant-1',
+            drive: 'main',
+            resourceId: 'folder-1',
+            subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+            permissions: ['read'],
+            inherit: true,
+          },
+        ],
+        revokeGrant,
+      }
+    )
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
@@ -4000,7 +3921,7 @@ describe('FilesPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Actions for chatllm' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
 
-    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('grant-1'))
+    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith(aclTarget('folder-1'), 'grant-1'))
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Access revoked for chatllm', 'success')
     )
@@ -4026,33 +3947,39 @@ describe('FilesPage', () => {
     const grant = vi.fn(async () => undefined)
     const refreshGrants = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Team folder',
-        kind: 'directory',
-      },
-      affordances: {
-        held: ['read', 'write', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read', 'write'],
-        canCreateShare: false,
-      },
-      grants: [
-        {
-          id: 'grant-1',
-          drive: 'main',
+    mockSharePage(
+      {
+        ...baseController(),
+        current: {
           resourceId: 'folder-1',
-          subject: { type: 'host', id: '1st:mcp-host/chatllm' },
-          permissions: ['read'],
-          inherit: true,
+          gfsUri: 'gfs://main/folder',
+          name: 'Team folder',
+          kind: 'directory',
         },
-      ],
-      grant,
-      refreshGrants,
-    })
+        affordances: {
+          held: ['read', 'write', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read', 'write'],
+          canCreateShare: false,
+        },
+      },
+      {
+        grants: [
+          {
+            id: 'grant-1',
+            drive: 'main',
+            resourceId: 'folder-1',
+            subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+            permissions: ['read'],
+            inherit: true,
+          },
+        ],
+        grant,
+        refreshGrants,
+        // The inherited walk finished and found every ancestor.
+        inheritedCoverage: 'complete',
+      }
+    )
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
@@ -4060,7 +3987,12 @@ describe('FilesPage', () => {
     fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
 
     await waitFor(() =>
-      expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read', 'write'], true)
+      expect(grant).toHaveBeenCalledWith(
+        aclTarget('folder-1'),
+        ['host:1st:mcp-host/chatllm'],
+        ['read', 'write'],
+        true
+      )
     )
     expect(refreshGrants).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('chatllm is now an Editor', 'success')
@@ -4088,35 +4020,39 @@ describe('FilesPage', () => {
     })
     const grant = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Team folder',
-        kind: 'directory',
-      },
-      affordances: {
-        held: ['read', 'write', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read', 'write'],
-        canCreateShare: false,
-      },
-      grants: [
-        {
-          id: 'grant-1',
-          drive: 'main',
+    mockSharePage(
+      {
+        ...baseController(),
+        current: {
           resourceId: 'folder-1',
-          subject: { type: 'host', id: '1st:mcp-host/chatllm' },
-          permissions: ['read'],
-          inherit: true,
+          gfsUri: 'gfs://main/folder',
+          name: 'Team folder',
+          kind: 'directory',
         },
-      ],
-      // The inherited walk stopped at a privacy boundary: an ancestor the
-      // user cannot see may still grant Editor.
-      inheritedCoverage: 'read-boundary',
-      grant,
-    })
+        affordances: {
+          held: ['read', 'write', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read', 'write'],
+          canCreateShare: false,
+        },
+      },
+      {
+        grants: [
+          {
+            id: 'grant-1',
+            drive: 'main',
+            resourceId: 'folder-1',
+            subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+            permissions: ['read'],
+            inherit: true,
+          },
+        ],
+        // The inherited walk stopped at a privacy boundary: an ancestor the
+        // user cannot see may still grant Editor.
+        inheritedCoverage: 'read-boundary',
+        grant,
+      }
+    )
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
@@ -4152,33 +4088,37 @@ describe('FilesPage', () => {
     })
     const revokeShare = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Team folder',
-        kind: 'directory',
-      },
-      affordances: {
-        held: ['read', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read'],
-        canCreateShare: true,
-      },
-      grants: [],
-      shares: [
-        {
-          id: 'share-1',
-          drive: 'main',
+    mockSharePage(
+      {
+        ...baseController(),
+        current: {
           resourceId: 'folder-1',
-          subject: { type: 'user', id: 'user-9' },
-          permissions: ['read'],
-          includeDescendants: true,
+          gfsUri: 'gfs://main/folder',
+          name: 'Team folder',
+          kind: 'directory',
         },
-      ],
-      revokeShare,
-    })
+        affordances: {
+          held: ['read', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read'],
+          canCreateShare: true,
+        },
+      },
+      {
+        grants: [],
+        shares: [
+          {
+            id: 'share-1',
+            drive: 'main',
+            resourceId: 'folder-1',
+            subject: { type: 'user', id: 'user-9' },
+            permissions: ['read'],
+            includeDescendants: true,
+          },
+        ],
+        revokeShare,
+      }
+    )
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
@@ -4189,7 +4129,7 @@ describe('FilesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Actions for Shared Member' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
 
-    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('share-1'))
+    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith(aclTarget('folder-1'), 'share-1'))
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Shared access revoked for Shared Member', 'success')
     )
@@ -4204,33 +4144,37 @@ describe('FilesPage', () => {
       },
     })
     const revokeShare = vi.fn(async () => undefined)
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Team folder',
-        kind: 'directory',
-      },
-      affordances: {
-        held: ['read', 'manage_acl'],
-        canDelegate: true,
-        grantableBits: ['read'],
-        canCreateShare: true,
-      },
-      grants: [],
-      shares: [
-        {
-          id: 'share-1',
-          drive: 'main',
+    mockSharePage(
+      {
+        ...baseController(),
+        current: {
           resourceId: 'folder-1',
-          subject: { type: 'user', id: 'user-outside' },
-          permissions: ['read'],
-          includeDescendants: true,
+          gfsUri: 'gfs://main/folder',
+          name: 'Team folder',
+          kind: 'directory',
         },
-      ],
-      revokeShare,
-    })
+        affordances: {
+          held: ['read', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: ['read'],
+          canCreateShare: true,
+        },
+      },
+      {
+        grants: [],
+        shares: [
+          {
+            id: 'share-1',
+            drive: 'main',
+            resourceId: 'folder-1',
+            subject: { type: 'user', id: 'user-outside' },
+            permissions: ['read'],
+            includeDescendants: true,
+          },
+        ],
+        revokeShare,
+      }
+    )
 
     renderFilesPage()
     await openManageDialog('Team folder')
@@ -4334,31 +4278,6 @@ describe('FilesPage', () => {
     )
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
     expect(moveResource).not.toHaveBeenCalled()
-  })
-
-  it('refreshes server affordances whenever the manage dialog opens', async () => {
-    const refreshAffordances = vi.fn(async () => undefined)
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder',
-        name: 'Product',
-        kind: 'directory',
-      },
-      affordances: {
-        held: ['read', 'manage_acl'],
-        canDelegate: false,
-        grantableBits: [],
-        canCreateShare: false,
-      },
-      revalidateAffordances: refreshAffordances,
-    })
-
-    renderFilesPage()
-    await openManageDialog('Product')
-
-    await waitFor(() => expect(refreshAffordances).toHaveBeenCalledTimes(1))
   })
 
   it('keeps Manage open without stale read-only access while permissions refresh', async () => {
