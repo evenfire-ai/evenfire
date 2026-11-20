@@ -7652,6 +7652,15 @@ body.sidebar-resizing {
   margin-bottom: 0;
 }
 
+/* The assistant chat wraps its markdown in a click container; trim through it. */
+.markdown-content > .chat-md-root:first-child > :first-child {
+  margin-top: 0;
+}
+
+.markdown-content > .chat-md-root:last-child > :last-child {
+  margin-bottom: 0;
+}
+
 .markdown-content p {
   margin: 0 0 10px;
   white-space: normal;

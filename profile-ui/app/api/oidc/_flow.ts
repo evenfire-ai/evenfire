@@ -12,6 +12,8 @@ export const OIDC_PROFILE_FETCH_TIMEOUT_MS = OIDC_OPERATION_DEADLINE_MS + 2_000
 const BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
 const CALLBACK_PATH = '/api/oidc/callback'
+/** The member session cookie External REST sets for password login (`sessionCookie.ts`). */
+const PROFILE_SESSION_COOKIE_PREFIX = 'profile_session='
 const SAFE_FAILURES = [
   'oidc_not_configured',
   'oidc_attempt_rejected',
@@ -27,8 +29,13 @@ const SAFE_FAILURE_SET: ReadonlySet<string> = new Set(SAFE_FAILURES)
 
 export type OidcProfileConfiguration = Readonly<{
   redirectUri: string
-  memberAuthenticationActivated: false
+  memberAuthenticationActivated: boolean
 }>
+
+export type OidcCompletionOutcome =
+  | Readonly<{ kind: 'identity_proof_verified' }>
+  | Readonly<{ kind: 'no_matching_member' }>
+  | Readonly<{ kind: 'member_signed_in'; sessionCookie: string }>
 
 export type OidcFailureCode = (typeof SAFE_FAILURES)[number] | 'invalid_upstream'
 
@@ -86,6 +93,14 @@ async function requestExternal<T>(
   init?: RequestInit,
   clientKey?: string
 ): Promise<T> {
+  return (await requestExternalWithHeaders<T>(path, init, clientKey)).body
+}
+
+async function requestExternalWithHeaders<T>(
+  path: string,
+  init?: RequestInit,
+  clientKey?: string
+): Promise<{ body: T; headers: Headers }> {
   let response: Response
   try {
     response = await fetch(externalUrl(path), {
@@ -148,7 +163,7 @@ async function requestExternal<T>(
       retryableCode && retrySameAttempt !== false
     )
   }
-  return body as T
+  return { body: body as T, headers: response.headers }
 }
 
 export async function getOidcProfileConfiguration(
@@ -162,7 +177,7 @@ export async function getOidcProfileConfiguration(
   if (
     !config ||
     typeof config.redirectUri !== 'string' ||
-    config.memberAuthenticationActivated !== false
+    typeof config.memberAuthenticationActivated !== 'boolean'
   ) {
     throw new OidcProfileFlowError(503, 'oidc_unavailable', true)
   }
@@ -203,11 +218,18 @@ export function originMatchesCallback(request: Request, callback: string): boole
   }
 }
 
-export function requestMatchesCallback(request: Request, callback: string): boolean {
+/**
+ * Compares only the path. `request.url` does not carry the public origin: `next start`
+ * builds it from its own listener (`<proto>://localhost:<port>`) and ignores Host and
+ * X-Forwarded-Host, so behind the proxy its origin never equals the redirect URI.
+ * The public origin is enforced without trusting request headers: `/start` sets the
+ * binding cookie only when the browser's Origin is the redirect URI origin, the
+ * `__Host-` cookie is sent back only to that host, and Control API claims an attempt
+ * only for the stored binding and the configured redirect URI.
+ */
+export function requestPathMatchesCallback(request: Request, callback: string): boolean {
   try {
-    const incoming = new URL(request.url)
-    const expected = new URL(callback)
-    return incoming.origin === expected.origin && incoming.pathname === expected.pathname
+    return new URL(request.url).pathname === new URL(callback).pathname
   } catch {
     return false
   }
@@ -253,7 +275,7 @@ export function clearBrowserCookie(name: string): string {
 }
 
 export async function postOidcProfileFlow<T>(
-  route: 'attempts' | 'complete' | 'cancel',
+  route: 'attempts' | 'cancel',
   body: Record<string, unknown>,
   request: Request
 ): Promise<T> {
@@ -265,6 +287,56 @@ export async function postOidcProfileFlow<T>(
     },
     oidcClientKey(request)
   )
+}
+
+/**
+ * Completes the attempt. When member sign-in is on, External REST answers with the
+ * same `profile_session` Set-Cookie header password login sets; it is relayed to the
+ * browser unchanged, so the token never passes through a response body.
+ */
+export async function completeOidcProfileFlow(
+  body: Record<string, unknown>,
+  request: Request
+): Promise<OidcCompletionOutcome> {
+  const { body: result, headers } = await requestExternalWithHeaders<{
+    outcome?: unknown
+    memberAuthenticationActivated?: unknown
+    memberSignIn?: unknown
+  }>(
+    '/oidc/profile-flow/complete',
+    { method: 'POST', body: JSON.stringify(body) },
+    oidcClientKey(request)
+  )
+  if (result?.outcome === 'identity_proof_verified') {
+    if (result.memberAuthenticationActivated !== true) return { kind: 'identity_proof_verified' }
+    if (result.memberSignIn === 'no_matching_member') return { kind: 'no_matching_member' }
+  }
+  if (result?.outcome === 'member_signed_in' && result.memberAuthenticationActivated === true) {
+    const sessionCookies = headers
+      .getSetCookie()
+      .filter(cookie => cookie.startsWith(PROFILE_SESSION_COOKIE_PREFIX))
+    if (sessionCookies.length === 1 && sessionCookies[0].length <= 8192) {
+      return { kind: 'member_signed_in', sessionCookie: sessionCookies[0] }
+    }
+  }
+  // The attempt was consumed upstream; an unrecognised answer cannot be retried.
+  throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
+}
+
+export function memberSignedInRedirect(
+  location: string,
+  sessionCookie: string,
+  clearBindingCookie: string
+): Response {
+  const headers = new Headers({
+    location,
+    'cache-control': 'no-store',
+    'referrer-policy': 'no-referrer',
+    'x-content-type-options': 'nosniff',
+  })
+  headers.append('set-cookie', sessionCookie)
+  headers.append('set-cookie', clearBindingCookie)
+  return new Response(null, { status: 303, headers })
 }
 
 export async function beginOidcAttempt(
