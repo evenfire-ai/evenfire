@@ -33,7 +33,12 @@ import {
   type DesktopUploadTransport,
   formatGfsUploadLimit,
 } from './gfs/upload.js'
-import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
+import {
+  GfsClient,
+  type GfsResourceView,
+  type ResolvedGfsResource,
+  parseSubjectKey,
+} from './gfs/uriHandler.js'
 import {
   type GfsWatchClient,
   type GfsWatchClientDeps,
@@ -878,6 +883,11 @@ export interface AppServiceOptions {
   gfsWatch?: Pick<GfsWatchClientDeps, 'fetch' | 'requestJson' | 'clock' | 'random' | 'log'>
 }
 
+export type GfsNavigationResolution =
+  | { status: 'resolved'; resource: ResolvedGfsResource }
+  | { status: 'superseded' }
+  | { status: 'unavailable' }
+
 export class AppService {
   private readonly authClient = new AuthClient()
   private readonly memberRegistrationServiceClient = new MemberRegistrationServiceClient()
@@ -918,6 +928,11 @@ export class AppService {
   // A transient runWithTeamContext hop temporarily installs another team's
   // token in sessionToken. Existing GFS jobs keep their captured token and
   // scope, but new GFS operations must not capture that temporary token.
+  // Exempt: the click-navigation read (resolveGfsUriForNavigation) may run
+  // with the hop token and is deliberately not gated on this depth. GFS
+  // authority is per user, not per team: the server mints a user-scoped token
+  // and resolves across every active membership, so the hop token reads
+  // exactly what the home token would, and blocking would drop real clicks.
   private gfsTransientTeamHopDepth = 0
   // While a `runWithTeamContext` hop that will restore the original team is in
   // flight, `me.teamId` holds the borrowed team. The chat store (and the delete
@@ -2800,6 +2815,40 @@ export class AppService {
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
   async resolveGfsUri(uri: string) {
     return this.gfsClient.resolveUri(uri, this.requireSessionToken())
+  }
+
+  /**
+   * Resolve for a user click that will route the UI. Unlike `resolveGfsUri`
+   * this never throws: the caller needs to tell "the session this click
+   * belonged to is gone" (drop silently) from "nothing to open" (tell the user).
+   *
+   * Authority is `(gfsAuthEpoch, me.id)`, not the token: transient team hops
+   * swap the token without changing GFS authority, which the server scopes to
+   * the user, so comparing tokens would drop legitimate clicks.
+   */
+  async resolveGfsUriForNavigation(uri: string): Promise<GfsNavigationResolution> {
+    const token = this.sessionToken
+    const userId = this.me?.id
+    const epoch = this.gfsAuthEpoch
+    if (!token || !userId || this.gfsDispatchBlocked) return { status: 'superseded' }
+    const stillCurrent = () =>
+      Boolean(this.sessionToken) && this.me?.id === userId && this.gfsAuthEpoch === epoch
+    let resource: ResolvedGfsResource
+    try {
+      resource = await this.gfsClient.resolveUri(uri, token)
+    } catch (error) {
+      if (!stillCurrent()) return { status: 'superseded' }
+      // The renderer shows one generic message for every failure cause. Only
+      // the error class is logged: GfsUriError messages embed the URI the
+      // renderer sent, and a CR/LF in it would forge log lines.
+      console.warn(
+        '[AppService] GFS navigation resolve failed:',
+        error instanceof Error ? error.name : typeof error
+      )
+      return { status: 'unavailable' }
+    }
+    if (!stillCurrent()) return { status: 'superseded' }
+    return { status: 'resolved', resource }
   }
 
   /**

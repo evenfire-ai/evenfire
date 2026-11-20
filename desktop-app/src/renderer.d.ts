@@ -163,6 +163,18 @@ declare global {
           bytes?: number
           updatedAt?: string
         }>
+        /**
+         * Never rejects. `superseded`: the session the call started under is gone
+         * (drop silently). `unavailable`: nothing to open (tell the user).
+         */
+        resolveForNavigation: (uri: string) => Promise<
+          | {
+              status: 'resolved'
+              resource: Awaited<ReturnType<Window['clerum']['gfs']['resolve']>>
+            }
+          | { status: 'superseded' }
+          | { status: 'unavailable' }
+        >
         download: (
           uri: string,
           options?: { maxBytes?: number; signal?: AbortSignal }
