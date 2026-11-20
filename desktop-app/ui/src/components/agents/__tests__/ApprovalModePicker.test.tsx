@@ -138,7 +138,7 @@ describe('ApprovalModePicker — model selector look', () => {
     expect(descriptionId).toBeTruthy()
     const description = document.getElementById(descriptionId as string)
     expect(description?.textContent).toBe(
-      'Allow all runs tools in this chat without asking, except scheduled tasks. Continue?'
+      'Allow all runs tools in this chat without asking. Scheduled tasks and Host guardrail checks still ask. Continue?'
     )
     expect(dialog.contains(description)).toBe(true)
   })

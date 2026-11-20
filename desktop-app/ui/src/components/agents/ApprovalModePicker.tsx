@@ -11,7 +11,7 @@ export interface ApprovalModePickerProps {
 }
 
 const ALLOW_ALL_CONFIRM =
-  'Allow all runs tools in this chat without asking, except scheduled tasks. Continue?'
+  'Allow all runs tools in this chat without asking. Scheduled tasks and Host guardrail checks still ask. Continue?'
 const FIRST_SEND_LOCK_HINT = 'The approval mode can change once the first message reaches the Host.'
 const SAVING_HINT = 'Saving the approval mode…'
 const CLASSIFIER_NOTE = 'shell always asks on this model'
