@@ -1041,6 +1041,32 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     }
   })
 
+  it('signs in through the default transaction runner', async () => {
+    // No deps.transaction: the module's own withTransaction runs, on the
+    // suite's database through the mocked db.js pool.
+    const email = `${uniqueLabel('default-runner')}@fixture.test`
+    const userId = await seedUser(email)
+    const subject = uniqueLabel('default-runner-subject')
+    const proof = await defaultFake.signIn({ sub: subject, email, email_verified: true })
+
+    const result = await signInOidcMember({
+      proof,
+      provider: defaultFake.provider,
+      policy: policyOf(defaultFake),
+      contract: 'v2',
+      sessionPolicy,
+    })
+
+    expect(result).toMatchObject({
+      status: 'signed_in',
+      userId,
+      contract: 'v2',
+      created: { account: false, link: true },
+    })
+    expect(await linkCount(subject)).toBe(1)
+    expect(await sessionCount(userId)).toBe(1)
+  })
+
   it('reruns the whole transaction once on a unique-key conflict and rethrows a second', async () => {
     // A parallel sign-in links the subject after this one looked for a link:
     // its link insert fails with 23505, and the rerun signs in by that link.
