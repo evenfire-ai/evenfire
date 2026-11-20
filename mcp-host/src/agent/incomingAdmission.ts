@@ -408,40 +408,51 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           })
           const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
           const channelCap = readChannelCap(live, conversation.channel_type)
-          // The approver policy gates raises only, after the channel check.
-          // A mode at or below the stored one, and manual, always pass. The
-          // policy is the one in force (`effective`), as notifications use.
-          const policyRefusal =
-            channelCap === 'allow_all' &&
-            raisesApprovalMode(normalizeApprovalMode(conversation.approval_mode), command)
-              ? approverPolicyRefusal(normalizedMessage, live.effective)
-              : null
-          const cap: ApprovalMode = policyRefusal ? 'manual' : channelCap
-          const stored = await manager.setApprovalMode(
-            conversation,
-            command,
-            {
-              ceiling: readModeCeiling(live),
-              cap,
-            },
-            'command',
-            normalizedMessage.sender
-          )
-          let refusal: ApprovalModeRefusal | null = null
-          if (command !== 'manual' && channelCap !== 'allow_all') refusal = 'channel'
-          else refusal = policyRefusal
-          if (refusal) {
+          const ceiling = readModeCeiling(live)
+          const current = normalizeApprovalMode(conversation.approval_mode)
+          const logCommandRefusal = (reason: ApprovalModeRefusal, outcome: string): void => {
             logger.info(
               {
                 event: 'approval_mode_command_refused',
                 session: approvalLogId(conversation.id),
                 channel: normalizedMessage.channelType,
                 requested: command,
-                reason: refusal,
+                reason,
               },
-              'Approval mode command refused; stored manual'
+              `Approval mode command refused; ${outcome}`
             )
           }
+          // The approver policy gates raises only, after the channel check.
+          // A mode at or below the stored one, and manual, always pass. The
+          // policy is the one in force (`effective`), as notifications use.
+          // A refused raise stores nothing: the stored mode stays as it was.
+          const policyRefusal =
+            channelCap === 'allow_all' && raisesApprovalMode(current, command)
+              ? approverPolicyRefusal(normalizedMessage, live.effective)
+              : null
+          if (policyRefusal) {
+            logCommandRefusal(policyRefusal, 'stored mode unchanged')
+            return {
+              success: true,
+              status: 'completed' as const,
+              response: approvalModeReply(
+                current,
+                effectiveApprovalMode(current, ceiling, channelCap),
+                policyRefusal
+              ),
+            }
+          }
+          const stored = await manager.setApprovalMode(
+            conversation,
+            command,
+            { ceiling, cap: channelCap },
+            'command',
+            normalizedMessage.sender
+          )
+          // With the channel switch off, the command stores manual.
+          const refusal: ApprovalModeRefusal | null =
+            command !== 'manual' && channelCap !== 'allow_all' ? 'channel' : null
+          if (refusal) logCommandRefusal(refusal, 'stored manual')
           return {
             success: true,
             status: 'completed' as const,

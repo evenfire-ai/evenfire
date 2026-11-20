@@ -179,7 +179,8 @@ messaging channel: under `cli_only` no channel sender can, and under
 can, unless that channel block sets `enabled: false`. An entry must equal the
 ID the channel reports: the Telegram user ID, the Slack user ID, the Teams `from.id`
 of the Bot Framework activity, or the email From address, case included. A
-refused raise stores `manual`; lowering the mode is always allowed. An unset
+refused raise leaves the stored mode unchanged, and the reply says why;
+lowering the mode is always allowed. An unset
 policy or `channel_users` adds no check, and any other value refuses every
 raise and logs `approval_config_invalid` for `defaultPolicy`.
 
