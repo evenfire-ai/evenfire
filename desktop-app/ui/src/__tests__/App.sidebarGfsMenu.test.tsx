@@ -458,6 +458,7 @@ describe('App sidebar GFS resource menu', () => {
       bridge.gfs.affordances = vi.fn(affordances)
       renderApp()
       await waitForShell()
+      await launchAlpha(bridge)
       fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
       expect(drawerOpen()).toBe(true)
       openExplorer()
@@ -478,8 +479,18 @@ describe('App sidebar GFS resource menu', () => {
       await waitFor(() => expect(bridge.gfs.affordances).toHaveBeenCalled())
       expect(screen.queryByRole('dialog', { name: dialogName })).toBeNull()
 
+      const callsBeforeEscape = bridge.sandboxUi.setVisible.mock.calls.length
       fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
       expect(drawerOpen()).toBe(false)
+      // The drawer no longer covers the view, but the checking action still does.
+      await flushFrames()
+      await act(async () => {})
+      expect(
+        bridge.sandboxUi.setVisible.mock.calls
+          .slice(callsBeforeEscape)
+          .map(([visible]: [boolean]) => visible)
+      ).not.toContain(true)
+      expect(lastVisibility(bridge)).toBe(false)
 
       await act(async () => {
         releaseAffordances()
