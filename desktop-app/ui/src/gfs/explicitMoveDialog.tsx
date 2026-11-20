@@ -24,8 +24,8 @@ function errorMessage(error: unknown): string {
 
 /**
  * One move of an explicit source through the shared commit path, bound to an
- * owner's operations. The drag path and every Move dialog owner dispatch
- * through here, so the deps the commit runs with are stated once.
+ * owner's operations. The sidebar tree's drag path and the action host's Move
+ * dialog dispatch through here; FilesPage calls `runGfsMoveCommit` directly.
  */
 export function commitGfsExplicitMove(
   deps: GfsExplicitMoveCommitDeps,
