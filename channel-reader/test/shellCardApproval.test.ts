@@ -152,7 +152,7 @@ describe('shell card approval handler', () => {
     expect(rpc.sendDenial).not.toHaveBeenCalled()
   })
 
-  it('a Teams shell card offers Approve and Deny only', async () => {
+  it('a Teams shell card offers Allow once, Allow this command, Always allow shell and Deny', async () => {
     const { adapter, sent } = capturingAdapter('teams')
     const rpc = makeRpcClient({
       sendMessage: vi.fn(async () => ({
