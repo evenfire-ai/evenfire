@@ -1,0 +1,446 @@
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+type MainEvent = {
+  senderFrame: { url: string }
+  sender: unknown
+  returnValue?: unknown
+}
+type SyncHandler = (event: MainEvent) => void
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>(done => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+const harness = vi.hoisted(() => {
+  const state = {
+    onHandlers: new Map<string, SyncHandler>(),
+    handleHandlers: new Map<string, (event: MainEvent) => unknown>(),
+    appListeners: new Map<string, (...args: unknown[]) => void>(),
+    windows: [] as Array<Record<string, any>>,
+    readyResolver: null as null | (() => void),
+    initialize: vi.fn().mockResolvedValue(undefined),
+    logout: vi.fn(async () => 7),
+    nativeSet: vi.fn(),
+    nativeGet: vi.fn(),
+    nativeDelete: vi.fn(),
+    sessionGeneration: 0,
+    invalidateSandboxUiSession: null as null | (() => void),
+    sessionCleared: null as null | (() => void),
+    parseSandboxUiDeepLink: vi.fn(() => null),
+    registeredLogout: null as null | (() => Promise<unknown>),
+    createWindow: null as null | ((options?: Record<string, unknown>) => Record<string, any>),
+  }
+  state.createWindow = (options: Record<string, unknown> = {}) => {
+    const window = {
+      options,
+      webContents: {
+        id: 41,
+        on: vi.fn(),
+        send: vi.fn(),
+        setWindowOpenHandler: vi.fn(),
+        loadFile: vi.fn().mockResolvedValue(undefined),
+        loadURL: vi.fn().mockResolvedValue(undefined),
+      },
+      loadFile: vi.fn().mockResolvedValue(undefined),
+      loadURL: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      once: vi.fn(),
+      isDestroyed: vi.fn(() => false),
+      isVisible: vi.fn(() => true),
+      isMinimized: vi.fn(() => false),
+      isMaximized: vi.fn(() => false),
+      isFullScreen: vi.fn(() => false),
+      isFocused: vi.fn(() => true),
+      restore: vi.fn(),
+      show: vi.fn(),
+      focus: vi.fn(),
+      maximize: vi.fn(),
+      setTitle: vi.fn(),
+      getTitle: vi.fn(() => 'Evenfire'),
+      destroy: vi.fn(),
+    }
+    state.windows.push(window)
+    state.appListeners.get('browser-window-created')?.({}, window)
+    return window
+  }
+  return state
+})
+const hostPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+
+vi.mock('keytar', () => ({
+  getPassword: harness.nativeGet,
+  setPassword: harness.nativeSet,
+  deletePassword: harness.nativeDelete,
+}))
+
+vi.mock('electron', () => ({
+  BrowserWindow: class {
+    constructor(options?: Record<string, unknown>) {
+      return harness.createWindow?.(options)
+    }
+    static getAllWindows() {
+      return harness.windows
+    }
+    static fromWebContents(sender: unknown) {
+      return harness.windows.find(window => window.webContents === sender) ?? null
+    }
+  },
+  app: {
+    dock: undefined,
+    isPackaged: false,
+    isReady: () => true,
+    getPath: () => process.env.SPEC125_SCRATCH,
+    setName: vi.fn(),
+    setAppUserModelId: vi.fn(),
+    setAsDefaultProtocolClient: vi.fn(),
+    requestSingleInstanceLock: () => true,
+    whenReady: () =>
+      new Promise<void>(resolve => {
+        harness.readyResolver = resolve
+      }),
+    on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+      harness.appListeners.set(event, listener)
+    }),
+    quit: vi.fn(),
+    exit: vi.fn(),
+  },
+  ipcMain: {
+    on: vi.fn((channel: string, handler: SyncHandler) => {
+      harness.onHandlers.set(channel, handler)
+    }),
+    handle: vi.fn((channel: string, handler: (event: MainEvent) => unknown) => {
+      harness.handleHandlers.set(channel, handler)
+    }),
+    removeHandler: vi.fn(),
+  },
+  safeStorage: { isEncryptionAvailable: () => false },
+  nativeTheme: { shouldUseDarkColors: false, on: vi.fn() },
+  powerMonitor: { on: vi.fn() },
+  Notification: vi.fn(),
+  clipboard: { writeText: vi.fn() },
+  dialog: { showSaveDialog: vi.fn() },
+}))
+
+vi.mock('../appService.js', () => ({
+  AppService: class {
+    constructor(options?: {
+      onSandboxUiSessionInvalidated?: () => void
+      onSessionCleared?: () => void
+    }) {
+      harness.invalidateSandboxUiSession = options?.onSandboxUiSessionInvalidated ?? null
+      harness.sessionCleared = options?.onSessionCleared ?? null
+    }
+    initialize = harness.initialize
+    logout = harness.logout
+    getSessionGeneration = () => harness.sessionGeneration
+  },
+}))
+vi.mock('../config.js', () => ({
+  config: { appName: 'Evenfire', externalRestApiBaseUrl: '', rpcProxyBaseUrl: '' },
+  getActiveEnvKey: vi.fn(() => 'test'),
+  getDesktopRuntimeConfigState: vi.fn(() => ({ storagePath: '' })),
+  hydrateDesktopRuntimeConfig: vi.fn(),
+}))
+vi.mock('../desktopTextContextMenu.js', () => ({ installDesktopTextContextMenus: vi.fn() }))
+vi.mock('../devIsolation.js', () => ({
+  resolveDevIsolation: vi.fn(() => ({ mode: 'shared' })),
+  devIsolationRuntimePolicy: vi.fn(() => ({
+    appName: null,
+    pinWindowTitle: false,
+    acceptDeepLinks: true,
+    registerOsProtocols: false,
+  })),
+  formatDevIsolationLogLine: vi.fn(),
+  publicDevIsolationRecord: vi.fn(),
+  verifyDevIsolationRuntime: vi.fn(() => ({ ok: true })),
+}))
+vi.mock('../ipc.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../ipc.js')>()
+  return {
+    ...actual,
+    registerIpcHandlers: vi.fn((_service, logout: () => Promise<unknown>) => {
+      harness.registeredLogout = logout
+    }),
+  }
+})
+vi.mock('../mainWindowReadiness.js', () => ({ wireMainWindowRendererReadiness: vi.fn() }))
+vi.mock('../pluginSdkRuntime.js', () => ({ initPluginSdkRuntime: vi.fn() }))
+vi.mock('../protocolLaunchArgs.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../protocolLaunchArgs.js')>()
+  return { ...original, shouldRegisterOsProtocols: vi.fn(() => false) }
+})
+vi.mock('../sandboxUiDeepLinks.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../sandboxUiDeepLinks.js')>()
+  return { ...actual, parseSandboxUiDeepLink: harness.parseSandboxUiDeepLink }
+})
+vi.mock('../sandboxUiProtocolWindowPolicy.js', () => ({
+  shouldAcceptSandboxUiProtocolLink: vi.fn(() => true),
+}))
+vi.mock('../sandboxUiSessionRefresh.js', () => ({ notifySandboxUiHostResumed: vi.fn() }))
+vi.mock('../shortcutRouter.js', () => ({ wireHostDesktopShortcutRouting: vi.fn() }))
+vi.mock('../systemIcon.js', () => ({
+  installAdaptiveSystemIcon: vi.fn(),
+  resolveSystemIconPath: vi.fn(() => 'icon.png'),
+}))
+vi.mock('../clerumDeepLink.js', () => ({
+  routeClerumOauthCompleted: vi.fn(() => ({ kind: 'ignore' })),
+}))
+
+describe('macOS Quit drain', () => {
+  let originalPlatformDescriptor: PropertyDescriptor | undefined
+
+  beforeEach(async () => {
+    originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+    if (!originalPlatformDescriptor)
+      throw new Error('Node process.platform descriptor is unavailable')
+    Object.defineProperty(process, 'platform', { ...originalPlatformDescriptor, value: 'darwin' })
+    vi.resetModules()
+    harness.appListeners.clear()
+    harness.onHandlers.clear()
+    harness.handleHandlers.clear()
+    harness.windows.length = 0
+    harness.readyResolver = null
+    harness.initialize.mockReset().mockResolvedValue(undefined)
+    harness.nativeSet.mockReset().mockResolvedValue(undefined)
+    harness.nativeGet.mockReset().mockResolvedValue(null)
+    harness.nativeDelete.mockReset().mockResolvedValue(true)
+  })
+
+  async function startMain(): Promise<void> {
+    await import('../main.ts')
+    harness.readyResolver?.()
+    await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
+  }
+
+  afterEach(async () => {
+    try {
+      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      openTokenStoreAdmission()
+    } finally {
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, 'platform', originalPlatformDescriptor)
+      }
+    }
+  })
+
+  afterAll(() => {
+    expect(Object.getOwnPropertyDescriptor(process, 'platform')).toEqual(hostPlatformDescriptor)
+  })
+
+  it('reopens admission and cancels the stale retry when a window is requested during drain', async () => {
+    await startMain()
+    harness.nativeSet.mockReset()
+    const releases: Array<() => void> = []
+    harness.nativeSet.mockImplementation(() => new Promise<void>(resolve => releases.push(resolve)))
+    const { TokenStore } = await import('../tokenStore.ts')
+    const { app } = await import('electron')
+    const quit = vi.mocked(app.quit)
+    quit.mockClear()
+    const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
+    await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
+    let second: Promise<void> | undefined
+    try {
+      const closed = harness.windows[0].on.mock.calls.find((c: unknown[]) => c[0] === 'closed')?.[1]
+      expect(closed).toBeTypeOf('function')
+      closed()
+      harness.windows.splice(0)
+      let veto = false
+      const event = {
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true
+          veto = true
+        },
+      }
+      harness.appListeners.get('will-quit')?.(event)
+      expect(veto).toBe(true)
+      second = new TokenStore().setSessionToken('synthetic-second', 'second-aaaaaaaaaaaa')
+      await new Promise(resolve => setImmediate(resolve))
+      expect(harness.nativeSet).toHaveBeenCalledTimes(1)
+      const activate = harness.appListeners.get('activate')
+      expect(activate).toBeTypeOf('function')
+      activate?.()
+      await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(2))
+      releases[0]()
+      await first
+      releases[1]()
+      await second
+      await new Promise(resolve => setImmediate(resolve))
+      expect(quit).not.toHaveBeenCalled()
+      expect(harness.windows).toHaveLength(1)
+    } finally {
+      for (const release of releases) release()
+      await first
+      if (second && releases.length > 1) await second
+    }
+  })
+
+  it('cancels Quit before a token-dependent main-window initializer can block', async () => {
+    const firstNativeWrite = deferred<void>()
+    const initializerWrite = deferred<void>()
+    harness.initialize.mockRejectedValueOnce(new Error('synthetic first initialization failure'))
+    const initializationError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await startMain()
+      expect(initializationError).toHaveBeenCalledWith(
+        '[Desktop] Could not initialize the desktop session:',
+        expect.any(Error)
+      )
+    } finally {
+      initializationError.mockRestore()
+    }
+    harness.initialize.mockClear()
+    harness.nativeSet
+      .mockImplementationOnce(() => firstNativeWrite.promise)
+      .mockImplementationOnce(() => initializerWrite.promise)
+    const { TokenStore } = await import('../tokenStore.ts')
+    const { app } = await import('electron')
+    const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
+    try {
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
+      const closed = harness.windows[0].on.mock.calls.find(
+        (call: unknown[]) => call[0] === 'closed'
+      )?.[1]
+      expect(closed).toBeTypeOf('function')
+      closed()
+      harness.windows.splice(0)
+
+      let vetoed = false
+      harness.appListeners.get('will-quit')?.({
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true
+          vetoed = true
+        },
+      })
+      expect(vetoed).toBe(true)
+
+      harness.initialize.mockImplementation(async () => {
+        await new TokenStore().setSessionToken(
+          'synthetic-initializer-token',
+          'initializer-aaaaaaaaaaaa'
+        )
+      })
+      harness.appListeners.get('activate')?.()
+      await vi.waitFor(() => expect(harness.initialize).toHaveBeenCalled())
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(2))
+      expect(harness.windows).toHaveLength(0)
+
+      firstNativeWrite.resolve()
+      await first
+      initializerWrite.resolve()
+      await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
+      expect(vi.mocked(app.quit)).not.toHaveBeenCalled()
+    } finally {
+      firstNativeWrite.resolve()
+      initializerWrite.resolve()
+      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      openTokenStoreAdmission()
+      await first
+    }
+  })
+
+  it('cancels the pending drain when a secondary window is created directly', async () => {
+    await startMain()
+    const firstNativeWrite = deferred<void>()
+    const secondNativeWrite = deferred<void>()
+    harness.nativeSet
+      .mockImplementationOnce(() => firstNativeWrite.promise)
+      .mockImplementationOnce(() => secondNativeWrite.promise)
+    const { TokenStore } = await import('../tokenStore.ts')
+    const { BrowserWindow, app } = await import('electron')
+    const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
+    let second: Promise<void> | undefined
+    try {
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
+      const closed = harness.windows[0].on.mock.calls.find(
+        (call: unknown[]) => call[0] === 'closed'
+      )?.[1]
+      expect(closed).toBeTypeOf('function')
+      closed()
+      harness.windows.splice(0)
+      let vetoed = false
+      harness.appListeners.get('will-quit')?.({
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true
+          vetoed = true
+        },
+      })
+      expect(vetoed).toBe(true)
+
+      second = new TokenStore().setSessionToken('synthetic-second', 'second-aaaaaaaaaaaa')
+      new BrowserWindow({})
+      expect(harness.windows).toHaveLength(1)
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(2))
+      firstNativeWrite.resolve()
+      secondNativeWrite.resolve()
+      await Promise.all([first, second])
+      await new Promise(resolve => setImmediate(resolve))
+      expect(vi.mocked(app.quit)).not.toHaveBeenCalled()
+      expect(harness.windows).toHaveLength(1)
+    } finally {
+      firstNativeWrite.resolve()
+      secondNativeWrite.resolve()
+      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      openTokenStoreAdmission()
+      await first
+      if (second) await second
+    }
+  })
+
+  it('retries app.quit once after a normal drain and permits the final Quit', async () => {
+    await startMain()
+    const nativeWrite = deferred<void>()
+    harness.nativeSet.mockImplementationOnce(() => nativeWrite.promise)
+    const { TokenStore } = await import('../tokenStore.ts')
+    const { app } = await import('electron')
+    const quit = vi.mocked(app.quit)
+    quit.mockClear()
+    const write = new TokenStore().setSessionToken('synthetic-token', 'token-aaaaaaaaaaaa')
+    try {
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
+      const closed = harness.windows[0].on.mock.calls.find(
+        (call: unknown[]) => call[0] === 'closed'
+      )?.[1]
+      expect(closed).toBeTypeOf('function')
+      closed()
+      harness.windows.splice(0)
+      let prevented = false
+      harness.appListeners.get('will-quit')?.({
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true
+          prevented = true
+        },
+      })
+      expect(prevented).toBe(true)
+      expect(quit).not.toHaveBeenCalled()
+
+      nativeWrite.resolve()
+      await write
+      await vi.waitFor(() => expect(quit).toHaveBeenCalledTimes(1))
+      await new Promise(resolve => setImmediate(resolve))
+      expect(quit).toHaveBeenCalledTimes(1)
+
+      let finalQuitPrevented = false
+      harness.appListeners.get('will-quit')?.({
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true
+          finalQuitPrevented = true
+        },
+      })
+      expect(finalQuitPrevented).toBe(false)
+      expect(quit).toHaveBeenCalledTimes(1)
+    } finally {
+      nativeWrite.resolve()
+      await write
+    }
+  })
+})
