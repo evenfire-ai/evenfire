@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'net'
 import type { RPCServer } from '../server'
 import type { HostActivityEvent } from '../server/types'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 async function startServer(
   configure: (server: RPCServer) => void
@@ -18,11 +19,11 @@ async function startServer(
   return { server, baseUrl: `http://127.0.0.1:${address.port}` }
 }
 
-const rpcEdgeHeaders = {
+const rpcEdgeHeaders = withRpcProxyEdgeTestAuthentication({
   'x-clerum-edge-caller': 'rpc-proxy',
   'x-clerum-edge-host-ref': 'chatllm',
   'x-clerum-edge-user-id': 'user-1',
-}
+})
 
 describe('RPCServer activity routes', () => {
   it('serves activity snapshot with limit/sinceEventId', async () => {

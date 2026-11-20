@@ -60,10 +60,11 @@ function read(relativeFromThisFile: string): string {
 /** Fail-loud single-match extraction — a miss means the key is unregistered. */
 function extractOne(source: string, pattern: RegExp, label: string): string {
   const match = source.match(pattern)
-  if (!match || match[1] === undefined) {
+  const value = match?.[2] ?? match?.[1]
+  if (value === undefined) {
     throw new Error(`Could not extract ${label} with ${pattern} — register the key`)
   }
-  return match[1]
+  return value
 }
 
 describe('subscription catalog sync cron config', () => {
@@ -120,7 +121,7 @@ describe('subscription catalog sync cron config', () => {
     expect(
       extractOne(
         source,
-        /SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED:\s*"([^"]+)"/,
+        /SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED:\s*(["'])([^"']+)\1/,
         'SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED in deploy/base/control-plane/configmaps.yaml'
       )
     ).toBe('false')
@@ -130,7 +131,7 @@ describe('subscription catalog sync cron config', () => {
     const interval = Number(
       extractOne(
         source,
-        /SUBSCRIPTION_CATALOG_SYNC_INTERVAL_MS:\s*"(\d+)"/,
+        /SUBSCRIPTION_CATALOG_SYNC_INTERVAL_MS:\s*(["'])(\d+)\1/,
         'SUBSCRIPTION_CATALOG_SYNC_INTERVAL_MS in deploy/base/control-plane/configmaps.yaml'
       )
     )
@@ -142,7 +143,7 @@ describe('subscription catalog sync cron config', () => {
     expect(
       extractOne(
         source,
-        /LLM_CATALOG_SYNC_CRON_ENABLED:\s*"([^"]+)"/,
+        /LLM_CATALOG_SYNC_CRON_ENABLED:\s*(["'])([^"']+)\1/,
         'LLM_CATALOG_SYNC_CRON_ENABLED in deploy/base/control-plane/configmaps.yaml'
       )
     ).toBe('true')

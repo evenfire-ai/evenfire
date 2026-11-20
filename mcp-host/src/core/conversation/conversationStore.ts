@@ -53,6 +53,7 @@ export interface GetOrCreateOptions {
 
 export interface PersistedSessionListing {
   sessionKey: string
+  channelType?: string | null
   approval: PendingApproval
   taskId: string
   sourceMessage?: Record<string, unknown>

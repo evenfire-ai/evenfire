@@ -15,6 +15,10 @@ import {
   controlApiStreamRequest,
 } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
+import {
+  sendWorkflowActionDelegationTransportError,
+  workflowActionDelegationHeaders,
+} from '../workflowActionDelegation.js'
 
 type GfsRouterOptions = {
   edgeRequestLimit?: number
@@ -172,6 +176,7 @@ export function relayControlApiError(error: ControlApiError, res: Response): voi
 }
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
+  if (sendWorkflowActionDelegationTransportError(error, res)) return
   // A caller-influenced path stays the edge's own 400 envelope (rule 1 of the
   // global handler) instead of the flat `{error:'invalid_request'}` body.
   if (error instanceof ControlApiPathError) {
@@ -350,6 +355,7 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
       const data = await gfsControlApiRequest(req, 'POST', '/external/gfs/token', {
         userSessionToken: extractAuthToken(req),
         body: req.body ?? {},
+        extraHeaders: workflowActionDelegationHeaders(req),
       })
       res.status(200).json(data)
     } catch (error) {

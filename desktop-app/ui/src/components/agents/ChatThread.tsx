@@ -1,6 +1,7 @@
 import {
   Fragment,
   type ReactElement,
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -12,6 +13,7 @@ import {
   useAgentChatActionsContext,
 } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
+import { useChatLinkActivation } from '@contexts/ChatLinkActivationContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -280,6 +282,21 @@ export function ChatThread({
 }: ChatThreadProps) {
   const { selectedAgent, handleSelectChatAgent: onStartNewChat } = useNavigationContext()
   const { decideApproval, pushToast } = useNotificationsContext()
+  const activateChatLink = useChatLinkActivation()
+  const handleAssistantMarkdownClick = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      // React already retargets a click on a Text node to its parent element.
+      const anchor = (event.target as Element).closest('a')
+      if (!anchor || !event.currentTarget.contains(anchor)) return
+      // Any default navigation of the main document reloads the app and drops every tab.
+      event.preventDefault()
+      // The second click of a double click would open the external target again.
+      // Keyboard activation (Enter) dispatches a click with detail 0.
+      if (event.detail > 1) return
+      void activateChatLink(anchor.getAttribute('href') ?? '')
+    },
+    [activateChatLink]
+  )
   const {
     composerImageAttachments,
     composerReferenceAttachments,
@@ -899,11 +916,16 @@ export function ChatThread({
                                 </pre>
                               ) : message.role === 'assistant' ? (
                                 <div className="message-block markdown-content">
-                                  <ChatMarkdownContent
-                                    model={semanticModel}
-                                    query={localSearchQuery}
-                                    activeOccurrence={activeSearchOccurrence}
-                                  />
+                                  <div
+                                    className="chat-md-root"
+                                    onClick={handleAssistantMarkdownClick}
+                                  >
+                                    <ChatMarkdownContent
+                                      model={semanticModel}
+                                      query={localSearchQuery}
+                                      activeOccurrence={activeSearchOccurrence}
+                                    />
+                                  </div>
                                   {selectedAgent && !hasResponseFileAttachment && (
                                     <MessageArtifactActions
                                       hostRef={selectedAgent}

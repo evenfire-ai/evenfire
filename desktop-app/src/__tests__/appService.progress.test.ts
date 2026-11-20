@@ -244,6 +244,31 @@ describe('AppService.startTaskProgressStream', () => {
     }
   })
 
+  it('does not reconnect a stream before the server Retry-After after admission 429', async () => {
+    vi.useFakeTimers()
+    try {
+      const service = makeService()
+      let calls = 0
+      service.rpcClient = {
+        openTaskProgressStream: vi.fn().mockImplementation(async () => {
+          calls += 1
+          throw new ApiError('Too Many Requests', 429, '', '20')
+        }),
+      }
+      service.startTaskProgressStream('s429', 7, 'chatllm', 'task-1', ['chatllm'], () => {})
+
+      await flushAsyncWork()
+      expect(calls).toBe(1)
+      await vi.advanceTimersByTimeAsync(19_999)
+      expect(calls).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toBe(2)
+      service.stopTaskProgressStream('s429')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('does not retry on task_not_found_or_expired; surfaces the loss for reconcile', async () => {
     vi.useFakeTimers()
     try {

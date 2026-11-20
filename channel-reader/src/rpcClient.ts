@@ -813,13 +813,12 @@ export class RPCClient {
    * Acknowledge delivery of a cron result.
    */
   async acknowledgeCronResult(taskId: string, source: ChannelReaderRuntimeSource): Promise<void> {
-    try {
-      await fetch(`${this.baseUrl}/v1/runtime/cron/results/${taskId}`, {
-        method: 'DELETE',
-        headers: this.runtimeHeaders(source),
-      })
-    } catch (error) {
-      console.error(`[RPC] Failed to acknowledge cron result ${taskId}:`, error)
+    const response = await fetch(`${this.baseUrl}/v1/runtime/cron/results/${taskId}`, {
+      method: 'DELETE',
+      headers: this.runtimeHeaders(source),
+    })
+    if (!response.ok) {
+      throw new Error(`Failed to acknowledge cron result: ${response.status}`)
     }
   }
 

@@ -315,7 +315,7 @@ function makeRecipe(overrides?: Partial<WorkflowRecipeCRD>): WorkflowRecipeCRD {
     kind: 'WorkflowRecipe',
     metadata: { name: 'test-recipe', namespace: 'sandbox-recipes', uid: 'uid-123' },
     spec: {
-      workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+      workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
     },
     status: { phase: 'approved' },
     ...overrides,
@@ -1744,7 +1744,7 @@ describe('WorkflowRecipeReconciler', () => {
     const recipe = makeRecipe({
       spec: {
         agent: { provider: 'zai', model: 'glm-4.7' },
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
         pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
       },
     })
@@ -1799,7 +1799,7 @@ describe('WorkflowRecipeReconciler', () => {
       makeRecipe({
         spec: {
           agent: { provider: 'zai', model: 'glm-4.7' },
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
         },
       })
@@ -1844,7 +1844,7 @@ describe('WorkflowRecipeReconciler', () => {
       makeRecipe({
         spec: {
           agent: { provider: 'zai', model: 'glm-4.7' },
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
         },
       })
@@ -1880,7 +1880,7 @@ describe('WorkflowRecipeReconciler', () => {
       makeRecipe({
         spec: {
           agent: { provider: 'zai', model: 'glm-4.7' },
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
         },
         status: { phase: 'active', ...(conditions ? { conditions } : {}) },
@@ -2140,7 +2140,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).workflowReconciler.cleanupPluginWorkloadSdk = cleanupPluginWorkloadSdk
       const recipe = makeRecipe({
         spec: {
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
         },
         status: {
           phase: 'active',
@@ -2191,7 +2191,7 @@ describe('WorkflowRecipeReconciler', () => {
     const capabilityRemovedRecipe = (phase: string, conditions: unknown[]) =>
       makeRecipe({
         spec: {
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
         },
         status: {
           phase,
@@ -2230,7 +2230,7 @@ describe('WorkflowRecipeReconciler', () => {
         const recipe = makeRecipe({
           spec: {
             workloads: [
-              { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
             ],
             ...(history === 'steps-removed' ? { steps: [] } : {}),
           },
@@ -2330,7 +2330,7 @@ describe('WorkflowRecipeReconciler', () => {
       const recipe = makeRecipe({
         spec: {
           agent: { provider: 'zai', model: 'glm-4.7' },
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
         },
       })
@@ -2451,7 +2451,7 @@ describe('WorkflowRecipeReconciler', () => {
           pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
         },
         spec: {
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
         },
       })
@@ -2559,7 +2559,7 @@ describe('WorkflowRecipeReconciler', () => {
         conditions: [ownershipConflict],
       },
       spec: {
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
         pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
       },
     } as Partial<WorkflowRecipeCRD>)
@@ -3835,7 +3835,7 @@ describe('WorkflowRecipeReconciler', () => {
           makeRecipe({
             spec: {
               workloads: [
-                { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 9090 },
+                { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 9090 },
               ],
             },
           })
@@ -3874,7 +3874,7 @@ describe('WorkflowRecipeReconciler', () => {
         const recipe = makeRecipe({
           spec: {
             workloads: [
-              { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
             ],
             steps: [{ id: 'run', run: snippetRun() }],
           },
@@ -3906,7 +3906,7 @@ describe('WorkflowRecipeReconciler', () => {
         const recipe = makeRecipe({
           spec: {
             workloads: [
-              { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
             ],
             resources: [res],
           },
@@ -3935,7 +3935,7 @@ describe('WorkflowRecipeReconciler', () => {
           makeRecipe({
             spec: {
               workloads: [
-                { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+                { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
               ],
               resources: [res],
             },
@@ -4006,7 +4006,7 @@ describe('WorkflowRecipeReconciler', () => {
         const recipe = makeRecipe({
           spec: {
             workloads: [
-              { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
             ],
             resources: [res],
           },
@@ -4047,7 +4047,7 @@ describe('WorkflowRecipeReconciler', () => {
         const recipe = makeRecipe({
           spec: {
             workloads: [
-              { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
             ],
             resources: [res],
           },
@@ -4110,7 +4110,7 @@ describe('WorkflowRecipeReconciler', () => {
         makeRecipe({
           spec: {
             workloads: [
-              { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
             ],
             resources: [res],
           },
@@ -5710,7 +5710,7 @@ describe('WorkflowRecipeReconciler', () => {
     const recipe = makeRecipe({
       spec: {
         agent: { provider: 'zai', model: 'glm-4.7' },
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
         pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
       },
       status: {
@@ -6211,8 +6211,8 @@ describe('WorkflowRecipeReconciler', () => {
       makeRecipe({
         spec: {
           workloads: [
-            { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
-            { id: 'api', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+            { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
+            { id: 'api', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
           ],
         },
       })
@@ -6236,9 +6236,9 @@ describe('WorkflowRecipeReconciler', () => {
       makeRecipe({
         spec: {
           workloads: [
-            { id: 'ui', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
-            { id: 'api', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
-            { id: 'cache', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+            { id: 'ui', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
+            { id: 'api', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
+            { id: 'cache', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
           ],
           ui: {
             workloadRef: 'ui',
@@ -8690,7 +8690,7 @@ describe('WorkflowRecipeReconciler', () => {
       const recipe = makeRecipe({
         metadata: { name: 'test-recipe', namespace: 'sandbox-recipes', uid: 'uid-sdk-delete' },
         spec: {
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           ...(workflow ? { steps: [{ id: 'task', instruction: 'run' }] } : {}),
         },
         status: {
@@ -17117,7 +17117,7 @@ describe('WorkflowRecipeReconciler', () => {
       spec: {
         dryRun: true,
         workloads: [
-          { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+          { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
           { id: 'worker', type: 'deployment', image: 'worker:latest' },
         ],
       },
@@ -17134,7 +17134,7 @@ describe('WorkflowRecipeReconciler', () => {
     const recipe = makeRecipe({
       spec: {
         dryRun: true,
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
         resources: [{ id: 'data', type: 'pvc', size: '10Gi' }],
       },
     })
@@ -17417,7 +17417,7 @@ describe('WorkflowRecipeReconciler', () => {
       metadata: { name: 'simple-recipe', namespace: 'sandbox-recipes', uid: 'uid-nw' },
       spec: {
         workloads: [
-          { id: 'web-server', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 80 },
+          { id: 'web-server', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 80 },
         ],
       },
       status: { phase: 'approved' },
@@ -18387,7 +18387,7 @@ describe('WorkflowRecipeReconciler', () => {
             {
               id: 'app',
               type: 'deployment',
-              image: 'nginx:1.30.6-alpine',
+              image: 'nginx:1.30.7-alpine',
               port: 8080,
               envSecret: {
                 name: 'app-creds',
@@ -19005,7 +19005,7 @@ describe('WorkflowRecipeReconciler', () => {
             {
               id: 'app',
               type: 'deployment',
-              image: 'nginx:1.30.6-alpine',
+              image: 'nginx:1.30.7-alpine',
               port: 8080,
               envSecret: { name: 'shared-name', keys: [{ secretKey: 'k', envVar: 'STOLEN' }] },
             },
@@ -19074,7 +19074,7 @@ describe('WorkflowRecipeReconciler', () => {
             {
               id: 'app',
               type: 'deployment',
-              image: 'nginx:1.30.6-alpine',
+              image: 'nginx:1.30.7-alpine',
               port: 8080,
               envSecret: {
                 name: 'app-creds',
@@ -19115,7 +19115,7 @@ describe('WorkflowRecipeReconciler', () => {
             {
               id: workloadId,
               type: 'deployment',
-              image: 'nginx:1.30.6-alpine',
+              image: 'nginx:1.30.7-alpine',
               port: 8080,
               oauthClientRefs: refs,
               ...(overrides?.transport
@@ -19672,7 +19672,7 @@ describe('WorkflowRecipeReconciler', () => {
           },
           spec: {
             workloads: [
-              { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
             ],
             oauthClients: [
               {
@@ -19888,7 +19888,7 @@ describe('WorkflowRecipeReconciler', () => {
           generation: 4,
         },
         spec: {
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           steps: [{ id: 'run', run: snippetRun() }],
         },
       })
@@ -21237,7 +21237,7 @@ describe('WorkflowRecipeReconciler', () => {
     function recipeWithBackgroundAccess(): WorkflowRecipeCRD {
       return makeRecipe({
         spec: {
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           oauthClients: [
             {
               id: 'gmail',
@@ -21645,7 +21645,7 @@ describe('WorkflowRecipeReconciler', () => {
         spec: {
           agent: { provider: 'zai', model: 'glm-4.7' },
           steps: [{ id: 'research', instruction: 'search' }],
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
         },
         status: {
           phase: 'failed',
@@ -21683,7 +21683,7 @@ describe('WorkflowRecipeReconciler', () => {
             {
               id: 'app',
               type: 'deployment',
-              image: 'nginx:1.30.6-alpine',
+              image: 'nginx:1.30.7-alpine',
               port: 8080,
               egressBindings: [{ dns: 'api.example.com', port: 443 }],
             },
@@ -21814,7 +21814,7 @@ describe('WorkflowRecipeReconciler', () => {
         },
         spec: {
           steps: [{ id: 'step-1', run: snippetRun() }],
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           pluginWorkloadSdk: {
             clientNotifications: { allowedEventTypes: ['workflow.completed'] },
             allowedCallers: ['app'],
@@ -21921,7 +21921,7 @@ describe('WorkflowRecipeReconciler', () => {
         },
         spec: {
           steps: [{ id: 'step-1', run: snippetRun() }],
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
         },
         status: {
@@ -21977,7 +21977,7 @@ describe('WorkflowRecipeReconciler', () => {
       const awaitingTrigger = makeRecipe({
         spec: {
           steps: [{ id: 'step-1', instruction: 'run' }],
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
         },
         status: { phase: 'active', message: CN_MESSAGE },
       })
@@ -21994,7 +21994,7 @@ describe('WorkflowRecipeReconciler', () => {
         },
         spec: {
           steps: [{ id: 'step-1', run: snippetRun() }],
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
         },
         status: { phase: 'active', message: CN_MESSAGE },
       })
@@ -22057,7 +22057,7 @@ describe('WorkflowRecipeReconciler', () => {
           spec: {
             agent: { provider: 'zai', model: 'glm-4.7' },
             workloads: [
-              { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
             ],
             pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
           },
@@ -22107,7 +22107,7 @@ describe('WorkflowRecipeReconciler', () => {
           spec: {
             agent: { provider: 'zai', model: 'glm-4.7' },
             workloads: [
-              { id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 },
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 },
             ],
             pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
           },
@@ -22137,7 +22137,7 @@ describe('WorkflowRecipeReconciler', () => {
       // recomputes instead of reusing, the marker never reaches the patch body.
       const recipe = makeRecipe({
         spec: {
-          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.7-alpine', port: 8080 }],
           pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
         },
         status: { phase: 'active' },

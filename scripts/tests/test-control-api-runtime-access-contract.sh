@@ -7,8 +7,9 @@ PROFILE_FILE="$ROOT_DIR/deploy/scripts/control-api-runtime-access-profiles.tsv"
 MIGRATION_SCRIPT="$ROOT_DIR/deploy/scripts/run-control-api-db-migration.sh"
 
 
-# Existing Control API sentinels remain local; the shared helper owns profile
-# shape, role-specific values, and the two exact OIDC rows.
+# Existing Control API sentinels, including the three PR2 authority rows,
+# remain local; the shared helper owns profile shape, role-specific values, and
+# the two exact OIDC rows.
 sentinels=(
   $'dynamic_clients\tlegacy_dml'
   $'entity_change_feed\tnone'
@@ -26,6 +27,9 @@ sentinels=(
   $'external_user_sessions\tlegacy_dml'
   $'external_user_session_security_epochs\tupsert'
   $'external_v1_session_revocations\tappend'
+  $'workflow_authority_bindings\tappend'
+  $'pr2_readiness_activations\tupsert'
+  $'pr2_readiness_evidence\tupsert'
 )
 missing_sentinels=()
 for sentinel in "${sentinels[@]}"; do

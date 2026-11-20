@@ -475,3 +475,93 @@ describe('rateLimitMiddleware denial log', () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain(desktopUserId)
   })
 })
+
+describe('rateLimitMiddleware deadlineSignal (C12 P4)', () => {
+  beforeEach(() => {
+    checkAndIncrement.mockReset()
+    hits.inc.mockReset()
+  })
+
+  function deadlineApp(onBackendUnavailable: 'process-memory' | 'closed', signal: AbortSignal) {
+    const handler = vi.fn((_req: express.Request, res: express.Response) => {
+      res.status(204).end()
+    })
+    const deadlineSignal = vi.fn(() => signal)
+    const app = express()
+    app.get(
+      '/limited',
+      (req, _res, next) => {
+        ;(req as unknown as { log: { warn: () => void } }).log = { warn: vi.fn() }
+        next()
+      },
+      rateLimitMiddleware({
+        bucketType: 'unit_bucket',
+        maxPerMinute: LIMIT,
+        getBucketKey: () => 'unit:key',
+        onBackendUnavailable,
+        deadlineSignal,
+      }),
+      handler
+    )
+    return { app, handler, deadlineSignal }
+  }
+
+  it("applies 'process-memory' when the deadline aborts before Postgres answers", async () => {
+    const controller = new AbortController()
+    // The limiter never answers; the deadline aborts once it was consulted.
+    checkAndIncrement.mockImplementation(() => {
+      queueMicrotask(() => controller.abort('deadline'))
+      return new Promise<RateLimitCheck>(() => undefined)
+    })
+    const { app, handler, deadlineSignal } = deadlineApp('process-memory', controller.signal)
+
+    const response = await request(app).get('/limited')
+
+    expect(response.status).toBe(204)
+    // Witness: the Postgres limiter was consulted, and the in-memory counter
+    // counted this request (remaining LIMIT - 1, the fallback metric).
+    expect(checkAndIncrement).toHaveBeenCalledExactlyOnceWith('unit:key', LIMIT)
+    expect(deadlineSignal).toHaveBeenCalledTimes(1)
+    expect(response.headers['x-ratelimit-remaining']).toBe(String(LIMIT - 1))
+    expect(hits.inc).toHaveBeenCalledExactlyOnceWith(
+      { bucket_type: 'unit_bucket', result: 'fallback_allowed' },
+      1
+    )
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("applies 'closed' (503) when the deadline has already aborted", async () => {
+    const controller = new AbortController()
+    controller.abort('deadline')
+    checkAndIncrement.mockImplementation(() => new Promise<RateLimitCheck>(() => undefined))
+    const { app, handler } = deadlineApp('closed', controller.signal)
+
+    const response = await request(app).get('/limited')
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
+    // Witness: the limiter was consulted before the deadline answer.
+    expect(checkAndIncrement).toHaveBeenCalledTimes(1)
+    expect(hits.inc).toHaveBeenCalledExactlyOnceWith(
+      { bucket_type: 'unit_bucket', result: 'unavailable' },
+      1
+    )
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('keeps the Postgres decision when the limiter answers before the deadline', async () => {
+    const controller = new AbortController()
+    checkAndIncrement.mockResolvedValue(available(LIMIT + 1))
+    const { app, handler } = deadlineApp('process-memory', controller.signal)
+
+    const response = await request(app).get('/limited')
+
+    expect(response.status).toBe(429)
+    expect(hits.inc).toHaveBeenCalledExactlyOnceWith(
+      { bucket_type: 'unit_bucket', result: 'denied' },
+      1
+    )
+    expect(handler).not.toHaveBeenCalled()
+    expect(controller.signal.aborted).toBe(false)
+  })
+})
