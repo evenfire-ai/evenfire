@@ -502,11 +502,21 @@ export async function retireDesktopUser(
          SELECT 1
            FROM gfs_desktop_operator_links
           WHERE user_id = $1::uuid
-       ) AS has_link_history`,
+       ) AS has_link_history,
+       EXISTS(
+         SELECT 1
+           FROM user_oidc_links
+          WHERE user_id = $1::uuid
+       ) AS has_oidc_link`,
       [targetUserId]
     )
-    const hasLinkHistory =
-      (history.rows[0] as { has_link_history?: unknown } | undefined)?.has_link_history === true
+    const historyRow = history.rows[0] as
+      | { has_link_history?: unknown; has_oidc_link?: unknown }
+      | undefined
+    const hasOperatorLinkHistory = historyRow?.has_link_history === true
+    // An OIDC link is identity history (user_oidc_links.user_id is ON DELETE
+    // RESTRICT): the member is retained as a retired row, never purged.
+    const hasLinkHistory = hasOperatorLinkHistory || historyRow?.has_oidc_link === true
 
     if (!hasLinkHistory && options.retainWithoutLinkHistory !== true) {
       await disableWorkflowApprovalMedium(db, targetUserId)
@@ -567,7 +577,7 @@ export async function retireDesktopUser(
       }
       throw error
     }
-    if (hasLinkHistory && !revoked) {
+    if (hasOperatorLinkHistory && !revoked) {
       throw new DesktopUserRetirementError(
         'retirement_conflict',
         'operator-link history has no active generation to retire'
@@ -695,6 +705,19 @@ export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserRe
     )
     if ((operatorLinkHistory.rowCount ?? 0) > 0) {
       return { error: 'gfs_operator_link_history_retained' }
+    }
+
+    // An OIDC link is identity history: user_oidc_links.user_id is ON DELETE
+    // RESTRICT, so a linked member is retired (retained row), never purged.
+    const oidcLink = await db.query(
+      `SELECT 1
+         FROM user_oidc_links
+        WHERE user_id = $1
+        LIMIT 1`,
+      [userId]
+    )
+    if ((oidcLink.rowCount ?? 0) > 0) {
+      return { error: 'linked_identity' }
     }
 
     await db.query(
