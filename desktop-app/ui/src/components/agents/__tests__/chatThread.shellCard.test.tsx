@@ -303,7 +303,7 @@ describe('ApprovalModePicker', () => {
     const { getByTestId, queryByTestId } = render(
       <ApprovalModePicker agentRef="agent-x" chatId="chat-new" />
     )
-    const trigger = getByTestId('approval-mode-picker') as HTMLButtonElement
+    const trigger = getByTestId('approval-mode-picker')
     fireEvent.click(trigger)
     expect(getByTestId('approval-mode-option-manual')).not.toBeNull()
 
@@ -312,7 +312,7 @@ describe('ApprovalModePicker', () => {
       send = beginApprovalModeFirstSend('agent-x', 'chat-new')
     })
 
-    expect(trigger.disabled).toBe(true)
+    expect(trigger.getAttribute('aria-disabled')).toBe('true')
     expect(queryByTestId('approval-mode-option-manual')).toBeNull()
     fireEvent.click(trigger)
     expect(queryByTestId('approval-mode-option-manual')).toBeNull()
@@ -321,7 +321,7 @@ describe('ApprovalModePicker', () => {
     act(() => {
       send.release()
     })
-    expect(trigger.disabled).toBe(false)
+    expect(trigger.getAttribute('aria-disabled')).toBeNull()
     fireEvent.click(trigger)
     await act(async () => {
       fireEvent.click(getByTestId('approval-mode-option-auto'))

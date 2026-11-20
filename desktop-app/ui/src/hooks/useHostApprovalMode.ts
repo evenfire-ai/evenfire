@@ -3,6 +3,7 @@ import type { ApprovalMode } from '../../../src/types'
 import {
   type HostApprovalModeTransport,
   type HostApprovalModeView,
+  clearHostApprovalModeSaveFailure,
   getHostApprovalModeSnapshot,
   readHostApprovalMode,
   selectHostApprovalMode,
@@ -12,6 +13,8 @@ import {
 
 export interface UseHostApprovalModeResult extends HostApprovalModeView {
   selectMode: (mode: ApprovalMode) => Promise<boolean>
+  /** Forget this chat's failed pick once the user has seen it. */
+  clearSaveFailure: () => void
 }
 
 export function useHostApprovalMode(
@@ -54,5 +57,9 @@ export function useHostApprovalMode(
     (mode: ApprovalMode) => selectHostApprovalMode(transport, agentRef, chatId, mode),
     [transport, agentRef, chatId]
   )
-  return { ...view, selectMode }
+  const clearSaveFailure = useCallback(
+    () => clearHostApprovalModeSaveFailure(agentRef, chatId),
+    [agentRef, chatId]
+  )
+  return { ...view, selectMode, clearSaveFailure }
 }

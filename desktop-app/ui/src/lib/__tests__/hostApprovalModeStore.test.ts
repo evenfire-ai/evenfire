@@ -5,6 +5,7 @@ import {
   type SessionApprovalSnapshot,
   approvalModeForFirstSend,
   beginApprovalModeFirstSend,
+  clearHostApprovalModeSaveFailure,
   confirmHeldApprovalModeFromSend,
   hostApprovalModeEpoch,
   migrateHeldApprovalMode,
@@ -12,6 +13,7 @@ import {
   readHostApprovalMode,
   resetHostApprovalModeStore,
   selectHostApprovalMode,
+  subscribeHostApprovalMode,
 } from '../hostApprovalModeStore'
 
 const AGENT = 'trader'
@@ -256,5 +258,99 @@ describe('hostApprovalModeStore', () => {
     expect(readSessionApproval).not.toHaveBeenCalled()
     expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Auto-approve')
     expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('auto')
+  })
+})
+
+describe('hostApprovalModeStore — save failure flag (picker spec C2)', () => {
+  it('R24: a 404 that answers after the first send began flags the save as failed', async () => {
+    let rejectPatch!: (error: Error) => void
+    const { client } = transport({
+      setApprovalMode: vi.fn(
+        () =>
+          new Promise<SessionApprovalSnapshot>((_resolve, reject) => {
+            rejectPatch = reject
+          })
+      ),
+    })
+    await selectHostApprovalMode(client, AGENT, null, 'allow_all')
+    migrateHeldApprovalMode(AGENT, CHAT)
+
+    const write = selectHostApprovalMode(client, AGENT, CHAT, 'manual')
+    const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    rejectPatch(new Error('Set approval mode failed (404)'))
+
+    await expect(write).resolves.toBe(false)
+    expect(readHostApprovalMode(AGENT, CHAT).storedMode).toBe('allow_all')
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+    send.release()
+  })
+
+  it('a 404 hold before any first send is not a failure', async () => {
+    const { client, setApprovalMode } = transport()
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+    setApprovalMode.mockRejectedValue(new Error('Set approval mode failed (404)'))
+
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')).resolves.toBe(true)
+
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(false)
+  })
+
+  it('a refusal during the first send flags the save and notifies the picker', async () => {
+    const { client, setApprovalMode } = transport()
+    await selectHostApprovalMode(client, AGENT, null, 'allow_all')
+    migrateHeldApprovalMode(AGENT, CHAT)
+    const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    const listener = vi.fn()
+    const unsubscribe = subscribeHostApprovalMode(AGENT, CHAT, listener)
+
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'manual')).resolves.toBe(false)
+
+    expect(setApprovalMode).not.toHaveBeenCalled()
+    expect(listener).toHaveBeenCalled()
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+    unsubscribe()
+    send.release()
+  })
+
+  it('an older write that settles after a refused newer pick does not clear the failure', async () => {
+    let resolvePatch!: (value: SessionApprovalSnapshot) => void
+    const { client } = transport({
+      setApprovalMode: vi.fn(
+        () =>
+          new Promise<SessionApprovalSnapshot>(resolve => {
+            resolvePatch = resolve
+          })
+      ),
+    })
+    await selectHostApprovalMode(client, AGENT, null, 'allow_all')
+    migrateHeldApprovalMode(AGENT, CHAT)
+
+    const older = selectHostApprovalMode(client, AGENT, CHAT, 'auto')
+    const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'manual')).resolves.toBe(false)
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+
+    resolvePatch(snapshot('auto'))
+    await expect(older).resolves.toBe(true)
+
+    expect(readHostApprovalMode(AGENT, CHAT).storedMode).toBe('auto')
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+    send.release()
+  })
+
+  it('the explicit clear drops the flag and notifies', async () => {
+    const { client, setApprovalMode } = transport()
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+    setApprovalMode.mockRejectedValue(new Error('Set approval mode failed (401)'))
+    await selectHostApprovalMode(client, AGENT, CHAT, 'auto')
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+    const listener = vi.fn()
+    const unsubscribe = subscribeHostApprovalMode(AGENT, CHAT, listener)
+
+    clearHostApprovalModeSaveFailure(AGENT, CHAT)
+
+    expect(listener).toHaveBeenCalled()
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(false)
+    unsubscribe()
   })
 })
