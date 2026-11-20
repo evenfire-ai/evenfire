@@ -14899,46 +14899,6 @@ pre {
   cursor: pointer;
 }
 
-.da-gfs-inline-form {
-  display: flex;
-  align-items: end;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  margin: var(--space-3) 0;
-  padding: var(--space-3);
-  background: var(--surface-soft);
-}
-
-.da-gfs-inline-form__field {
-  display: grid;
-  min-width: min(22rem, 100%);
-  gap: var(--space-1);
-}
-
-.da-gfs-inline-form__field span,
-.da-gfs-inline-form__copy {
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-}
-
-.da-gfs-inline-form__field input {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-}
-
-.da-gfs-inline-form__field input:focus-visible {
-  border-color: var(--focus-ring);
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
-
 .da-gfs-breadcrumb {
   display: flex;
   flex-wrap: wrap;
@@ -16416,17 +16376,6 @@ pre {
   white-space: normal;
 }
 
-.da-gfs-manage-dialog__title-edit {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.da-gfs-manage-dialog__title-edit .ui-control {
-  min-width: 0;
-}
-
 .da-gfs-manage-dialog__top-actions {
   display: flex;
   align-items: center;
@@ -16632,21 +16581,6 @@ pre {
   border-color: rgba(var(--danger-rgb), 0.4);
   background: rgba(var(--danger-rgb), 0.09);
   box-shadow: inset 3px 0 0 rgba(var(--danger-rgb), 0.6);
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: end;
-  margin: 0;
-  border-color: rgba(var(--accent-rgb), 0.3);
-  background: rgba(var(--accent-rgb), 0.07);
-}
-
-.da-gfs-manage-dialog__body > .da-gfs-inline-form {
-  margin: 0;
-  border: 0;
-  background: var(--surface-soft);
 }
 
 .da-gfs-new-folder-modal {
@@ -16975,14 +16909,6 @@ pre {
 
 .da-gfs-move-dialog__action-buttons .ui-button {
   border-radius: 999px;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__field {
-  min-width: 0;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__copy {
-  align-self: center;
 }
 
 .da-gfs-manage-section--access .da-gfs-delegation__empty {
@@ -17377,15 +17303,6 @@ pre {
     justify-content: flex-end;
   }
 
-  .da-gfs-manage-dialog__title-edit {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .da-gfs-manage-dialog__title-edit .ui-button:last-child {
-    grid-column: 1 / -1;
-    justify-self: start;
-  }
-
   .da-gfs-manage-dialog__body {
     padding: var(--space-2);
   }
@@ -17407,10 +17324,6 @@ pre {
 
   .da-gfs-move-dialog__action-buttons {
     justify-content: flex-end;
-  }
-
-  .da-gfs-manage-section--actions .da-gfs-inline-form {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

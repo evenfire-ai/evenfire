@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { revokeGfsSessionAccess } from '@lib/gfsSessionAuthority'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -89,6 +90,22 @@ async function mountWithRowEditor() {
   return { client, renameResource, form: screen.getByRole('form', { name: 'Rename resource' }) }
 }
 
+/**
+ * Counts reads of the session's access flag from here on. Files reads it only
+ * inside action guards, never while rendering, so a read proves the action
+ * reached its session guard instead of returning before it.
+ */
+function countAccessFlagReads(client: QueryClient): () => number {
+  const accessKey = JSON.stringify(desktopQueryKeys.gfsAccessState(SCOPE, 0))
+  const read = client.getQueryData.bind(client)
+  let reads = 0
+  vi.spyOn(client, 'getQueryData').mockImplementation((queryKey => {
+    if (JSON.stringify(queryKey) === accessKey) reads += 1
+    return read(queryKey)
+  }) as QueryClient['getQueryData'])
+  return () => reads
+}
+
 describe('FilesPage submits through the shared action runners', () => {
   afterEach(() => {
     cleanup()
@@ -110,10 +127,12 @@ describe('FilesPage submits through the shared action runners', () => {
     const { client, renameResource, form } = await mountWithRowEditor()
     // Revoked in the cache, submitted before any observer re-renders the page.
     revokeGfsSessionAccess(client, SCOPE, 0)
+    const accessFlagReads = countAccessFlagReads(client)
     fireEvent.submit(form)
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 20))
     })
+    expect(accessFlagReads()).toBeGreaterThan(0)
     expect(renameResource).not.toHaveBeenCalled()
     client.clear()
   })
@@ -125,11 +144,13 @@ describe('FilesPage submits through the shared action runners', () => {
     // Revoked in the cache; the page has not re-rendered when Rename runs its
     // permission check, so the revoked session must stay silent on its own.
     revokeGfsSessionAccess(client, SCOPE, 0)
+    const accessFlagReads = countAccessFlagReads(client)
     fireEvent.click(rename)
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 20))
     })
 
+    expect(accessFlagReads()).toBeGreaterThan(0)
     expect(screen.queryByRole('textbox', { name: 'New name' })).toBeNull()
     expect(pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('Could not verify permissions'),

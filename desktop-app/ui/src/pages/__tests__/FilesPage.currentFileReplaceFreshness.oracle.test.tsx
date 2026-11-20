@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { GFS_AUTHORITY_STALE_TIME_MS } from '@lib/gfsAuthorityQueryPolicy'
+import { revokeGfsSessionAccess } from '@lib/gfsSessionAuthority'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -400,6 +401,74 @@ describe('FilesPage current-file Replace permission freshness', () => {
         7
       )
     )
+    scenario.client.clear()
+  })
+})
+
+// A revocation lands in the query cache before Files re-renders, so a Replace
+// picked in that window still runs on the previous render's closure.
+describe('FilesPage current-file Replace after the session is revoked', () => {
+  const SCOPE = ':user-a:team-a'
+
+  it('starts nothing when the session was revoked before the file was picked', async () => {
+    const scenario = await renderCurrentFileReplaceScenario()
+    const replaceMenuItem = await reachCurrentFileReplaceThroughKeyboard(scenario.user)
+    const readsBefore = scenario.affordances.mock.calls.length
+    const replaceInput = screen.getByLabelText('Replace report.txt') as HTMLInputElement
+    scenario.pushToast.mockClear()
+
+    await act(async () => {
+      fireEvent.click(replaceMenuItem)
+      revokeGfsSessionAccess(scenario.client, SCOPE, 1)
+      fireEvent.change(replaceInput, {
+        target: { files: [new File(['new contents'], 'report.txt', { type: 'text/plain' })] },
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    // The pick reached the input; Replace refused it before any check.
+    expect(replaceInput.files?.[0]?.name).toBe('report.txt')
+    expect(scenario.pushToast).not.toHaveBeenCalled()
+    expect(scenario.affordances).toHaveBeenCalledTimes(readsBefore)
+    expect(scenario.replaceFileFromPath).not.toHaveBeenCalled()
+    scenario.client.clear()
+  })
+
+  it('reports no permission verdict when the session is revoked during the write check', async () => {
+    const denied = delegationAffordances(new Set(['read', 'manage_acl']), false)
+    let resolveRead!: (value: ReturnType<typeof delegationAffordances>) => void
+    const read = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+      resolveRead = resolve
+    })
+    const scenario = await renderCurrentFileReplaceScenario()
+    const readsBeforeExpiry = scenario.affordances.mock.calls.length
+    const replaceMenuItem = await reachCurrentFileReplaceThroughKeyboard(scenario.user)
+    vi.useFakeTimers({ toFake: ['Date'] })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GFS_AUTHORITY_STALE_TIME_MS + 1)
+    })
+    scenario.affordances.mockImplementationOnce(async () => read)
+
+    await selectReplacement(replaceMenuItem)
+    await waitFor(() => expect(scenario.affordances).toHaveBeenCalledTimes(readsBeforeExpiry + 1))
+    expect(scenario.pushToast).toHaveBeenCalledWith(
+      'Checking write permission for report.txt…',
+      'info'
+    )
+    scenario.pushToast.mockClear()
+
+    await act(async () => revokeGfsSessionAccess(scenario.client, SCOPE, 1))
+    await act(async () => resolveRead(denied))
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    expect(scenario.pushToast).not.toHaveBeenCalled()
+    expect(scenario.replaceFileFromPath).not.toHaveBeenCalled()
     scenario.client.clear()
   })
 })

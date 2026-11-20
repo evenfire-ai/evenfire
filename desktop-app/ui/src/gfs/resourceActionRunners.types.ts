@@ -1,5 +1,6 @@
 import type { GfsUploadNameReservationBook } from '@clerum/gfs-interaction-policy'
 import type { useGfsResourceOperations } from '@hooks/domain/useGfsResourceOperations'
+import type { requireFreshGfsPermissions } from '@lib/gfsFreshPermissions'
 import type { GfsAccessState } from '@lib/gfsSessionAuthority.types'
 
 type GfsResourceOperations = ReturnType<typeof useGfsResourceOperations>
@@ -24,7 +25,7 @@ export interface GfsActionRunnerDeps extends GfsActionGuardDeps {
     resourceId: string,
     resourceName: string,
     bits: readonly string[]
-  ) => Promise<unknown | null>
+  ) => ReturnType<typeof requireFreshGfsPermissions>
 }
 
 /**

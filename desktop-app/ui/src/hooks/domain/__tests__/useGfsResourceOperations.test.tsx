@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useInfiniteQuery } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   affordancesResult,
   childView,
@@ -21,6 +22,25 @@ import { publishGfsOpenLocation, readGfsOpenLocations } from '@/lib/gfsOpenLocat
 import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
 import { useGfsResourceOperations } from '../useGfsResourceOperations'
+
+// Pass-through spy: lets a test prove a rejection reached the session
+// judgement, which an outcome of "nothing changed" cannot show by itself.
+const authorityJudgements = vi.hoisted(() => ({ outcomes: [] as unknown[] }))
+vi.mock('@lib/gfsSessionAuthority', async importOriginal => {
+  const actual = await importOriginal<typeof import('@lib/gfsSessionAuthority')>()
+  return {
+    ...actual,
+    handleGfsAuthorityFailure: (...args: Parameters<typeof actual.handleGfsAuthorityFailure>) => {
+      const outcome = actual.handleGfsAuthorityFailure(...args)
+      authorityJudgements.outcomes.push({
+        captured: { scope: args[1], generation: args[2] },
+        live: args[5],
+        outcome,
+      })
+      return outcome
+    },
+  }
+})
 
 type Me = NonNullable<AuthContextValue['me']>
 
@@ -149,12 +169,21 @@ describe('useGfsResourceOperations', () => {
     })
     expect(screen.getByTestId('files-current').textContent).toBe('folder-b')
 
+    authorityJudgements.outcomes.length = 0
     await act(async () => {
       rejectRename(new Error(failure))
       await renameOutcome
     })
 
     expect(await renameOutcome).toBeInstanceOf(Error)
+    // The 401 was judged against the session the rename was sent under.
+    expect(authorityJudgements.outcomes).toEqual([
+      {
+        captured: { scope: scopeA, generation: 1 },
+        live: { scope: scopeB, generation: 2 },
+        outcome: 'stale',
+      },
+    ])
     expect(screen.getByTestId('files-access').textContent).toBe('active')
     expect(screen.getByTestId('files-current').textContent).toBe('folder-b')
     expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scopeB, 2))).toBe('active')
@@ -249,6 +278,57 @@ describe('useGfsResourceOperations', () => {
     client.clear()
   })
 
+  it('sends no tree refresh for a session that was replaced while the commit reaction ran', async () => {
+    const created = childView('new-folder', 'New folder', 'directory', {
+      parentResourceId: 'parent',
+    })
+    const listChildren = vi.fn(async () => listChildrenPage([]))
+    installClerum({
+      listChildren,
+      createFolder: vi.fn(async () => createFolderResult('parent', created)),
+    })
+    let releaseReaction!: () => void
+    const onCommitted = vi.fn(
+      () =>
+        new Promise<void>(resolve => {
+          releaseReaction = resolve
+        })
+    )
+    let ops!: ReturnType<typeof useGfsResourceOperations>
+    function CommitProbe() {
+      ops = useGfsResourceOperations({ onCommitted })
+      return null
+    }
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    // The tree keeps observing the folder listing of the session the write ran in.
+    const view = (me: Me, generation: number) => (
+      <AuthContext.Provider value={sessionAuth(me, generation)}>
+        <QueryClientProvider client={client}>
+          <TreeFolderProbe folderId="parent" scope={scopeA} generation={1} />
+          <CommitProbe />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    const rendered = render(view(userA, 1))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+
+    let createdFolder!: Promise<unknown>
+    await act(async () => {
+      createdFolder = ops.createFolder('parent', 'New folder')
+    })
+    await waitFor(() => expect(onCommitted).toHaveBeenCalledTimes(1))
+    rendered.rerender(view(userB, 2))
+    await act(async () => {
+      releaseReaction()
+      await createdFolder
+    })
+
+    // The commit settled through its reaction; only the refresh was withheld.
+    expect(onCommitted).toHaveBeenCalledWith(expect.objectContaining({ op: 'createFolder' }))
+    expect(listChildren).toHaveBeenCalledTimes(1)
+    client.clear()
+  })
+
   it('relocates the shared open-location registry after a move from an instance with no controller', async () => {
     const receipt = await moveResourceReceipt('moved', 'new-parent', 5)
     installClerum({ moveResource: vi.fn(async () => receipt) })
@@ -310,6 +390,147 @@ describe('useGfsResourceOperations', () => {
     await waitFor(() => expect(screen.getByTestId('files-access').textContent).toBe('revoked'))
     client.clear()
   })
+})
+
+// The writes both the controller and a surface without one expose.
+type Operations = Pick<
+  ReturnType<typeof useGfsResourceOperations>,
+  | 'createFolder'
+  | 'createFile'
+  | 'createFileFromPath'
+  | 'replaceFile'
+  | 'replaceFileFromPath'
+  | 'deleteResource'
+  | 'moveResource'
+>
+type FailingRoute = Parameters<typeof gfsRouteFailureMessage>[0]
+const TOKEN = 'fixture-session-token'
+const createFileRoute: FailingRoute = client =>
+  client.createResource(
+    { parentResourceId: 'parent', drive: 'main', name: 'a.txt', kind: 'file', encodedData: 'aGk=' },
+    TOKEN
+  )
+const replaceFileRoute: FailingRoute = client =>
+  client.replaceFile({ resourceId: 'doc', drive: 'main', encodedData: 'aGk=', ifMatch: 1 }, TOKEN)
+
+// Every write is judged against the session it was issued under; rename has
+// its own late-401 test above.
+const capturedAuthorityWrites: Array<{
+  ipc: string
+  run: (ops: Operations) => Promise<unknown>
+  route: FailingRoute
+}> = [
+  {
+    ipc: 'createFolder',
+    run: ops => ops.createFolder('parent', 'New folder'),
+    route: client =>
+      client.createResource(
+        { parentResourceId: 'parent', drive: 'main', name: 'New folder', kind: 'directory' },
+        TOKEN
+      ),
+  },
+  {
+    ipc: 'createFile',
+    run: ops => ops.createFile('parent', 'a.txt', 'aGk='),
+    route: createFileRoute,
+  },
+  {
+    ipc: 'createFileFromPath',
+    run: ops => ops.createFileFromPath('parent', 'a.txt', '/fixture/a.txt'),
+    route: createFileRoute,
+  },
+  { ipc: 'replaceFile', run: ops => ops.replaceFile('doc', 'aGk=', 1), route: replaceFileRoute },
+  {
+    ipc: 'replaceFileFromPath',
+    run: ops => ops.replaceFileFromPath('doc', '/fixture/a.txt', 1),
+    route: replaceFileRoute,
+  },
+  {
+    ipc: 'deleteResource',
+    run: ops => ops.deleteResource('doc', 1),
+    route: client => client.deleteResource({ resourceId: 'doc', drive: 'main', ifMatch: 1 }, TOKEN),
+  },
+  {
+    ipc: 'moveResource',
+    run: ops => ops.moveResource('doc', 'destination', 1),
+    route: client =>
+      client.moveResource(
+        { resourceId: 'doc', drive: 'main', destinationId: 'destination', ifMatch: 1 },
+        TOKEN
+      ),
+  },
+]
+
+describe('useGfsResourceOperations — a late 401 is judged by the session it was sent under', () => {
+  for (const write of capturedAuthorityWrites)
+    for (const handler of ['controller', 'no controller'] as const)
+      for (const sameSession of [true, false]) {
+        it(`${write.ipc} through the ${handler} handler ${
+          sameSession ? 'revokes its own session' : 'keeps the session that replaced it'
+        }`, async () => {
+          const failure = await gfsRouteFailureMessage(write.route, 401, {
+            code: 'unauthorized',
+            message: 'session expired',
+          })
+          let mainGeneration = 1
+          let rejectWrite!: (error: Error) => void
+          const sent = vi.fn(
+            () =>
+              new Promise((_resolve, reject) => {
+                rejectWrite = reject
+              })
+          )
+          Object.defineProperty(window, 'clerum', {
+            configurable: true,
+            value: {
+              gfs: {
+                listAccessible: vi.fn(async () => listAccessiblePage([])),
+                listChildren: vi.fn(async () => listChildrenPage([])),
+                [write.ipc]: sent,
+              },
+              auth: { getSessionGeneration: vi.fn(async () => mainGeneration) },
+            },
+          })
+          const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+          const view = (me: Me, generation: number) => (
+            <AuthContext.Provider value={sessionAuth(me, generation)}>
+              <QueryClientProvider client={client}>
+                <FilesProbe />
+                <HostProbe />
+              </QueryClientProvider>
+            </AuthContext.Provider>
+          )
+          const rendered = render(view(userA, 1))
+          const ops = () => (handler === 'controller' ? filesCtrl : hostOps)
+
+          const outcome = write.run(ops()).catch(error => error)
+          await waitFor(() => expect(sent).toHaveBeenCalledTimes(1))
+          if (!sameSession) {
+            mainGeneration = 2
+            rendered.rerender(view(userB, 2))
+          }
+          await act(async () => {
+            rejectWrite(new Error(failure))
+            await outcome
+          })
+
+          expect(await outcome).toBeInstanceOf(Error)
+          if (sameSession) {
+            await waitFor(() =>
+              expect(screen.getByTestId('files-access').textContent).toBe('revoked')
+            )
+            expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scopeA, 1))).toBe('revoked')
+          } else {
+            // Let the move's main-generation check and every handler settle.
+            await act(async () => {
+              for (let round = 0; round < 6; round += 1) await new Promise(r => setTimeout(r, 0))
+            })
+            expect(screen.getByTestId('files-access').textContent).toBe('active')
+            expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scopeB, 2))).toBe('active')
+          }
+          client.clear()
+        })
+      }
 })
 
 describe('useGfsBrowserController readAccessState', () => {
