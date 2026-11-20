@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsWatchSubscription } from '@hooks/domain/useGfsWatchSubscription'
-import { revokeGfsSessionAccess } from '@lib/gfsSessionAuthority'
+import { readGfsAccessState, revokeGfsSessionAccess } from '@lib/gfsSessionAuthority'
 import { purgeGfsSessionCache, refetchGfsAccess } from '@lib/gfsWatchReaction'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -1033,6 +1033,44 @@ describe('GfsActionHost — review round', () => {
 
     await waitFor(() => expect(toastMessages(h)).toEqual(['Downloaded notes.txt']))
     anchorClick.mockRestore()
+  })
+
+  it('a download refused with a 401 fails closed: the session is revoked and nothing is toasted', async () => {
+    const unauthorized = await gfsRouteFailureMessage(
+      client => client.download('gfs://main/file-t', 'fixture-session-token'),
+      401,
+      { code: 'unauthorized', message: 'session is not valid' }
+    )
+    const h = await harness()
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    h.bridge.download.mockRejectedValue(new Error(unauthorized))
+    expect(readGfsAccessState(h.client, SCOPE, 1)).toBe('active')
+
+    h.open(await listedRow('file-t', 'notes.txt', 'file'), 'download')
+
+    await waitFor(() => expect(readGfsAccessState(h.client, SCOPE, 1)).toBe('revoked'))
+    expect(h.bridge.download).toHaveBeenCalledWith('gfs://main/file-t')
+    await act(async () => {})
+    expect(anchorClick).not.toHaveBeenCalled()
+    expect(h.toasts).toEqual([])
+    anchorClick.mockRestore()
+  })
+
+  it('a download that fails for another reason toasts the error and keeps the session', async () => {
+    const missing = await gfsRouteFailureMessage(
+      client => client.download('gfs://main/file-t', 'fixture-session-token'),
+      404,
+      { code: 'not_found', message: 'resource not found' }
+    )
+    const h = await harness()
+    h.bridge.download.mockRejectedValue(new Error(missing))
+
+    h.open(await listedRow('file-t', 'notes.txt', 'file'), 'download')
+
+    await waitFor(() => expect(h.toasts).toHaveLength(1))
+    expect(h.toasts[0]!.tone).toBe('error')
+    expect(h.toasts[0]!.message).toContain('resource not found')
+    expect(readGfsAccessState(h.client, SCOPE, 1)).toBe('active')
   })
 
   describe('S-9: granting from the host Share', () => {
