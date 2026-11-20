@@ -521,12 +521,19 @@ describe('useGfsResourceOperations — a late 401 is judged by the session it wa
             )
             expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scopeA, 1))).toBe('revoked')
           } else {
-            // Let the move's main-generation check and every handler settle.
-            await act(async () => {
-              for (let round = 0; round < 6; round += 1) await new Promise(r => setTimeout(r, 0))
-            })
-            expect(screen.getByTestId('files-access').textContent).toBe('active')
+            // A mutation records its error only after every onError/onSettled
+            // handler has resolved, however many awaits they hold, so the
+            // checks below cannot run before the late 401 was judged.
+            await waitFor(() =>
+              expect(
+                client
+                  .getMutationCache()
+                  .getAll()
+                  .map(m => m.state.status)
+              ).toEqual(['error'])
+            )
             expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scopeB, 2))).toBe('active')
+            expect(screen.getByTestId('files-access').textContent).toBe('active')
           }
           client.clear()
         })
