@@ -2,14 +2,26 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom'
 import { IconButton, MenuItem } from '@components/Common'
 import { IconMoreVertical } from '@components/SidebarNav/icons'
+import { fixedContainingBlockOrigin } from '@/lib/fixedContainingBlockOrigin'
 
 type AccessRowMenuProps = {
   disabled?: boolean
   label: string
   onRemove: () => void | Promise<void>
+  /**
+   * Where the panel mounts. Defaults to document.body. GfsGrantList passes its
+   * hosting dialog, which is layered at the same z-index as this panel, so a
+   * body panel would only win by DOM order.
+   */
+  portalContainer?: HTMLElement | null
 }
 
-export function AccessRowMenu({ disabled = false, label, onRemove }: AccessRowMenuProps) {
+export function AccessRowMenu({
+  disabled = false,
+  label,
+  onRemove,
+  portalContainer = null,
+}: AccessRowMenuProps) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -60,8 +72,11 @@ export function AccessRowMenu({ disabled = false, label, onRemove }: AccessRowMe
     const top = opensAbove
       ? Math.max(inset, triggerRect.top - menuHeight - gap)
       : Math.min(triggerRect.bottom + gap, window.innerHeight - menuHeight - inset)
-    setPosition({ left, top: Math.max(inset, top) })
-  }, [])
+    // Inside a backdrop-filtered dialog, that dialog is the panel's fixed
+    // containing block; document.body has no such ancestor.
+    const origin = portalContainer ? fixedContainingBlockOrigin(menu) : { left: 0, top: 0 }
+    setPosition({ left: left - origin.left, top: Math.max(inset, top) - origin.top })
+  }, [portalContainer])
 
   useLayoutEffect(() => {
     if (!open) {
@@ -113,7 +128,7 @@ export function AccessRowMenu({ disabled = false, label, onRemove }: AccessRowMe
                 Remove access
               </MenuItem>
             </div>,
-            document.body
+            portalContainer ?? document.body
           )
         : null}
     </span>

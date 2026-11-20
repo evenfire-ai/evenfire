@@ -3,6 +3,7 @@ import type { KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@components/Common/Button'
 import { MenuItem } from '@components/Common/MenuItem'
+import { fixedContainingBlockOrigin } from '@/lib/fixedContainingBlockOrigin'
 import type { DropdownSelectProps } from './types'
 
 export function DropdownSelect({
@@ -63,20 +64,12 @@ export function DropdownSelect({
       Math.max(viewportPadding, rect.left),
       Math.max(viewportPadding, window.innerWidth - width - viewportPadding)
     )
-    // A custom container can sit under a transform/filter ancestor that turns
-    // `position: fixed` into positioning against that ancestor (which may also
-    // be scrolled). The offset between where the menu is drawn and its own
-    // left/top is that block's viewport origin; the clamped viewport position
-    // is translated by it. document.body has no such ancestor, so it is skipped.
+    // A custom container can sit under a transform/filter ancestor that becomes
+    // the menu's fixed containing block; document.body has no such ancestor,
+    // so the measurement is skipped there.
     const menu = menuRef.current
-    let originLeft = 0
-    let originTop = 0
-    if (portalContainer && menu) {
-      const menuRect = menu.getBoundingClientRect()
-      originLeft = menuRect.left - (parseFloat(menu.style.left) || 0)
-      originTop = menuRect.top - (parseFloat(menu.style.top) || 0)
-    }
-    setPortalPosition({ left: left - originLeft, top: top - originTop, width })
+    const origin = portalContainer && menu ? fixedContainingBlockOrigin(menu) : { left: 0, top: 0 }
+    setPortalPosition({ left: left - origin.left, top: top - origin.top, width })
   }, [options.length, portalContainer])
 
   useLayoutEffect(() => {

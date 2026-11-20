@@ -1296,4 +1296,45 @@ describe('GfsActionHost — Share role dropdown layering', () => {
     )
     expect(screen.queryByRole('listbox')).toBeNull()
   })
+
+  it('mounts the row actions menu inside the Share dialog and Remove access still applies', async () => {
+    const grantId = '44444444-4444-4444-4444-444444444444'
+    const agentGrant = await grantsListPage([
+      {
+        id: grantId,
+        drive: 'main',
+        resourceId: 'folder-s',
+        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        inherit: true,
+      },
+    ])
+    const h = await harness({
+      myAgents: [
+        {
+          name: 'chatllm',
+          contextRef: 'ctx-1',
+          mcpServers: [],
+          gfsSubject: { type: 'host' as const, id: '1st:mcp-host/chatllm' },
+        },
+      ],
+    })
+    h.bridge.listGrants.mockImplementation(async () => agentGrant)
+    h.bridge.resolve.mockImplementation(async () =>
+      resolveResource(resolvedDirectory('folder-s', 'Shared', { parentResourceId: null }))
+    )
+    h.open(await listedRow('folder-s', 'Shared', 'directory', null), 'share')
+    const share = await screen.findByRole('dialog', { name: /shared/i })
+
+    fireEvent.click(await within(share).findByRole('button', { name: 'Actions for chatllm' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for chatllm' })
+    // A panel at document.body ties the window-level dialog layer and only
+    // wins by DOM order.
+    expect(menu.parentElement).not.toBe(document.body)
+    expect(share.contains(menu)).toBe(true)
+
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Remove access' }))
+    await waitFor(() => expect(h.bridge.revokeGrant).toHaveBeenCalledWith(grantId))
+    expect(screen.queryByRole('menu', { name: 'Actions for chatllm' })).toBeNull()
+  })
 })

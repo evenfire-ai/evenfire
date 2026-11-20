@@ -204,14 +204,15 @@ export function GfsGrantList({
     if (!loading) setStableNotice(noticeText)
   }, [loading, noticeText])
 
-  // Role menus mount inside the hosting dialog, not at document.body: a
-  // window-level Share dialog sits above the dropdown layer, so a body menu
-  // paints under it. Inside the dialog, the backdrop-filtered (and scrollable)
-  // modal around it becomes the menu's fixed containing block; DropdownSelect
-  // compensates for that block's origin when it places the menu.
-  const [rolePortalContainer, setRolePortalContainer] = useState<HTMLElement | null>(null)
-  const resolveRolePortalContainer = useCallback((list: HTMLUListElement | null) => {
-    setRolePortalContainer(list?.closest<HTMLElement>('[role="dialog"]') ?? null)
+  // Role and row-action menus mount inside the hosting dialog, not at
+  // document.body: a window-level Share dialog sits at or above their layer,
+  // so a body menu paints under it (or wins only by DOM order). Inside the
+  // dialog, the backdrop-filtered (and scrollable) modal around it becomes the
+  // menu's fixed containing block; each menu compensates for that block's
+  // origin when it places itself. Outside a dialog this stays null (body).
+  const [menuPortalContainer, setMenuPortalContainer] = useState<HTMLElement | null>(null)
+  const resolveMenuPortalContainer = useCallback((list: HTMLUListElement | null) => {
+    setMenuPortalContainer(list?.closest<HTMLElement>('[role="dialog"]') ?? null)
   }, [])
 
   return (
@@ -245,7 +246,7 @@ export function GfsGrantList({
         <ul
           className="da-gfs-grant-list"
           aria-label="Resource access"
-          ref={resolveRolePortalContainer}
+          ref={resolveMenuPortalContainer}
         >
           {showGrantRows
             ? visibleItems.map(item => {
@@ -277,7 +278,7 @@ export function GfsGrantList({
                         options={ROLE_OPTIONS}
                         placeholder="Role"
                         portal
-                        portalContainer={rolePortalContainer}
+                        portalContainer={menuPortalContainer}
                         value={roleForPermissions(item.permissions)}
                       />
                     </span>
@@ -285,6 +286,7 @@ export function GfsGrantList({
                       disabled={revoking}
                       label={label}
                       onRemove={() => onRevoke(item, label)}
+                      portalContainer={menuPortalContainer}
                     />
                   </li>
                 )
@@ -324,7 +326,7 @@ export function GfsGrantList({
                         options={ROLE_OPTIONS}
                         placeholder="Role"
                         portal
-                        portalContainer={rolePortalContainer}
+                        portalContainer={menuPortalContainer}
                         value={roleForPermissions(row.permissions)}
                       />
                     </span>
@@ -332,6 +334,7 @@ export function GfsGrantList({
                       disabled={revoking || !onRemoveInherited}
                       label={label}
                       onRemove={() => void onRemoveInherited?.(row, label)}
+                      portalContainer={menuPortalContainer}
                     />
                   </li>
                 )
@@ -367,6 +370,7 @@ export function GfsGrantList({
                       disabled={revokingShare || !onRevokeShare}
                       label={label}
                       onRemove={() => onRevokeShare?.(item, label)}
+                      portalContainer={menuPortalContainer}
                     />
                   </li>
                 )
