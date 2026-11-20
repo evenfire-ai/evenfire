@@ -23,6 +23,25 @@ import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
 import { useGfsResourceOperations } from '../useGfsResourceOperations'
 
+// Pass-through spy: lets a test prove a rejection reached the session
+// judgement, which an outcome of "nothing changed" cannot show by itself.
+const authorityJudgements = vi.hoisted(() => ({ outcomes: [] as unknown[] }))
+vi.mock('@lib/gfsSessionAuthority', async importOriginal => {
+  const actual = await importOriginal<typeof import('@lib/gfsSessionAuthority')>()
+  return {
+    ...actual,
+    handleGfsAuthorityFailure: (...args: Parameters<typeof actual.handleGfsAuthorityFailure>) => {
+      const outcome = actual.handleGfsAuthorityFailure(...args)
+      authorityJudgements.outcomes.push({
+        captured: { scope: args[1], generation: args[2] },
+        live: args[5],
+        outcome,
+      })
+      return outcome
+    },
+  }
+})
+
 type Me = NonNullable<AuthContextValue['me']>
 
 const userA: Me = {
@@ -150,12 +169,21 @@ describe('useGfsResourceOperations', () => {
     })
     expect(screen.getByTestId('files-current').textContent).toBe('folder-b')
 
+    authorityJudgements.outcomes.length = 0
     await act(async () => {
       rejectRename(new Error(failure))
       await renameOutcome
     })
 
     expect(await renameOutcome).toBeInstanceOf(Error)
+    // The 401 was judged against the session the rename was sent under.
+    expect(authorityJudgements.outcomes).toEqual([
+      {
+        captured: { scope: scopeA, generation: 1 },
+        live: { scope: scopeB, generation: 2 },
+        outcome: 'stale',
+      },
+    ])
     expect(screen.getByTestId('files-access').textContent).toBe('active')
     expect(screen.getByTestId('files-current').textContent).toBe('folder-b')
     expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scopeB, 2))).toBe('active')
