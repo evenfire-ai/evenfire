@@ -104,22 +104,11 @@ function authValue(me: AuthContextValue['me']): AuthContextValue {
   }
 }
 
-function Harness({
-  children,
-  productionQueryDefaults = false,
-}: {
-  children: ReactNode
-  productionQueryDefaults?: boolean
-}) {
+// The app's own query defaults: a looser harness default would let a test
+// pass on refetches production never makes.
+function Harness({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<AuthContextValue['me']>(userA)
-  const [client] = useState(
-    () =>
-      new QueryClient(
-        productionQueryDefaults
-          ? { defaultOptions: desktopQueryDefaults }
-          : { defaultOptions: { queries: { retry: false } } }
-      )
-  )
+  const [client] = useState(() => new QueryClient({ defaultOptions: desktopQueryDefaults }))
   lastHarnessQueryClient = client
   return (
     <AuthContext.Provider value={authValue(me)}>
@@ -1318,10 +1307,7 @@ function RevalidateProbe() {
 }
 
 // Files mounts the Share dialog only while Share is open, so every open is a
-// fresh mount of the access hook under the app's query defaults.
-function ProductionHarness({ children }: { children: ReactNode }) {
-  return <Harness productionQueryDefaults>{children}</Harness>
-}
+// fresh mount of the access hook.
 
 function ShareAccessPanel({ ctrl }: { ctrl: ReturnType<typeof useGfsBrowserController> }) {
   const access = useGfsResourceAccess(
@@ -1418,7 +1404,7 @@ describe('useGfsResourceAccess — reopening Share', () => {
         },
       })
 
-      render(<ReopenedShareProbe />, { wrapper: ProductionHarness })
+      render(<ReopenedShareProbe />, { wrapper: Harness })
       await waitFor(() => expect(screen.getByTestId('grants-count').textContent).toBe('1'))
       expect(screen.getByTestId('shares-count').textContent).toBe('0')
       await waitFor(() => expect(watch.opens).toBe(1))
@@ -1484,7 +1470,7 @@ describe('useGfsResourceAccess — reopening Share', () => {
       },
     })
 
-    render(<ReopenedShareProbe />, { wrapper: ProductionHarness })
+    render(<ReopenedShareProbe />, { wrapper: Harness })
     await waitFor(() =>
       expect(screen.getByTestId('inherited-coverage').textContent).toBe('unavailable')
     )
@@ -1519,7 +1505,7 @@ describe('useGfsResourceAccess — reopening Share', () => {
       },
     })
 
-    render(<ReopenedShareProbe />, { wrapper: ProductionHarness })
+    render(<ReopenedShareProbe />, { wrapper: Harness })
     await waitFor(() =>
       expect(screen.getByTestId('inherited-coverage').textContent).toBe('complete')
     )
