@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue, useAuthContext } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { GfsActionHost } from '@components/GfsActionHost'
 import { useGfsActionOverlay } from '@components/GfsActionHost/overlay'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
@@ -435,10 +436,18 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
     renderShell()
     const chevron = await screen.findByRole('button', { name: 'Expand Docs' })
 
-    fireEvent.contextMenu(chevron, { clientX: 30, clientY: 40 })
+    // A real right-click: pointerdown/mousedown, contextmenu, pointerup/mouseup.
+    // fireEvent.contextMenu alone would never reach a toggle wired to the
+    // button's other events.
+    await userEvent.setup().pointer({
+      keys: '[MouseRight]',
+      target: chevron,
+      coords: { clientX: 30, clientY: 40 },
+    })
 
     const menu = await screen.findByRole('menu', { name: 'Actions for Docs' })
     expect(menuItem(menu, 'Open folder')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Expand Docs' })).toBe(chevron)
     expect(chevron.getAttribute('aria-expanded')).toBe('false')
   })
 
