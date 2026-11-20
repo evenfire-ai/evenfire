@@ -315,8 +315,8 @@ async function wake(): Promise<void> {
         const result = await runRetentionBatch(
           client,
           undefined,
-          ({ grain, durationMs, outcome }) => {
-            if (outcome === 'failed') {
+          ({ grain, durationMs, outcome: attemptOutcome }) => {
+            if (attemptOutcome === 'failed') {
               failedRetention = { retentionGrain: grain, retentionGrainDurationMs: durationMs }
               return
             }
