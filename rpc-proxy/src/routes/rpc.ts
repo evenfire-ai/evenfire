@@ -22,6 +22,7 @@ import {
   runHostRpcPreflightCheckpoint,
 } from '../middleware/auth.js'
 import { chatJsonBody } from '../middleware/chatJsonBody.js'
+import { validateHostRef } from '../middleware/hostRefValidation.js'
 import { jsonBody } from '../middleware/jsonBody.js'
 import { runtimeHostEdgeContext, sendCheckpointError } from '../routeActionBindingV2.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
@@ -65,12 +66,6 @@ import type { ResolvedServerConnection } from '../types.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
-// Edge caps on the client-supplied page size before forwarding upstream. The
-// host enforces its own identical caps independently; these are the proxy's
-// own copy (the two services share no package, so each names its own).
-const SESSIONS_LIMIT_CAP = 100
-const MESSAGES_LIMIT_CAP = 200
-
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
     value.length > 0 &&
@@ -83,13 +78,6 @@ function isSafeUpstreamPathSegment(value: string): boolean {
 
 function isSafeUpstreamAgentSegment(value: string): boolean {
   return isSafeUpstreamPathSegment(value) && value.length <= 200 && !value.includes(':')
-}
-
-function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
-  if (value === undefined) return undefined
-  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
-  const parsed = Number(value)
-  return Number.isSafeInteger(parsed) ? parsed : null
 }
 
 type ShellAction = 'once' | 'command' | 'shell'
@@ -543,12 +531,6 @@ export function createRpcRouter(): Router {
           requestId,
           origin: 'direct_chat',
         })
-        if (body.attachments != null && !Array.isArray(body.attachments)) {
-          res
-            .status(400)
-            .json({ error: 'invalid_attachments', message: 'Attachments must be a list.' })
-          return
-        }
         // First-message mode. This body is an allowlist: forward approvalMode
         // only for a stored value when the token also has host:approval:write,
         // the mode PATCH's scope. Carrying the field without that scope is 403.
@@ -1411,6 +1393,9 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'mode must be manual, auto, or allow_all' })
           return
         }
+        // The Host-ref grammar every sibling Host route applies after its
+        // preflight, before the Host is resolved.
+        if (!validateHostRef(req, res)) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
           auth.sub,

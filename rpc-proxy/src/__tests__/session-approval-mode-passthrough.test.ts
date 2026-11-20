@@ -168,6 +168,27 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
+  // Each passes the path-segment check but not the Host-create grammar, which
+  // every sibling Host route applies.
+  it.each(['Bad_Ref', 'Host', '-host', 'host-', 'bad.name'])(
+    'returns 400 for the hostRef %s and does not resolve or call the host',
+    async hostRef => {
+      const fetchMock = vi.fn()
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      const res = await request(makeApp())
+        .patch(`/rpc/hosts/${hostRef}/sessions/chatllm/c1/approval-mode`)
+        .set('authorization', 'Bearer user-token')
+        .send({ mode: 'auto' })
+        .expect(400)
+
+      expect(res.body).toEqual({ error: 'Invalid hostRef' })
+      expect(authTokenMock.verifyRpcToken).toHaveBeenCalledTimes(1)
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    }
+  )
+
   it('returns 400 for a non-object body and does not call the host', async () => {
     const fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch
