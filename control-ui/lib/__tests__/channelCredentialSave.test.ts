@@ -30,7 +30,7 @@ describe('channel credential parent-save planning', () => {
       {
         kind: 'replace',
         key: 'telegram-bot-token',
-        label: 'Telegram Bot Token',
+        label: 'Telegram bot token',
         value: 'telegram-next',
       },
       {
@@ -60,7 +60,7 @@ describe('channel credential parent-save planning', () => {
       ['telegram']
     )
     expect(plan.operations).toEqual([])
-    expect(plan.invalidLabels).toEqual(['Telegram Bot Token'])
+    expect(plan.invalidLabels).toEqual(['Telegram bot token'])
     expect(JSON.stringify(plan)).not.toContain('telegram-next')
   })
 

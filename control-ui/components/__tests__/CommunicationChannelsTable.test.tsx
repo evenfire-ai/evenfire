@@ -58,7 +58,7 @@ describe('CommunicationChannelsTable', () => {
     expect(screen.getAllByRole('menuitem')[0]).toHaveTextContent('View details')
   })
 
-  it('shows configured provider types in one column', () => {
+  it('shows channel names and agents without a redundant provider column', () => {
     renderTable({
       items: [
         {
@@ -73,11 +73,10 @@ describe('CommunicationChannelsTable', () => {
       ],
     })
 
-    expect(screen.getByRole('columnheader', { name: 'Type' })).toBeInTheDocument()
-    expect(
-      screen.getByRole('cell', { name: 'Telegram, Slack, Microsoft Teams' })
-    ).toBeInTheDocument()
-    for (const removedHeading of ['Telegram', 'Slack', 'Teams']) {
+    expect(screen.getByRole('cell', { name: 'multi-provider-channel' })).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: 'agent-a' })).toBeInTheDocument()
+    expect(screen.getAllByRole('columnheader')).toHaveLength(3)
+    for (const removedHeading of ['Type', 'Telegram', 'Slack', 'Teams']) {
       expect(screen.queryByRole('columnheader', { name: removedHeading })).not.toBeInTheDocument()
     }
   })
@@ -305,5 +304,67 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
     const telegramCopy = screen.getByRole('menuitem', { name: 'Copy config into Telegram' })
     expect(slackCopy).toBeDisabled()
     expect(telegramCopy).toBeDisabled()
+  })
+})
+
+describe('provider channel tabs', () => {
+  it('separates provider references, preserves shared channels, and scopes search', () => {
+    const items: CommunicationChannelItem[] = [
+      {
+        metadata: { name: 'telegram-only' },
+        spec: { telegramSettings: { botHandle: '@fixture_bot' } },
+      },
+      {
+        metadata: { name: 'slack-only' },
+        spec: { slackSettings: { workspaceId: 'fixture-workspace' } },
+      },
+      { metadata: { name: 'teams-only' }, spec: { teamsSettings: { appId: 'fixture-app' } } },
+      {
+        metadata: { name: 'shared' },
+        spec: {
+          telegram: [{ channelId: 'fixture-chat' }],
+          slack: [{ channelId: 'fixture-slack' }],
+          teams: [{ channelId: 'fixture-teams' }],
+        },
+      },
+    ]
+    const view = (provider: 'telegram' | 'slack' | 'teams') => (
+      <ToastProvider>
+        <CommunicationChannelsTable items={items} provider={provider} onChanged={vi.fn()} />
+      </ToastProvider>
+    )
+    const { rerender } = render(view('telegram'))
+    expect(screen.getAllByRole('tab')).toHaveLength(3)
+    expect(screen.getByRole('tab', { name: 'Telegram' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: 'Slack' })).toHaveAttribute(
+      'href',
+      '/external-channels/providers/slack'
+    )
+    expect(screen.getByText('telegram-only')).toBeInTheDocument()
+    expect(screen.getByText('shared')).toBeInTheDocument()
+    expect(screen.queryByText('slack-only')).not.toBeInTheDocument()
+    expect(screen.queryByText('teams-only')).not.toBeInTheDocument()
+
+    rerender(view('slack'))
+    expect(screen.getByRole('tab', { name: 'Slack' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('slack-only')).toBeInTheDocument()
+    expect(screen.getByText('shared')).toBeInTheDocument()
+    expect(screen.queryByText('telegram-only')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search communication channels' }), {
+      target: { value: 'telegram-only' },
+    })
+    expect(screen.getByText('No channels match this search.')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search communication channels' }), {
+      target: { value: '' },
+    })
+    rerender(view('teams'))
+    expect(screen.getByRole('tab', { name: 'Microsoft Teams' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    expect(screen.getByText('teams-only')).toBeInTheDocument()
+    expect(screen.getByText('shared')).toBeInTheDocument()
+    expect(screen.queryByText('slack-only')).not.toBeInTheDocument()
   })
 })
