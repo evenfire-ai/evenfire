@@ -13,6 +13,7 @@ import { createRoot } from 'react-dom/client'
 import type { ApprovalModeResult } from '../../../../../src/types'
 import {
   beginApprovalModeFirstSend,
+  hostApprovalModeEpoch,
   noteHostApprovalModeFromSession,
   resetHostApprovalModeStore,
 } from '../../../lib/hostApprovalModeStore'
@@ -31,12 +32,21 @@ function patchFailure(status: number): Error {
   return new Error(`Set approval mode failed (${status})`)
 }
 
-function sessionApproval(mode: ApprovalMode) {
+const RANK: Record<ApprovalMode, number> = { manual: 0, auto: 1, allow_all: 2 }
+
+function lower(a: ApprovalMode, b: ApprovalMode): ApprovalMode {
+  return RANK[a] <= RANK[b] ? a : b
+}
+
+/** The fake Host's ceiling. Desktop chats have channel cap allow_all. */
+const host = { ceiling: 'allow_all' as ApprovalMode }
+
+function sessionApproval(mode: ApprovalMode, ceiling: ApprovalMode = host.ceiling) {
   return {
     approvalMode: mode,
-    modeCeiling: 'allow_all' as ApprovalMode,
+    modeCeiling: ceiling,
     channelCap: 'allow_all' as ApprovalMode,
-    effectiveApprovalMode: mode,
+    effectiveApprovalMode: lower(mode, ceiling),
     shellClassifierAvailable: true,
   }
 }
@@ -56,19 +66,31 @@ function seed(chatId: string, mode: ApprovalMode = 'manual'): void {
 
 const setApprovalMode = vi.fn()
 const loadSessionMessages = vi.fn()
+const listSessions = vi.fn()
 
 function resetWorld(): void {
   setApprovalMode.mockReset()
   loadSessionMessages.mockReset()
+  listSessions.mockReset()
+  host.ceiling = 'allow_all'
   loadSessionMessages.mockImplementation(async (_agent: string, _host: string, chatId: string) => {
     const stored = server[chatId]
     if (!stored) throw new Error(`fake Host has no session ${chatId}`)
     return sessionApproval(stored)
   })
+  // The catalog page the picker reads the Host ceiling from (SessionsListResult).
+  listSessions.mockImplementation(async () => ({
+    items: Object.keys(server).map(chatId => ({
+      agent: 'agent-x',
+      chatId,
+      turnCount: 1,
+      ...sessionApproval(server[chatId] ?? 'manual'),
+    })),
+  }))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     writable: true,
-    value: { rpc: { setApprovalMode, loadSessionMessages } },
+    value: { rpc: { setApprovalMode, loadSessionMessages, listSessions } },
   })
   resetHostApprovalModeStore()
   for (const key of Object.keys(server)) delete server[key]
@@ -508,6 +530,20 @@ describe('ApprovalModePicker state — focus (F1)', () => {
  * gone: mcp-host answers 404 for a chat the store has seen (C5): not saved.
  */
 type Outcome = 'ok' | 'fail' | 'dropped' | 'gone'
+/** A chat with a session row, or the blank chat (no chat id: picks are held). */
+type Screen = ChatKey | 'blank'
+const SCREENS: readonly Screen[] = [...CHATS, 'blank']
+const NAMES: Record<ApprovalMode, string> = {
+  manual: 'Manual',
+  auto: 'Auto-approve',
+  allow_all: 'Allow all',
+}
+const OPTION_IDS: Record<ApprovalMode, string> = {
+  manual: 'approval-mode-option-manual',
+  auto: 'approval-mode-option-auto',
+  allow_all: 'approval-mode-option-allow-all',
+}
+
 interface ModelWrite {
   id: number
   chat: ChatKey
@@ -516,7 +552,7 @@ interface ModelWrite {
   settled: boolean
 }
 interface Model {
-  screen: ChatKey
+  screen: Screen
   menuOpen: boolean
   confirming: boolean
   writes: ModelWrite[]
@@ -524,6 +560,14 @@ interface Model {
   /** L1: the latest write's requested mode while it failed and the stored mode has not equalled it since. */
   failedRequest: Record<ChatKey, ApprovalMode | null>
   expectedCalls: ChatKey[]
+  /** The fake Host's ceiling now. */
+  ceiling: ApprovalMode
+  /** Ceiling in the last snapshot Desktop applied for each chat (D1: its limit). */
+  limit: Record<ChatKey, ApprovalMode>
+  /** Desktop's Host-wide ceiling (D2), the blank chat's limit. Null: unknown. */
+  hostCeiling: ApprovalMode | null
+  /** The blank chat's held pick. */
+  held: ApprovalMode
 }
 interface Real {
   scheduler: fc.Scheduler
@@ -533,38 +577,80 @@ interface Real {
   nextWriteId: number
 }
 
+function pickerChatId(screen: Screen): string {
+  return screen === 'blank' ? '' : screen
+}
+
 function closeMenu(model: Model): void {
   model.menuOpen = false
   model.confirming = false
 }
 
-function startWrite(model: Model, mode: ApprovalMode, outcome: Outcome, real: Real): void {
-  model.writes.push({
-    id: model.writes.length + 1,
-    chat: model.screen,
-    mode,
-    outcome,
-    settled: false,
-  })
-  model.expectedCalls.push(model.screen)
+function startWrite(model: Model, chat: ChatKey, mode: ApprovalMode, outcome: Outcome, real: Real) {
+  model.writes.push({ id: model.writes.length + 1, chat, mode, outcome, settled: false })
+  model.expectedCalls.push(chat)
   real.pendingOutcomes.push(outcome)
 }
 
 /** A save for this chat is unanswered (PATCH not settled). */
-function saveInFlight(model: Readonly<Model>, chat: ChatKey): boolean {
-  return model.writes.some(write => write.chat === chat && !write.settled)
+function saveInFlight(model: Readonly<Model>, screen: Screen): boolean {
+  return model.writes.some(write => write.chat === screen && !write.settled)
+}
+
+/** D1: the highest mode the chat on screen can run, or null while unknown. */
+function limitOf(model: Readonly<Model>, screen: Screen): ApprovalMode | null {
+  return screen === 'blank' ? model.hostCeiling : model.limit[screen]
+}
+
+function storedOf(model: Readonly<Model>, screen: Screen): ApprovalMode {
+  return screen === 'blank' ? model.held : model.stored[screen]
+}
+
+/** D1: the chip shows the mode the Host runs: the stored pick under the limit. */
+function effectiveOf(model: Readonly<Model>, screen: Screen): ApprovalMode {
+  const limit = limitOf(model, screen)
+  const stored = storedOf(model, screen)
+  return limit === null ? stored : lower(stored, limit)
+}
+
+function offered(model: Readonly<Model>, mode: ApprovalMode): boolean {
+  const limit = limitOf(model, model.screen)
+  return limit === null || RANK[mode] <= RANK[limit]
+}
+
+/** D3: the menu note names the limit, and what the chat was set to above it. */
+function expectedNote(model: Readonly<Model>): string | null {
+  const stored = storedOf(model, model.screen)
+  const effective = effectiveOf(model, model.screen)
+  const limit = limitOf(model, model.screen)
+  if (stored !== effective) {
+    return `Set to ${NAMES[stored]}; this Host limits this chat to ${NAMES[effective]}.`
+  }
+  if (limit !== null && limit !== 'allow_all')
+    return `This Host limits this chat to ${NAMES[limit]}.`
+  return null
+}
+
+/** Desktop applied a fresh snapshot of `chat` taken now: its limit and the Host ceiling move. */
+function freshSnapshot(model: Model, chat: ChatKey): void {
+  model.limit[chat] = model.ceiling
+  model.hostCeiling = model.ceiling
 }
 
 function assertInvariants(model: Model, real: Real): void {
-  const { queryByTestId } = real.utils
+  const { getByTestId, queryByTestId } = real.utils
   // S4: one save in flight per chat; the chip of that chat is busy meanwhile.
   for (const chat of CHATS) {
     expect(
       model.writes.filter(write => write.chat === chat && !write.settled).length
     ).toBeLessThanOrEqual(1)
   }
-  expect(real.utils.getByTestId('approval-mode-picker').getAttribute('aria-busy') === 'true').toBe(
+  expect(getByTestId('approval-mode-picker').getAttribute('aria-busy') === 'true').toBe(
     saveInFlight(model, model.screen)
+  )
+  // D1: the chip shows the mode the Host runs.
+  expect(getByTestId('approval-mode-picker').textContent).toBe(
+    NAMES[effectiveOf(model, model.screen)]
   )
   // L2 + menu shape
   expect(queryByTestId('approval-mode-option-manual') !== null).toBe(
@@ -573,23 +659,35 @@ function assertInvariants(model: Model, real: Real): void {
   expect(queryByTestId('approval-mode-confirm-allow-all') !== null).toBe(
     model.menuOpen && model.confirming
   )
+  // D3: rows above the limit are shown but not offered; the note names the limit.
+  if (model.menuOpen && !model.confirming) {
+    for (const mode of ['manual', 'auto', 'allow_all'] as const) {
+      expect(getByTestId(OPTION_IDS[mode]).getAttribute('aria-disabled') === 'true').toBe(
+        !offered(model, mode)
+      )
+    }
+    expect(queryByTestId('approval-mode-limit-note')?.textContent ?? null).toBe(expectedNote(model))
+  }
   // S2 + L1: the error shows exactly for the chat on screen with the menu closed.
+  const failed = model.screen === 'blank' ? null : model.failedRequest[model.screen]
   expect(queryByTestId('approval-mode-write-error') !== null).toBe(
-    model.failedRequest[model.screen] !== null && !model.menuOpen
+    failed !== null && !model.menuOpen
   )
   // S1 + C1: every PATCH targeted the chat on screen at the click.
   expect(setApprovalMode.mock.calls.map(call => call[2])).toEqual(model.expectedCalls)
 }
 
 class SwitchChat implements fc.AsyncCommand<Model, Real> {
-  constructor(readonly target: ChatKey) {}
+  constructor(readonly target: Screen) {}
   check(model: Readonly<Model>) {
     return model.screen !== this.target
   }
   async run(model: Model, real: Real) {
     model.screen = this.target
     closeMenu(model)
-    real.utils.rerender(<ApprovalModePicker agentRef="agent-x" chatId={this.target} />)
+    real.utils.rerender(
+      <ApprovalModePicker agentRef="agent-x" chatId={pickerChatId(this.target)} />
+    )
     assertInvariants(model, real)
   }
   toString() {
@@ -604,7 +702,9 @@ class Remount implements fc.AsyncCommand<Model, Real> {
   async run(model: Model, real: Real) {
     closeMenu(model)
     real.utils.unmount()
-    real.utils = render(<ApprovalModePicker agentRef="agent-x" chatId={model.screen} />)
+    real.utils = render(
+      <ApprovalModePicker agentRef="agent-x" chatId={pickerChatId(model.screen)} />
+    )
     assertInvariants(model, real)
   }
   toString() {
@@ -621,10 +721,18 @@ class ToggleMenu implements fc.AsyncCommand<Model, Real> {
       closeMenu(model)
     } else if (!saveInFlight(model, model.screen)) {
       model.menuOpen = true
-      model.failedRequest[model.screen] = null
+      // D4: opening re-reads the limit: the chat's own session, or for the
+      // blank chat the Host ceiling from the catalog.
+      if (model.screen === 'blank') {
+        model.hostCeiling = model.ceiling
+      } else {
+        model.failedRequest[model.screen] = null
+        freshSnapshot(model, model.screen)
+      }
     }
     // A busy chip ignores the click: the menu stays closed and the error stays.
     fireEvent.click(real.utils.getByTestId('approval-mode-picker'))
+    await flush()
     assertInvariants(model, real)
   }
   toString() {
@@ -641,9 +749,14 @@ class Pick implements fc.AsyncCommand<Model, Real> {
     return model.menuOpen && !model.confirming
   }
   async run(model: Model, real: Real) {
-    closeMenu(model)
-    startWrite(model, this.mode, this.outcome, real)
-    fireEvent.click(real.utils.getByTestId(`approval-mode-option-${this.mode}`))
+    // D3: a row above the limit does nothing, and the menu stays open.
+    if (offered(model, this.mode)) {
+      closeMenu(model)
+      if (model.screen === 'blank') model.held = this.mode
+      else startWrite(model, model.screen, this.mode, this.outcome, real)
+    }
+    fireEvent.click(real.utils.getByTestId(OPTION_IDS[this.mode]))
+    await flush()
     assertInvariants(model, real)
   }
   toString() {
@@ -656,8 +769,8 @@ class PickAllowAll implements fc.AsyncCommand<Model, Real> {
     return model.menuOpen && !model.confirming
   }
   async run(model: Model, real: Real) {
-    model.confirming = true
-    fireEvent.click(real.utils.getByTestId('approval-mode-option-allow-all'))
+    if (offered(model, 'allow_all')) model.confirming = true
+    fireEvent.click(real.utils.getByTestId(OPTION_IDS.allow_all))
     assertInvariants(model, real)
   }
   toString() {
@@ -672,8 +785,10 @@ class Confirm implements fc.AsyncCommand<Model, Real> {
   }
   async run(model: Model, real: Real) {
     closeMenu(model)
-    startWrite(model, 'allow_all', this.outcome, real)
+    if (model.screen === 'blank') model.held = 'allow_all'
+    else startWrite(model, model.screen, 'allow_all', this.outcome, real)
     fireEvent.click(real.utils.getByTestId('approval-mode-confirm-allow-all'))
+    await flush()
     assertInvariants(model, real)
   }
   toString() {
@@ -703,6 +818,50 @@ class Dismiss implements fc.AsyncCommand<Model, Real> {
   }
 }
 
+/** An admin changes the Host ceiling. Desktop learns it only from its next read. */
+class SetCeiling implements fc.AsyncCommand<Model, Real> {
+  constructor(readonly ceiling: ApprovalMode) {}
+  check(model: Readonly<Model>) {
+    return model.ceiling !== this.ceiling
+  }
+  async run(model: Model, real: Real) {
+    model.ceiling = this.ceiling
+    host.ceiling = this.ceiling
+    assertInvariants(model, real)
+  }
+  toString() {
+    return `SetCeiling(${this.ceiling})`
+  }
+}
+
+/**
+ * A read of `chat` made outside the picker (chat open, reconcile, chat list),
+ * answered now. It moves that chat's own limit, but not a Host ceiling that
+ * Desktop already knows (D2), and not a chat whose save is in flight.
+ */
+class PassiveRead implements fc.AsyncCommand<Model, Real> {
+  constructor(readonly chat: ChatKey) {}
+  check() {
+    return true
+  }
+  async run(model: Model, real: Real) {
+    if (!saveInFlight(model, this.chat)) model.limit[this.chat] = model.ceiling
+    const epoch = hostApprovalModeEpoch()
+    act(() => {
+      noteHostApprovalModeFromSession(
+        'agent-x',
+        this.chat,
+        sessionApproval(server[this.chat] ?? 'manual'),
+        epoch
+      )
+    })
+    assertInvariants(model, real)
+  }
+  toString() {
+    return `PassiveRead(${this.chat})`
+  }
+}
+
 class Settle implements fc.AsyncCommand<Model, Real> {
   check(model: Readonly<Model>) {
     return model.writes.some(write => !write.settled)
@@ -717,6 +876,9 @@ class Settle implements fc.AsyncCommand<Model, Real> {
     if (!write) throw new Error(`settled unknown write ${real.settledIds[before]}`)
     write.settled = true
     if (write.outcome === 'ok' || write.outcome === 'dropped') model.stored[write.chat] = write.mode
+    // The PATCH answer (ok) or the re-read after a failure carries the Host's
+    // ceiling now. A 404 for a seen chat carries nothing.
+    if (write.outcome !== 'gone') freshSnapshot(model, write.chat)
     // S3: only the latest write for its chat decides that chat's error.
     const latest = [...model.writes].reverse().find(entry => entry.chat === write.chat)
     if (latest?.id === write.id) {
@@ -735,12 +897,15 @@ class Settle implements fc.AsyncCommand<Model, Real> {
 }
 
 const outcomes = fc.constantFrom<Outcome>('ok', 'fail', 'dropped', 'gone')
-const switchChat = fc.constantFrom(...CHATS).map(target => new SwitchChat(target))
+const switchChat = fc.constantFrom(...SCREENS).map(target => new SwitchChat(target))
 const toggleMenu = fc.constant(new ToggleMenu())
 const pick = fc
   .tuple(fc.constantFrom('manual' as const, 'auto' as const), outcomes)
   .map(([mode, outcome]) => new Pick(mode, outcome))
 const settle = fc.constant(new Settle())
+const setCeiling = fc
+  .constantFrom<ApprovalMode>('manual', 'auto', 'allow_all')
+  .map(ceiling => new SetCeiling(ceiling))
 // Weighted by repetition: the interleavings that matter (A3 R3-R9, R14, R16)
 // need open → pick → switch/remount → settle chains.
 const commandArbitraries = [
@@ -758,13 +923,15 @@ const commandArbitraries = [
   fc
     .constantFrom('cancel' as const, 'escape' as const, 'outside' as const)
     .map(how => new Dismiss(how)),
+  setCeiling,
+  fc.constantFrom(...CHATS).map(chat => new PassiveRead(chat)),
   settle,
   settle,
   settle,
 ]
 
 describe('ApprovalModePicker state — A6 command model', () => {
-  it('keeps S1–S4, L1, L2 and C1 for any event order and settlement order', async () => {
+  it('keeps S1–S4, L1, L2, C1 and D1–D4 for any event order and settlement order', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.scheduler(),
@@ -801,6 +968,11 @@ describe('ApprovalModePicker state — A6 command model', () => {
             stored: { 'chat-1': 'manual', 'chat-2': 'manual' },
             failedRequest: { 'chat-1': null, 'chat-2': null },
             expectedCalls: [],
+            ceiling: 'allow_all',
+            // The seeds were read under ceiling allow_all; the first filled the Host ceiling.
+            limit: { 'chat-1': 'allow_all', 'chat-2': 'allow_all' },
+            hostCeiling: 'allow_all',
+            held: 'manual',
           }
           await fc.asyncModelRun(() => ({ model, real }), commands)
           // Quiescence: settle everything still pending, then re-check.

@@ -4340,6 +4340,17 @@ body.sidebar-resizing {
   cursor: default;
 }
 
+/* A row that stays focusable but is not offered (approval modes above the
+ * Host's limit). It keeps its focus-visible background, not a hover one. */
+.model-selector-item[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.model-selector-item[aria-disabled='true']:hover:not(:focus-visible) {
+  background: transparent;
+}
+
 .model-selector-item--active {
   background: rgba(var(--edge-rgb), 0.2);
   font-weight: var(--font-weight-medium);

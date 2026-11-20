@@ -11,6 +11,7 @@ import {
   migrateHeldApprovalMode,
   noteHostApprovalModeFromSession,
   readHostApprovalMode,
+  refreshHostApprovalModeLimit,
   resetHostApprovalModeStore,
   selectHostApprovalMode,
   subscribeHostApprovalMode,
@@ -296,6 +297,171 @@ describe('hostApprovalModeStore', () => {
     expect(readSessionApproval).not.toHaveBeenCalled()
     expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Auto-approve')
     expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('auto')
+  })
+})
+
+describe('hostApprovalModeStore — Host limit', () => {
+  const OTHER = 'chat-2'
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(res => {
+      resolve = res
+    })
+    return { promise, resolve }
+  }
+
+  it('leaves a blank chat’s limit unknown until any session of the Host is read, then follows its ceiling', () => {
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBeNull()
+    const listener = vi.fn()
+    const unsubscribe = subscribeHostApprovalMode(AGENT, null, listener)
+
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'auto' }))
+
+    expect(listener).toHaveBeenCalled()
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+    // Another Host's ceiling is its own.
+    expect(readHostApprovalMode('other-host', null).modeLimit).toBeNull()
+    unsubscribe()
+  })
+
+  it('limits a chat the Host answered for by its own ceiling and channel cap', () => {
+    noteHostApprovalModeFromSession(
+      AGENT,
+      CHAT,
+      snapshot('allow_all', {
+        modeCeiling: 'allow_all',
+        channelCap: 'manual',
+        effectiveApprovalMode: 'manual',
+      })
+    )
+
+    const view = readHostApprovalMode(AGENT, CHAT)
+    expect(view.modeLimit).toBe('manual')
+    expect(view.storedMode).toBe('allow_all')
+    expect(view.effectiveMode).toBe('manual')
+    expect(view.label).toBeNull()
+    // The blank chat is a Desktop chat: only the Host ceiling limits it.
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('allow_all')
+  })
+
+  it('caps a blank-chat hold by a known ceiling and keeps the pick for the first send', async () => {
+    const { client } = transport()
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'manual' }))
+
+    await expect(selectHostApprovalMode(client, AGENT, null, 'allow_all')).resolves.toBe(true)
+
+    const view = readHostApprovalMode(AGENT, null)
+    expect(view.storedMode).toBe('allow_all')
+    expect(view.effectiveMode).toBe('manual')
+    expect(view.label).toBeNull()
+    expect(view.firstSendMode).toBe('allow_all')
+  })
+
+  it('a refresh replaces a known ceiling; a read made elsewhere fills it only while unknown', async () => {
+    const readHostModeCeiling = vi.fn(async () => 'auto' as const)
+    const { client } = transport({ readHostModeCeiling })
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'manual' }))
+    // A catalog page served from the cache after the ceiling changed.
+    noteHostApprovalModeFromSession(AGENT, OTHER, snapshot('manual', { modeCeiling: 'auto' }))
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('manual')
+
+    await refreshHostApprovalModeLimit(client, AGENT, null)
+    expect(readHostModeCeiling).toHaveBeenCalledWith(AGENT)
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+
+    // An older page served again from the cache does not undo the refresh.
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'manual' }))
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+  })
+
+  it('a PATCH answer replaces the Host ceiling', async () => {
+    const { client, setApprovalMode } = transport()
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'manual' }))
+    setApprovalMode.mockResolvedValue(snapshot('auto', { modeCeiling: 'auto' }))
+
+    await selectHostApprovalMode(client, AGENT, CHAT, 'auto')
+
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+    expect(readHostApprovalMode(AGENT, CHAT).modeLimit).toBe('auto')
+  })
+
+  it('refreshes a chat the Host answered for from its own session', async () => {
+    const readHostModeCeiling = vi.fn(async () => 'manual' as const)
+    const { client, readSessionApproval } = transport({ readHostModeCeiling })
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'manual' }))
+    readSessionApproval.mockResolvedValue(snapshot('manual', { modeCeiling: 'allow_all' }))
+
+    await refreshHostApprovalModeLimit(client, AGENT, CHAT)
+
+    expect(readSessionApproval).toHaveBeenCalledWith(AGENT, CHAT)
+    expect(readHostModeCeiling).not.toHaveBeenCalled()
+    expect(readHostApprovalMode(AGENT, CHAT).modeLimit).toBe('allow_all')
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('allow_all')
+  })
+
+  it('a menu refresh answered before a pick lands does not undo the pick', async () => {
+    const read = deferred<SessionApprovalSnapshot>()
+    const { client, readSessionApproval, setApprovalMode } = transport()
+    readSessionApproval.mockReturnValueOnce(read.promise)
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+
+    // The menu opens and its read leaves; the user picks before it returns.
+    const refresh = refreshHostApprovalModeLimit(client, AGENT, CHAT)
+    setApprovalMode.mockResolvedValueOnce(snapshot('auto'))
+    await expect(selectHostApprovalMode(client, AGENT, CHAT, 'auto')).resolves.toBe(true)
+    // The Host answered the read before the PATCH landed.
+    read.resolve(snapshot('manual'))
+    await refresh
+
+    expect(readSessionApproval).toHaveBeenCalledTimes(1)
+    expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe('auto')
+    expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Auto-approve')
+  })
+
+  it('shares one read between refreshes of the same chat that overlap', async () => {
+    const answer = deferred<'auto'>()
+    const readHostModeCeiling = vi.fn(() => answer.promise)
+    const { client } = transport({ readHostModeCeiling })
+
+    const first = refreshHostApprovalModeLimit(client, AGENT, null)
+    const second = refreshHostApprovalModeLimit(client, AGENT, null)
+    answer.resolve('auto')
+    await Promise.all([first, second])
+
+    expect(readHostModeCeiling).toHaveBeenCalledTimes(1)
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+  })
+
+  it('a refresh that fails keeps the last known limit', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const readHostModeCeiling = vi.fn(async () => {
+      throw new Error('List sessions failed (503)')
+    })
+    const { client } = transport({ readHostModeCeiling })
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'auto' }))
+
+    await refreshHostApprovalModeLimit(client, AGENT, null)
+
+    expect(readHostModeCeiling).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalled()
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+  })
+
+  it('forgets the Host ceiling on a scope reset, and drops a refresh that crosses it', async () => {
+    const answer = deferred<'auto'>()
+    const readHostModeCeiling = vi.fn(() => answer.promise)
+    const { client } = transport({ readHostModeCeiling })
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'manual' }))
+    const refresh = refreshHostApprovalModeLimit(client, AGENT, null)
+
+    resetHostApprovalModeStore()
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBeNull()
+    answer.resolve('auto')
+    await refresh
+
+    expect(readHostModeCeiling).toHaveBeenCalledTimes(1)
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBeNull()
   })
 })
 

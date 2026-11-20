@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Button, Pill } from '@components/Common'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useHostApprovalMode } from '@hooks/useHostApprovalMode'
-import type { ApprovalMode } from '@lib/hostApprovalModeStore'
+import type { ApprovalMode, HostApprovalModeView } from '@lib/hostApprovalModeStore'
 
 export interface ApprovalModePickerProps {
   agentRef: string
@@ -22,6 +22,33 @@ const MODE_OPTIONS: ReadonlyArray<{ mode: ApprovalMode; label: string; testId: s
   { mode: 'auto', label: 'Auto-approve', testId: 'approval-mode-option-auto' },
   { mode: 'allow_all', label: 'Allow all', testId: 'approval-mode-option-allow-all' },
 ]
+
+const MODE_RANK: Record<ApprovalMode, number> = { manual: 0, auto: 1, allow_all: 2 }
+
+function modeName(mode: ApprovalMode): string {
+  return MODE_OPTIONS.find(option => option.mode === mode)?.label ?? 'Manual'
+}
+
+/**
+ * The menu's note on the Host limit: what the chat was set to when the Host
+ * runs less, or which modes the Host allows when some rows are not offered.
+ */
+function limitNote(view: HostApprovalModeView): string | null {
+  if (view.storedMode !== view.effectiveMode) {
+    return `Set to ${modeName(view.storedMode)}; this Host limits this chat to ${modeName(view.effectiveMode)}.`
+  }
+  if (view.modeLimit !== null && view.modeLimit !== 'allow_all') {
+    return `This Host limits this chat to ${modeName(view.modeLimit)}.`
+  }
+  return null
+}
+
+function savedAnnouncement(view: HostApprovalModeView): string {
+  if (view.storedMode !== view.effectiveMode) {
+    return `Approval mode set to ${modeName(view.storedMode)}; this Host limits this chat to ${modeName(view.effectiveMode)}.`
+  }
+  return `Approval mode set to ${modeName(view.effectiveMode)}.`
+}
 
 /**
  * Session approval-mode control, sat next to the model selector in the
@@ -46,29 +73,43 @@ const MODE_OPTIONS: ReadonlyArray<{ mode: ApprovalMode; label: string; testId: s
  * store, per chat, so the error follows the chat across switches and remounts.
  * Opening the menu again clears it.
  *
+ * The chip shows the mode the Host runs. Modes above the Host's limit for the
+ * chat stay in the menu but are not offered (`aria-disabled`, described by a
+ * note that names the limit); when the chat is set above the limit, the note
+ * says so. With no answer from the Host yet the limit is unknown and every
+ * mode is offered. Opening the menu re-reads the limit, so rows follow an
+ * admin's change. A saved pick is announced through a polite status region,
+ * with the limit when the Host runs less than the pick.
+ *
  * When the session's model cannot run the shell classifier and the mode is
  * auto, the chip turns warning-toned and says so in its tooltip and to screen
  * readers; the open menu says it too.
  */
 export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps) {
   const selectionChatId = chatId || null
+  const approval = useHostApprovalMode(agentRef, selectionChatId)
   const {
     label,
     effectiveMode,
+    modeLimit,
     shellClassifierAvailable,
     firstSendInFlight,
     writeInFlight,
     saveFailed,
     selectMode,
     clearSaveFailure,
-  } = useHostApprovalMode(agentRef, selectionChatId)
+    refreshLimit,
+    readView,
+  } = approval
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [announcement, setAnnouncement] = useState('')
   const containerRef = useRef<HTMLDivElement | null>(null)
   const cancelRef = useRef<HTMLButtonElement | null>(null)
   const confirmRef = useRef<HTMLButtonElement | null>(null)
   const classifierNoteId = useId()
   const confirmTextId = useId()
+  const limitNoteId = useId()
 
   // The chip cannot open while the first send or a save for this chat is in flight.
   const locked = firstSendInFlight || writeInFlight
@@ -83,12 +124,19 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
       setOpen(false)
       setConfirming(false)
     }
+    if (renderedFor.scopeKey !== scopeKey) setAnnouncement('')
     setRenderedFor({ scopeKey, locked })
   }
+  // The chat on screen after the last commit, for a save that settles later.
+  const shownScopeKey = useRef(scopeKey)
+  useLayoutEffect(() => {
+    shownScopeKey.current = scopeKey
+  })
 
   const chipLabel = label ?? 'Manual'
   const showClassifierNote = effectiveMode === 'auto' && shellClassifierAvailable === false
   const menuOpen = open && !locked
+  const limitNoteText = limitNote(approval)
 
   const close = useCallback(() => {
     setOpen(false)
@@ -117,7 +165,13 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
   const choose = (mode: ApprovalMode) => {
     close()
     focusChip()
-    void selectMode(mode)
+    const pickedFor = scopeKey
+    void selectMode(mode).then(saved => {
+      // Announce a saved pick only while its chat is still on screen.
+      if (saved && shownScopeKey.current === pickedFor) {
+        setAnnouncement(savedAnnouncement(readView()))
+      }
+    })
   }
 
   // Tab and Shift+Tab wrap between the two buttons, also when a click on the
@@ -161,7 +215,10 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
         }
         onClick={() => {
           if (locked) return
-          if (!open) clearSaveFailure()
+          if (!open) {
+            clearSaveFailure()
+            void refreshLimit()
+          }
           setConfirming(false)
           setOpen(current => !current)
         }}
@@ -191,6 +248,16 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
           {CLASSIFIER_NOTE}
         </span>
       ) : null}
+
+      {/* A polite live region, not role="status": the composer has its own status line. */}
+      <span
+        className="visually-hidden"
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid="approval-mode-status"
+      >
+        {announcement}
+      </span>
 
       {saveFailed && !menuOpen ? (
         <span
@@ -260,20 +327,35 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
               Shell always asks on this model.
             </p>
           ) : null}
+          {limitNoteText ? (
+            <p
+              id={limitNoteId}
+              className="model-selector-notice"
+              data-testid="approval-mode-limit-note"
+            >
+              {limitNoteText}
+            </p>
+          ) : null}
           <ul className="model-selector-list">
             {MODE_OPTIONS.map(option => {
               const isActive = option.mode === effectiveMode
+              // Above the Host's limit: shown, not offered. Unknown limit offers all.
+              const aboveLimit = modeLimit !== null && MODE_RANK[option.mode] > MODE_RANK[modeLimit]
               return (
                 <li key={option.mode}>
                   <button
                     type="button"
                     role="menuitemradio"
                     aria-checked={isActive}
+                    aria-disabled={aboveLimit || undefined}
+                    aria-describedby={aboveLimit && limitNoteText ? limitNoteId : undefined}
                     data-testid={option.testId}
                     className={`model-selector-item${isActive ? ' model-selector-item--active' : ''}`}
-                    onClick={() =>
-                      option.mode === 'allow_all' ? setConfirming(true) : choose(option.mode)
-                    }
+                    onClick={() => {
+                      if (aboveLimit) return
+                      if (option.mode === 'allow_all') setConfirming(true)
+                      else choose(option.mode)
+                    }}
                   >
                     <span className="model-selector-item-label">{option.label}</span>
                     {isActive ? (
