@@ -16,7 +16,10 @@ import {
   type InvitationPurpose,
   insertInvitationForTeams,
 } from '../src/services/directory/invitationStore.js'
-import { acceptInvitationForEmailInTransaction } from '../src/services/directory/membership.js'
+import {
+  acceptInvitationForEmailInTransaction,
+  softDeleteMember,
+} from '../src/services/directory/membership.js'
 import type { InviteRole } from '../src/services/directory/types.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import {
@@ -239,6 +242,32 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       status: input.status ?? 'pending',
     })
     return { id: created.invitation.id, token: created.invitation.token }
+  }
+
+  /**
+   * Seeds two pending invitations for one address and makes the one with the
+   * lower or the higher id the more recently created, so creation order and
+   * id order can be made to disagree.
+   */
+  async function seedTwoInvitations(
+    email: string,
+    specs: readonly [{ teamId: string; role: InviteRole }, { teamId: string; role: InviteRole }],
+    newest: 'lower id' | 'higher id'
+  ) {
+    const created = []
+    for (const spec of specs)
+      created.push({ ...spec, ...(await seedInvitation({ email, ...spec })) })
+    const [lower, higher] = created.sort((a, b) => (a.id < b.id ? -1 : 1))
+    const [older, newer] = newest === 'lower id' ? [higher!, lower!] : [lower!, higher!]
+    await testPool.query(
+      `UPDATE invitations SET created_at = NOW() - INTERVAL '2 hours' WHERE id = $1`,
+      [older.id]
+    )
+    await testPool.query(
+      `UPDATE invitations SET created_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+      [newer.id]
+    )
+    return { older, newer }
   }
 
   async function retireUser(userId: string): Promise<void> {
@@ -876,6 +905,111 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       status: 'accepted',
       accepted_user_id: acceptedUserId,
     })
+  })
+
+  it('applies two invitations in one sign-in', async () => {
+    const email = `${uniqueLabel('two-invitations')}@fixture.test`
+    const userId = await seedUser(email)
+    const firstTeam = await seedTeam('two-invitations-first')
+    const secondTeam = await seedTeam('two-invitations-second')
+    const first = await seedInvitation({ email, teamId: firstTeam, role: 'member' })
+    const second = await seedInvitation({ email, teamId: secondTeam, role: 'inviter' })
+    const proof = await defaultFake.signIn({
+      sub: uniqueLabel('two-invitations-subject'),
+      email,
+      email_verified: true,
+    })
+
+    const result = signedIn(await signIn(defaultFake, proof))
+
+    expect(result).toMatchObject({ userId, invitationsApplied: 2 })
+    for (const invitation of [first, second]) {
+      expect(await invitationState(invitation.id)).toEqual({
+        status: 'accepted',
+        accepted_user_id: userId,
+      })
+    }
+    const memberships = await membershipsOf(userId)
+    expect(memberships).toHaveLength(2)
+    expect(memberships).toEqual(
+      expect.arrayContaining([
+        { team_id: firstTeam, role: 'member' },
+        { team_id: secondTeam, role: 'inviter' },
+      ])
+    )
+  })
+
+  it("a teamless member with two invitations lands in the most recently created invitation's team", async () => {
+    for (const newest of ['lower id', 'higher id'] as const) {
+      const email = `${uniqueLabel('latest-team')}@fixture.test`
+      const userId = await seedUser(email)
+      const { older, newer } = await seedTwoInvitations(
+        email,
+        [
+          { teamId: await seedTeam('latest-team-a'), role: 'member' },
+          { teamId: await seedTeam('latest-team-b'), role: 'inviter' },
+        ],
+        newest
+      )
+      // The member was removed from the older invitation's team a month ago.
+      // Both acceptances share one NOW(), so a membership lookup would rank
+      // that older team row first.
+      await seedMembership(older.teamId, userId, 'member')
+      await testPool.query(
+        `UPDATE team_members SET created_at = NOW() - INTERVAL '30 days'
+          WHERE team_id = $1 AND user_id = $2`,
+        [older.teamId, userId]
+      )
+      expect(await softDeleteMember(older.teamId, userId, actorId)).toMatchObject({
+        status: 'deleted',
+      })
+      expect(await membershipsOf(userId)).toEqual([])
+      const proof = await defaultFake.signIn({
+        sub: uniqueLabel('latest-team-subject'),
+        email,
+        email_verified: true,
+      })
+
+      const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
+
+      expect(result, newest).toMatchObject({ userId, invitationsApplied: 2 })
+      expect(verifyExternalSessionToken(result.token), newest).toMatchObject({
+        userId,
+        teamId: newer.teamId,
+        role: newer.role,
+      })
+    }
+  })
+
+  it('the latest-created duplicate invitation sets the role', async () => {
+    for (const newest of ['lower id', 'higher id'] as const) {
+      const email = `${uniqueLabel('duplicate-role')}@fixture.test`
+      const userId = await seedUser(email)
+      const teamId = await seedTeam('duplicate-role-team')
+      const { newer } = await seedTwoInvitations(
+        email,
+        [
+          { teamId, role: 'admin' },
+          { teamId, role: 'inviter' },
+        ],
+        newest
+      )
+      const proof = await defaultFake.signIn({
+        sub: uniqueLabel('duplicate-role-subject'),
+        email,
+        email_verified: true,
+      })
+
+      const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
+
+      expect(result, newest).toMatchObject({ userId, invitationsApplied: 2 })
+      expect(await membershipsOf(userId), newest).toEqual([{ team_id: teamId, role: newer.role }])
+      expect(verifyExternalSessionToken(result.token), newest).toMatchObject({
+        userId,
+        teamId,
+        role: newer.role,
+      })
+    }
   })
 
   it('the issued token authenticates as the member', async () => {

@@ -3,7 +3,7 @@ import type { OidcMemberSignInPolicy, OidcProviderConfiguration } from '../../oi
 import type { VerifiedOidcIdentityProof } from '../../oidc/protocol.js'
 import type { OidcVerifiedAttributes } from '../../oidc/protocolEngine.js'
 import type { EffectiveUserAccessPolicy } from '../access/userAccessPolicy.js'
-import type { InvitationRow } from '../directory/invitationStore.js'
+import { type InvitationRow, loadInvitationTeams } from '../directory/invitationStore.js'
 import { currentMemberMembership, findFirstActiveMembership } from '../directory/login.js'
 import { acceptPendingMembershipInvitation } from '../directory/membership.js'
 import type { TeamRole } from '../directory/types.js'
@@ -52,22 +52,39 @@ function isUniqueViolation(error: unknown): boolean {
   )
 }
 
+/** A pending invitation with its creation time in microseconds, which a JS Date would truncate. */
+type PendingInvitation = InvitationRow & { created_at_us: string }
+
+/** Oldest created first; the id breaks a tie. */
+function byCreation(a: PendingInvitation, b: PendingInvitation): number {
+  const aCreated = BigInt(a.created_at_us)
+  const bCreated = BigInt(b.created_at_us)
+  if (aCreated !== bCreated) return aCreated < bCreated ? -1 : 1
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+}
+
 /**
  * Accepts every pending member invitation addressed to the account's stored
  * email, not to the provider's claim. The caller holds the user row lock, so
  * the order is the one every invitation path takes: the user, then the
- * invitations (`FOR UPDATE`, by id), then the team_members rows the
- * acceptance writes. Password-reset, admin-desktop-access, expired, revoked
- * and draft invitations are never selected.
+ * invitations (`FOR UPDATE`, by id for a deterministic lock order), then the
+ * team_members rows the acceptance writes. Password-reset,
+ * admin-desktop-access, expired, revoked and draft invitations are never
+ * selected.
+ *
+ * The locked rows are applied oldest created first, so of two invitations to
+ * one team the latest created sets the role. Returns the applied invitations
+ * in that order.
  */
 async function applyPendingInvitations(
   db: DbTransactionClient,
   account: OidcResolvedAccount
-): Promise<number> {
+): Promise<InvitationRow[]> {
   const pending = await db.query(
     `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose,
             i.created_at, i.expires_at, i.accepted_at, i.accepted_user_id,
-            t.name AS team_name
+            t.name AS team_name,
+            (extract(epoch FROM i.created_at) * 1000000)::bigint::text AS created_at_us
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
       WHERE lower(i.email) = lower($1)
@@ -78,11 +95,13 @@ async function applyPendingInvitations(
         FOR UPDATE OF i`,
     [account.email]
   )
-  let applied = 0
-  for (const invitation of pending.rows as InvitationRow[]) {
+  const applied: InvitationRow[] = []
+  for (const invitation of [...(pending.rows as PendingInvitation[])].sort(byCreation)) {
     // The row is locked and matched the same predicates, so a false return is
     // not expected; only an acceptance that happened is counted.
-    if (await acceptPendingMembershipInvitation(db, invitation, account.userId)) applied += 1
+    if (await acceptPendingMembershipInvitation(db, invitation, account.userId)) {
+      applied.push(invitation)
+    }
   }
   return applied
 }
@@ -105,6 +124,24 @@ async function currentMembershipIn(
   return result.rows[0] as SessionTeam | undefined
 }
 
+/**
+ * The team of the most recently created applied invitation that grants one:
+ * its primary team, in the order its acceptance used, with the role the
+ * acceptances left there.
+ */
+async function latestInvitedTeam(
+  db: DbTransactionClient,
+  userId: string,
+  applied: readonly InvitationRow[]
+): Promise<SessionTeam | undefined> {
+  for (let index = applied.length - 1; index >= 0; index -= 1) {
+    const invitation = applied[index]!
+    const [primary] = await loadInvitationTeams(db, invitation.id, invitation)
+    if (primary) return currentMembershipIn(db, userId, primary.team_id)
+  }
+  return undefined
+}
+
 async function signInResolvedMember(
   db: DbTransactionClient,
   input: OidcMemberSignInInput
@@ -118,22 +155,23 @@ async function signInResolvedMember(
   const { account } = resolution
 
   // An existing member's team is chosen before the invitations are applied:
-  // a member who already has a team keeps it, and only a teamless member
-  // lands in an invited team. The kept team's role is read again afterwards,
-  // because an invitation to that team may have changed it. A kept membership
-  // that a concurrent removal ended meanwhile counts as no team.
-  // An account created by this sign-in keeps nothing: its only team so far is
-  // the new-member team, so the lookup after the invitations ranks an invited
-  // team first and falls back to the new-member team.
+  // a member who already has a team keeps it, with its role read again
+  // afterwards, because an invitation to that team may have changed it. A kept
+  // membership that a concurrent removal ended meanwhile counts as no team.
+  // A teamless member, and an account created by this sign-in (whose only team
+  // so far is the new-member team), land in the team of the most recently
+  // created applied invitation; otherwise in their first active team, which
+  // for a new account is the new-member team; otherwise they are teamless.
   const before = account.created.account
     ? undefined
     : ((await findFirstActiveMembership(db, account.userId)).rows[0] as SessionTeam | undefined)
-  const invitationsApplied = await applyPendingInvitations(db, account)
+  const applied = await applyPendingInvitations(db, account)
   const kept = before?.team_id
     ? await currentMembershipIn(db, account.userId, before.team_id)
     : undefined
   const team =
     kept ??
+    (await latestInvitedTeam(db, account.userId, applied)) ??
     ((await findFirstActiveMembership(db, account.userId)).rows[0] as SessionTeam | undefined) ??
     TEAMLESS_MEMBER
 
@@ -162,7 +200,7 @@ async function signInResolvedMember(
     token: issued.token,
     contract: issued.contract,
     created: Object.freeze({ ...account.created }),
-    invitationsApplied,
+    invitationsApplied: applied.length,
   })
 }
 
