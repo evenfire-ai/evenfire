@@ -8,7 +8,7 @@ type MembershipRow = {
   team_name: string | null
 }
 
-async function findFirstActiveMembership(
+export async function findFirstActiveMembership(
   db: {
     query: (
       text: string,
