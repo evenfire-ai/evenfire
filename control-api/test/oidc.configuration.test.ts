@@ -358,6 +358,27 @@ describe('OIDC member sign-in configuration', () => {
     expect(provider.memberSignIn?.entraTenantId).toBeNull()
   })
 
+  it('refuses a tenant pin on a non-Entra issuer', () => {
+    expect(refusal({ ...OIDC_ENV, CONTROL_API_OIDC_TENANT_ID: TENANT })).toBe(
+      'Invalid OIDC provider configuration field(s): CONTROL_API_OIDC_TENANT_ID'
+    )
+    expect(
+      refusal({
+        ...OIDC_ENV,
+        CONTROL_API_OIDC_ALLOW_GUESTS: 'true',
+        CONTROL_API_OIDC_REQUIRED_ROLE: 'member',
+        CONTROL_API_OIDC_TENANT_ID: TENANT,
+      })
+    ).toContain('CONTROL_API_OIDC_TENANT_ID')
+    expect(
+      refusal({
+        ...OIDC_ENV,
+        CONTROL_API_OIDC_ALLOW_GUESTS: 'true',
+        CONTROL_API_OIDC_REQUIRED_ROLE: 'member',
+      })
+    ).toContain('CONTROL_API_OIDC_ALLOW_GUESTS')
+  })
+
   it('requires REQUIRED_ROLE and TENANT_ID with ALLOW_GUESTS', () => {
     const guests = { CONTROL_API_OIDC_ALLOW_GUESTS: 'true' }
     expect(refusal({ ...ENTRA_ENV, ...guests })).toContain('CONTROL_API_OIDC_ALLOW_GUESTS')

@@ -234,6 +234,7 @@ function parseMemberEligibility(
       bad.add(OPTIONAL_ENV.tenantId)
     }
   }
+  if (!entraIssuer && tenantRaw !== undefined) bad.add(OPTIONAL_ENV.tenantId)
   if (entraIssuer) {
     if (tenantRaw === undefined) bad.add(OPTIONAL_ENV.tenantId)
     const [authority, version, ...rest] = issuerUrl.pathname.split('/').filter(Boolean)
