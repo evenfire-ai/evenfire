@@ -223,6 +223,34 @@ describe('oidcEmailState', () => {
       false,
       'no_email',
     ],
+    ...(
+      [
+        ['leading whitespace', ' member@example.test'],
+        ['trailing whitespace', 'member@example.test '],
+        ['inner whitespace', 'mem ber@example.test'],
+        ['a control character', 'member\u007f@example.test'],
+        ['no @', 'member.example.test'],
+        ['two @', 'member@other@example.test'],
+        ['no dot in the domain', 'member@example'],
+        ['more than 320 characters', `${'a'.repeat(308)}@example.test`],
+      ] as const
+    ).map(
+      ([shape, email]) =>
+        [
+          `a verified claim with ${shape} is no email`,
+          proof({ email_verified: present(true) }, email),
+          entra(),
+          false,
+          'no_email',
+        ] as const
+    ),
+    [
+      'a verified 320-character address is verified',
+      proof({ email_verified: present(true) }, `${'a'.repeat(307)}@example.test`),
+      entra(),
+      false,
+      'verified',
+    ],
   ])('%s', (_name, input, pol, guest, expected) => {
     expect(oidcEmailState(input, pol, guest)).toBe(expected)
   })

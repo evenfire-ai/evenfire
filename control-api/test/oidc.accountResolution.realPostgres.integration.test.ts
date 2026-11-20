@@ -530,6 +530,38 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     expect(await linksFor(subject)).toEqual([])
   })
 
+  it('a malformed email claim refuses with email_claim_missing and writes nothing', async () => {
+    // Entra allows creation, so a malformed claim that got past the email check would create an account.
+    const fake = entraFake('fake-entra-malformed-email')
+    const local = uniqueLabel('malformed')
+    await seedUser(`${local}@entra.fixture.test`)
+    const before = await watchedTables()
+
+    for (const email of [
+      ` ${local}@entra.fixture.test`,
+      `${local}@entra.fixture.test `,
+      `${local} x@entra.fixture.test`,
+      `${local}.entra.fixture.test`,
+      `${local}@other@entra.fixture.test`,
+    ]) {
+      const subject = uniqueLabel('malformed-subject')
+      const proof = await fake.signIn({
+        sub: subject,
+        tid: ENTRA_TENANT_ID,
+        email,
+        email_verified: true,
+      })
+      expect(proof.attributes.email).toBe(email)
+      expect(await resolve(fake, proof)).toEqual({
+        status: 'refused',
+        reason: 'email_claim_missing',
+      })
+      expect(await linksFor(subject)).toEqual([])
+    }
+
+    expect(await watchedTables()).toEqual(before)
+  })
+
   it('email_unverified when email_verified is false', async () => {
     const email = `${uniqueLabel('unverified')}@fixture.test`
     await seedUser(email)
@@ -610,7 +642,7 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     })
   })
 
-  it('an unknown new-member team refuses with provider_configuration and rolls back the user insert', async () => {
+  it('an unknown new-member team refuses with provider_configuration and creates no user', async () => {
     const fake = entraFake('fake-entra-unknown-team', {
       CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: randomUUID(),
     })

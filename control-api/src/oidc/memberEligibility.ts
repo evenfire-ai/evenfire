@@ -5,9 +5,28 @@ export type OidcEligibility =
   | Readonly<{ eligible: true; guest: boolean }>
   | Readonly<{ eligible: false; reason: 'not_eligible' }>
 
+/** `no_email`: the claim is absent, empty or not a plausible address. */
 export type OidcEmailState = 'verified' | 'unverified' | 'missing_claim' | 'no_email'
 
 const NOT_ELIGIBLE: OidcEligibility = Object.freeze({ eligible: false, reason: 'not_eligible' })
+
+const MAX_EMAIL_LENGTH = 320
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/
+
+/**
+ * A plausible address: one '@', a dot in the domain, no whitespace or control
+ * characters, at most 320 characters. It is not trimmed: surrounding
+ * whitespace makes the claim malformed.
+ */
+function isPlausibleEmail(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= MAX_EMAIL_LENGTH &&
+    !CONTROL_CHARACTERS.test(value) &&
+    EMAIL_SHAPE.test(value)
+  )
+}
 
 /** Claims whose "unsupported" observation means we cannot judge eligibility. */
 const ELIGIBILITY_CLAIMS = ['tid', 'idp', 'roles', 'acct', 'email_verified'] as const
@@ -65,7 +84,7 @@ export function oidcEmailState(
   policy: OidcMemberSignInPolicy,
   guest: boolean
 ): OidcEmailState {
-  if (typeof proof.attributes.email !== 'string' || proof.attributes.email === '') return 'no_email'
+  if (!isPlausibleEmail(proof.attributes.email)) return 'no_email'
   const claim = observe(proof, 'email_verified')
   if (claim.status === 'present') return claim.value === true ? 'verified' : 'unverified'
   if (claim.status === 'missing' && policy.entraTenantId !== null && !guest) return 'missing_claim'
