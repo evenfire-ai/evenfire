@@ -17,14 +17,14 @@ vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
 vi.mock('../services/controlApiRestService.js', () => controlApiMock)
 
-// Same scope as rename. Wake rides on the token, copied from approve, so the
-// happy path carries only host:session:write.
+// Same scope as approve and deny. Wake rides on the token, copied from
+// approve, so the happy path carries only host:approval:write.
 const VALID_CLAIMS = {
   sub: 'user-uuid-123',
   typ: 'user' as const,
   accessScope: 'team' as const,
   teamId: 'team-1',
-  scopes: ['host:session:write'],
+  scopes: ['host:approval:write'],
   hostRefs: ['chatllm'],
   jti: 'j1',
   iat: 1,
@@ -183,7 +183,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
-  it('returns 403 when the token lacks host:session:write', async () => {
+  it('returns 403 when the token lacks host:approval:write', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
       ...VALID_CLAIMS,
       scopes: ['host:session:read'],
@@ -199,6 +199,32 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
 
     expect(fetchMock).not.toHaveBeenCalled()
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
+  it('refuses a rename-only host:session:write token that rename still accepts', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      scopes: ['host:session:write'],
+    })
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { title: 'Renamed' }))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'allow_all' })
+      .expect(403)
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    await request(makeApp())
+      .patch('/rpc/hosts/chatllm/sessions/chatllm/c1/name')
+      .set('authorization', 'Bearer user-token')
+      .send({ title: 'Renamed' })
+      .expect(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/name'
+    )
   })
 
   it('returns 403 when the user cannot access the host', async () => {
@@ -272,7 +298,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
   it('wakes and retries the upstream once when the token has host:wake:write', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
       ...VALID_CLAIMS,
-      scopes: ['host:session:write', 'host:wake:write'],
+      scopes: ['host:approval:write', 'host:wake:write'],
     })
     const upstream = {
       approvalMode: 'allow_all',

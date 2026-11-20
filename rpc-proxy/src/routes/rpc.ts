@@ -550,11 +550,12 @@ export function createRpcRouter(): Router {
           return
         }
         // First-message mode. This body is an allowlist: forward approvalMode
-        // only for a stored value when the token also has host:session:write.
-        // Carrying the field without that scope is 403. A message without the
-        // field needs only host:message:invoke. An invalid value is dropped.
+        // only for a stored value when the token also has host:approval:write,
+        // the mode PATCH's scope. Carrying the field without that scope is 403.
+        // A message without the field needs only host:message:invoke. An
+        // invalid value is dropped.
         const carriesApprovalMode = Object.prototype.hasOwnProperty.call(body, 'approvalMode')
-        if (carriesApprovalMode && !auth.scopes.includes('host:session:write')) {
+        if (carriesApprovalMode && !auth.scopes.includes('host:approval:write')) {
           res.status(403).json({ error: 'Forbidden: missing scope' })
           return
         }
@@ -1379,14 +1380,16 @@ export function createRpcRouter(): Router {
     }
   )
 
-  // Set a session's stored approval mode. Scope and host access match rename.
-  // Unlike rename this write is wake-eligible: it copies the approve route's
-  // single retry. There is no idempotency key, so a hold re-issues the PATCH
-  // at most once. The body is only { mode }; mcp-host clamps the effective mode.
+  // Set a session's stored approval mode. A mode answers later cards in
+  // advance, so the scope is approve's (host:approval:write), not rename's.
+  // Host access matches rename. Unlike rename this write is wake-eligible: it
+  // copies the approve route's single retry. There is no idempotency key, so a
+  // hold re-issues the PATCH at most once. The body is only { mode }; mcp-host
+  // clamps the effective mode.
   router.patch(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode',
     requireRpcAuth,
-    requireScope('host:session:write'),
+    requireScope('host:approval:write'),
     jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
@@ -1424,7 +1427,7 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${logHost} method=set-approval-mode agent=${logAgent} chatId=${logChatId} mode=${mode}`
         )
         const upstreamBody = { mode }
-        // Wake-eligible finite operation: scope stays host:session:write.
+        // Wake-eligible finite operation: scope stays host:approval:write.
         // Waking also needs host:wake:write on the token.
         const attempt = async (timeoutMs?: number) => {
           const response = await fetch(

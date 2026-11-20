@@ -1437,7 +1437,7 @@ export class RpcProxyClient {
 
   /**
    * Sets the session approval mode. The route wakes, like approve, so the
-   * caller mints `host:session:write` and `host:wake:write`. A 400, 401 or 404
+   * caller mints `host:approval:write` and `host:wake:write`. A 400, 401 or 404
    * is a definite rejection: the message keeps the status so the renderer can
    * leave the painted label alone. Any other failure is not proof of the
    * stored mode.
