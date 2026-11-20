@@ -1653,7 +1653,15 @@
   },
   {
     "suite": "approvalModeAdmission.integration.test.ts",
-    "fullName": "approval mode admission X1 runs shell, MCP, live download, admin_forced, denied, denials_active, and guardrail ask without classify"
+    "fullName": "approval mode admission X1 runs shell, MCP, live download, admin_forced, denied, and denials_active without classify"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission X2 cards a guardrail ask from an explicit ask rule in allow-all, exactly and without classify"
+  },
+  {
+    "suite": "approvalModeAdmission.integration.test.ts",
+    "fullName": "approval mode admission X2 cards a guardrail ask from the unmatched default of a Host with rules in allow-all, exactly and without classify"
   },
   {
     "suite": "approvalModeAdmission.integration.test.ts",
@@ -2049,10 +2057,6 @@
   },
   {
     "suite": "decideApproval.test.ts",
-    "fullName": "decideApproval X1 'shell_exec' 'guardrail_ask' runs in allow-all"
-  },
-  {
-    "suite": "decideApproval.test.ts",
     "fullName": "decideApproval X1 'http_request' 'ordinary' runs in allow-all"
   },
   {
@@ -2074,10 +2078,6 @@
   {
     "suite": "decideApproval.test.ts",
     "fullName": "decideApproval X1 'http_request' 'denials_active' runs in allow-all"
-  },
-  {
-    "suite": "decideApproval.test.ts",
-    "fullName": "decideApproval X1 'http_request' 'guardrail_ask' runs in allow-all"
   },
   {
     "suite": "decideApproval.test.ts",
@@ -2105,7 +2105,15 @@
   },
   {
     "suite": "decideApproval.test.ts",
-    "fullName": "decideApproval X1 'browser_open' 'guardrail_ask' runs in allow-all"
+    "fullName": "decideApproval X2 shell_exec guardrail_ask is an exact card in allow-all, even with every grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X2 http_request guardrail_ask is an exact card in allow-all, even with every grant"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval X2 browser_open guardrail_ask is an exact card in allow-all, even with every grant"
   },
   {
     "suite": "decideApproval.test.ts",

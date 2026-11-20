@@ -299,7 +299,8 @@ spec:
                         may run. manual asks on every gated tool. auto judges
                         shell on supported models and runs http_request with no
                         card. allow_all runs gated tools, except cron_manage,
-                        which asks exactly when manual would. Absent means
+                        which asks exactly when manual would, and a guardrail
+                        ask, which still shows its card. Absent means
                         manual. mcp-host reads this from the Host CR only (dev
                         mode reads CLERUM_APPROVAL_CONFIG). An older CRD prunes
                         an unknown value, which fails safe to manual.

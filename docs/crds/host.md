@@ -141,7 +141,7 @@ An absent ceiling, a Host with no `spec.approval`, or any other value means `man
 
 A Host whose approval policy comes only from the ConfigMap has ceiling `manual` and channel cap `manual`. mcp-host uses `spec.approval` or the ConfigMap policy as one whole object, so adding `spec.approval` replaces that policy. Copy `defaultPolicy`, `channels`, and `tools` into the CR in the same edit that sets the ceiling.
 
-An explicit `shell_exec: true`, including the example above, keeps a card on every `shell_exec` in auto, with no classifier and no shell memory. Remove that line if auto should judge shell.
+An explicit `shell_exec: true`, including the example above, keeps a card on every `shell_exec` in auto, with no classifier and no shell memory. Remove that line if auto should judge shell. Allow-all runs it with no card. A guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules) keeps its card in every interactive mode, allow-all included.
 
 Apply this CRD before any component writes `modeCeiling` or `allowModeChange`. Until it is applied, the API server prunes the new fields and the ceiling stays manual. An `allowModeChange: false` written before the CRD is lost; write it again after the CRD is applied, before raising the ceiling.
 

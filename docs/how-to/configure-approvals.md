@@ -112,11 +112,17 @@ again restores that choice.
 | --- | --- |
 | `manual` | Today's card. The classifier is not called. |
 | `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. `http_request` runs with no card. Every other tool still shows a card. |
-| `allow_all` | Runs every call that would have shown a card, except `cron_manage`. |
+| `allow_all` | Runs every call that would have shown a card, except `cron_manage` and a guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules), which still show their card. |
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant
 already stored for it still covers a later create, including while the chat is
 allow-all. The mode does not change its forced create/enable gate.
+
+A guardrail `ask` shows its card in every interactive mode, scoped to that one
+call, with no Always option. Allow-all still runs these with no card: a tool an
+admin forces to ask with `spec.approval.tools.<tool>: true`, a tool the user
+denied earlier in the chat, and a GFS download (`clerum__gfs_download`), which
+otherwise asks on every call. A guardrail `deny` still blocks in every mode.
 
 ### Ceiling
 
@@ -215,7 +221,8 @@ provider, or the boot fallback's pair while the Host primary cannot be built.
 
 An explicit `tools.shell_exec: true` keeps a card on every shell call in auto,
 with no classifier and no shell memory. Remove the line if auto should judge
-shell. See [Host CRD](../crds/host.md#approval-mode-ceiling).
+shell. It does not keep a card in allow-all; a guardrail `ask` rule does. See
+[Host CRD](../crds/host.md#approval-mode-ceiling).
 
 ## Option C — the Control UI
 
