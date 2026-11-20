@@ -4,20 +4,16 @@ import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, render } from '@testing-library/react'
 import { createGfsUploadNameReservationBook } from '@clerum/gfs-interaction-policy'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
-import { useGfsResourceOperations } from '@hooks/domain/useGfsResourceOperations'
+import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { fetchGfsAuthority, requireFreshGfsPermissions } from '@lib/gfsFreshPermissions'
 import type { GfsFreshPermissionsContext } from '@lib/gfsFreshPermissions.types'
-import {
-  handleGfsAuthorityFailure,
-  readGfsAccessState,
-  revokeGfsSessionAccess,
-} from '@lib/gfsSessionAuthority'
+import { readGfsAccessState, revokeGfsSessionAccess } from '@lib/gfsSessionAuthority'
 import {
   affordancesFailureMessage,
   childView,
   createFolderResult,
   gfsRouteFailureMessage,
+  listAccessiblePage,
   renameResourceResult,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
@@ -62,7 +58,7 @@ const writable = () => delegationAffordances(new Set(['read', 'write', 'delete']
 
 interface Harness {
   client: QueryClient
-  ops: ReturnType<typeof useGfsResourceOperations>
+  ctrl: ReturnType<typeof useGfsBrowserController>
   bridge: {
     affordances: ReturnType<typeof vi.fn>
     getSessionGeneration: ReturnType<typeof vi.fn>
@@ -85,6 +81,7 @@ async function harness(
 ): Promise<Harness> {
   const created = await createFolderResult('folder-d', childView('new-1', 'Reports', 'directory'))
   const renamed = await renameResourceResult('file-t', 'renamed.txt', 4)
+  const noRoots = await listAccessiblePage([])
   const bridge = {
     affordances: vi.fn(affordances),
     getSessionGeneration: vi.fn(async () => 1),
@@ -98,6 +95,7 @@ async function harness(
     value: {
       auth: { getSessionGeneration: bridge.getSessionGeneration },
       gfs: {
+        listAccessible: vi.fn(async () => noRoots),
         affordances: bridge.affordances,
         createFolder: bridge.createFolder,
         renameResource: bridge.renameResource,
@@ -108,10 +106,11 @@ async function harness(
     },
   })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  client.setQueryData(desktopQueryKeys.gfsAccessState(SCOPE, 1), 'active')
-  let ops!: ReturnType<typeof useGfsResourceOperations>
+  // The controller FilesPage runs owns the session's access flag, its
+  // fail-closed writer and the mutations the runners send.
+  let ctrl!: ReturnType<typeof useGfsBrowserController>
   function Probe() {
-    ops = useGfsResourceOperations()
+    ctrl = useGfsBrowserController()
     return null
   }
   render(
@@ -126,36 +125,35 @@ async function harness(
   const owner = { current: true }
   // The library judges only the published session here, never the access
   // flag or the owner's token, so the runner's own checks are what stand
-  // between those events and the mutation.
+  // between those events and the mutation. Authority failures fail closed
+  // through the controller, as FilesPage routes them.
   const libContext = (gen: number): GfsFreshPermissionsContext => ({
     queryClient: client,
     handleAuthorityFailure: (error, scope, generation) =>
-      handleGfsAuthorityFailure(
-        client,
-        scope,
-        generation,
+      ctrl.handleAuthorityFailure(
         error instanceof Error ? error.message : String(error),
         'operation',
-        { scope: SCOPE, generation: published.generation }
-      ) !== 'not-authority',
+        scope,
+        generation
+      ),
     pushToast: message => toasts.push(message),
     isCurrent: () => published.generation === gen,
   })
   const deps = (): GfsActionRunnerDeps => {
     const gen = published.generation
     return {
-      ops,
+      ops: ctrl,
       freshPermissions: (resourceId, resourceName, bits) =>
         requireFreshGfsPermissions(
           { scope: SCOPE, gen, resourceId, resourceName, bits },
           libContext(gen)
         ),
-      readAccessState: () => readGfsAccessState(client, SCOPE, published.generation),
+      readAccessState: () => ctrl.readAccessState(),
       publishedGeneration: () => published.generation,
       isCurrent: () => owner.current,
     }
   }
-  return { client, ops, bridge, toasts, published, owner, deps, libContext }
+  return { client, ctrl, bridge, toasts, published, owner, deps, libContext }
 }
 
 const target = { resourceId: 'file-t', name: 'notes.txt', version: 3 }
@@ -390,6 +388,26 @@ describe('GFS action runners', () => {
       'main'
     )
     expect(result.status).toBe('aborted')
+  })
+
+  it('upload: an upload aborted after reserving its name gives the name back', async () => {
+    const h = await harness()
+    const reservations = createGfsUploadNameReservationBook()
+    const upload = () =>
+      runGfsUpload(h.deps(), folder, new File(['x'], 'report.txt'), new Set(), reservations)
+    h.bridge.getSessionGeneration.mockResolvedValue(2)
+
+    expect((await upload()).status).toBe('aborted')
+    expect(h.bridge.createFileFromPath).not.toHaveBeenCalled()
+
+    h.bridge.getSessionGeneration.mockResolvedValue(1)
+    expect(await upload()).toEqual({ status: 'done', value: { name: 'report.txt' } })
+    expect(h.bridge.createFileFromPath).toHaveBeenCalledWith(
+      'folder-d',
+      'report.txt',
+      '/local/report.txt',
+      'main'
+    )
   })
 
   it('upload: a name conflict retries under the next free name while current', async () => {
