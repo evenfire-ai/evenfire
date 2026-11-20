@@ -488,20 +488,22 @@ describe('parent-folder confirmation run', () => {
     expect(page.closeButton().disabled).toBe(false)
   })
 
-  it('S-10 sends every write while the renderer is offline instead of pausing it', async () => {
-    const page = await mount()
-    await page.openRemovePlan()
-    await screen.findByRole('alertdialog')
-    page.goOffline()
-    expect(onlineManager.isOnline()).toBe(false)
+  for (const mode of modes) {
+    it(`S-10 sends every ${mode.name} write while the renderer is offline instead of pausing it`, async () => {
+      const page = await mount()
+      await mode.open(page)
+      await screen.findByRole('alertdialog')
+      page.goOffline()
+      expect(onlineManager.isOnline()).toBe(false)
 
-    await page.confirmPlan()
-    await waitSettled()
+      await page.confirmPlan()
+      await waitSettled()
 
-    expect(writeTargets(page.writes)).toEqual(REMOVE_WRITES)
-    await waitFor(() => expect(page.pushToast).toHaveBeenCalledWith(REMOVE_SUCCESS, 'success'))
-    expect(page.closeButton().disabled).toBe(false)
-  })
+      expect(writeTargets(page.writes)).toEqual(mode.writes)
+      await waitFor(() => expect(page.pushToast).toHaveBeenCalledWith(mode.success, 'success'))
+      expect(page.closeButton().disabled).toBe(false)
+    })
+  }
 })
 
 describe('direct role change', () => {

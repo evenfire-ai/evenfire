@@ -2,7 +2,7 @@
 import { type ReactNode, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, onlineManager } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -426,6 +426,56 @@ describe('useGfsResourceAccess — grants list / revoke / inherit (#826)', () =>
       expect(grant).toHaveBeenCalledWith('root', ['team:qa'], ['read'], 'main', false)
     )
   })
+
+  // Main owns the network: a write paused on the renderer's online flag would
+  // run later, after its caller's session check, possibly under another session.
+  for (const write of [
+    {
+      button: 'grant inherit true',
+      ipc: 'grant',
+      sentWith: ['root', ['user:bob'], ['read'], 'main', true],
+    },
+    { button: 'revoke grant', ipc: 'revokeGrant', sentWith: ['grant-42'] },
+    { button: 'revoke share', ipc: 'revokeShare', sentWith: ['share-42'] },
+  ] as const) {
+    it(`sends ${write.ipc} while the renderer is offline instead of pausing it`, async () => {
+      const sent = vi.fn(async () => undefined)
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => listAccessiblePage([])),
+            resolve: vi.fn(async () => rootDirectory()),
+            listChildren: vi.fn(async () => listChildrenPage([])),
+            affordances: vi.fn(async () =>
+              affordancesResult(heldAffordances(['read', 'manage_acl']))
+            ),
+            listGrants: vi.fn(async () => directGrant()),
+            listShares: vi.fn(async () => sharesListPage([])),
+            [write.ipc]: sent,
+          },
+        },
+      })
+
+      render(<ManageProbe />, { wrapper: Harness })
+      await act(async () => {
+        screen.getByRole('button', { name: 'open root' }).click()
+      })
+      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+      try {
+        act(() => onlineManager.setOnline(false))
+        expect(onlineManager.isOnline()).toBe(false)
+
+        await act(async () => {
+          screen.getByRole('button', { name: write.button }).click()
+        })
+
+        await waitFor(() => expect(sent).toHaveBeenCalledWith(...write.sentWith))
+      } finally {
+        onlineManager.setOnline(true)
+      }
+    })
+  }
 
   it('lists direct shares when Manage opens and caches them session-scoped', async () => {
     const listGrants = vi.fn(async () => [])
