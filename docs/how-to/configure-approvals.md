@@ -104,11 +104,13 @@ and platform defaults — treat “require approval” as the safe baseline.
 ## Approval modes
 
 Each interactive session stores `manual`, `auto`, or `allow_all`. A new session
-is `manual`. Rank is `manual` < `auto` < `allow_all`. Desktop labels the higher
-two "Auto-approve" and "Allow all". A messaging command uses `allow-all`. The
-effective mode is the minimum of the stored choice, the ceiling, and the
-channel cap. A lower ceiling or cap keeps the stored choice, so raising it
-again restores that choice.
+is `manual`, except a Desktop chat whose first message carries a mode picked
+before the chat existed: that chat stores the carried mode. Rank is
+`manual` < `auto` < `allow_all`. Desktop labels the higher two "Auto-approve"
+and "Allow all". A messaging command uses `allow-all`. The effective mode is
+the minimum of the stored choice, the ceiling, and the channel cap. A lower
+ceiling or cap keeps the stored choice, so raising it again restores that
+choice.
 
 | Mode | What a gated call does |
 | --- | --- |
