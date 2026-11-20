@@ -16,6 +16,7 @@ import {
   classifierAvailable,
   classifierServingPair,
   classifyToolCall,
+  configuredShellClassifierModel,
   shellClassifierCallOptions,
 } from '../shellClassifier'
 
@@ -212,6 +213,20 @@ async function histogramCounts(): Promise<[number, number, number]> {
     await count(clerumPromptCacheWriteTokens, 'clerum_prompt_cache_creation_tokens_count'),
   ]
 }
+
+describe('configuredShellClassifierModel', () => {
+  it('uses gpt-5.5 when the Host sets nothing or a blank string', () => {
+    expect(configuredShellClassifierModel(undefined)).toBe('gpt-5.5')
+    expect(configuredShellClassifierModel(null)).toBe('gpt-5.5')
+    expect(configuredShellClassifierModel('')).toBe('gpt-5.5')
+    expect(configuredShellClassifierModel('   ')).toBe('gpt-5.5')
+    expect(configuredShellClassifierModel(12)).toBe('gpt-5.5')
+  })
+
+  it('keeps a configured model name', () => {
+    expect(configuredShellClassifierModel(' gpt-4.1-mini ')).toBe('gpt-4.1-mini')
+  })
+})
 
 describe('classifierServingPair', () => {
   it('uses the Host primary when failover is not serving a fallback', () => {

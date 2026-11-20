@@ -317,6 +317,7 @@ const HostApprovalSchema = z
   .object({
     defaultPolicy: z.string().optional(),
     modeCeiling: z.enum(['manual', 'auto', 'allow_all']).optional(),
+    shellClassifierModel: z.string().optional(),
     channels: z
       .object({
         telegram: HostApprovalChannelSchema.optional(),

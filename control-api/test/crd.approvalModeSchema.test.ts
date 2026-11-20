@@ -63,6 +63,13 @@ describe('host.yaml approval mode schema', () => {
     expect(asRecord(approval.modeCeiling)?.enum).toEqual([...APPROVAL_MODES])
   })
 
+  it('shellClassifierModel is a string and absent means the default classifier model', () => {
+    const field = asRecord(approval.shellClassifierModel)
+    expect(field?.type).toBe('string')
+    expect(field?.enum).toBeUndefined()
+    expect(String(field?.description)).toContain('gpt-5.5')
+  })
+
   it('allowModeChange is a boolean under telegram, email, slack and teams', () => {
     const channels = asRecord(asRecord(approval.channels)?.properties)
     expect(channels && Object.keys(channels).sort()).toEqual([...MODE_CHANNELS].sort())

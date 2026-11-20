@@ -25,6 +25,7 @@ import {
 } from '../core/approval/approvalMode'
 import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
 import type { ShellAction } from '../core/approval/shellCard'
+import type { ShellClassifierCaller } from '../core/approval/shellClassifier'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
 import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
@@ -250,6 +251,7 @@ export class AgentStateMachine extends EventEmitter {
   // engine + policy + provider factory, or null when no policy is configured.
   // Null in dev/tests → no failover (byte-identical to today).
   private failoverSupportProvider: FailoverSupportProvider | null = null
+  private shellClassifierProvider: (() => ShellClassifierCaller | null) | null = null
 
   // #654 — live-catalog image-input capability resolver (provider, model →
   // evidence + policy admission). Null in dev/tests/unwired hosts → images
@@ -371,6 +373,14 @@ export class AgentStateMachine extends EventEmitter {
   setFailoverSupport(provider: FailoverSupportProvider): void {
     this.failoverSupportProvider = provider
     logger.info({ component: 'Agent' }, 'Failover support provider set')
+  }
+
+  /**
+   * Dedicated shell classifier. Read on each shell decision, so a credential
+   * or Host setting change applies to the next call. Absent keeps the chat pair.
+   */
+  setShellClassifierProvider(provider: () => ShellClassifierCaller | null): void {
+    this.shellClassifierProvider = provider
   }
 
   /**
@@ -1643,6 +1653,7 @@ export class AgentStateMachine extends EventEmitter {
       // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
       // no failover.
       failover: this.failoverSupportProvider?.() ?? undefined,
+      shellClassifierProvider: () => this.shellClassifierProvider?.() ?? null,
       imageInput: this.imageInputResolver ?? undefined,
       onApprovalNeeded: (requestId, taskId, approval) => {
         this.registerApproval(requestId, taskId, task, approval)

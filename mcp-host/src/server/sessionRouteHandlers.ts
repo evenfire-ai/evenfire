@@ -63,6 +63,13 @@ export interface SessionRouteHandlerDeps {
    * not a fallback means the session model is the classifier pair.
    */
   servedModel?: () => { provider: string; model: string; fallback: boolean } | null
+  /**
+   * Dedicated shell classifier pair, when the Host can build one. When it
+   * returns a pair, shellClassifierAvailable uses that pair instead of the
+   * chat or failover pair. Null keeps the chat pair. Admission must use the
+   * same pair.
+   */
+  shellClassifierPair?: () => { providerType: string; modelName: string } | null
 }
 
 export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
@@ -93,11 +100,14 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     const cap = readChannelCap(snapshot, channelType)
     const approvalMode = normalizeApprovalMode(stored)
     const model = sessionModel(selections)
-    const classifierModel = classifierServingPair({
-      primaryProvider: model.providerType,
-      primaryModel: model.modelName,
-      served: deps.servedModel?.(),
-    })
+    const dedicated = deps.shellClassifierPair?.() ?? null
+    const classifierModel =
+      dedicated ??
+      classifierServingPair({
+        primaryProvider: model.providerType,
+        primaryModel: model.modelName,
+        served: deps.servedModel?.(),
+      })
     return {
       approvalMode,
       modeCeiling: ceiling,

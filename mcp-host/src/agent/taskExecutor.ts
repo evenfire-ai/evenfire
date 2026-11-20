@@ -26,6 +26,7 @@ import type { ApprovalModeInputs } from '../core/approval/gateCause'
 import { approvalLogId } from '../core/approval/grantMemory'
 import type { ShellAction } from '../core/approval/shellCard'
 import {
+  type ShellClassifierCaller,
   classifierServingPair,
   classifyToolCall,
   classifierAvailable as isClassifierAvailable,
@@ -319,6 +320,13 @@ export interface TaskExecutorDeps {
    * so `usage_events` records the pair really served). Absent → no failover.
    */
   failover?: ExecutorFailoverSupport
+
+  /**
+   * Dedicated shell classifier. When it returns a caller, auto judges shell
+   * with that provider instead of the chat or failover pair. Null keeps the
+   * chat pair. The session read must use the same pair.
+   */
+  shellClassifierProvider?: () => ShellClassifierCaller | null
 
   /** Live, service-authenticated checkpoint for v2 runtime effects. */
   actionAuthorityCheckpoint?: RuntimeActionCheckpoint
@@ -2403,11 +2411,9 @@ export class TaskExecutor {
    * The model serving this turn. Failover's sticky pair wins; otherwise the
    * Host primary that this task was built with.
    */
-  private classifierCaller(): {
-    provider: Pick<SingleTurnProvider, 'completeSingleTurn'>
-    providerType: string
-    modelName: string
-  } {
+  private classifierCaller(): ShellClassifierCaller {
+    const dedicated = this.deps.shellClassifierProvider?.() ?? null
+    if (dedicated) return dedicated
     const primaryProvider = this.deps.llmProvider.getProviderType()
     const primaryModel = this.deps.modelName
     const served = this.deps.failover?.engine.servedBy()

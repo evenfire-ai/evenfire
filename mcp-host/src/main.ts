@@ -12,6 +12,7 @@
  *
  * Phase 6: Added approval handler wiring and approval config propagation.
  */
+import { createHash } from 'node:crypto'
 import * as path from 'node:path'
 import { HostActivityHub } from './activityHub'
 import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
@@ -43,6 +44,10 @@ import {
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
 import { applyHostChange } from './core/approval/hostChange'
 import { createHostEventGate } from './core/approval/hostEventGate'
+import {
+  type ShellClassifierCaller,
+  configuredShellClassifierModel,
+} from './core/approval/shellClassifier'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -651,6 +656,49 @@ function hostAllowlistView(): AllowlistView {
  * selection: the next task rebuilds with the new key. Returns null when no Host
  * model is configured or the key/provider is unavailable.
  */
+let shellClassifierCache: {
+  fingerprint: string
+  model: string
+  caller: ShellClassifierCaller
+} | null = null
+
+/**
+ * Dedicated shell classifier for a Host that holds an OpenAI credential.
+ * The chat model is not the judge. No credential, or a provider that cannot
+ * be built, returns null and admission keeps the chat or failover pair.
+ * The credential is hashed only as a cache key and is never logged.
+ */
+function shellClassifierCaller(): ShellClassifierCaller | null {
+  const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
+  const credential = keys.openai?.['openai-api-key']
+  if (typeof credential !== 'string' || credential.length === 0) {
+    shellClassifierCache = null
+    return null
+  }
+  const model = configuredShellClassifierModel(currentHost?.spec.approval?.shellClassifierModel)
+  const fingerprint = createHash('sha256').update(credential).digest('hex')
+  if (shellClassifierCache?.fingerprint === fingerprint && shellClassifierCache.model === model) {
+    return shellClassifierCache.caller
+  }
+  const provider = createLLMProvider(
+    keys,
+    { provider: 'openai', name: model },
+    { env: hostProviderEnv('openai') }
+  )
+  if (!provider) {
+    // createLLMProvider already logged the construction failure.
+    shellClassifierCache = null
+    return null
+  }
+  const caller: ShellClassifierCaller = {
+    provider,
+    providerType: provider.getProviderType(),
+    modelName: model,
+  }
+  shellClassifierCache = { fingerprint, model, caller }
+  return caller
+}
+
 function buildProviderForModel(model: string): SingleTurnProvider | null {
   const modelCfg = currentHost?.spec.model
   if (!modelCfg?.provider) return null
@@ -1928,6 +1976,7 @@ async function initializeAgent(): Promise<void> {
   // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
   // reads the live policy + sticky failover state. Null when no policy.
   agent.setFailoverSupport(currentFailoverSupport)
+  agent.setShellClassifierProvider(shellClassifierCaller)
 
   // Phase 6: publish approval once. Host changes publish again from onHostChange,
   // before credential reconciliation. initializeProvider does not.
@@ -2933,6 +2982,10 @@ async function startRPCServer(): Promise<void> {
         : { providerType: 'unknown', modelName: 'unknown' }
     },
     servedModel: () => failoverEngine?.servedBy() ?? null,
+    shellClassifierPair: () => {
+      const caller = shellClassifierCaller()
+      return caller ? { providerType: caller.providerType, modelName: caller.modelName } : null
+    },
   })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {

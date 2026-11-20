@@ -61,6 +61,13 @@ export interface ApprovalConfig {
    * allow_all; an absent or any other value is manual.
    */
   modeCeiling?: string
+  /**
+   * Model the dedicated shell classifier calls when this Host has an OpenAI
+   * credential. Absent or blank means gpt-5.5. A model the classifier does
+   * not allow shows the shell card. With no OpenAI credential, auto keeps
+   * the model serving the turn.
+   */
+  shellClassifierModel?: string
 }
 
 // ─── Approval Decision ─────────────────────────────────────
