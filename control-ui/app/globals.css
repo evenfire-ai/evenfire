@@ -9379,6 +9379,14 @@ td.cu-registry-description {
     box-shadow 0.15s;
 }
 
+.cu-markdown-editor[data-color-mode='dark'] {
+  color-scheme: dark;
+}
+
+.cu-markdown-editor[data-color-mode='light'] {
+  color-scheme: light;
+}
+
 .cu-markdown-editor--invalid {
   border-color: var(--cu-danger);
   box-shadow: 0 0 0 3px rgba(var(--cu-danger-rgb), 0.16);
@@ -13599,6 +13607,10 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-markdown-preview__content a {
   color: var(--cu-accent);
   text-underline-offset: 2px;
+}
+
+:root[data-theme='light'] .cu-identity-preview__document .cu-gfs-markdown-preview__content a {
+  color: var(--cu-link);
 }
 
 .cu-gfs-markdown-preview__content code {
