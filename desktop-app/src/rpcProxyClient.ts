@@ -119,9 +119,11 @@ function parseApprovalMode(value: unknown): ApprovalMode | undefined {
   return undefined
 }
 
+/** Absent is the plain approve; any other value is refused rather than sent as one. */
 function parseShellAction(value: unknown): ShellAction | undefined {
+  if (value === undefined) return undefined
   if (value === 'once' || value === 'command' || value === 'shell') return value
-  return undefined
+  throw new Error('Invalid shellAction')
 }
 
 /** A malformed descriptor is dropped. The card then uses today's buttons. */

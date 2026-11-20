@@ -76,7 +76,7 @@ describe('RpcProxyClient — approveToolCall()', () => {
     })
   })
 
-  it('forwards a shell card action and omits an invalid one', async () => {
+  it('forwards a shell card action and refuses an invalid one', async () => {
     fetchSpy.mockResolvedValueOnce(okResponse())
     await client.approveToolCall('rpc-token', 'chatllm', 'task-123', 'tc-456', false, 'command')
     const [, commandInit] = fetchSpy.mock.calls[0] as [string, RequestInit]
@@ -86,20 +86,11 @@ describe('RpcProxyClient — approveToolCall()', () => {
       shellAction: 'command',
     })
 
-    fetchSpy.mockResolvedValueOnce(okResponse())
-    await client.approveToolCall(
-      'rpc-token',
-      'chatllm',
-      'task-123',
-      'tc-456',
-      false,
-      'nope' as 'once'
-    )
-    const [, invalidInit] = fetchSpy.mock.calls[1] as [string, RequestInit]
-    expect(JSON.parse(invalidInit.body as string)).toEqual({
-      taskId: 'task-123',
-      toolCallId: 'tc-456',
-    })
+    // A typo is not sent as a plain approve.
+    await expect(
+      client.approveToolCall('rpc-token', 'chatllm', 'task-123', 'tc-456', false, 'nope' as 'once')
+    ).rejects.toThrow('Invalid shellAction')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
   it('sends alwaysApprove when the desktop asks to allowlist the tool', async () => {
