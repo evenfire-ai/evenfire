@@ -241,6 +241,13 @@ async function wake(): Promise<void> {
   let outcome = 'failed'
   let costRollupAttempted = false
   const retentionDurationMsByGrain: Partial<Record<RetentionGrain, number>> = {}
+  const roundedRetentionDurations = () =>
+    Object.fromEntries(
+      Object.entries(retentionDurationMsByGrain).map(([grain, durationMs]) => [
+        grain,
+        Math.round(durationMs),
+      ])
+    )
   let failedRetention:
     | { retentionGrain: RetentionGrain; retentionGrainDurationMs: number }
     | undefined
@@ -317,7 +324,10 @@ async function wake(): Promise<void> {
           undefined,
           ({ grain, durationMs, outcome: attemptOutcome }) => {
             if (attemptOutcome === 'failed') {
-              failedRetention = { retentionGrain: grain, retentionGrainDurationMs: durationMs }
+              failedRetention = {
+                retentionGrain: grain,
+                retentionGrainDurationMs: Math.round(durationMs),
+              }
               return
             }
             retentionDurationMsByGrain[grain] =
@@ -329,7 +339,7 @@ async function wake(): Promise<void> {
         rootLogger.info(
           {
             ...result,
-            retentionDurationMsByGrain,
+            retentionDurationMsByGrain: roundedRetentionDurations(),
             inventoryEvents,
             costPersistence,
             streamRegistrationGaps,
@@ -363,7 +373,7 @@ async function wake(): Promise<void> {
         err: error,
         outcome,
         durationMs: Date.now() - startedAt,
-        retentionDurationMsByGrain,
+        retentionDurationMsByGrain: roundedRetentionDurations(),
         ...failedRetention,
       },
       'trace maintenance wake failed'

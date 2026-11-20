@@ -123,7 +123,7 @@ async function worker(scheduler: fc.Scheduler, billingEnabled = false) {
     if (sql.includes('governed_trace_prune_expired_')) {
       const family = params?.[0]
       limits.push(Number(params?.at(-1)))
-      clock += 7
+      clock += 7.25
       if (family === 'agent_run') {
         agentAttempts += 1
         if (mode === 'late-grain-failure') {
