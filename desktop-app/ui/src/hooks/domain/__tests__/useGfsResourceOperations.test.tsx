@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useInfiniteQuery } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   affordancesResult,
   childView,
@@ -310,6 +311,147 @@ describe('useGfsResourceOperations', () => {
     await waitFor(() => expect(screen.getByTestId('files-access').textContent).toBe('revoked'))
     client.clear()
   })
+})
+
+// The writes both the controller and a surface without one expose.
+type Operations = Pick<
+  ReturnType<typeof useGfsResourceOperations>,
+  | 'createFolder'
+  | 'createFile'
+  | 'createFileFromPath'
+  | 'replaceFile'
+  | 'replaceFileFromPath'
+  | 'deleteResource'
+  | 'moveResource'
+>
+type FailingRoute = Parameters<typeof gfsRouteFailureMessage>[0]
+const TOKEN = 'fixture-session-token'
+const createFileRoute: FailingRoute = client =>
+  client.createResource(
+    { parentResourceId: 'parent', drive: 'main', name: 'a.txt', kind: 'file', encodedData: 'aGk=' },
+    TOKEN
+  )
+const replaceFileRoute: FailingRoute = client =>
+  client.replaceFile({ resourceId: 'doc', drive: 'main', encodedData: 'aGk=', ifMatch: 1 }, TOKEN)
+
+// Every write is judged against the session it was issued under; rename has
+// its own late-401 test above.
+const capturedAuthorityWrites: Array<{
+  ipc: string
+  run: (ops: Operations) => Promise<unknown>
+  route: FailingRoute
+}> = [
+  {
+    ipc: 'createFolder',
+    run: ops => ops.createFolder('parent', 'New folder'),
+    route: client =>
+      client.createResource(
+        { parentResourceId: 'parent', drive: 'main', name: 'New folder', kind: 'directory' },
+        TOKEN
+      ),
+  },
+  {
+    ipc: 'createFile',
+    run: ops => ops.createFile('parent', 'a.txt', 'aGk='),
+    route: createFileRoute,
+  },
+  {
+    ipc: 'createFileFromPath',
+    run: ops => ops.createFileFromPath('parent', 'a.txt', '/fixture/a.txt'),
+    route: createFileRoute,
+  },
+  { ipc: 'replaceFile', run: ops => ops.replaceFile('doc', 'aGk=', 1), route: replaceFileRoute },
+  {
+    ipc: 'replaceFileFromPath',
+    run: ops => ops.replaceFileFromPath('doc', '/fixture/a.txt', 1),
+    route: replaceFileRoute,
+  },
+  {
+    ipc: 'deleteResource',
+    run: ops => ops.deleteResource('doc', 1),
+    route: client => client.deleteResource({ resourceId: 'doc', drive: 'main', ifMatch: 1 }, TOKEN),
+  },
+  {
+    ipc: 'moveResource',
+    run: ops => ops.moveResource('doc', 'destination', 1),
+    route: client =>
+      client.moveResource(
+        { resourceId: 'doc', drive: 'main', destinationId: 'destination', ifMatch: 1 },
+        TOKEN
+      ),
+  },
+]
+
+describe('useGfsResourceOperations — a late 401 is judged by the session it was sent under', () => {
+  for (const write of capturedAuthorityWrites)
+    for (const handler of ['controller', 'no controller'] as const)
+      for (const sameSession of [true, false]) {
+        it(`${write.ipc} through the ${handler} handler ${
+          sameSession ? 'revokes its own session' : 'keeps the session that replaced it'
+        }`, async () => {
+          const failure = await gfsRouteFailureMessage(write.route, 401, {
+            code: 'unauthorized',
+            message: 'session expired',
+          })
+          let mainGeneration = 1
+          let rejectWrite!: (error: Error) => void
+          const sent = vi.fn(
+            () =>
+              new Promise((_resolve, reject) => {
+                rejectWrite = reject
+              })
+          )
+          Object.defineProperty(window, 'clerum', {
+            configurable: true,
+            value: {
+              gfs: {
+                listAccessible: vi.fn(async () => listAccessiblePage([])),
+                listChildren: vi.fn(async () => listChildrenPage([])),
+                [write.ipc]: sent,
+              },
+              auth: { getSessionGeneration: vi.fn(async () => mainGeneration) },
+            },
+          })
+          const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+          const view = (me: Me, generation: number) => (
+            <AuthContext.Provider value={sessionAuth(me, generation)}>
+              <QueryClientProvider client={client}>
+                <FilesProbe />
+                <HostProbe />
+              </QueryClientProvider>
+            </AuthContext.Provider>
+          )
+          const rendered = render(view(userA, 1))
+          const ops = () => (handler === 'controller' ? filesCtrl : hostOps)
+
+          const outcome = write.run(ops()).catch(error => error)
+          await waitFor(() => expect(sent).toHaveBeenCalledTimes(1))
+          if (!sameSession) {
+            mainGeneration = 2
+            rendered.rerender(view(userB, 2))
+          }
+          await act(async () => {
+            rejectWrite(new Error(failure))
+            await outcome
+          })
+
+          expect(await outcome).toBeInstanceOf(Error)
+          if (sameSession) {
+            await waitFor(() =>
+              expect(screen.getByTestId('files-access').textContent).toBe('revoked')
+            )
+            expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scopeA, 1))).toBe('revoked')
+          } else {
+            // Let the move's main-generation check and every handler settle.
+            await act(async () => {
+              for (let round = 0; round < 6; round += 1) await new Promise(r => setTimeout(r, 0))
+            })
+            expect(screen.getByTestId('files-access').textContent).toBe('active')
+            expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scopeB, 2))).toBe('active')
+          }
+          client.clear()
+        })
+      }
 })
 
 describe('useGfsBrowserController readAccessState', () => {
