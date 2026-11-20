@@ -688,6 +688,9 @@ ensure_artifact packages/workflow-runtime-core dist/index.js "npm run build"
 # @clerum/network-policy-core is a file: dependency of workflow-recipes and
 # host-context-controller (issue #299). Run its node:test suite when it changes.
 run_if_changed packages/network-policy-core "npm test"
+# @clerum/external-channel-contracts holds the External Channels contracts and
+# their canonical fixtures. Run its node:test suite when it changes.
+run_if_changed packages/external-channel-contracts "npm test"
 run_if_changed control-api "npm test"
 run_if_changed external-rest-api "npm test"
 run_if_changed rpc-proxy "npm test"

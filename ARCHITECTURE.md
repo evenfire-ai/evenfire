@@ -114,6 +114,7 @@ Shared packages under [`packages/`](packages/) (npm name `@clerum/<dir>`):
 | [codex-catalog-projection](packages/codex-catalog-projection/)                   | Codex model allowlist snapshot and execution projection, used by HCC, mcp-host and workflow-recipes |
 | [desktop-app-links](packages/desktop-app-links/)                                 | `evenfire://app/...` link contract shared by the Desktop App and Profile UI                         |
 | [display-field](packages/display-field/)                                         | Validation for free-text display fields (control/bidi characters, length)                           |
+| [external-channel-contracts](packages/external-channel-contracts/)               | External Channels contracts: receipt claims, admission, origin route, principal, fixtures           |
 | [frontend-components](packages/frontend-components/)                             | React table, record-list and edit-dialog components shared by Control UI and Profile UI             |
 | [gfs-interaction-policy](packages/gfs-interaction-policy/)                       | Browser-safe GFS upload naming/collision/retry policy, `FileReference` v1, file classifier          |
 | [grok-provider-attempt-contract](packages/grok-provider-attempt-contract/)       | Grok subscription wire contract: limits, origins, request hashing, ticket and receipt types         |
