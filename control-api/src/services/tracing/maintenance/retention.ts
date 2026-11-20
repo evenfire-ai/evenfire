@@ -102,11 +102,15 @@ export async function runRetentionBatch(
           throw new Error(`retention grain ${entry.grain} exceeded its bounded delete budget`)
         }
       } catch (error) {
-        observe?.({
-          grain: entry.grain,
-          durationMs: performance.now() - startedAt,
-          outcome: 'failed',
-        })
+        try {
+          observe?.({
+            grain: entry.grain,
+            durationMs: performance.now() - startedAt,
+            outcome: 'failed',
+          })
+        } catch {
+          // Preserve the pruning error if reporting the failed attempt also fails.
+        }
         throw error
       }
       observe?.({

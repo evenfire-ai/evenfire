@@ -14,7 +14,10 @@ import {
 } from '../src/services/tracing/maintenance/inventorySampler.js'
 import { selectPeriodCosts } from '../src/services/tracing/maintenance/periodSelection.js'
 import { estimateRequestedCapacityDaily } from '../src/services/tracing/maintenance/requestedCapacityEstimate.js'
-import { runRetentionBatch } from '../src/services/tracing/maintenance/retention.js'
+import {
+  type RetentionAttempt,
+  runRetentionBatch,
+} from '../src/services/tracing/maintenance/retention.js'
 
 const key: DailyCostKey = {
   utcDay: '2026-07-10',
@@ -272,7 +275,9 @@ describe('trace maintenance cost contracts', () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
       .mockRejectedValueOnce(cancellation)
-    const observe = vi.fn()
+    const observe = vi.fn((attempt: RetentionAttempt) => {
+      if (attempt.outcome === 'failed') throw new Error('fixture retention observer failed')
+    })
 
     await expect(runRetentionBatch({ query }, undefined, observe)).rejects.toBe(cancellation)
     expect(query).toHaveBeenCalledTimes(3)
