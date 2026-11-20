@@ -2134,5 +2134,145 @@
   {
     "suite": "guardrailGate.test.ts",
     "fullName": "mode-set guardrail rewrite and redaction an X1 run keeps the rewrite and redacts via post_tool_use"
+  },
+  {
+    "suite": "actionAuthority.toolLifecycle.test.ts",
+    "fullName": "V2 action-authority tool lifecycle passes json_transform approvalAlso and fileReads through, and checks authority on execute"
+  },
+  {
+    "suite": "readerGuardrails.integration.test.ts",
+    "fullName": "json_transform file reads follow file_read a file read runs and reaches the model wrapped as untrusted tool output"
+  },
+  {
+    "suite": "readerGuardrails.integration.test.ts",
+    "fullName": "json_transform file reads follow file_read a file_read deny under secrets blocks json_transform on that file only"
+  },
+  {
+    "suite": "readerGuardrails.integration.test.ts",
+    "fullName": "json_transform file reads follow file_read an allowlist Host cards a file file_read is not allowed, as file_read would"
+  },
+  {
+    "suite": "readerGuardrails.integration.test.ts",
+    "fullName": "json_transform file reads follow file_read an ask on file_read cards a file read but not an input call"
+  },
+  {
+    "suite": "readerGuardrails.integration.test.ts",
+    "fullName": "json_transform file reads follow file_read in allow-all a derived file_read ask is the X2 card, exact and without Always"
+  },
+  {
+    "suite": "readerGuardrails.integration.test.ts",
+    "fullName": "json_transform file reads follow file_read manual: tools.file_read true cards a json_transform file read and leaves input calls alone"
+  },
+  {
+    "suite": "readerGuardrails.integration.test.ts",
+    "fullName": "json_transform file reads follow file_read auto: tools.file_read true cards a json_transform file read and leaves input calls alone"
+  },
+  {
+    "suite": "readerGuardrails.integration.test.ts",
+    "fullName": "json_transform file reads follow file_read tools.file_read false does not loosen json_transform true"
+  },
+  {
+    "suite": "mcpApprovalGateController.nativeCause.test.ts",
+    "fullName": "nativeApprovalCause equals the old gate rule for every native tool without approvalAlso"
+  },
+  {
+    "suite": "mcpApprovalGateController.nativeCause.test.ts",
+    "fullName": "nativeApprovalCause keeps the old rule for an unknown tool name and for an override on another tool"
+  },
+  {
+    "suite": "mcpApprovalGateController.nativeCause.test.ts",
+    "fullName": "nativeApprovalCause a true override on an approvalAlso name forces a card"
+  },
+  {
+    "suite": "mcpApprovalGateController.nativeCause.test.ts",
+    "fullName": "nativeApprovalCause a false override on an approvalAlso name never loosens the tool"
+  },
+  {
+    "suite": "mcpApprovalGateController.nativeCause.test.ts",
+    "fullName": "nativeApprovalCause an approvalAlso true override wins over the tool's own false"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "guardrail file_read rules over a native tool’s declared reads a file_read deny blocks the read through another tool"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "guardrail file_read rules over a native tool’s declared reads an allowlist Host asks for a read file_read is not allowed, exactly as file_read would"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "guardrail file_read rules over a native tool’s declared reads an unattended run refuses a derived ask"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "guardrail file_read rules over a native tool’s declared reads the guardrail decision event reports the derived decision"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "guardrail file_read rules over a native tool’s declared reads a tool that declares no reads keeps its own decision"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "guardrail file_read rules over a native tool’s declared reads an MCP tool’s declared reads are not evaluated as file_read"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool definition sanitizes every result and asks for no approval of its own"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool definition a file call inherits file_read for approval overrides and guardrail rules"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool with input no path is byte-identical to the old tool for every operation"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool with file a file with no root is refused"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool with file invalid JSON in a file returns the fixed text and no file bytes"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool with file a protected platform path is refused as file_read refuses it"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool with file absolute paths, traversal and links that leave the root are refused"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool with file a FIFO is refused at once instead of waiting for a writer"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool with file a directory, a missing file and a file over 5 MiB are refused with fixed text"
+  },
+  {
+    "suite": "rules.test.ts",
+    "fullName": "evaluateDerivedFileReads (file_read rules over another tool’s reads) a declared path gets exactly what file_read {path} gets"
+  },
+  {
+    "suite": "rules.test.ts",
+    "fullName": "evaluateDerivedFileReads (file_read rules over another tool’s reads) a path no file_read rule matches gets the unmatched ask, as file_read would"
+  },
+  {
+    "suite": "rules.test.ts",
+    "fullName": "evaluateDerivedFileReads (file_read rules over another tool’s reads) an allow on one path never hides a deny on another"
+  },
+  {
+    "suite": "rules.test.ts",
+    "fullName": "evaluateDerivedFileReads (file_read rules over another tool’s reads) with subtrees, a rule on a path inside a declared directory applies"
+  },
+  {
+    "suite": "rules.test.ts",
+    "fullName": "evaluateDerivedFileReads (file_read rules over another tool’s reads) with subtrees, equals, json equals, json one_of and json contains rules inside the directory apply"
+  },
+  {
+    "suite": "rules.test.ts",
+    "fullName": "evaluateDerivedFileReads (file_read rules over another tool’s reads) a whole-workspace read takes every ask or deny file_read rule with a /path predicate"
   }
 ]
