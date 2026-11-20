@@ -3,18 +3,38 @@
  *
  * A blank chat has no chatId, so the pick is held locally and the first send
  * carries it. After the session exists, a change is a PATCH. A 400 or 401
- * leaves the painted label alone. A 404 before the first send holds the mode
- * for that send. While the first send of a chat whose session row the store
- * has not seen is in flight, the mode cannot change: a PATCH would reach the
- * Host before the send creates the row. Any other failure is not proof of the
- * stored mode: the next session read paints the label, including a write the
- * server committed before the response was dropped.
+ * leaves the painted label alone. A 404 for a chat whose session row the store
+ * has not seen holds the mode for the first send. A 404 for a chat the store
+ * has seen on the Host is a failed save: the row is gone or belongs to someone
+ * else, and the label keeps the last mode the Host reported. Only mcp-host's
+ * own "session not found" answer arrives as a 404 here; the main process
+ * reports any other 404 as a plain failure. While the first send of a chat
+ * whose session row the store has not seen is in flight, the mode cannot
+ * change: a PATCH would reach the Host before the send creates the row. Nor
+ * can it change while the chat's previous write is unanswered: one mode write
+ * is in flight per chat. Any other failure is not proof of the stored mode:
+ * the next session read paints the label, including a write the server
+ * committed before the response was dropped.
  *
  * Each existing chat also remembers whether its latest pick was not saved
  * (`saveFailed`), so the picker can say so after a chat switch or a remount.
  * Only the chat's latest write sets or clears it. A failed pick of the mode the
  * chat already stores is not a failure, and a read that shows the requested
  * mode clears it.
+ *
+ * The view also carries the highest mode the chat can run (`modeLimit`): the
+ * Host ceiling capped by the chat's channel. The Host may store a pick above
+ * it, but the picker offers only modes up to it. A chat the Host has answered
+ * for uses its own snapshot. Any other chat (the blank chat, a chat whose
+ * first send was not answered yet) uses the Host-wide ceiling from the latest
+ * snapshot of any session of that Host, and its label is the held pick capped
+ * by that ceiling. With no snapshot of the Host yet, the limit is unknown
+ * (null) and every mode is offered. `refreshHostApprovalModeLimit` re-reads
+ * the limit when the picker opens, because an admin can change the ceiling at
+ * any time. A refresh, a PATCH answer and the re-read after a failed PATCH
+ * replace the Host-wide ceiling; a session or catalog read made elsewhere
+ * fills it only while it is unknown, because a catalog page can be served
+ * from a cache after a newer answer.
  */
 import type { ApprovalMode } from '../../../src/types'
 
@@ -30,9 +50,18 @@ export interface SessionApprovalSnapshot {
 
 export interface HostApprovalModeView {
   storedMode: ApprovalMode
+  /**
+   * The mode the Host runs. Before the Host has answered for the chat, the held
+   * pick capped by the Host ceiling when that is known.
+   */
   effectiveMode: ApprovalMode
   /** Shown while the effective mode is auto or allow-all. Null for manual. */
   label: string | null
+  /**
+   * Highest mode the chat can run: min(Host ceiling, channel cap). Null while
+   * no snapshot of the Host has been seen, so the limit is unknown.
+   */
+  modeLimit: ApprovalMode | null
   shellClassifierAvailable: boolean
   /** Non-manual mode the first message should carry. Null once the server has it. */
   firstSendMode: ApprovalMode | null
@@ -41,6 +70,11 @@ export interface HostApprovalModeView {
    * row. The mode cannot change until the send is acknowledged or fails.
    */
   firstSendInFlight: boolean
+  /**
+   * A mode write for the chat is unanswered (its PATCH, or the re-read after
+   * a failed one). The mode cannot change until it settles.
+   */
+  writeInFlight: boolean
   /** The chat's latest pick was not saved, and the stored mode is still not that pick. */
   saveFailed: boolean
 }
@@ -52,7 +86,15 @@ export interface HostApprovalModeTransport {
     mode: ApprovalMode
   ) => Promise<SessionApprovalSnapshot>
   readSessionApproval: (agentRef: string, chatId: string) => Promise<SessionApprovalSnapshot>
+  /**
+   * The Host-wide ceiling, read from any one session of the Host. Null when the
+   * Host has no session to read it from.
+   */
+  readHostModeCeiling?: (agentRef: string) => Promise<ApprovalMode | null>
 }
+
+/** Where a snapshot came from. Only `fresh` replaces a known Host-wide ceiling. */
+type SnapshotSource = 'fresh' | 'passive'
 
 interface Entry {
   scopeGeneration: number
@@ -62,6 +104,8 @@ interface Entry {
   effectiveMode: ApprovalMode
   modeCeiling: ApprovalMode
   channelCap: ApprovalMode
+  /** A snapshot carried a valid ceiling and cap for this chat; until then they are defaults. */
+  limitKnown: boolean
   shellClassifierAvailable: boolean
   /** Unpersisted non-manual hold. Null when the hold is manual or the server has the mode. */
   heldForFirstSend: ApprovalMode | null
@@ -94,6 +138,19 @@ let writeIdSeq = 0
  * chat. Reads capture this before they start.
  */
 let writeSeq = 0
+/**
+ * Host-wide ceiling per agentRef in this scope, from the latest snapshot of
+ * any of the Host's sessions. Absent: unknown. Cleared on a scope reset.
+ */
+const hostCeilings = new Map<string, ApprovalMode>()
+/** Limit refreshes in flight, per chat key. Cleared on a scope reset. */
+const limitRefreshes = new Map<string, Promise<void>>()
+
+const MODE_RANK: Record<ApprovalMode, number> = { manual: 0, auto: 1, allow_all: 2 }
+
+function lowerMode(a: ApprovalMode, b: ApprovalMode): ApprovalMode {
+  return MODE_RANK[a] <= MODE_RANK[b] ? a : b
+}
 
 function keyFor(agentRef: string, chatId: string | null): string {
   return `${agentRef}::${chatId ?? ''}`
@@ -129,14 +186,32 @@ function isDefiniteRejection(error: unknown): boolean {
   return status === 400 || status === 401
 }
 
+/**
+ * A chat the Host has answered for is limited by its own ceiling and cap. Any
+ * other chat is a Desktop chat (channel cap allow_all) on its Host's ceiling.
+ */
+function limitFor(entry: Entry): ApprovalMode | null {
+  if (entry.limitKnown) return lowerMode(entry.modeCeiling, entry.channelCap)
+  return hostCeilings.get(entry.agentRef) ?? null
+}
+
 function buildView(entry: Entry): HostApprovalModeView {
+  const modeLimit = limitFor(entry)
+  // The Host's own effective mode when it has answered for the chat; before
+  // that, the held pick, which the Host will cap by its ceiling.
+  const effectiveMode =
+    entry.limitKnown || modeLimit === null
+      ? entry.effectiveMode
+      : lowerMode(entry.effectiveMode, modeLimit)
   return {
     storedMode: entry.storedMode,
-    effectiveMode: entry.effectiveMode,
-    label: labelFor(entry.effectiveMode),
+    effectiveMode,
+    label: labelFor(effectiveMode),
+    modeLimit,
     shellClassifierAvailable: entry.shellClassifierAvailable,
     firstSendMode: entry.persisted ? null : entry.heldForFirstSend,
     firstSendInFlight: entry.firstSendsInFlight > 0,
+    writeInFlight: entry.writing,
     // Derived, so a writer that sets the stored mode without applySnapshot
     // (the 404 hold, migrateHeldApprovalMode) cannot show an error for it.
     saveFailed: entry.failedMode !== null && entry.failedMode !== entry.storedMode,
@@ -160,6 +235,7 @@ function getEntry(agentRef: string, chatId: string | null): Entry {
       effectiveMode: 'manual',
       modeCeiling: 'manual',
       channelCap: 'manual',
+      limitKnown: false,
       shellClassifierAvailable: true,
       heldForFirstSend: null,
       persisted: false,
@@ -181,12 +257,34 @@ function current(entry: Entry): boolean {
   return entry.scopeGeneration === scopeGeneration
 }
 
-function applySnapshot(entry: Entry, snapshot: SessionApprovalSnapshot): void {
+/**
+ * Records the Host-wide ceiling. A fresh answer replaces it; a passive read
+ * fills it only while it is unknown. Every chat of the Host is notified,
+ * because chats without their own snapshot (the blank chat among them) take
+ * their limit and label from it.
+ */
+function noteHostCeiling(agentRef: string, ceiling: unknown, source: SnapshotSource): void {
+  if (!agentRef || !isMode(ceiling)) return
+  const known = hostCeilings.get(agentRef)
+  if (known === ceiling || (source === 'passive' && known !== undefined)) return
+  hostCeilings.set(agentRef, ceiling)
+  for (const entry of entries.values()) {
+    if (entry.agentRef === agentRef && current(entry)) notify(entry)
+  }
+}
+
+function applySnapshot(
+  entry: Entry,
+  snapshot: SessionApprovalSnapshot,
+  source: SnapshotSource
+): void {
+  noteHostCeiling(entry.agentRef, snapshot.modeCeiling, source)
   if (!isMode(snapshot.approvalMode) || !isMode(snapshot.effectiveApprovalMode)) return
   entry.storedMode = snapshot.approvalMode
   entry.effectiveMode = snapshot.effectiveApprovalMode
   if (isMode(snapshot.modeCeiling)) entry.modeCeiling = snapshot.modeCeiling
   if (isMode(snapshot.channelCap)) entry.channelCap = snapshot.channelCap
+  entry.limitKnown = isMode(snapshot.modeCeiling) && isMode(snapshot.channelCap)
   if (typeof snapshot.shellClassifierAvailable === 'boolean') {
     entry.shellClassifierAvailable = snapshot.shellClassifierAvailable
   }
@@ -236,18 +334,77 @@ export function hostApprovalModeEpoch(_agentRef?: string, _chatId?: string | nul
   return writeSeq
 }
 
+function noteSessionRead(
+  agentRef: string,
+  chatId: string,
+  snapshot: SessionApprovalSnapshot,
+  readEpoch: number | undefined,
+  source: SnapshotSource
+): void {
+  if (!agentRef || !chatId) return
+  // The ceiling is Host-wide: a read too old for this chat's mode still
+  // says what the Host's ceiling was.
+  noteHostCeiling(agentRef, snapshot.modeCeiling, source)
+  const entry = getEntry(agentRef, chatId)
+  if (entry.writing) return
+  if (readEpoch !== undefined && entry.lastWriteSeq > readEpoch) return
+  applySnapshot(entry, snapshot, source)
+  notify(entry)
+}
+
+/** A session or catalog read made outside the picker (chat open, reconcile, chat list). */
 export function noteHostApprovalModeFromSession(
   agentRef: string,
   chatId: string,
   snapshot: SessionApprovalSnapshot,
   readEpoch?: number
 ): void {
-  if (!agentRef || !chatId) return
-  const entry = getEntry(agentRef, chatId)
-  if (entry.writing) return
-  if (readEpoch !== undefined && entry.lastWriteSeq > readEpoch) return
-  applySnapshot(entry, snapshot)
-  notify(entry)
+  noteSessionRead(agentRef, chatId, snapshot, readEpoch, 'passive')
+}
+
+/**
+ * Re-reads the limit the picker offers modes by, as the picker opens: the
+ * chat's own session when the store has seen its row, otherwise the Host's
+ * ceiling from any one of its sessions. A refresh for the same chat that is
+ * still in flight is reused. A refresh that crosses a scope reset is dropped.
+ * A failed refresh keeps the last known limit; the next opening reads again.
+ */
+export function refreshHostApprovalModeLimit(
+  transport: HostApprovalModeTransport,
+  agentRef: string,
+  chatId: string | null
+): Promise<void> {
+  if (!agentRef) return Promise.resolve()
+  const key = keyFor(agentRef, chatId)
+  const running = limitRefreshes.get(key)
+  if (running) return running
+  const generation = scopeGeneration
+  const readOwnSession = chatId !== null && getEntry(agentRef, chatId).persisted
+  let finish!: () => void
+  const refresh = new Promise<void>(resolve => {
+    finish = resolve
+  })
+  limitRefreshes.set(key, refresh)
+  void (async () => {
+    try {
+      if (readOwnSession && chatId !== null) {
+        const readEpoch = writeSeq
+        const snapshot = await transport.readSessionApproval(agentRef, chatId)
+        if (generation !== scopeGeneration) return
+        noteSessionRead(agentRef, chatId, snapshot, readEpoch, 'fresh')
+      } else if (transport.readHostModeCeiling) {
+        const ceiling = await transport.readHostModeCeiling(agentRef)
+        if (generation !== scopeGeneration) return
+        noteHostCeiling(agentRef, ceiling, 'fresh')
+      }
+    } catch (error) {
+      console.warn('[hostApprovalModeStore] approval-mode limit refresh failed:', error)
+    } finally {
+      if (limitRefreshes.get(key) === refresh) limitRefreshes.delete(key)
+      finish()
+    }
+  })()
+  return refresh
 }
 
 export function readHostApprovalMode(
@@ -361,6 +518,13 @@ export async function selectHostApprovalMode(
 ): Promise<boolean> {
   if (!agentRef || !isMode(mode)) return false
   const entry = getEntry(agentRef, chatId)
+  // One mode write in flight per chat. Two overlapping PATCHes can be answered
+  // in either order, and the answer that lands last would set the label, which
+  // can then differ from what the Host stored. A pick while this chat's write
+  // is unanswered is refused before it takes a write id, so it changes nothing
+  // (no PATCH, no flag, no notify) and the write in flight still decides the
+  // label and the save-failure flag. The picker is busy for the same window.
+  if (chatId && entry.writing) return false
   // Every pick on an existing chat is a write for the save-failure flag, the
   // refusal below included. The id gates only `failedMode`: labels, `writing`,
   // `lastWriteSeq` and the return value behave as before.
@@ -394,17 +558,21 @@ export async function selectHostApprovalMode(
   try {
     const result = await transport.setApprovalMode(agentRef, chatId, mode)
     if (!current(entry)) return false
-    applySnapshot(entry, result)
+    applySnapshot(entry, result, 'fresh')
     settleSaveFailure(false)
     return true
   } catch (error) {
     if (!current(entry)) return false
     if (isNotFound(error)) {
+      // The store has seen this chat's row on the Host, so the 404 does not
+      // mean "no row yet": holding the pick would paint a mode the Host does
+      // not run. The pick counts as not saved and the label stays.
+      //
       // A first send began after this PATCH left. The 404 only says the row
       // did not exist yet; the send creates it with the mode it carried, which
       // the label still shows. Holding this mode would paint a mode the
       // session never stores, so the pick counts as not saved.
-      if (entry.firstSendsBegun !== firstSendsBegunAtStart) {
+      if (entry.persisted || entry.firstSendsBegun !== firstSendsBegunAtStart) {
         settleSaveFailure(true)
         return false
       }
@@ -423,7 +591,7 @@ export async function selectHostApprovalMode(
     try {
       const read = await transport.readSessionApproval(agentRef, chatId)
       if (!current(entry)) return false
-      applySnapshot(entry, read)
+      applySnapshot(entry, read, 'fresh')
     } catch (readError) {
       console.warn('[hostApprovalModeStore] session re-read failed:', readError)
     }
@@ -458,4 +626,6 @@ export function resetHostApprovalModeStore(): void {
   // writeSeq stays monotonic. A read captured before this reset must still
   // lose to a write that happens after it.
   entries.clear()
+  hostCeilings.clear()
+  limitRefreshes.clear()
 }

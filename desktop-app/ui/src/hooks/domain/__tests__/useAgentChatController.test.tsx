@@ -752,6 +752,136 @@ describe('useAgentChatController — characterization (D.0)', () => {
         expect(transport.setApprovalMode).toHaveBeenCalledWith('agent-x', chatId, 'manual')
         expect(readHostApprovalMode('agent-x', chatId).firstSendMode).toBeNull()
       })
+
+      it('reads the new session after the first send’s ack, so the label shows the mode the Host runs', async () => {
+        clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-abc' })
+        clerum.rpc.getTaskResult.mockResolvedValue({ response: 'ok' })
+        // The Host stores the pick and runs it capped by its manual ceiling.
+        clerum.rpc.loadSessionMessages.mockImplementation(
+          async (_hostRef: string, agent: string, chatId: string) => ({
+            agent,
+            chatId,
+            state: 'idle',
+            turns: [],
+            approvalMode: 'allow_all',
+            modeCeiling: 'manual',
+            channelCap: 'allow_all',
+            effectiveApprovalMode: 'manual',
+            shellClassifierAvailable: true,
+          })
+        )
+        const transport = approvalTransport()
+        const { result } = renderController()
+        await settleMount()
+        await act(async () => {
+          await selectHostApprovalMode(transport, 'agent-x', null, 'allow_all')
+        })
+
+        const sendPromise = result.current.handleSendAgentMessage('first message')
+        await waitForProgressHandler('task-abc')
+        const chatId = sentThreadId()!
+        expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+          approvalMode: 'allow_all',
+        })
+
+        await waitFor(() =>
+          expect(readHostApprovalMode('agent-x', chatId).effectiveMode).toBe('manual')
+        )
+        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+          'agent-x',
+          'agent-x',
+          chatId,
+          undefined,
+          { limit: 1 }
+        )
+        expect(readHostApprovalMode('agent-x', chatId).label).toBeNull()
+        expect(readHostApprovalMode('agent-x', chatId).storedMode).toBe('allow_all')
+        expect(readHostApprovalMode('agent-x', chatId).modeLimit).toBe('manual')
+
+        await act(async () => {
+          clerum.emitTaskProgress('task-abc', {
+            type: 'terminal',
+            data: { taskId: 'task-abc', status: 'completed' },
+          })
+        })
+        await act(async () => {
+          await sendPromise
+        })
+      })
+
+      it('later messages carry no mode and do not lock the picker once the first send is acknowledged', async () => {
+        clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-first' })
+        clerum.rpc.getTaskResult.mockResolvedValue({ status: 'completed', response: 'ok' })
+        // The read after the ack carries no approval fields here, so only the
+        // ack's confirmation can mark the chat's row as known.
+        clerum.rpc.loadSessionMessages.mockResolvedValue({ agent: '', chatId: '', turns: [] })
+        const transport = approvalTransport()
+        const { result } = renderController()
+        await settleMount()
+        await act(async () => {
+          await selectHostApprovalMode(transport, 'agent-x', null, 'allow_all')
+        })
+
+        const firstSend = result.current.handleSendAgentMessage('first message')
+        await waitForProgressHandler('task-first')
+        const chatId = sentThreadId()!
+        expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+          approvalMode: 'allow_all',
+        })
+        await act(async () => {
+          clerum.emitTaskProgress('task-first', {
+            type: 'terminal',
+            data: { taskId: 'task-first', status: 'completed' },
+          })
+        })
+        await act(async () => {
+          await firstSend
+        })
+        expect(readHostApprovalMode('agent-x', chatId).firstSendMode).toBeNull()
+        expect(result.current.activeChatId).toBe(chatId)
+
+        const second = deferred<{ taskId: string }>()
+        clerum.rpc.invokeHostMessage.mockImplementationOnce(() => second.promise)
+        // The chat takes a new message once the first task's reply is in and
+        // the chat is idle again.
+        await waitFor(() =>
+          expect(result.current.chatMessages.map(message => message.role)).toEqual([
+            'user',
+            'assistant',
+          ])
+        )
+        await waitFor(() =>
+          expect(result.current.sessionStateByChatKey[makeTaskKey('agent-x', chatId)]?.state).toBe(
+            'idle'
+          )
+        )
+        const secondSend = result.current.handleSendAgentMessage('second message')
+        await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2))
+
+        const secondRequest = clerum.rpc.invokeHostMessage.mock.calls[1]?.[1] as Record<
+          string,
+          unknown
+        >
+        expect(secondRequest.threadId).toBe(chatId)
+        expect(secondRequest.content).toBe('second message')
+        expect(secondRequest).not.toHaveProperty('approvalMode')
+        // The picker stays usable while the second message is in flight.
+        expect(readHostApprovalMode('agent-x', chatId).firstSendInFlight).toBe(false)
+
+        await act(async () => {
+          second.resolve({ taskId: 'task-second' })
+        })
+        await waitForProgressHandler('task-second')
+        await act(async () => {
+          clerum.emitTaskProgress('task-second', {
+            type: 'terminal',
+            data: { taskId: 'task-second', status: 'completed' },
+          })
+        })
+        await act(async () => {
+          await secondSend
+        })
+      })
     })
 
     it('4.5 surfaces a failed terminal as an error assistant message', async () => {

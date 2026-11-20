@@ -658,6 +658,12 @@ test.describe.serial('per-task tool approval scope', () => {
         expect(await readCardLedger(appPage)).toEqual([])
 
         await humanClick(appPage.getByTestId('approval-mode-picker'))
+        // The menu offers only modes up to the Host ceiling the renderer
+        // knows, and opening it re-reads that ceiling. The direct read above
+        // does not reach the renderer, so wait for the re-read to offer Auto.
+        await expect(appPage.getByTestId('approval-mode-option-auto')).toBeEnabled({
+          timeout: 30_000,
+        })
         await humanClick(appPage.getByTestId('approval-mode-option-auto'))
         await expect(appPage.getByTestId('approval-mode-label')).toHaveText('Auto-approve')
         await expect(appPage.getByTestId('approval-mode-write-error')).toHaveCount(0)
@@ -741,6 +747,10 @@ test.describe.serial('per-task tool approval scope', () => {
         expect(await readCardLedger(appPage)).toEqual([])
 
         await humanClick(appPage.getByTestId('approval-mode-picker'))
+        // Offered once the menu's re-read of the Host ceiling shows allow_all.
+        await expect(appPage.getByTestId('approval-mode-option-allow-all')).toBeEnabled({
+          timeout: 30_000,
+        })
         await humanClick(appPage.getByTestId('approval-mode-option-allow-all'))
         // Allow all asks before it writes.
         await expect(appPage.getByRole('dialog', { name: 'Confirm allow all' })).toBeVisible()

@@ -41,6 +41,12 @@ export type { SandboxUiApp } from './types.js'
 const MODEL_NOT_ALLOWED = 'model_not_allowed'
 /** CAS precondition failure on `POST …/hosts/:hostRef/model` (issue #654). */
 const MODEL_SELECTION_CONFLICT = 'model_selection_conflict'
+/**
+ * mcp-host's answer on the approval-mode route when the session row is missing
+ * or belongs to another user. rpc-proxy relays it unchanged. Its own 404s (no
+ * such route, Host not found) carry other bodies.
+ */
+const APPROVAL_MODE_SESSION_NOT_FOUND = 'session not found'
 
 function wireObject(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -1437,10 +1443,16 @@ export class RpcProxyClient {
 
   /**
    * Sets the session approval mode. The route wakes, like approve, so the
-   * caller mints `host:session:write` and `host:wake:write`. A 400, 401 or 404
+   * caller mints `host:approval:write` and `host:wake:write`. A 400, 401 or 404
    * is a definite rejection: the message keeps the status so the renderer can
    * leave the painted label alone. Any other failure is not proof of the
    * stored mode.
+   *
+   * The message says `(404)` only for mcp-host's "session not found" answer,
+   * which the renderer reads as "no row yet" for a chat it has not seen on the
+   * Host. A 404 with any other body (an rpc-proxy without this route, a Host
+   * that is gone) carries a different token, so the renderer shows the write
+   * as failed instead of holding the pick.
    */
   async setApprovalMode(
     rpcToken: string,
@@ -1470,7 +1482,11 @@ export class RpcProxyClient {
       const body = await readErrorBody(response)
       const hostAccessDenial = hostAccessDenialError(response.status, body)
       if (hostAccessDenial) throw hostAccessDenial
-      throw new ApiError(`Set approval mode failed (${response.status})`, response.status, body)
+      const statusToken =
+        response.status === 404 && errorCodeFromBody(body) !== APPROVAL_MODE_SESSION_NOT_FOUND
+          ? '404, not a session answer'
+          : String(response.status)
+      throw new ApiError(`Set approval mode failed (${statusToken})`, response.status, body)
     }
     const parsed = await response.json().catch(() => undefined)
     const result = parseApprovalModeResult(parsed)

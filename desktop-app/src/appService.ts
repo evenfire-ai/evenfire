@@ -247,9 +247,10 @@ const HOST_MODEL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.model
 // HOST_FINITE_OPERATION_SCOPES (whose every entry carries wake, asserted by
 // appService.wakeScopeMatrix.issue791.test.ts) for exactly that reason.
 const HOST_SESSION_TITLE_SCOPES: RpcScope[] = ['host:session:write']
-// Mode changes copy the approve route's wake-and-hold, so this call also asks
-// for host:wake:write. Rename stays non-wake on HOST_SESSION_TITLE_SCOPES.
-const HOST_APPROVAL_MODE_SCOPES: RpcScope[] = ['host:session:write', 'host:wake:write']
+// Mode changes use the approve route's scope and copy its wake-and-hold, so
+// this call asks for host:approval:write and host:wake:write. Rename stays
+// non-wake on HOST_SESSION_TITLE_SCOPES.
+const HOST_APPROVAL_MODE_SCOPES: RpcScope[] = ['host:approval:write', 'host:wake:write']
 const HOST_ARTIFACT_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.artifact
 const HOST_APPROVAL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.approval
 const MCP_SERVERS_LIST_SCOPES: RpcScope[] = ['mcp:servers:list']
@@ -4435,14 +4436,14 @@ export class AppService {
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     // A non-manual hold is stored on the first message, which rpc-proxy accepts
-    // only when the token also has host:session:write. manual stays on the
+    // only when the token also has host:approval:write. manual stays on the
     // usual three message scopes and the field is not forwarded.
     const heldApprovalMode =
       request.approvalMode === 'auto' || request.approvalMode === 'allow_all'
         ? request.approvalMode
         : undefined
     const messageScopes: RpcScope[] = heldApprovalMode
-      ? [...HOST_WAKEABLE_OPERATION_SCOPES, 'host:session:write']
+      ? [...HOST_WAKEABLE_OPERATION_SCOPES, 'host:approval:write']
       : HOST_WAKEABLE_OPERATION_SCOPES
     const rpc = await this.issueRpcTokenForHostRefs(messageScopes, effectiveHostRefs)
     const outgoingAttachmentCount = Array.isArray(request.attachments)
@@ -5641,9 +5642,11 @@ export class AppService {
 
   /**
    * Stores the session approval mode. The token is scoped to this one host and
-   * carries session-write plus wake, because the route wakes like approve.
-   * A 400, 401 or 404 leaves the stored mode unchanged; the renderer keeps the
-   * old label. Any other failure is reconciled from the next session read.
+   * carries approve's scopes, approval-write plus wake, because the route
+   * wakes like approve. A 400, 401 or 404 leaves the stored mode unchanged.
+   * The renderer keeps the old label, except that a 404 for a chat whose
+   * session row it has not seen holds the pick for the first send. Any other
+   * failure is reconciled from the next session read.
    */
   async setApprovalMode(
     hostRef: string,

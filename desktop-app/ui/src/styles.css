@@ -4340,6 +4340,17 @@ body.sidebar-resizing {
   cursor: default;
 }
 
+/* A row that stays focusable but is not offered (approval modes above the
+ * Host's limit). It keeps its focus-visible background, not a hover one. */
+.model-selector-item[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.model-selector-item[aria-disabled='true']:hover:not(:focus-visible) {
+  background: transparent;
+}
+
 .model-selector-item--active {
   background: rgba(var(--edge-rgb), 0.2);
   font-weight: var(--font-weight-medium);
@@ -4443,6 +4454,17 @@ body.sidebar-resizing {
  * on the ghost surface. Must follow the neutral rule to win on color. */
 .composer-actions-right .model-selector-chip.model-selector-chip--disabled {
   color: var(--text-dim);
+}
+
+/* Busy approval-mode chip while its save is in flight: it stays focusable (a
+ * pick hands focus back to it), so it keeps the interactive class and its
+ * focus ring, but hover no longer suggests it opens. */
+.composer-actions-right
+  .model-selector-chip.model-selector-chip--disabled.ui-pill--interactive:hover {
+  background: var(--surface-soft);
+  border-color: rgba(var(--edge-rgb), 0.32);
+  color: var(--text-dim);
+  cursor: default;
 }
 
 /* Caret reads as a control affordance (muted), not a status accent. */

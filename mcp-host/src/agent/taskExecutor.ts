@@ -64,6 +64,7 @@ import { DefaultLoopController } from '../core/orchestration/loopConfig'
 import { NativeToolPresentationController } from '../core/orchestration/nativeToolPresentationController'
 import type { SpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { StubSpilloverResolver } from '../core/orchestration/spilloverResolver'
+import { approvedToolResultTransform } from '../core/orchestration/toolCallPolicy'
 import {
   resolveToolPresentation,
   selectDeferredNatives,
@@ -904,11 +905,12 @@ export class TaskExecutor {
         resolvedCompletedResults
       )
       // The frozen request: its messages plus the batch results before this call.
+      // The result gets the same post_tool_use redaction as a call the loop admits.
       const toolResult = await executeSingleTool(
         suspendedCall,
         loopConfig,
         undefined,
-        undefined,
+        approvedToolResultTransform(suspendedCall, loopConfig),
         requestImageUsage(approval.context_snapshot, batchResults)
       )
       collectToolAttachments([toolResult], this.completedAttachments)

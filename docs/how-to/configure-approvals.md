@@ -50,7 +50,7 @@ Example policy JSON:
 }
 ```
 
-In dev mode (`CLERUM_DEV_MODE`), which has no Host watch, `modeCeiling` and `allowModeChange` are read from this JSON. Outside dev mode those keys in `CLERUM_APPROVAL_CONFIG` are ignored. A Host whose policy comes only from the ConfigMap stays at ceiling `manual` and channel cap `manual` until the same policy is copied onto the Host CR. See [Host CRD](../crds/host.md#approval-mode-ceiling).
+In dev mode (`CLERUM_DEV_MODE`), which has no Host watch, `modeCeiling` and `allowModeChange` are read from this JSON. Outside dev mode those keys in `CLERUM_APPROVAL_CONFIG` are ignored. A Host whose policy comes only from the ConfigMap has ceiling `manual`, so every session runs as manual, until a ceiling is set on the Host CR. Its channel switches keep their defaults, so Telegram, Slack and Teams sessions can then rise unless `allowModeChange: false` is copied onto the CR too. See [Host CRD](../crds/host.md#approval-mode-ceiling).
 
 `defaultPolicy` values (Host CRD / runtime):
 
@@ -114,11 +114,17 @@ again restores that choice.
 | --- | --- |
 | `manual` | Today's card. The classifier is not called. |
 | `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. `http_request` runs with no card. Every other tool still shows a card. |
-| `allow_all` | Runs every call that would have shown a card, except `cron_manage`. |
+| `allow_all` | Runs every call that would have shown a card, except `cron_manage` and a guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules), which still show their card. |
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant
 already stored for it still covers a later create, including while the chat is
 allow-all. The mode does not change its forced create/enable gate.
+
+A guardrail `ask` shows its card in every interactive mode, scoped to that one
+call, with no Always option. Allow-all still runs these with no card: a tool an
+admin forces to ask with `spec.approval.tools.<tool>: true`, a tool the user
+denied earlier in the chat, and a GFS download (`clerum__gfs_download`), which
+otherwise asks on every call. A guardrail `deny` still blocks in every mode.
 
 ### Ceiling
 
@@ -136,7 +142,7 @@ An `allow_all` ceiling accepts, among other things: shell that can read the
 process environment, the runtime-token Secret, and the Host GFS token; HTTP to
 any public host on ports 80 and 443 when the allowlist is empty; MCP servers
 running under the user's own OAuth identity; and edits to shared identity files.
-`cron_manage` still asks. In `auto`, `http_request` runs with no card unless
+`cron_manage` still asks, and a guardrail `ask` still shows its card. In `auto`, `http_request` runs with no card unless
 `tools.http_request` is `true`, which keeps the card.
 
 ### Channel cap
@@ -163,12 +169,28 @@ arrives.
 
 A messaging command may always store `manual`. It may store `auto` or
 `allow_all` only while that channel's switch is on. When the switch is off,
-the command stores `manual` and says the channel is limited to manual. On
-Slack, a sender who passed the channel allowlist only by display username
-(a legacy entry) cannot raise the mode either: the command stores `manual`
-and asks for the Slack user ID to be allowlisted.
+the command stores `manual` and says the channel is limited to manual.
 Turning the switch off again lowers every session on that channel at the
 next tool call.
+
+An explicit `defaultPolicy` also limits who can raise the mode from a
+messaging channel: under `cli_only` no channel sender can, and under
+`designated_approvers` only a sender listed in that channel's `approvers`
+can, unless that channel block sets `enabled: false`. An entry must equal the
+ID the channel reports:
+
+- Telegram: the Telegram user ID.
+- Slack: the Slack user ID.
+- Microsoft Teams: the `from.id` of the Bot Framework activity. Under
+  `designated_approvers`, a Host with no `teams.approvers` list refuses every
+  Teams raise.
+- Email: the From address, compared case-sensitively, so
+  `Ana@example.com` and `ana@example.com` are different entries.
+
+A refused raise leaves the stored mode unchanged, and the reply says why;
+lowering the mode is always allowed. An unset
+policy or `channel_users` adds no check, and any other value refuses every
+raise and logs `approval_config_invalid` for `defaultPolicy`.
 
 ### Kill switch
 
@@ -215,7 +237,8 @@ the card. `http_request` still runs with no card.
 
 An explicit `tools.shell_exec: true` keeps a card on every shell call in auto,
 with no classifier and no shell memory. Remove the line if auto should judge
-shell. See [Host CRD](../crds/host.md#approval-mode-ceiling).
+shell. It does not keep a card in allow-all; a guardrail `ask` rule does. See
+[Host CRD](../crds/host.md#approval-mode-ceiling).
 
 ## Option C — the Control UI
 

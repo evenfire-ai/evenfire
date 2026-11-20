@@ -3967,6 +3967,26 @@ export function useAgentChatController({
         const ackOk = !responseRecord.error && responseRecord.success !== false
         if (ackOk && sendChatId) confirmHeldApprovalModeFromSend(sendAgent, sendChatId)
         releaseApprovalModeFirstSend()
+        // The label shows the held pick, which the Host stores but caps by its
+        // ceiling. The ack carries no mode, so one read of the new session
+        // shows the mode the Host runs. The epoch drops it if a pick lands
+        // first, and a scope change drops it on arrival.
+        if (ackOk && sendChatId && heldApprovalMode) {
+          const approvalReadEpoch = hostApprovalModeEpoch(sendAgent, sendChatId)
+          void chatStore
+            .loadSessionMessages(sendAgent, sendAgent, sendChatId, { limit: 1 })
+            .then(session => {
+              if (!sendAuthScopeIsCurrent()) return
+              const approval = snapshotFromSessionRead(session)
+              if (approval) {
+                noteHostApprovalModeFromSession(sendAgent, sendChatId, approval, approvalReadEpoch)
+              }
+            })
+            .catch(error => {
+              // The label keeps the pick until the next read of the chat.
+              console.warn('[approval-mode] read after the first send failed', error)
+            })
+        }
         // #654 H1 — the send IS the write. Its ack carries the revision that
         // write produced, and adopting it is what arms the NEXT conditional
         // write correctly; without it the client keeps the revision it read

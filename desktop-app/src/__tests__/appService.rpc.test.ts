@@ -945,3 +945,70 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.rpcClient.getHostStatus).not.toHaveBeenCalled()
   })
 })
+
+describe('AppService.approveToolCall shell card actions', () => {
+  function approvalService() {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = { id: 7, teamId: 'team-1' }
+    service.issueRpcTokenForHostRefs = vi
+      .fn()
+      .mockResolvedValueOnce({ token: 'rpc-test-token' })
+      .mockResolvedValueOnce({ token: 'rpc-test-token-refreshed' })
+    service.rpcTokenManager = { clear: vi.fn() }
+    const approveToolCall = vi.fn().mockResolvedValue({ decision: 'approved' })
+    service.rpcClient = { approveToolCall }
+    return { service, approveToolCall }
+  }
+
+  it.each(['once', 'command', 'shell'] as const)(
+    'forwards the %s action to the approval route',
+    async shellAction => {
+      const { service, approveToolCall } = approvalService()
+
+      await service.approveToolCall('chatllm', 'task-1', 'call-1', ['chatllm'], { shellAction })
+
+      expect(approveToolCall).toHaveBeenCalledTimes(1)
+      expect(approveToolCall).toHaveBeenCalledWith(
+        'rpc-test-token',
+        'chatllm',
+        'task-1',
+        'call-1',
+        false,
+        shellAction
+      )
+    }
+  )
+
+  it('forwards the action again on the retry after a token refresh', async () => {
+    const { service, approveToolCall } = approvalService()
+    approveToolCall.mockRejectedValueOnce(
+      new ApiError('Approve failed (401): expired', 401, '{"error":"expired"}')
+    )
+
+    await service.approveToolCall('chatllm', 'task-1', 'call-1', ['chatllm'], {
+      shellAction: 'command',
+    })
+
+    expect(service.rpcTokenManager.clear).toHaveBeenCalledTimes(1)
+    expect(approveToolCall).toHaveBeenCalledTimes(2)
+    expect(approveToolCall).toHaveBeenNthCalledWith(
+      1,
+      'rpc-test-token',
+      'chatllm',
+      'task-1',
+      'call-1',
+      false,
+      'command'
+    )
+    expect(approveToolCall).toHaveBeenNthCalledWith(
+      2,
+      'rpc-test-token-refreshed',
+      'chatllm',
+      'task-1',
+      'call-1',
+      false,
+      'command'
+    )
+  })
+})

@@ -14,6 +14,7 @@ export type CellId =
   | 'A5'
   | 'A6'
   | 'X1'
+  | 'X2'
   | 'U1'
 
 export type ModeDecision =
@@ -108,7 +109,14 @@ export function decideApproval(input: {
   if (tool === 'cron') return manualColumn(input, true)
   // An unknown mode is manual. Falling through would use the auto column.
   if (input.mode !== 'auto' && input.mode !== 'allow_all') return manualColumn(input, false)
-  if (input.mode === 'allow_all') return { kind: 'run', cell: 'X1' }
+  if (input.mode === 'allow_all') {
+    // A guardrail ask is the operator's rule: allow-all still shows its exact
+    // card. Every other cause runs.
+    if (input.cause === 'guardrail_ask') {
+      return { kind: 'card', cell: 'X2', scope: 'exact_invocation' }
+    }
+    return { kind: 'run', cell: 'X1' }
+  }
 
   if (AUTO_EXACT_CAUSES.has(input.cause) || input.cause !== 'ordinary') {
     return { kind: 'card', cell: 'A5', scope: 'exact_invocation' }

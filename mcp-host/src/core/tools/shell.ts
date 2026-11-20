@@ -63,9 +63,11 @@ function shellUxRecursiveRootDelete(args: string[]): boolean {
 }
 
 function shellUxBlocked(rawCommand: string): boolean {
-  // A backslash-newline continues the same command line in the shell, so it
-  // must not split a segment. A bare newline does end the command.
-  const command = rawCommand.replace(SHELL_UX_LINE_CONTINUATION, ' ')
+  // sh removes a backslash-newline before it splits words, so `-r\<newline>f`
+  // reads as `-rf`. Remove it the same way. A bare newline does end the
+  // command. A backslash before CRLF is removed too, although sh keeps the CR
+  // and ends the command there; that can only add a block.
+  const command = rawCommand.replace(SHELL_UX_LINE_CONTINUATION, '')
   if (SHELL_UX_FORK_BOMB.test(command) || SHELL_UX_DEVICE_REDIRECT.test(command)) return true
   for (const segment of command.split(SHELL_UX_SEGMENT_SEPARATOR)) {
     const rmArgs = shellUxArguments(segment, SHELL_UX_RM)

@@ -902,7 +902,16 @@ function storeNameGrant(
     }
     return
   }
-  if (!modeAllows) return
+  if (!modeAllows) {
+    // The call still runs once. Only an Always answer was asked to store.
+    if (alwaysApprove) {
+      logger.info(
+        { event: 'always_approve_ignored', toolName, reason: 'mode_not_manual', effectiveMode },
+        'Always approve ignored: grants are stored only in manual'
+      )
+    }
+    return
+  }
   if (alwaysApprove) {
     conversation.auto_approved_tools.add(toolName)
     return

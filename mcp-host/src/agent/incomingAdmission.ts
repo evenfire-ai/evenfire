@@ -13,13 +13,17 @@ import {
   type ApprovalConfigSnapshot,
   type ApprovalMode,
   effectiveApprovalMode,
+  normalizeApprovalMode,
   parseApprovalModeCommand,
+  raisesApprovalMode,
   readChannelCap,
   readModeCeiling,
 } from '../core/approval/approvalMode'
 import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
 import type { ConversationManager } from '../core/conversation/conversation'
 import { FileReferenceErrorCode, LlmErrorCode } from '../core/errors'
+import { ApprovalResolver } from '../core/extensions/approvalResolver'
+import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import {
   chatTransportSupportsImageInput,
   imageInputDenialMessage,
@@ -125,11 +129,92 @@ function carriedApprovalMode(message: IncomingMessage): ApprovalMode | undefined
   return undefined
 }
 
-type ApprovalModeRefusal = 'channel' | 'slack_username'
+type ApprovalModeRefusal = 'channel' | 'policy_cli_only' | 'not_approver' | 'policy_invalid'
 
 const APPROVAL_MODE_REFUSAL_TEXT: Record<ApprovalModeRefusal, string> = {
   channel: 'This channel is limited to manual.',
-  slack_username: 'Only an allowlisted Slack user ID can raise the mode.',
+  policy_cli_only: "This Host's approval policy does not let a messaging channel raise the mode.",
+  not_approver: 'Only a designated approver can raise the mode.',
+  policy_invalid: "This Host's approval policy is not valid, so the mode cannot be raised.",
+}
+
+const approvalResolver = new ApprovalResolver()
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * The config `canUserApprove` reads for a designated-approvers raise, or null
+ * to refuse. That function trusts the CRD schema, which a dev-mode or
+ * ConfigMap policy skips: an absent `channels` would throw, and a string
+ * `approvers` would match by substring, so either shape refuses here, as does
+ * a non-boolean `enabled`. An absent `enabled` reads as enabled, the same
+ * opt-out rule as an absent channel block. `canUserApprove` reads a missing
+ * key as disabled, so the entry is passed with `enabled: true`. Only
+ * `enabled: false` refuses a listed approver.
+ */
+function designatedApproverConfig(
+  config: ApprovalConfig,
+  channelType: string
+): ApprovalConfig | null {
+  const channels: unknown = config.channels
+  if (!isPlainObject(channels)) return null
+  const entry = channels[channelType]
+  if (entry === undefined) return config
+  if (!isPlainObject(entry)) return null
+  const { approvers, enabled } = entry
+  if (
+    approvers !== undefined &&
+    !(Array.isArray(approvers) && approvers.every(approver => typeof approver === 'string'))
+  ) {
+    return null
+  }
+  if (enabled !== undefined && typeof enabled !== 'boolean') return null
+  if (enabled !== undefined) return config
+  return {
+    ...config,
+    channels: { ...channels, [channelType]: { ...entry, enabled: true } },
+  } as ApprovalConfig
+}
+
+/**
+ * The approver policy for a messaging-channel raise. Unset (absent, null or
+ * empty) and `channel_users` add no check, so the channel switch alone
+ * decides. `cli_only` and `designated_approvers` use `canUserApprove`:
+ * cli_only refuses every channel sender, and designated_approvers needs the
+ * sender in that channel's `approvers`, in a block not set `enabled: false`.
+ * Any other value refuses: the CRD enum does not cover a dev-mode or
+ * ConfigMap policy.
+ */
+function approverPolicyRefusal(
+  message: IncomingMessage,
+  config: ApprovalConfig | undefined
+): ApprovalModeRefusal | null {
+  if (!config) return null
+  const policy: unknown = config.defaultPolicy
+  if (policy === undefined || policy === null || policy === '' || policy === 'channel_users') {
+    return null
+  }
+  if (policy !== 'cli_only' && policy !== 'designated_approvers') {
+    logger.warn(
+      { event: 'approval_config_invalid', field: 'defaultPolicy' },
+      'defaultPolicy is not cli_only, channel_users or designated_approvers; a messaging channel cannot raise the mode'
+    )
+    return 'policy_invalid'
+  }
+  const resolved =
+    policy === 'cli_only' ? config : designatedApproverConfig(config, message.channelType)
+  const allowed =
+    resolved !== null &&
+    approvalResolver.canUserApprove(
+      message.sender,
+      message.channelType,
+      message.channelId,
+      resolved
+    )
+  if (allowed) return null
+  return policy === 'cli_only' ? 'policy_cli_only' : 'not_approver'
 }
 
 function approvalModeReply(
@@ -139,11 +224,6 @@ function approvalModeReply(
 ): string {
   const base = `Approval mode is ${stored}. Effective mode is ${effective}.`
   return refusal ? `${base} ${APPROVAL_MODE_REFUSAL_TEXT[refusal]}` : base
-}
-
-/** A Slack display-username match is not a stable identity, so it cannot raise. */
-function slackUsernameOnly(message: IncomingMessage): boolean {
-  return message.channelType === 'slack' && message.senderMatch === 'username'
 }
 
 function approvalModeStoreFailure(provider: string | undefined): MessageResponse {
@@ -328,21 +408,51 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           })
           const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
           const channelCap = readChannelCap(live, conversation.channel_type)
-          const usernameOnly = slackUsernameOnly(normalizedMessage)
-          const cap: ApprovalMode = usernameOnly ? 'manual' : channelCap
+          const ceiling = readModeCeiling(live)
+          const current = normalizeApprovalMode(conversation.approval_mode)
+          const logCommandRefusal = (reason: ApprovalModeRefusal, outcome: string): void => {
+            logger.info(
+              {
+                event: 'approval_mode_command_refused',
+                session: approvalLogId(conversation.id),
+                channel: normalizedMessage.channelType,
+                requested: command,
+                reason,
+              },
+              `Approval mode command refused; ${outcome}`
+            )
+          }
+          // The approver policy gates raises only, after the channel check.
+          // A mode at or below the stored one, and manual, always pass. The
+          // policy is the one in force (`effective`), as notifications use.
+          // A refused raise stores nothing: the stored mode stays as it was.
+          const policyRefusal =
+            channelCap === 'allow_all' && raisesApprovalMode(current, command)
+              ? approverPolicyRefusal(normalizedMessage, live.effective)
+              : null
+          if (policyRefusal) {
+            logCommandRefusal(policyRefusal, 'stored mode unchanged')
+            return {
+              success: true,
+              status: 'completed' as const,
+              response: approvalModeReply(
+                current,
+                effectiveApprovalMode(current, ceiling, channelCap),
+                policyRefusal
+              ),
+            }
+          }
           const stored = await manager.setApprovalMode(
             conversation,
             command,
-            {
-              ceiling: readModeCeiling(live),
-              cap,
-            },
+            { ceiling, cap: channelCap },
             'command',
             normalizedMessage.sender
           )
-          let refusal: ApprovalModeRefusal | null = null
-          if (command !== 'manual' && channelCap !== 'allow_all') refusal = 'channel'
-          else if (command !== 'manual' && usernameOnly) refusal = 'slack_username'
+          // With the channel switch off, the command stores manual.
+          const refusal: ApprovalModeRefusal | null =
+            command !== 'manual' && channelCap !== 'allow_all' ? 'channel' : null
+          if (refusal) logCommandRefusal(refusal, 'stored manual')
           return {
             success: true,
             status: 'completed' as const,

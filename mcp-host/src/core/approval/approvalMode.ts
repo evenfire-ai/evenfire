@@ -156,6 +156,11 @@ export function approvalModeConfigWarnings(
   return warnings
 }
 
+/** True when `requested` ranks above `stored`. */
+export function raisesApprovalMode(stored: ApprovalMode, requested: ApprovalMode): boolean {
+  return APPROVAL_MODE_RANK[requested] > APPROVAL_MODE_RANK[stored]
+}
+
 /** Effective mode is min(stored, ceiling, channel cap). */
 export function effectiveApprovalMode(
   stored: ApprovalMode,

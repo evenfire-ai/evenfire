@@ -23,7 +23,6 @@ const X1_CAUSES: GateCause[] = [
   'live',
   'denied',
   'denials_active',
-  'guardrail_ask',
 ]
 
 function grants(partial?: {
@@ -340,6 +339,26 @@ describe('decideApproval', () => {
           wholeTool: true,
         })
       ).toEqual({ kind: 'run', cell: 'X1' })
+    }
+  )
+
+  it.each(NON_CRON)(
+    'X2 %s guardrail_ask is an exact card in allow-all, even with every grant',
+    toolName => {
+      expect(
+        decide({
+          mode: 'allow_all',
+          toolName,
+          cause: 'guardrail_ask',
+          classifierAvailable: true,
+          verdict: 'APPROVE',
+          wholeTool: true,
+          task: [toolName],
+          always: [toolName],
+          command: 'ls',
+          commands: ['ls'],
+        })
+      ).toEqual({ kind: 'card', cell: 'X2', scope: 'exact_invocation' })
     }
   )
 })

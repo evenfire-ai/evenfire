@@ -62,6 +62,28 @@ const RUNS = [
   'echo x > /dev/stderr',
 ] as const
 
+// sh removes a backslash-newline before it splits words, so each of these is
+// the joined command on the right.
+const BLOCKED_JOINED_LINES = [
+  ['rm flags split mid-token (rm -rf /*)', 'rm -r\\\nf /*'],
+  ['rm command word split (rm -rf /)', 'r\\\nm -rf /'],
+  ['rm root operand split (rm -rf /*)', 'rm -rf /\\\n*'],
+  ['dd command word split (dd ... of=/dev/sda)', 'd\\\nd if=/dev/zero of=/dev/sda'],
+  ['dd of= split mid-token (of=/dev/sda)', 'dd if=/dev/zero o\\\nf=/dev/sda'],
+  ['dd device path split mid-token (of=/dev/sda)', 'dd if=/dev/zero of=/dev/s\\\nda'],
+  ['redirect device path split mid-token (> /dev/sda)', 'echo x > /dev/s\\\nda'],
+  ['fork bomb split mid-token', ':(\\\n){ :|:& };:'],
+  // sh keeps the CR and ends the command here; the guard folds it like LF.
+  ['rm flags split by backslash-CRLF', 'rm -r\\\r\nf /*'],
+] as const
+
+const RUNS_JOINED_LINES = [
+  // sh reads `rm -rf /tmp/x`, not `/` and `tmp/x`.
+  ['rm operand split mid-token (rm -rf /tmp/x)', 'rm -rf /\\\ntmp/x'],
+  // A bare newline ends the command: sh runs `rm -r`, then `f /*`.
+  ['rm flags split by a bare newline', 'rm -r\nf /*'],
+] as const
+
 function fakeChild(): ChildProcess {
   const emitter = new EventEmitter()
   const stdout = new EventEmitter() as NonNullable<ChildProcess['stdout']>
@@ -300,6 +322,22 @@ describe('ShellTool.execute', () => {
   })
 
   it.each(RUNS)('runs %s', async command => {
+    const result = await new ShellTool(workspacePath, 5_000, ['PATH']).execute({ command })
+
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['-c', command])
+    expect(result.is_error).toBe(false)
+  })
+
+  it.each(BLOCKED_JOINED_LINES)('blocks %s before spawn', async (_label, command) => {
+    const result = await new ShellTool(workspacePath, 5_000, ['PATH']).execute({ command })
+
+    expect(result.is_error).toBe(true)
+    expect(result.content).toBe(BLOCKED_MESSAGE)
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it.each(RUNS_JOINED_LINES)('runs %s', async (_label, command) => {
     const result = await new ShellTool(workspacePath, 5_000, ['PATH']).execute({ command })
 
     expect(spawnMock).toHaveBeenCalledTimes(1)

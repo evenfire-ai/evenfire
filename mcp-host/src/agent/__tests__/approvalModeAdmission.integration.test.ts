@@ -13,6 +13,7 @@ import { approvalLogId } from '../../core/approval/grantMemory'
 import type { ShellClassifierCaller } from '../../core/approval/shellClassifier'
 import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../core/conversation/conversation'
+import { pendingApprovalWireFields } from '../../core/conversation/pendingApprovalView'
 import type { StoreHandle } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { LlmErrorCode } from '../../core/errors'
@@ -726,7 +727,7 @@ describe('approval mode admission', () => {
     }
   })
 
-  it('X1 runs shell, MCP, live download, admin_forced, denied, denials_active, and guardrail ask without classify', async () => {
+  it('X1 runs shell, MCP, live download, admin_forced, denied, and denials_active without classify', async () => {
     const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
     process.env.MCP_HOST_GATEWAY_URL = 'http://gateway.invalid'
     process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN = 'token'
@@ -784,30 +785,59 @@ describe('approval mode admission', () => {
       })
       expect(workflow.approval).toBeUndefined()
       expect(workflow.classifyCalls).toBe(0)
-
-      const asked = await drive({
-        mode: 'allow_all',
-        calls: [http('http-ask-x1')],
-        guardrails: {
-          rules: [
-            {
-              id: 'ask-http-x1',
-              action: 'ask',
-              reasonCode: DESCRIPTION_SENTINEL,
-              match: { tool: { provenance: 'native', name: 'http_request' } },
-            },
-          ],
-        },
-      })
-      expect(asked.approval).toBeUndefined()
-      expect(asked.classifyCalls).toBe(0)
-      expect(vi.mocked(requestPinned)).toHaveBeenCalled()
     } finally {
       info.mockRestore()
       delete process.env.MCP_HOST_GATEWAY_URL
       delete process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN
     }
   })
+
+  it.each([
+    [
+      'an explicit ask rule',
+      {
+        id: 'ask-http-x2',
+        action: 'ask' as const,
+        reasonCode: DESCRIPTION_SENTINEL,
+        match: { tool: { provenance: 'native' as const, name: 'http_request' } },
+      },
+    ],
+    [
+      'the unmatched default of a Host with rules',
+      {
+        id: 'allow-shell-x2',
+        action: 'allow' as const,
+        match: { tool: { provenance: 'native' as const, name: 'shell_exec' } },
+      },
+    ],
+  ])(
+    'X2 cards a guardrail ask from %s in allow-all, exactly and without classify',
+    async (_label, rule) => {
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+      try {
+        const asked = await drive({
+          mode: 'allow_all',
+          calls: [http('http-ask-x2')],
+          guardrails: { rules: [rule] },
+        })
+        expect(asked.approval).toMatchObject({
+          tool_name: 'http_request',
+          authorization_scope: 'exact_invocation',
+        })
+        expect(pendingApprovalWireFields(asked.approval!).alwaysApproveAllowed).toBe(false)
+        expect(asked.executor.executorState).toBe('waiting_approval')
+        expect(asked.classifyCalls).toBe(0)
+        expect(vi.mocked(requestPinned)).not.toHaveBeenCalled()
+        expect(infoEvents(info, 'L4')).toHaveLength(0)
+
+        const ran = await drive({ mode: 'allow_all', calls: [http('http-no-guardrail-x2')] })
+        expect(ran.approval).toBeUndefined()
+        expect(vi.mocked(requestPinned)).toHaveBeenCalledTimes(1)
+      } finally {
+        info.mockRestore()
+      }
+    }
+  )
 
   it('C1 honors a cron task grant in auto and cards allow-all creates that manual would card', async () => {
     const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
@@ -1371,16 +1401,7 @@ describe('L2 and L4', () => {
         prepare: conversation => {
           conversation.last_effective_approval_mode = 'allow_all'
         },
-        guardrails: {
-          rules: [
-            {
-              id: 'ask-shell-l4',
-              action: 'ask',
-              reasonCode: DESCRIPTION_SENTINEL,
-              match: { tool: { provenance: 'native', name: 'shell_exec' } },
-            },
-          ],
-        },
+        tools: { shell_exec: true },
       })
       const l4 = infoEvents(info, 'L4')
       expect(l4).toHaveLength(1)
@@ -1388,7 +1409,7 @@ describe('L2 and L4', () => {
         event: 'L4',
         session: approvalLogId(result.conversation.id),
         tool: 'shell_exec',
-        cause: 'guardrail_ask',
+        cause: 'admin_forced',
         mode: 'allow_all',
       })
       expect(String((l4[0] as { session: string }).session)).toMatch(/^[0-9a-f]{64}$/)

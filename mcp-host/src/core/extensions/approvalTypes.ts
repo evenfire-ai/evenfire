@@ -32,8 +32,10 @@ export interface ChannelApprovalConfig {
   enabled: boolean
   approvers?: string[]
   /**
-   * When true, a telegram, email, slack, or teams session may use a channel
-   * cap of allow_all. Every other channel stays manual. Absent is false.
+   * When true, that channel's cap is allow_all; false, or a non-boolean
+   * value, caps it at manual. Absent is true for telegram, slack and teams
+   * and false for email. rpc is always allow_all; every other channel is
+   * manual.
    */
   allowModeChange?: boolean
 }
