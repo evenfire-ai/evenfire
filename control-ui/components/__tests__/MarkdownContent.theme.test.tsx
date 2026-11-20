@@ -1,8 +1,15 @@
 import React from 'react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { MarkdownContent } from '../MarkdownContent'
 import { ThemeProvider } from '../ThemeContext'
+
+beforeAll(async () => {
+  // Resolve the client-only renderer before the default async-query deadline
+  // starts, so this test measures rendered theme behavior instead of import
+  // transform latency under full-suite worker load.
+  await import('@uiw/react-md-editor')
+})
 
 afterEach(() => {
   cleanup()
