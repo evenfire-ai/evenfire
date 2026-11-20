@@ -50,7 +50,7 @@ Example policy JSON:
 }
 ```
 
-In dev mode (`CLERUM_DEV_MODE`), which has no Host watch, `modeCeiling` and `allowModeChange` are read from this JSON. Outside dev mode those keys in `CLERUM_APPROVAL_CONFIG` are ignored. A Host whose policy comes only from the ConfigMap stays at ceiling `manual` and channel cap `manual` until the same policy is copied onto the Host CR. See [Host CRD](../crds/host.md#approval-mode-ceiling).
+In dev mode (`CLERUM_DEV_MODE`), which has no Host watch, `modeCeiling` and `allowModeChange` are read from this JSON. Outside dev mode those keys in `CLERUM_APPROVAL_CONFIG` are ignored. A Host whose policy comes only from the ConfigMap has ceiling `manual`, so every session runs as manual, until a ceiling is set on the Host CR. Its channel switches keep their defaults, so Telegram, Slack and Teams sessions can then rise unless `allowModeChange: false` is copied onto the CR too. See [Host CRD](../crds/host.md#approval-mode-ceiling).
 
 `defaultPolicy` values (Host CRD / runtime):
 
