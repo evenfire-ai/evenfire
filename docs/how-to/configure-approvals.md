@@ -168,6 +168,16 @@ and asks for the Slack user ID to be allowlisted.
 Turning the switch off again lowers every session on that channel at the
 next tool call.
 
+An explicit `defaultPolicy` also limits who can raise the mode from a
+messaging channel: under `cli_only` no channel sender can, and under
+`designated_approvers` only a sender listed in that channel's `approvers`
+can, in a channel block with `enabled: true`. An entry must equal the ID the
+channel reports: the Telegram user ID, the Slack user ID, the Teams `from.id`
+of the Bot Framework activity, or the email From address, case included. A
+refused raise stores `manual`; lowering the mode is always allowed. An unset
+policy or `channel_users` adds no check, and any other value refuses every
+raise and logs `approval_config_invalid` for `defaultPolicy`.
+
 ### Kill switch
 
 Lower `modeCeiling`, or set a channel's `allowModeChange` to false, with an
