@@ -62,10 +62,14 @@ describe('nativeApprovalCause', () => {
     const registry = new NativeToolRegistry(config, 'test-conv')
     const names = registry.listDefinitions().map(d => d.name)
     expect(names.length).toBeGreaterThan(10)
+    // The tools that inherit another tool's override; every other tool is compared.
+    expect(names.filter(name => registry.get(name)?.approvalAlso !== undefined)).toEqual([
+      'json_transform',
+    ])
+    const compareNames = names.filter(name => registry.get(name)?.approvalAlso === undefined)
     let compared = 0
-    for (const name of names) {
+    for (const name of compareNames) {
       const tool = registry.get(name)
-      expect(tool?.approvalAlso).toBeUndefined()
       for (const override of [undefined, true, false] as const) {
         const tools = override === undefined ? undefined : { [name]: override }
         const expected = previousGateRule(tool, override)
@@ -74,7 +78,7 @@ describe('nativeApprovalCause', () => {
         compared++
       }
     }
-    expect(compared).toBe(names.length * 3)
+    expect(compared).toBe((names.length - 1) * 3)
   })
 
   it('keeps the old rule for an unknown tool name and for an override on another tool', () => {
