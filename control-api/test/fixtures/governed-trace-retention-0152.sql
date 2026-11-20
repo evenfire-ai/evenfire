@@ -1,5 +1,5 @@
--- The event function and path changes installed by private checkpoint 156bc43251ef52fb67ae430038756b3ad6e91433.
--- Only replay into a disposable fixture that already has the public 0151.
+-- Frozen event function and path settings for the historical search-path upgrade case.
+-- Apply only to a disposable fixture with the earlier indexed retention definitions.
     CREATE OR REPLACE FUNCTION public.governed_trace_prune_expired_events(
       requested_family text,
       batch_limit integer DEFAULT 1000

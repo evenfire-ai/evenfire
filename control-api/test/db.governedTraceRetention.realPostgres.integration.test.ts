@@ -29,7 +29,7 @@ const routineSignatures = [
   'public.governed_trace_enforce_append_only()',
   'public.governed_trace_assert_stream_integrity()',
 ]
-// prosrc of the event function at f7527b4fc and the private checkpoint at 156bc4325.
+// Event function source fingerprints for the reviewed definition and the frozen search-path fixture.
 const earlierEventBodies = {
   reviewed: '97914123ef820cde18bfbb84db852640cb42df083960a064ac0c206fb9a9602b',
   checkpoint: '5459678cf5611cc1d289e557e8ff5c4b6d703d2a5343fac63be71f195d8c5ff7',
@@ -614,8 +614,8 @@ describeRealPostgres('governed trace retention in PostgreSQL', () => {
         expect(await retentionCatalog(fixture)).toEqual(final)
         expect(await readRetentionIndexes(fixture)).toEqual(indexes)
 
-        // Recreate the recorded identities from the previous hardened image.
-        // The routine bodies and indexes are already the final definitions.
+        // Relabel receipts over the already-hardened catalog to exercise alias acceptance.
+        // This scenario verifies receipt reconciliation and preservation of the final definitions.
         await fixture.query('DELETE FROM schema_migrations WHERE version = $1', [
           GOVERNED_TRACE_RETENTION_MIGRATION,
         ])
