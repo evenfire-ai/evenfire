@@ -442,6 +442,35 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
     expect(chevron.getAttribute('aria-expanded')).toBe('false')
   })
 
+  it('opens at the pointer for a chevron right-click that follows the ContextMenu key', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('folder-d', 'Docs', 'directory', { permissions: ['read'] }),
+        ])
+      ),
+      affordances: vi.fn(
+        appServiceAffordanceProducer(async () => heldPermissionResponse(['read']))
+      ),
+    })
+    renderShell()
+    const row = await screen.findByRole('button', { name: 'Docs' })
+    const chevron = screen.getByRole('button', { name: 'Expand Docs' })
+    row.focus()
+    fireEvent.keyDown(row, { key: 'ContextMenu' })
+    const keyboardMenu = await screen.findByRole('menu', { name: 'Actions for Docs' })
+
+    // Still inside the key's armed window (no keyup yet): only the chevron's
+    // mousedown tells this contextmenu apart from the key's own follow-up.
+    fireEvent.mouseDown(chevron)
+    fireEvent.contextMenu(chevron, { clientX: 300, clientY: 400 })
+
+    const pointerMenu = await screen.findByRole('menu', { name: 'Actions for Docs' })
+    expect(pointerMenu).not.toBe(keyboardMenu)
+    expect(pointerMenu.style.left).toBe('306px')
+    expect(pointerMenu.style.top).toBe('406px')
+  })
+
   it('drops a choice made in a menu opened under the previous session generation of the same team', async () => {
     const affordances = vi.fn(
       appServiceAffordanceProducer(async () => heldPermissionResponse(['read', 'write']))
