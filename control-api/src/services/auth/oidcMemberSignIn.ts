@@ -117,14 +117,17 @@ async function signInResolvedMember(
   if (resolution.status === 'refused') return resolution
   const { account } = resolution
 
-  // The team is chosen before the invitations are applied: a member who
-  // already has a team keeps it, and only a teamless member lands in an
-  // invited team. The kept team's role is read again afterwards, because an
-  // invitation to that team may have changed it. A kept membership that a
-  // concurrent removal ended meanwhile counts as no team.
-  const before = (await findFirstActiveMembership(db, account.userId)).rows[0] as
-    | SessionTeam
-    | undefined
+  // An existing member's team is chosen before the invitations are applied:
+  // a member who already has a team keeps it, and only a teamless member
+  // lands in an invited team. The kept team's role is read again afterwards,
+  // because an invitation to that team may have changed it. A kept membership
+  // that a concurrent removal ended meanwhile counts as no team.
+  // An account created by this sign-in keeps nothing: its only team so far is
+  // the new-member team, so the lookup after the invitations ranks an invited
+  // team first and falls back to the new-member team.
+  const before = account.created.account
+    ? undefined
+    : ((await findFirstActiveMembership(db, account.userId)).rows[0] as SessionTeam | undefined)
   const invitationsApplied = await applyPendingInvitations(db, account)
   const kept = before?.team_id
     ? await currentMembershipIn(db, account.userId, before.team_id)

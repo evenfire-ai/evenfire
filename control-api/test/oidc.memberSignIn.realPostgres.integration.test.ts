@@ -143,12 +143,16 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
 
   const committed: TransactionRunner = work => withTransaction(work, testPool)
 
-  function entraFake(registrationId: string): OidcMemberSignInFakeProvider {
+  function entraFake(
+    registrationId: string,
+    env: Record<string, string | undefined> = {}
+  ): OidcMemberSignInFakeProvider {
     return createOidcMemberSignInFakeProvider({
       issuer: ENTRA_ISSUER,
       memberSignInEnv: {
         CONTROL_API_OIDC_REGISTRATION_ID: registrationId,
         CONTROL_API_OIDC_TENANT_ID: ENTRA_TENANT_ID,
+        ...env,
       },
     })
   }
@@ -577,6 +581,70 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       email,
       teamId: invitedTeam,
       role: 'inviter',
+    })
+  })
+
+  it('a new account with a pending invitation lands in the invited team, not the new-member team', async () => {
+    const newMemberTeam = await seedTeam('new-member-team')
+    const fake = entraFake('fake-entra-new-account-team', {
+      CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: newMemberTeam,
+    })
+    const invitedTeam = await seedTeam('new-account-invited-team')
+    const invitedEmail = `${uniqueLabel('new-invited')}@entra.fixture.test`
+    await seedInvitation({ email: invitedEmail, teamId: invitedTeam, role: 'inviter' })
+
+    const invited = signedIn(
+      await signIn(
+        fake,
+        await fake.signIn({
+          sub: uniqueLabel('new-invited-subject'),
+          tid: ENTRA_TENANT_ID,
+          email: invitedEmail,
+          email_verified: true,
+        }),
+        { contract: 'v1' }
+      )
+    )
+
+    expect(invited).toMatchObject({
+      created: { account: true, link: true },
+      invitationsApplied: 1,
+    })
+    expect(verifyExternalSessionToken(invited.token)).toMatchObject({
+      userId: invited.userId,
+      email: invitedEmail,
+      teamId: invitedTeam,
+      role: 'inviter',
+    })
+    const memberships = await membershipsOf(invited.userId)
+    expect(memberships).toHaveLength(2)
+    expect(memberships).toEqual(
+      expect.arrayContaining([
+        { team_id: newMemberTeam, role: 'member' },
+        { team_id: invitedTeam, role: 'inviter' },
+      ])
+    )
+
+    // Without an invitation, a new account lands in the new-member team.
+    const plainEmail = `${uniqueLabel('new-plain')}@entra.fixture.test`
+    const plain = signedIn(
+      await signIn(
+        fake,
+        await fake.signIn({
+          sub: uniqueLabel('new-plain-subject'),
+          tid: ENTRA_TENANT_ID,
+          email: plainEmail,
+          email_verified: true,
+        }),
+        { contract: 'v1' }
+      )
+    )
+    expect(plain).toMatchObject({ created: { account: true, link: true }, invitationsApplied: 0 })
+    expect(verifyExternalSessionToken(plain.token)).toMatchObject({
+      userId: plain.userId,
+      email: plainEmail,
+      teamId: newMemberTeam,
+      role: 'member',
     })
   })
 
