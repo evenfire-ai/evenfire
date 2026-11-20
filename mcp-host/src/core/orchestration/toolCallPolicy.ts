@@ -11,7 +11,9 @@ import type { ShellVerdict } from '../approval/shellClassifier'
 import { isDenied } from '../conversation/denialPolicy'
 import { oneShotMatches } from '../extensions/approvalMatch'
 import {
+  type ToolGuardrailDecision,
   type ToolIdentity,
+  atLeastAsStrict,
   recordAndCheck,
   recordDecision,
   resolveToolIdentityFromRegistry,
@@ -125,7 +127,8 @@ export async function admitToolCall(
       }
     }
 
-    const decision = await config.guardrails.decide(toolIdentity, call.arguments)
+    let decision = await config.guardrails.decide(toolIdentity, call.arguments)
+    decision = withDerivedFileReads(config, call.name, toolIdentity, decision)
     config.events.emit({
       type: 'guardrail:decision',
       data: {
@@ -212,6 +215,29 @@ export async function admitToolCall(
     return { kind: 'execute', call, toolIdentity }
   }
   return applyApprovalMode(call, config, gate, toolIdentity)
+}
+
+/**
+ * Applies the Host's `file_read` rules to the files a native tool call reads
+ * (`Tool.fileReads`), so reading a file through another tool is never looser
+ * than `file_read` itself. Only a strictly stricter result replaces the call's
+ * own decision; the deny and ask branches then act on it as usual.
+ */
+function withDerivedFileReads(
+  config: LoopConfig,
+  name: string,
+  identity: ToolIdentity,
+  own: ToolGuardrailDecision
+): ToolGuardrailDecision {
+  if (identity.provenance !== 'native') return own
+  const reads = config.toolRegistry.get(name)?.fileReads?.(own.effectiveInput)
+  if (reads === undefined) return own
+  const derived = config.guardrails?.derivedFileReadDecision?.(reads)
+  if (derived === undefined) return own
+  if (derived.decision === own.decision || !atLeastAsStrict(derived.decision, own.decision)) {
+    return own
+  }
+  return { ...own, decision: derived.decision, reasonCode: derived.reasonCode, source: 'host_rule' }
 }
 
 function skipped(call: ToolCall): ToolCallAdmission {

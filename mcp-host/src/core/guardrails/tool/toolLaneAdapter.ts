@@ -8,14 +8,16 @@
  * so this exposes a decision-only `decide()`; the loop acts on the decision
  * (deny → bounded error, ask → suspension, allow/no_decision → existing path).
  */
+import type { FileReads } from '../../interfaces'
 import { type CoreBoundaryDeps, evaluateBoundary } from '../boundary'
 import type { GuardrailsConfig } from '../config'
+import { aggregateDecision, pickPresentationReason } from '../decision'
 import { type FetchLike, createHookFetcher } from '../hooks/hookFetcher'
 import { RemoteToolHook, type ToolResultView } from '../hooks/remoteToolHook'
 import type { HookDescriptor } from '../hooks/types'
 import type { Contributor, Decision } from '../types'
 import type { ToolIdentity } from './provenance'
-import { compileRules, evaluateRules } from './rules'
+import { compileRules, evaluateDerivedFileReads, evaluateRules } from './rules'
 
 export interface ToolLaneGuardrailDeps {
   getAuthToken?: () => string
@@ -65,6 +67,13 @@ export interface ToolGuardrailDecision {
 /** The tool-lane guardrail the loop consults before executing a tool. */
 export interface ToolLaneGuardrail {
   decide(identity: ToolIdentity, input: ToolLaneInput): Promise<ToolGuardrailDecision>
+  /**
+   * The rule decision `file_read` would get for the files another native tool
+   * call reads (`Tool.fileReads`). Synchronous, rules only: hooks are not called.
+   * `undefined` when the Host has no rules. Optional for test doubles; the
+   * builder below always provides it.
+   */
+  derivedFileReadDecision?(reads: FileReads): { decision: Decision; reasonCode: string } | undefined
   /**
    * PostToolUse redaction (spec §6.2 / §10 #3): transform the model-visible tool
    * result through the installed `post_tool_use` hooks, in order. Optional — a
@@ -130,6 +139,14 @@ export function buildToolLaneGuardrail(
         effectiveInput: e.effectiveInput,
         source: e.source,
       }
+    },
+    derivedFileReadDecision(reads) {
+      const contributions = evaluateDerivedFileReads(compiled, reads)
+      if (contributions.length === 0) return undefined
+      const decision = aggregateDecision(contributions)
+      const reasonCode = pickPresentationReason(contributions, decision)
+      if (reasonCode === undefined) throw new Error('derived file_read decision has no reason')
+      return { decision, reasonCode }
     },
   }
 

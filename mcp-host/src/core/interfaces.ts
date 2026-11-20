@@ -116,11 +116,13 @@ export interface ExecutionContext {
 
 /**
  * Workspace paths a tool call reads, as the model wrote them (the same form
- * `file_read {path}` takes). `wholeWorkspace` marks a call whose reads are not
- * bounded by `paths`.
+ * `file_read {path}` takes).
+ * - `subtrees`: a path may be a directory, and the call reads all of it.
+ * - `wholeWorkspace`: the call's reads are not bounded by `paths`.
  */
 export interface FileReads {
   readonly paths: readonly string[]
+  readonly subtrees?: true
   readonly wholeWorkspace?: true
 }
 
