@@ -555,8 +555,9 @@ test('Profile OIDC start sets a binding cookie only for the configured public or
 })
 
 // Dev spike: OIDC member sign-in relays External REST's password-login session cookie.
+// Shape copied from Express `res.cookie` output, including the comma inside Expires.
 const upstreamSessionCookie =
-  'profile_session=session-token-fixture; Max-Age=43200; Path=/; HttpOnly; Secure; SameSite=Lax'
+  'profile_session=session-token-fixture; Max-Age=43200; Path=/; Expires=Sat, 21 Nov 2026 04:48:01 GMT; HttpOnly; Secure; SameSite=Lax'
 
 function memberSignInResponse(body: unknown, cookies: string[] = []): Response {
   const headers = new Headers({ 'content-type': 'application/json' })
