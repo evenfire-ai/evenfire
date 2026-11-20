@@ -87,6 +87,24 @@ async function applyPendingInvitations(
   return applied
 }
 
+/** The member's current, active membership in one team. */
+async function currentMembershipIn(
+  db: DbTransactionClient,
+  userId: string,
+  teamId: string
+): Promise<SessionTeam | undefined> {
+  const result = await db.query(
+    `SELECT tm.team_id, tm.role, t.name AS team_name
+       FROM team_members tm
+       JOIN teams t ON t.id = tm.team_id
+      WHERE tm.user_id = $1
+        AND tm.team_id = $2
+        AND tm.status = 'active'`,
+    [userId, teamId]
+  )
+  return result.rows[0] as SessionTeam | undefined
+}
+
 async function signInResolvedMember(
   db: DbTransactionClient,
   input: OidcMemberSignInInput
@@ -99,12 +117,20 @@ async function signInResolvedMember(
   if (resolution.status === 'refused') return resolution
   const { account } = resolution
 
-  // Read before the invitations are applied: a member who already has a team
-  // keeps it, and only a teamless member lands in an invited team.
-  const before = await findFirstActiveMembership(db, account.userId)
+  // The team is chosen before the invitations are applied: a member who
+  // already has a team keeps it, and only a teamless member lands in an
+  // invited team. The kept team's role is read again afterwards, because an
+  // invitation to that team may have changed it. A kept membership that a
+  // concurrent removal ended meanwhile counts as no team.
+  const before = (await findFirstActiveMembership(db, account.userId)).rows[0] as
+    | SessionTeam
+    | undefined
   const invitationsApplied = await applyPendingInvitations(db, account)
+  const kept = before?.team_id
+    ? await currentMembershipIn(db, account.userId, before.team_id)
+    : undefined
   const team =
-    (before.rows[0] as SessionTeam | undefined) ??
+    kept ??
     ((await findFirstActiveMembership(db, account.userId)).rows[0] as SessionTeam | undefined) ??
     TEAMLESS_MEMBER
 

@@ -534,6 +534,30 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     )
   })
 
+  it("a kept team's role is re-read after an invitation changes it", async () => {
+    const email = `${uniqueLabel('kept-role')}@fixture.test`
+    const userId = await seedUser(email)
+    const keptTeam = await seedTeam('kept-role-team')
+    await seedMembership(keptTeam, userId, 'member')
+    await seedInvitation({ email, teamId: keptTeam, role: 'admin' })
+    const proof = await defaultFake.signIn({
+      sub: uniqueLabel('kept-role-subject'),
+      email,
+      email_verified: true,
+    })
+
+    const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
+
+    expect(result).toMatchObject({ userId, contract: 'v1', invitationsApplied: 1 })
+    expect(await membershipsOf(userId)).toEqual([{ team_id: keptTeam, role: 'admin' }])
+    expect(verifyExternalSessionToken(result.token)).toMatchObject({
+      userId,
+      email,
+      teamId: keptTeam,
+      role: 'admin',
+    })
+  })
+
   it('a teamless member lands in the invited team', async () => {
     const email = `${uniqueLabel('teamless')}@fixture.test`
     const userId = await seedUser(email)
