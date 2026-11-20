@@ -32,6 +32,7 @@ export const PROFILE_ROUTES = {
   invitation: (token: string) => `/invitations/${segment(token)}`,
   openDesktopApp: (recipeNs: string, recipeName: string) =>
     `/open/apps/${segment(recipeNs)}/${segment(recipeName)}`,
+  oidcStart: '/api/oidc/start',
   oidcSignedIn: '/oidc/signed-in',
   oidcResult: (reason: OidcRefusalReason) => withQuery('/oidc/result', { reason }),
   members: {

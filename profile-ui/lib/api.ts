@@ -12,6 +12,8 @@ import type {
   DesktopEnvironmentResponse,
   DesktopReleaseResponse,
   InvitationPreview,
+  OidcProfileFlowConfigurationResponse,
+  OidcSignInMethod,
   PasswordLoginResponse,
 } from '../app/types/api'
 import type {
@@ -292,6 +294,23 @@ export async function loginWithPassword(
   clearToken()
   clearUnconfirmedLogout()
   return body
+}
+
+// Plain fetch on purpose: the login panel runs while signed out, so this call must not trip the
+// logout fence or the global auth-expired handler that apiGet enforces.
+export async function getOidcSignInMethod(): Promise<OidcSignInMethod | null> {
+  try {
+    const res = await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/oidc/profile-flow/configuration`)
+    if (res.status !== 200) return null
+    const body = (await res.json()) as OidcProfileFlowConfigurationResponse | null
+    const label = typeof body?.displayLabel === 'string' ? body.displayLabel.trim() : ''
+    if (body?.memberAuthenticationActivated !== true || !label) return null
+    return { label }
+  } catch {
+    // Member sign-in is optional: a network error or malformed body must leave the password
+    // form unchanged, never surface an error on the login panel.
+    return null
+  }
 }
 
 export async function logoutProfileUI(): Promise<{
