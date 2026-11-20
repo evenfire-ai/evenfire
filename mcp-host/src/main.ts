@@ -649,13 +649,6 @@ function hostAllowlistView(): AllowlistView {
   return hostSubsetAllowlistView(allowlistView(), currentHost?.spec.allowedModels)
 }
 
-/**
- * R2.9(a) — build a provider instance for a specific model within the Host's
- * configured provider, reading the LIVE ConfigStore keys. Called per task by
- * {@link resolveTaskModel}, so a key rotation never reverts a session's
- * selection: the next task rebuilds with the new key. Returns null when no Host
- * model is configured or the key/provider is unavailable.
- */
 let shellClassifierCache: {
   fingerprint: string
   model: string
@@ -699,6 +692,13 @@ function shellClassifierCaller(): ShellClassifierCaller | null {
   return caller
 }
 
+/**
+ * R2.9(a) — build a provider instance for a specific model within the Host's
+ * configured provider, reading the LIVE ConfigStore keys. Called per task by
+ * {@link resolveTaskModel}, so a key rotation never reverts a session's
+ * selection: the next task rebuilds with the new key. Returns null when no Host
+ * model is configured or the key/provider is unavailable.
+ */
 function buildProviderForModel(model: string): SingleTurnProvider | null {
   const modelCfg = currentHost?.spec.model
   if (!modelCfg?.provider) return null

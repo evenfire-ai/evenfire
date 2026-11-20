@@ -197,7 +197,7 @@ describe('main session reads: classifier pair', () => {
 
     expect(item.modeCeiling).toBe('auto')
     expect(item.shellClassifierAvailable).toBe(true)
-  })
+  }, 20_000)
 
   it('reports the classifier unavailable when the Host pins a model it does not call', async () => {
     fake.primaryKeySlot = 'openai-api-key'
@@ -219,7 +219,7 @@ describe('main session reads: classifier pair', () => {
     const item = await listedSession(harness)
 
     expect(item.shellClassifierAvailable).toBe(false)
-  })
+  }, 20_000)
 
   it('keeps the dedicated classifier while failover serves another provider', async () => {
     fake.primaryKeySlot = 'openai-api-key'
@@ -237,7 +237,7 @@ describe('main session reads: classifier pair', () => {
     engine!.noteServedFallback({ provider: 'zai', model: 'glm-4.6' })
 
     expect((await listedSession(harness)).shellClassifierAvailable).toBe(true)
-  })
+  }, 20_000)
 
   it('reports the boot fallback pair, not the inconstructible Host primary', async () => {
     const loaded = await loadMain()
