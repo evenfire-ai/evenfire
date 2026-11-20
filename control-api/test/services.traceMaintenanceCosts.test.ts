@@ -230,7 +230,8 @@ describe('trace maintenance cost contracts', () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 200 })
       .mockResolvedValueOnce({ rows: [], rowCount: 188 })
 
-    await expect(runRetentionBatch({ query })).resolves.toEqual({
+    const observe = vi.fn()
+    await expect(runRetentionBatch({ query }, undefined, observe)).resolves.toEqual({
       eventsDeleted: 800,
       costsDeleted: 200,
       promptsDeleted: 0,
@@ -245,7 +246,42 @@ describe('trace maintenance cost contracts', () => {
       ['agent_run', 200],
       ['infrastructure_telemetry', 188],
     ])
+    expect(observe.mock.calls.map(([attempt]) => attempt.grain)).toEqual([
+      'agent_run',
+      'administrative',
+      'infrastructure_telemetry',
+      'infrastructure_cost',
+      'approval_prompt',
+      'agent_run',
+      'infrastructure_telemetry',
+    ])
+    for (const [attempt] of observe.mock.calls) {
+      expect(attempt.outcome).toBe('completed')
+      expect(Number.isFinite(attempt.durationMs)).toBe(true)
+      expect(attempt.durationMs).toBeGreaterThanOrEqual(0)
+    }
     expect(query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toMatch(/COUNT\s*\(/i)
+  })
+
+  it('reports the failed grain and propagates the PostgreSQL cancellation', async () => {
+    const cancellation = Object.assign(new Error('canceling statement due to statement timeout'), {
+      code: '57014',
+    })
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockRejectedValueOnce(cancellation)
+    const observe = vi.fn()
+
+    await expect(runRetentionBatch({ query }, undefined, observe)).rejects.toBe(cancellation)
+    expect(query).toHaveBeenCalledTimes(3)
+    expect(observe.mock.calls.map(([attempt]) => [attempt.grain, attempt.outcome])).toEqual([
+      ['agent_run', 'completed'],
+      ['administrative', 'completed'],
+      ['infrastructure_telemetry', 'failed'],
+    ])
+    expect(observe.mock.calls[2]?.[0].durationMs).toBeGreaterThanOrEqual(0)
   })
 
   it('uses the full bounded wake budget for a single backlogged grain', async () => {

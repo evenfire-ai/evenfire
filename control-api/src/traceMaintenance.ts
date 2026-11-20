@@ -23,7 +23,7 @@ import {
   closedUtcDayRange,
   runMaintenanceCostPersistence,
 } from './services/tracing/maintenance/maintenanceCostService.js'
-import { runRetentionBatch } from './services/tracing/maintenance/retention.js'
+import { type RetentionGrain, runRetentionBatch } from './services/tracing/maintenance/retention.js'
 import {
   TraceMaintenanceShutdownCoordinator,
   type TraceMaintenanceShutdownSignal,
@@ -240,6 +240,10 @@ async function wake(): Promise<void> {
   const startedAt = Date.now()
   let outcome = 'failed'
   let costRollupAttempted = false
+  const retentionDurationMsByGrain: Partial<Record<RetentionGrain, number>> = {}
+  let failedRetention:
+    | { retentionGrain: RetentionGrain; retentionGrainDurationMs: number }
+    | undefined
   try {
     const now = new Date()
     const costConfig = costPersistenceConfig()
@@ -308,12 +312,24 @@ async function wake(): Promise<void> {
               billedVersions: 0,
               skippedReason: costConfig.enabled ? 'cadence' : 'disabled',
             }
-        const result = await runRetentionBatch(client)
+        const result = await runRetentionBatch(
+          client,
+          undefined,
+          ({ grain, durationMs, outcome }) => {
+            if (outcome === 'failed') {
+              failedRetention = { retentionGrain: grain, retentionGrainDurationMs: durationMs }
+              return
+            }
+            retentionDurationMsByGrain[grain] =
+              (retentionDurationMsByGrain[grain] ?? 0) + durationMs
+          }
+        )
         await client.query('COMMIT')
         outcome = 'completed'
         rootLogger.info(
           {
             ...result,
+            retentionDurationMsByGrain,
             inventoryEvents,
             costPersistence,
             streamRegistrationGaps,
@@ -343,7 +359,13 @@ async function wake(): Promise<void> {
       nextGcpPricingImportAt = Math.min(nextGcpPricingImportAt, retryAt)
     }
     rootLogger.error(
-      { err: error, outcome, durationMs: Date.now() - startedAt },
+      {
+        err: error,
+        outcome,
+        durationMs: Date.now() - startedAt,
+        retentionDurationMsByGrain,
+        ...failedRetention,
+      },
       'trace maintenance wake failed'
     )
   } finally {
