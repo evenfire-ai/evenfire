@@ -612,8 +612,11 @@ export function GfsActionHost({
     gate: accessState !== 'active',
     handleAuthorityFailure: (message, surface, scope, generation) =>
       handleGfsAuthorityFailure(queryClient, scope, generation, message, surface, liveRef.current),
-    // The ACL write already failed closed in its mutation; this only classifies.
-    failClosed: error => isGfsSessionAuthorityFailure(toMessage(error), 'operation'),
+    // The dialog also calls IPC directly (grant, affordances), outside any
+    // mutation that would revoke on its own; a repeat purge after one that
+    // did is harmless.
+    failClosed: error =>
+      failClosed(toMessage(error), action.originScope, action.originGen) !== 'not-authority',
     freshPermissions: (resourceId, resourceName, bits, grantableBits) =>
       freshPermissions(action, () => isActionCurrent(action))(
         resourceId,
