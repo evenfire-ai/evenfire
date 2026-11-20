@@ -63,7 +63,7 @@ export interface GfsActionHostContextValue {
    * surfaces under it must not consume the key. False while an action is
    * still checking its permissions or waiting on the file picker.
    */
-  actionOpen: boolean
+  dialogShown: boolean
 }
 
 export interface GfsActionHostProps {

@@ -505,10 +505,10 @@ export function GfsActionHost({
     activeAction && (activeAction.phase === 'dialog' || activeAction.phase === 'running')
       ? activeAction
       : null
-  const actionOpen = shownAction !== null
+  const dialogShown = shownAction !== null
   const contextValue = useMemo<GfsActionHostContextValue>(
-    () => ({ openGfsAction, hostMovingResourceId, actionOpen }),
-    [actionOpen, hostMovingResourceId, openGfsAction]
+    () => ({ openGfsAction, hostMovingResourceId, dialogShown }),
+    [dialogShown, hostMovingResourceId, openGfsAction]
   )
 
   const renderDialog = (action: GfsHostActiveAction) => {
