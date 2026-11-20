@@ -10,10 +10,11 @@
  * own "session not found" answer arrives as a 404 here; the main process
  * reports any other 404 as a plain failure. While the first send of a chat
  * whose session row the store has not seen is in flight, the mode cannot
- * change: a PATCH would reach the Host before the send creates the row. Any
- * other failure is not proof of the stored mode: the next session read paints
- * the label, including a write the server committed before the response was
- * dropped.
+ * change: a PATCH would reach the Host before the send creates the row. Nor
+ * can it change while the chat's previous write is unanswered: one mode write
+ * is in flight per chat. Any other failure is not proof of the stored mode:
+ * the next session read paints the label, including a write the server
+ * committed before the response was dropped.
  *
  * Each existing chat also remembers whether its latest pick was not saved
  * (`saveFailed`), so the picker can say so after a chat switch or a remount.
@@ -46,6 +47,11 @@ export interface HostApprovalModeView {
    * row. The mode cannot change until the send is acknowledged or fails.
    */
   firstSendInFlight: boolean
+  /**
+   * A mode write for the chat is unanswered (its PATCH, or the re-read after
+   * a failed one). The mode cannot change until it settles.
+   */
+  writeInFlight: boolean
   /** The chat's latest pick was not saved, and the stored mode is still not that pick. */
   saveFailed: boolean
 }
@@ -142,6 +148,7 @@ function buildView(entry: Entry): HostApprovalModeView {
     shellClassifierAvailable: entry.shellClassifierAvailable,
     firstSendMode: entry.persisted ? null : entry.heldForFirstSend,
     firstSendInFlight: entry.firstSendsInFlight > 0,
+    writeInFlight: entry.writing,
     // Derived, so a writer that sets the stored mode without applySnapshot
     // (the 404 hold, migrateHeldApprovalMode) cannot show an error for it.
     saveFailed: entry.failedMode !== null && entry.failedMode !== entry.storedMode,
@@ -366,6 +373,13 @@ export async function selectHostApprovalMode(
 ): Promise<boolean> {
   if (!agentRef || !isMode(mode)) return false
   const entry = getEntry(agentRef, chatId)
+  // One mode write in flight per chat. Two overlapping PATCHes can be answered
+  // in either order, and the answer that lands last would set the label, which
+  // can then differ from what the Host stored. A pick while this chat's write
+  // is unanswered is refused before it takes a write id, so it changes nothing
+  // (no PATCH, no flag, no notify) and the write in flight still decides the
+  // label and the save-failure flag. The picker is busy for the same window.
+  if (chatId && entry.writing) return false
   // Every pick on an existing chat is a write for the save-failure flag, the
   // refusal below included. The id gates only `failedMode`: labels, `writing`,
   // `lastWriteSeq` and the return value behave as before.

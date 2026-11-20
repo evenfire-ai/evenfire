@@ -13,6 +13,7 @@ export interface ApprovalModePickerProps {
 const ALLOW_ALL_CONFIRM =
   'Allow all runs tools in this chat without asking, except scheduled tasks. Continue?'
 const FIRST_SEND_LOCK_HINT = 'The approval mode can change once the first message reaches the Host.'
+const SAVING_HINT = 'Saving the approval mode…'
 const CLASSIFIER_NOTE = 'shell always asks on this model'
 const WRITE_ERROR = 'The approval mode could not be saved.'
 
@@ -35,6 +36,12 @@ const MODE_OPTIONS: ReadonlyArray<{ mode: ApprovalMode; label: string; testId: s
  * opened for one chat ever shows or acts on the next. The same happens when the
  * chat's first send starts: the store refuses a change in that window.
  *
+ * One mode write is in flight per chat. While the chat's save is unanswered
+ * the chip is busy (`aria-busy`, `aria-disabled`) and does not open, and the
+ * store refuses a second pick, so two saves can never be answered out of
+ * order. The chip stays focusable: a pick hands focus back to it just before
+ * the save starts.
+ *
  * Whether the chat's latest pick was not saved lives in the approval-mode
  * store, per chat, so the error follows the chat across switches and remounts.
  * Opening the menu again clears it.
@@ -50,6 +57,7 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
     effectiveMode,
     shellClassifierAvailable,
     firstSendInFlight,
+    writeInFlight,
     saveFailed,
     selectMode,
     clearSaveFailure,
@@ -62,22 +70,25 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
   const classifierNoteId = useId()
   const confirmTextId = useId()
 
+  // The chip cannot open while the first send or a save for this chat is in flight.
+  const locked = firstSendInFlight || writeInFlight
+
   // Reset during render, not in an effect: a passive effect would commit the
   // previous chat's menu under the next chat first, and could undo a click
   // that lands before it runs.
   const scopeKey = `${agentRef}::${selectionChatId ?? ''}`
-  const [renderedFor, setRenderedFor] = useState({ scopeKey, locked: firstSendInFlight })
-  if (renderedFor.scopeKey !== scopeKey || renderedFor.locked !== firstSendInFlight) {
-    if (renderedFor.scopeKey !== scopeKey || (firstSendInFlight && !renderedFor.locked)) {
+  const [renderedFor, setRenderedFor] = useState({ scopeKey, locked })
+  if (renderedFor.scopeKey !== scopeKey || renderedFor.locked !== locked) {
+    if (renderedFor.scopeKey !== scopeKey || (locked && !renderedFor.locked)) {
       setOpen(false)
       setConfirming(false)
     }
-    setRenderedFor({ scopeKey, locked: firstSendInFlight })
+    setRenderedFor({ scopeKey, locked })
   }
 
   const chipLabel = label ?? 'Manual'
   const showClassifierNote = effectiveMode === 'auto' && shellClassifierAvailable === false
-  const menuOpen = open && !firstSendInFlight
+  const menuOpen = open && !locked
 
   const close = useCallback(() => {
     setOpen(false)
@@ -131,22 +142,25 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
         size="sm"
         interactive={!firstSendInFlight}
         role="button"
-        className={`model-selector-chip${firstSendInFlight ? ' model-selector-chip--disabled' : ''}`}
+        className={`model-selector-chip${locked ? ' model-selector-chip--disabled' : ''}`}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        aria-disabled={firstSendInFlight || undefined}
+        aria-disabled={locked || undefined}
+        aria-busy={writeInFlight || undefined}
         aria-label={`Approval mode — ${chipLabel}`}
         aria-describedby={showClassifierNote ? classifierNoteId : undefined}
         data-testid="approval-mode-picker"
         title={
           firstSendInFlight
             ? FIRST_SEND_LOCK_HINT
-            : showClassifierNote
-              ? `${chipLabel}: ${CLASSIFIER_NOTE}`
-              : undefined
+            : writeInFlight
+              ? SAVING_HINT
+              : showClassifierNote
+                ? `${chipLabel}: ${CLASSIFIER_NOTE}`
+                : undefined
         }
         onClick={() => {
-          if (firstSendInFlight) return
+          if (locked) return
           if (!open) clearSaveFailure()
           setConfirming(false)
           setOpen(current => !current)

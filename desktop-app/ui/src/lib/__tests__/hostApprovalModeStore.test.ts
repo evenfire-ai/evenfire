@@ -299,6 +299,68 @@ describe('hostApprovalModeStore', () => {
   })
 })
 
+describe('hostApprovalModeStore — one write in flight per chat', () => {
+  /** Each PATCH commits on arrival; its answer is released later, in any order. */
+  function slowHost(initial: SessionApprovalSnapshot['approvalMode']) {
+    const host = { mode: initial }
+    const answers: Array<{ settle: () => void }> = []
+    const setApprovalMode = vi.fn(
+      (_agent: string, _chat: string, mode: SessionApprovalSnapshot['approvalMode']) => {
+        host.mode = mode
+        return new Promise<SessionApprovalSnapshot>(resolve => {
+          answers.push({ settle: () => resolve(snapshot(mode)) })
+        })
+      }
+    )
+    return { host, answers, setApprovalMode }
+  }
+
+  it('refuses a pick while the chat’s write is unanswered, so the label stays what the Host stored', async () => {
+    const { host, answers, setApprovalMode } = slowHost('auto')
+    const { client } = transport({ setApprovalMode })
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('auto'))
+
+    const first = selectHostApprovalMode(client, AGENT, CHAT, 'manual')
+    expect(readHostApprovalMode(AGENT, CHAT).writeInFlight).toBe(true)
+    const second = selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')
+    // Answers arrive newest first.
+    for (const answer of [...answers].reverse()) answer.settle()
+    const results = await Promise.all([first, second])
+
+    expect(readHostApprovalMode(AGENT, CHAT).effectiveMode).toBe(host.mode)
+    expect(results).toEqual([true, false])
+    expect(setApprovalMode).toHaveBeenCalledTimes(1)
+    expect(readHostApprovalMode(AGENT, CHAT).writeInFlight).toBe(false)
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(false)
+  })
+
+  it('a refused pick changes nothing, and the write in flight still flags its own failure', async () => {
+    const rejecters: Array<(error: Error) => void> = []
+    const setApprovalMode = vi.fn(
+      () =>
+        new Promise<SessionApprovalSnapshot>((_resolve, reject) => {
+          rejecters.push(reject)
+        })
+    )
+    const { client } = transport({ setApprovalMode })
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual'))
+    const first = selectHostApprovalMode(client, AGENT, CHAT, 'auto')
+    const listener = vi.fn()
+    const unsubscribe = subscribeHostApprovalMode(AGENT, CHAT, listener)
+
+    const refused = selectHostApprovalMode(client, AGENT, CHAT, 'allow_all')
+    expect(setApprovalMode).toHaveBeenCalledTimes(1)
+    expect(listener).not.toHaveBeenCalled()
+    for (const reject of rejecters) reject(new Error('Set approval mode failed (401)'))
+
+    await expect(refused).resolves.toBe(false)
+    await expect(first).resolves.toBe(false)
+    expect(readHostApprovalMode(AGENT, CHAT).storedMode).toBe('manual')
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+    unsubscribe()
+  })
+})
+
 describe('hostApprovalModeStore — save failure flag (picker spec C2)', () => {
   it('R24: a 404 that answers after the first send began flags the save as failed', async () => {
     let rejectPatch!: (error: Error) => void
@@ -350,7 +412,7 @@ describe('hostApprovalModeStore — save failure flag (picker spec C2)', () => {
     send.release()
   })
 
-  it('an older write that settles after a refused newer pick does not clear the failure', async () => {
+  it('a pick refused while a write and the first send are in flight leaves the outcome to that write', async () => {
     let resolvePatch!: (value: SessionApprovalSnapshot) => void
     const { client } = transport({
       setApprovalMode: vi.fn(
@@ -365,14 +427,17 @@ describe('hostApprovalModeStore — save failure flag (picker spec C2)', () => {
 
     const older = selectHostApprovalMode(client, AGENT, CHAT, 'auto')
     const send = beginApprovalModeFirstSend(AGENT, CHAT)
+    // One write in flight per chat: the pick is refused before it becomes
+    // the chat's latest write, so it raises no flag of its own.
     await expect(selectHostApprovalMode(client, AGENT, CHAT, 'manual')).resolves.toBe(false)
-    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+    expect(client.setApprovalMode).toHaveBeenCalledTimes(1)
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(false)
 
     resolvePatch(snapshot('auto'))
     await expect(older).resolves.toBe(true)
 
     expect(readHostApprovalMode(AGENT, CHAT).storedMode).toBe('auto')
-    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(true)
+    expect(readHostApprovalMode(AGENT, CHAT).saveFailed).toBe(false)
     send.release()
   })
 

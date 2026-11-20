@@ -211,6 +211,94 @@ describe('ApprovalModePicker — model selector look', () => {
   })
 })
 
+describe('ApprovalModePicker — one save in flight', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    return { promise, resolve, reject }
+  }
+
+  it('keeps the chip busy while a save is in flight, so a second pick cannot start', async () => {
+    const save = deferred<unknown>()
+    setApprovalMode.mockReturnValueOnce(save.promise)
+    seed('chat-1', 'manual')
+    const { getByTestId, queryByTestId } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-1" />
+    )
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    fireEvent.click(getByTestId('approval-mode-option-auto'))
+
+    const chip = getByTestId('approval-mode-picker')
+    expect(chip.getAttribute('aria-busy')).toBe('true')
+    expect(chip.getAttribute('aria-disabled')).toBe('true')
+    expect(chip.getAttribute('title')).toBe('Saving the approval mode…')
+    // The pick handed focus back to the chip; a busy chip keeps it.
+    expect(chip.getAttribute('tabindex')).toBe('0')
+    expect(document.activeElement).toBe(chip)
+    fireEvent.click(chip)
+    fireEvent.keyDown(chip, { key: 'Enter' })
+    expect(chip.getAttribute('aria-expanded')).toBe('false')
+    expect(queryByTestId('approval-mode-option-manual')).toBeNull()
+    expect(setApprovalMode).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      save.resolve({
+        approvalMode: 'auto',
+        modeCeiling: 'allow_all',
+        channelCap: 'allow_all',
+        effectiveApprovalMode: 'auto',
+      })
+    })
+    expect(chip.getAttribute('aria-busy')).toBeNull()
+    expect(chip.getAttribute('aria-disabled')).toBeNull()
+    expect(chip.textContent).toBe('Auto-approve')
+    fireEvent.click(chip)
+    expect(queryByTestId('approval-mode-option-manual')).not.toBeNull()
+  })
+
+  it('shows a failed save at once, and not while the next save is in flight', async () => {
+    const first = deferred<unknown>()
+    const second = deferred<unknown>()
+    setApprovalMode.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    seed('chat-1', 'manual')
+    const { getByTestId, queryByTestId } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-1" />
+    )
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    fireEvent.click(getByTestId('approval-mode-option-auto'))
+    // A click while the save is in flight opens nothing.
+    fireEvent.click(getByTestId('approval-mode-picker'))
+
+    await act(async () => {
+      first.reject(new Error('Set approval mode failed (500)'))
+    })
+    expect(getByTestId('approval-mode-write-error').textContent).toBe(
+      'The approval mode could not be saved.'
+    )
+
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    expect(queryByTestId('approval-mode-write-error')).toBeNull()
+    fireEvent.click(getByTestId('approval-mode-option-manual'))
+    expect(setApprovalMode).toHaveBeenCalledTimes(2)
+    expect(getByTestId('approval-mode-picker').getAttribute('aria-busy')).toBe('true')
+    expect(queryByTestId('approval-mode-write-error')).toBeNull()
+
+    await act(async () => {
+      second.resolve({
+        approvalMode: 'manual',
+        modeCeiling: 'allow_all',
+        channelCap: 'allow_all',
+        effectiveApprovalMode: 'manual',
+      })
+    })
+    expect(queryByTestId('approval-mode-write-error')).toBeNull()
+  })
+})
+
 describe('ApprovalModePicker — chat switch', () => {
   // The composer mounts the picker un-keyed, so a chat or tab switch only
   // changes its props. Nothing opened for one chat may act on the next.

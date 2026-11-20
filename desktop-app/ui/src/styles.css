@@ -4445,6 +4445,17 @@ body.sidebar-resizing {
   color: var(--text-dim);
 }
 
+/* Busy approval-mode chip while its save is in flight: it stays focusable (a
+ * pick hands focus back to it), so it keeps the interactive class and its
+ * focus ring, but hover no longer suggests it opens. */
+.composer-actions-right
+  .model-selector-chip.model-selector-chip--disabled.ui-pill--interactive:hover {
+  background: var(--surface-soft);
+  border-color: rgba(var(--edge-rgb), 0.32);
+  color: var(--text-dim);
+  cursor: default;
+}
+
 /* Caret reads as a control affordance (muted), not a status accent. */
 .composer-actions-right .model-selector-chip-caret {
   opacity: 0.55;

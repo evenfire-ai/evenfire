@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * Approval-mode picker local state (spec "Approval-mode picker local state",
- * A4 invariants S1-S3, L1, L2, F1, C1). A fast-check command model drives the
+ * A4 invariants S1-S4, L1, L2, F1, C1). A fast-check command model drives the
  * real picker and the real approval-mode store; only the IPC boundary is
  * mocked, backed by a small fake server. Scenario tests pin the A3 rows.
  */
@@ -138,22 +138,19 @@ describe('ApprovalModePicker state — save errors (A3 rows)', () => {
     expect(utils.queryByTestId('approval-mode-write-error')?.textContent).toBe(SAVE_ERROR)
   })
 
-  it('R6: a newer save for the same chat wins over an older failure that settles later', async () => {
+  it('R6: no second save for the chat starts while its first is in flight, so that save decides the outcome', async () => {
     const older = deferred<ApprovalModeResult>()
-    const newer = deferred<ApprovalModeResult>()
-    setApprovalMode.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise)
+    setApprovalMode.mockReturnValueOnce(older.promise)
     const utils = renderPicker('chat-1')
     pickAuto(utils)
     fireEvent.click(utils.getByTestId('approval-mode-picker'))
-    fireEvent.click(utils.getByTestId('approval-mode-option-manual'))
-    expect(setApprovalMode).toHaveBeenCalledTimes(2)
+    expect(utils.queryByTestId('approval-mode-option-manual')).toBeNull()
+    expect(setApprovalMode).toHaveBeenCalledTimes(1)
 
-    newer.resolve(patchSuccess('manual'))
-    await flush()
     older.reject(patchFailure(500))
     await flush()
 
-    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
+    expect(utils.queryByTestId('approval-mode-write-error')?.textContent).toBe(SAVE_ERROR)
   })
 
   it('R9: a save that fails while the chat is unmounted shows when the chat mounts again', async () => {
@@ -184,19 +181,22 @@ describe('ApprovalModePicker state — save errors (A3 rows)', () => {
     expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
   })
 
-  it('R14: an error that arrives while the menu is open shows once the chip closes the menu', async () => {
+  it('R14: the menu cannot open while the save is in flight, so its failure shows at once', async () => {
     const write = deferred<ApprovalModeResult>()
     setApprovalMode.mockReturnValueOnce(write.promise)
     const utils = renderPicker('chat-1')
     pickAuto(utils)
     fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    expect(utils.getByTestId('approval-mode-picker').getAttribute('aria-expanded')).toBe('false')
 
     write.reject(patchFailure(500))
     await flush()
-    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
-
-    fireEvent.click(utils.getByTestId('approval-mode-picker'))
     expect(utils.queryByTestId('approval-mode-write-error')?.textContent).toBe(SAVE_ERROR)
+
+    // Only an opening click clears it.
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    expect(utils.queryByTestId('approval-mode-option-manual')).not.toBeNull()
+    expect(utils.queryByTestId('approval-mode-write-error')).toBeNull()
   })
 
   it('R16: a failed response for a save the Host did commit shows no error', async () => {
@@ -550,8 +550,22 @@ function startWrite(model: Model, mode: ApprovalMode, outcome: Outcome, real: Re
   real.pendingOutcomes.push(outcome)
 }
 
+/** A save for this chat is unanswered (PATCH not settled). */
+function saveInFlight(model: Readonly<Model>, chat: ChatKey): boolean {
+  return model.writes.some(write => write.chat === chat && !write.settled)
+}
+
 function assertInvariants(model: Model, real: Real): void {
   const { queryByTestId } = real.utils
+  // S4: one save in flight per chat; the chip of that chat is busy meanwhile.
+  for (const chat of CHATS) {
+    expect(
+      model.writes.filter(write => write.chat === chat && !write.settled).length
+    ).toBeLessThanOrEqual(1)
+  }
+  expect(real.utils.getByTestId('approval-mode-picker').getAttribute('aria-busy') === 'true').toBe(
+    saveInFlight(model, model.screen)
+  )
   // L2 + menu shape
   expect(queryByTestId('approval-mode-option-manual') !== null).toBe(
     model.menuOpen && !model.confirming
@@ -605,10 +619,11 @@ class ToggleMenu implements fc.AsyncCommand<Model, Real> {
   async run(model: Model, real: Real) {
     if (model.menuOpen) {
       closeMenu(model)
-    } else {
+    } else if (!saveInFlight(model, model.screen)) {
       model.menuOpen = true
       model.failedRequest[model.screen] = null
     }
+    // A busy chip ignores the click: the menu stays closed and the error stays.
     fireEvent.click(real.utils.getByTestId('approval-mode-picker'))
     assertInvariants(model, real)
   }
@@ -749,7 +764,7 @@ const commandArbitraries = [
 ]
 
 describe('ApprovalModePicker state — A6 command model', () => {
-  it('keeps S1–S3, L1, L2 and C1 for any event order and settlement order', async () => {
+  it('keeps S1–S4, L1, L2 and C1 for any event order and settlement order', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.scheduler(),
