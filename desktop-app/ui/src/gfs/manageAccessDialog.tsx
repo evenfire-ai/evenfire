@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { isEditorGfsPermissions, planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
 import { Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
@@ -8,6 +8,7 @@ import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsResourceAccess } from '@hooks/domain/useGfsResourceAccess'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
+import { watchGfsAccessRevocation } from '@lib/gfsSessionAuthority'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
 import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
@@ -21,7 +22,11 @@ import {
 import type { GfsInheritedAccessSource, GfsInheritedCoverageState } from '@/gfs/delegation.types'
 import type { Tone } from '@/uiTypes'
 import type { TeamDirectoryResult } from '../../../src/types'
-import type { GfsManageAccessDialogProps, MyAgentEntry } from './manageAccessDialog.types'
+import type {
+  GfsManageAccessDialogProps,
+  GfsParentUpdateGuards,
+  MyAgentEntry,
+} from './manageAccessDialog.types'
 import { bindGfsActionGuards } from './resourceActionRunners'
 
 /** Maps a permission set onto the Share dialog's two roles (Editor > Read). */
@@ -163,7 +168,12 @@ export function GfsManageAccessDialog({
   const { affordances, affordancesError, loadingAffordances, revalidateAffordances } = access
   const isFolder = target.kind === 'directory'
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
+  const queryClient = useQueryClient()
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
+  // A confirmed parent-folder run in flight. The ref answers synchronously in
+  // event handlers whose closures predate the render that set the state.
+  const confirmRunningRef = useRef(false)
+  const [confirmRunning, setConfirmRunning] = useState(false)
   // Pending parent-folder confirmation (role change or removal) for a member
   // whose file access is inherited from ancestor folders. change-role carries
   // the split plan's affected grant-backed folders (R1-M5: each rewritten
@@ -182,8 +192,9 @@ export function GfsManageAccessDialog({
         skippedFolderNames: string[]
         /** Folders whose sharing entries still grant Editor after the change. */
         residualEditorFolderNames: string[]
+        guards: GfsParentUpdateGuards
       }
-    | { row: GfsMergedAccessRow; label: string; mode: 'remove' }
+    | { row: GfsMergedAccessRow; label: string; mode: 'remove'; guards: GfsParentUpdateGuards }
     | null
   >(null)
 
@@ -198,7 +209,7 @@ export function GfsManageAccessDialog({
   }, [])
   const isCurrentRef = useRef(isCurrent)
   isCurrentRef.current = isCurrent
-  const bindGuards = () => {
+  const bindGuardSet = () => {
     const session = {
       readAccessState: deps.readAccessState,
       publishedGeneration: deps.publishedGeneration,
@@ -222,7 +233,28 @@ export function GfsManageAccessDialog({
         if (admitted) pushToast(message, tone)
       })
     }
-    return { ...action, presentOutcome }
+    return { action, session: outcome, presentOutcome }
+  }
+  const bindGuards = () => {
+    const set = bindGuardSet()
+    return set ? { ...set.action, presentOutcome: set.presentOutcome } : null
+  }
+  // A parent-folder plan is bound to the session it was computed in. Its
+  // confirmation keeps writing after the dialog unmounts (a navigation must not
+  // cut a cascade half-way), so the writes are admitted by the session alone;
+  // the dialog's own liveness only decides whether the run may start.
+  const bindParentUpdateGuards = (): GfsParentUpdateGuards | null => {
+    const originScope = deps.originScope()
+    const originGen = deps.publishedGeneration()
+    const set = bindGuardSet()
+    if (!set || originGen === null) return null
+    return {
+      isCurrent: set.action.isCurrent,
+      sessionAdmit: set.session.admitEffect,
+      presentOutcome: set.presentOutcome,
+      originScope,
+      originGen,
+    }
   }
 
   // Opening Share on a target re-reads its authority once; later renders must
@@ -302,6 +334,9 @@ export function GfsManageAccessDialog({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      // Nothing closes while a confirmed run writes: the user would believe
+      // they cancelled a cascade that keeps going.
+      if (confirmRunningRef.current) return
       if (parentUpdateOpen) setParentUpdate(null)
       else onCloseRef.current()
     }
@@ -393,7 +428,7 @@ export function GfsManageAccessDialog({
     const freshAuthority = await deps.fetchAuthority(target.resourceId, target.name)
     if (!freshAuthority) return
     if (!freshAuthority.held?.includes('manage_acl')) {
-      pushToast?.(`You do not have manage access to ${target.name}.`, 'error')
+      guards.presentOutcome(`You do not have manage access to ${target.name}.`, 'error')
       return
     }
     const bits = rolePermissionRequest(item.subject.type, role).filter(bit =>
@@ -431,6 +466,8 @@ export function GfsManageAccessDialog({
   ) => {
     const inherited = row.inherited
     if (!inherited) return
+    const guards = bindParentUpdateGuards()
+    if (!guards) return
     const subject = inherited.subject
     // N1: the dropdown displays the MERGED effective role (direct ⊔
     // inherited). Re-selecting the already-displayed role is a no-op —
@@ -461,11 +498,12 @@ export function GfsManageAccessDialog({
             role === 'read'
               ? collectResidualEditorFolderNames(plan.shareOnlySources, row.shares, target.name)
               : [],
+          guards,
         })
         return
       }
       if (skippedFolderNames.length > 0) {
-        pushToast?.(
+        guards.presentOutcome(
           `Sharing details on ${joinFolderNames(skippedFolderNames)} could not be verified; existing access was kept.`,
           'error'
         )
@@ -473,7 +511,7 @@ export function GfsManageAccessDialog({
       }
       // Nothing writable anywhere: explain the surviving share access.
       if (plan.shareOnlySources.length > 0 || row.shares.length > 0) {
-        pushToast?.(
+        guards.presentOutcome(
           `${label} still has ${roleForAccessPermissions(row.permissions) === 'editor' ? 'Editor' : 'Read-only'} access from sharing entries that can't be edited here.`,
           'info'
         )
@@ -490,17 +528,20 @@ export function GfsManageAccessDialog({
       try {
         folderAffordances = await window.clerum.gfs.affordances(source.resourceId, GFS_DRIVE_MAIN)
       } catch (affordancesError) {
+        // A session failure revokes even when the dialog is already gone.
         if (deps.failClosed(affordancesError)) return
-        pushToast?.(describeGfsGrantError(affordancesError).message, 'error')
+        if (!guards.isCurrent()) return
+        guards.presentOutcome(describeGfsGrantError(affordancesError).message, 'error')
         return
       }
+      if (!guards.isCurrent()) return
       const bits = rolePermissionRequest(subject.type, role).filter(bit =>
         folderAffordances.grantableBits.includes(bit)
       )
       const expressesRole =
         role === 'editor' ? bits.includes('read') && bits.includes('write') : bits.includes('read')
       if (!folderAffordances.canDelegate || !expressesRole) {
-        pushToast?.(
+        guards.presentOutcome(
           `Your access on ${source.name} does not allow making ${label} ${role === 'editor' ? 'an Editor' : 'Read-only'}.`,
           'error'
         )
@@ -526,14 +567,18 @@ export function GfsManageAccessDialog({
               target.name
             )
           : [],
+      guards,
     })
   }
 
   const handleInheritedRemove = (row: GfsMergedAccessRow, label: string) => {
-    setParentUpdate({ row, label, mode: 'remove' })
+    const guards = bindParentUpdateGuards()
+    if (!guards) return
+    setParentUpdate({ row, label, mode: 'remove', guards })
   }
 
   const confirmParentUpdate = async () => {
+    if (confirmRunningRef.current) return
     const request = parentUpdate
     const inherited = request?.row.inherited
     if (!request || !inherited) {
@@ -545,15 +590,33 @@ export function GfsManageAccessDialog({
     const subject = inherited.subject
     const subjectKey = subject.id ? `${subject.type}:${subject.id}` : subject.type
     const label = request.label
+    const { guards } = request
     setParentUpdate(null)
-    setUpdatingAccessRole(true)
+    // Opened before the first await so no revocation can slip in unobserved,
+    // and before the close lock so a throw here cannot leave it engaged.
+    const revocation = watchGfsAccessRevocation(queryClient, guards.originScope, guards.originGen)
+    confirmRunningRef.current = true
+    setConfirmRunning(true)
+    let wroteAny = false
+    // Every write re-proves the plan's session with main. A run that has not
+    // written yet does not start once the dialog is gone; after that it runs
+    // to the end so a navigation never leaves the cascade half-applied. An
+    // abort reports nothing: whatever already landed shows on the next open.
+    const admitWrite = async (): Promise<boolean> => {
+      if (revocation.revoked() || !(await guards.sessionAdmit()) || revocation.revoked()) {
+        return false
+      }
+      if (!wroteAny && !guards.isCurrent()) return false
+      wroteAny = true
+      return true
+    }
     // Partial-failure honesty (R1-H1): the confirm issues several sequential
     // calls; the first failure stops the run, refreshes both lists so the
     // dialog shows the TRUE partial state, and the toast says exactly how far
     // the change got. Full success is never claimed on partial completion.
     const failPartially = async (updateError: unknown, summary: string) => {
       if (deps.failClosed(updateError)) return
-      pushToast?.(`${summary} (${describeGfsGrantError(updateError).message})`, 'error')
+      guards.presentOutcome(`${summary} (${describeGfsGrantError(updateError).message})`, 'error')
       await Promise.all([
         access.refreshGrants(),
         access.refreshInheritedAccess(),
@@ -565,8 +628,14 @@ export function GfsManageAccessDialog({
         let removed = 0
         for (const source of sources) {
           try {
-            if (source.grantId) await access.revokeGrant(target, source.grantId)
-            for (const shareId of source.shareIds) await access.revokeShare(target, shareId)
+            if (source.grantId) {
+              if (!(await admitWrite())) return
+              await access.revokeGrant(target, source.grantId)
+            }
+            for (const shareId of source.shareIds) {
+              if (!(await admitWrite())) return
+              await access.revokeShare(target, shareId)
+            }
             removed += 1
           } catch (updateError) {
             await failPartially(
@@ -579,8 +648,14 @@ export function GfsManageAccessDialog({
         // The file's own direct rows are aligned with the removal.
         if (request.row.grant || request.row.shares.length > 0) {
           try {
-            if (request.row.grant) await access.revokeGrant(target, request.row.grant.id)
-            for (const share of request.row.shares) await access.revokeShare(target, share.id)
+            if (request.row.grant) {
+              if (!(await admitWrite())) return
+              await access.revokeGrant(target, request.row.grant.id)
+            }
+            for (const share of request.row.shares) {
+              if (!(await admitWrite())) return
+              await access.revokeShare(target, share.id)
+            }
           } catch (updateError) {
             await failPartially(
               updateError,
@@ -589,7 +664,7 @@ export function GfsManageAccessDialog({
             return
           }
         }
-        pushToast?.(
+        guards.presentOutcome(
           sources.length === 1
             ? `Access removed on ${firstSource?.name ?? target.name} and everything inside it`
             : `Access removed on ${sources.length} folders and everything inside them`,
@@ -612,6 +687,7 @@ export function GfsManageAccessDialog({
           // OWN scope flag (R1-M5 — the pre-flight guaranteed a known
           // boolean). The folder's share rows are never touched by a role
           // change; they survive as residual access and are disclosed below.
+          if (!(await admitWrite())) return
           await window.clerum.gfs.grant(
             source.resourceId,
             [subjectKey],
@@ -646,6 +722,7 @@ export function GfsManageAccessDialog({
           const expressesRole =
             fileBits.includes('read') && (request.nextRole === 'read' || fileBits.includes('write'))
           if (expressesRole) {
+            if (!(await admitWrite())) return
             await access.grant(target, [subjectKey], fileBits, request.row.grant.inherit)
           } else {
             // N2 (R1-M5): an empty bit set means the file's affordances are
@@ -679,14 +756,17 @@ export function GfsManageAccessDialog({
           ? `Sharing entries on ${joinFolderNames(residualNames)} still grant Editor access.`
           : ''
       if (partialMessages.length > 0) {
-        pushToast?.([...partialMessages, residualMessage].filter(Boolean).join(' '), 'error')
+        guards.presentOutcome(
+          [...partialMessages, residualMessage].filter(Boolean).join(' '),
+          'error'
+        )
       } else if (residualMessage) {
-        pushToast?.(
+        guards.presentOutcome(
           `Changed grant access to ${request.nextRole === 'editor' ? 'Editor' : 'Read-only'} on ${affectedNames.length > 0 ? joinFolderNames(affectedNames) : target.name}. ${residualMessage}`,
           'info'
         )
       } else {
-        pushToast?.(
+        guards.presentOutcome(
           affectedNames.length > 0
             ? `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}${inheritedCoverageCaveat(access.inheritedCoverage)}`
             : `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${target.name}${inheritedCoverageCaveat(access.inheritedCoverage)}`,
@@ -699,7 +779,9 @@ export function GfsManageAccessDialog({
         access.refreshShares(),
       ])
     } finally {
-      setUpdatingAccessRole(false)
+      revocation.stop()
+      confirmRunningRef.current = false
+      setConfirmRunning(false)
     }
   }
 
@@ -709,7 +791,7 @@ export function GfsManageAccessDialog({
         className="da-gfs-manage-modal"
         role="presentation"
         onMouseDown={event => {
-          if (event.target === event.currentTarget) onClose()
+          if (event.target === event.currentTarget && !confirmRunningRef.current) onClose()
         }}
       >
         <section
@@ -731,8 +813,11 @@ export function GfsManageAccessDialog({
             <span className="da-gfs-manage-dialog__top-actions">
               <IconButton
                 autoFocus
+                disabled={confirmRunning}
                 label="Close share dialog"
-                onClick={onClose}
+                onClick={() => {
+                  if (!confirmRunningRef.current) onClose()
+                }}
                 size="sm"
                 variant="ghost"
               >
@@ -813,7 +898,7 @@ export function GfsManageAccessDialog({
                   shareError={sharesError}
                   shares={access.shares}
                   subjects={delegationSubjects}
-                  updatingRole={updatingAccessRole}
+                  updatingRole={updatingAccessRole || confirmRunning}
                 />
               </section>
             ) : null}
@@ -822,7 +907,7 @@ export function GfsManageAccessDialog({
       </div>
 
       <GfsInheritedAccessDialog
-        busy={updatingAccessRole}
+        busy={updatingAccessRole || confirmRunning}
         request={
           parentUpdate?.row.inherited
             ? {

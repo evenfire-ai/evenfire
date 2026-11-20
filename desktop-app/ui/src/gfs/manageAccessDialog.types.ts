@@ -32,6 +32,22 @@ export interface GfsManageAccessDeps {
   fetchAuthority: (resourceId: string, resourceName: string) => Promise<GfsServerAuthority | null>
   readAccessState: GfsActionGuardDeps['readAccessState']
   publishedGeneration: GfsActionGuardDeps['publishedGeneration']
+  /** The session scope the owner runs now; read when a multi-step write binds its guards. */
+  originScope: () => string | null
+}
+
+/**
+ * Guards a parent-folder plan carries from the moment it is computed to the
+ * end of its confirmation, so the plan is never applied under another session.
+ */
+export interface GfsParentUpdateGuards {
+  /** The dialog is still mounted, its owner still current and the session unchanged. */
+  isCurrent: () => boolean
+  /** Session-only confirmation with main: ignores whether the dialog is still mounted. */
+  sessionAdmit: () => Promise<boolean>
+  presentOutcome: (message: string, tone: Tone) => void
+  originScope: string | null
+  originGen: number
 }
 
 export interface GfsManageAccessDialogProps {

@@ -2272,6 +2272,7 @@ export function FilesPage({
       fetchRowAuthority(resourceId, resourceName, GFS_DRIVE_MAIN),
     readAccessState: () => ctrl.readAccessState(),
     publishedGeneration: () => moveWorkspaceRef.current.sessionGeneration,
+    originScope: () => moveWorkspaceRef.current.sessionScope,
   }
 
   // A folder row is shared in place: the browser keeps its location. A file

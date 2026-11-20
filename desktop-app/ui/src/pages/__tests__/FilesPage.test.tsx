@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
@@ -55,6 +55,18 @@ const accessMock = vi.hoisted(() => {
   return {
     useGfsResourceAccess: (target: { resourceId: string } | null) => {
       const ctrl = (hookMock.useGfsBrowserController.mock.results.at(-1)?.value ?? {}) as Acl
+      // Like the real hook, every mount seeds its session's shared access flag.
+      useQuery({
+        queryKey: desktopQueryKeys.gfsAccessState(
+          (ctrl.sessionScope as string | null | undefined) ?? 'anonymous',
+          (ctrl.sessionGeneration as number | null | undefined) ?? null
+        ),
+        queryFn: () => 'active',
+        enabled: false,
+        initialData: 'active',
+        gcTime: Infinity,
+        staleTime: Infinity,
+      })
       const resourceId = target?.resourceId
       const isCurrent = ctrl.current?.resourceId === resourceId
       const affordances = isCurrent
