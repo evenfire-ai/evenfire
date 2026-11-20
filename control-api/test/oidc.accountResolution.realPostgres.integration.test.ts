@@ -832,4 +832,56 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     )
     expect(connection.rowCount).toBe(0)
   })
+
+  it('scopes links to their connection when two connections share an issuer', async () => {
+    const connectionA = entraFake('fake-entra-scope-a')
+    const connectionB = entraFake('fake-entra-scope-b')
+    expect(connectionB.provider.issuer).toBe(connectionA.provider.issuer)
+
+    // A member linked under A is linked again under B by email (row 3), not an identity conflict.
+    const memberEmail = `${uniqueLabel('scope-member')}@entra.fixture.test`
+    const memberId = await seedUser(memberEmail)
+    const subjectUnderA = uniqueLabel('scope-a-subject')
+    await seedLink(connectionA.provider, subjectUnderA, memberId)
+    const subjectUnderB = uniqueLabel('scope-b-subject')
+    const linkedAgain = await resolve(
+      connectionB,
+      await connectionB.signIn({
+        sub: subjectUnderB,
+        tid: ENTRA_TENANT_ID,
+        email: memberEmail,
+        email_verified: true,
+      })
+    )
+    expect(linkedAgain).toMatchObject({
+      status: 'resolved',
+      account: { userId: memberId, created: { account: false, link: true } },
+    })
+    expect(await linksFor(subjectUnderB)).toEqual([
+      {
+        connection_id: 'fake-entra-scope-b',
+        issuer: ENTRA_ISSUER,
+        subject: subjectUnderB,
+        user_id: memberId,
+      },
+    ])
+
+    // A subject linked under A has no link under B: without an email it is refused, not signed in as A's user.
+    const sharedSubject = uniqueLabel('scope-shared-subject')
+    await seedLink(
+      connectionA.provider,
+      sharedSubject,
+      await seedUser(`${uniqueLabel('scope-a-only')}@entra.fixture.test`)
+    )
+    const before = await watchedTables()
+    const underB = await resolve(
+      connectionB,
+      await connectionB.signIn({ sub: sharedSubject, tid: ENTRA_TENANT_ID })
+    )
+    expect(underB).toEqual({ status: 'refused', reason: 'email_claim_missing' })
+    expect(await watchedTables()).toEqual(before)
+    expect((await linksFor(sharedSubject)).map(link => link.connection_id)).toEqual([
+      'fake-entra-scope-a',
+    ])
+  })
 })
