@@ -769,6 +769,53 @@ describe('GfsActionHost — move', () => {
   })
 })
 
+describe('GfsActionHost — move close controls', () => {
+  it('disables Cancel and Close only while its move runs', async () => {
+    const h = await harness()
+    const target: GfsHostActionTarget = {
+      ...(await listedRow('file-t', 'notes.txt', 'file', 'folder-p')),
+      ancestorCrumbs: [
+        {
+          resourceId: 'folder-q',
+          gfsUri: 'gfs://main/folder-q',
+          name: 'Archive',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+    }
+    h.bridge.resolve.mockImplementation(async () =>
+      resolveResource(
+        resolvedFile('file-t', 'notes.txt', { parentResourceId: 'folder-p', version: 3 })
+      )
+    )
+    const landed = deferred<Awaited<ReturnType<typeof moveResourceReceipt>>>()
+    const committing = deferred<void>()
+    h.bridge.moveResource.mockImplementation(() => {
+      committing.resolve()
+      return landed.promise
+    })
+    const closeControls = (shown: HTMLElement) =>
+      [
+        within(shown).getByRole('button', { name: 'Cancel' }),
+        within(shown).getByRole('button', { name: 'Close move dialog' }),
+      ].map(button => (button as HTMLButtonElement).disabled)
+
+    h.open(target, 'move')
+    await settleUntil(() => screen.queryByRole('dialog', { name: /move/i }) !== null)
+    const moveDialog = screen.getByRole('dialog', { name: /move/i })
+    expect(closeControls(moveDialog)).toEqual([false, false])
+
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (Archive)' }))
+    await act(async () => committing.promise)
+    expect(closeControls(moveDialog)).toEqual([true, true])
+
+    await act(async () => landed.resolve(await moveResourceReceipt('file-t', 'folder-q', 4)))
+    await settleUntil(() => dialog() === null)
+  })
+})
+
 describe('GfsActionHost — share', () => {
   async function shareTarget() {
     return listedRow('folder-s', 'Shared', 'directory', null)
