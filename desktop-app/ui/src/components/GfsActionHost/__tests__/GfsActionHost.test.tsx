@@ -226,6 +226,16 @@ async function harness(
 const revoke = (h: Harness) => revokeGfsSessionAccess(h.client, SCOPE, 1)
 const dialog = () => screen.queryByRole('dialog')
 const overlayOpen = (h: Harness) => h.overlay[h.overlay.length - 1] ?? false
+
+/** Runs task turns until `ready` holds, bounded by a turn count rather than by time. */
+async function settleUntil(ready: () => boolean, maxTurns = 200) {
+  for (let turn = 0; turn < maxTurns && !ready(); turn += 1) {
+    await act(async () => {
+      await new Promise(done => window.setTimeout(done, 0))
+    })
+  }
+  expect(ready()).toBe(true)
+}
 const toastMessages = (h: Harness) => h.toasts.map(toast => toast.message)
 
 /** Opens Rename on `target` and waits for its dialog. */
@@ -845,12 +855,20 @@ describe('GfsActionHost — review round', () => {
     const h = await harness()
     h.bridge.resolve.mockImplementation(async () => resolvedSource())
     const landed = deferred<Awaited<ReturnType<typeof moveResourceReceipt>>>()
-    h.bridge.moveResource.mockImplementation(() => landed.promise)
+    const committing = deferred<void>()
+    h.bridge.moveResource.mockImplementation(() => {
+      committing.resolve()
+      return landed.promise
+    })
 
     h.open(await moveTarget(), 'move')
-    const moveDialog = await screen.findByRole('dialog', { name: /move/i })
+    // Every bridge call answers at once, so the dialog opens after a fixed number of
+    // task turns however loaded the machine is; a wall-clock timeout would not.
+    await settleUntil(() => screen.queryByRole('dialog', { name: /move/i }) !== null)
+    const moveDialog = screen.getByRole('dialog', { name: /move/i })
     fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (Archive)' }))
-    await waitFor(() => expect(h.bridge.moveResource).toHaveBeenCalledTimes(1))
+    await act(async () => committing.promise)
+    expect(h.bridge.moveResource).toHaveBeenCalledTimes(1)
     // The revocation renders while the move runs, so the revocation effect skips it.
     await act(async () => {
       revoke(h)
