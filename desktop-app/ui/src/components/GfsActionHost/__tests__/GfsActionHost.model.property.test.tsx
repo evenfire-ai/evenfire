@@ -14,6 +14,7 @@ import { GFS_WATCH_DEBOUNCE_MS } from '@constants/gfsWatch'
 import { GFS_UNAVAILABLE_LOCATION_MESSAGE } from '@hooks/domain/useGfsBrowserController'
 import { useGfsWatchSubscription } from '@hooks/domain/useGfsWatchSubscription'
 import { useGfsWatchKeyReactions } from '@hooks/useGfsWatchKeyReactions'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { revokeGfsSessionAccess } from '@lib/gfsSessionAuthority'
 import { buildGfsWatchKeys, gfsWatchKey } from '@lib/gfsWatchKeys'
 import { purgeGfsSessionCache, refetchGfsAccess } from '@lib/gfsWatchReaction'
@@ -27,6 +28,7 @@ import {
   accessibleResource,
   childView,
   createFolderResult,
+  downloadResult,
   gfsRouteFailureMessage,
   grantsListPage,
   listAccessiblePage,
@@ -129,6 +131,37 @@ async function deleteReceipt(resourceId: string, ifMatch: number) {
   )
 }
 
+/** What `gfs.revokeGrant` resolves to, through the real GfsClient. */
+async function revokeGrantReceipt(grantId: string) {
+  const client = new GfsClient({
+    baseUrl: 'https://gfs.fixture.test',
+    requestJson: async () => ({ ok: true, data: {} }) as never,
+    fetchBytes: async () => new ArrayBuffer(0),
+  })
+  return structuredClone(await client.revokeGrant(grantId, 'fixture-session-token'))
+}
+
+/** The agent every root folder is shared with, as a Share row names it. */
+const AGENT_NAME = 'chatllm'
+const AGENT_SUBJECT = { type: 'host' as const, id: '1st:mcp-host/chatllm' }
+let myAgents: unknown[] = []
+
+/** What `agents.listMine` resolves to, through AppService's real listing. */
+async function myAgentsListing() {
+  const service = Object.create(AppService.prototype) as AppService
+  Object.assign(service, {
+    sessionToken: 'fixture-session-token',
+    authClient: {
+      getMyAgents: async () => ({
+        agents: [
+          { name: AGENT_NAME, contextRef: 'ctx-1', mcpServers: [], gfsSubject: AGENT_SUBJECT },
+        ],
+      }),
+    },
+  })
+  return structuredClone(await service.listMyAgents())
+}
+
 let uploadSource = ''
 
 /**
@@ -201,6 +234,7 @@ type MutationOp =
   | 'createFolder'
   | 'createFileFromPath'
   | 'moveResource'
+  | 'revokeGrant'
 
 interface MutationCall {
   op: MutationOp
@@ -288,7 +322,18 @@ interface GenCall {
   family: ActionFamily | null
 }
 
-type ActionFamily = 'move' | 'upload' | 'dialog' | 'copy'
+type ActionFamily = 'move' | 'upload' | 'dialog' | 'share' | 'gesture'
+
+/** An action that opens no surface: its only outcome is a toast. */
+type GestureId = 'copy-link' | 'copy-route' | 'download'
+const GESTURES = new Set<string>(['copy-link', 'copy-route', 'download'])
+
+interface Gesture {
+  actionId: GestureId
+  name: string
+  origin: Session
+  at: number
+}
 
 interface AccessEvent {
   at: number
@@ -332,7 +377,10 @@ interface World {
   releaseBits: Map<string, () => void>
   /** Last time every cached bit read went stale. */
   bitsAgedAt: number
-  openings: Array<{ origin: Session; at: number }>
+  /** Copies and downloads chosen in a live session. */
+  openings: Gesture[]
+  /** Root folder -> id of the agent grant its Share dialog can remove. */
+  grants: Map<string, string>
   /** The Move generation check during which a fixed example revokes access. */
   revokeAtMoveCheck: number | null
   moveChecksSeen: number
@@ -402,21 +450,28 @@ const askedByHost = (stack: string | undefined) => {
 
 /**
  * Which host action a generation check belongs to, by the code on its stack:
- * the Move pipeline and its dialog, the upload loop, a copy's toast, or the one dialog action
- * (rename, delete, new folder) the host runs at a time. Same file-name
- * dependence as `askedByHost`.
+ * the Move pipeline and its dialog, the upload loop, a write of the Share dialog, a copy's or
+ * a download's toast, or the one dialog action (rename, delete, new folder) the host runs at a
+ * time. Same file-name dependence as `askedByHost`; a download is told by its function name.
  */
 function askingFamily(stack: string | undefined): ActionFamily | null {
   if (!askedByHost(stack)) return null
   const text = stack ?? ''
   if (/explicitMoveDialog|moveCommit|useGfsResourceOperations/.test(text)) return 'move'
   if (/runGfsUpload|runUpload/.test(text)) return 'upload'
-  if (/gfsResourceClipboard/.test(text)) return 'copy'
+  if (/manageAccessDialog/.test(text)) return 'share'
+  if (/gfsResourceClipboard|\bat download \(/.test(text)) return 'gesture'
   return 'dialog'
 }
 
 const familyOf = (op: MutationOp): ActionFamily =>
-  op === 'moveResource' ? 'move' : op === 'createFileFromPath' ? 'upload' : 'dialog'
+  op === 'moveResource'
+    ? 'move'
+    : op === 'createFileFromPath'
+      ? 'upload'
+      : op === 'revokeGrant'
+        ? 'share'
+        : 'dialog'
 
 /** Every IPC answer the oracle orders: the scheduler decides when it lands. */
 function scheduled<A extends unknown[], R>(
@@ -622,7 +677,43 @@ function installBridge(w: World) {
       if (held) return held.then(() => affordanceProducer(id, drive))
       return w.s.schedule(affordanceProducer(id, drive), 'affordances')
     },
-    listGrants: vi.fn(async () => grantsListPage([])),
+    listGrants: vi.fn(async (resourceId: string) => {
+      const grantId = w.grants.get(resourceId)
+      return grantsListPage(
+        grantId
+          ? [
+              {
+                id: grantId,
+                drive: 'main',
+                resourceId,
+                subject: AGENT_SUBJECT,
+                permissions: ['read'],
+                inherit: true,
+              },
+            ]
+          : []
+      )
+    }),
+    revokeGrant: mutation(
+      'revokeGrant',
+      (grantId: string) => ({
+        target: [...w.grants].find(([, id]) => id === grantId)?.[0] ?? grantId,
+      }),
+      async (grantId: string) => {
+        for (const [resourceId, id] of w.grants) if (id === grantId) w.grants.delete(resourceId)
+        return revokeGrantReceipt(grantId)
+      }
+    ),
+    download: scheduled(w, 'download', async (uri: string) => {
+      const current = node(uri.replace('gfs://main/', ''))
+      if (!current) throw new Error(failures.notFound)
+      return downloadResult(
+        resolvedFile(current.id, current.name, {
+          parentResourceId: current.parent,
+          version: current.version,
+        })
+      )
+    }),
     listShares: vi.fn(async () => sharesListPage([])),
     renameResource: mutation(
       'renameResource',
@@ -763,7 +854,7 @@ function installBridge(w: World) {
       gfsWatch: w.watch.bridge,
       sandboxUi,
       team: { directory: vi.fn(async () => ({ items: [] })) },
-      agents: { listMine: vi.fn(async () => []) },
+      agents: { listMine: vi.fn(async () => structuredClone(myAgents)) },
     },
   })
 }
@@ -1147,11 +1238,12 @@ function checkAtRest(w: World) {
       w.mainSwitches.every(at => at < submission.openedAt) &&
       w.publishes.every(at => at < submission.openedAt)
     if (!undisturbed) continue
-    // A Move becomes `running` only after its first generation check: a close
-    // that really took effect before it cancels the move, which is accepted.
-    // A close ignored while running does not count.
+    // A Move becomes `running` only after its first generation check, and a
+    // Share write only starts while its dialog is mounted: a close that really
+    // took effect before the request cancels it, which is accepted. A close
+    // ignored while running does not count.
     if (
-      submission.op === 'moveResource' &&
+      (submission.op === 'moveResource' || submission.op === 'revokeGrant') &&
       submission.calls.length === 0 &&
       (submission.dismissedAt ?? -1) > submission.at
     ) {
@@ -1183,12 +1275,14 @@ function checkAtRest(w: World) {
       ...[s.at, ...s.calls.flatMap(call => [call.at, call.settledAt ?? -1])].filter(t => t < at),
       -1
     )
-  // A copy is no submission: it asks main once, before its toast.
-  const copyChecks = w.genCalls.filter(call => call.host && call.family === 'copy').length
-  if (copyChecks > w.openings.length) {
-    violations.push(`K1: ${copyChecks} copy generation checks for ${w.openings.length} copies`)
+  // A copy or a download is no submission: it asks main once, before its toast.
+  const gestureChecks = w.genCalls.filter(call => call.host && call.family === 'gesture').length
+  if (gestureChecks > w.openings.length) {
+    violations.push(
+      `K1: ${gestureChecks} copy/download generation checks for ${w.openings.length} gestures`
+    )
   }
-  for (const check of w.genCalls.filter(call => call.host && call.family !== 'copy')) {
+  for (const check of w.genCalls.filter(call => call.host && call.family !== 'gesture')) {
     const asker = w.submissions
       .filter(s => familyOf(s.op) === check.family && s.at < check.at)
       .sort((a, b) => lastActivityBefore(b, check.at) - lastActivityBefore(a, check.at))[0]
@@ -1269,7 +1363,18 @@ function checkAtRest(w: World) {
   expect(violations).toEqual([])
 }
 
-const COPY_TOASTS = /^Shareable EvenDrive link|^Shareable EvenDrive links are unavailable/
+const COPY_LINK_TOASTS = /^Shareable EvenDrive link|^Shareable EvenDrive links are unavailable/
+const COPY_ROUTE_TOASTS = /^(File|Folder) ID copied$|^Could not copy the (file|folder) ID/
+
+/** Whether `message` is one of the toasts the gesture can end with. */
+function isGestureOutcome(gesture: Gesture, message: string): boolean {
+  if (gesture.actionId === 'copy-link') return COPY_LINK_TOASTS.test(message)
+  if (gesture.actionId === 'copy-route') return COPY_ROUTE_TOASTS.test(message)
+  return (
+    message === `Downloaded ${gesture.name}` ||
+    message === describeGfsReadError(new Error(failures.notFound)).message
+  )
+}
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
@@ -1313,11 +1418,14 @@ function judgeToast(w: World, toast: Toast) {
     }
     return
   }
-  // A copy opens no dialog, but its toast is an outcome like any other: the
-  // session it was chosen in must still be the rendered one and main's.
-  if (COPY_TOASTS.test(toast.message)) {
-    toast.legal = w.openings.some(o => current(o.origin) && mainAdmits(w, o.origin.gen, o.at))
-    if (!toast.legal) toast.why = 'copy feedback outside the session it was chosen in'
+  // A copy or a download opens no dialog, but its toast is an outcome like
+  // any other: the session it was chosen in must still be the rendered one and main's.
+  const gestures = w.openings.filter(o => isGestureOutcome(o, toast.message))
+  if (gestures.length > 0) {
+    toast.legal = gestures.some(o => current(o.origin) && mainAdmits(w, o.origin.gen, o.at))
+    if (!toast.legal) {
+      toast.why = `${gestures[0]!.actionId} feedback outside the session it was chosen in`
+    }
     return
   }
   toast.legal = false
@@ -1432,7 +1540,14 @@ const ACTION_LABELS: Record<string, string> = {
   'new-folder': 'New folder',
   'upload-file': 'Upload file',
   'copy-link': 'Copy link',
+  download: 'Download',
 }
+/** Its label names the row's kind. */
+const COPY_ROUTE_LABEL = /^Copy (file|folder) ID$/
+const labelOf = (actionId: string): string | RegExp =>
+  actionId === 'copy-route' ? COPY_ROUTE_LABEL : ACTION_LABELS[actionId]!
+const inShareFlyout = (actionId: string) =>
+  actionId === 'share' || actionId === 'copy-link' || actionId === 'copy-route'
 
 /** E4: choose an item of the open menu. */
 class Choose extends OracleEvent {
@@ -1442,11 +1557,12 @@ class Choose extends OracleEvent {
   async perform(m: Model, w: World) {
     const menu = openMenu()
     if (!menu || !m.menu) return
-    const label = ACTION_LABELS[this.actionId]!
+    const label = labelOf(this.actionId)
     let item = within(menu).queryByRole('menuitem', { name: label }) as HTMLButtonElement | null
-    if (!item?.getAttribute('aria-haspopup') && this.actionId === 'copy-link') item = null
-    if (this.actionId === 'share' || this.actionId === 'copy-link') {
-      // Both live in the Share flyout once it has entries of its own.
+    const copy = inShareFlyout(this.actionId) && this.actionId !== 'share'
+    if (!item?.getAttribute('aria-haspopup') && copy) item = null
+    if (inShareFlyout(this.actionId)) {
+      // Share and the copies live in the Share flyout once it has entries of its own.
       const trigger = (within(menu).queryAllByRole('menuitem') as HTMLButtonElement[]).find(entry =>
         entry.getAttribute('aria-haspopup')
       )
@@ -1457,7 +1573,7 @@ class Choose extends OracleEvent {
         item = flyout
           ? (within(flyout).queryByRole('menuitem', { name: label }) as HTMLButtonElement | null)
           : null
-      } else if (this.actionId === 'copy-link') {
+      } else if (copy) {
         item = within(menu).queryByRole('menuitem', { name: label }) as HTMLButtonElement | null
       }
     }
@@ -1468,9 +1584,17 @@ class Choose extends OracleEvent {
     const opened = m.menu
     const at = tick(w)
     const live = sameSession(opened.origin, m.session) && accessActive(w, m.session)
-    // A copy opens no action: its toast is judged against the opening itself.
-    if (live && this.actionId === 'copy-link') w.openings.push({ origin: opened.origin, at })
-    if (live && this.actionId !== 'copy-link') {
+    // A copy or a download opens no action: its toast is judged against the opening itself.
+    const gesture = GESTURES.has(this.actionId)
+    if (live && gesture) {
+      w.openings.push({
+        actionId: this.actionId as GestureId,
+        name: opened.name,
+        origin: opened.origin,
+        at,
+      })
+    }
+    if (live && !gesture) {
       m.action = {
         token: ++m.nextToken,
         actionId: this.actionId,
@@ -1599,6 +1723,27 @@ class Submit extends OracleEvent {
       const moved = submit(m, w, 'moveResource', action)
       moved.outcomes.add(FOLDER_MOVE_NOTICE)
       fireEvent.click(move)
+    } else if (action.actionId === 'share') {
+      // Only a root carries a grant of its own; elsewhere the row is inherited.
+      if (w.nodes.get(action.target)?.parent !== null || !w.grants.has(action.target)) return
+      const rowActions = `Actions for ${AGENT_NAME}`
+      // The access list comes from reads the scheduler does not hold back.
+      let rowMenu = button(rowActions)
+      for (let wait = 0; wait < 6 && !rowMenu; wait += 1) {
+        await act(async () => {
+          await sleep(10)
+        })
+        rowMenu = button(rowActions)
+      }
+      if (!rowMenu || rowMenu.disabled) return
+      fireEvent.click(rowMenu)
+      await flush()
+      const remove = screen.queryByRole('menuitem', {
+        name: 'Remove access',
+      }) as HTMLButtonElement | null
+      if (!remove || remove.disabled) return
+      submit(m, w, 'revokeGrant', action, `Access revoked for ${AGENT_NAME}`)
+      fireEvent.click(remove)
     } else {
       return
     }
@@ -1959,7 +2104,7 @@ class Advance extends OracleEvent {
           )
         )
         .map(([id]) => id)
-      if (offered.includes('share')) offered.push('copy-link')
+      if (offered.includes('share')) offered.push('copy-link', 'copy-route')
       const actionId =
         offered.includes(this.actionId) || offered.length === 0
           ? this.actionId
@@ -2145,6 +2290,59 @@ const outcomeWhileMainIsAhead = (): Cmd[] => [
   new SwitchTeam(false),
   new Rest(),
   new PublishHeldSession(),
+  new Rest(),
+]
+
+/**
+ * A Share removal whose request is out when main switches session: its
+ * outcome belongs to the session it ran in, never the next one (S4).
+ */
+const shareOutcomeAfterSwitch = (): Cmd[] => [
+  new OpenMenuOn('Docs'),
+  new Rest(),
+  new Choose('share'),
+  new Rest(),
+  new Submit(1),
+  new StepUntilSent('revokeGrant'),
+  new SwitchTeam(),
+  new Rest(),
+]
+
+/** A download whose bytes arrive after main switched session shows nothing (S4). */
+const downloadAfterSwitch = (): Cmd[] => [
+  new OpenMenuOn('notes.txt'),
+  new Rest(),
+  new Choose('download'),
+  new SwitchTeam(),
+  new Rest(),
+]
+
+/** Lets everything land without judging: a held read keeps an outcome pending. */
+class Settle extends OracleEvent {
+  async perform(_m: Model, w: World) {
+    await rest(w)
+  }
+  toString() {
+    return 'Settle'
+  }
+}
+
+/**
+ * An action chosen while another one's opening check is still out replaces
+ * it; the replaced check, landing later, must leave the new dialog alone (L1).
+ */
+const choiceReplacesOpeningCheck = (): Cmd[] => [
+  new OpenMenuOn('notes.txt'),
+  new Rest(),
+  // Stale bits make the opening read them again; that read is held.
+  new BitsAge(),
+  new HoldBits(NOTES),
+  new Choose('rename'),
+  new OpenMenuOn('Quarterly'),
+  new Settle(),
+  new Choose('delete'),
+  new Rest(),
+  new ReleaseBits(NOTES),
   new Rest(),
 ]
 
@@ -2416,12 +2614,15 @@ const allEvents = [
       'new-folder',
       'upload-file',
       'share',
-      'copy-link'
+      'share',
+      'copy-link',
+      'copy-route',
+      'download'
     )
   ),
   pick.map(p => new OpenMenu(p) as Cmd),
   ...times(2, step),
-  fc.constantFrom(...Object.keys(ACTION_LABELS)).map(id => new Choose(id) as Cmd),
+  fc.constantFrom(...Object.keys(ACTION_LABELS), 'copy-route').map(id => new Choose(id) as Cmd),
   fc.nat({ max: 99 }).map(n => new Submit(n) as Cmd),
   fc.constant(new DismissMenu() as Cmd),
   fc.constant(new DismissDialog() as Cmd),
@@ -2513,6 +2714,10 @@ async function mountWorld(s: Scheduler): Promise<World> {
     releaseBits: new Map(),
     bitsAgedAt: -1,
     openings: [],
+    grants: new Map([
+      [DOCS, '42424242-4242-4242-4242-424242424242'],
+      [ARCHIVE, '43434343-4343-4343-4343-434343434343'],
+    ]),
     heldGen: null,
     changeBeforeNextMove: null,
     revokeAtMoveCheck: null,
@@ -2530,6 +2735,8 @@ async function mountWorld(s: Scheduler): Promise<World> {
   vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {
     w.pickerClicks += 1
   })
+  // jsdom saves nothing to disk: the download's anchor click is inert.
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
   render(
     <QueryClientProvider client={queryClient}>
       <Shell world={w} />
@@ -2588,6 +2795,7 @@ beforeAll(async () => {
   // The local file the upload producer reads, as a picked file would be.
   uploadSource = join(mkdtempSync(join(tmpdir(), 'gfs-oracle-')), 'report.txt')
   writeFileSync(uploadSource, 'data')
+  myAgents = await myAgentsListing()
   failures = {
     stale: await gfsRouteFailureMessage(
       client =>
@@ -2632,6 +2840,9 @@ beforeAll(async () => {
 }, 30_000)
 
 beforeAll(() => {
+  // jsdom has no object URLs, which a download saves through.
+  URL.createObjectURL = () => 'blob:gfs-oracle'
+  URL.revokeObjectURL = () => undefined
   // jsdom paints no frames and observes no resizes.
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
     cb(0)
@@ -2713,6 +2924,9 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
       moveAfterRemoteChange,
       echoDuringHostRefresh,
       moveThenRename,
+      shareOutcomeAfterSwitch,
+      choiceReplacesOpeningCheck,
+      downloadAfterSwitch,
     ])
     // What the generated runs reached is reported, not asserted: it depends
     // on how the draws fall, and any new awaited IPC reorders them. The fixed
@@ -2741,6 +2955,7 @@ describe('GfsActionHost — model-based oracle (A6)', () => {
     expect(coverage.get('call:moveResource') ?? 0, 'a Move PATCH (example)').toBeGreaterThan(0)
     expect(coverage.get('toast:success') ?? 0).toBeGreaterThan(0)
     expect(coverage.get('cas-refused') ?? 0, 'a refused CAS (example)').toBeGreaterThan(0)
+    expect(coverage.get('call:revokeGrant') ?? 0, 'a Share removal (example)').toBeGreaterThan(0)
   }, 300_000)
 
   it('keeps a row menu on its own resource and bits across crossed openings', async () => {
