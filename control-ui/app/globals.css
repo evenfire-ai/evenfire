@@ -9225,6 +9225,14 @@ td.cu-registry-description {
   padding-inline-start: calc(var(--cu-space-5) + 10px);
 }
 
+.cu-identity-panel__intro:has(+ .cu-banner--error) {
+  margin-bottom: 0;
+}
+
+.cu-identity-panel > .cu-banner--error {
+  margin: var(--cu-space-4) 0;
+}
+
 .cu-identity-dirty {
   display: inline-flex;
   align-items: center;
