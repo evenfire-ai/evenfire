@@ -1,3 +1,5 @@
+import type { OidcRefusalReason } from '../api/oidc/types'
+
 type QueryValue = boolean | number | string | null | undefined
 type ProfileRouteQuery = Record<string, QueryValue>
 
@@ -30,6 +32,8 @@ export const PROFILE_ROUTES = {
   invitation: (token: string) => `/invitations/${segment(token)}`,
   openDesktopApp: (recipeNs: string, recipeName: string) =>
     `/open/apps/${segment(recipeNs)}/${segment(recipeName)}`,
+  oidcSignedIn: '/oidc/signed-in',
+  oidcResult: (reason: OidcRefusalReason) => withQuery('/oidc/result', { reason }),
   members: {
     root: '/members',
     invite: '/members/invite',
