@@ -7787,7 +7787,7 @@ td.cu-registry-description {
   }
 
   .cu-channel-create-panel .cu-agent-step-rail {
-    grid-template-columns: repeat(2, minmax(2.25rem, 1fr));
+    grid-template-columns: repeat(3, minmax(2.25rem, 1fr));
   }
 
   .cu-create-step-flow--2 .cu-agent-step-rail {
@@ -15036,4 +15036,56 @@ button.cu-gfs-tree__button:focus-visible,
   display: flex;
   justify-content: flex-end;
   gap: var(--cu-space-1);
+}
+
+.cu-channel-provider-tabs {
+  padding-top: var(--cu-space-3);
+  padding-bottom: var(--cu-space-2);
+}
+
+.cu-channel-provider-tabs__label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-channel-create-panel .eft-secret-field__label,
+.cu-channel-create-panel .cu-field > label,
+.cu-channel-create-panel .cu-field__label,
+.cu-channel-create-panel .cu-section-title {
+  color: var(--cu-text);
+  font-size: var(--cu-font-size-md);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.cu-channel-create-panel .cu-agent-step-rail__copy {
+  align-content: start;
+}
+
+.cu-teams-setup--inline {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.cu-channel-create-panel .cu-channel-credentials--inline > .cu-form-stack {
+  max-width: none;
+}
+
+.cu-channel-create-panel .cu-channel-credentials--inline .cu-credential-field {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.cu-channel-access .cu-selection-dropdown--inline .cu-selection-dropdown__list {
+  min-height: 0;
+  max-height: min(22rem, 40vh);
+  grid-auto-rows: max-content;
+  align-content: start;
+  overflow-y: scroll;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--cu-border-hover) var(--cu-surface);
 }
