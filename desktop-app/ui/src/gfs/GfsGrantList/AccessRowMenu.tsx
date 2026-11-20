@@ -10,8 +10,8 @@ type AccessRowMenuProps = {
   onRemove: () => void | Promise<void>
   /**
    * Where the panel mounts. Defaults to document.body. GfsGrantList passes its
-   * hosting dialog, which is layered at the same z-index as this panel, so a
-   * body panel would only win by DOM order.
+   * hosting dialog: the window-level Share modal is layered at this panel's
+   * z-index, so a body panel would only win by DOM order.
    */
   portalContainer?: HTMLElement | null
 }
