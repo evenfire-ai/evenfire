@@ -149,3 +149,53 @@ describe('OIDC deployment configuration', () => {
     )
   })
 })
+
+describe('OIDC member sign-in switch', () => {
+  it('stays off unless the switch is exactly "enabled"', () => {
+    const off = loadOidcProviderConfiguration(OIDC_ENV, GENERATION_KEY)!
+    const on = loadOidcProviderConfiguration(
+      { ...OIDC_ENV, CONTROL_API_OIDC_MEMBER_SIGN_IN: 'enabled' },
+      GENERATION_KEY
+    )!
+    expect(off.memberAuthenticationActivated).toBe(false)
+    expect(on.memberAuthenticationActivated).toBe(true)
+    // Toggling the switch must not invalidate attempts already in flight.
+    expect(on.configurationGeneration).toBe(off.configurationGeneration)
+  })
+
+  it.each(['true', 'ENABLED', 'on', '', ' enabled'])(
+    'rejects the switch value %j without echoing the credential',
+    value => {
+      let message = ''
+      try {
+        loadOidcProviderConfiguration(
+          { ...OIDC_ENV, CONTROL_API_OIDC_MEMBER_SIGN_IN: value },
+          GENERATION_KEY
+        )
+      } catch (error) {
+        message = (error as Error).message
+      }
+      expect(message).toContain('CONTROL_API_OIDC_MEMBER_SIGN_IN')
+      expect(message).not.toContain(SECRET)
+    }
+  )
+
+  it('leaves OIDC unconfigured when only the switch is set', () => {
+    expect(
+      loadOidcProviderConfiguration({ CONTROL_API_OIDC_MEMBER_SIGN_IN: 'enabled' }, GENERATION_KEY)
+    ).toBeUndefined()
+  })
+
+  it('still rejects any other unknown OIDC setting', () => {
+    expect(() =>
+      loadOidcProviderConfiguration(
+        {
+          ...OIDC_ENV,
+          CONTROL_API_OIDC_MEMBER_SIGN_IN: 'enabled',
+          CONTROL_API_OIDC_MEMBER_SIGN_INN: 'enabled',
+        },
+        GENERATION_KEY
+      )
+    ).toThrow('Unsupported OIDC configuration field: CONTROL_API_OIDC_MEMBER_SIGN_INN')
+  })
+})

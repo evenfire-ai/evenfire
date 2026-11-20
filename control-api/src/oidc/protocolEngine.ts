@@ -92,7 +92,7 @@ export type OidcProviderValidation = Readonly<{
   displayLabel: string
   issuer: string
   configurationGeneration: string
-  memberAuthenticationActivated: false
+  memberAuthenticationActivated: boolean
   reason?: OidcProviderValidationReason
 }>
 
@@ -791,7 +791,7 @@ export class OidcProtocolEngine {
       displayLabel: this.provider.displayLabel,
       issuer: this.provider.issuer,
       configurationGeneration: this.provider.configurationGeneration,
-      memberAuthenticationActivated: false,
+      memberAuthenticationActivated: this.provider.memberAuthenticationActivated,
       ...(reason ? { reason } : {}),
     })
   }

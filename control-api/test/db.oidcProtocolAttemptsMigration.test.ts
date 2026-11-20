@@ -10,7 +10,7 @@ vi.mock('pg', () => ({
 const VERSION = '0148_oidc_protocol_attempts'
 
 describe(`${VERSION} migration`, () => {
-  it('is registered after the latest development migration', async () => {
+  it('is registered directly after the GFS watch session migration', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migrationIndex = CONTROL_API_MIGRATIONS.findIndex(
       candidate => candidate.version === VERSION
@@ -26,9 +26,6 @@ describe(`${VERSION} migration`, () => {
       '0141_oidc_protocol_attempts',
       '0145_oidc_protocol_attempts',
     ])
-    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(
-      '0150_oidc_protocol_attempt_browser_binding'
-    )
   })
 
   it('creates only purpose-bound OIDC protocol attempts with encrypted transient proof inputs', async () => {
@@ -55,14 +52,17 @@ describe(`${VERSION} migration`, () => {
     )
   })
 
-  it('registers the complete OIDC migration tail and legacy receipts', async () => {
+  it('registers the OIDC migrations consecutively with their legacy receipts', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
-    expect(CONTROL_API_MIGRATIONS.slice(-3).map(migration => migration.version)).toEqual([
+    const first = CONTROL_API_MIGRATIONS.findIndex(migration => migration.version === VERSION)
+    expect(first).toBeGreaterThanOrEqual(0)
+    const oidcMigrations = CONTROL_API_MIGRATIONS.slice(first, first + 3)
+    expect(oidcMigrations.map(migration => migration.version)).toEqual([
       '0148_oidc_protocol_attempts',
       '0149_oidc_protocol_attempt_expiry_index',
       '0150_oidc_protocol_attempt_browser_binding',
     ])
-    expect(CONTROL_API_MIGRATIONS.slice(-3).map(migration => migration.legacyVersions)).toEqual([
+    expect(oidcMigrations.map(migration => migration.legacyVersions)).toEqual([
       [
         '0130_oidc_protocol_attempts',
         '0131_oidc_protocol_attempts',

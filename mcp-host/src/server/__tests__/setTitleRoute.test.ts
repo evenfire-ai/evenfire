@@ -38,7 +38,12 @@ function makeRes() {
 }
 
 function makeReq(opts: {
-  caller?: { caller: string; userId?: string; hostRef?: string }
+  caller?: {
+    caller: string
+    userId?: string
+    hostRef?: string
+    actionContextV2?: { target?: Record<string, string> }
+  }
   agent?: string
   chatId?: string
   body?: unknown
@@ -135,6 +140,33 @@ describe('handleSetTitleRoute (spec 15 Fase B)', () => {
     )
     expect(captured.statusCode).toBe(200)
     expect(captured.jsonBody).toEqual({ ok: true, title: 'Quarterly plan' })
+  })
+
+  it('rejects a v2 rename target mismatch before changing the session title', async () => {
+    const captured = makeRes()
+    const setTitleHandler = vi.fn().mockResolvedValue({ ok: true, title: 'New title' })
+    await handleSetTitleRoute(
+      makeReq({
+        caller: {
+          ...RPC_CALLER,
+          actionContextV2: {
+            target: {
+              hostRef: 'mcp-host/chatllm',
+              agent: 'other-agent',
+              chatId: 'chat-1',
+              action: 'rename',
+            },
+          },
+        },
+        body: { title: 'New title' },
+      }),
+      captured.res,
+      makeHandlers({ setTitleHandler })
+    )
+
+    expect(captured.statusCode).toBe(403)
+    expect(captured.jsonBody).toEqual({ error: 'Runtime edge action mismatch' })
+    expect(setTitleHandler).not.toHaveBeenCalled()
   })
 
   it('never logs the raw title on ANY console channel — only titleLength (T4)', async () => {

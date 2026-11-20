@@ -321,6 +321,7 @@ describe("agent rate limit through a real GfsServer", () => {
     vi.stubEnv("GFS_PORT", "0");
     vi.stubEnv("GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA", String(R));
     vi.stubEnv("GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA", "2");
+    vi.stubEnv("GFS_CONTROL_API_SERVICE_TOKEN", "test-control-api-service-token");
     return loadConfig();
   }
 

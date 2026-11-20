@@ -10,11 +10,13 @@ import {
   type WorkflowRunActorType,
   WorkflowRunIdempotencyConflictError,
   type WorkflowRunRow,
+  type WorkflowTriggerAuthorityValidator,
   computeWorkflowRunPayloadHash,
   createApprovedRun,
   createRun,
 } from '../workflowRunService.js'
 import type { TriggerAllowedActor, TriggerBody, WorkflowRouteCaller } from './types.js'
+import type { WorkflowAuthorityBinding } from './workflowAuthorityBindingService.js'
 import {
   getMcpHostWorkflowPrincipalId,
   getTriggerActorForCaller,
@@ -93,6 +95,38 @@ function selectedWorkflowTeamId(
     return userSessionGrant.teamId
   }
   return null
+}
+
+function selectedWorkflowGrantFromV2Authority(
+  caller: Extract<WorkflowRouteCaller, { kind: 'user-session' }>,
+  authority: WorkflowAuthorityBinding | null | undefined,
+  recipeNamespace: string,
+  recipeName: string
+): WorkflowTriggerGrantResult {
+  if (caller.session.contract !== 'v2' || !authority) return { granted: false }
+
+  const binding = authority.binding
+  const target = binding.target as Record<string, unknown>
+  if (
+    binding.operationId !== 'workflow.trigger' ||
+    binding.resource.type !== 'workflow_recipe' ||
+    binding.resource.logicalId !== `${recipeNamespace}/${recipeName}` ||
+    target.recipeNamespace !== recipeNamespace ||
+    target.recipeName !== recipeName ||
+    binding.userId !== caller.claims.userId ||
+    binding.sid !== caller.session.sid ||
+    binding.sessionVersion !== caller.session.sessionVersion
+  ) {
+    return { granted: false }
+  }
+
+  if (binding.pathKind === 'direct' && binding.effectiveTeamId === null) {
+    return { granted: true, source: 'user', userId: binding.userId }
+  }
+  if (binding.pathKind === 'team' && isUuid(binding.effectiveTeamId ?? '')) {
+    return { granted: true, source: 'team', teamId: binding.effectiveTeamId! }
+  }
+  return { granted: false }
 }
 
 function getWorkflowUsageTeamIdForCaller(
@@ -225,6 +259,8 @@ export async function triggerWorkflow(params: {
   body: TriggerBody
   idempotencyKey: string
   correlationId?: string
+  authority?: WorkflowAuthorityBinding | null
+  validateCurrentInTransaction?: WorkflowTriggerAuthorityValidator
 }): Promise<WorkflowTriggerResult> {
   const { gateway, caller, recipeNamespace: ns, recipeName: name, body } = params
   const idempotencyKey = params.idempotencyKey.trim()
@@ -275,13 +311,16 @@ export async function triggerWorkflow(params: {
   if (caller.kind === 'admin-ui') {
     recipeAuthorized = true
   } else if (caller.kind === 'user-session') {
-    userSessionGrant = await resolveWorkflowTriggerGrant({
-      userId: caller.claims.userId,
-      recipeNamespace: ns,
-      recipeName: name,
-      mode: 'direct-user-session',
-      currentTeamId: caller.claims.teamId,
-    })
+    userSessionGrant =
+      caller.session.contract === 'v2'
+        ? selectedWorkflowGrantFromV2Authority(caller, params.authority, ns, name)
+        : await resolveWorkflowTriggerGrant({
+            userId: caller.claims.userId,
+            recipeNamespace: ns,
+            recipeName: name,
+            mode: 'direct-user-session',
+            currentTeamId: caller.claims.teamId,
+          })
     recipeAuthorized = userSessionGrant.granted
   } else {
     recipeAuthorized = await ensureRecipeAuthorized(caller, ns, name)
@@ -370,6 +409,8 @@ export async function triggerWorkflow(params: {
         maxDurationSeconds: maxRunDurationSeconds,
         ttlSecondsAfterFinished,
       },
+      authority: params.authority,
+      validateCurrentInTransaction: params.validateCurrentInTransaction,
     })
 
     if (approval.kind === 'mismatch') {
@@ -413,6 +454,7 @@ export async function triggerWorkflow(params: {
       inputs: body.inputs ?? {},
       intermediateParameters: body.intermediateParameters ?? null,
       outputOverrides: body.outputOverrides ?? null,
+      authorityBindingHash: params.authority?.bindingHash ?? null,
     })
 
     try {
@@ -468,6 +510,8 @@ export async function triggerWorkflow(params: {
       output_overrides: body.outputOverrides ?? null,
       max_duration_seconds: maxRunDurationSeconds,
       ttl_seconds_after_finished: ttlSecondsAfterFinished,
+      authority: params.authority,
+      validateCurrentInTransaction: params.validateCurrentInTransaction,
     })
     return { kind: 'run', ...result }
   } catch (err) {

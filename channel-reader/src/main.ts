@@ -1484,9 +1484,6 @@ export class ChannelReader {
         console.log(`[Main]   Provider Event: ${msg.providerIdentity.providerEventId}`)
       }
       console.log(`[Main]   Time: ${msg.timestamp.toISOString()}`)
-      console.log(
-        `[Main]   Content: ${msg.content.substring(0, 100)}${msg.content.length > 100 ? '...' : ''}`
-      )
       console.log('-'.repeat(50))
 
       const providerEventKey = this.providerEventDedupeKey(msg)

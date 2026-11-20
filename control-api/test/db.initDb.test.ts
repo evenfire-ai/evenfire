@@ -27,7 +27,7 @@ describe('db.initDb', () => {
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('holds one advisory lock while partitioning legacy and PR1 migration transactions', async () => {
+  it('holds one advisory lock while partitioning legacy and composed migration transactions', async () => {
     const { initDb } = await import('../src/db.js')
 
     await initDb()
@@ -69,10 +69,16 @@ describe('db.initDb', () => {
     expect(sqls).not.toContain('ROLLBACK')
     // The committed password-admission rollout fence, one dev batch through
     // 0136_llm_catalog_dismissed_backfill (as in dev), then one transaction per
-    // post-dev version.
+    // PR1 version. PR2 uses 18 transactions for schema changes, constraint
+    // validations, and receipts. The two retention versions use one each.
     const { PR1_MIGRATION_VERSIONS } = await import('../src/migrations/migrationRunner.js')
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length)
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length + 20)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(
+      2 + PR1_MIGRATION_VERSIONS.length + 20
+    )
+    expect(sqls.filter(sql => /^ALTER TABLE \w+ VALIDATE CONSTRAINT \w+$/.test(sql))).toHaveLength(
+      8
+    )
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)

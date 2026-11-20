@@ -46,7 +46,7 @@ export async function getConversationScopedWorkflowHealth(params: {
      )
      SELECT scoped_runs.*,
             (COUNT(*) FILTER (
-              WHERE scoped_runs.phase IN ('Pending', 'Running')
+              WHERE scoped_runs.phase IN ('Pending', 'Running', 'AuthorizationPaused')
             ) OVER ())::int AS "activeRuns"
        FROM scoped_runs
       ORDER BY scoped_runs.created_at DESC,

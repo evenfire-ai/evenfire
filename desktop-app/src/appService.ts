@@ -33,7 +33,12 @@ import {
   type DesktopUploadTransport,
   formatGfsUploadLimit,
 } from './gfs/upload.js'
-import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
+import {
+  GfsClient,
+  type GfsResourceView,
+  type ResolvedGfsResource,
+  parseSubjectKey,
+} from './gfs/uriHandler.js'
 import {
   type GfsWatchClient,
   type GfsWatchClientDeps,
@@ -277,6 +282,13 @@ const PREWARM_COOLDOWN_MAX_HOSTS = 256
 // or error. Never a persistent loop, never coupled to the status stream.
 const PREWARM_REEMIT_MAX_ATTEMPTS = 2
 const PREWARM_REEMIT_INTERVAL_MS = 10_000
+
+function retryAfterDelayMs(error: unknown): number {
+  if (!(error instanceof ApiError) || error.status !== 429 || !error.retryAfter) return 0
+  if (!/^\d+$/.test(error.retryAfter.trim())) return 0
+  const seconds = Number(error.retryAfter)
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds * 1000 : 0
+}
 
 function compareSemverLike(left: string, right: string): number {
   const parse = (value: string) =>
@@ -871,6 +883,11 @@ export interface AppServiceOptions {
   gfsWatch?: Pick<GfsWatchClientDeps, 'fetch' | 'requestJson' | 'clock' | 'random' | 'log'>
 }
 
+export type GfsNavigationResolution =
+  | { status: 'resolved'; resource: ResolvedGfsResource }
+  | { status: 'superseded' }
+  | { status: 'unavailable' }
+
 export class AppService {
   private readonly authClient = new AuthClient()
   private readonly memberRegistrationServiceClient = new MemberRegistrationServiceClient()
@@ -911,6 +928,11 @@ export class AppService {
   // A transient runWithTeamContext hop temporarily installs another team's
   // token in sessionToken. Existing GFS jobs keep their captured token and
   // scope, but new GFS operations must not capture that temporary token.
+  // Exempt: the click-navigation read (resolveGfsUriForNavigation) may run
+  // with the hop token and is deliberately not gated on this depth. GFS
+  // authority is per user, not per team: the server mints a user-scoped token
+  // and resolves across every active membership, so the hop token reads
+  // exactly what the home token would, and blocking would drop real clicks.
   private gfsTransientTeamHopDepth = 0
   // While a `runWithTeamContext` hop that will restore the original team is in
   // flight, `me.teamId` holds the borrowed team. The chat store (and the delete
@@ -2793,6 +2815,40 @@ export class AppService {
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
   async resolveGfsUri(uri: string) {
     return this.gfsClient.resolveUri(uri, this.requireSessionToken())
+  }
+
+  /**
+   * Resolve for a user click that will route the UI. Unlike `resolveGfsUri`
+   * this never throws: the caller needs to tell "the session this click
+   * belonged to is gone" (drop silently) from "nothing to open" (tell the user).
+   *
+   * Authority is `(gfsAuthEpoch, me.id)`, not the token: transient team hops
+   * swap the token without changing GFS authority, which the server scopes to
+   * the user, so comparing tokens would drop legitimate clicks.
+   */
+  async resolveGfsUriForNavigation(uri: string): Promise<GfsNavigationResolution> {
+    const token = this.sessionToken
+    const userId = this.me?.id
+    const epoch = this.gfsAuthEpoch
+    if (!token || !userId || this.gfsDispatchBlocked) return { status: 'superseded' }
+    const stillCurrent = () =>
+      Boolean(this.sessionToken) && this.me?.id === userId && this.gfsAuthEpoch === epoch
+    let resource: ResolvedGfsResource
+    try {
+      resource = await this.gfsClient.resolveUri(uri, token)
+    } catch (error) {
+      if (!stillCurrent()) return { status: 'superseded' }
+      // The renderer shows one generic message for every failure cause. Only
+      // the error class is logged: GfsUriError messages embed the URI the
+      // renderer sent, and a CR/LF in it would forge log lines.
+      console.warn(
+        '[AppService] GFS navigation resolve failed:',
+        error instanceof Error ? error.name : typeof error
+      )
+      return { status: 'unavailable' }
+    }
+    if (!stillCurrent()) return { status: 'superseded' }
+    return { status: 'resolved', resource }
   }
 
   /**
@@ -4704,6 +4760,7 @@ export class AppService {
     const connect = async () => {
       if (closed) return
       abortController = new AbortController()
+      let serverRetryAfterMs = 0
       try {
         const rpc = await this.issueRpcTokenForHostRefs(HOST_STATUS_SCOPES, effectiveHostRefs)
         await this.rpcClient.openHostStatusStream(
@@ -4753,6 +4810,7 @@ export class AppService {
         }
       } catch (error) {
         if (closed) return
+        serverRetryAfterMs = retryAfterDelayMs(error)
         if (error instanceof ApiError && error.status === 401) {
           this.rpcTokenManager.clear()
         }
@@ -4760,10 +4818,13 @@ export class AppService {
       } finally {
         if (closed) return
         clearRetry()
-        retryTimer = setTimeout(() => {
-          backoffMs = Math.min(backoffMs * 2, 15000)
-          void connect()
-        }, backoffMs)
+        retryTimer = setTimeout(
+          () => {
+            backoffMs = Math.min(backoffMs * 2, 15000)
+            void connect()
+          },
+          Math.max(backoffMs, serverRetryAfterMs)
+        )
       }
     }
 
@@ -4830,6 +4891,7 @@ export class AppService {
     const connect = async () => {
       if (closed) return
       abortController = new AbortController()
+      let serverRetryAfterMs = 0
       try {
         const rpc = await this.issueRpcTokenForHostRefs(HOST_ACTIVITY_SCOPES, effectiveHostRefs)
         await this.rpcClient.openHostActivityStream(
@@ -4878,6 +4940,7 @@ export class AppService {
         if (!closed) onEvent({ type: 'error', message: 'Activity stream disconnected' })
       } catch (error) {
         if (closed) return
+        serverRetryAfterMs = retryAfterDelayMs(error)
         if (error instanceof ApiError && error.status === 401) {
           this.rpcTokenManager.clear()
         }
@@ -4885,10 +4948,13 @@ export class AppService {
       } finally {
         if (closed) return
         clearRetry()
-        retryTimer = setTimeout(() => {
-          backoffMs = Math.min(backoffMs * 2, 15000)
-          void connect()
-        }, backoffMs)
+        retryTimer = setTimeout(
+          () => {
+            backoffMs = Math.min(backoffMs * 2, 15000)
+            void connect()
+          },
+          Math.max(backoffMs, serverRetryAfterMs)
+        )
       }
     }
 
@@ -5125,6 +5191,7 @@ export class AppService {
       try {
         while (!closed && !giveUp) {
           abortController = new AbortController()
+          let serverRetryAfterMs = 0
           // F3: this 8s bound guards CONNECTION ESTABLISHMENT only (open request →
           // first server bytes). It's cleared on `waiting` (connection established),
           // which then arms the longer waiting-for-open bound. A server that never
@@ -5140,6 +5207,7 @@ export class AppService {
               abortController.signal
             )
           } catch (error) {
+            serverRetryAfterMs = retryAfterDelayMs(error)
             // F4: a 401 on token re-issue (the 300s RPC token expired mid-stream)
             // clears the cache so the NEXT attempt re-mints a fresh token, then
             // falls through to retry. A single transient 401 must NOT collapse a
@@ -5161,7 +5229,7 @@ export class AppService {
             RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1),
             RECONNECT_MAX_DELAY_MS
           )
-          await new Promise(resolve => setTimeout(resolve, delayMs))
+          await new Promise(resolve => setTimeout(resolve, Math.max(delayMs, serverRetryAfterMs)))
         }
         // Exhausted/gave up without a clean terminal → surface the loss as a
         // structured `gone` (§4.5-2), NOT the generic `error`. The renderer's

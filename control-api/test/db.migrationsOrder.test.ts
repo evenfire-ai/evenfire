@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import {
+  PR1_MIGRATION_VERSIONS,
+  PR2_MIGRATION_VERSIONS,
+} from '../src/migrations/migrationRunner.js'
 
 // Mock pg exactly like the other db.*.test.ts specs so importing ../src/db.js
 // does not spin up a real Pool as a module side effect.
@@ -67,7 +71,16 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     const incomingDev = '0129_workflow_schedules_concurrency_policy'
     const passwordAdmission = '0130_password_login_success_admission'
     const lastDev = '0136_llm_catalog_dismissed_backfill'
-    const task106 = ['0137_user_access_foundation', '0138_legacy_password_security_epoch_backfill']
+    // The runner's post-dev versions (PR1's two, then dev's catalog-prune and
+    // GFS watch versions, then dev's OIDC versions), then PR2's in consecutive
+    // slots after dev's last.
+    const task106 = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]
+    expect(task106.slice(0, 4)).toEqual([
+      '0137_user_access_foundation',
+      '0138_legacy_password_security_epoch_backfill',
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
+    ])
     const oidc = [
       '0148_oidc_protocol_attempts',
       '0149_oidc_protocol_attempt_expiry_index',
@@ -81,16 +94,15 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(versions[versions.indexOf(incomingDev) + 1]).toBe(passwordAdmission)
     expect(versions[versions.indexOf(lastDev) + 1]).toBe(task106[0])
     expect(
-      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 2)
+      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + task106.length)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
-    expect(
-      versions.slice(versions.indexOf(task106.at(-1)!) + 1, versions.indexOf(task106.at(-1)!) + 4)
-    ).toEqual([
-      '0139_llm_catalog_prune_columns',
-      '0140_llm_catalog_prune_episodes',
-      '0141_gfs_resource_changed_notify',
-    ])
+    // Dev's GFS watch migrations follow its catalog-prune pair, its OIDC
+    // migrations follow the watch triggers, and PR2 follows dev's last OIDC
+    // migration.
+    expect(versions[versions.indexOf('0140_llm_catalog_prune_episodes') + 1]).toBe(
+      '0141_gfs_resource_changed_notify'
+    )
     const watchTriggers = [
       '0142_gfs_authz_grants_notify',
       '0143_gfs_authz_shares_notify',
@@ -100,11 +112,13 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0147_gfs_watch_session_users_notify',
     ]
     const afterResourceNotify = versions.indexOf('0141_gfs_resource_changed_notify') + 1
-    expect(versions.slice(afterResourceNotify, afterResourceNotify + watchTriggers.length)).toEqual(
-      watchTriggers
-    )
-    expect(versions.slice(-3)).toEqual(oidc)
-    expect(versions.at(-1)).toBe(oidc.at(-1))
+    expect(versions.slice(afterResourceNotify)).toEqual([
+      ...watchTriggers,
+      ...oidc,
+      ...PR2_MIGRATION_VERSIONS,
+      '0157_governed_trace_retention_indexed',
+      '0158_governed_trace_retention_hardening',
+    ])
   })
 
   it('keeps legacy aliases unique and distinct from current versions', async () => {

@@ -19,6 +19,7 @@ import {
   requireChatStore,
   requireChatStoreForBindingGeneration,
 } from './chatStoreBinding.js'
+import { externalUrlToOpen } from './externalUrl.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
 import type { GfsWatchClient, GfsWatchOwner } from './gfs/watchClient.js'
@@ -805,6 +806,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
+  })
+  ipcMain.handle('gfs:resolveForNavigation', async (event, payload: { uri: string }) => {
+    assertTrustedSender(event)
+    return service.resolveGfsUriForNavigation(sanitizeString(payload?.uri))
   })
   ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
@@ -2319,11 +2324,9 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
 
   ipcMain.handle('app:openUrl', async (event, { url }: { url: string }) => {
     assertTrustedSender(event)
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      throw new Error('Only HTTP(S) URLs are allowed')
-    }
+    const target = externalUrlToOpen(url)
     const { shell } = await import('electron')
-    await shell.openExternal(url)
+    await shell.openExternal(target)
   })
 
   ipcMain.handle('desktop:openWindow', async (event, { hostRef }: { hostRef: string }) => {
