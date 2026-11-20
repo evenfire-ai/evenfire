@@ -151,21 +151,37 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * `canUserApprove` trusts the CRD schema, which a dev-mode or ConfigMap policy
- * skips: an absent `channels` would throw, and a string `approvers` would
- * match by substring. Either shape refuses the raise instead.
+ * The config `canUserApprove` reads for a designated-approvers raise, or null
+ * to refuse. That function trusts the CRD schema, which a dev-mode or
+ * ConfigMap policy skips: an absent `channels` would throw, and a string
+ * `approvers` would match by substring, so either shape refuses here, as does
+ * a non-boolean `enabled`. An absent `enabled` reads as enabled, the same
+ * opt-out rule as an absent channel block. `canUserApprove` reads a missing
+ * key as disabled, so the entry is passed with `enabled: true`. Only
+ * `enabled: false` refuses a listed approver.
  */
-function approverListWellFormed(config: ApprovalConfig, channelType: string): boolean {
+function designatedApproverConfig(
+  config: ApprovalConfig,
+  channelType: string
+): ApprovalConfig | null {
   const channels: unknown = config.channels
-  if (!isPlainObject(channels)) return false
+  if (!isPlainObject(channels)) return null
   const entry = channels[channelType]
-  if (entry === undefined) return true
-  if (!isPlainObject(entry)) return false
-  const approvers = entry.approvers
-  return (
-    approvers === undefined ||
-    (Array.isArray(approvers) && approvers.every(approver => typeof approver === 'string'))
-  )
+  if (entry === undefined) return config
+  if (!isPlainObject(entry)) return null
+  const { approvers, enabled } = entry
+  if (
+    approvers !== undefined &&
+    !(Array.isArray(approvers) && approvers.every(approver => typeof approver === 'string'))
+  ) {
+    return null
+  }
+  if (enabled !== undefined && typeof enabled !== 'boolean') return null
+  if (enabled !== undefined) return config
+  return {
+    ...config,
+    channels: { ...channels, [channelType]: { ...entry, enabled: true } },
+  } as ApprovalConfig
 }
 
 /**
@@ -173,8 +189,9 @@ function approverListWellFormed(config: ApprovalConfig, channelType: string): bo
  * empty) and `channel_users` add no check, so the channel switch alone
  * decides. `cli_only` and `designated_approvers` use `canUserApprove`:
  * cli_only refuses every channel sender, and designated_approvers needs the
- * sender in that channel's enabled `approvers`. Any other value refuses: the
- * CRD enum does not cover a dev-mode or ConfigMap policy.
+ * sender in that channel's `approvers`, in a block not set `enabled: false`.
+ * Any other value refuses: the CRD enum does not cover a dev-mode or
+ * ConfigMap policy.
  */
 function approverPolicyRefusal(
   message: IncomingMessage,
@@ -192,9 +209,16 @@ function approverPolicyRefusal(
     )
     return 'policy_invalid'
   }
+  const resolved =
+    policy === 'cli_only' ? config : designatedApproverConfig(config, message.channelType)
   const allowed =
-    (policy === 'cli_only' || approverListWellFormed(config, message.channelType)) &&
-    approvalResolver.canUserApprove(message.sender, message.channelType, message.channelId, config)
+    resolved !== null &&
+    approvalResolver.canUserApprove(
+      message.sender,
+      message.channelType,
+      message.channelId,
+      resolved
+    )
   if (allowed) return null
   return policy === 'cli_only' ? 'policy_cli_only' : 'not_approver'
 }

@@ -1559,12 +1559,45 @@ describe('approver policy on a messaging-channel mode raise', () => {
     expect(run.stored('telegram', NON_APPROVER.telegram)).toBe('manual')
   })
 
+  it('designated_approvers: a block with no enabled key lets a listed approver raise', async () => {
+    const run = policyRun(
+      policySnapshot('designated_approvers', {
+        telegram: { approvers: [APPROVER.telegram], allowModeChange: true },
+      })
+    )
+
+    const response = await run.command('telegram', APPROVER.telegram, 'allow-all')
+
+    expect(response).toMatchObject({
+      success: true,
+      response: 'Approval mode is allow_all. Effective mode is allow_all.',
+    })
+    expect(run.stored('telegram', APPROVER.telegram)).toBe('allow_all')
+    expect(run.refusals()).toEqual([])
+  })
+
+  it('designated_approvers: a block with no enabled key still refuses a non-approver', async () => {
+    const run = policyRun(
+      policySnapshot('designated_approvers', {
+        telegram: { approvers: [APPROVER.telegram], allowModeChange: true },
+      })
+    )
+
+    const response = await run.command('telegram', NON_APPROVER.telegram, 'allow-all')
+
+    expect(response).toMatchObject({ success: true, response: REFUSAL_REPLY.not_approver })
+    expect(run.stored('telegram', NON_APPROVER.telegram)).toBe('manual')
+  })
+
   it.each([
     [
       'the channel is disabled',
       { telegram: { enabled: false, approvers: [APPROVER.telegram], allowModeChange: true } },
     ],
-    ['enabled is absent', { telegram: { approvers: [APPROVER.telegram], allowModeChange: true } }],
+    [
+      'enabled is not a boolean',
+      { telegram: { enabled: 'true', approvers: [APPROVER.telegram], allowModeChange: true } },
+    ],
     [
       'approvers is a string',
       { telegram: { enabled: true, approvers: `${APPROVER.telegram}9`, allowModeChange: true } },
