@@ -4,9 +4,12 @@ import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
 import remarkRehype from 'remark-rehype'
 import { unified } from 'unified'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
+import { externalUrlToOpen } from '../../../src/externalUrl'
 import type { AgentChatMessage } from '../uiTypes'
 import { parseChatMessageDisplay } from './chatMessageAttachments'
 import { looksLikeJson } from './format'
+import { EXTERNAL_LINK_SCHEMES, urlScheme } from './urlScheme'
 
 type SemanticText = Text & { searchFragmentId?: string }
 
@@ -51,16 +54,58 @@ const FLOW_BOUNDARIES = new Set([
 ])
 const URL_PROPERTIES = new Set(['href', 'src'])
 
+/**
+ * The only link targets a chat message may carry, in the exact form the click
+ * handler hands on. Anything else is rendered as plain text instead: relative
+ * paths and `href=""` would navigate the app's own document and reload it,
+ * dropping every open tab, and `#` fragments (such as GFM footnotes) would
+ * scroll the whole app shell rather than the message.
+ */
+export function canonicalChatLinkHref(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const scheme = urlScheme(raw)
+  if (scheme === 'gfs') return normalizeGfsResourceUri(raw)
+  if (scheme === null || !EXTERNAL_LINK_SCHEMES.has(scheme)) return null
+  if (scheme === 'http' || scheme === 'https') {
+    try {
+      const url = new URL(raw)
+      return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null
+    } catch {
+      return null
+    }
+  }
+  if (scheme === 'mailto') {
+    try {
+      return externalUrlToOpen(raw)
+    } catch {
+      // `app:openUrl` would refuse this target, so it must not render as a link.
+      return null
+    }
+  }
+  return null
+}
+
+function normalizeChildren<T extends RootContent>(children: T[]): T[] {
+  return children.flatMap(child => {
+    if (child.type === 'raw') return [{ type: 'text', value: child.value } as T]
+    normalizeTree(child)
+    if (child.type !== 'element' || child.tagName !== 'a') return [child]
+    const href = canonicalChatLinkHref(child.properties.href)
+    if (href === null) return child.children as T[]
+    child.properties.href = href
+    // The author-supplied title would otherwise be a tooltip that lies about the target.
+    child.properties.title = href
+    return [child]
+  })
+}
+
 function normalizeTree(node: RootContent | Root): void {
   if ('children' in node) {
-    node.children = node.children.map(child => {
-      if (child.type === 'raw') return { type: 'text', value: child.value }
-      normalizeTree(child)
-      return child
-    }) as typeof node.children
+    node.children = normalizeChildren<RootContent>(node.children) as typeof node.children
   }
   if (node.type === 'element') {
     for (const property of URL_PROPERTIES) {
+      if (node.tagName === 'a' && property === 'href') continue
       if (Object.hasOwn(node.properties, property)) {
         node.properties[property] = defaultUrlTransform(String(node.properties[property] || ''))
       }

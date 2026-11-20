@@ -203,11 +203,18 @@ export function originMatchesCallback(request: Request, callback: string): boole
   }
 }
 
-export function requestMatchesCallback(request: Request, callback: string): boolean {
+/**
+ * Compares only the path. `request.url` does not carry the public origin: `next start`
+ * builds it from its own listener (`<proto>://localhost:<port>`) and ignores Host and
+ * X-Forwarded-Host, so behind the proxy its origin never equals the redirect URI.
+ * The public origin is enforced without trusting request headers: `/start` sets the
+ * binding cookie only when the browser's Origin is the redirect URI origin, the
+ * `__Host-` cookie is sent back only to that host, and Control API claims an attempt
+ * only for the stored binding and the configured redirect URI.
+ */
+export function requestPathMatchesCallback(request: Request, callback: string): boolean {
   try {
-    const incoming = new URL(request.url)
-    const expected = new URL(callback)
-    return incoming.origin === expected.origin && incoming.pathname === expected.pathname
+    return new URL(request.url).pathname === new URL(callback).pathname
   } catch {
     return false
   }
