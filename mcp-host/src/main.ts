@@ -656,10 +656,14 @@ let shellClassifierCache: {
 } | null = null
 
 /**
- * Dedicated shell classifier for a Host that holds an OpenAI credential.
- * The chat model is not the judge. No credential, or a provider that cannot
- * be built, returns null and admission keeps the chat or failover pair.
- * The credential is hashed only as a cache key and is never logged.
+ * Dedicated shell classifier for a Host whose model provider is OpenAI. The
+ * ConfigStore holds only the Host provider's credentials
+ * (`apiKeysFromConfigStore`), so any other provider has no OpenAI key here.
+ * Dev mode reads every provider's key from the env, so an OPENAI_API_KEY
+ * there is used whatever the Host model. The chat model is not the judge. No
+ * OpenAI key, or a provider that cannot be built, returns null and admission
+ * keeps the chat or failover pair. The credential is hashed only as a cache
+ * key and is never logged.
  */
 function shellClassifierCaller(): ShellClassifierCaller | null {
   const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys

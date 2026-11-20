@@ -590,7 +590,13 @@ export interface SessionStateWire {
   channelCap: ApprovalMode
   /** min(stored, ceiling, channel cap), computed on this read. */
   effectiveApprovalMode: ApprovalMode
-  /** Pure classifier table for the session's current model. No provider is built. */
+  /**
+   * Classifier table for the pair admission would judge shell with: the
+   * dedicated classifier when the Host's model provider is OpenAI, else the
+   * failover pair while a fallback serves, else the session's current model.
+   * No model is called, but finding the dedicated classifier builds and caches
+   * its provider.
+   */
   shellClassifierAvailable: boolean
 }
 

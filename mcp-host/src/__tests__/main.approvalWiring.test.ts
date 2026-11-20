@@ -171,7 +171,7 @@ afterEach(async () => {
 })
 
 describe('main session reads: classifier pair', () => {
-  it('reports the dedicated shell classifier when the Host has an OpenAI credential', async () => {
+  it('reports the dedicated shell classifier when the Host model provider is OpenAI', async () => {
     fake.primaryKeySlot = 'openai-api-key'
     fake.allowlist = new Map([['openai', [{ model: 'gpt-4.1' }, { model: 'gpt-5.4-mini' }]]])
     const loaded = await loadMain()
