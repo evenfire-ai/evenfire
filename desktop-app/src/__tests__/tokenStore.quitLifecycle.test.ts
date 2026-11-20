@@ -134,4 +134,66 @@ describe('TokenStore macOS Quit admission', () => {
       'session-token::second-bbbbbbbbbbbb',
     ])
   })
+
+  it('tracks getSessionToken until its held native read settles', async () => {
+    const nativeRead = deferred<string | null>()
+    keytar.getPassword.mockImplementationOnce(() => nativeRead.promise)
+    const read = new tokenStoreModule.TokenStore().getSessionToken('current-bbbbbbbbbbbb')
+    let drainSettled = false
+    try {
+      await vi.waitFor(() =>
+        expect(keytar.getPassword).toHaveBeenCalledWith(
+          'Evenfire',
+          'session-token::current-bbbbbbbbbbbb'
+        )
+      )
+      expect(tokenStoreModule.closeTokenStoreAdmission()).toBe(true)
+      const drain = tokenStoreModule.waitForTokenStoreOperations().then(() => {
+        drainSettled = true
+      })
+      await new Promise(resolve => setImmediate(resolve))
+      expect(drainSettled).toBe(false)
+
+      nativeRead.resolve('synthetic-current-token')
+      await expect(read).resolves.toBe('synthetic-current-token')
+      await drain
+      expect(drainSettled).toBe(true)
+    } finally {
+      nativeRead.resolve('synthetic-current-token')
+      tokenStoreModule.openTokenStoreAdmission()
+      await read
+    }
+  })
+
+  it('tracks clearSessionToken while its native delete is held', async () => {
+    const nativeDelete = deferred<boolean>()
+    keytar.deletePassword.mockImplementationOnce(() => nativeDelete.promise)
+    const clear = new tokenStoreModule.TokenStore().clearSessionToken('current-bbbbbbbbbbbb')
+    let drainSettled = false
+    let drain: Promise<void> | undefined
+    try {
+      await vi.waitFor(() =>
+        expect(keytar.deletePassword).toHaveBeenCalledWith(
+          'Evenfire',
+          'session-token::current-bbbbbbbbbbbb'
+        )
+      )
+      expect(tokenStoreModule.closeTokenStoreAdmission()).toBe(true)
+      drain = tokenStoreModule.waitForTokenStoreOperations().then(() => {
+        drainSettled = true
+      })
+      await new Promise(resolve => setImmediate(resolve))
+      expect(drainSettled).toBe(false)
+
+      nativeDelete.resolve(true)
+      await clear
+      await drain
+      expect(drainSettled).toBe(true)
+    } finally {
+      nativeDelete.resolve(true)
+      tokenStoreModule.openTokenStoreAdmission()
+      await clear
+      await drain
+    }
+  })
 })
