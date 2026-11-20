@@ -455,14 +455,14 @@ its statement budget even without contention. Worker wake duration includes
 work outside the database transaction.
 
 `0158_governed_trace_retention_hardening` installs the final retention
-definitions and records its version in one transaction. The runner accepts
-`0151_governed_trace_retention_indexed` and
-`0153_governed_trace_retention_hardening` as aliases and records their current
-versions without replaying the corresponding SQL. An existing
-`0152_governed_trace_retention_search_path` receipt remains in the database.
-Use the approved migration image for
-reconciliation because an obsolete checkpoint image could change the routine
-definitions after the final receipt was recorded.
+definitions and records its version in one transaction. The
+[migration registry](../../control-api/src/db.ts) accepts the earlier indexed
+and hardening receipts as aliases and records their canonical versions without
+replaying SQL. An existing receipt for the intermediate search-path migration
+documented in the [upgrade tests](../../control-api/test/db.governedTraceRetention.realPostgres.integration.test.ts)
+remains in the database. Use the approved migration image for reconciliation
+because an obsolete checkpoint image could change the routine definitions
+after the final receipt was recorded.
 
 For acceptance, record these observations for the same candidate:
 
