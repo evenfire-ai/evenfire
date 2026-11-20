@@ -3,7 +3,7 @@ import type { KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@components/Common/Button'
 import { MenuItem } from '@components/Common/MenuItem'
-import { fixedContainingBlockOrigin } from '@/lib/fixedContainingBlockOrigin'
+import { fixedContainingBlockOrigin } from '@lib/fixedContainingBlockOrigin'
 import type { DropdownSelectProps } from './types'
 
 export function DropdownSelect({

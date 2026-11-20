@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom'
 import { IconButton, MenuItem } from '@components/Common'
 import { IconMoreVertical } from '@components/SidebarNav/icons'
-import { fixedContainingBlockOrigin } from '@/lib/fixedContainingBlockOrigin'
+import { fixedContainingBlockOrigin } from '@lib/fixedContainingBlockOrigin'
 
 type AccessRowMenuProps = {
   disabled?: boolean
