@@ -473,6 +473,8 @@ function FileExplorerNode({
             className={`da-file-explorer__toggle${isExpanded ? ' is-expanded' : ''}`}
             label={`${isExpanded ? 'Collapse' : 'Expand'} ${label}`}
             onClick={() => onToggle(node.resourceId)}
+            onContextMenu={handleRowContextMenu}
+            onMouseDown={disarmKeyboardOpen}
             size="sm"
             variant="ghost"
           >

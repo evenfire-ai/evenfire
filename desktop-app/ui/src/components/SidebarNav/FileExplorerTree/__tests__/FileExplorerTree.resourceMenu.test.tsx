@@ -421,6 +421,27 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
     expect(affordances).not.toHaveBeenCalled()
   })
 
+  it("opens a folder's menu from its chevron as from its label, without toggling it", async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('folder-d', 'Docs', 'directory', { permissions: ['read'] }),
+        ])
+      ),
+      affordances: vi.fn(
+        appServiceAffordanceProducer(async () => heldPermissionResponse(['read']))
+      ),
+    })
+    renderShell()
+    const chevron = await screen.findByRole('button', { name: 'Expand Docs' })
+
+    fireEvent.contextMenu(chevron, { clientX: 30, clientY: 40 })
+
+    const menu = await screen.findByRole('menu', { name: 'Actions for Docs' })
+    expect(menuItem(menu, 'Open folder')).not.toBeNull()
+    expect(chevron.getAttribute('aria-expanded')).toBe('false')
+  })
+
   it('drops a choice made in a menu opened under the previous session generation of the same team', async () => {
     const affordances = vi.fn(
       appServiceAffordanceProducer(async () => heldPermissionResponse(['read', 'write']))
