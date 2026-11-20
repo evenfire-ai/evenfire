@@ -2134,5 +2134,69 @@
   {
     "suite": "guardrailGate.test.ts",
     "fullName": "mode-set guardrail rewrite and redaction an X1 run keeps the rewrite and redacts via post_tool_use"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: a telegram raise by a sender not in approvers is refused and stores nothing"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: a email raise by a sender not in approvers is refused and stores nothing"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: an email raise from a sender whose case differs from the listed approver is refused"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: email may always lower the mode or keep it"
+  },
+  {
+    "suite": "approvedToolRedaction.integration.test.ts",
+    "fullName": "post_tool_use redaction of an approved call redacts the result in manual after an ordinary card is approved"
+  },
+  {
+    "suite": "approvedToolRedaction.integration.test.ts",
+    "fullName": "post_tool_use redaction of an approved call redacts the result in allow_all after a guardrail ask card is approved"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm flags split mid-token (rm -rf /*) before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs rm operand split mid-token (rm -rf /tmp/x)"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm after a comment ending in a backslash before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm after backslash-CRLF before spawn"
+  },
+  {
+    "suite": "shellClassifier.test.ts",
+    "fullName": "shell classifier applies the provider table and the 8192 character argument limit"
+  },
+  {
+    "suite": "shellClassifier.test.ts",
+    "fullName": "shell classifier calls gpt-5.5 with effort none and does not call other OpenAI models"
+  },
+  {
+    "suite": "shellCardApprovalRoute.test.ts",
+    "fullName": "shell card approval route command from a channel whose flag is false resolves to once"
+  },
+  {
+    "suite": "main.approvalWiring.test.ts",
+    "fullName": "main hands the dedicated classifier to admission admission judges shell with the dedicated gpt-5.5 classifier main builds, not the chat model"
+  },
+  {
+    "suite": "main.approvalWiring.test.ts",
+    "fullName": "main session reads: classifier pair reports the classifier unavailable when the Host pins a model it does not call"
+  },
+  {
+    "suite": "main.approvalWiring.test.ts",
+    "fullName": "main session reads: classifier pair reports the saved model a task runs, even when the Host subset hides it from selection"
   }
 ]

@@ -1936,6 +1936,34 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
 }
 
 /**
+ * The agent state machine, with the per-task sources it reads from this
+ * module.
+ */
+function createAgent(queue: MessageQueue, lifecycle: TaskLifecycle): AgentStateMachine {
+  const created = new AgentStateMachine(queue, lifecycle, {
+    maxTaskDuration: config.agentMaxTaskDuration,
+    maxToolCallsPerTask: config.agentMaxToolCallsPerTask,
+    autoStart: true,
+    taskDelay: config.agentTaskDelay,
+    approvalTimeout: config.agentApprovalTimeout,
+  })
+
+  // R2 — inject the per-task model resolver. Closes over the module globals
+  // (currentHost + configStore) so it always reads the live keys/allowlist; a
+  // key rotation or allowlist reload is picked up on the next task with no
+  // re-wiring.
+  created.setTaskModelResolver(resolveTaskModel)
+  created.setImageInputResolver(resolveImageInput)
+
+  // R5 — inject the provider-fallback support. Closes over the module globals
+  // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
+  // reads the live policy + sticky failover state. Null when no policy.
+  created.setFailoverSupport(currentFailoverSupport)
+  created.setShellClassifierProvider(shellClassifierCaller)
+  return created
+}
+
+/**
  * Initialize the message queue and agent.
  */
 async function initializeAgent(): Promise<void> {
@@ -1949,14 +1977,8 @@ async function initializeAgent(): Promise<void> {
   taskLifecycle = new TaskLifecycle()
   messageQueue.setLifecycle(taskLifecycle)
 
-  // Create agent state machine
-  agent = new AgentStateMachine(messageQueue, taskLifecycle, {
-    maxTaskDuration: config.agentMaxTaskDuration,
-    maxToolCallsPerTask: config.agentMaxToolCallsPerTask,
-    autoStart: true,
-    taskDelay: config.agentTaskDelay,
-    approvalTimeout: config.agentApprovalTimeout,
-  })
+  // Create agent state machine. Set once here (the agent is created once).
+  agent = createAgent(messageQueue, taskLifecycle)
 
   logger.info(
     {
@@ -1968,19 +1990,6 @@ async function initializeAgent(): Promise<void> {
     },
     '[Main] Agent config: taskDelay=ms, maxTaskDuration=ms, maxToolCalls=, maxQueueSize=, approvalTimeout=ms'
   )
-
-  // R2 — inject the per-task model resolver. Closes over the module globals
-  // (currentHost + configStore) so it always reads the live keys/allowlist; a
-  // key rotation or allowlist reload is picked up on the next task with no
-  // re-wiring. Set once here (the agent is created once).
-  agent.setTaskModelResolver(resolveTaskModel)
-  agent.setImageInputResolver(resolveImageInput)
-
-  // R5 — inject the provider-fallback support. Closes over the module globals
-  // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
-  // reads the live policy + sticky failover state. Null when no policy.
-  agent.setFailoverSupport(currentFailoverSupport)
-  agent.setShellClassifierProvider(shellClassifierCaller)
 
   // Phase 6: publish approval once. Host changes publish again from onHostChange,
   // before credential reconciliation. initializeProvider does not.
@@ -3997,6 +4006,10 @@ async function main(): Promise<void> {
 export const mainRpcTestSeams = {
   setAgent(next: AgentStateMachine | null): void {
     agent = next
+  },
+  /** The agent initializeAgent builds, without the rest of the boot. */
+  createAgent(queue: MessageQueue, lifecycle: TaskLifecycle): AgentStateMachine {
+    return createAgent(queue, lifecycle)
   },
   setMessageQueue(next: MessageQueue | null): void {
     messageQueue = next

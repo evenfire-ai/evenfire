@@ -8,7 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'node:net'
 import { register } from 'prom-client'
 import type { AgentStateMachine } from '../agent'
+import type { TaskExecutor } from '../agent/taskExecutor'
 import type { ConfigStoreOptions } from '../config/configStore'
+import type { ApprovalModeInputs } from '../core/approval/gateCause'
+import { type Conversation, FinishReason } from '../core/types'
+import type { Task } from '../queue'
 import type { RPCServer } from '../server'
 import type { HostCRD } from '../types'
 
@@ -204,7 +208,9 @@ describe('main session reads: classifier pair', () => {
     const loaded = await loadMain()
     await loaded.main.onHostChange(
       host({
-        model: { provider: 'openai', name: 'gpt-5.4-mini' },
+        // The classifier table accepts this chat model, so a fallback from the
+        // pinned model to the chat model would read as available.
+        model: { provider: 'openai', name: 'gpt-5.5' },
         approval: {
           defaultPolicy: 'channel_users',
           channels: {},
@@ -239,6 +245,35 @@ describe('main session reads: classifier pair', () => {
     expect((await listedSession(harness)).shellClassifierAvailable).toBe(true)
   }, 20_000)
 
+  // Tasks resolve a saved selection against the global allowlist, not the
+  // Host subset (taskModelPair), so the session read must too. Bedrock has no
+  // OpenAI key to mask this with the dedicated classifier, and its table
+  // depends on the model name.
+  it('reports the saved model a task runs, even when the Host subset hides it from selection', async () => {
+    fake.allowlist = new Map([
+      [
+        'bedrock',
+        [{ model: 'meta.llama3-70b-instruct-v1:0' }, { model: 'anthropic.claude-sonnet-4-5-v1:0' }],
+      ],
+    ])
+    const loaded = await loadMain()
+    await loaded.main.onHostChange(
+      host({
+        model: { provider: 'bedrock', name: 'meta.llama3-70b-instruct-v1:0' },
+        allowedModels: [{ provider: 'bedrock', model: 'meta.llama3-70b-instruct-v1:0' }],
+      })
+    )
+    const harness = await startServer(loaded)
+    await seedRpcSession(loaded.agent)
+    // The Host default is not an anthropic.* model, which the table refuses.
+    expect((await listedSession(harness)).shellClassifierAvailable).toBe(false)
+    const conv = loaded.agent.getConversationManager().getSessionByKey(await rpcKey())
+    // Saved before the subset narrowed. Globally allowed, hidden by the subset.
+    conv!.modelSelections = { bedrock: 'anthropic.claude-sonnet-4-5-v1:0' }
+
+    expect((await listedSession(harness)).shellClassifierAvailable).toBe(true)
+  }, 20_000)
+
   it('reports the boot fallback pair, not the inconstructible Host primary', async () => {
     const loaded = await loadMain()
     // The Claude primary has no key; the zai fallback has one, so the Host
@@ -269,6 +304,76 @@ describe('main session reads: classifier pair', () => {
     expect(item.modeCeiling).toBe('auto')
     expect(item.shellClassifierAvailable).toBe(true)
   })
+})
+
+describe('main hands the dedicated classifier to admission', () => {
+  it('admission judges shell with the dedicated gpt-5.5 classifier main builds, not the chat model', async () => {
+    fake.primaryKeySlot = 'openai-api-key'
+    const loaded = await loadMain()
+    const { MessageQueue } = await import('../queue')
+    const { TaskLifecycle } = await import('../lifecycle/taskLifecycle')
+    const { OpenAIProvider } = await import('../llm/openai')
+    // The agent initializeAgent builds, with the sources main hands it.
+    const agent = loaded.main.mainRpcTestSeams.createAgent(new MessageQueue(), new TaskLifecycle())
+    loaded.main.mainRpcTestSeams.setAgent(agent)
+    const calledModels: string[] = []
+    const completeSingleTurn = vi
+      .spyOn(OpenAIProvider.prototype, 'completeSingleTurn')
+      .mockImplementation(async function (this: InstanceType<typeof OpenAIProvider>) {
+        calledModels.push((this as unknown as { defaultModel: string }).defaultModel)
+        return {
+          content: 'APPROVE',
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          finish_reason: FinishReason.Stop,
+        }
+      })
+    try {
+      // gpt-4.1 serves the turn. The classifier table refuses it, so only the
+      // dedicated pair can make shell judgeable.
+      await loaded.main.onHostChange(host({ model: { provider: 'openai', name: 'gpt-4.1' } }))
+      await seedRpcSession(agent)
+      const conversation = agent.getConversationManager().getSessionByKey(await rpcKey())
+      expect(conversation).toBeDefined()
+      const task: Task = {
+        id: 'task-classifier-wiring',
+        source: 'channel',
+        status: 'processing',
+        priority: 'normal',
+        createdAt: new Date(),
+        sourceMessage: {
+          sender: USER,
+          content: 'run ls',
+          channelType: 'rpc',
+          channelId: HOST,
+          threadId: CHAT,
+          messageId: 'msg-classifier-wiring',
+          timestamp: new Date().toISOString(),
+          hostRef: HOST,
+        },
+        conversationHistory: [],
+      }
+
+      // The executor the state machine builds for a task, and the inputs its
+      // admission reads.
+      const executor = (
+        agent as unknown as { createTaskExecutor(task: Task): TaskExecutor }
+      ).createTaskExecutor(task)
+      const inputs = (
+        executor as unknown as { approvalModeInputs(c: Conversation): ApprovalModeInputs }
+      ).approvalModeInputs(conversation!)
+
+      expect(inputs.classifierAvailable({ command: 'ls' })).toBe(true)
+      const verdict = await inputs.classify(
+        { id: 'call-1', name: 'shell_exec', arguments: { command: 'ls' } },
+        'Run a command'
+      )
+      expect(verdict).toBe('APPROVE')
+      expect(calledModels).toEqual(['gpt-5.5'])
+    } finally {
+      completeSingleTurn.mockRestore()
+      loaded.main.mainRpcTestSeams.setAgent(null)
+    }
+  }, 20_000)
 })
 
 describe('main session reads: failover and the published approval spec', () => {

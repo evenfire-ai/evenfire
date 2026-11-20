@@ -1410,6 +1410,23 @@ describe('approver policy on a messaging-channel mode raise', () => {
     }
   )
 
+  // Email approver matching is exact, case included, by decision.
+  it('designated_approvers: an email raise from a sender whose case differs from the listed approver is refused', async () => {
+    const run = policyRun(policySnapshot('designated_approvers'))
+    const sender = 'Approver@example.test'
+    expect(sender.toLowerCase()).toBe(APPROVER.email)
+
+    const response = await run.command('email', sender, 'allow-all')
+
+    expect(run.spies.dispatch).not.toHaveBeenCalled()
+    expect(response).toMatchObject({ success: true, response: REFUSAL_REPLY.not_approver })
+    expect(run.stored('email', sender)).toBe('manual')
+    expect(run.refusals()).toEqual([
+      expect.objectContaining({ channel: 'email', requested: 'allow_all', reason: 'not_approver' }),
+    ])
+    expect(run.setApprovalMode).not.toHaveBeenCalled()
+  })
+
   it.each(POLICY_CHANNELS)(
     'cli_only: a %s raise is refused and stores nothing, even from a listed approver',
     async channel => {
