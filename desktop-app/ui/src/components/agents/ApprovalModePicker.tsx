@@ -60,6 +60,7 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
   const cancelRef = useRef<HTMLButtonElement | null>(null)
   const confirmRef = useRef<HTMLButtonElement | null>(null)
   const classifierNoteId = useId()
+  const confirmTextId = useId()
 
   // Reset during render, not in an effect: a passive effect would commit the
   // previous chat's menu under the next chat first, and could undo a click
@@ -192,10 +193,13 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
           className="model-selector-popover"
           role="dialog"
           aria-label="Confirm allow all"
+          aria-describedby={confirmTextId}
           tabIndex={-1}
           onKeyDown={keepFocusInConfirmation}
         >
-          <p className="approval-mode-picker-confirm-text">{ALLOW_ALL_CONFIRM}</p>
+          <p id={confirmTextId} className="approval-mode-picker-confirm-text">
+            {ALLOW_ALL_CONFIRM}
+          </p>
           <div className="approval-mode-picker-confirm-actions">
             <Button
               ref={cancelRef}

@@ -122,6 +122,27 @@ describe('ApprovalModePicker — model selector look', () => {
     expect(setApprovalMode).not.toHaveBeenCalled()
   })
 
+  it('describes the Allow all dialog with what Allow all does', () => {
+    seed('chat-1', 'manual')
+    const { getByTestId, getByRole } = render(
+      <ApprovalModePicker agentRef="agent-x" chatId="chat-1" />
+    )
+
+    fireEvent.click(getByTestId('approval-mode-picker'))
+    fireEvent.click(getByTestId('approval-mode-option-allow-all'))
+
+    // Cancel takes focus on open, so the text is only read out as the
+    // dialog's description.
+    const dialog = getByRole('dialog', { name: 'Confirm allow all' })
+    const descriptionId = dialog.getAttribute('aria-describedby')
+    expect(descriptionId).toBeTruthy()
+    const description = document.getElementById(descriptionId as string)
+    expect(description?.textContent).toBe(
+      'Allow all runs tools in this chat without asking, except scheduled tasks. Continue?'
+    )
+    expect(dialog.contains(description)).toBe(true)
+  })
+
   it('does not confirm Allow all on the second click of a double-click on its row', async () => {
     setApprovalMode.mockResolvedValue({
       approvalMode: 'allow_all',
