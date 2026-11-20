@@ -752,6 +752,62 @@ describe('useAgentChatController — characterization (D.0)', () => {
         expect(transport.setApprovalMode).toHaveBeenCalledWith('agent-x', chatId, 'manual')
         expect(readHostApprovalMode('agent-x', chatId).firstSendMode).toBeNull()
       })
+
+      it('reads the new session after the first send’s ack, so the label shows the mode the Host runs', async () => {
+        clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-abc' })
+        clerum.rpc.getTaskResult.mockResolvedValue({ response: 'ok' })
+        // The Host stores the pick and runs it capped by its manual ceiling.
+        clerum.rpc.loadSessionMessages.mockImplementation(
+          async (_hostRef: string, agent: string, chatId: string) => ({
+            agent,
+            chatId,
+            state: 'idle',
+            turns: [],
+            approvalMode: 'allow_all',
+            modeCeiling: 'manual',
+            channelCap: 'allow_all',
+            effectiveApprovalMode: 'manual',
+            shellClassifierAvailable: true,
+          })
+        )
+        const transport = approvalTransport()
+        const { result } = renderController()
+        await settleMount()
+        await act(async () => {
+          await selectHostApprovalMode(transport, 'agent-x', null, 'allow_all')
+        })
+
+        const sendPromise = result.current.handleSendAgentMessage('first message')
+        await waitForProgressHandler('task-abc')
+        const chatId = sentThreadId()!
+        expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+          approvalMode: 'allow_all',
+        })
+
+        await waitFor(() =>
+          expect(readHostApprovalMode('agent-x', chatId).effectiveMode).toBe('manual')
+        )
+        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+          'agent-x',
+          'agent-x',
+          chatId,
+          undefined,
+          { limit: 1 }
+        )
+        expect(readHostApprovalMode('agent-x', chatId).label).toBeNull()
+        expect(readHostApprovalMode('agent-x', chatId).storedMode).toBe('allow_all')
+        expect(readHostApprovalMode('agent-x', chatId).modeLimit).toBe('manual')
+
+        await act(async () => {
+          clerum.emitTaskProgress('task-abc', {
+            type: 'terminal',
+            data: { taskId: 'task-abc', status: 'completed' },
+          })
+        })
+        await act(async () => {
+          await sendPromise
+        })
+      })
     })
 
     it('4.5 surfaces a failed terminal as an error assistant message', async () => {
