@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { TELEMETRY_RETENTION_PREDICATES } from '../src/migrations/governedTraceRetention.js'
 import {
   CURRENT_DECISION_SOURCE_KINDS,
   DECISION_SOURCE_KINDS,
@@ -24,6 +25,27 @@ describe('0061_governed_run_trace_schema_foundation migration', () => {
       release: clientRelease,
     })
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+  })
+
+  it('installs the retention function with one clock sample and the online index predicates', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb()
+
+    const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
+    const body = sqls.find(sql =>
+      sql.includes('CREATE OR REPLACE FUNCTION public.governed_trace_prune_expired_events')
+    )
+    expect(body).toBeDefined()
+    expect(body!.match(/prune_time := clock_timestamp\(\)/g)).toHaveLength(1)
+    expect(body).not.toMatch(/clock_timestamp\(\)\s*-\s*INTERVAL/)
+    const indexes = sqls.filter(sql =>
+      sql.startsWith('CREATE INDEX CONCURRENTLY idx_infra_telemetry_retention_')
+    )
+    expect(indexes).toHaveLength(2)
+    for (const predicate of Object.values(TELEMETRY_RETENTION_PREDICATES)) {
+      expect(body).toContain(`WHERE ${predicate}`)
+      expect(indexes.some(sql => sql.endsWith(`WHERE ${predicate}`))).toBe(true)
+    }
   })
 
   it('registers the governed ledgers, immutable stream, read view, and bounded retention path', async () => {
