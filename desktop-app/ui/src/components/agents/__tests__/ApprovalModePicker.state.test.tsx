@@ -12,6 +12,7 @@ import fc from 'fast-check'
 import { createRoot } from 'react-dom/client'
 import type { ApprovalModeResult } from '../../../../../src/types'
 import {
+  approvalModeForFirstSend,
   beginApprovalModeFirstSend,
   hostApprovalModeEpoch,
   noteHostApprovalModeFromSession,
@@ -521,6 +522,116 @@ describe('ApprovalModePicker state — focus (F1)', () => {
   })
 })
 
+describe('ApprovalModePicker state — Allow all under a limit that drops (D3)', () => {
+  /** A catalog page whose one session carries the Host's ceiling (SessionsListResult). */
+  function catalogPage(ceiling: ApprovalMode) {
+    return {
+      items: [
+        { agent: 'agent-x', chatId: 'chat-1', turnCount: 1, ...sessionApproval('manual', ceiling) },
+      ],
+    }
+  }
+
+  /**
+   * A blank chat on a Host Desktop has not read yet: the limit is unknown, so
+   * the menu offers Allow all while the opening's refresh is still out.
+   */
+  function openConfirmationWhileTheLimitIsUnknown() {
+    act(() => {
+      resetHostApprovalModeStore()
+    })
+    const catalog = deferred<ReturnType<typeof catalogPage>>()
+    listSessions.mockReturnValueOnce(catalog.promise)
+    const utils = renderPicker('')
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    expect(listSessions).toHaveBeenCalledTimes(1)
+    expect(utils.getByTestId('approval-mode-option-allow-all').getAttribute('aria-disabled')).toBe(
+      null
+    )
+    fireEvent.click(utils.getByTestId('approval-mode-option-allow-all'))
+    expect(utils.queryByTestId('approval-mode-confirm-allow-all')).not.toBeNull()
+    return { utils, catalog }
+  }
+
+  it('returns to the menu when the refresh lowers the limit under an open confirmation, and holds nothing', async () => {
+    const { utils, catalog } = openConfirmationWhileTheLimitIsUnknown()
+
+    catalog.resolve(catalogPage('auto'))
+    await flush()
+
+    expect(utils.queryByTestId('approval-mode-confirm-allow-all')).toBeNull()
+    const allowAll = utils.getByTestId('approval-mode-option-allow-all')
+    expect(allowAll.getAttribute('aria-disabled')).toBe('true')
+    expect(utils.getByTestId('approval-mode-limit-note').textContent).toBe(
+      'This Host limits this chat to Auto-approve.'
+    )
+    // Focus goes back to the row that opened the confirmation; the note describes it.
+    expect(document.activeElement).toBe(allowAll)
+    expect(approvalModeForFirstSend('agent-x', null)).toBeNull()
+    expect(utils.getByTestId('approval-mode-picker').textContent).toBe('Manual')
+  })
+
+  it('still confirms Allow all when the refresh shows the Host allows it', async () => {
+    const { utils, catalog } = openConfirmationWhileTheLimitIsUnknown()
+
+    catalog.resolve(catalogPage('allow_all'))
+    await flush()
+    fireEvent.click(utils.getByTestId('approval-mode-confirm-allow-all'))
+
+    expect(approvalModeForFirstSend('agent-x', null)).toBe('allow_all')
+    expect(utils.getByTestId('approval-mode-picker').textContent).toBe('Allow all')
+  })
+
+  it.each([
+    ['auto', false],
+    ['allow_all', true],
+  ] as const)(
+    'Confirm checks the limit the store holds at the click (a read with ceiling %s lands first)',
+    async (ceiling, stores) => {
+      setApprovalMode.mockResolvedValue(patchSuccess('allow_all'))
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = false
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      const find = (testId: string) =>
+        container.querySelector<HTMLElement>(`[data-testid="${testId}"]`)
+      try {
+        root.render(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
+        await vi.waitFor(() => expect(find('approval-mode-picker')?.textContent).toBe('Manual'))
+        find('approval-mode-picker')!.click()
+        // The opening's own refresh lands before the confirmation opens.
+        await vi.waitFor(() => expect(loadSessionMessages).toHaveBeenCalledTimes(1))
+        await new Promise(resolve => setTimeout(resolve, 0))
+        await vi.waitFor(() => expect(find('approval-mode-option-allow-all')).not.toBeNull())
+        find('approval-mode-option-allow-all')!.click()
+        await vi.waitFor(() => expect(find('approval-mode-confirm-allow-all')).not.toBeNull())
+        const confirm = find('approval-mode-confirm-allow-all')!
+
+        // A read of the chat lands, and the click arrives before React renders it.
+        noteHostApprovalModeFromSession('agent-x', 'chat-1', sessionApproval('manual', ceiling))
+        confirm.click()
+        await new Promise(resolve => setTimeout(resolve, 0))
+
+        if (stores) {
+          expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1', 'allow_all')
+          await vi.waitFor(() =>
+            expect(find('approval-mode-picker')?.textContent).toBe('Allow all')
+          )
+        } else {
+          expect(setApprovalMode).not.toHaveBeenCalled()
+          // The read reached the picker: the confirmation is gone and the row is not offered.
+          await vi.waitFor(() => expect(find('approval-mode-confirm-allow-all')).toBeNull())
+          expect(find('approval-mode-option-allow-all')?.getAttribute('aria-disabled')).toBe('true')
+        }
+      } finally {
+        root.unmount()
+        container.remove()
+        actEnvironment.IS_REACT_ACT_ENVIRONMENT = true
+      }
+    }
+  )
+})
+
 // ---------------------------------------------------------------------------
 // A6 — independent oracle: a trivial reference model of the A4 invariants.
 // ---------------------------------------------------------------------------
@@ -629,6 +740,16 @@ function expectedNote(model: Readonly<Model>): string | null {
   if (limit !== null && limit !== 'allow_all')
     return `This Host limits this chat to ${NAMES[limit]}.`
   return null
+}
+
+/**
+ * D3: once the limit on screen drops below Allow all, an open confirmation
+ * goes back to the menu; nothing above the limit can be confirmed.
+ */
+function dropConfirmationAboveLimit(model: Model): void {
+  if (model.menuOpen && model.confirming && !offered(model, 'allow_all')) {
+    model.confirming = false
+  }
 }
 
 /** Desktop applied a fresh snapshot of `chat` taken now: its limit and the Host ceiling move. */
@@ -784,9 +905,12 @@ class Confirm implements fc.AsyncCommand<Model, Real> {
     return model.menuOpen && model.confirming
   }
   async run(model: Model, real: Real) {
-    closeMenu(model)
-    if (model.screen === 'blank') model.held = 'allow_all'
-    else startWrite(model, model.screen, 'allow_all', this.outcome, real)
+    // D3: Confirm stores Allow all only while the limit on screen offers it.
+    if (offered(model, 'allow_all')) {
+      closeMenu(model)
+      if (model.screen === 'blank') model.held = 'allow_all'
+      else startWrite(model, model.screen, 'allow_all', this.outcome, real)
+    }
     fireEvent.click(real.utils.getByTestId('approval-mode-confirm-allow-all'))
     await flush()
     assertInvariants(model, real)
@@ -846,6 +970,7 @@ class PassiveRead implements fc.AsyncCommand<Model, Real> {
   }
   async run(model: Model, real: Real) {
     if (!saveInFlight(model, this.chat)) model.limit[this.chat] = model.ceiling
+    dropConfirmationAboveLimit(model)
     const epoch = hostApprovalModeEpoch()
     act(() => {
       noteHostApprovalModeFromSession(
@@ -879,6 +1004,8 @@ class Settle implements fc.AsyncCommand<Model, Real> {
     // The PATCH answer (ok) or the re-read after a failure carries the Host's
     // ceiling now. A 404 for a seen chat carries nothing.
     if (write.outcome !== 'gone') freshSnapshot(model, write.chat)
+    // The Host ceiling is the blank chat's limit, so its confirmation can close here.
+    dropConfirmationAboveLimit(model)
     // S3: only the latest write for its chat decides that chat's error.
     const latest = [...model.writes].reverse().find(entry => entry.chat === write.chat)
     if (latest?.id === write.id) {
