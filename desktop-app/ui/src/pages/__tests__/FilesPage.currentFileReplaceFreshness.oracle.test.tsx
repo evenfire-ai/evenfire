@@ -15,8 +15,16 @@ import {
   resolveResource,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { bindGfsActionGuards } from '@/gfs/resourceActionRunners'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilesPage } from '../FilesPage'
+
+// Pass-through spy: the revoked-session refusal has no visible effect, so the
+// guard bind it stops at is the only proof the Replace handler ran.
+vi.mock('@/gfs/resourceActionRunners', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/gfs/resourceActionRunners')>()
+  return { ...actual, bindGfsActionGuards: vi.fn(actual.bindGfsActionGuards) }
+})
 
 const member = (teamId: string, userId: string) => ({
   id: userId,
@@ -416,6 +424,8 @@ describe('FilesPage current-file Replace after the session is revoked', () => {
     const readsBefore = scenario.affordances.mock.calls.length
     const replaceInput = screen.getByLabelText('Replace report.txt') as HTMLInputElement
     scenario.pushToast.mockClear()
+    const guardBinds = vi.mocked(bindGfsActionGuards)
+    const bindsBefore = guardBinds.mock.calls.length
 
     await act(async () => {
       fireEvent.click(replaceMenuItem)
@@ -430,8 +440,9 @@ describe('FilesPage current-file Replace after the session is revoked', () => {
       await new Promise(resolve => setTimeout(resolve, 0))
     })
 
-    // The pick reached the input; Replace refused it before any check.
-    expect(replaceInput.files?.[0]?.name).toBe('report.txt')
+    // Replace ran on the pick and refused it at its guards, before any check.
+    expect(guardBinds).toHaveBeenCalledTimes(bindsBefore + 1)
+    expect(guardBinds.mock.results.at(-1)).toEqual({ type: 'return', value: null })
     expect(scenario.pushToast).not.toHaveBeenCalled()
     expect(scenario.affordances).toHaveBeenCalledTimes(readsBefore)
     expect(scenario.replaceFileFromPath).not.toHaveBeenCalled()
