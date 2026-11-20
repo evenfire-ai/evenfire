@@ -550,6 +550,7 @@ export function useAgentChatController({
     readPendingSelection,
     writePendingSelection,
     clearPendingSelection,
+    dropTeamScopedPendingSelections,
     isChatDeleted,
   } = chatListCtl
   const [chatMessages, setChatMessages] = useState<AgentChatMessage[]>([])
@@ -1198,23 +1199,39 @@ export function useAgentChatController({
     // Fence async sends, task terminals, and reconciliation before stopping any
     // native subscriptions. Same-principal navigation and composer drafts remain
     // owned by their workspace tabs across the switch.
-    sendScopeGeneration.current += 1
-    agentSendSetupOwnerRef.current = null
-    agentSendInFlightRef.current = false
-    setAgentSending(false)
-    tracker.releaseAll()
-    fsm.reset()
-    reconcileChatRef.current?.reset()
-    resetReplyNotificationDedupe()
-    retainedSends.resetRetainedSendStore()
-    withdrawnTurnIdsRef.current.clear()
-    parkedRestorationsRef.current.clear()
-    setActivityByAgentMessage({})
-    setProgressByAgentMessage({})
-    setAgentError(null)
-    setFailedAgentSend(null)
-    await stopAllActivityStreams()
-  }, [fsm, resetReplyNotificationDedupe, retainedSends, stopAllActivityStreams, tracker])
+    try {
+      sendScopeGeneration.current += 1
+      agentSendSetupOwnerRef.current = null
+      agentSendInFlightRef.current = false
+      setAgentSending(false)
+      tracker.releaseAll()
+      fsm.reset()
+      reconcileChatRef.current?.reset()
+      resetReplyNotificationDedupe()
+      retainedSends.resetRetainedSendStore()
+      withdrawnTurnIdsRef.current.clear()
+      parkedRestorationsRef.current.clear()
+      setActivityByAgentMessage({})
+      setProgressByAgentMessage({})
+      setAgentError(null)
+      setFailedAgentSend(null)
+      await stopAllActivityStreams()
+    } finally {
+      // A concrete chat requested before the team switch belongs to the previous
+      // team's index; if it survived, the re-run triggered by the new team id
+      // would open it under the new team. `latest`/`none` name no chat and stay
+      // valid. Runs last, after the stream stop, so a request made while
+      // awaiting it is dropped too.
+      dropTeamScopedPendingSelections()
+    }
+  }, [
+    dropTeamScopedPendingSelections,
+    fsm,
+    resetReplyNotificationDedupe,
+    retainedSends,
+    stopAllActivityStreams,
+    tracker,
+  ])
 
   const resetChat = useCallback(() => {
     beginSelectionIntent()
