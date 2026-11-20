@@ -84,6 +84,31 @@ function argumentJson(args: Record<string, unknown>): string | undefined {
   }
 }
 
+/**
+ * 16 output tokens. OpenAI reasoning-family models also get effort `none`,
+ * or those tokens are spent on hidden reasoning and the reply is empty.
+ * Other pairs must not receive the field: gpt-4.1 answers 400.
+ */
+export function shellClassifierCallOptions(
+  providerType: string,
+  modelName: string,
+  signal: AbortSignal
+): {
+  max_tokens: number
+  signal: AbortSignal
+  reasoning_effort?: 'none'
+} {
+  const options: {
+    max_tokens: number
+    signal: AbortSignal
+    reasoning_effort?: 'none'
+  } = { max_tokens: 16, signal }
+  if (providerType === 'openai' && OPENAI_RESPONSES_REASONING_FAMILY.test(modelName)) {
+    options.reasoning_effort = 'none'
+  }
+  return options
+}
+
 function providerSupportsClassifier(providerType: string, modelName: string): boolean {
   if (providerType === 'claude') return true
   if (providerType === 'bedrock') return BEDROCK_ANTHROPIC_MODEL.test(modelName)
@@ -167,10 +192,10 @@ async function judge(input: ClassifyInput): Promise<ShellVerdict> {
   timeout.signal.addEventListener('abort', abortLinked, { once: true })
 
   try {
-    const response = await input.provider.completeSingleTurn(messages, {
-      max_tokens: 16,
-      signal: linked.signal,
-    })
+    const response = await input.provider.completeSingleTurn(
+      messages,
+      shellClassifierCallOptions(input.providerType, input.modelName, linked.signal)
+    )
     enqueueUsage(input, response.usage)
     if (input.taskSignal.aborted) return 'CANCELLED'
     if (timeout.signal.aborted) return 'ESCALATE'

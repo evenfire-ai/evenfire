@@ -16,6 +16,7 @@ import {
   classifierAvailable,
   classifierServingPair,
   classifyToolCall,
+  shellClassifierCallOptions,
 } from '../shellClassifier'
 
 const SENDER = 'sender-sentinel@example.test'
@@ -59,7 +60,12 @@ const MODEL_USAGE = {
 }
 
 type Provider = Pick<SingleTurnProvider, 'completeSingleTurn'>
-type CallOptions = { max_tokens?: number; temperature?: number; signal?: AbortSignal }
+type CallOptions = {
+  max_tokens?: number
+  temperature?: number
+  signal?: AbortSignal
+  reasoning_effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh'
+}
 
 afterEach(() => {
   vi.useRealTimers()
@@ -302,6 +308,7 @@ describe('shell classifier', () => {
     for (const call of seen) {
       expect(call.options?.max_tokens).toBe(16)
       expect(call.options).not.toHaveProperty('temperature')
+      expect(call.options).not.toHaveProperty('reasoning_effort')
       const system = systemText(call.messages)
       const user = userText(call.messages)
       expect(system).not.toContain(COMMAND)
@@ -329,6 +336,23 @@ describe('shell classifier', () => {
       expect(user).toContain('shell_exec')
     }
     expect(systemText(seen[0].messages)).toBe(systemText(seen[1].messages))
+  })
+
+  it('asks an OpenAI reasoning-family model for effort none and leaves other pairs alone', () => {
+    const signal = new AbortController().signal
+    const reasoning = shellClassifierCallOptions('openai', 'gpt-5.5', signal)
+    expect(reasoning.max_tokens).toBe(16)
+    expect(reasoning.signal).toBe(signal)
+    expect(reasoning.reasoning_effort).toBe('none')
+
+    const established = shellClassifierCallOptions('openai', 'gpt-4o', signal)
+    expect(established.max_tokens).toBe(16)
+    expect(established.signal).toBe(signal)
+    expect(established).not.toHaveProperty('reasoning_effort')
+
+    const claude = shellClassifierCallOptions('claude', 'claude-sonnet', signal)
+    expect(claude.max_tokens).toBe(16)
+    expect(claude).not.toHaveProperty('reasoning_effort')
   })
 
   it('calls the model at the argument limit and skips the call over it', async () => {
