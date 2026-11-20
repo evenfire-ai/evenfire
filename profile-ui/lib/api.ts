@@ -74,10 +74,10 @@ function markLogoutUnconfirmed(): boolean {
 
 /**
  * Clears the logout fence. The fence is released only after a successful
- * password login (parsed response), a confirmed logout, an accepted recovery submission, or a
+ * password login (parsed response), a confirmed logout, an accepted recovery submission, a
  * non-replay invitation acceptance that set a new session cookie, or an OIDC callback that
- * just set a new session (it leaves a short-lived marker cookie that `/oidc/signed-in` checks);
- * a recovery page view never releases it, and neither does opening `/oidc/signed-in` by hand.
+ * just set a new session (it leaves a short-lived marker cookie that `/oidc/signed-in` checks).
+ * A recovery page view never releases it, and neither does opening `/oidc/signed-in` by hand.
  */
 export function clearUnconfirmedLogout(): void {
   if (typeof window === 'undefined') return

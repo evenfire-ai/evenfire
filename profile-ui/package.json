@@ -1,6 +1,6 @@
 {
   "name": "clerum-profile-ui",
-  "version": "0.1.247",
+  "version": "0.1.248",
   "private": true,
   "scripts": {
     "dev": "next dev",
