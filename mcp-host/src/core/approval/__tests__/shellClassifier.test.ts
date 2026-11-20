@@ -269,8 +269,12 @@ describe('shell classifier', () => {
         {}
       )
     ).toBe(false)
-    expect(classifierAvailable('openai', 'gpt-4o', {})).toBe(true) // not in OPENAI_RESPONSES_REASONING_FAMILY
+    expect(classifierAvailable('openai', 'gpt-5.5', {})).toBe(true)
+    expect(classifierAvailable('openai', 'gpt-4o', {})).toBe(false)
+    expect(classifierAvailable('openai', 'gpt-4.1', {})).toBe(false)
+    expect(classifierAvailable('openai', 'gpt-4.1-mini', {})).toBe(false)
     expect(classifierAvailable('openai', 'gpt-5.4-mini', {})).toBe(false)
+    expect(classifierAvailable('openai', 'gpt-5.5-mini', {})).toBe(false)
     expect(classifierAvailable('azure', 'my-deployment', {})).toBe(false)
     for (const provider of [
       'codex-subscription',
@@ -353,6 +357,37 @@ describe('shell classifier', () => {
     const claude = shellClassifierCallOptions('claude', 'claude-sonnet', signal)
     expect(claude.max_tokens).toBe(16)
     expect(claude).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('calls gpt-5.5 with effort none and does not call other OpenAI models', async () => {
+    async function callsFor(model: string) {
+      const seen: CallOptions[] = []
+      const verdict = await classifyToolCall(
+        baseInput({
+          providerType: 'openai',
+          modelName: model,
+          provider: {
+            completeSingleTurn: async (_messages, options) => {
+              seen.push(options ?? {})
+              return modelResponse('APPROVE')
+            },
+          },
+        })
+      )
+      return { verdict, seen }
+    }
+
+    const allowed = await callsFor('gpt-5.5')
+    expect(allowed.seen).toHaveLength(1)
+    expect(allowed.seen[0]?.max_tokens).toBe(16)
+    expect(allowed.seen[0]?.reasoning_effort).toBe('none')
+    expect(allowed.verdict).toBe('APPROVE')
+
+    for (const model of ['gpt-4o', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-5.4-mini']) {
+      const refused = await callsFor(model)
+      expect(refused.seen).toHaveLength(0)
+      expect(refused.verdict).toBe('ESCALATE')
+    }
   })
 
   it('calls the model at the argument limit and skips the call over it', async () => {
