@@ -62,13 +62,22 @@ async function regionMap(window) {
     const leading = document.querySelector('.window-titlebar__leading')
     const actions = document.querySelector('.window-titlebar__actions')
     const search = document.querySelector('.window-titlebar__actions .search-input')
-    const leadingButtons = [...leading.querySelectorAll('button')].filter(visible)
+    const missing = Object.entries({ titlebar, controls, leading, actions, search })
+      .filter(([, element]) => !element)
+      .map(([name]) => name)
+    const leadingButtons = leading ? [...leading.querySelectorAll('button')].filter(visible) : []
+    // Return what was found instead of throwing, so assertRegions can say what
+    // the harness failed to render.
+    if (missing.length > 0 || leadingButtons.length === 0) {
+      return { missing, leadingButtons: leadingButtons.map(probe) }
+    }
     const lastLeadingButton = leadingButtons[leadingButtons.length - 1]
     const titlebarMidY = titlebar.getBoundingClientRect().top + titlebar.getBoundingClientRect().height / 2
     const gapStart = controls.getBoundingClientRect().right
     const gapEnd = leading.getBoundingClientRect().left
     const afterLeading = lastLeadingButton.getBoundingClientRect().right + 24
     return {
+      missing,
       platform: titlebar.dataset.platform,
       actionsComputedRegion: computedRegion(actions),
       boxes: { titlebar: box(titlebar), controls: box(controls), leading: box(leading), actions: box(actions), search: box(search) },
@@ -83,6 +92,11 @@ async function regionMap(window) {
 
 function assertRegions(map, scenario, expectedLeadingLabels) {
   const detail = JSON.stringify(map)
+  assert.deepEqual(
+    map.missing,
+    [],
+    `${scenario}: the harness renders the title bar, both slots and the search: ${detail}`
+  )
   assert.deepEqual(
     map.leadingButtons.map(button => button.label),
     expectedLeadingLabels,
