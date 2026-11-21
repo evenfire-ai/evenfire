@@ -12,6 +12,9 @@ FAKE_LOG="${TMP}/kubectl.log"
 STRICT='signed-assertion-v1'
 # Any value other than the strict one: an HCC or Host on a rolled-back release.
 PREVIOUS='previous-edge-protocol'
+# Selectors the harness must refuse before any rollout: an unknown value, no
+# selector, and the two header protocols that signed-assertion-v1 retired.
+REFUSED_SELECTORS=("$PREVIOUS" none legacy-headers dedicated-header-v1)
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
@@ -283,7 +286,7 @@ grep -Fq 'rollout restart deployment/rpc-proxy -n rpc-proxy' "$FAKE_LOG" ||
   fail 'Proxy-only restart did not restart the RPC Proxy'
 pass 'Proxy-only restart works without any Host option'
 
-for refused in "$PREVIOUS" none; do
+for refused in "${REFUSED_SELECTORS[@]}"; do
   : >"$FAKE_LOG"
   if run_rollout proxy-strict "$refused" "$REJECT_TIMEOUT" restart-targets \
     --restart-proxy --restart-hcc --restart-host chatllm >/dev/null 2>"${TMP}/reject.err"; then
@@ -358,7 +361,7 @@ hosts_line="$(first_log_line 'rollout_namespace_deployments mcp-host')"
    "$(grep -Fc 'rollout_if_present control-plane/host-context-controller' "$FAKE_LOG")" -eq 1 &&
    "$(grep -Fc 'rollout_namespace_deployments mcp-host' "$FAKE_LOG")" -eq 1 ]] ||
   fail 'pre-gate-sync rolls an edge workload more than once'
-for refused in "$PREVIOUS" none; do
+for refused in "${REFUSED_SELECTORS[@]}"; do
   : >"$FAKE_LOG"
   if run_pre_gate_edge_block "$refused" >/dev/null 2>&1; then
     fail "pre-gate-sync accepted HCC selector $refused"
