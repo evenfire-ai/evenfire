@@ -814,6 +814,43 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     })
   })
 
+  it('a new account invited to the new-member team takes the invited role', async () => {
+    const newMemberTeam = await seedTeam('invited-new-member-team')
+    const fake = entraFake('fake-entra-invited-new-member-team', {
+      CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: newMemberTeam,
+    })
+    const email = `${uniqueLabel('invited-new-member')}@entra.fixture.test`
+    const invitation = await seedInvitation({ email, teamId: newMemberTeam, role: 'inviter' })
+
+    const result = signedIn(
+      await signIn(
+        fake,
+        await fake.signIn({
+          sub: uniqueLabel('invited-new-member-subject'),
+          tid: ENTRA_TENANT_ID,
+          email,
+          email_verified: true,
+        }),
+        { contract: 'v1' }
+      )
+    )
+
+    // The new-member row was written by this sign-in, so the invitation still sets the role.
+    expect(result).toMatchObject({ created: { account: true, link: true }, invitationsApplied: 1 })
+    expect(await invitationState(invitation.id)).toEqual({
+      status: 'accepted',
+      accepted_user_id: result.userId,
+    })
+    expect(await membershipsOf(result.userId)).toEqual([
+      { team_id: newMemberTeam, role: 'inviter' },
+    ])
+    expect(verifyExternalSessionToken(result.token)).toMatchObject({
+      userId: result.userId,
+      teamId: newMemberTeam,
+      role: 'inviter',
+    })
+  })
+
   it.each(['row 3', 'row 4'] as const)(
     'concurrent first sign-ins give one account, one link and two sessions: %s',
     async row => {

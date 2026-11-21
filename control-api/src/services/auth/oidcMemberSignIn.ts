@@ -71,13 +71,18 @@ function byCreation(a: PendingInvitation, b: PendingInvitation): number {
  * admin-desktop-access, expired, revoked and draft invitations are never
  * selected.
  *
- * The member did not choose these invitations, so their memberships are
- * insert-only: an invitation adds a team only where the account has no
- * team_members row in any status. It never changes an existing role and never
- * restores a removed membership; the invitation is still accepted. The locked
- * rows are applied newest created first, so of two invitations to one new
- * team the latest created sets the role. Returns the applied invitations
- * oldest created first.
+ * An existing member did not choose these invitations, so for them the
+ * memberships are insert-only: an invitation adds a team only where the
+ * account has no team_members row in any status. It never changes an existing
+ * role and never restores a removed membership; the invitation is still
+ * accepted. An account created by this sign-in has no memberships but the
+ * new-member team row this sign-in wrote, so its invitations are applied as an
+ * acceptance applies them, and one to the new-member team sets its role.
+ *
+ * Either way, of two invitations to one team the latest created sets the
+ * role: insert-only rows are applied newest created first (the first insert
+ * wins), upserted rows oldest created first (the last write wins). Returns the
+ * applied invitations oldest created first.
  */
 async function applyPendingInvitations(
   db: DbTransactionClient,
@@ -98,20 +103,20 @@ async function applyPendingInvitations(
         FOR UPDATE OF i`,
     [account.email]
   )
-  const newestFirst = [...(pending.rows as PendingInvitation[])].sort(byCreation).reverse()
+  const membershipWrite = account.created.account ? 'upsert' : 'insert_only'
+  const oldestFirst = [...(pending.rows as PendingInvitation[])].sort(byCreation)
+  const order = membershipWrite === 'insert_only' ? [...oldestFirst].reverse() : oldestFirst
   const applied: InvitationRow[] = []
-  for (const invitation of newestFirst) {
+  for (const invitation of order) {
     // The row is locked and matched the same predicates, so a false return is
     // not expected; only an acceptance that happened is counted.
     if (
-      await acceptPendingMembershipInvitation(db, invitation, account.userId, {
-        membershipWrite: 'insert_only',
-      })
+      await acceptPendingMembershipInvitation(db, invitation, account.userId, { membershipWrite })
     ) {
       applied.push(invitation)
     }
   }
-  return applied.reverse()
+  return membershipWrite === 'insert_only' ? applied.reverse() : applied
 }
 
 /** The member's current, active membership in one team. */
