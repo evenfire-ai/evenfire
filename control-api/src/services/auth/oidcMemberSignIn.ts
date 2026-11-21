@@ -1,10 +1,14 @@
 import { type DbTransactionClient, withTransaction } from '../../db.js'
+import { rootLogger } from '../../observability/logger.js'
 import type { OidcMemberSignInPolicy, OidcProviderConfiguration } from '../../oidc/configuration.js'
 import type { VerifiedOidcIdentityProof } from '../../oidc/protocol.js'
 import type { EffectiveUserAccessPolicy } from '../access/userAccessPolicy.js'
 import { type InvitationRow, loadInvitationTeams } from '../directory/invitationStore.js'
 import { findFirstActiveMembership } from '../directory/login.js'
-import { acceptPendingMembershipInvitation } from '../directory/membership.js'
+import {
+  type PendingInvitationAcceptance,
+  acceptPendingMembershipInvitation,
+} from '../directory/membership.js'
 import type { TeamRole } from '../directory/types.js'
 import {
   type ExternalSessionContract,
@@ -62,6 +66,35 @@ function byCreation(a: PendingInvitation, b: PendingInvitation): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 }
 
+const INVITATION_SAVEPOINT = 'oidc_member_invitation'
+
+/**
+ * Accepts an existing member's invitation only if it adds a membership in
+ * every one of its teams. If any team already had a team_members row, in any
+ * status, everything the acceptance wrote is rolled back: the invitation stays
+ * pending, unaccepted, and no team of it gains a membership. Accepted, it would
+ * leave a role that a later Google login applies to the existing membership
+ * (healAcceptedInvitationMemberships), so an inviter could demote an admin.
+ *
+ * The decision uses what the insert did, so a row that a concurrent
+ * transaction committed first also leaves the invitation pending. An error
+ * propagates with the savepoint still open; the caller's transaction is then
+ * rolled back whole, and a unique-key conflict reruns it as before.
+ */
+async function acceptIntoNewTeamsOnly(
+  db: DbTransactionClient,
+  invitation: InvitationRow,
+  userId: string
+): Promise<PendingInvitationAcceptance> {
+  await db.query(`SAVEPOINT ${INVITATION_SAVEPOINT}`)
+  const outcome = await acceptPendingMembershipInvitation(db, invitation, userId, {
+    membershipWrite: 'insert_only',
+  })
+  if (outcome !== 'accepted') await db.query(`ROLLBACK TO SAVEPOINT ${INVITATION_SAVEPOINT}`)
+  await db.query(`RELEASE SAVEPOINT ${INVITATION_SAVEPOINT}`)
+  return outcome
+}
+
 /**
  * Accepts every pending member invitation addressed to the account's stored
  * email, not to the provider's claim. The caller holds the user row lock, so
@@ -71,18 +104,20 @@ function byCreation(a: PendingInvitation, b: PendingInvitation): number {
  * admin-desktop-access, expired, revoked and draft invitations are never
  * selected.
  *
- * An existing member did not choose these invitations, so for them the
- * memberships are insert-only: an invitation adds a team only where the
- * account has no team_members row in any status. It never changes an existing
- * role and never restores a removed membership; the invitation is still
- * accepted. An account created by this sign-in has no memberships but the
- * new-member team row this sign-in wrote, so its invitations are applied as an
- * acceptance applies them, and one to the new-member team sets its role.
+ * An existing member did not choose these invitations, so for them an
+ * invitation is accepted only where it adds a membership in each of its teams
+ * (acceptIntoNewTeamsOnly). One naming a team where the account has a
+ * team_members row in any status stays pending and adds no membership: it
+ * never changes an existing role and never restores a removed membership. An
+ * account created by this sign-in has no memberships but the new-member team
+ * row this sign-in wrote, so its invitations are applied as an acceptance
+ * applies them, and one to the new-member team sets its role.
  *
  * Either way, of two invitations to one team the latest created sets the
- * role: insert-only rows are applied newest created first (the first insert
- * wins), upserted rows oldest created first (the last write wins). Returns the
- * applied invitations oldest created first.
+ * role: an existing member's are applied newest created first, so the newest
+ * adds the membership and an older one finds it and stays pending; a new
+ * account's are upserted oldest created first (the last write wins). Returns
+ * the applied invitations oldest created first.
  */
 async function applyPendingInvitations(
   db: DbTransactionClient,
@@ -108,13 +143,26 @@ async function applyPendingInvitations(
   const order = membershipWrite === 'insert_only' ? [...oldestFirst].reverse() : oldestFirst
   const applied: InvitationRow[] = []
   for (const invitation of order) {
-    // The row is locked and matched the same predicates, so a false return is
-    // not expected; only an acceptance that happened is counted.
-    if (
-      await acceptPendingMembershipInvitation(db, invitation, account.userId, { membershipWrite })
-    ) {
+    const outcome =
+      membershipWrite === 'insert_only'
+        ? await acceptIntoNewTeamsOnly(db, invitation, account.userId)
+        : await acceptPendingMembershipInvitation(db, invitation, account.userId)
+    if (outcome === 'accepted') {
       applied.push(invitation)
+      continue
     }
+    // The row is locked and matched the same predicates, so `not_pending` is
+    // not expected. `existing_membership` is: an inviter may address an
+    // invitation to a team the member already belongs to. Never the email.
+    rootLogger.info(
+      {
+        component: 'oidc_member_sign_in',
+        event: 'oidc_member_invitation_left_pending',
+        invitationId: invitation.id,
+        reason: outcome,
+      },
+      'OIDC member sign-in left an invitation pending'
+    )
   }
   return membershipWrite === 'insert_only' ? applied.reverse() : applied
 }

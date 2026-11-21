@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { type DbClient, type DbTransactionClient, initDb, withTransaction } from '../src/db.js'
 import type { PinnedFetchOptions } from '../src/http/pinnedFetch.js'
+import { rootLogger } from '../src/observability/logger.js'
 import type { OidcProviderConfiguration } from '../src/oidc/configuration.js'
 import type { VerifiedOidcIdentityProof } from '../src/oidc/protocol.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
@@ -16,6 +17,7 @@ import {
   type InvitationPurpose,
   insertInvitationForTeams,
 } from '../src/services/directory/invitationStore.js'
+import { googleLoginData } from '../src/services/directory/login.js'
 import {
   acceptInvitationForEmailInTransaction,
   deleteManagedUserForUser,
@@ -597,7 +599,7 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     )
   })
 
-  it("an invitation to a kept team does not change the member's role", async () => {
+  it("an invitation to a kept team stays pending and does not change the member's role", async () => {
     const email = `${uniqueLabel('kept-role')}@fixture.test`
     const userId = await seedUser(email)
     const keptTeam = await seedTeam('kept-role-team')
@@ -611,12 +613,12 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
 
     const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
 
-    // The invitation is consumed, but only a password-login or invitation-link
+    // The invitation stays pending: only a password-login or invitation-link
     // acceptance can change an existing membership.
-    expect(result).toMatchObject({ userId, contract: 'v1', invitationsApplied: 1 })
+    expect(result).toMatchObject({ userId, contract: 'v1', invitationsApplied: 0 })
     expect(await invitationState(invitation.id)).toEqual({
-      status: 'accepted',
-      accepted_user_id: userId,
+      status: 'pending',
+      accepted_user_id: null,
     })
     expect(await membershipsOf(userId)).toEqual([{ team_id: keptTeam, role: 'member' }])
     expect(verifyExternalSessionToken(result.token)).toMatchObject({
@@ -642,10 +644,10 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
 
     const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
 
-    expect(result).toMatchObject({ userId, invitationsApplied: 1 })
+    expect(result).toMatchObject({ userId, invitationsApplied: 0 })
     expect(await invitationState(invitation.id)).toEqual({
-      status: 'accepted',
-      accepted_user_id: userId,
+      status: 'pending',
+      accepted_user_id: null,
     })
     expect(await membershipsOf(userId)).toEqual([{ team_id: adminTeam, role: 'admin' }])
     expect(verifyExternalSessionToken(result.token)).toMatchObject({
@@ -655,7 +657,56 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     })
   })
 
-  it('an invitation does not reactivate a removed membership', async () => {
+  it("an inviter's member invitation cannot demote an admin through OIDC sign-in and a later Google login", async () => {
+    const email = `${uniqueLabel('demotion')}@fixture.test`
+    const userId = await seedUser(email)
+    const adminTeam = await seedTeam('demotion-admin-team')
+    await seedMembership(adminTeam, userId, 'admin')
+    // The external invitation route lets an inviter address this to an admin.
+    const invitation = await seedInvitation({ email, teamId: adminTeam, role: 'member' })
+    const proof = await defaultFake.signIn({
+      sub: uniqueLabel('demotion-subject'),
+      email,
+      email_verified: true,
+    })
+    const info = vi.spyOn(rootLogger, 'info')
+    try {
+      const result = signedIn(await signIn(defaultFake, proof))
+
+      // Soft, so that without the fix the Google login below still runs and
+      // shows the demotion this test exists for.
+      expect.soft(result).toMatchObject({ userId, invitationsApplied: 0 })
+      expect.soft(await invitationState(invitation.id)).toEqual({
+        status: 'pending',
+        accepted_user_id: null,
+      })
+      expect.soft(await membershipsOf(userId)).toEqual([{ team_id: adminTeam, role: 'admin' }])
+      expect.soft(info).toHaveBeenCalledWith(
+        {
+          component: 'oidc_member_sign_in',
+          event: 'oidc_member_invitation_left_pending',
+          invitationId: invitation.id,
+          reason: 'existing_membership',
+        },
+        'OIDC member sign-in left an invitation pending'
+      )
+      expect.soft(JSON.stringify(info.mock.calls)).not.toContain(email)
+    } finally {
+      info.mockRestore()
+    }
+
+    // Every Google login heals memberships from the address's accepted invitations.
+    const google = await googleLoginData({ email })
+
+    expect(google).toMatchObject({
+      isNewUser: false,
+      user: { id: userId },
+      membership: { team_id: adminTeam, role: 'admin' },
+    })
+    expect(await membershipsOf(userId)).toEqual([{ team_id: adminTeam, role: 'admin' }])
+  })
+
+  it('an invitation does not reactivate a removed membership and stays pending', async () => {
     const email = `${uniqueLabel('removed-member')}@fixture.test`
     const userId = await seedUser(email)
     const removedTeam = await seedTeam('removed-member-team')
@@ -672,10 +723,10 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
 
     const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
 
-    expect(result).toMatchObject({ userId, invitationsApplied: 1 })
+    expect(result).toMatchObject({ userId, invitationsApplied: 0 })
     expect(await invitationState(invitation.id)).toEqual({
-      status: 'accepted',
-      accepted_user_id: userId,
+      status: 'pending',
+      accepted_user_id: null,
     })
     const rows = await testPool.query<{ role: string; status: string }>(
       `SELECT role, status FROM team_members WHERE team_id = $1 AND user_id = $2`,
@@ -706,13 +757,15 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
 
     const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
 
-    expect(result).toMatchObject({ userId, invitationsApplied: 2 })
-    for (const invitation of [sameTeam, otherTeam]) {
-      expect(await invitationState(invitation.id)).toEqual({
-        status: 'accepted',
-        accepted_user_id: userId,
-      })
-    }
+    expect(result).toMatchObject({ userId, invitationsApplied: 1 })
+    expect(await invitationState(sameTeam.id)).toEqual({
+      status: 'pending',
+      accepted_user_id: null,
+    })
+    expect(await invitationState(otherTeam.id)).toEqual({
+      status: 'accepted',
+      accepted_user_id: userId,
+    })
     const memberships = await membershipsOf(userId)
     expect(memberships).toHaveLength(2)
     expect(memberships).toEqual(
@@ -728,11 +781,89 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     })
   })
 
-  it('a teamless member lands in the invited team', async () => {
+  it.each(['active', 'deleted'] as const)(
+    'a multi-team invitation naming a team where the member has a row (%s) stays pending and adds no team',
+    async existing => {
+      const email = `${uniqueLabel(`multi-team-${existing}`)}@fixture.test`
+      const userId = await seedUser(email)
+      const memberTeam = await seedTeam(`multi-team-${existing}-member`)
+      const newTeam = await seedTeam(`multi-team-${existing}-new`)
+      const controlTeam = await seedTeam(`multi-team-${existing}-control`)
+      await seedMembership(memberTeam, userId, 'admin')
+      if (existing === 'deleted') {
+        expect(await softDeleteMember(memberTeam, userId, actorId)).toMatchObject({
+          status: 'deleted',
+        })
+      }
+      const multiTeam = await insertInvitationForTeams(testPool, {
+        inviteeName: 'Invited Member',
+        email,
+        teamAssignments: [
+          { teamId: newTeam, role: 'inviter' },
+          { teamId: memberTeam, role: 'member' },
+        ],
+        purpose: 'member_invitation',
+        status: 'pending',
+      })
+      // Positive control in the same sign-in: an invitation to a fresh team
+      // only. It is applied before the multi-team invitation in one case and
+      // after it in the other, so the rollback must neither undo earlier work
+      // nor stop later work.
+      const control = await seedInvitation({ email, teamId: controlTeam, role: 'member' })
+      const [older, newer] =
+        existing === 'active'
+          ? [multiTeam.invitation.id, control.id]
+          : [control.id, multiTeam.invitation.id]
+      await testPool.query(
+        `UPDATE invitations SET created_at = NOW() - INTERVAL '2 hours' WHERE id = $1`,
+        [older]
+      )
+      await testPool.query(
+        `UPDATE invitations SET created_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+        [newer]
+      )
+      const proof = await defaultFake.signIn({
+        sub: uniqueLabel(`multi-team-${existing}-subject`),
+        email,
+        email_verified: true,
+      })
+
+      const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
+
+      expect(result).toMatchObject({ userId, invitationsApplied: 1 })
+      expect(await invitationState(multiTeam.invitation.id)).toEqual({
+        status: 'pending',
+        accepted_user_id: null,
+      })
+      expect(await invitationState(control.id)).toEqual({
+        status: 'accepted',
+        accepted_user_id: userId,
+      })
+      const rows = await testPool.query<{ team_id: string; role: string; status: string }>(
+        `SELECT team_id::text AS team_id, role, status FROM team_members WHERE user_id = $1::uuid`,
+        [userId]
+      )
+      // No row for the new team; the existing row is unchanged.
+      expect(rows.rows).toHaveLength(2)
+      expect(rows.rows).toEqual(
+        expect.arrayContaining([
+          { team_id: memberTeam, role: 'admin', status: existing },
+          { team_id: controlTeam, role: 'member', status: 'active' },
+        ])
+      )
+      expect(verifyExternalSessionToken(result.token)).toMatchObject(
+        existing === 'active'
+          ? { userId, teamId: memberTeam, role: 'admin' }
+          : { userId, teamId: controlTeam, role: 'member' }
+      )
+    }
+  )
+
+  it('a teamless member accepts an invitation to a new team and lands in it', async () => {
     const email = `${uniqueLabel('teamless')}@fixture.test`
     const userId = await seedUser(email)
     const invitedTeam = await seedTeam('teamless-invited-team')
-    await seedInvitation({ email, teamId: invitedTeam, role: 'inviter' })
+    const invitation = await seedInvitation({ email, teamId: invitedTeam, role: 'inviter' })
     const proof = await defaultFake.signIn({
       sub: uniqueLabel('teamless-subject'),
       email,
@@ -742,6 +873,11 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
 
     expect(result).toMatchObject({ userId, contract: 'v1', invitationsApplied: 1 })
+    expect(await invitationState(invitation.id)).toEqual({
+      status: 'accepted',
+      accepted_user_id: userId,
+    })
+    expect(await membershipsOf(userId)).toEqual([{ team_id: invitedTeam, role: 'inviter' }])
     expect(verifyExternalSessionToken(result.token)).toMatchObject({
       userId,
       email,
@@ -1097,7 +1233,7 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     )
   })
 
-  it("a teamless member with two invitations lands in the most recently created invitation's team", async () => {
+  it("a teamless member's invitation to a team they were removed from stays pending, and they land in the other invited team", async () => {
     for (const newest of ['lower id', 'higher id'] as const) {
       const email = `${uniqueLabel('latest-team')}@fixture.test`
       const userId = await seedUser(email)
@@ -1110,8 +1246,8 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
         newest
       )
       // The member was removed from the older invitation's team a month ago.
-      // The older invitation is accepted but does not restore that membership,
-      // so the newer invitation's team is the only active one.
+      // The older invitation stays pending and does not restore that
+      // membership, so the newer invitation's team is the only active one.
       await seedMembership(older.teamId, userId, 'member')
       await testPool.query(
         `UPDATE team_members SET created_at = NOW() - INTERVAL '30 days'
@@ -1130,10 +1266,10 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
 
       const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
 
-      expect(result, newest).toMatchObject({ userId, invitationsApplied: 2 })
+      expect(result, newest).toMatchObject({ userId, invitationsApplied: 1 })
       expect(await invitationState(older.id), newest).toEqual({
-        status: 'accepted',
-        accepted_user_id: userId,
+        status: 'pending',
+        accepted_user_id: null,
       })
       expect(await membershipsOf(userId), newest).toEqual([
         { team_id: newer.teamId, role: newer.role },
@@ -1146,12 +1282,12 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     }
   })
 
-  it('the latest-created duplicate invitation sets the role', async () => {
+  it('the latest-created duplicate invitation sets the role and the older one stays pending', async () => {
     for (const newest of ['lower id', 'higher id'] as const) {
       const email = `${uniqueLabel('duplicate-role')}@fixture.test`
       const userId = await seedUser(email)
       const teamId = await seedTeam('duplicate-role-team')
-      const { newer } = await seedTwoInvitations(
+      const { older, newer } = await seedTwoInvitations(
         email,
         [
           { teamId, role: 'admin' },
@@ -1167,7 +1303,17 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
 
       const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
 
-      expect(result, newest).toMatchObject({ userId, invitationsApplied: 2 })
+      // The newer invitation adds the membership first; the older one then
+      // finds that row and stays pending.
+      expect(result, newest).toMatchObject({ userId, invitationsApplied: 1 })
+      expect(await invitationState(newer.id), newest).toEqual({
+        status: 'accepted',
+        accepted_user_id: userId,
+      })
+      expect(await invitationState(older.id), newest).toEqual({
+        status: 'pending',
+        accepted_user_id: null,
+      })
       expect(await membershipsOf(userId), newest).toEqual([{ team_id: teamId, role: newer.role }])
       expect(verifyExternalSessionToken(result.token), newest).toMatchObject({
         userId,

@@ -139,42 +139,61 @@ async function invitationListResponse(
  *   (OIDC sign-in). A membership is added only for a team where the user has no
  *   team_members row in any status; an existing row, including a removed one,
  *   is never changed, so an invitation can neither demote nor restore a member.
+ *   The acceptance reports a team that kept its row as `existing_membership`.
  */
 export type InvitationMembershipWrite = 'upsert' | 'insert_only'
 
+/**
+ * What acceptPendingMembershipInvitation did.
+ * - `accepted`: the invitation was consumed and its memberships written.
+ * - `not_pending`: no pending row matched; nothing was written.
+ * - `existing_membership` (`insert_only` only): the invitation was consumed and
+ *   the new teams were added, but at least one of its teams already had a
+ *   team_members row, which was left as it was. A caller that must not accept
+ *   such an invitation rolls back to a savepoint taken before the call.
+ */
+export type PendingInvitationAcceptance = 'accepted' | 'not_pending' | 'existing_membership'
+
+/**
+ * Writes the invitation's team memberships and returns how many of its teams
+ * kept an existing team_members row unchanged: none for `upsert`, which writes
+ * every team; for `insert_only`, every team the insert skipped.
+ */
 async function applyInvitationMemberships(
   db: Pick<DbClient, 'query'>,
   invitation: InvitationRow,
   userId: string,
   write: InvitationMembershipWrite
-): Promise<InvitationTeamRow[]> {
+): Promise<number> {
   const teams = await loadInvitationTeams(db, invitation.id, invitation)
-  if (teams.length === 0) return teams
+  if (teams.length === 0) return 0
 
   const values = [
     JSON.stringify(teams.map(team => ({ team_id: team.team_id, role: team.role }))),
     userId,
   ]
   if (write === 'insert_only') {
-    await db.query(
+    // Counted from the rows this insert wrote, not from an earlier read, so a
+    // row that a concurrent transaction committed first also counts as kept.
+    const inserted = await db.query(
       `INSERT INTO team_members(team_id, user_id, role, status)
        SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
          FROM jsonb_to_recordset($1::jsonb) AS item(team_id text, role text)
-       ON CONFLICT (team_id, user_id) DO NOTHING`,
+       ON CONFLICT (team_id, user_id) DO NOTHING
+       RETURNING team_id`,
       values
     )
-  } else {
-    await db.query(
-      `INSERT INTO team_members(team_id, user_id, role, status)
-       SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
-         FROM jsonb_to_recordset($1::jsonb) AS item(team_id text, role text)
-       ON CONFLICT (team_id, user_id)
-       DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()`,
-      values
-    )
+    return teams.length - (inserted.rowCount ?? 0)
   }
-
-  return teams
+  await db.query(
+    `INSERT INTO team_members(team_id, user_id, role, status)
+     SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
+       FROM jsonb_to_recordset($1::jsonb) AS item(team_id text, role text)
+     ON CONFLICT (team_id, user_id)
+     DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()`,
+    values
+  )
+  return 0
 }
 
 /**
@@ -188,7 +207,7 @@ export async function acceptPendingMembershipInvitation(
   invitation: InvitationRow,
   userId: string,
   options: Readonly<{ membershipWrite?: InvitationMembershipWrite }> = {}
-): Promise<boolean> {
+): Promise<PendingInvitationAcceptance> {
   const consumed = await db.query(
     `UPDATE invitations
         SET status = 'accepted',
@@ -201,9 +220,14 @@ export async function acceptPendingMembershipInvitation(
   RETURNING id`,
     [invitation.id, userId]
   )
-  if ((consumed.rowCount ?? 0) === 0) return false
-  await applyInvitationMemberships(db, invitation, userId, options.membershipWrite ?? 'upsert')
-  return true
+  if ((consumed.rowCount ?? 0) === 0) return 'not_pending'
+  const kept = await applyInvitationMemberships(
+    db,
+    invitation,
+    userId,
+    options.membershipWrite ?? 'upsert'
+  )
+  return kept === 0 ? 'accepted' : 'existing_membership'
 }
 
 /**
@@ -237,7 +261,8 @@ async function applyInvitationAcceptance(
     }
     return { replay: true as const }
   }
-  if (!(await acceptPendingMembershipInvitation(db, invitation, userId))) {
+  // An upsert acceptance is either accepted or not pending.
+  if ((await acceptPendingMembershipInvitation(db, invitation, userId)) !== 'accepted') {
     return { error: 'not_pending' as const }
   }
   return null
