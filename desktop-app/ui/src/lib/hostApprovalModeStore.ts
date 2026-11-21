@@ -34,7 +34,9 @@
  * any time. A refresh, a PATCH answer and the re-read after a failed PATCH
  * replace the Host-wide ceiling, unless a request that started later has
  * already answered: the server may have answered the older request before an
- * admin changed the ceiling. A session or catalog read made elsewhere fills
+ * admin changed the ceiling. Start order only stands in for the order in which
+ * the Host read its ceiling, so the ceiling kept is not always the newest (see
+ * `noteHostCeiling`). A session or catalog read made elsewhere fills
  * it only while it is unknown, because a catalog page can be served from a
  * cache after a newer answer.
  */
@@ -287,6 +289,17 @@ function current(entry: Entry): boolean {
  * request has its own sequence, so no two fresh answers tie. When the value
  * changes, every chat of the Host is notified, because chats without their
  * own snapshot (the blank chat among them) take their limit and label from it.
+ *
+ * Known limit of ordering on the client: Desktop sees when a request started
+ * and when its answer landed, not when the Host read its ceiling. Around an
+ * admin's change, two interleavings look the same here:
+ * - The request that started first was read first and is answered last. It
+ *   carries the older ceiling, and this rule drops it.
+ * - The request that started first reached the Host after the later one, so
+ *   it carries the newer ceiling. This rule drops it too and keeps the older.
+ * Without an order from the Host no client rule gets both right. A wrong
+ * ceiling changes only what chats without their own snapshot offer and show;
+ * the Host enforces its own ceiling, and the next menu opening reads it again.
  */
 function noteHostCeiling(agentRef: string, ceiling: unknown, source: SnapshotSource): void {
   if (!agentRef || !isMode(ceiling)) return
