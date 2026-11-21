@@ -34,6 +34,38 @@ test('Host route deterministic validators preserve approval, model, and title ru
   })
 })
 
+test('no production source still reads or sends the removed static rpc-proxy edge token', () => {
+  const { execFileSync, spawnSync } = require('node:child_process')
+  const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    cwd: __dirname,
+    encoding: 'utf8',
+  }).trim()
+  const sourcePathspec = [
+    '--',
+    '.',
+    ':!docs',
+    ':!*.md',
+    ':!*.test.*',
+    ':!**/__tests__/**',
+    ':!**/test/**',
+    ':!tests/**',
+  ]
+  const grep = (pattern) =>
+    spawnSync('git', ['grep', '-n', '-E', pattern, ...sourcePathspec], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+  // Liveness witness: the same pathspec finds the assertion header the forwarders now send.
+  const witness = grep('x-clerum-edge-assertion|HOST_EDGE_ASSERTION_HEADER')
+  assert.equal(witness.status, 0, witness.stderr)
+  assert.ok(witness.stdout.includes('rpc-proxy/src/'), 'witness must reach rpc-proxy source')
+  assert.ok(witness.stdout.includes('mcp-host/src/'), 'witness must reach mcp-host source')
+  const removed = grep(
+    'RPC_PROXY_MCP_HOST_EDGE_TOKEN|MCP_HOST_RPC_PROXY_EDGE_TOKEN|rpcProxyServiceAuthenticated|parseRpcProxyEdgeToken|rpcProxyEdgeToken|mcpHostEdgeToken|x-clerum-rpc-proxy-edge-token'
+  )
+  assert.equal(removed.status, 1, `static edge token still referenced:\n${removed.stdout}`)
+})
+
 test('Host edge assertion constants pin the wire contract and no static edge token remains', () => {
   assert.equal(contracts.HOST_EDGE_ASSERTION_HEADER, 'x-clerum-edge-assertion')
   assert.equal(contracts.HOST_EDGE_ASSERTION_AUDIENCE, 'evenfire-host-runtime-edge')
