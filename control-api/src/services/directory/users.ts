@@ -352,8 +352,10 @@ function memberSignInConfigured(): boolean {
     )
   } catch (error) {
     // An unreadable configuration may still have the switch on, so the row is
-    // kept: a retained row can be purged later, a deleted one cannot be
-    // restored. The OIDC routes log the settings at fault; this logs the class only.
+    // kept, which fails safe: a deleted member cannot be restored, while a
+    // retired row only holds its address (nothing in control-api purges it;
+    // reusing the address needs an admin fix). The OIDC routes log the
+    // settings at fault; this logs the class only.
     rootLogger.warn(
       {
         component: 'desktop_user_retirement',
