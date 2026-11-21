@@ -174,16 +174,11 @@ export function useTabReferenceSuggestion({
       const n = failures?.requestKey === requestKey ? failures.n + 1 : 1
       attemptsRef.current = { requestKey, n }
       if (n >= MAX_ATTEMPTS) {
-        // Giving up keeps an older answer for the same file that may still be
-        // shown, instead of hiding a suggestion that was only being refreshed.
-        setCache(current => ({
-          key: prefetchKey,
-          gfsUri,
-          scope,
-          result: displayable(current, gfsUri, scope, minVersion)
-            ? current.result
-            : { status: 'none' },
-        }))
+        // A candidate shown while revalidating is dropped here too: the key
+        // moved because the file changed after that candidate was resolved, so
+        // keeping it would offer a version known to be stale until the next
+        // change.
+        setCache({ key: prefetchKey, gfsUri, scope, result: { status: 'none' } })
         return
       }
       if (!mountedRef.current) return

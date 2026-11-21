@@ -58,7 +58,8 @@ import type { TabReferenceSuggestionInput } from '../useTabReferenceSuggestion.t
  * - the chip equals the model's prediction: nothing without a visible target,
  *   otherwise the cached candidate if it is the same file, the same scope and,
  *   for a preview, not older than the version on screen; that covers the
- *   stale-while-revalidate answer kept after three failures;
+ *   stale-while-revalidate answer shown while a revalidation retries, and its
+ *   loss once the revalidation gives up;
  * - independently of the model, whatever is shown is the current file, resolved
  *   under the current scope and not older than the preview (S4), and nothing is
  *   shown without a visible target (L3);
@@ -67,8 +68,7 @@ import type { TabReferenceSuggestionInput } from '../useTabReferenceSuggestion.t
  *   row, and no visit makes more than three requests (K1). A request without a
  *   visible target is never predicted, so it fails as unpredicted;
  * - if the last applied answer for the current key was transient, it was the
- *   third in a row, and the chip is the kept candidate the model predicts or
- *   nothing; if it was usable, the chip is exactly that answer (L1, S6).
+ *   third in a row; if it was usable, the chip is exactly that answer (L1, S6).
  *
  * Left to the scenario tests:
  *
@@ -392,8 +392,7 @@ function referenceSettled(real: Real, id: number) {
   ref.failures = { requestKey: call.requestKey, n }
   call.failureRun = n
   if (n >= MAX_ATTEMPTS) {
-    const kept = shownFrom(ref.cache, call.uri, call.scope, call.floor)
-    ref.cache = { ...entry, result: kept ? { status: 'ready', view: kept } : { status: 'none' } }
+    ref.cache = { ...entry, result: { status: 'none' } }
     return
   }
   ref.timer = { requestKey: call.requestKey, due: Date.now() + DELAYS[n - 1]! }

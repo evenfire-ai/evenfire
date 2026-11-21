@@ -55,6 +55,7 @@ const answers = {} as {
 }
 let aChanged: GfsWatchEvent
 let bChanged: GfsWatchEvent
+let aResync: GfsWatchEvent
 
 beforeAll(async () => {
   views = {
@@ -86,6 +87,10 @@ beforeAll(async () => {
   try {
     aChanged = (await source.changed([gfsWatchKey('file', A)!])).find(e => e.type === 'changed')!
     bChanged = (await source.changed([gfsWatchKey('file', B)!])).find(e => e.type === 'changed')!
+    // The resync the client emits when it reopens the stream over A.
+    aResync = (await source.reauthorize([gfsWatchKey('file', A)!])).find(
+      e => e.type === 'resync' && e.keys.includes(gfsWatchKey('file', A)!)
+    )!
   } finally {
     await source.stop()
   }
@@ -562,19 +567,21 @@ describe('useTabReferenceSuggestion — observed changes', () => {
     expect(hook.result.current.candidate).toEqual(referenceOf(views.a1))
   })
 
-  it('S-10b: the old candidate stays during a revalidation and after it fails three times', async () => {
+  it('S-10b: the old candidate stays while a revalidation retries and goes once it gives up', async () => {
     const hook = await cachedOn(A, answers.a1)
-    invalidateWith(hook, aChanged)
+    invalidateWith(hook, aResync)
+    expect(calls).toHaveLength(2)
     expect(hook.result.current.candidate).toEqual(referenceOf(views.a1))
     await settle(calls[1], answers.unavailable)
     expect(hook.result.current.candidate).toEqual(referenceOf(views.a1))
     await advance(FIRST_RETRY_MS)
     await settle(calls[2], answers.superseded)
+    expect(hook.result.current.candidate).toEqual(referenceOf(views.a1))
     await advance(SECOND_RETRY_MS)
     await settle(calls[3], new Error('bridge failed'))
     await advance(SECOND_RETRY_MS * 2)
     expect(calls).toHaveLength(4)
-    expect(hook.result.current.candidate).toEqual(referenceOf(views.a1))
+    expect(hook.result.current.candidate).toBeNull()
   })
 
   it('S-10b: a revalidation that resolves to a folder replaces the candidate', async () => {
