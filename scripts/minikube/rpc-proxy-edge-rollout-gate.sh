@@ -91,7 +91,7 @@ proxy_cohort_ready() {
 # Rollback gate: HCC has been rolled back to a revision that does not select
 # signed-assertion-v1, and no HCC-managed Host Deployment or Host pod
 # (terminating pods included) still carries it. Only then may the RPC Proxy
-# roll back to an image that does not sign the edge assertion.
+# roll back to an image that does not forward the edge assertion.
 host_cohort_unsigned() {
   local hcc hcc_pods deployments managed_pods strict_pods
   hcc="$(bounded_kubectl_get host-hcc-deployment deployment host-context-controller \

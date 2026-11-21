@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # Fail closed unless a full overlay targets the signed-assertion edge protocol on both sides:
 # the HCC selects signed-assertion-v1 exactly once and the RPC Proxy carries the same label.
-# Any other target would leave Hosts that require the assertion without a Proxy that signs it,
+# Any other target would leave Hosts that require the assertion without a Proxy that forwards it,
 # or a Proxy rolled back without the ordered Host-first rollback command.
 
 require "open3"

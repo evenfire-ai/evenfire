@@ -4378,7 +4378,8 @@ export class HostReconciler {
           return
         }
         // Every Host Deployment HCC writes carries the edge protocol label, so a
-        // create always waits for the RPC Proxy cohort that signs for it.
+        // create always waits for the RPC Proxy cohort that forwards its edge
+        // assertion.
         await this.assertRpcProxyEdgeCohortReady()
         revalidate?.()
         return observeCreate('Deployment', () =>

@@ -18,7 +18,8 @@ case "$args" in
   *'get deployment host-context-controller '* )
     printf '%s\n' '{"spec":{"template":{"spec":{"containers":[{"env":[{"name":"CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL","value":"signed-assertion-v1"}]}]}}}}'
     ;;
-  # The coordinator waits for the signing RPC Proxy cohort before any Host work.
+  # The coordinator waits for the RPC Proxy cohort that forwards the edge
+  # assertion before any Host work.
   *'get deployment rpc-proxy '* )
     printf '%s\n' '{"metadata":{"generation":1},"spec":{"replicas":1,"template":{"metadata":{"labels":{"clerum.io/rpc-proxy-edge-protocol":"signed-assertion-v1"}}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}}'
     ;;

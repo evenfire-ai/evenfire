@@ -115,7 +115,7 @@ wait_hosts_unsigned() {
 if [[ "$MODE" == "rollback-proxy" ]]; then
   # Roll back HCC first. Its selected Deployment revision owns the Host
   # image/protocol and reconciles the Host fleet off signed-assertion-v1; the
-  # Proxy may stop signing only after no Host requires the assertion.
+  # Proxy may stop forwarding the assertion only after no Host requires it.
   "${KC[@]}" rollout undo deployment/host-context-controller -n "$CONTROL_PLANE_NAMESPACE" \
     --to-revision="$HCC_REVISION" >/dev/null
   "${KC[@]}" rollout status deployment/host-context-controller -n "$CONTROL_PLANE_NAMESPACE" \
@@ -162,7 +162,8 @@ if [[ "$RESTART_ALL_NON_EDGE" == true ]]; then
   restart_all_non_edge
 fi
 
-# Hosts are only advanced after the complete signing Proxy cohort is observed.
+# Hosts are only advanced after the complete RPC Proxy cohort that forwards the
+# edge assertion is observed.
 # HCC also checks this condition at each Host Deployment write.
 if [[ "$RESTART_PROXY" == true ]]; then
   restart_and_wait "$PROXY_NAMESPACE" rpc-proxy

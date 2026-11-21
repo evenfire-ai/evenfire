@@ -217,7 +217,7 @@ run_apply_preflight "$STRICT" "$STRICT" >/dev/null ||
   fail 'signed-assertion target pair rejected by full-apply guard'
 [[ -n "$(first_log_line ' kustomize fixture-overlay')" ]] || fail 'full-apply guard never rendered the overlay'
 if run_apply_preflight "$PREVIOUS" "$STRICT" >/dev/null 2>&1; then
-  fail 'full overlay allowed a Proxy that does not sign for signed-assertion Hosts'
+  fail 'full overlay allowed a Proxy that does not forward the assertion to signed-assertion Hosts'
 fi
 if run_apply_preflight "$STRICT" "$PREVIOUS" >/dev/null 2>&1; then
   fail 'full overlay allowed an HCC that does not select signed-assertion-v1'
