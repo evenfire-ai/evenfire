@@ -180,8 +180,8 @@ describe('V2 wake-and-hold rewrites the action context and the assertion togethe
   // request's most recent checkpoint.
   it('at rest, each Host call pairs the context and the assertion of one checkpoint', async () => {
     const requests = [
-      { token: 'v2-token-a', jti: 'jti-a', limit: '5' },
-      { token: 'v2-token-b', jti: 'jti-b', limit: '6' },
+      { token: 'test-token-v2-a', jti: 'jti-a', limit: '5' },
+      { token: 'test-token-v2-b', jti: 'jti-b', limit: '6' },
     ]
     delegationMock.tokenDeclaresV2.mockReturnValue(true)
     delegationMock.verifyUserDelegationV2.mockImplementation((token: string) =>
