@@ -2176,6 +2176,38 @@
     "fullName": "ShellTool.execute blocks rm after backslash-CRLF before spawn"
   },
   {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm with its root operand on a continuation after a comment line before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks dd with its device target on a continuation after a comment line before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm with its root operand on a continuation after backslash-CRLF before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs rm with a /tmp/x operand split mid-token after a comment line"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs dd reading a disk into an image file after a comment line"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs rm with a /tmp/x operand split mid-token after backslash-CRLF"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute checks a 150 KB repeated rm backslash-LF command in linear time"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute checks a 150 KB repeated comment line and rm backslash-LF command in linear time"
+  },
+  {
     "suite": "shellClassifier.test.ts",
     "fullName": "shell classifier applies the provider table and the 8192 character argument limit"
   },

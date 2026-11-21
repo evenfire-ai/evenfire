@@ -30,7 +30,7 @@ const STATE_DB_COMMAND_PATTERN = /(^|[^A-Za-z0-9_.-])state\.db|\.clerum-state(\/
 // It runs on the Host event loop, so every check is linear in the command
 // length: each pass splits into segments once, finds the first `rm`/`dd` per
 // segment, and tests its whitespace-split arguments with plain string checks.
-// There are at most two passes. A lookahead that rescans to the segment end
+// There are at most three passes. A lookahead that rescans to the segment end
 // from every `rm` start is quadratic.
 const SHELL_UX_LINE_CONTINUATION = /\\\r?\n/g
 const SHELL_UX_SEGMENT_SEPARATOR = /[;&|\n]/
@@ -74,18 +74,47 @@ function shellUxMatches(command: string): boolean {
   return false
 }
 
+/**
+ * The command with a backslash-newline removed only where sh removes it,
+ * judged per physical line without parsing quotes or escapes. A line that
+ * contains `#` keeps its backslash-newline: when the `#` starts a comment, the
+ * backslash belongs to the comment. A line ending in backslash-CR-LF keeps it
+ * too: the backslash escapes the CR, and the LF ends the command. Each line is
+ * read once, so this stays linear.
+ */
+function shellUxShJoined(rawCommand: string): string {
+  const lines = rawCommand.split('\n')
+  const parts: string[] = []
+  for (const [index, line] of lines.entries()) {
+    const isLast = index === lines.length - 1
+    if (!isLast && line.endsWith('\\') && !line.includes('#')) {
+      parts.push(line.slice(0, -1))
+    } else {
+      parts.push(isLast ? line : `${line}\n`)
+    }
+  }
+  return parts.join('')
+}
+
 function shellUxBlocked(rawCommand: string): boolean {
   // sh removes a backslash-newline before it splits words, so `-r\<newline>f`
-  // reads as `-rf`. The joined text is checked for that. A bare newline does
-  // end the command.
-  // sh does not join every backslash-newline. Inside a `#` comment or single
-  // quotes the backslash stays literal, and `\<CR><LF>` escapes the CR, so the
-  // LF still ends the command. In those cases the next line runs as its own
-  // command, but joining glues it to the line before. The raw text, split at
-  // its own newlines, is checked too. Either match blocks.
+  // reads as `-rf`. A bare newline ends the command. sh does not remove a
+  // backslash-newline at the end of a `#` comment, and in `\<CR><LF>` the
+  // backslash escapes the CR, so the LF ends the command.
+  // Three texts are checked, and any match blocks:
+  // 1. Every backslash-newline removed: a command whose lines sh joins.
+  // 2. The raw text, split at its own newlines: a line sh does not join, run
+  //    as its own command.
+  // 3. A backslash-newline removed only where sh removes it (shellUxShJoined):
+  //    a command that mixes both, such as a comment line followed by a command
+  //    whose operand is on a continuation line. A `#` that does not start a
+  //    comment (`a#b`) also stops the join here, although sh joins that line.
+  //    Text 1 covers such a line when sh joins every line of the command.
+  // No pass parses quotes.
   const joined = rawCommand.replace(SHELL_UX_LINE_CONTINUATION, '')
   if (shellUxMatches(joined)) return true
-  return joined !== rawCommand && shellUxMatches(rawCommand)
+  if (joined === rawCommand) return false
+  return shellUxMatches(rawCommand) || shellUxMatches(shellUxShJoined(rawCommand))
 }
 
 // Node/libuv error codes (E2BIG, ENOMEM, ERR_INVALID_ARG_VALUE) are fixed
