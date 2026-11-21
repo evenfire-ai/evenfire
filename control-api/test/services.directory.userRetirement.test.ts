@@ -242,7 +242,7 @@ describe('retireDesktopUser', () => {
     expect(mocks.retireParentInTransaction).not.toHaveBeenCalled()
   })
 
-  it('keeps the legacy hard-delete only for users with no operator-link history and persists its replay result', async () => {
+  it('keeps the legacy hard-delete only for users with no operator-link or OIDC-link history while OIDC member sign-in is off, and persists its replay result', async () => {
     const { retireDesktopUser } = await import('../src/services/directory/users.js')
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
