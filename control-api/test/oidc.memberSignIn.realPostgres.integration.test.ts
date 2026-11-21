@@ -775,9 +775,10 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       info.mockRestore()
     }
 
-    // The sign-in linked this account, and Google login never heals a linked
-    // account from the address's accepted invitations, so it does not demote:
-    // the role stays admin.
+    // The sign-in left the invitation pending, so a later Google login finds
+    // no accepted invitation to heal from and the role stays admin. That login
+    // never heals a linked account is proven by the "does not restore the
+    // teams of an account that OIDC sign-in re-created" tests.
     const google = await googleLoginData({ email })
 
     expect(google).toMatchObject({
