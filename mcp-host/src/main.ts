@@ -167,6 +167,7 @@ import {
   WorkflowApprovalNotificationTerminal,
 } from './server'
 import { createSessionRouteHandlers } from './server/sessionRouteHandlers'
+import { pendingApprovalsForStatus } from './server/statusProjection'
 import { projectContextBreakdown } from './server/wireProjections'
 import { SessionProcessor } from './session'
 import { serializeSessionKey } from './session/types.js'
@@ -2690,8 +2691,8 @@ async function getStatus(): Promise<StatusResponse> {
 
   const cronJobs = cronScheduler?.getAllJobs().length || 0
 
-  // Phase 6: Include pending approvals
-  const pendingApprovals = agent?.getPendingApprovals() || []
+  // Phase 6: Include pending approvals, projected to their start time only
+  const pendingApprovals = pendingApprovalsForStatus(agent)
 
   const mcpServers = mcpManager ? mcpManager.status.snapshot() : []
   const degraded = computeDegradedReason()

@@ -174,18 +174,11 @@ export interface StatusResponse {
     failed: number
   }
   cronJobs: number
-  pendingApprovals?: Array<{
-    requestId: string
-    userId: string
-    toolName: string
-    parameters: Record<string, unknown>
-    description: string
-    since: string
-    // U5 — connect_required discriminator, mirrored from the underlying
-    // PendingApproval. Absent reason ⇒ generic approval (back-compat).
-    reason?: 'approval_required' | 'connect_required'
-    mcpServerName?: string
-  }>
+  /**
+   * One entry per pending approval, with only its start time: this route
+   * serves every user of the Host, so it names no request, user or tool.
+   */
+  pendingApprovals?: Array<{ since: string }>
   /**
    * Per-MCP-server health snapshot (spec §4.2). Omitted by older mcp-host
    * builds; consumers MUST treat absence as "unknown for every server".
