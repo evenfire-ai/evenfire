@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import userEvent from '@testing-library/user-event'
 import * as api from '../../lib/api'
 import { HostIdentityTab } from '../HostIdentityTab'
+import { ThemeProvider } from '../ThemeContext'
 import { ToastProvider } from '../Toast'
 
 vi.mock('../../lib/api', () => ({
@@ -11,7 +12,10 @@ vi.mock('../../lib/api', () => ({
   updateHostPersonalization: vi.fn(),
 }))
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  window.localStorage.clear()
+})
 
 const initialFiles = {
   agents: '## Agent instructions',
@@ -19,6 +23,14 @@ const initialFiles = {
   resourceVersion: '1',
   soul: '## Values',
   user: '## User context',
+}
+
+const producerFiles = {
+  agents: 'Use tools.',
+  identity: 'I am Clerum.',
+  resourceVersion: '12345',
+  soul: 'Be helpful.',
+  user: 'User context.',
 }
 
 describe('HostIdentityTab', () => {
@@ -29,9 +41,11 @@ describe('HostIdentityTab', () => {
 
   function renderTab(onActionsChange?: (actions: React.ReactNode | null) => void) {
     return render(
-      <ToastProvider>
-        <HostIdentityTab hostName="foo" onActionsChange={onActionsChange} />
-      </ToastProvider>
+      <ThemeProvider>
+        <ToastProvider>
+          <HostIdentityTab hostName="foo" onActionsChange={onActionsChange} />
+        </ToastProvider>
+      </ThemeProvider>
     )
   }
 
@@ -67,6 +81,94 @@ describe('HostIdentityTab', () => {
     await waitFor(() => expect(soul).toHaveTextContent('Values'), { timeout: 10000 })
     expect(screen.getByRole('heading', { name: 'SOUL.md' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Edit SOUL.md' })).toBeInTheDocument()
+  })
+
+  it.each([
+    { fileName: 'IDENTITY.md', label: 'Identity' },
+    { fileName: 'SOUL.md', label: 'Soul' },
+    { fileName: 'AGENTS.md', label: 'Agent instructions' },
+    { fileName: 'USER.md', label: 'User context' },
+  ])('uses the active light theme for the read-only $fileName view', async ({ label }) => {
+    window.localStorage.setItem('clerum.control-ui.theme', 'light')
+    renderTab()
+
+    await waitFor(() => expect(document.documentElement).toHaveAttribute('data-theme', 'light'))
+    await userEvent.setup().click(screen.getByRole('tab', { name: label }))
+
+    const article = await screen.findByRole('article', {
+      name: `Rendered ${label} document`,
+    })
+    await waitFor(() => expect(article).toHaveAttribute('data-color-mode', 'light'))
+    await waitFor(() => expect(article.querySelector('.wmde-markdown')).not.toBeNull())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('renders the admin notice before the accessible tabs after loading', async () => {
+    vi.mocked(api.getHostPersonalization).mockResolvedValue(producerFiles)
+    renderTab()
+
+    const notice = await screen.findByText(
+      'Admin-managed identity files are readable by the agent but blocked from agent writes.'
+    )
+    const tablist = screen.getByRole('tablist', { name: 'Identity file sections' })
+
+    expect(notice).toHaveClass('cu-identity-panel__intro')
+    expect(notice.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(
+      within(tablist)
+        .getAllByRole('tab')
+        .map(tab => tab.textContent)
+    ).toEqual(['Identity', 'Soul', 'Agent instructions', 'User context'])
+    expect(screen.getByRole('article', { name: 'Rendered Identity document' })).toHaveTextContent(
+      'I am Clerum.'
+    )
+    expect(screen.getByRole('heading', { name: 'IDENTITY.md' })).toBeInTheDocument()
+  })
+
+  it('keeps tabs available after a load error and restores content after reload', async () => {
+    vi.mocked(api.getHostPersonalization)
+      .mockRejectedValueOnce(new Error('Identity files unavailable'))
+      .mockResolvedValueOnce(producerFiles)
+    renderTab()
+
+    const notice = await screen.findByText(
+      'Admin-managed identity files are readable by the agent but blocked from agent writes.'
+    )
+    const panel = notice.closest('section')
+    expect(panel).not.toBeNull()
+    const error = within(panel as HTMLElement).getByRole('alert')
+    const tablist = within(panel as HTMLElement).getByRole('tablist', {
+      name: 'Identity file sections',
+    })
+
+    expect(error).toHaveTextContent('Identity files unavailable')
+    expect(notice.compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(error.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(
+      within(tablist)
+        .getAllByRole('tab')
+        .map(tab => tab.textContent)
+    ).toEqual(['Identity', 'Soul', 'Agent instructions', 'User context'])
+
+    fireEvent.click(within(error).getByRole('button', { name: 'Reload' }))
+
+    await waitFor(() => expect(api.getHostPersonalization).toHaveBeenCalledTimes(2))
+    await screen.findByRole('article', { name: 'Rendered Identity document' })
+    const recoveredPanel = screen.getByRole('region', { name: 'Admin-managed identity files' })
+    expect(within(recoveredPanel).queryByRole('alert')).not.toBeInTheDocument()
+    const recoveredTablist = within(recoveredPanel).getByRole('tablist', {
+      name: 'Identity file sections',
+    })
+    expect(recoveredTablist).toBeInTheDocument()
+    expect(
+      within(recoveredTablist)
+        .getAllByRole('tab')
+        .map(tab => tab.textContent)
+    ).toEqual(['Identity', 'Soul', 'Agent instructions', 'User context'])
+    expect(screen.getByRole('article', { name: 'Rendered Identity document' })).toHaveTextContent(
+      'I am Clerum.'
+    )
+    expect(screen.getByRole('heading', { name: 'IDENTITY.md' })).toBeInTheDocument()
   })
 
   it('uses the Markdown renderer without activating unsafe links or remote images', async () => {

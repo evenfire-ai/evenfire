@@ -9220,6 +9220,17 @@ td.cu-registry-description {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--cu-space-2);
+  margin: var(--cu-space-4) 0 var(--cu-space-6);
+  /* Match the tab rail gutter plus the existing tab button's inline padding. */
+  padding-inline-start: calc(var(--cu-space-5) + 10px);
+}
+
+.cu-identity-panel__intro:has(+ .cu-banner--error) {
+  margin-bottom: 0;
+}
+
+.cu-identity-panel > .cu-banner--error {
+  margin: var(--cu-space-4) 0;
 }
 
 .cu-identity-dirty {
@@ -9377,6 +9388,14 @@ td.cu-registry-description {
   transition:
     border-color 0.15s,
     box-shadow 0.15s;
+}
+
+.cu-markdown-editor[data-color-mode='dark'] {
+  color-scheme: dark;
+}
+
+.cu-markdown-editor[data-color-mode='light'] {
+  color-scheme: light;
 }
 
 .cu-markdown-editor--invalid {
@@ -13599,6 +13618,10 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-markdown-preview__content a {
   color: var(--cu-accent);
   text-underline-offset: 2px;
+}
+
+:root[data-theme='light'] .cu-identity-preview__document .cu-gfs-markdown-preview__content a {
+  color: var(--cu-link);
 }
 
 .cu-gfs-markdown-preview__content code {
