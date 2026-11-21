@@ -12,6 +12,18 @@ const BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
 const CODE_RE = /^[\x21-\x7e]{1,4096}$/
 const SESSION_TOKEN_MAX_LENGTH = 4096
+const DISPLAY_LABEL_MAX_LENGTH = 80
+/** Refusal reasons Profile UI may see. Anything else is an upstream contract break. */
+const REFUSAL_REASONS: ReadonlySet<string> = new Set([
+  'account_disabled',
+  'identity_conflict',
+  'account_needs_attention',
+  'email_claim_missing',
+  'email_unverified',
+  'not_eligible',
+  'no_account',
+  'provider_configuration',
+])
 const SAFE_ERRORS = new Set([
   'oidc_not_configured',
   'oidc_attempt_rejected',
@@ -53,6 +65,15 @@ function connectionKey(req: Request): string {
   return req.ip || req.socket.remoteAddress || 'unknown'
 }
 
+/**
+ * The directly connected peer (the Profile UI pod). Profile UI forwards the browser IP as
+ * X-Forwarded-For, so with `trust proxy 1` req.ip is client-influenced; only the socket
+ * address is a hard ceiling.
+ */
+function socketKey(req: Request): string {
+  return req.socket.remoteAddress || 'unknown'
+}
+
 function clientRateKey(req: Request): string {
   const key = req.get('x-oidc-client-key')
   if (key && CLIENT_KEY_RE.test(key)) return `client:${key}`
@@ -82,7 +103,7 @@ export function createOidcProfileFlowRouter(): Router {
   const perConnection = createRateLimiter({
     windowMs: 60_000,
     maxRequests: 600,
-    keyFn: req => `edge:${connectionKey(req)}`,
+    keyFn: req => `edge:${socketKey(req)}`,
     errorCode: 'oidc_unavailable',
   })
   router.use('/oidc/profile-flow', perClient, perConnection)
@@ -92,6 +113,7 @@ export function createOidcProfileFlowRouter(): Router {
       const { data } = await controlApiRequestWithStatus<{
         redirectUri: string
         memberAuthenticationActivated: boolean
+        displayLabel?: unknown
       }>('GET', '/external/oidc/profile-flow/configuration', upstreamCall(req))
       if (
         typeof data?.redirectUri !== 'string' ||
@@ -100,9 +122,18 @@ export function createOidcProfileFlowRouter(): Router {
         res.status(503).json({ error: 'oidc_unavailable' })
         return
       }
+      // An edge can deploy before control-api: a missing or invalid label means "no button",
+      // not an outage.
+      const displayLabel =
+        typeof data.displayLabel === 'string' &&
+        data.displayLabel.length >= 1 &&
+        data.displayLabel.length <= DISPLAY_LABEL_MAX_LENGTH
+          ? data.displayLabel
+          : undefined
       res.status(200).json({
         redirectUri: data.redirectUri,
         memberAuthenticationActivated: data.memberAuthenticationActivated,
+        ...(displayLabel !== undefined ? { displayLabel } : {}),
       })
     } catch (error) {
       forwardFailure(error, res, next)
@@ -159,11 +190,7 @@ export function createOidcProfileFlowRouter(): Router {
     try {
       const { data } = await controlApiRequestWithStatus<
         | { outcome: 'identity_proof_verified'; memberAuthenticationActivated: false }
-        | {
-            outcome: 'identity_proof_verified'
-            memberAuthenticationActivated: true
-            memberSignIn: 'no_matching_member'
-          }
+        | { outcome: 'refused'; memberAuthenticationActivated: true; reason: string }
         | {
             outcome: 'member_signed_in'
             memberAuthenticationActivated: true
@@ -185,14 +212,15 @@ export function createOidcProfileFlowRouter(): Router {
         return
       }
       if (
-        data?.outcome === 'identity_proof_verified' &&
+        data?.outcome === 'refused' &&
         data.memberAuthenticationActivated === true &&
-        data.memberSignIn === 'no_matching_member'
+        typeof data.reason === 'string' &&
+        REFUSAL_REASONS.has(data.reason)
       ) {
         res.status(200).json({
-          outcome: 'identity_proof_verified',
+          outcome: 'refused',
           memberAuthenticationActivated: true,
-          memberSignIn: 'no_matching_member',
+          reason: data.reason,
         })
         return
       }

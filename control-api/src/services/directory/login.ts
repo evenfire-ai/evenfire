@@ -8,7 +8,7 @@ type MembershipRow = {
   team_name: string | null
 }
 
-async function findFirstActiveMembership(
+export async function findFirstActiveMembership(
   db: {
     query: (
       text: string,
@@ -105,7 +105,7 @@ function teamlessMemberMembership(): MembershipRow {
   }
 }
 
-export async function currentMemberMembership(
+async function currentMemberMembership(
   db: Pick<DbTransactionClient, 'query'>,
   user: { id: string; email: string }
 ): Promise<MembershipRow> {

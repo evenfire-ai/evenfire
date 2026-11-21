@@ -12,6 +12,7 @@ import {
   parseCallbackParameters,
   postOidcProfileFlow,
   readSingleCookie,
+  refusedRedirect,
   requestPathMatchesCallback,
   responseForFlowError,
 } from '../_flow'
@@ -104,16 +105,15 @@ export async function GET(request: Request): Promise<Response> {
     )
     if (result.kind === 'member_signed_in') {
       return memberSignedInRedirect(
-        PROFILE_ROUTES.root,
+        PROFILE_ROUTES.oidcSignedIn,
         result.sessionCookie,
         clearBrowserCookie(browserCookieName(callback.state))
       )
     }
-    if (result.kind === 'no_matching_member') {
-      return terminalFailure(
-        'Your identity was verified, but no Evenfire account matches it. Ask your administrator to add you, then sign in again.',
-        403,
-        callback.state
+    if (result.kind === 'refused') {
+      return refusedRedirect(
+        PROFILE_ROUTES.oidcResult(result.reason),
+        clearBrowserCookie(browserCookieName(callback.state))
       )
     }
     return terminalFailure(

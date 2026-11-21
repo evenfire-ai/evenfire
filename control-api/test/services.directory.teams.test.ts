@@ -272,6 +272,7 @@ describe('services/directory team management unit tests', () => {
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ id: 'u1' }], rowCount: 1 })
     await expect(adminDeleteUser('u1')).resolves.toEqual({ ok: true, id: 'u1' })
 
@@ -284,6 +285,7 @@ describe('services/directory team management unit tests', () => {
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     dbMocks.txQuery.mockResolvedValueOnce({ rows: [{ id: 'u1' }], rowCount: 1 })
     await expect(adminDeleteUser('u1')).resolves.toEqual({ ok: true, id: 'u1' })
     expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
@@ -293,16 +295,21 @@ describe('services/directory team management unit tests', () => {
     )
     expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
       3,
-      expect.stringContaining('UPDATE workflow_approval_medium_accounts'),
+      expect.stringContaining('FROM user_oidc_links'),
       ['u1']
     )
     expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
       4,
-      expect.stringContaining('UPDATE workflow_approval_medium_challenges'),
+      expect.stringContaining('UPDATE workflow_approval_medium_accounts'),
       ['u1']
     )
     expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
       5,
+      expect.stringContaining('UPDATE workflow_approval_medium_challenges'),
+      ['u1']
+    )
+    expect(dbMocks.txQuery).toHaveBeenNthCalledWith(
+      6,
       expect.stringContaining('DELETE FROM users'),
       ['u1']
     )

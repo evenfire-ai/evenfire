@@ -1,6 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { isIP } from 'node:net'
+import {
+  OIDC_SIGNED_IN_MARKER_COOKIE,
+  OIDC_SIGNED_IN_MARKER_MAX_AGE_SECONDS,
+} from '../../constants/oidc'
 import { EXTERNAL_REST_API_INTERNAL_URL } from '../../constants/serverApi'
+import { OIDC_REFUSAL_REASONS, type OidcCompletionOutcome, type OidcRefusalReason } from './types'
 
 export const OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS = 600
 /** Control API and Profile UI clocks can differ by a small amount. */
@@ -25,6 +30,7 @@ const SAFE_FAILURES = [
   'oidc_operation_cancelled',
   'oidc_unavailable',
 ] as const
+const REFUSAL_REASON_SET: ReadonlySet<string> = new Set(OIDC_REFUSAL_REASONS)
 const SAFE_FAILURE_SET: ReadonlySet<string> = new Set(SAFE_FAILURES)
 
 export type OidcProfileConfiguration = Readonly<{
@@ -32,10 +38,7 @@ export type OidcProfileConfiguration = Readonly<{
   memberAuthenticationActivated: boolean
 }>
 
-export type OidcCompletionOutcome =
-  | Readonly<{ kind: 'identity_proof_verified' }>
-  | Readonly<{ kind: 'no_matching_member' }>
-  | Readonly<{ kind: 'member_signed_in'; sessionCookie: string }>
+export type { OidcCompletionOutcome }
 
 export type OidcFailureCode = (typeof SAFE_FAILURES)[number] | 'invalid_upstream'
 
@@ -77,10 +80,22 @@ export function noStoreText(message: string, status: number, retryAfterSeconds?:
   })
 }
 
-export function oidcClientKey(request: Request): string | undefined {
+/**
+ * Best-effort browser IP: a valid `cf-connecting-ip`, otherwise the left-most `x-forwarded-for`
+ * entry. Only a valid IP is returned. External REST's per-socket limit is the hard
+ * ceiling; this value only lets it tell browsers apart.
+ */
+export function oidcBrowserClientIp(request: Request): string | undefined {
+  const connecting = request.headers.get('cf-connecting-ip')?.trim() ?? ''
+  if (connecting && isIP(connecting) !== 0) return connecting
   const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? ''
   if (!forwarded || isIP(forwarded) === 0) return undefined
-  return createHash('sha256').update(forwarded).digest('hex')
+  return forwarded
+}
+
+export function oidcClientKey(request: Request): string | undefined {
+  const ip = oidcBrowserClientIp(request)
+  return ip ? createHash('sha256').update(ip).digest('hex') : undefined
 }
 
 function externalUrl(path: string): string {
@@ -88,19 +103,17 @@ function externalUrl(path: string): string {
   return `${base}/api/v1${path}`
 }
 
-async function requestExternal<T>(
-  path: string,
-  init?: RequestInit,
-  clientKey?: string
-): Promise<T> {
-  return (await requestExternalWithHeaders<T>(path, init, clientKey)).body
+async function requestExternal<T>(path: string, init?: RequestInit, request?: Request): Promise<T> {
+  return (await requestExternalWithHeaders<T>(path, init, request)).body
 }
 
 async function requestExternalWithHeaders<T>(
   path: string,
   init?: RequestInit,
-  clientKey?: string
+  request?: Request
 ): Promise<{ body: T; headers: Headers }> {
+  const clientKey = request ? oidcClientKey(request) : undefined
+  const clientIp = request ? oidcBrowserClientIp(request) : undefined
   let response: Response
   try {
     response = await fetch(externalUrl(path), {
@@ -112,6 +125,7 @@ async function requestExternalWithHeaders<T>(
         accept: 'application/json',
         'x-oidc-operation-deadline-ms': String(OIDC_OPERATION_DEADLINE_MS),
         ...(clientKey ? { 'x-oidc-client-key': clientKey } : {}),
+        ...(clientIp ? { 'x-forwarded-for': clientIp } : {}),
         ...(init?.body ? { 'content-type': 'application/json' } : {}),
         ...((init?.headers as Record<string, string> | undefined) ?? {}),
       },
@@ -172,7 +186,7 @@ export async function getOidcProfileConfiguration(
   const config = await requestExternal<OidcProfileConfiguration>(
     '/oidc/profile-flow/configuration',
     undefined,
-    oidcClientKey(request)
+    request
   )
   if (
     !config ||
@@ -285,14 +299,15 @@ export async function postOidcProfileFlow<T>(
       method: 'POST',
       body: JSON.stringify(body),
     },
-    oidcClientKey(request)
+    request
   )
 }
 
 /**
- * Completes the attempt. When member sign-in is on, External REST answers with the
- * same `profile_session` Set-Cookie header password login sets; it is relayed to the
- * browser unchanged, so the token never passes through a response body.
+ * Completes the attempt. When member sign-in is on, External REST answers a sign-in
+ * with the same `profile_session` Set-Cookie header password login sets; it is relayed
+ * to the browser unchanged, so the token never passes through a response body. A refusal
+ * carries one of the listed reasons and never a session.
  */
 export async function completeOidcProfileFlow(
   body: Record<string, unknown>,
@@ -301,15 +316,13 @@ export async function completeOidcProfileFlow(
   const { body: result, headers } = await requestExternalWithHeaders<{
     outcome?: unknown
     memberAuthenticationActivated?: unknown
-    memberSignIn?: unknown
-  }>(
-    '/oidc/profile-flow/complete',
-    { method: 'POST', body: JSON.stringify(body) },
-    oidcClientKey(request)
-  )
-  if (result?.outcome === 'identity_proof_verified') {
-    if (result.memberAuthenticationActivated !== true) return { kind: 'identity_proof_verified' }
-    if (result.memberSignIn === 'no_matching_member') return { kind: 'no_matching_member' }
+    reason?: unknown
+  }>('/oidc/profile-flow/complete', { method: 'POST', body: JSON.stringify(body) }, request)
+  if (
+    result?.outcome === 'identity_proof_verified' &&
+    result.memberAuthenticationActivated !== true
+  ) {
+    return { kind: 'identity_proof_verified' }
   }
   if (result?.outcome === 'member_signed_in' && result.memberAuthenticationActivated === true) {
     const sessionCookies = headers
@@ -319,22 +332,46 @@ export async function completeOidcProfileFlow(
       return { kind: 'member_signed_in', sessionCookie: sessionCookies[0] }
     }
   }
+  if (
+    result?.outcome === 'refused' &&
+    result.memberAuthenticationActivated === true &&
+    typeof result.reason === 'string' &&
+    REFUSAL_REASON_SET.has(result.reason)
+  ) {
+    return { kind: 'refused', reason: result.reason as OidcRefusalReason }
+  }
   // The attempt was consumed upstream; an unrecognised answer cannot be retried.
   throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
 }
 
-export function memberSignedInRedirect(
-  location: string,
-  sessionCookie: string,
-  clearBindingCookie: string
-): Response {
-  const headers = new Headers({
+function redirectHeaders(location: string): Headers {
+  return new Headers({
     location,
     'cache-control': 'no-store',
     'referrer-policy': 'no-referrer',
     'x-content-type-options': 'nosniff',
   })
+}
+
+/** The session, the binding clear and a marker that tells `/oidc/signed-in` the session is new. */
+export function memberSignedInRedirect(
+  location: string,
+  sessionCookie: string,
+  clearBindingCookie: string
+): Response {
+  const headers = redirectHeaders(location)
   headers.append('set-cookie', sessionCookie)
+  headers.append('set-cookie', clearBindingCookie)
+  headers.append(
+    'set-cookie',
+    `${OIDC_SIGNED_IN_MARKER_COOKIE}=1; Path=/; Max-Age=${OIDC_SIGNED_IN_MARKER_MAX_AGE_SECONDS}; Secure; SameSite=Lax`
+  )
+  return new Response(null, { status: 303, headers })
+}
+
+/** A refusal sets no session; it only releases the binding cookie. */
+export function refusedRedirect(location: string, clearBindingCookie: string): Response {
+  const headers = redirectHeaders(location)
   headers.append('set-cookie', clearBindingCookie)
   return new Response(null, { status: 303, headers })
 }

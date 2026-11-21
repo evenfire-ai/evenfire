@@ -19,13 +19,18 @@ import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAcce
 import { selectExternalSessionRepresentation } from '../../services/auth/externalSessionIssuance.js'
 import {
   type OidcMemberSignInResult,
-  signInOidcVerifiedMember,
+  signInOidcMember,
 } from '../../services/auth/oidcMemberSignIn.js'
 
 const BROWSER_BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
 const CODE_RE = /^[\x21-\x7e]{1,4096}$/
 const ISSUER_MAX_LENGTH = 2048
+const ERROR_CODE_RE = /^[A-Za-z0-9_]{1,64}$/
+const OIDC_SETTING_NAME_RE = /CONTROL_API_OIDC_[A-Z_]+/g
+
+/** The claims member eligibility reads (tenant, guest markers, roles), kept as verified evidence. */
+const POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze(['tid', 'idp', 'roles', 'acct'])
 
 type Provider = NonNullable<ReturnType<typeof loadOidcProviderConfiguration>>
 type Engine = Pick<
@@ -33,7 +38,10 @@ type Engine = Pick<
   'beginIdentityProofAttempt' | 'completeIdentityProofAttempt' | 'cancelIdentityProofAttempt'
 >
 
-type SignInMember = (proof: VerifiedOidcIdentityProof) => Promise<OidcMemberSignInResult>
+type SignInMember = (
+  proof: VerifiedOidcIdentityProof,
+  provider: Provider
+) => Promise<OidcMemberSignInResult>
 
 export type ExternalOidcProfileFlowDependencies = Readonly<{
   getProvider?: () => Provider | undefined
@@ -47,36 +55,87 @@ function defaultProvider(): Provider | undefined {
   return loadOidcProviderConfiguration(process.env, config.oauthEncryptionKey)
 }
 
+/**
+ * At most one engine, for the current configuration generation, so provider
+ * discovery is not repeated on every request. The generation covers every
+ * protocol setting and the client credential; a new generation replaces the
+ * engine. The member sign-in switch is not part of it and is read from the
+ * provider loaded for each request.
+ */
+const engines = new Map<string, OidcProtocolEngine>()
+
 function defaultEngine(provider: Provider): OidcProtocolEngine {
-  return new OidcProtocolEngine(provider, {
+  const cached = engines.get(provider.configurationGeneration)
+  if (cached) return cached
+  const engine = new OidcProtocolEngine(provider, {
     db: pool,
     getClientSecret: () => process.env[provider.clientSecretRef] ?? '',
     encryptionKeyHex: config.oauthEncryptionKey,
+    policyEvidenceClaimNames: POLICY_EVIDENCE_CLAIM_NAMES,
   })
+  engines.clear()
+  engines.set(provider.configurationGeneration, engine)
+  return engine
 }
 
 /**
  * Issues the Profile UI session exactly as password login does: no requested contract
  * and no client version, so the same representation is selected.
+ *
+ * `signInOidcMember` runs in its own default transaction runner: it retries a
+ * unique-key conflict only when the PostgreSQL error code reaches it unchanged.
  */
 async function defaultSignInMember(
-  proof: VerifiedOidcIdentityProof
+  proof: VerifiedOidcIdentityProof,
+  provider: Provider
 ): Promise<OidcMemberSignInResult> {
-  const policy = await resolveEffectiveUserAccessPolicy()
-  const selection = selectExternalSessionRepresentation({}, policy)
+  const policy = provider.memberSignIn
+  if (!policy) throw new Error('OIDC member sign-in is switched off')
+  const sessionPolicy = await resolveEffectiveUserAccessPolicy()
+  const selection = selectExternalSessionRepresentation({}, sessionPolicy)
   if (selection.status !== 'selected') {
     throw new Error('Profile UI session representation is unavailable')
   }
-  return signInOidcVerifiedMember({
-    attributes: proof.attributes,
-    contract: selection.contract,
+  return signInOidcMember({
+    proof,
+    provider,
     policy,
+    contract: selection.contract,
+    sessionPolicy,
   })
 }
 
 /** Correlates sign-ins without writing the provider subject itself to logs. */
 function subjectFingerprint(proof: VerifiedOidcIdentityProof): string {
   return createHash('sha256').update(`${proof.issuer}\n${proof.subject}`).digest('hex').slice(0, 16)
+}
+
+/**
+ * The only facts a failure log carries: the error class and, when it has one,
+ * its code. A message or a database error's detail can hold an email or a row value.
+ */
+function errorSummary(error: unknown): { errorClass: string; code?: string } {
+  const errorClass =
+    error instanceof Error ? error.constructor.name : error === null ? 'null' : typeof error
+  const code =
+    typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  return typeof code === 'string' && ERROR_CODE_RE.test(code)
+    ? { errorClass, code }
+    : { errorClass }
+}
+
+/**
+ * A provider configuration error answers 503 on every OIDC route. Its log names
+ * the settings at fault (the member sign-in switch set without its release
+ * guard names CONTROL_API_OIDC_UNRELEASED), never their values.
+ */
+function logConfigurationFailure(error: unknown): void {
+  const fields =
+    error instanceof Error ? [...new Set(error.message.match(OIDC_SETTING_NAME_RE) ?? [])] : []
+  logger.error(
+    { event: 'oidc_configuration_unavailable', ...errorSummary(error), fields },
+    'OIDC provider configuration is unusable; OIDC routes answer 503 until it is fixed'
+  )
 }
 
 function safeFailure(error: unknown, res: Response, includeRetryability = false): void {
@@ -147,27 +206,33 @@ export function createExternalOidcProfileFlowRouter(
   )
   router.use('/external/oidc/profile-flow', ...edgeRateLimits)
 
-  router.get('/external/oidc/profile-flow/configuration', (_req, res) => {
-    try {
-      const provider = getProvider()
-      if (!provider) return res.status(404).json({ error: 'oidc_not_configured' })
-      return res.status(200).json({
-        redirectUri: provider.redirectUri,
-        memberAuthenticationActivated: provider.memberAuthenticationActivated,
-      })
-    } catch {
-      return res.status(503).json({ error: 'oidc_configuration_unavailable' })
-    }
-  })
-
-  router.post('/external/oidc/profile-flow/attempts', async (req, res) => {
+  /** The configured provider, or undefined once the 404 or 503 answer is sent. */
+  function configuredProvider(res: Response): Provider | undefined {
     let provider: Provider | undefined
     try {
       provider = getProvider()
-    } catch {
-      return res.status(503).json({ error: 'oidc_configuration_unavailable' })
+    } catch (error) {
+      logConfigurationFailure(error)
+      res.status(503).json({ error: 'oidc_configuration_unavailable' })
+      return undefined
     }
-    if (!provider) return res.status(404).json({ error: 'oidc_not_configured' })
+    if (!provider) res.status(404).json({ error: 'oidc_not_configured' })
+    return provider
+  }
+
+  router.get('/external/oidc/profile-flow/configuration', (_req, res) => {
+    const provider = configuredProvider(res)
+    if (!provider) return
+    res.status(200).json({
+      redirectUri: provider.redirectUri,
+      memberAuthenticationActivated: provider.memberAuthenticationActivated,
+      displayLabel: provider.displayLabel,
+    })
+  })
+
+  router.post('/external/oidc/profile-flow/attempts', async (req, res) => {
+    const provider = configuredProvider(res)
+    if (!provider) return
     if (!validBinding(req.body?.browserBinding)) {
       return res.status(400).json({ error: 'invalid_oidc_attempt' })
     }
@@ -186,13 +251,8 @@ export function createExternalOidcProfileFlowRouter(
   })
 
   router.post('/external/oidc/profile-flow/complete', async (req, res) => {
-    let provider: Provider | undefined
-    try {
-      provider = getProvider()
-    } catch {
-      return res.status(503).json({ error: 'oidc_configuration_unavailable' })
-    }
-    if (!provider) return res.status(404).json({ error: 'oidc_not_configured' })
+    const provider = configuredProvider(res)
+    if (!provider) return
     const { state, code, browserBinding, issuer } = req.body ?? {}
     if (
       !validState(state) ||
@@ -224,16 +284,16 @@ export function createExternalOidcProfileFlowRouter(
         memberAuthenticationActivated: false,
       })
     }
-    return completeMemberSignIn(proof, req, res)
+    return completeMemberSignIn(proof, provider, req, res)
   })
 
   async function completeMemberSignIn(
     proof: VerifiedOidcIdentityProof,
+    provider: Provider,
     req: Request,
     res: Response
   ): Promise<void> {
     const audit = {
-      event: 'oidc_member_sign_in',
       registrationId: proof.registrationId,
       issuer: proof.issuer,
       subjectFingerprint: subjectFingerprint(proof),
@@ -241,27 +301,65 @@ export function createExternalOidcProfileFlowRouter(
     }
     let result: OidcMemberSignInResult
     try {
-      result = await signInMember(proof)
+      result = await signInMember(proof, provider)
     } catch (error) {
       // The attempt is already consumed: the browser must start a new one.
-      logger.error({ ...audit, outcome: 'failed', err: error }, 'OIDC member sign-in failed')
+      logger.error(
+        { event: 'oidc_member_sign_in_failed', ...audit, ...errorSummary(error) },
+        'OIDC member sign-in failed'
+      )
       res.status(503).json({ error: 'oidc_storage_unavailable', retrySameAttempt: false })
       return
     }
     if (result.status === 'refused') {
-      logger.info(
-        { ...audit, outcome: 'refused', reason: result.reason },
-        'OIDC member sign-in refused'
-      )
+      if (result.cause === undefined) {
+        logger.info(
+          { event: 'oidc_member_refused', ...audit, reason: result.reason },
+          'OIDC member sign-in refused'
+        )
+      } else {
+        // A configuration refusal names its cause for the operator; the cause
+        // never goes into the response.
+        logger.warn(
+          {
+            event: 'oidc_member_refused',
+            ...audit,
+            reason: result.reason,
+            cause: result.cause,
+            ...(result.cause === 'connection_mismatch'
+              ? { action: 'use a new registration id' }
+              : {}),
+          },
+          result.cause === 'connection_mismatch'
+            ? 'OIDC member sign-in refused: the registration id is recorded for another issuer or client; use a new registration id'
+            : 'OIDC member sign-in refused: the configured new-member team does not exist'
+        )
+      }
       res.status(200).json({
-        outcome: 'identity_proof_verified',
+        outcome: 'refused',
         memberAuthenticationActivated: true,
-        memberSignIn: 'no_matching_member',
+        reason: result.reason,
       })
       return
     }
+    const member = { ...audit, userId: result.userId }
+    if (result.created.account) {
+      logger.info(
+        { event: 'oidc_member_account_created', ...member },
+        'OIDC member account created'
+      )
+    }
+    if (result.created.link) {
+      logger.info({ event: 'oidc_member_link_created', ...member }, 'OIDC member link created')
+    }
+    if (result.invitationsApplied > 0) {
+      logger.info(
+        { event: 'oidc_member_invitation_applied', ...member, count: result.invitationsApplied },
+        'OIDC member invitations applied'
+      )
+    }
     logger.info(
-      { ...audit, outcome: 'signed_in', userId: result.userId, sessionContract: result.contract },
+      { event: 'oidc_member_signed_in', ...member, sessionContract: result.contract },
       'OIDC member signed in'
     )
     res.status(200).json({
@@ -273,13 +371,8 @@ export function createExternalOidcProfileFlowRouter(
   }
 
   router.post('/external/oidc/profile-flow/cancel', async (req, res) => {
-    let provider: Provider | undefined
-    try {
-      provider = getProvider()
-    } catch {
-      return res.status(503).json({ error: 'oidc_configuration_unavailable' })
-    }
-    if (!provider) return res.status(404).json({ error: 'oidc_not_configured' })
+    const provider = configuredProvider(res)
+    if (!provider) return
     const { state, browserBinding } = req.body ?? {}
     if (!validState(state) || !validBinding(browserBinding)) {
       return res.status(400).json({ error: 'invalid_oidc_attempt' })
