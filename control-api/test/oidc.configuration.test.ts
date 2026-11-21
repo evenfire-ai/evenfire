@@ -206,7 +206,15 @@ describe('OIDC member sign-in configuration', () => {
     )
   })
 
-  it.each(['true', 'ENABLED', ''])('refuses guard value %j', value => {
+  it.each([
+    'true',
+    'ENABLED',
+    '',
+    'Acknowledged',
+    'ACKNOWLEDGED',
+    ' acknowledged',
+    'acknowledged ',
+  ])('refuses guard value %j', value => {
     const message = refusal({ ...OIDC_ENV, ...SWITCH, CONTROL_API_OIDC_UNRELEASED: value })
     expect(message).toContain('CONTROL_API_OIDC_UNRELEASED')
   })

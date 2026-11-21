@@ -556,7 +556,14 @@ describe('Control API OIDC member sign-in completion', () => {
       })
       expect(flowLog.error).not.toHaveBeenCalled()
 
-      for (const guard of [undefined, 'yes']) {
+      for (const guard of [
+        undefined,
+        'yes',
+        'Acknowledged',
+        'ACKNOWLEDGED',
+        ' acknowledged',
+        'acknowledged ',
+      ]) {
         flowLog.error.mockReset()
         stubOidcEnvironment(guard)
 
