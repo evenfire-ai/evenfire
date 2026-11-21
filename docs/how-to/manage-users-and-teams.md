@@ -176,9 +176,8 @@ There is no "deactivate" for members. The options are:
 - **Delete member** (Members tab or member detail). Team memberships are
   removed first. If the member was the only person on some teams, you can tick
   **Delete empty teams too**. The account is hard-deleted, or kept as a
-  retired record if it was ever linked to a control admin or an OIDC sign-in,
-  or if OIDC member sign-in is on. Its approval DM accounts are disabled
-  either way.
+  retired record if it was ever linked to a control admin. Its approval DM
+  accounts are disabled either way.
 - **Delete a team** (Teams tab → **Delete**). The API only deletes a team with
   no active members, and returns `team_not_empty` otherwise. Remove or delete
   its members first. A team referenced by workflow audit history is kept, and
