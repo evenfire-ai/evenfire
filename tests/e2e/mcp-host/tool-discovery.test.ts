@@ -5,9 +5,10 @@
  * tools are registered and used during message processing. It deliberately
  * does not call an HCC route with a caller-selected Context.
  */
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import {
+  DEFAULT_HOST_REF,
   getPodLogs,
   getStatus,
   getTaskResult,
@@ -15,10 +16,17 @@ import {
   waitForIdle,
   waitForTasksProcessed,
 } from '../helpers.js'
+import { issueRealRpcToken } from './runtimeAuth.js'
+
+let statusToken: string
+
+beforeAll(async () => {
+  statusToken = await issueRealRpcToken(['host:status:read'], [DEFAULT_HOST_REF])
+})
 
 describe('Tool Discovery', () => {
   it('mcp-host publishes only its effective connected mock-server fleet', async () => {
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     const mock = status.mcpServers?.find((server: any) => server.name === 'mock-server')
 
     expect(mock).toBeDefined()
@@ -46,7 +54,7 @@ describe('Tool Discovery', () => {
 
   it('mcp-host processes messages via single pipeline', async () => {
     const correlationId = `tool-discovery-${randomUUID()}`
-    const before = await getStatus()
+    const before = await getStatus(statusToken)
     const tasksProcessedBefore = before.agent?.tasksProcessed
     expect(tasksProcessedBefore).toEqual(expect.any(Number))
 
@@ -59,10 +67,14 @@ describe('Tool Discovery', () => {
     expect(accepted.data).toMatchObject({ success: true, status: 'pending' })
     expect(accepted.data.taskId).toEqual(expect.any(String))
 
-    const completedCount = await waitForTasksProcessed(tasksProcessedBefore + 1, 60_000)
+    const completedCount = await waitForTasksProcessed(
+      statusToken,
+      tasksProcessedBefore + 1,
+      60_000
+    )
     expect(completedCount.agent.tasksProcessed).toBeGreaterThanOrEqual(tasksProcessedBefore + 1)
 
-    const idle = await waitForIdle(30_000)
+    const idle = await waitForIdle(statusToken, 30_000)
     expect(idle.agent.state).toBe('idle')
 
     const taskId = accepted.data.taskId as string
