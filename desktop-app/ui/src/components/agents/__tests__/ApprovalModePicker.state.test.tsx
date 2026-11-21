@@ -930,12 +930,16 @@ class Confirm implements fc.AsyncCommand<Model, Real> {
     return model.menuOpen && model.confirming
   }
   async run(model: Model, real: Real) {
-    // D3: Confirm stores Allow all only while the limit on screen offers it.
-    if (offered(model, 'allow_all')) {
-      closeMenu(model)
-      if (model.screen === 'blank') model.held = 'allow_all'
-      else startWrite(model, model.screen, 'allow_all', this.outcome, real)
-    }
+    // A confirmation open here is always under the limit: PassiveRead and
+    // Settle drop it as they lower the limit (dropConfirmationAboveLimit),
+    // and SetCeiling moves no limit. So the model pins D3's close during
+    // render, but never clicks Confirm above the limit. Confirm's own check
+    // of the store's limit at the click, for a read the picker has not
+    // rendered yet, is pinned by the scenario test "Confirm checks the limit
+    // the store holds at the click".
+    closeMenu(model)
+    if (model.screen === 'blank') model.held = 'allow_all'
+    else startWrite(model, model.screen, 'allow_all', this.outcome, real)
     fireEvent.click(real.utils.getByTestId('approval-mode-confirm-allow-all'))
     await flush()
     assertInvariants(model, real)
@@ -1090,6 +1094,14 @@ const commandArbitraries = [
 
 describe('ApprovalModePicker state — A6 command model', () => {
   it('keeps S1–S4, L1, L2, C1 and D1–D4 for any event order and settlement order', async () => {
+    // Run before the random mix, which rarely reaches it: a read lowers the
+    // limit while the Allow-all confirmation is open (D3).
+    const examples: [fc.Scheduler, fc.AsyncCommand<Model, Real>[]][] = [
+      [
+        fc.schedulerFor([]),
+        [new ToggleMenu(), new PickAllowAll(), new SetCeiling('manual'), new PassiveRead('chat-1')],
+      ],
+    ]
     await fc.assert(
       fc.asyncProperty(
         fc.scheduler(),
@@ -1140,7 +1152,7 @@ describe('ApprovalModePicker state — A6 command model', () => {
           assertInvariants(model, real)
         }
       ),
-      { numRuns: Number(process.env.PICKER_MODEL_RUNS ?? 500) }
+      { numRuns: Number(process.env.PICKER_MODEL_RUNS ?? 500), examples }
     )
   })
 })
