@@ -32,6 +32,7 @@ import {
   deleteManagedUserForUser,
   setInvitationPasswordForEmail,
   softDeleteMember,
+  updateMemberRole,
 } from '../src/services/directory/membership.js'
 import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import type { InviteRole } from '../src/services/directory/types.js'
@@ -639,6 +640,62 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       role: 'member',
     })
   })
+
+  it('a role change committed while the sign-in applies invitations is the role the session carries', async () => {
+    const email = `${uniqueLabel('live-role')}@fixture.test`
+    const userId = await seedUser(email)
+    const keptTeam = await seedTeam('live-role-kept')
+    const invitedTeam = await seedTeam('live-role-invited')
+    await seedMembership(keptTeam, userId, 'admin')
+    // An invitation to another team: the sign-in locks it after it has read
+    // the kept team, so holding its row pauses the sign-in in between.
+    const invitation = await seedInvitation({ email, teamId: invitedTeam, role: 'member' })
+    const proof = await defaultFake.signIn({
+      sub: uniqueLabel('live-role-subject'),
+      email,
+      email_verified: true,
+    })
+    const blocker = await testPool.connect()
+    let signingIn: Promise<PromiseSettledResult<OidcMemberSignInResult>> | undefined
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query(`SELECT id FROM invitations WHERE id = $1 FOR UPDATE`, [invitation.id])
+      signingIn = settle(signIn(defaultFake, proof, { contract: 'v1' }))
+      await waitForLockWaiter()
+      // An admin demotes the member on another connection and commits while
+      // the sign-in waits with the kept team, read as admin, in hand.
+      expect(await updateMemberRole(keptTeam, userId, 'member', actorId)).toMatchObject({
+        role: 'member',
+      })
+      await blocker.query('COMMIT')
+    } catch (error) {
+      await blocker.query('ROLLBACK')
+      throw error
+    } finally {
+      blocker.release()
+      if (signingIn) await signingIn
+    }
+
+    const result = signedIn(valueOf(await signingIn!))
+    expect(result).toMatchObject({ userId, invitationsApplied: 1 })
+    expect(await invitationState(invitation.id)).toEqual({
+      status: 'accepted',
+      accepted_user_id: userId,
+    })
+    expect(verifyExternalSessionToken(result.token)).toMatchObject({
+      userId,
+      teamId: keptTeam,
+      role: 'member',
+    })
+    const memberships = await membershipsOf(userId)
+    expect(memberships).toHaveLength(2)
+    expect(memberships).toEqual(
+      expect.arrayContaining([
+        { team_id: keptTeam, role: 'member' },
+        { team_id: invitedTeam, role: 'member' },
+      ])
+    )
+  }, 20_000)
 
   it('an existing admin with a pending member invitation stays admin', async () => {
     const email = `${uniqueLabel('kept-admin')}@fixture.test`
