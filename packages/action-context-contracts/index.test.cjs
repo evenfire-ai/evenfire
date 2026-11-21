@@ -363,6 +363,29 @@ test('checkpoint response accepts only strict server-derived destinations on all
       url: 'https://search.internal.example/rpc',
     }
   )
+  const hostEdgeAssertion = 'eyJhbGciOiJSUzI1NiJ9.eyJ2IjoyfQ.c2lnbmF0dXJl'
+  assert.equal(
+    contracts.validateActionAuthorityCheckpointResponse({ ...allowed, hostEdgeAssertion })
+      .hostEdgeAssertion,
+    hostEdgeAssertion
+  )
+  for (const refused of [
+    { ...allowed, destination: null, hostEdgeAssertion },
+    {
+      ...allowed,
+      destination: {
+        kind: 'mcp_server',
+        ref: 'mcp-system/search',
+        url: 'https://search.internal.example/rpc',
+      },
+      hostEdgeAssertion,
+    },
+    { ...allowed, hostEdgeAssertion: 'not-a-jws' },
+    { ...allowed, hostEdgeAssertion: 42 },
+    { ...allowed, hostEdgeAssertion: `${'a'.repeat(8190)}.b.c` },
+  ]) {
+    assert.throws(() => contracts.validateActionAuthorityCheckpointResponse(refused))
+  }
   for (const destination of [
     { kind: 'host', ref: 'not-namespaced', url: 'http://host.internal' },
     { kind: 'host', ref: 'mcp-host/host-b', url: 'file:///etc/passwd' },
