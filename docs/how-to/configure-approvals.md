@@ -142,6 +142,12 @@ A control-api admin, or a Kubernetes principal who can write
 Setting `auto` or `allow_all` accepts unattended shell on this Host. Treat
 either as suitable only for a single-user Host. v1 does not enforce that.
 
+On Hosts that run the `mcp-host-slim`, `mcp-host-full` or `mcp-host-desktop`
+image, which ship developer tools, treat `auto` with the same caution as
+`allow_all`. The classifier judges the command text only, so an approval is not
+a guarantee that the command is read-only. Keep the ceiling at `manual` on those
+Hosts unless the Host is single-user and you accept that risk.
+
 An `allow_all` ceiling accepts, among other things: shell that can read the
 process environment, the runtime-token Secret, and the Host GFS token; HTTP to
 any public host on ports 80 and 443 when the allowlist is empty; MCP servers
