@@ -737,7 +737,7 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     })
   })
 
-  it("an inviter's member invitation cannot demote an admin through OIDC sign-in and a later Google login", async () => {
+  it("an inviter's member invitation to an admin stays pending through OIDC sign-in, and neither the sign-in nor a later Google login demotes the admin", async () => {
     const email = `${uniqueLabel('demotion')}@fixture.test`
     const userId = await seedUser(email)
     const adminTeam = await seedTeam('demotion-admin-team')
@@ -753,15 +753,15 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     try {
       const result = signedIn(await signIn(defaultFake, proof))
 
-      // Soft, so that the Google login below still runs when the invitation
-      // was accepted by mistake.
-      expect.soft(result).toMatchObject({ userId, invitationsApplied: 0 })
-      expect.soft(await invitationState(invitation.id)).toEqual({
+      // The invitation names a team the admin already belongs to, so the
+      // sign-in leaves it pending and unapplied, and the admin role survives.
+      expect(result).toMatchObject({ userId, invitationsApplied: 0 })
+      expect(await invitationState(invitation.id)).toEqual({
         status: 'pending',
         accepted_user_id: null,
       })
-      expect.soft(await membershipsOf(userId)).toEqual([{ team_id: adminTeam, role: 'admin' }])
-      expect.soft(info).toHaveBeenCalledWith(
+      expect(await membershipsOf(userId)).toEqual([{ team_id: adminTeam, role: 'admin' }])
+      expect(info).toHaveBeenCalledWith(
         {
           component: 'oidc_member_sign_in',
           event: 'oidc_member_invitation_left_pending',
@@ -770,13 +770,14 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
         },
         'OIDC member sign-in left an invitation pending'
       )
-      expect.soft(JSON.stringify(info.mock.calls)).not.toContain(email)
+      expect(JSON.stringify(info.mock.calls)).not.toContain(email)
     } finally {
       info.mockRestore()
     }
 
     // The sign-in linked this account, and Google login never heals a linked
-    // account from the address's accepted invitations: the role stays admin.
+    // account from the address's accepted invitations, so it does not demote:
+    // the role stays admin.
     const google = await googleLoginData({ email })
 
     expect(google).toMatchObject({
