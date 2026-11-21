@@ -34,7 +34,7 @@ export default async function OidcResultPage({ searchParams }: OidcResultPagePro
               <p className="cu-sidebar__subtitle">Profile Portal</p>
             </div>
           </div>
-          <h1 className="page-title">Sign-in unsuccessful</h1>
+          <h2 className="page-title">Sign-in unsuccessful</h2>
           <div className="message message--error-plain" role="alert">
             {messageForReason(reason)}
           </div>
