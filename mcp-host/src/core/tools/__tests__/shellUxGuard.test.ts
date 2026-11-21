@@ -103,6 +103,15 @@ const BLOCKED_MIXED_LINES = [
     'ls # list\\\ndd if=/dev/zero \\\nof=/dev/sda',
   ],
   ['rm with its root operand on a continuation after backslash-CRLF', 'echo x\\\r\nrm -rf \\\n/'],
+  // A `#` inside a word starts no comment, so sh joins the rm line.
+  [
+    'rm with a # inside an argument and its root operand on a continuation after a comment line',
+    'ls # list\\\nrm -rf tmp#1 \\\n/',
+  ],
+  [
+    'dd with a # inside an argument and its device target on a continuation after backslash-CRLF',
+    'echo x\\\r\ndd if=/dev/zero bs=1#x \\\nof=/dev/sda',
+  ],
 ] as const
 
 const RUNS_JOINED_LINES = [
@@ -128,6 +137,11 @@ const RUNS_MIXED_LINES = [
   [
     'rm with a /tmp/x operand split mid-token after backslash-CRLF',
     'echo x\\\r\nrm -rf /\\\ntmp/x',
+  ],
+  // The # twin: sh runs `rm -rf tmp#1 /tmp/x`.
+  [
+    'rm with a # inside an argument and a /tmp/x operand split mid-token after a comment line',
+    'ls # list\\\nrm -rf tmp#1 /\\\ntmp/x',
   ],
 ] as const
 

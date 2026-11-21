@@ -76,18 +76,21 @@ function shellUxMatches(command: string): boolean {
 
 /**
  * The command with a backslash-newline removed only where sh removes it,
- * judged per physical line without parsing quotes or escapes. A line that
- * contains `#` keeps its backslash-newline: when the `#` starts a comment, the
- * backslash belongs to the comment. A line ending in backslash-CR-LF keeps it
- * too: the backslash escapes the CR, and the LF ends the command. Each line is
- * read once, so this stays linear.
+ * judged per physical line without parsing quotes or escapes. A line with a
+ * `#` at the start of a word keeps its backslash-newline: sh reads that `#` as
+ * a comment, so the backslash belongs to the comment. A `#` inside a word
+ * (`tmp#1`) starts no comment, so that line is joined. A line ending in
+ * backslash-CR-LF keeps its newline too: the backslash escapes the CR, and the
+ * LF ends the command. Each line is read once, so this stays linear.
  */
+const SHELL_UX_COMMENT_START = /(?:^|\s)#/
+
 function shellUxShJoined(rawCommand: string): string {
   const lines = rawCommand.split('\n')
   const parts: string[] = []
   for (const [index, line] of lines.entries()) {
     const isLast = index === lines.length - 1
-    if (!isLast && line.endsWith('\\') && !line.includes('#')) {
+    if (!isLast && line.endsWith('\\') && !SHELL_UX_COMMENT_START.test(line)) {
       parts.push(line.slice(0, -1))
     } else {
       parts.push(isLast ? line : `${line}\n`)
@@ -107,9 +110,9 @@ function shellUxBlocked(rawCommand: string): boolean {
   //    as its own command.
   // 3. A backslash-newline removed only where sh removes it (shellUxShJoined):
   //    a command that mixes both, such as a comment line followed by a command
-  //    whose operand is on a continuation line. A `#` that does not start a
-  //    comment (`a#b`) also stops the join here, although sh joins that line.
-  //    Text 1 covers such a line when sh joins every line of the command.
+  //    whose operand is on a continuation line. Only a `#` at the start of a
+  //    word stops the join, as in sh. A ` #` inside quotes also stops it here,
+  //    although sh joins that line; text 1 covers it when sh joins every line.
   // No pass parses quotes.
   const joined = rawCommand.replace(SHELL_UX_LINE_CONTINUATION, '')
   if (shellUxMatches(joined)) return true

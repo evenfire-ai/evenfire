@@ -2185,6 +2185,18 @@
   },
   {
     "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm with a # inside an argument and its root operand on a continuation after a comment line before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks dd with a # inside an argument and its device target on a continuation after backslash-CRLF before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs rm with a # inside an argument and a /tmp/x operand split mid-token after a comment line"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
     "fullName": "ShellTool.execute blocks rm with its root operand on a continuation after backslash-CRLF before spawn"
   },
   {
