@@ -582,4 +582,65 @@ describe('mounted Host routes behind the edge assertion', () => {
       await mounted.stop()
     }
   })
+
+  it('lists pending approvals of every user in status only by their start time', async () => {
+    const { pendingApprovalsForStatus } = await import('../statusProjection')
+    const since = ['2026-11-21T10:00:00.000Z', '2026-11-21T10:05:00.000Z']
+    const agent = {
+      getPendingApprovals: vi.fn(() => [
+        {
+          requestId: 'request-of-user',
+          userId: USER,
+          toolName: 'shell',
+          parameters: { command: 'ls' },
+          description: 'List files',
+          since: since[0],
+        },
+        {
+          requestId: 'request-of-other-user',
+          userId: OTHER_USER,
+          toolName: 'send_email',
+          parameters: { to: 'someone' },
+          description: 'Send an email',
+          since: since[1],
+          reason: 'connect_required' as const,
+          mcpServerName: 'mail',
+        },
+      ]),
+    }
+    const mounted = await mount(server =>
+      server.onStatus(async () => ({
+        agent: {
+          state: 'waiting_approval',
+          currentTaskId: null,
+          tasksProcessed: 0,
+          tasksSucceeded: 0,
+          tasksFailed: 0,
+          uptime: 1,
+        },
+        queue: { pending: 0, processing: 0, completed: 0, failed: 0 },
+        cronJobs: 0,
+        pendingApprovals: pendingApprovalsForStatus(agent),
+      }))
+    )
+    try {
+      const response = await fetch(`${mounted.baseUrl}/v1/runtime/status`, {
+        headers: {
+          ...clearHeaders(),
+          [HOST_EDGE_ASSERTION_HEADER]: assertion({ scopes: ['host:status:read'] }),
+        },
+      })
+      expect(response.status).toBe(200)
+      const body = (await response.json()) as {
+        agent: { state: string }
+        pendingApprovals: Array<Record<string, unknown>>
+      }
+      expect(body.agent.state).toBe('waiting_approval')
+      expect(agent.getPendingApprovals).toHaveBeenCalledTimes(1)
+      expect(body.pendingApprovals).toHaveLength(2)
+      expect(body.pendingApprovals).toEqual(since.map(value => ({ since: value })))
+    } finally {
+      await mounted.stop()
+    }
+  })
 })
