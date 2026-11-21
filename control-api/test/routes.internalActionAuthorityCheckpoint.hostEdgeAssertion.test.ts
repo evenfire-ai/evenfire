@@ -9,6 +9,7 @@ import {
   HOST_EDGE_ASSERTION_V2_CLAIM_KEYS,
   canonicalActionTarget,
   hashActionTarget,
+  validateActionAuthorityCheckpointResponse,
   validateHostEdgeAssertionClaims,
 } from '@clerum/action-context-contracts'
 import { config } from '../src/config.js'
@@ -291,6 +292,8 @@ describe('V2 checkpoint issues a Host edge assertion to rpc-proxy for a Host des
         checkedAt: response.body.checkedAt,
       })
     ).toEqual({ ok: true })
+    // rpc-proxy reads the whole response through the shared checkpoint response validator.
+    expect(validateActionAuthorityCheckpointResponse(response.body)).toEqual(response.body)
     expect(authority.checkpointCalls).toBe(1)
   })
 
@@ -325,6 +328,7 @@ describe('V2 checkpoint issues a Host edge assertion to rpc-proxy for a Host des
       host: HOST_LOGICAL_ID,
     })
     expect(response.body.hostEdgeAssertion).not.toBe(response.body.hostMessageAdmissionReceipt)
+    expect(validateActionAuthorityCheckpointResponse(response.body)).toEqual(response.body)
     expect(admission.checkAndIncrement).toHaveBeenCalledTimes(1)
     expect(authority.checkpointCalls).toBe(1)
   })
@@ -353,6 +357,8 @@ describe('V2 checkpoint issues no Host edge assertion outside an allowed rpc-pro
     )
     expect(response.body.status).toBe('allowed')
     expect(response.body.destination).toMatchObject({ kind: 'host' })
+    expect(response.body).not.toHaveProperty('hostEdgeAssertion')
+    expect(validateActionAuthorityCheckpointResponse(response.body)).toEqual(response.body)
     expect(Object.keys(response.body).sort()).toEqual(ALLOWED_KEYS)
     expect(authority.checkpointCalls).toBe(1)
   })
@@ -372,6 +378,10 @@ describe('V2 checkpoint issues no Host edge assertion outside an allowed rpc-pro
     const response = await checkpoint(checkpointRequest('host.status.read')).expect(200)
     expect(response.body.status).toBe('allowed')
     expect(response.body.destination).toEqual(destination)
+    // The validator runs before the key check, so an assertion on a non-Host destination is
+    // refused by the shared contract that rpc-proxy applies.
+    expect(validateActionAuthorityCheckpointResponse(response.body)).toEqual(response.body)
+    expect(response.body).not.toHaveProperty('hostEdgeAssertion')
     expect(Object.keys(response.body).sort()).toEqual(ALLOWED_KEYS)
     expect(authority.checkpointCalls).toBe(1)
   })
