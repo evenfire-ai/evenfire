@@ -14,6 +14,7 @@ import { BasicSafety } from '../core/safety/safety'
 import { DefaultToolOutputProcessor } from '../core/safety/toolOutputProcessor'
 import { SpilloverStorage } from '../core/spillover'
 import { AttachmentReadTool } from '../core/tools/attachmentRead'
+import { JsonTransformTool } from '../core/tools/jsonTransform'
 import { ShellTool } from '../core/tools/shell'
 import type { ToolOutput } from '../core/types'
 import type { IncomingMessage } from '../server'
@@ -199,5 +200,28 @@ describe('V2 action-authority tool lifecycle', () => {
     expect(Number.isInteger(shellPid)).toBe(true)
     expect(() => process.kill(shellPid, 0)).toThrow()
     expect(checkpoint).toHaveBeenCalledOnce()
+  })
+
+  it('passes json_transform approvalAlso and fileReads through, and checks authority on execute', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'v2-json-transform-'))
+    try {
+      await fs.writeFile(path.join(root, 'a.json'), '{"v":"V2_WITNESS"}')
+      const checkpoint = vi.fn(async () => 'allowed' as const)
+      const v2Tool = withRuntimeActionAuthorityForToolRegistry(
+        registryFor(new JsonTransformTool(root)),
+        binding,
+        checkpoint
+      ).get('json_transform')!
+      const params = { file: 'a.json', operation: 'get', path: 'v' }
+
+      expect(v2Tool.approvalAlso?.(params)).toEqual(['file_read'])
+      expect(v2Tool.fileReads?.(params)).toEqual({ paths: ['a.json'] })
+      expect(checkpoint).not.toHaveBeenCalled()
+      const result = await v2Tool.execute(params)
+      expect(result).toMatchObject({ content: 'V2_WITNESS', is_error: false })
+      expect(checkpoint).toHaveBeenCalledOnce()
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 })

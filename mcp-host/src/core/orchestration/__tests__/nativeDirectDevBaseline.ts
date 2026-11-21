@@ -8,6 +8,11 @@
  * Native `direct` must reproduce it byte for byte. Regenerate only from a tree
  * without native presentation (a pre-#1003 `dev` commit plus the change being
  * measured), never from one that has it.
+ *
+ * The json_transform entry and its system-prompt line come from the
+ * json_transform definition that added file input. They were captured after checking
+ * that, with the old json_transform, the same capture reproduced every previous
+ * hash; tool names, order and every other entry and line are unchanged.
  */
 export const NATIVE_DIRECT_DEV_BASELINE: Record<
   string,
@@ -32,8 +37,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'alpha__record__read_000',
       'beta__record__read_001',
     ],
-    toolsSha256: 'fe3dbc488a0f97a2eb6fa943784b5c8afc9b10d62d463488ced58a18b305059a',
-    systemSha256: '668b69541f799f7326d65c58e240392cf7ffbb04fe19949f30f637963398f3f7',
+    toolsSha256: 'e29cf11dfb0235d1be6bd04e0f266dc7972e4a86cb6a0b1f0a01b5b3b6b5f014',
+    systemSha256: 'f9ce8075171f3c269f80563cf209d45f4d3d1d2824dda2634863c3f0a2755e61',
   },
   'codex-direct/83': {
     toolNames: [
@@ -135,8 +140,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'beta__record__read_079',
       'beta__record__read_081',
     ],
-    toolsSha256: '52e43a3df88abfc266b25e6ea60a08f057695157f1e0f06d42107eda1f97ba04',
-    systemSha256: '3566ff2629f62dade922e57efc28b30e860cfb567d1270104b1f8cc7037e42c6',
+    toolsSha256: '2087de9c6ce02dde05f71673eb9866b940f5200659c074885d0c628d4158b5fb',
+    systemSha256: '795b4bef2d4d5c399389f26dd1cdecb41a09a8e94e61239ef72a7510bbe3b683',
   },
   'codex-auto/2': {
     toolNames: [
@@ -160,8 +165,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'alpha__record__read_000',
       'beta__record__read_001',
     ],
-    toolsSha256: '7ce088f861c80b525a8297db3d516f2cda55438d4f087d13a4003c4042677afb',
-    systemSha256: 'd5ffa762e7a3f3ceb6b4467ba1254869855a2686e4a8cc0a13363f0e98db22da',
+    toolsSha256: '2d739a8b7f61905a6034661c5caa909fb2c39170250fe6fc36e38d0e2f1e561b',
+    systemSha256: 'ac14551c65523f92b98ab4b9ada651b23736d0bca50b70453d51034f11d36d08',
   },
   'codex-auto/83': {
     toolNames: [
@@ -183,8 +188,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'clerum__tool_describe',
       'clerum__tool_call',
     ],
-    toolsSha256: '8066918e4db60a825574f6a9fb23cae660245fc0f72c545695e15c0f40500abb',
-    systemSha256: 'f3f347dc42c6c1c7e7bacdad998d4d80990110486dc0c0da39cd0a222b90d39d',
+    toolsSha256: '7bb4be70dadbc5108f5e17100c0491ef12eb5b1a8c688d9521cb717386e65231',
+    systemSha256: 'a3368ec500012545273138e96ca7625803888e7334436622e901ccc01f4e75df',
   },
   'codex-discovery/2': {
     toolNames: [
@@ -206,8 +211,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'clerum__tool_describe',
       'clerum__tool_call',
     ],
-    toolsSha256: '8066918e4db60a825574f6a9fb23cae660245fc0f72c545695e15c0f40500abb',
-    systemSha256: 'f3f347dc42c6c1c7e7bacdad998d4d80990110486dc0c0da39cd0a222b90d39d',
+    toolsSha256: '7bb4be70dadbc5108f5e17100c0491ef12eb5b1a8c688d9521cb717386e65231',
+    systemSha256: 'a3368ec500012545273138e96ca7625803888e7334436622e901ccc01f4e75df',
   },
   'codex-discovery/83': {
     toolNames: [
@@ -229,8 +234,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'clerum__tool_describe',
       'clerum__tool_call',
     ],
-    toolsSha256: '8066918e4db60a825574f6a9fb23cae660245fc0f72c545695e15c0f40500abb',
-    systemSha256: 'f3f347dc42c6c1c7e7bacdad998d4d80990110486dc0c0da39cd0a222b90d39d',
+    toolsSha256: '7bb4be70dadbc5108f5e17100c0491ef12eb5b1a8c688d9521cb717386e65231',
+    systemSha256: 'a3368ec500012545273138e96ca7625803888e7334436622e901ccc01f4e75df',
   },
   'legacy-on/2': {
     toolNames: [
@@ -254,8 +259,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'alpha__record__read_000',
       'beta__record__read_001',
     ],
-    toolsSha256: '7ce088f861c80b525a8297db3d516f2cda55438d4f087d13a4003c4042677afb',
-    systemSha256: '327fa8298ebf97257ba4f14cb3a87a1eefbef9adc36980a4ead052393df34ebd',
+    toolsSha256: '2d739a8b7f61905a6034661c5caa909fb2c39170250fe6fc36e38d0e2f1e561b',
+    systemSha256: 'f171c9cd1c1dfa6f00ae2761eb10585d6c73829f0aa1b18277e3b65e4a2a2756',
   },
   'legacy-on/83': {
     toolNames: [
@@ -277,8 +282,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'clerum__tool_describe',
       'clerum__tool_call',
     ],
-    toolsSha256: '8066918e4db60a825574f6a9fb23cae660245fc0f72c545695e15c0f40500abb',
-    systemSha256: '992abacfbd64f470c8d97052ad522c07c56a77031c568b2020c822d5e19b723a',
+    toolsSha256: '7bb4be70dadbc5108f5e17100c0491ef12eb5b1a8c688d9521cb717386e65231',
+    systemSha256: 'e3d90d282f5e7750da0825b850fc41bb283a2cc477f086b411dc2fe9a7eaaf85',
   },
   'legacy-off/2': {
     toolNames: [
@@ -299,8 +304,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'alpha__record__read_000',
       'beta__record__read_001',
     ],
-    toolsSha256: 'fe3dbc488a0f97a2eb6fa943784b5c8afc9b10d62d463488ced58a18b305059a',
-    systemSha256: 'd16364615e38bc03fc60b064dcb49bfed388da1e444bc9c3796f04ef159b2db4',
+    toolsSha256: 'e29cf11dfb0235d1be6bd04e0f266dc7972e4a86cb6a0b1f0a01b5b3b6b5f014',
+    systemSha256: 'a274c3402feedfaac12e45a0471fdd038bed2cd619ffedd20ebc94b1adf74e53',
   },
   'legacy-off/83': {
     toolNames: [
@@ -402,7 +407,7 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'beta__record__read_079',
       'beta__record__read_081',
     ],
-    toolsSha256: '52e43a3df88abfc266b25e6ea60a08f057695157f1e0f06d42107eda1f97ba04',
-    systemSha256: '8fe54798922afd30541118853b4069f9223149201641c01a2351dca405534ac1',
+    toolsSha256: '2087de9c6ce02dde05f71673eb9866b940f5200659c074885d0c628d4158b5fb',
+    systemSha256: 'f48ae24878afb5f9e35f26f0b7c0194d8b7954d96ec6c7a230a8e4746d48e7bf',
   },
 }

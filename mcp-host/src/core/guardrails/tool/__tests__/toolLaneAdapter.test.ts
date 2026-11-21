@@ -113,3 +113,58 @@ describe('buildToolLaneGuardrail', () => {
     expect(v).toEqual({ content: '[redacted]', isError: true })
   })
 })
+
+describe('derivedFileReadDecision', () => {
+  const rules: GuardrailsConfig = {
+    rules: [
+      { id: 'allow-native', action: 'allow', match: { tool: { provenance: 'native', name: '*' } } },
+      {
+        id: 'ask-secrets',
+        action: 'ask',
+        reasonCode: 'secrets_read',
+        match: {
+          tool: { provenance: 'native', name: 'file_read' },
+          arguments: [{ type: 'path', pointer: '/path', op: 'under', value: 'secrets' }],
+        },
+      },
+    ],
+  }
+
+  it('returns the strictest file_read decision and its reason for the declared reads', () => {
+    const g = buildToolLaneGuardrail(rules)!
+    expect(g.derivedFileReadDecision?.({ paths: ['pub/a.json', 'secrets/a.json'] })).toEqual({
+      decision: 'ask',
+      reasonCode: 'secrets_read',
+    })
+    expect(g.derivedFileReadDecision?.({ paths: ['pub/a.json'] })).toEqual({
+      decision: 'allow',
+      reasonCode: 'rule:allow-native',
+    })
+  })
+
+  it('is undefined on a Host with hooks but no rules, and never calls a hook', () => {
+    let hookCalls = 0
+    const fetchImpl = async () => {
+      hookCalls++
+      return { status: 200, text: async () => '{"decision":"deny","reasonCode":"hook_blocked"}' }
+    }
+    const g = buildToolLaneGuardrail(
+      {
+        hookDescriptors: [
+          {
+            id: 'th',
+            endpoint: 'http://svc',
+            path: '/',
+            lifecyclePoints: ['pre_tool_use'],
+            capabilities: ['may_deny'],
+            failMode: 'closed',
+            order: 100,
+          },
+        ],
+      },
+      { getAuthToken: () => '', fetchImpl }
+    )!
+    expect(g.derivedFileReadDecision?.({ paths: ['secrets/a.json'] })).toBeUndefined()
+    expect(hookCalls).toBe(0)
+  })
+})

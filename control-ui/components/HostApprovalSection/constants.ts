@@ -75,7 +75,7 @@ export const NATIVE_TOOLS: NativeToolMeta[] = [
   {
     name: 'json_transform',
     codeDefault: 'skip',
-    description: 'Transform JSON via JMESPath / jq-style queries.',
+    description: 'Query JSON from a string or a workspace file. File reads follow file_read.',
   },
   {
     name: 'shell_exec',

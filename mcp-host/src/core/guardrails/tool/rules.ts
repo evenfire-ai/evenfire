@@ -9,9 +9,10 @@
  * NOTE (spec §6.1): an `allow` is an affirmative grant over the WHOLE call — a
  * rule that pins only some arguments still permits arbitrary values in the rest.
  */
+import type { FileReads } from '../../interfaces'
 import type { GuardrailRule } from '../config'
 import type { Contributor } from '../types'
-import { type ArgumentPredicate, evaluatePredicate } from './predicates'
+import { type ArgumentPredicate, evaluatePredicate, isUnder } from './predicates'
 import type { ToolIdentity } from './provenance'
 
 const DEFAULT_MAX_RULES = 100
@@ -109,13 +110,93 @@ export function evaluateRules(
     const predicates = (rule.match.arguments ?? []) as ArgumentPredicate[]
     const allMatch = predicates.every(p => evaluatePredicate(args, p))
     if (!allMatch) continue
-    out.push({
-      phase: 'pre',
-      source: 'host_rule',
-      sourceId: rule.id,
-      decision: rule.action,
-      reasonCode: rule.reasonCode ?? `rule:${rule.id}`,
-    })
+    out.push(ruleContribution(rule))
+  }
+  return out
+}
+
+function ruleContribution(rule: GuardrailRule): Contributor<Record<string, unknown>, string> {
+  return {
+    phase: 'pre',
+    source: 'host_rule',
+    sourceId: rule.id,
+    decision: rule.action,
+    reasonCode: rule.reasonCode ?? `rule:${rule.id}`,
+  }
+}
+
+const FILE_READ_IDENTITY: ToolIdentity = { provenance: 'native', name: 'file_read' }
+const FILE_READ_PATH_POINTER = '/path'
+
+/** The unmatched default `file_read {path}` gets from a non-empty rule set. */
+const UNMATCHED_FILE_READ: Contributor<Record<string, unknown>, string> = {
+  phase: 'pre',
+  source: 'current',
+  sourceId: 'unmatched',
+  decision: 'ask',
+  reasonCode: 'unmatched_ask',
+}
+
+function pathPredicates(rule: GuardrailRule): ArgumentPredicate[] {
+  return ((rule.match.arguments ?? []) as ArgumentPredicate[]).filter(
+    p => p.pointer === FILE_READ_PATH_POINTER
+  )
+}
+
+function isStrictFileReadRule(rule: GuardrailRule): boolean {
+  return (rule.action === 'ask' || rule.action === 'deny') && toolMatches(rule, FILE_READ_IDENTITY)
+}
+
+/**
+ * Whether a `/path` predicate can match some path strictly inside `base`, which
+ * `file_read {path: base}` alone does not test. `outside` and `exists` need no
+ * clause: when they match a path inside `base`, they match `base` itself.
+ */
+function canMatchInside(p: ArgumentPredicate, base: string): boolean {
+  const inside = (v: unknown): boolean => typeof v === 'string' && isUnder(v, base)
+  if (p.type === 'path') return (p.op === 'equals' || p.op === 'under') && inside(p.value)
+  if (p.type !== 'json') return false
+  if (p.op === 'equals') return inside(p.value)
+  if (p.op === 'one_of') return Array.isArray(p.value) && p.value.some(inside)
+  // A substring may occur in any path below `base`.
+  return p.op === 'contains'
+}
+
+/**
+ * What the rule set gives `file_read {path}` for each declared read, so a read
+ * through another native tool is never looser than `file_read` itself.
+ *
+ * - Each declared path P gets `file_read {path: P}`'s contributions, allow rules
+ *   included, or the unmatched default when none matches.
+ * - With `subtrees`, P may be a directory whose whole subtree the tool reads,
+ *   so every ask/deny `file_read` rule naming a path inside P also contributes.
+ * - A whole-workspace read takes every ask/deny `file_read` rule with a `/path`
+ *   predicate, whatever its value: some file in the workspace may match it.
+ *
+ * Hooks are not consulted: they see the real tool call under its own name.
+ * Empty when the Host has no rules.
+ */
+export function evaluateDerivedFileReads(
+  compiled: CompiledRules,
+  reads: FileReads
+): Array<Contributor<Record<string, unknown>, string>> {
+  if (!compiled.hasRules) return []
+  const out: Array<Contributor<Record<string, unknown>, string>> = []
+  for (const path of reads.paths) {
+    const direct = evaluateRules(compiled, FILE_READ_IDENTITY, { path })
+    out.push(...(direct.length > 0 ? direct : [UNMATCHED_FILE_READ]))
+    if (!reads.subtrees) continue
+    for (const rule of compiled.rules) {
+      if (!isStrictFileReadRule(rule)) continue
+      if (pathPredicates(rule).some(p => canMatchInside(p, path))) out.push(ruleContribution(rule))
+    }
+  }
+  if (reads.wholeWorkspace) {
+    for (const rule of compiled.rules) {
+      if (isStrictFileReadRule(rule) && pathPredicates(rule).length > 0) {
+        out.push(ruleContribution(rule))
+      }
+    }
   }
   return out
 }
