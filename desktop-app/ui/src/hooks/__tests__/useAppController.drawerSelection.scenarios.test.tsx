@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, waitFor } from '@testing-library/react'
+import { act } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { installAppControllerClerum } from '../domain/__tests__/__fixtures__/appControllerHarness'
 import {
@@ -15,6 +15,7 @@ import {
   seedChats,
   selectInDrawer,
   visibleConversation,
+  waitFor,
   waitForSettled,
 } from '../domain/__tests__/__fixtures__/drawerSelectionFixtures'
 import { type MockClerum, uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'

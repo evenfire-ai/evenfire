@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, waitFor } from '@testing-library/react'
+import { act, cleanup } from '@testing-library/react'
 import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '@constants/navigation'
 import type { AccessCatalog } from '../../../../src/types'
@@ -17,6 +17,7 @@ import {
   messageIdFor,
   routeIndexThroughStore,
   seedChats,
+  waitFor,
 } from '../domain/__tests__/__fixtures__/drawerSelectionFixtures'
 import { type MockClerum, uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
 

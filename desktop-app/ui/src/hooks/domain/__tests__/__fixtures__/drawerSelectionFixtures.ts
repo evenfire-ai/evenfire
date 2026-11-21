@@ -1,5 +1,5 @@
 import { expect } from 'vitest'
-import { act, waitFor } from '@testing-library/react'
+import { act, waitFor as rtlWaitFor } from '@testing-library/react'
 import { resolveGfsPreview } from '../../../../lib/gfsPreview'
 import type { RenderAppControllerResult } from './appControllerHarness'
 import { renderAppController } from './appControllerHarness'
@@ -38,6 +38,16 @@ export function gfsPreview(name = 'notes.md') {
   const preview = resolveGfsPreview({ gfsUri: `gfs://main/${name}`, name, bytes: 12 })
   if (!preview) throw new Error(`Expected ${name} to be previewable`)
   return preview
+}
+
+const ASYNC_WAIT_TIMEOUT_MS = 5_000
+
+/** Real ChatStore-backed effects can exceed Testing Library's 1s default on CI runners. */
+export function waitFor<T>(
+  callback: () => T | Promise<T>,
+  options?: Parameters<typeof rtlWaitFor>[1]
+) {
+  return rtlWaitFor(callback, { timeout: ASYNC_WAIT_TIMEOUT_MS, ...options })
 }
 
 export async function bootApp(): Promise<AppUnderTest> {
