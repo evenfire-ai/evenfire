@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
+import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
 import { createRpcHostActivityStreamRouter } from '../routes/rpcHostActivityStream.js'
@@ -56,31 +57,51 @@ const OLD_SHAPE_CONNECTION = {
 type HostCall = { path: string; headers: Record<string, string> }
 const originalFetch = globalThis.fetch
 let controlApiBody: Record<string, unknown>
+let controlApiHostAccessStatus: number
 let controlApiCalls: string[]
 let hostCalls: HostCall[]
+// Answers the Host request with the given index (0 = first Host call).
+let hostAnswer: (index: number, path: string) => Response
 
 function headersOf(init?: RequestInit): Record<string, string> {
   return Object.fromEntries(new Headers(init?.headers).entries())
 }
 
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion: EDGE_ASSERTION }
+  controlApiHostAccessStatus = 200
   controlApiCalls = []
   hostCalls = []
+  hostAnswer = () => jsonResponse(200, {})
   globalThis.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input)
-    if (url.includes('/rpc/access/users/')) {
+    if (url.startsWith(config.controlApiBaseUrl.replace(/\/+$/, ''))) {
       controlApiCalls.push(url)
-      const body =
+      if (url.endsWith('/wake')) return jsonResponse(200, { status: 'active' })
+      if (controlApiHostAccessStatus !== 200) {
+        return jsonResponse(controlApiHostAccessStatus, { error: 'rejected' })
+      }
+      return jsonResponse(
+        200,
         init?.method === 'POST' ? { ...controlApiBody, bindingStatus: 'recorded' } : controlApiBody
-      return new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
+      )
     }
-    hostCalls.push({ path: new URL(url).pathname, headers: headersOf(init) })
-    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    const path = new URL(url).pathname
+    // The wake-and-hold readiness probe uses the unguarded Host health route;
+    // it is not a guarded Host call.
+    if (path === '/v1/runtime/health' && hostCalls.length > 0) {
+      return jsonResponse(200, { ok: true })
+    }
+    hostCalls.push({ path, headers: headersOf(init) })
+    return hostAnswer(hostCalls.length - 1, path)
   }) as unknown as typeof fetch
 })
 
@@ -339,5 +360,121 @@ describe('route scopes: each rpc-proxy route reaches its Host route only with it
     await request(makeApp()).get('/rpc/hosts/chatllm/sessions').set('authorization', 'Bearer tok')
     expect(hostCalls).toHaveLength(1)
     expect(hostCalls[0]!.path).toBe('/v1/runtime/sessions')
+  })
+})
+
+const HOST_401 = () => jsonResponse(401, { error: 'Invalid runtime edge assertion' })
+
+function hostDownThen(next: () => Response) {
+  return (index: number) => {
+    if (index === 0) throw new TypeError('fetch failed')
+    return next()
+  }
+}
+
+// Routes whose Host forwarder throws UpstreamHostError and whose route ends in
+// respondUpstreamUnavailable.
+const THROWING_FORWARDER_ROWS = ROUTE_SCOPE_ROWS.filter(row =>
+  ['messages', 'task result'].includes(row.label)
+)
+
+// Routes that hand a failure to the app error handler with next(error).
+const NEXT_ERROR_ROWS: RouteRow[] = [
+  ROUTE_SCOPE_ROWS.find(row => row.label === 'status')!,
+  ROUTE_SCOPE_ROWS.find(row => row.label === 'activity')!,
+  {
+    label: 'health',
+    method: 'get',
+    path: '/rpc/hosts/chatllm/health',
+    scope: 'host:health:read',
+    hostPath: '/v1/runtime/health',
+  },
+]
+
+describe('authentication failures reach the client as 401', () => {
+  it.each(THROWING_FORWARDER_ROWS)(
+    '$label: a Host 401 on the first attempt answers 401, not 502',
+    async row => {
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope]))
+      hostAnswer = HOST_401
+
+      const res = await send(row)
+
+      expect(hostCalls).toHaveLength(1)
+      expect(hostCalls[0]!.path).toBe(row.hostPath)
+      expect(res.status).toBe(401)
+      expect(res.body).toEqual({ error: 'Unauthorized' })
+    }
+  )
+
+  it.each(THROWING_FORWARDER_ROWS)(
+    '$label: a Host 401 on the post-wake retry answers 401, not 502',
+    async row => {
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+      hostAnswer = hostDownThen(HOST_401)
+
+      const res = await send(row)
+
+      // Witness: the first attempt failed as Host down, the wake ran, and the
+      // retry reached the Host, which refused it.
+      expect(controlApiCalls.filter(url => url.endsWith('/wake'))).toHaveLength(1)
+      expect(hostCalls).toHaveLength(2)
+      expect(hostCalls[1]!.path).toBe(row.hostPath)
+      expect(res.status).toBe(401)
+      expect(res.body).toEqual({ error: 'Unauthorized' })
+    }
+  )
+
+  it.each(NEXT_ERROR_ROWS)('$label: a Host 401 answers 401, not 500', async row => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope]))
+    hostAnswer = HOST_401
+
+    const res = await send(row)
+
+    expect(hostCalls).toHaveLength(1)
+    expect(hostCalls[0]!.path).toBe(row.hostPath)
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it.each(NEXT_ERROR_ROWS)(
+    '$label: a control-api 401 on the Host resolve answers 401, not 500',
+    async row => {
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope]))
+      controlApiHostAccessStatus = 401
+
+      const res = await send(row)
+
+      // Witness: the resolve reached control-api; its rejection stopped the
+      // request before any Host call.
+      expect(controlApiCalls).toHaveLength(1)
+      expect(hostCalls).toEqual([])
+      expect(res.status).toBe(401)
+      expect(res.body).toEqual({ error: 'Unauthorized' })
+    }
+  )
+
+  it('wake: a control-api 401 on the Host resolve answers 401, not 500', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:wake:write']))
+    controlApiHostAccessStatus = 401
+
+    const res = await request(makeApp())
+      .post('/rpc/hosts/chatllm/wake')
+      .set('authorization', 'Bearer tok')
+
+    expect(controlApiCalls).toHaveLength(1)
+    expect(controlApiCalls[0]).toContain('/mcp-hosts/chatllm')
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('status: any other Host failure keeps the 500 answer', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))
+    hostAnswer = () => jsonResponse(500, { error: 'boom' })
+
+    const res = await send(NEXT_ERROR_ROWS[0]!)
+
+    expect(hostCalls).toHaveLength(1)
+    expect(res.status).toBe(500)
   })
 })

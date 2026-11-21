@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express'
+import { respondAuthenticationFailure } from './routes/rpc.js'
 import { UpstreamBodyReadError } from './services/upstreamBody.js'
 import { isUpstreamTimeoutError } from './services/wakeAndHold.js'
 
@@ -27,6 +28,8 @@ export function apiErrorHandler(
   res: Response,
   _next: NextFunction
 ): void {
+  if (respondAuthenticationFailure(res, err)) return
+
   if (isUpstreamTimeoutError(err)) {
     res.status(504).json({ error: 'Gateway Timeout' })
     return

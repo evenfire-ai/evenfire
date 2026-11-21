@@ -68,7 +68,9 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // Keep legacy denial precedence (scope before body parsing), while v2 route
 // binding must see parsed body data before its remote Control API checkpoint.
 /**
- * Pre-wake host error mapping: fetch timeout → 504, everything else → 502.
+ * Pre-wake host error mapping: an authentication failure gets the answer of
+ * respondAuthenticationFailure (401, or the control-api rejection's answer),
+ * fetch timeout → 504, everything else → 502.
  *
  * Guards `res.headersSent` (§11.5): this is the terminal responder that
  * route-level outer catches invoke after a held request may already have
@@ -84,6 +86,7 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
     )
     return
   }
+  if (respondAuthenticationFailure(res, error)) return
   if (isUpstreamTimeoutError(error)) {
     res.status(504).json({ error: 'Gateway Timeout' })
     return
@@ -189,6 +192,32 @@ export function respondControlApiHostAccessRejection(
     return
   }
   res.status(409).json({ error: 'Direct run attribution conflict' })
+}
+
+/**
+ * The one mapping of an authentication failure to the client, called first by
+ * both terminal error paths (respondUpstreamUnavailable and apiErrorHandler).
+ * A Host 401 means the edge assertion was refused, usually because it or the
+ * RPC token expired: the client gets 401 so it refreshes its token, never a
+ * 500 or 502. A control-api host access rejection gets its own answer. Errors
+ * are matched by `name`, like controlApiHostAccessRejection. Returns false,
+ * having written nothing, for every other error.
+ */
+export function respondAuthenticationFailure(res: ExpressResponse, error: unknown): boolean {
+  if (
+    error instanceof Error &&
+    error.name === 'UpstreamHostError' &&
+    (error as Error & { status?: unknown }).status === 401
+  ) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return true
+  }
+  const rejection = controlApiHostAccessRejection(error)
+  if (rejection) {
+    respondControlApiHostAccessRejection(res, rejection)
+    return true
+  }
+  return false
 }
 
 /**
