@@ -68,6 +68,7 @@ import { gfsResourceOpenTarget, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
 import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
+import { gfsSessionScope } from '@lib/gfsSessionAuthority'
 import { buildGfsWatchKeys, gfsWatchKey, parseGfsWatchKey } from '@lib/gfsWatchKeys'
 import {
   purgeGfsSessionCache,
@@ -1382,10 +1383,11 @@ export function App() {
     [vm.completeGfsResourceNavigationPreview]
   )
 
-  const previewSessionScope =
-    vm.isAuthenticated && vm.me
-      ? `${vm.runtimeConfigState?.envKey ?? ''}:${vm.me.id}:${vm.me.teamId ?? ''}`
-      : null
+  const previewSessionScope = gfsSessionScope({
+    isAuthenticated: vm.isAuthenticated,
+    me: vm.me,
+    runtimeConfigState: vm.runtimeConfigState,
+  })
   const previewSessionGeneration = isGfsSessionGeneration(vm.sessionGeneration)
     ? vm.sessionGeneration
     : null

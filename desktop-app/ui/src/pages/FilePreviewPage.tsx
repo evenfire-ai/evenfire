@@ -13,6 +13,7 @@ import {
 } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import { copyGfsDeepLink, copyGfsResourceId } from '@lib/gfsResourceClipboard'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
 import { useFilePreviewResourceActions } from './useFilePreviewResourceActions'
 
@@ -220,24 +221,21 @@ export function FilePreviewPage({
     unavailable,
   ])
 
-  const handleCopyLink = useCallback(async () => {
-    try {
-      const result = await window.clerum.gfs.copyDeepLink?.(gfsUri)
-      if (!result?.url) throw new Error('Shareable EvenDrive links are unavailable in this version')
-      pushToast?.('Shareable EvenDrive link copied', 'success')
-    } catch (error) {
-      pushToast?.(`Could not copy the EvenDrive link: ${toMessage(error)}`, 'error')
-    }
-  }, [gfsUri, pushToast])
+  const handleCopyLink = useCallback(
+    () =>
+      copyGfsDeepLink(gfsUri, pushToast, {
+        formatError: error => `Could not copy the EvenDrive link: ${toMessage(error)}`,
+      }),
+    [gfsUri, pushToast]
+  )
 
-  const handleCopyRoute = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(gfsUri)
-      pushToast?.('File ID copied', 'success')
-    } catch (error) {
-      pushToast?.(`Could not copy the file ID: ${toMessage(error)}`, 'error')
-    }
-  }, [gfsUri, pushToast])
+  const handleCopyRoute = useCallback(
+    () =>
+      copyGfsResourceId(gfsUri, 'file', pushToast, {
+        formatError: error => `Could not copy the file ID: ${toMessage(error)}`,
+      }),
+    [gfsUri, pushToast]
+  )
 
   const handleCopyContent = useCallback(async () => {
     const copy = copyContentRef.current
