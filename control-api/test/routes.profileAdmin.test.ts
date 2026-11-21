@@ -191,6 +191,8 @@ describe('routes/profileAdmin', () => {
       memberId: 'user-1',
       email: 'existing@example.com',
     })
+    // A retired row still holds its address, so the guard asks for it too.
+    expect(svc.listUsers).toHaveBeenCalledWith('existing@example.com', { includeRetired: true })
     expect(svc.createInvitationForTeams).not.toHaveBeenCalled()
   })
 

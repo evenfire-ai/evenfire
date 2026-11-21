@@ -244,7 +244,16 @@ export async function createAdminUser(email: string, name: string) {
   })
 }
 
-export async function listUsers(searchQuery = '') {
+/**
+ * The Control UI user list: active users only. A retired user keeps its
+ * team_members rows, so listing it would show a removed member with their
+ * teams. `includeRetired` is for the invitation guard alone: a retired row
+ * still holds its address, and an invitation to it could never be accepted.
+ */
+export async function listUsers(
+  searchQuery = '',
+  options: Readonly<{ includeRetired?: boolean }> = {}
+) {
   const query = searchQuery.trim()
   const result = await pool.query(
     `${ADMIN_USER_SELECT}
@@ -255,9 +264,10 @@ export async function listUsers(searchQuery = '') {
         OR COALESCE(p.display_name, '') ILIKE $2
         OR u.id::text = $1
       )
+        AND ($3::boolean OR u.lifecycle_state = 'active')
    ${ADMIN_USER_GROUP_ORDER}
       LIMIT 100`,
-    [query, `%${query}%`]
+    [query, `%${query}%`, options.includeRetired === true]
   )
   return result.rows.map(row => mapAdminUserRow(row as AdminUserRow))
 }

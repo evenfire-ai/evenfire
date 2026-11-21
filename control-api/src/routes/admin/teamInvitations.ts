@@ -14,12 +14,16 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
+/**
+ * Includes retired users: a retired row still holds the address and the
+ * invitation could never be accepted, so it is refused as for an active member.
+ */
 async function findExistingMemberByEmail(
   email: string
 ): Promise<{ id: string; email: string } | null> {
   const normalizedEmail = email.trim().toLowerCase()
   if (!normalizedEmail) return null
-  const matches = await listUsers(normalizedEmail)
+  const matches = await listUsers(normalizedEmail, { includeRetired: true })
   return (
     matches.find(member => String(member.email || '').toLowerCase() === normalizedEmail) || null
   )

@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import { adminDeleteTeam } from '../src/services/directory/teams.js'
-import { adminDeleteUser, retireDesktopUser } from '../src/services/directory/users.js'
+import { adminDeleteUser, listUsers, retireDesktopUser } from '../src/services/directory/users.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.js'
 import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
@@ -28,6 +28,7 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
   let adminPool: Pool
   let testPool: Pool
   let corePoolConnectSpy: ReturnType<typeof vi.spyOn>
+  let corePoolQuerySpy: ReturnType<typeof vi.spyOn>
 
   async function seedUser(label: string): Promise<string> {
     const id = randomUUID()
@@ -88,6 +89,10 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
     corePoolConnectSpy = vi
       .spyOn(pool, 'connect')
       .mockImplementation((() => testPool.connect()) as typeof pool.connect)
+    corePoolQuerySpy = vi
+      .spyOn(pool, 'query')
+      .mockImplementation(((text: string, values?: unknown[]) =>
+        testPool.query(text, values)) as unknown as typeof pool.query)
     await testPool.query(
       `INSERT INTO control_admin_users (id, username, password_hash, role, status)
        VALUES ($1, $2, 'fixture-password-hash', 'admin', 'active')`,
@@ -97,6 +102,7 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
 
   afterAll(async () => {
     try {
+      corePoolQuerySpy?.mockRestore()
       corePoolConnectSpy?.mockRestore()
       await endPoolAndWaitForClients(testPool)
       if (!adminPool) return
@@ -185,6 +191,43 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
 
     const team = await testPool.query(`SELECT 1 FROM teams WHERE id = $1`, [teamId])
     expect(team.rowCount).toBe(1)
+  })
+
+  it('leaves a retired member out of the admin user list, which still lists active members', async () => {
+    const retiredId = await seedLinkedUser('listed-retired')
+    const activeId = await seedUser('listed-active')
+    const teamId = await seedTeamWithMembers([retiredId, activeId])
+    const emailOf = async (userId: string) =>
+      (
+        await testPool.query<{ email: string }>(`SELECT email FROM users WHERE id = $1::uuid`, [
+          userId,
+        ])
+      ).rows[0]!.email
+    const retiredEmail = await emailOf(retiredId)
+    const activeEmail = await emailOf(activeId)
+    expect((await listUsers(retiredEmail)).map(user => user.id)).toEqual([retiredId])
+
+    expect(await retire(retiredId, 'oidc-retire-listed-v1')).toMatchObject({ outcome: 'retired' })
+    // The retired row keeps its active membership row; the list must not show it.
+    const kept = await testPool.query(
+      `SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2::uuid`,
+      [teamId, retiredId]
+    )
+    expect(kept.rows).toEqual([{ status: 'active' }])
+
+    expect(await listUsers(retiredEmail)).toEqual([])
+    expect((await listUsers('')).map(user => user.id)).not.toContain(retiredId)
+    expect(await listUsers(activeEmail)).toEqual([
+      expect.objectContaining({
+        id: activeId,
+        activeTeamCount: 1,
+        teams: [expect.objectContaining({ id: teamId, role: 'admin' })],
+      }),
+    ])
+    // Control: the invitation guard still finds the retired address.
+    expect((await listUsers(retiredEmail, { includeRetired: true })).map(user => user.id)).toEqual([
+      retiredId,
+    ])
   })
 
   it('refuses adminDeleteUser for a linked member', async () => {
