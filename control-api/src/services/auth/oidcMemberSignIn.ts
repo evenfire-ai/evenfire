@@ -188,9 +188,15 @@ async function currentMembershipIn(
 /**
  * The team of the most recently created applied invitation that grants one:
  * its primary team, in the order its acceptance used, with the role the
- * member now has there. That is undefined when the member has no active
- * membership in it (an invitation to a team the member was removed from adds
- * none), and the caller then falls back to the first active team.
+ * member now has there. Every team of an applied invitation has an active
+ * membership that this transaction wrote: an existing member's invitation is
+ * applied only if it inserted a new row in each of its teams, and a new
+ * account's invitations upsert each team as active. Concurrent transactions
+ * cannot see those rows to remove them, and the locks this transaction holds
+ * keep the invitation's teams from changing until it commits. So the first
+ * invitation with a team decides. The result is undefined only when no
+ * applied invitation names a team; the caller then falls back to the first
+ * active team.
  */
 async function latestInvitedTeam(
   db: DbTransactionClient,
