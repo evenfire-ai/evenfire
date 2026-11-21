@@ -68,7 +68,13 @@ import type { TabReferenceSuggestionInput } from '../useTabReferenceSuggestion.t
  *   row, and no visit makes more than three requests (K1). A request without a
  *   visible target is never predicted, so it fails as unpredicted;
  * - if the last applied answer for the current key was transient, it was the
- *   third in a row; if it was usable, the chip is exactly that answer (L1, S6).
+ *   third in a row; if it was usable, the chip is exactly that answer (L1, S6);
+ * - freshness (S7), judged from the server's version timeline and not from
+ *   the reference: once a watched change of the file on screen has been
+ *   observed after the chip's answer was delivered, the chip is at least the
+ *   version the server held at that change, or there is no chip. It runs
+ *   before the comparison with the reference, so a change to the hook's cache
+ *   rule fails here even when the reference copies it.
  *
  * Left to the scenario tests:
  *
@@ -214,6 +220,12 @@ interface Real {
   scheduledDelays: number[]
   visit: number
   visitKey: string | null
+  /** Logical time of the events S7 orders: deliveries and observed changes. */
+  clock: number
+  /** The last time each resolved view reached the hook. */
+  delivered: Map<ResolvedGfsResource, number>
+  /** The last watched change seen while the file was the target on screen. */
+  observed: Partial<Record<FileName, { at: number; serverVersion: number }>>
 }
 
 function previewTab(model: Model) {
@@ -463,6 +475,29 @@ function referenceOf(view: ResolvedGfsResource) {
   }
 }
 
+type Chip = ReturnType<typeof useTabReferenceSuggestion>['candidate']
+
+/** S7, from the server timeline and the delivery log only. */
+function expectFresh(real: Real, file: FileName | undefined, candidate: Chip) {
+  const change = file ? real.observed[file] : undefined
+  if (!candidate || !change) return
+  // Deliveries of an equal view are indistinguishable, so the latest one is
+  // taken: S7 can miss a stale chip this way, never report a fresh one.
+  let deliveredAt = -1
+  for (const [view, at] of real.delivered) {
+    const same =
+      view.gfsUri === candidate.gfsUri &&
+      view.name === candidate.label &&
+      view.version === candidate.version
+    if (same && at > deliveredAt) deliveredAt = at
+  }
+  if (deliveredAt > change.at) return
+  expect(
+    candidate.version,
+    `S7: a chip resolved before a watched change of ${file} is older than server v${change.serverVersion}`
+  ).toBeGreaterThanOrEqual(change.serverVersion)
+}
+
 async function assertAtRest(real: Real) {
   await drain(real)
   expectInStep(real, 'rest')
@@ -470,6 +505,8 @@ async function assertAtRest(real: Real) {
   const candidate = real.hook.result.current.candidate
   const target = targetOf(model)
   const uri = target ? URI[target.file] : null
+
+  expectFresh(real, target?.file, candidate)
 
   // The chip the reference predicts.
   const predicted =
@@ -540,7 +577,10 @@ function observeChange(file: FileName): Cmd {
       model.serverVersion[file] += 1
       // `invalidate` compares against the target on screen and re-keys the hook
       // at once, before the preview refresh below reaches it.
-      if (targetOf(model)?.file === file) model.revision += 1
+      if (targetOf(model)?.file === file) {
+        model.revision += 1
+        real.observed[file] = { at: ++real.clock, serverVersion: model.serverVersion[file] }
+      }
       referenceKeyChanged(real)
       // The URI the watch handler derives from the file's real watch key.
       const parts = parseGfsWatchKey(gfsWatchKey('file', URI[file])!)!
@@ -669,6 +709,9 @@ function setup(scheduler: Scheduler): Real {
     scheduledDelays: [],
     visit: 0,
     visitKey: null,
+    clock: 0,
+    delivered: new Map(),
+    observed: {},
   } as unknown as Real
   Object.defineProperty(window, 'clerum', {
     configurable: true,
@@ -682,6 +725,9 @@ function setup(scheduler: Scheduler): Real {
             return new Promise(() => undefined)
           }
           return scheduler.schedule(Promise.resolve(), `resolve #${call.id}`).then(() => {
+            if (call.answer !== 'reject' && call.answer.status === 'resolved') {
+              real.delivered.set(call.answer.resource, ++real.clock)
+            }
             referenceSettled(real, call.id)
             if (call.answer === 'reject') throw new Error('resolve bridge failed')
             return call.answer
