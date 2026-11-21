@@ -16,7 +16,6 @@ import {
   RPC_PROXY_EDGE_PROTOCOL_V1,
   resolveRuntimeControlScopes,
   resolveWorkflowControlScopes,
-  rpcProxyProtocolCohortIsReady,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
 import { HostContextLogger } from '../src/logger'
@@ -42,7 +41,7 @@ vi.mock('../src/config', () => ({
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
-    hostRpcProxyEdgeProtocol: 'legacy-headers',
+    hostRpcProxyEdgeProtocol: 'signed-assertion-v1',
     channelsNamespace: 'channels',
     hostFullReconcileConcurrency: 2,
     channelReaderImage: 'clerum/channel-reader:test',
@@ -190,83 +189,154 @@ function createReconciler(
 }
 
 describe('HostReconciler', () => {
-  it('recognizes only a complete, current dedicated-header RPC Proxy cohort', () => {
-    const deployment = {
-      metadata: { generation: 4 },
-      spec: {
-        replicas: 2,
-        selector: { matchLabels: { app: 'rpc-proxy' } },
-        template: {
-          metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
-        },
-      },
-      status: { observedGeneration: 4, updatedReplicas: 2, readyReplicas: 2, availableReplicas: 2 },
-    } as unknown as k8s.V1Deployment
-    const pod = (overrides: Partial<k8s.V1Pod> = {}) =>
-      ({
-        metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
-        status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
-        ...overrides,
-      }) as k8s.V1Pod
-    const ready = [pod(), pod()]
+  describe('RPC Proxy edge protocol barrier on Host Deployment writes', () => {
+    const rpcProxyRead = { name: 'rpc-proxy', namespace: 'rpc-proxy' }
+    const rpcProxyPodList = { namespace: 'rpc-proxy', labelSelector: 'app=rpc-proxy' }
 
-    expect(rpcProxyProtocolCohortIsReady(deployment, ready)).toBe(true)
-    expect(
-      rpcProxyProtocolCohortIsReady(deployment, [ready[0]!, pod({ metadata: { labels: {} } })])
-    ).toBe(false)
-    expect(
-      rpcProxyProtocolCohortIsReady(deployment, [
-        ready[0]!,
-        pod({ metadata: { deletionTimestamp: new Date('2026-10-03T00:00:00.000Z') } }),
-      ])
-    ).toBe(false)
-    expect(
-      rpcProxyProtocolCohortIsReady(
-        { ...deployment, status: { ...deployment.status, observedGeneration: 3 } },
-        ready
-      )
-    ).toBe(false)
-    expect(
-      rpcProxyProtocolCohortIsReady(
-        {
-          ...deployment,
-          spec: {
-            ...deployment.spec,
-            replicas: 0,
-            selector: deployment.spec?.selector ?? { matchLabels: {} },
-            template: deployment.spec?.template ?? { metadata: {}, spec: { containers: [] } },
+    function rpcProxyDeployment(templateLabel: string | undefined): k8s.V1Deployment {
+      return {
+        metadata: { name: 'rpc-proxy', namespace: 'rpc-proxy', generation: 3 },
+        spec: {
+          selector: { matchLabels: { app: 'rpc-proxy' } },
+          template: {
+            metadata: {
+              labels: templateLabel ? { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: templateLabel } : {},
+            },
           },
         },
-        []
-      )
-    ).toBe(false)
-  })
-
-  it('fails closed before creating a strict Host Deployment for an old Proxy cohort', async () => {
-    const mutableConfig = (await import('../src/config')).config as unknown as {
-      hostRpcProxyEdgeProtocol?: string
+        status: { observedGeneration: 3 },
+      }
     }
-    const previousProtocol = mutableConfig.hostRpcProxyEdgeProtocol
-    mutableConfig.hostRpcProxyEdgeProtocol = RPC_PROXY_EDGE_PROTOCOL_V1
-    onTestFinished(() => {
-      mutableConfig.hostRpcProxyEdgeProtocol = previousProtocol
-    })
 
-    const { reconciler, appsApi, coreApi } = createReconciler()
-    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 }).mockResolvedValueOnce({
-      metadata: { generation: 1 },
-      spec: {
-        replicas: 2,
-        template: { metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: 'legacy-headers' } } },
-      },
-      status: { observedGeneration: 1, updatedReplicas: 2, readyReplicas: 2, availableReplicas: 2 },
-    })
-    coreApi.listNamespacedPod.mockResolvedValue({ items: [] })
+    /** Route Deployment reads: rpc-proxy gets `proxy`, the Host gets `host` (404 when null). */
+    function routeDeploymentReads(
+      appsApi: ReturnType<typeof createMockAppsApi>,
+      proxy: k8s.V1Deployment,
+      host: k8s.V1Deployment | null
+    ) {
+      appsApi.readNamespacedDeployment.mockImplementation(
+        async ({ name, namespace }: { name: string; namespace: string }) => {
+          if (name === 'rpc-proxy' && namespace === 'rpc-proxy') return structuredClone(proxy)
+          if (host === null) throw { code: 404 }
+          return structuredClone(host)
+        }
+      )
+    }
 
-    await expect((reconciler as any).ensureDeployment(makeHost(), [], undefined)).rejects.toThrow(
-      'strict MCP Host rollout is blocked'
+    function existingHostDeployment(
+      reconciler: HostReconciler,
+      templateLabel: string
+    ): k8s.V1Deployment {
+      const existing = structuredClone(reconciler.buildDeployment(makeHost()))
+      existing.metadata = { ...existing.metadata, resourceVersion: '9', uid: 'deployment-uid' }
+      existing.spec!.template.metadata!.labels![RPC_PROXY_EDGE_PROTOCOL_LABEL] = templateLabel
+      return existing
+    }
+
+    it.each([
+      ['a template without the protocol label', rpcProxyDeployment(undefined), []],
+      ['a template on a retired protocol value', rpcProxyDeployment('dedicated-header-v1'), []],
+      [
+        'an unobserved generation',
+        { ...rpcProxyDeployment(RPC_PROXY_EDGE_PROTOCOL_V1), status: { observedGeneration: 2 } },
+        [],
+      ],
+      [
+        'a running pod without the protocol label',
+        rpcProxyDeployment(RPC_PROXY_EDGE_PROTOCOL_V1),
+        [{ metadata: { labels: { app: 'rpc-proxy' } }, status: { phase: 'Running' } }],
+      ],
+    ] satisfies Array<[string, k8s.V1Deployment, k8s.V1Pod[]]>)(
+      'refuses to create a Host Deployment while the RPC Proxy cohort has %s',
+      async (_case, proxy, pods) => {
+        const { reconciler, appsApi, coreApi } = createReconciler()
+        routeDeploymentReads(appsApi, proxy, null)
+        coreApi.listNamespacedPod.mockResolvedValue({ items: pods })
+
+        await expect(
+          (reconciler as any).ensureDeployment(makeHost(), [], undefined)
+        ).rejects.toThrow('strict MCP Host rollout is blocked')
+
+        expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith(rpcProxyRead)
+        expect(coreApi.listNamespacedPod).toHaveBeenCalledWith(rpcProxyPodList)
+        expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      }
     )
-    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+
+    it('creates a labelled Host Deployment once the RPC Proxy cohort carries the protocol', async () => {
+      const { reconciler, appsApi, coreApi } = createReconciler()
+      routeDeploymentReads(appsApi, rpcProxyDeployment(RPC_PROXY_EDGE_PROTOCOL_V1), null)
+      coreApi.listNamespacedPod.mockResolvedValue({
+        items: [
+          {
+            metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
+            status: { phase: 'Running' },
+          },
+        ],
+      })
+
+      await (reconciler as any).ensureDeployment(makeHost(), [], undefined)
+
+      expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith(rpcProxyRead)
+      expect(coreApi.listNamespacedPod).toHaveBeenCalledWith(rpcProxyPodList)
+      expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
+      const created = appsApi.createNamespacedDeployment.mock.calls[0]![0].body as k8s.V1Deployment
+      expect(created.spec?.template.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL]).toBe(
+        'signed-assertion-v1'
+      )
+    })
+
+    it.each(['legacy-headers', 'dedicated-header-v1'])(
+      'refuses to move a Host Deployment labelled %s onto the protocol while the RPC Proxy cohort lacks it',
+      async retired => {
+        const { reconciler, appsApi, coreApi } = createReconciler()
+        routeDeploymentReads(
+          appsApi,
+          rpcProxyDeployment(retired),
+          existingHostDeployment(reconciler, retired)
+        )
+
+        await expect(
+          (reconciler as any).ensureDeployment(makeHost(), [], undefined)
+        ).rejects.toThrow('strict MCP Host rollout is blocked')
+
+        expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith(rpcProxyRead)
+        expect(coreApi.listNamespacedPod).toHaveBeenCalledWith(rpcProxyPodList)
+        expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+      }
+    )
+
+    it('moves a Host Deployment onto the protocol once the RPC Proxy cohort carries it', async () => {
+      const { reconciler, appsApi, coreApi } = createReconciler()
+      routeDeploymentReads(
+        appsApi,
+        rpcProxyDeployment(RPC_PROXY_EDGE_PROTOCOL_V1),
+        existingHostDeployment(reconciler, 'dedicated-header-v1')
+      )
+
+      await (reconciler as any).ensureDeployment(makeHost(), [], undefined)
+
+      expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith(rpcProxyRead)
+      expect(coreApi.listNamespacedPod).toHaveBeenCalledWith(rpcProxyPodList)
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+    })
+
+    it('replaces an already labelled Host Deployment without reading the RPC Proxy cohort', async () => {
+      const { reconciler, appsApi, coreApi } = createReconciler()
+      const existing = existingHostDeployment(reconciler, RPC_PROXY_EDGE_PROTOCOL_V1)
+      existing.spec!.template.spec!.terminationGracePeriodSeconds = 120
+      routeDeploymentReads(appsApi, rpcProxyDeployment(undefined), existing)
+
+      await (reconciler as any).ensureDeployment(makeHost(), [], undefined)
+
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+      expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith({
+        namespace: 'mcp-host',
+        name: 'alpha-host',
+      })
+      expect(appsApi.readNamespacedDeployment).not.toHaveBeenCalledWith(rpcProxyRead)
+      expect(coreApi.listNamespacedPod).not.toHaveBeenCalledWith(rpcProxyPodList)
+    })
   })
 
   it('keys GFS lifecycle evidence by namespace/name/uid and refuses a missing uid (#696)', () => {

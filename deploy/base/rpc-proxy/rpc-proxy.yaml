@@ -28,7 +28,7 @@ spec:
     metadata:
       labels:
         app: rpc-proxy
-        clerum.io/rpc-proxy-edge-protocol: dedicated-header-v1
+        clerum.io/rpc-proxy-edge-protocol: signed-assertion-v1
     spec:
       automountServiceAccountToken: false
       containers:

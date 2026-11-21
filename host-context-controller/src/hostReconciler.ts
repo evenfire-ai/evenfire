@@ -100,33 +100,32 @@ const HOST_GROUP = 'clerum.io'
 const HOST_VERSION = 'v1alpha1'
 const HOST_PLURAL = 'hosts'
 export const RPC_PROXY_EDGE_PROTOCOL_LABEL = 'clerum.io/rpc-proxy-edge-protocol'
-export const RPC_PROXY_EDGE_PROTOCOL_V1 = 'dedicated-header-v1'
+export const RPC_PROXY_EDGE_PROTOCOL_V1 = 'signed-assertion-v1'
 
+/**
+ * True when no RPC Proxy pod can still serve without the edge assertion: the
+ * Deployment's current generation is observed, its template carries the
+ * protocol label, and every pod that is not terminal (Succeeded or Failed)
+ * carries it too. Terminating pods count, because they can serve during their
+ * grace period. Replica counts and readiness are deliberately not read: a surge
+ * rollout of a labelled release, an eviction or a failed pod must not block
+ * Host Deployment writes.
+ */
 export function rpcProxyProtocolCohortIsReady(
   deployment: k8s.V1Deployment,
   pods: k8s.V1Pod[]
 ): boolean {
-  const desired = deployment.spec?.replicas ?? 1
   const generation = deployment.metadata?.generation
   return (
-    desired > 0 &&
     typeof generation === 'number' &&
     (deployment.status?.observedGeneration ?? 0) >= generation &&
-    deployment.status?.updatedReplicas === desired &&
-    deployment.status?.readyReplicas === desired &&
-    deployment.status?.availableReplicas === desired &&
     deployment.spec?.template?.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] ===
       RPC_PROXY_EDGE_PROTOCOL_V1 &&
-    pods.length === desired &&
-    pods.every(
-      pod =>
-        !pod.metadata?.deletionTimestamp &&
-        pod.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] === RPC_PROXY_EDGE_PROTOCOL_V1 &&
-        pod.status?.phase === 'Running' &&
-        pod.status.conditions?.some(
-          condition => condition.type === 'Ready' && condition.status === 'True'
-        )
-    )
+    pods
+      .filter(pod => pod.status?.phase !== 'Succeeded' && pod.status?.phase !== 'Failed')
+      .every(
+        pod => pod.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] === RPC_PROXY_EDGE_PROTOCOL_V1
+      )
   )
 }
 
@@ -752,7 +751,7 @@ export class HostReconciler {
     })
     if (!rpcProxyProtocolCohortIsReady(deployment, pods.items ?? [])) {
       throw new Error(
-        'RPC Proxy edge protocol cohort is not fully ready; strict MCP Host rollout is blocked'
+        'RPC Proxy edge protocol cohort is not fully on signed-assertion-v1; strict MCP Host rollout is blocked'
       )
     }
   }
@@ -3614,9 +3613,7 @@ export class HostReconciler {
       [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
       [HOST_LABEL]: host.name,
       [CONTEXT_LABEL]: host.spec.contextRef,
-      ...(config.hostRpcProxyEdgeProtocol
-        ? { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: config.hostRpcProxyEdgeProtocol }
-        : {}),
+      [RPC_PROXY_EDGE_PROTOCOL_LABEL]: config.hostRpcProxyEdgeProtocol,
     }
 
     const isDesktop = !!(host.spec.desktop?.browser || host.spec.desktop?.x11)
@@ -3700,16 +3697,6 @@ export class HostReconciler {
           secretKeyRef: {
             name: mcpHostRuntimeTokenSecretName(host),
             key: MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY,
-          },
-        },
-      },
-      {
-        name: 'MCP_HOST_RPC_PROXY_EDGE_TOKEN',
-        valueFrom: {
-          secretKeyRef: {
-            name: 'rpc-proxy-edge-credentials',
-            key: 'RPC_PROXY_MCP_HOST_EDGE_TOKEN',
-            optional: config.hostRpcProxyEdgeProtocol !== RPC_PROXY_EDGE_PROTOCOL_V1,
           },
         },
       },
@@ -4390,14 +4377,11 @@ export class HostReconciler {
           applied = false
           return
         }
-        if (
-          config.hostRpcProxyEdgeProtocol === RPC_PROXY_EDGE_PROTOCOL_V1 &&
-          deployment.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] ===
-            RPC_PROXY_EDGE_PROTOCOL_V1
-        ) {
-          await this.assertRpcProxyEdgeCohortReady()
-          revalidate?.()
-        }
+        // Every Host Deployment HCC writes carries the edge protocol label, so a
+        // create always waits for the RPC Proxy cohort that forwards its edge
+        // assertion.
+        await this.assertRpcProxyEdgeCohortReady()
+        revalidate?.()
         return observeCreate('Deployment', () =>
           this.appsApi.createNamespacedDeployment({ namespace: host.namespace, body: deployment })
         )
@@ -4420,12 +4404,12 @@ export class HostReconciler {
           mutationAllowed,
           read,
           replace: async body => {
+            // A replace that moves a Host onto the protocol label waits for the
+            // RPC Proxy cohort; a Host already labelled needs no barrier.
             if (
-              config.hostRpcProxyEdgeProtocol === RPC_PROXY_EDGE_PROTOCOL_V1 &&
               deploymentBeingReplaced?.spec?.template?.metadata?.labels?.[
                 RPC_PROXY_EDGE_PROTOCOL_LABEL
-              ] !== RPC_PROXY_EDGE_PROTOCOL_V1 &&
-              body.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] === RPC_PROXY_EDGE_PROTOCOL_V1
+              ] !== RPC_PROXY_EDGE_PROTOCOL_V1
             ) {
               await this.assertRpcProxyEdgeCohortReady()
               revalidate?.()
