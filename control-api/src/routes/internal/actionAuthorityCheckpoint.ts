@@ -25,7 +25,7 @@ import {
 import { revalidateWorkflowTriggerCheckpoint } from '../../services/workflows/workflowTriggerCheckpointRevalidation.js'
 import {
   HostEdgeAssertionBindingError,
-  issueHostEdgeAssertion,
+  issueCheckpointHostEdgeAssertion,
 } from '../../utils/auth/hostEdgeAssertion.js'
 import {
   HostMessageAdmissionReceiptBindingError,
@@ -158,28 +158,9 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
         ) {
           try {
             edgeAssertionField = {
-              hostEdgeAssertion: issueHostEdgeAssertion({
-                v: 2,
-                sub: result.attribution.userId,
-                host: result.destination.ref,
-                expBound:
-                  result.validUntil === null
-                    ? null
-                    : Math.floor(Date.parse(result.validUntil) / 1000),
-                fields: {
-                  operationId: parsed.operationId,
-                  delegationJti: parsed.delegationJti,
-                  sid: result.attribution.sid,
-                  sessionVersion: result.attribution.sessionVersion,
-                  accessPathId: result.attribution.accessPathId,
-                  pathKind: result.attribution.pathKind,
-                  effectiveTeamId: result.attribution.effectiveTeamId,
-                  resource: parsed.resource,
-                  targetHash: parsed.targetHash,
-                  authorizationRevision: result.authorizationRevision,
-                  behaviorBindingHash: result.behaviorBindingHash,
-                  checkedAt: result.checkedAt,
-                },
+              hostEdgeAssertion: issueCheckpointHostEdgeAssertion({
+                request: parsed,
+                result: { ...result, destination: result.destination },
               }),
             }
           } catch (error) {

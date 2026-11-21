@@ -98,3 +98,54 @@ export function issueHostEdgeAssertion(
     }
   )
 }
+
+/** The allowed Host checkpoint and the request it answered, as the v 2 assertion binds them. */
+export type CheckpointHostEdgeAssertionInput = Readonly<{
+  request: Pick<
+    HostEdgeAssertionV2BoundClaims,
+    'operationId' | 'delegationJti' | 'resource' | 'targetHash'
+  >
+  result: Readonly<{
+    attribution: Pick<
+      HostEdgeAssertionV2BoundClaims,
+      'sid' | 'sessionVersion' | 'accessPathId' | 'pathKind' | 'effectiveTeamId'
+    > &
+      Readonly<{ userId: string }>
+    destination: Readonly<{ ref: string }>
+    validUntil: string | null
+    authorizationRevision: string
+    behaviorBindingHash: string
+    checkedAt: string
+  }>
+}>
+
+/**
+ * Signs the v 2 assertion for an allowed checkpoint whose destination is a Host. The claims
+ * come from the checkpoint result and the request it answered, and the lifetime is bounded
+ * by the checkpoint's `validUntil`.
+ */
+export function issueCheckpointHostEdgeAssertion({
+  request,
+  result,
+}: CheckpointHostEdgeAssertionInput): string {
+  return issueHostEdgeAssertion({
+    v: 2,
+    sub: result.attribution.userId,
+    host: result.destination.ref,
+    expBound: result.validUntil === null ? null : Math.floor(Date.parse(result.validUntil) / 1000),
+    fields: {
+      operationId: request.operationId,
+      delegationJti: request.delegationJti,
+      sid: result.attribution.sid,
+      sessionVersion: result.attribution.sessionVersion,
+      accessPathId: result.attribution.accessPathId,
+      pathKind: result.attribution.pathKind,
+      effectiveTeamId: result.attribution.effectiveTeamId,
+      resource: request.resource,
+      targetHash: request.targetHash,
+      authorizationRevision: result.authorizationRevision,
+      behaviorBindingHash: result.behaviorBindingHash,
+      checkedAt: result.checkedAt,
+    },
+  })
+}

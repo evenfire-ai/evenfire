@@ -17,11 +17,13 @@ async function main(): Promise<void> {
     { knownBehavior },
     { checkpointActionAuthority },
     { issueHostMessageAdmissionReceipt },
+    { issueCheckpointHostEdgeAssertion },
   ] = await Promise.all([
     import('../../src/services/access/accessExecutionBudget.js'),
     import('../../src/services/access/accessPath.js'),
     import('../../src/services/access/actionAuthorityCheckpoint.js'),
     import('../../src/utils/auth/hostMessageAdmissionReceipt.js'),
+    import('../../src/utils/auth/hostEdgeAssertion.js'),
   ])
   const input = JSON.parse(process.argv[2] ?? '') as FixtureInput
   const behavior = Object.freeze({
@@ -93,7 +95,19 @@ async function main(): Promise<void> {
               ),
           }
         : response
-    process.stdout.write(JSON.stringify(withAdmissionReceipt))
+    // The route issues the assertion to rpc-proxy for an allowed Host checkpoint; this
+    // fixture stands for rpc-proxy's call, so it carries the same assertion.
+    const withEdgeAssertion =
+      withAdmissionReceipt.status === 'allowed' && withAdmissionReceipt.destination?.kind === 'host'
+        ? {
+            ...withAdmissionReceipt,
+            hostEdgeAssertion: issueCheckpointHostEdgeAssertion({
+              request: input.request,
+              result: { ...withAdmissionReceipt, destination: withAdmissionReceipt.destination },
+            }),
+          }
+        : withAdmissionReceipt
+    process.stdout.write(JSON.stringify(withEdgeAssertion))
   } finally {
     budget.close()
   }
