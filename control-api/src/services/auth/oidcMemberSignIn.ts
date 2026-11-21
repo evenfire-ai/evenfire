@@ -71,9 +71,13 @@ function byCreation(a: PendingInvitation, b: PendingInvitation): number {
  * admin-desktop-access, expired, revoked and draft invitations are never
  * selected.
  *
- * The locked rows are applied oldest created first, so of two invitations to
- * one team the latest created sets the role. Returns the applied invitations
- * in that order.
+ * The member did not choose these invitations, so their memberships are
+ * insert-only: an invitation adds a team only where the account has no
+ * team_members row in any status. It never changes an existing role and never
+ * restores a removed membership; the invitation is still accepted. The locked
+ * rows are applied newest created first, so of two invitations to one new
+ * team the latest created sets the role. Returns the applied invitations
+ * oldest created first.
  */
 async function applyPendingInvitations(
   db: DbTransactionClient,
@@ -94,15 +98,20 @@ async function applyPendingInvitations(
         FOR UPDATE OF i`,
     [account.email]
   )
+  const newestFirst = [...(pending.rows as PendingInvitation[])].sort(byCreation).reverse()
   const applied: InvitationRow[] = []
-  for (const invitation of [...(pending.rows as PendingInvitation[])].sort(byCreation)) {
+  for (const invitation of newestFirst) {
     // The row is locked and matched the same predicates, so a false return is
     // not expected; only an acceptance that happened is counted.
-    if (await acceptPendingMembershipInvitation(db, invitation, account.userId)) {
+    if (
+      await acceptPendingMembershipInvitation(db, invitation, account.userId, {
+        membershipWrite: 'insert_only',
+      })
+    ) {
       applied.push(invitation)
     }
   }
-  return applied
+  return applied.reverse()
 }
 
 /** The member's current, active membership in one team. */
@@ -126,7 +135,9 @@ async function currentMembershipIn(
 /**
  * The team of the most recently created applied invitation that grants one:
  * its primary team, in the order its acceptance used, with the role the
- * acceptances left there.
+ * member now has there. That is undefined when the member has no active
+ * membership in it (an invitation to a team the member was removed from adds
+ * none), and the caller then falls back to the first active team.
  */
 async function latestInvitedTeam(
   db: DbTransactionClient,
@@ -155,8 +166,8 @@ async function signInResolvedMember(
 
   // An existing member's team is chosen before the invitations are applied:
   // a member who already has a team keeps it, with its role read again
-  // afterwards, because an invitation to that team may have changed it. A kept
-  // membership that a concurrent removal ended meanwhile counts as no team.
+  // afterwards. Invitations never change an existing membership here, but a
+  // concurrent removal may have ended it meanwhile; it then counts as no team.
   // A teamless member, and an account created by this sign-in (whose only team
   // so far is the new-member team), land in the team of the most recently
   // created applied invitation; otherwise in their first active team, which

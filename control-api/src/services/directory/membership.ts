@@ -130,22 +130,49 @@ async function invitationListResponse(
   })
 }
 
+/**
+ * How an acceptance writes the invitation's team memberships.
+ * - `upsert`: the invitee accepted this invitation themselves (invitation link,
+ *   password login). The invited role replaces an existing one and a removed
+ *   membership becomes active again.
+ * - `insert_only`: the invitation is applied without the invitee choosing it
+ *   (OIDC sign-in). A membership is added only for a team where the user has no
+ *   team_members row in any status; an existing row, including a removed one,
+ *   is never changed, so an invitation can neither demote nor restore a member.
+ */
+export type InvitationMembershipWrite = 'upsert' | 'insert_only'
+
 async function applyInvitationMemberships(
   db: Pick<DbClient, 'query'>,
   invitation: InvitationRow,
-  userId: string
+  userId: string,
+  write: InvitationMembershipWrite
 ): Promise<InvitationTeamRow[]> {
   const teams = await loadInvitationTeams(db, invitation.id, invitation)
   if (teams.length === 0) return teams
 
-  await db.query(
-    `INSERT INTO team_members(team_id, user_id, role, status)
-     SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
-       FROM jsonb_to_recordset($1::jsonb) AS item(team_id text, role text)
-     ON CONFLICT (team_id, user_id)
-     DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()`,
-    [JSON.stringify(teams.map(team => ({ team_id: team.team_id, role: team.role }))), userId]
-  )
+  const values = [
+    JSON.stringify(teams.map(team => ({ team_id: team.team_id, role: team.role }))),
+    userId,
+  ]
+  if (write === 'insert_only') {
+    await db.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
+         FROM jsonb_to_recordset($1::jsonb) AS item(team_id text, role text)
+       ON CONFLICT (team_id, user_id) DO NOTHING`,
+      values
+    )
+  } else {
+    await db.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
+         FROM jsonb_to_recordset($1::jsonb) AS item(team_id text, role text)
+       ON CONFLICT (team_id, user_id)
+       DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()`,
+      values
+    )
+  }
 
   return teams
 }
@@ -153,12 +180,14 @@ async function applyInvitationMemberships(
 /**
  * The single-use transition of a pending invitation. Its predicates are the
  * last guard against consuming a revoked, expired or password-reset row, so
- * they hold even when a caller skipped its own refusals.
+ * they hold even when a caller skipped its own refusals. The memberships are
+ * written as `membershipWrite` says, `upsert` unless the caller asks otherwise.
  */
 export async function acceptPendingMembershipInvitation(
   db: Pick<DbClient, 'query'>,
   invitation: InvitationRow,
-  userId: string
+  userId: string,
+  options: Readonly<{ membershipWrite?: InvitationMembershipWrite }> = {}
 ): Promise<boolean> {
   const consumed = await db.query(
     `UPDATE invitations
@@ -173,7 +202,7 @@ export async function acceptPendingMembershipInvitation(
     [invitation.id, userId]
   )
   if ((consumed.rowCount ?? 0) === 0) return false
-  await applyInvitationMemberships(db, invitation, userId)
+  await applyInvitationMemberships(db, invitation, userId, options.membershipWrite ?? 'upsert')
   return true
 }
 
