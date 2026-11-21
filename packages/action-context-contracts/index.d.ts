@@ -3,8 +3,123 @@ export declare const ACTION_OPERATION_SCOPE_PREFIX: 'action:'
 export declare const ACTION_TARGET_HASH_PREFIX: 'ath2_'
 export declare const ACTION_BEHAVIOR_HASH_PREFIX: 'bh2_'
 export declare const ACTION_AUTHORITY_CHECKPOINT_PATH: '/api/v1/internal/action-authority/checkpoint'
-export declare const RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER: 'x-clerum-rpc-proxy-edge-token'
-export declare const RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT: 'dev-rpc-proxy-mcp-host-edge-token'
+export declare const HOST_EDGE_ASSERTION_HEADER: 'x-clerum-edge-assertion'
+export declare const HOST_EDGE_ASSERTION_AUDIENCE: 'evenfire-host-runtime-edge'
+export declare const HOST_EDGE_ASSERTION_JWT_TYPE: 'host-edge-assertion+jwt'
+export declare const HOST_EDGE_ASSERTION_CLAIM_TYPE: 'host_edge_assertion'
+export declare const HOST_EDGE_ASSERTION_MAX_TTL_SECONDS: 300
+export declare const HOST_EDGE_ASSERTION_V1_CLAIM_KEYS: readonly [
+  'typ',
+  'v',
+  'iss',
+  'aud',
+  'sub',
+  'host',
+  'jti',
+  'iat',
+  'exp',
+  'teamId',
+  'scopes',
+]
+export declare const HOST_EDGE_ASSERTION_V2_CLAIM_KEYS: readonly [
+  'typ',
+  'v',
+  'iss',
+  'aud',
+  'sub',
+  'host',
+  'jti',
+  'iat',
+  'exp',
+  'operationId',
+  'delegationJti',
+  'sid',
+  'sessionVersion',
+  'accessPathId',
+  'pathKind',
+  'effectiveTeamId',
+  'resource',
+  'targetHash',
+  'authorizationRevision',
+  'behaviorBindingHash',
+  'checkedAt',
+]
+export type HostEdgeRpcProxyRoute =
+  | 'GET /v1/runtime/status'
+  | 'GET /v1/runtime/activity'
+  | 'GET /v1/runtime/activity/stream'
+  | 'POST /v1/runtime/messages'
+  | 'POST /v1/runtime/approvals/approve'
+  | 'POST /v1/runtime/approvals/deny'
+  | 'GET /v1/runtime/sessions/search'
+  | 'GET /v1/runtime/sessions'
+  | 'GET /v1/runtime/sessions/:agent/:chatId/messages'
+  | 'GET /v1/runtime/sessions/:agent/:chatId/context-breakdown'
+  | 'GET /v1/runtime/tasks/:taskId/result'
+  | 'POST /v1/runtime/tasks/:taskId/cancel'
+  | 'GET /v1/runtime/models'
+  | 'POST /v1/runtime/model'
+  | 'PATCH /v1/runtime/sessions/:agent/:chatId/name'
+  | 'GET /v1/runtime/tasks/:taskId/progress/stream'
+  | 'GET /v1/runtime/artifacts'
+  | 'GET /v1/runtime/artifacts/:filename/download'
+export type HostEdgeRpcProxyScope =
+  | 'host:status:read'
+  | 'host:activity:read'
+  | 'host:message:invoke'
+  | 'host:approval:write'
+  | 'host:session:read'
+  | 'host:session:write'
+  | 'host:model:write'
+  | 'host:task:read'
+export declare const HOST_EDGE_RPC_PROXY_ROUTE_SCOPES: Readonly<
+  Record<HostEdgeRpcProxyRoute, HostEdgeRpcProxyScope>
+>
+export interface HostEdgeAssertionV1Claims {
+  typ: 'host_edge_assertion'
+  v: 1
+  iss: string
+  aud: 'evenfire-host-runtime-edge'
+  sub: string
+  host: string
+  jti: string
+  iat: number
+  exp: number
+  teamId: string | null
+  scopes: string[]
+}
+export interface HostEdgeAssertionV2BoundClaims {
+  operationId: ActionOperationId
+  delegationJti: string
+  sid: string
+  sessionVersion: number
+  accessPathId: string
+  pathKind: 'direct' | 'team'
+  effectiveTeamId: string | null
+  resource: CanonicalResourceIdentityWire
+  targetHash: string
+  authorizationRevision: string
+  behaviorBindingHash: string
+  checkedAt: string
+}
+export interface HostEdgeAssertionV2Claims extends HostEdgeAssertionV2BoundClaims {
+  typ: 'host_edge_assertion'
+  v: 2
+  iss: string
+  aud: 'evenfire-host-runtime-edge'
+  sub: string
+  host: string
+  jti: string
+  iat: number
+  exp: number
+}
+export type HostEdgeAssertionExpectation =
+  | { v: 1; iss: string; host: string; sub: string; teamId: string | null; requiredScope: string }
+  | ({ v: 2; iss: string; host: string; sub: string } & HostEdgeAssertionV2BoundClaims)
+export declare function validateHostEdgeAssertionClaims(
+  payload: unknown,
+  expected: HostEdgeAssertionExpectation
+): Readonly<{ ok: true } | { ok: false; error: string }>
 export declare const ACTION_AUTHORITY_DESTINATION_KINDS: readonly ['host', 'mcp_server']
 export declare const ACCESS_RESOURCE_TYPES: readonly [
   'user',
