@@ -251,6 +251,7 @@ function allowedCheckpointBody(): Response {
       ref: 'mcp-host/chatllm',
       url: 'http://chatllm.mcp-host.svc.cluster.local:3000',
     },
+    hostEdgeAssertion: 'eyJhbGciOiJSUzI1NiJ9.eyJ2IjoyfQ.c2lnbmF0dXJl',
   })
 }
 

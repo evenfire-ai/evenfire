@@ -85,6 +85,18 @@ export async function resolveServerConnectionForUser(
   }
 }
 
+/**
+ * The edge assertion of a V2 checkpoint whose destination is a Host.
+ * `authorizeActionV2` refuses such a checkpoint without one, so a missing
+ * assertion here is a broken invariant and throws.
+ */
+export function v2HostEdgeAssertion(authorizedActionV2: AuthorizedActionV2): string {
+  if (authorizedActionV2.hostEdgeAssertion === null) {
+    throw new Error('V2 Host checkpoint carries no edge assertion')
+  }
+  return authorizedActionV2.hostEdgeAssertion
+}
+
 export async function resolveHostConnectionForUser(
   userId: string,
   hostRef: string,
@@ -108,7 +120,7 @@ export async function resolveHostConnectionForUser(
     host = {
       name: hostRef,
       url: destination.url,
-      headers: {},
+      headers: { [HOST_EDGE_ASSERTION_HEADER]: v2HostEdgeAssertion(authorizedActionV2) },
       attributionBindingStatus: undefined,
     }
   } else {

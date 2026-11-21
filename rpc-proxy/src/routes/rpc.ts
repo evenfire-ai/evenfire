@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
+import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
 import {
   ActionAuthorityCheckpointError,
   actionAuthorityCacheKey,
@@ -51,6 +52,7 @@ import {
   refreshV1HostConnection,
   resolveHostConnectionForUser,
   resolveServerConnectionForUser,
+  v2HostEdgeAssertion,
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
 import { readMutatingResponseBody } from '../services/upstreamBody.js'
@@ -288,8 +290,13 @@ function wakeAndHoldAuthorityOptions(
             }
           : {}),
       })
+      // Both headers come from the same checkpoint and are written together,
+      // with no await between them: never a newer context with an older
+      // assertion.
+      const assertion = v2HostEdgeAssertion(refreshed)
       req.authorizedActionV2 = refreshed
       host.headers['x-clerum-edge-action-context'] = refreshed.trustedEdgeHeader
+      host.headers[HOST_EDGE_ASSERTION_HEADER] = assertion
     },
   }
 }
