@@ -1617,7 +1617,7 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       expect(await userRow(userId)).toEqual([{ lifecycle_state: 'retired' }])
     })
 
-    it('keeps a retired row when the OIDC configuration cannot be read', async () => {
+    it('keeps a retired row when the OIDC configuration cannot be read while the switch is set', async () => {
       // The switch without its release guard: the loader refuses the configuration.
       const { CONTROL_API_OIDC_UNRELEASED: _guard, ...switchWithoutGuard } = entraFake(
         'fake-entra-unreadable-removal'
