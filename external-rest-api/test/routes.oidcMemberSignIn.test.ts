@@ -34,6 +34,7 @@ function buildApp() {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   controlApi.mockReset()
   authServiceMock.loginWithPassword.mockReset()
 })
@@ -57,6 +58,11 @@ async function complete(data: unknown) {
 
 describe('External REST OIDC member sign-in', () => {
   it('member_signed_in sets the same cookie as password login, and keeps the token out of the body', async () => {
+    // The cookie's Expires is rounded to the second: freeze the clock so the two
+    // responses cannot straddle a second boundary. Only Date is faked, so the
+    // HTTP round trips still run on real timers.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-21T12:00:00.500Z'))
     authServiceMock.loginWithPassword.mockResolvedValue({
       token: SESSION_TOKEN,
       me: { id: 'user-1' },
