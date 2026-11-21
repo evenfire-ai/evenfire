@@ -1711,7 +1711,7 @@ Every pending approval carries a durable `authorization_scope`. An ordinary card
 | `/deny`                | Cancel the call, block that tool name until approved, and revoke its Always approve                                                    |
 | `approval-mode <mode>` | Set this conversation's approval mode to `manual`, `auto` or `allow-all`                                                               |
 
-`approval-mode <mode>` works on Telegram, Slack, Teams and email. The whole message must be the command, in any letter case; for email, the subject and body together. Lowering the mode always works. With the channel's `allowModeChange` off, the command stores `manual`. Under an explicit `defaultPolicy` of `cli_only` or `designated_approvers`, a raise from a sender the policy does not allow leaves the stored mode unchanged. The reply gives the stored and the effective mode.
+`approval-mode <mode>` works on Telegram, Slack, Teams and email. The whole message must be the command, in any letter case; for email, the subject and body together. Lowering the mode always works. With the channel's `allowModeChange` off, the command stores `manual`. Under an explicit `defaultPolicy` of `cli_only` or `designated_approvers`, a raise from a sender the policy does not allow leaves the stored mode unchanged, and a session whose owner the policy does not allow runs as `manual` whatever it stored, including after a later change to `defaultPolicy` or `approvers`. The reply gives the stored and the effective mode.
 
 ### Architecture Components
 

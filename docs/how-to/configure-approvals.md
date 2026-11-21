@@ -108,9 +108,10 @@ is `manual`, except a Desktop chat whose first message carries a mode picked
 before the chat existed: that chat stores the carried mode. Rank is
 `manual` < `auto` < `allow_all`. Desktop labels the higher two "Auto-approve"
 and "Allow all". A messaging command uses `allow-all`. The effective mode is
-the minimum of the stored choice, the ceiling, and the channel cap. A lower
-ceiling or cap keeps the stored choice, so raising it again restores that
-choice.
+the minimum of the stored choice, the ceiling, and the channel cap. On a
+messaging channel the cap also carries the approver policy (see
+[Approver policy](#approver-policy)). A lower ceiling or cap keeps the stored
+choice, so raising it again restores that choice.
 
 | Mode | What a gated call does |
 | --- | --- |
@@ -149,19 +150,24 @@ running under the user's own OAuth identity; and edits to shared identity files.
 
 ### Channel cap
 
-The cap comes from the session's channel type, not from the session key.
+The cap comes from the session's channel type, not from the session key, and,
+on a messaging channel, from the [approver policy](#approver-policy) for the
+session's owner.
 
 | Session | Cap |
 | --- | --- |
-| Desktop (`rpc`) | `allow_all` |
-| Telegram, Slack, or Microsoft Teams | `allow_all` unless `approval.channels.<type>.allowModeChange` is `false`. The switch defaults to on |
-| Email | `allow_all` only when `approval.channels.email.allowModeChange` is `true`. The switch defaults to off, because the From address can be forged |
+| Desktop (`rpc`) | `allow_all`. The approver policy never applies |
+| Telegram, Slack, or Microsoft Teams | `allow_all` unless `approval.channels.<type>.allowModeChange` is `false`. The switch defaults to on. `manual` for an owner the approver policy does not allow |
+| Email | `allow_all` only when `approval.channels.email.allowModeChange` is `true`. The switch defaults to off, because the From address can be forged. `manual` for an owner the approver policy does not allow |
 | Any other channel | `manual` |
 
 A malformed value caps that channel at `manual`: a `channels` value or channel
 block that is not an object, or an `allowModeChange` that is not a boolean.
 mcp-host logs `approval_config_invalid` with the field name when the config
 arrives.
+
+The table assumes the approver policy allows the channel session's owner. For
+an owner it does not allow, the column is the same as a switch that is off.
 
 | Ceiling | Desktop can use | A channel whose switch is on can use | A channel whose switch is off can use |
 | --- | --- | --- | --- |
@@ -175,35 +181,50 @@ the command stores `manual` and says the channel is limited to manual.
 Turning the switch off again lowers every session on that channel at the
 next tool call.
 
+### Approver policy
+
 An explicit `defaultPolicy` also limits who can raise the mode from a
-messaging channel: under `cli_only` no channel sender can, and under
-`designated_approvers` only a sender listed in that channel's `approvers`
-can, unless that channel block sets `enabled: false`. An entry must equal the
-ID the channel reports:
+messaging channel, and who keeps a raised mode. The owner of a messaging
+session is the sender it belongs to. Under `cli_only`, no owner can raise the
+mode or keep a raised one. Under `designated_approvers`, only an owner listed
+in that channel's `approvers` can, unless that channel block sets
+`enabled: false`. Every other messaging session runs as `manual`, whatever it
+stored and whenever it stored it. Desktop sessions are never affected. An
+entry must equal the ID the channel reports:
 
 - Telegram: the Telegram user ID.
 - Slack: the Slack user ID.
 - Microsoft Teams: the `from.id` of the Bot Framework activity. Under
   `designated_approvers`, a Host with no `teams.approvers` list refuses every
-  Teams raise.
+  Teams raise and runs every Teams session as `manual`.
 - Email: the From address, compared case-sensitively, so
   `Ana@example.com` and `ana@example.com` are different entries.
 
 A refused raise leaves the stored mode unchanged, and the reply says why;
-lowering the mode is always allowed. An unset
-policy or `channel_users` adds no check, and any other value refuses every
-raise and logs `approval_config_invalid` for `defaultPolicy`.
+lowering the mode is always allowed. The reply's effective mode includes the
+policy, so an owner it does not allow sees `manual`. An unset policy or
+`channel_users` adds no check. Any other value runs every messaging session as
+`manual`, refuses every raise, and logs `approval_config_invalid` for
+`defaultPolicy`.
+
+The policy on the Host CR is read live, like the ceiling. Changing
+`defaultPolicy`, or removing an owner from `approvers`, lowers that owner's
+sessions at their next tool call, with no restart. The stored choice is kept, so allowing the owner
+again restores it.
 
 ### Kill switch
 
-Lower `modeCeiling`, or set a channel's `allowModeChange` to false, with an
-edit to the Host CR. That stops new unattended tool calls at the next tool
-call of every affected session, with no restart. Mode-scoped grants are
-cleared as soon as the new config arrives, even for a session that makes no
-tool call before the ceiling is raised again.
+Lower `modeCeiling`, set a channel's `allowModeChange` to false, or narrow
+the approver policy (set `defaultPolicy` to `cli_only` or
+`designated_approvers`, or remove an owner from a channel's `approvers`), with
+an edit to the Host CR. That stops new unattended tool calls at the next tool call of every
+affected session, with no restart. Mode-scoped grants are cleared as soon as
+the new config arrives, even for a session that makes no tool call before the
+change is undone. A card answered after the change resolves under the lower
+mode.
 
-A slower older Host event does not restore the ceiling or channel cap. The
-config that stays is the latest observed Host event.
+A slower older Host event does not restore the ceiling, the channel cap or the
+approver policy. The config that stays is the latest observed Host event.
 
 `cron_manage` asks exactly when manual would. Its task grant stays across the
 change. The switch does not stop a `shell_exec` the tool still tracks until
