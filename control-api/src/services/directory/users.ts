@@ -159,6 +159,15 @@ type AdminUserRow = {
   active_team_count: string | number
   teams?: unknown
   password_pending_from_accepted_invitation?: unknown
+  lifecycle_state: string
+}
+
+export type UserLifecycleState = 'active' | 'retired'
+
+/** users.lifecycle_state is NOT NULL and CHECKed to these two values (db.ts). */
+function userLifecycleState(value: string): UserLifecycleState {
+  if (value === 'active' || value === 'retired') return value
+  throw new Error(`unexpected users.lifecycle_state: ${value}`)
 }
 
 function mapAdminUserRow(row: AdminUserRow) {
@@ -180,6 +189,7 @@ function mapAdminUserRow(row: AdminUserRow) {
       }
     }),
     passwordPendingFromAcceptedInvitation: Boolean(row.password_pending_from_accepted_invitation),
+    lifecycleState: userLifecycleState(row.lifecycle_state),
   }
 }
 
@@ -188,6 +198,7 @@ const ADMIN_USER_SELECT = `SELECT u.id,
             u.name,
             u.picture,
             p.display_name,
+            u.lifecycle_state,
             ca.id AS control_admin_id,
             COUNT(DISTINCT CASE WHEN tm.status = 'active' THEN tm.team_id END) AS active_team_count,
             COALESCE(
@@ -214,7 +225,7 @@ const ADMIN_USER_SELECT = `SELECT u.id,
   LEFT JOIN team_members tm ON tm.user_id = u.id
   LEFT JOIN teams t ON t.id = tm.team_id`
 
-const ADMIN_USER_GROUP_ORDER = `GROUP BY u.id, u.email, u.name, u.picture, p.display_name, ca.id
+const ADMIN_USER_GROUP_ORDER = `GROUP BY u.id, u.email, u.name, u.picture, p.display_name, u.lifecycle_state, ca.id
   ORDER BY u.email ASC`
 
 export async function createAdminUser(email: string, name: string) {
@@ -251,6 +262,8 @@ export async function createAdminUser(email: string, name: string) {
  * team_members rows, so listing it would show a removed member with their
  * teams. `includeRetired` is for the invitation guard alone: a retired row
  * still holds its address, and an invitation to it could never be accepted.
+ * Each item carries its `lifecycleState`, so the guard can tell a removed
+ * member's address from an active member's.
  */
 export async function listUsers(
   searchQuery = '',

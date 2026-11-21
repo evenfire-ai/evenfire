@@ -230,6 +230,25 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
     ])
   })
 
+  it("marks each listed user's lifecycle state, so the invitation guard can tell a removed member", async () => {
+    const retiredId = await seedLinkedUser('state-retired')
+    const activeId = await seedUser('state-active')
+    const emailOf = async (userId: string) =>
+      (
+        await testPool.query<{ email: string }>(`SELECT email FROM users WHERE id = $1::uuid`, [
+          userId,
+        ])
+      ).rows[0]!.email
+    expect(await retire(retiredId, 'oidc-retire-state-v1')).toMatchObject({ outcome: 'retired' })
+
+    expect(await listUsers(await emailOf(retiredId), { includeRetired: true })).toEqual([
+      expect.objectContaining({ id: retiredId, lifecycleState: 'retired' }),
+    ])
+    expect(await listUsers(await emailOf(activeId))).toEqual([
+      expect.objectContaining({ id: activeId, lifecycleState: 'active' }),
+    ])
+  })
+
   it('refuses adminDeleteUser for a linked member', async () => {
     const userId = await seedLinkedUser('linked-admin-delete')
 

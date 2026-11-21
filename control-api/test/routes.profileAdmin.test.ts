@@ -174,7 +174,9 @@ describe('routes/profileAdmin', () => {
   })
 
   it('rejects Control UI member invitations when an active member already uses the email', async () => {
-    svc.listUsers.mockResolvedValue([{ id: 'user-1', email: 'existing@example.com' }])
+    svc.listUsers.mockResolvedValue([
+      { id: 'user-1', email: 'existing@example.com', lifecycleState: 'active' },
+    ])
 
     const app = express()
     app.use(express.json())
@@ -195,6 +197,55 @@ describe('routes/profileAdmin', () => {
     // A retired row still holds its address, so the guard asks for it too.
     expect(svc.listUsers).toHaveBeenCalledWith('existing@example.com', { includeRetired: true })
     expect(svc.createInvitationForTeams).not.toHaveBeenCalled()
+  })
+
+  const INVITATION_ROUTES = [
+    { route: '/admin/invitations', create: 'createInvitationForTeams' },
+    { route: '/admin/teams/t1/invitations', create: 'createInvitation' },
+  ] as const
+
+  it.each(INVITATION_ROUTES)(
+    'refuses $route for a removed member with member_email_retired and no member to open',
+    async ({ route, create }) => {
+      svc.listUsers.mockResolvedValue([
+        { id: 'user-9', email: 'removed@example.com', lifecycleState: 'retired' },
+      ])
+
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+      const res = await request(app)
+        .post(route)
+        .send({ name: 'Removed Member', email: 'Removed@Example.com', role: 'member' })
+        .expect(409)
+
+      expect(res.body).toEqual({
+        error: 'member_email_retired',
+        message: "This email belongs to a removed member and can't be invited again.",
+        email: 'removed@example.com',
+      })
+      expect(svc.listUsers).toHaveBeenCalledWith('removed@example.com', { includeRetired: true })
+      expect(svc[create]).not.toHaveBeenCalled()
+    }
+  )
+
+  it('rejects a team invitation when an active member already uses the email', async () => {
+    svc.listUsers.mockResolvedValue([
+      { id: 'user-1', email: 'existing@example.com', lifecycleState: 'active' },
+    ])
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+    const res = await request(app)
+      .post('/admin/teams/t1/invitations')
+      .send({ name: 'Existing Member', email: 'existing@example.com', role: 'member' })
+      .expect(409)
+
+    expect(res.body).toMatchObject({ error: 'member_email_exists', memberId: 'user-1' })
+    expect(svc.createInvitation).not.toHaveBeenCalled()
   })
 
   it('refuses password setup resend for an OIDC-linked account with 409 oidc_linked', async () => {
