@@ -68,7 +68,8 @@ import type { TabReferenceSuggestionInput } from '../useTabReferenceSuggestion.t
  *   row, and no visit makes more than three requests (K1). A request without a
  *   visible target is never predicted, so it fails as unpredicted;
  * - if the last applied answer for the current key was transient, it was the
- *   third in a row; if it was usable, the chip is exactly that answer (L1, S6);
+ *   third in a row and there is no chip; if it was usable, the chip is exactly
+ *   that answer (L1, S6);
  * - freshness (S7), judged from the server's version timeline and not from
  *   the reference: once a watched change of the file on screen has been
  *   observed after the chip's answer was delivered, the chip is at least the
@@ -551,6 +552,7 @@ async function assertAtRest(real: Real) {
   if (outcome === 'unusable') expect(candidate).toBeNull()
   else if (outcome === 'transient') {
     expect(last!.failureRun, 'gave up after exactly three failures').toBe(MAX_ATTEMPTS)
+    expect(candidate, 'L1: no chip once the revalidation gives up').toBeNull()
   } else expect(candidate, 'L1/S6').toEqual(referenceOf(outcome.usable))
 }
 
