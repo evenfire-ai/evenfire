@@ -342,6 +342,18 @@ describe('OIDC member sign-in configuration', () => {
     })
   })
 
+  it('refuses an Entra issuer with a trailing slash', () => {
+    for (const extra of [{}, { ...GUARD, ...SWITCH }]) {
+      expect(
+        refusal({
+          ...ENTRA_ENV,
+          ...extra,
+          CONTROL_API_OIDC_ISSUER: `https://login.microsoftonline.com/${TENANT}/v2.0/`,
+        })
+      ).toContain('CONTROL_API_OIDC_ISSUER')
+    }
+  })
+
   it('refuses ACCOUNT_CREATION on an Entra issuer', () => {
     expect(
       refusal({
