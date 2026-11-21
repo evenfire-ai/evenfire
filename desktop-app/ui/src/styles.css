@@ -421,10 +421,11 @@ h3 {
   height: var(--window-titlebar-height);
   /* Chromium unions all `-webkit-app-region` boxes in DOCUMENT ORDER and, where
      they overlap, the LAST one wins (z-index, position and pointer-events do not
-     enter into it). The property is inherited, so every descendant of
-     `.window-titlebar` without an explicit value is itself a `drag` box —
-     including the fixed, almost full-width `.window-titlebar__actions` and its
-     `.top-bar`, which overlap this slot. Every control that must stay clickable
+     enter into it). The property is inherited, so a descendant of
+     `.window-titlebar` is a `drag` box unless it, or an ancestor between it and
+     `.window-titlebar`, declares `no-drag` — that includes the fixed, almost
+     full-width `.window-titlebar__actions` and its `.top-bar`, which overlap
+     this slot. Every control that must stay clickable
      therefore declares `no-drag`, and this slot must stay AFTER
      `.window-titlebar__actions` in the DOM: rendered before it, the actions'
      inherited drag band would re-cover the leading buttons and the OS would
