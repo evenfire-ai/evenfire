@@ -310,6 +310,13 @@ describeRealPostgres(
       )
     })
 
+    it('an acct that is not the number 0 counts as a guest: not_eligible without ALLOW_GUESTS', async () => {
+      const fake = entraFake('on')
+      const member = memberClaims('string-acct')
+
+      await expectNotEligibleThenControl(fake, { ...member.claims, acct: '0' }, { acct: 0 })
+    })
+
     it('a foreign tid on an Entra provider is not_eligible and writes no row', async () => {
       const fake = entraFake('on')
       const member = memberClaims('foreign-tid')

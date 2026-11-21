@@ -61,9 +61,13 @@ export function evaluateOidcEligibility(
     if (tid.status !== 'present' || tid.value !== policy.entraTenantId) return NOT_ELIGIBLE
     const acct = observe(proof, 'acct')
     const idp = observe(proof, 'idp')
-    guest =
-      (acct.status === 'present' && acct.value === 1) ||
-      (idp.status === 'present' && idp.value !== entraTenantIdp(policy.entraTenantId))
+    // A member only when each marker that is present says so: `acct` exactly
+    // the number 0 and `idp` the tenant's own issuer. Any other present value
+    // counts as a guest, so an unexpected shape fails closed.
+    const memberByAcct = acct.status !== 'present' || acct.value === 0
+    const memberByIdp =
+      idp.status !== 'present' || idp.value === entraTenantIdp(policy.entraTenantId)
+    guest = !(memberByAcct && memberByIdp)
     if (guest && !policy.allowGuests) return NOT_ELIGIBLE
   }
 

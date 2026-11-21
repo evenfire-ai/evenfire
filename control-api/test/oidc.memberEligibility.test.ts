@@ -107,6 +107,47 @@ describe('evaluateOidcEligibility', () => {
       entra(),
       ok,
     ],
+    // The member check fails closed: any present acct other than the number 0
+    // is a guest, and is refused without ALLOW_GUESTS.
+    ...(
+      [
+        ['the string "0"', '0'],
+        ['the string "1"', '1'],
+        ['the number 2', 2],
+        ['true', true],
+      ] as const
+    ).flatMap(([shape, value]) => [
+      [
+        `Entra guest by acct ${shape} with allowGuests false`,
+        proof({ tid: present(TENANT), acct: present(value) }),
+        entra(),
+        no,
+      ] as const,
+      [
+        `Entra guest by acct ${shape} with allowGuests true`,
+        proof({ tid: present(TENANT), acct: present(value) }),
+        entra({ allowGuests: true }),
+        guestOk,
+      ] as const,
+    ]),
+    [
+      'Entra member with acct === 0 and no idp (control)',
+      proof({ tid: present(TENANT), acct: present(0), idp: missing }),
+      entra(),
+      ok,
+    ],
+    [
+      'Entra guest by a foreign idp despite acct === 0',
+      proof({ tid: present(TENANT), acct: present(0), idp: present('live.com') }),
+      entra(),
+      no,
+    ],
+    [
+      'Entra member with acct === 0 and the tenant idp (control)',
+      proof({ tid: present(TENANT), acct: present(0), idp: present(entraTenantIdp(TENANT)) }),
+      entra(),
+      ok,
+    ],
     [
       'Entra with an unsupported acct',
       proof({ tid: present(TENANT), acct: unsupported }),
