@@ -553,3 +553,128 @@ test('Profile OIDC start sets a binding cookie only for the configured public or
     restore()
   }
 })
+
+// Dev spike: OIDC member sign-in relays External REST's password-login session cookie.
+// Shape copied from Express `res.cookie` output, including the comma inside Expires.
+const upstreamSessionCookie =
+  'profile_session=session-token-fixture; Max-Age=43200; Path=/; Expires=Sat, 21 Nov 2026 04:48:01 GMT; HttpOnly; Secure; SameSite=Lax'
+
+function memberSignInResponse(body: unknown, cookies: string[] = []): Response {
+  const headers = new Headers({ 'content-type': 'application/json' })
+  for (const cookie of cookies) headers.append('set-cookie', cookie)
+  return new Response(JSON.stringify(body), { status: 200, headers })
+}
+
+function signInConfiguration(): Response {
+  return Response.json({ ...configuration, memberAuthenticationActivated: true })
+}
+
+test('a signed-in member gets the password-login session cookie and lands on Profile UI', async () => {
+  const paths: string[] = []
+  const restore = mockExternalApi(url => {
+    paths.push(url.pathname)
+    if (url.pathname.endsWith('/configuration')) return signInConfiguration()
+    return memberSignInResponse(
+      { outcome: 'member_signed_in', memberAuthenticationActivated: true },
+      [upstreamSessionCookie, 'unrelated=1; Path=/']
+    )
+  })
+  try {
+    const response = await GET(
+      new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+        headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+      })
+    )
+    const cookies = response.headers.getSetCookie()
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.get('location'), '/')
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    assert.deepEqual(cookies, [
+      upstreamSessionCookie,
+      `${browserCookieName(state)}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`,
+    ])
+    assert.equal(await response.text(), '')
+    assert.deepEqual(paths, [
+      '/api/v1/oidc/profile-flow/configuration',
+      '/api/v1/oidc/profile-flow/complete',
+    ])
+  } finally {
+    restore()
+  }
+})
+
+test('a verified identity with no matching member gets no session', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return signInConfiguration()
+    return memberSignInResponse({
+      outcome: 'identity_proof_verified',
+      memberAuthenticationActivated: true,
+      memberSignIn: 'no_matching_member',
+    })
+  })
+  try {
+    const response = await GET(
+      new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+        headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+      })
+    )
+    const cookies = response.headers.getSetCookie()
+    assert.equal(response.status, 403)
+    assert.match(await response.text(), /no Evenfire account matches it/)
+    assert.equal(cookies.length, 1)
+    assert.match(cookies[0] ?? '', /^__Host-ef_oidc_[a-f0-9]{24}=; .*Max-Age=0/)
+  } finally {
+    restore()
+  }
+})
+
+for (const [label, cookies] of [
+  ['no session cookie', []],
+  ['two session cookies', [upstreamSessionCookie, upstreamSessionCookie]],
+] as const) {
+  test(`a signed-in answer with ${label} fails closed and needs a new attempt`, async () => {
+    const restore = mockExternalApi(url => {
+      if (url.pathname.endsWith('/configuration')) return signInConfiguration()
+      return memberSignInResponse(
+        { outcome: 'member_signed_in', memberAuthenticationActivated: true },
+        [...cookies]
+      )
+    })
+    try {
+      const response = await GET(
+        new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+          headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+        })
+      )
+      const setCookies = response.headers.getSetCookie()
+      assert.equal(response.status, 503)
+      assert.match(await response.text(), /start a new sign-in attempt/i)
+      assert.equal(setCookies.length, 1)
+      assert.doesNotMatch(setCookies[0] ?? '', /profile_session/)
+    } finally {
+      restore()
+    }
+  })
+}
+
+test('Profile OIDC start still works when member sign-in is on', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return signInConfiguration()
+    return Response.json({
+      authorizationUrl: authorizationUrl(),
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    })
+  })
+  try {
+    const response = await POST(
+      new Request('https://profile.example.test/api/oidc/start', {
+        method: 'POST',
+        headers: { origin: 'https://profile.example.test' },
+      })
+    )
+    assert.equal(response.status, 303)
+    assert.match(response.headers.get('set-cookie') ?? '', /^__Host-ef_oidc_[a-f0-9]{24}=/)
+  } finally {
+    restore()
+  }
+})

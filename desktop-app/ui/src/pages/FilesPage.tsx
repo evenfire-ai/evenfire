@@ -2122,9 +2122,8 @@ export function FilesPage({
     if (current) showMoveDialog(current)
   }
 
-  /** Page-level rename works inline for any row or the current resource; the
-   *  manage dialog keeps its own inline title-edit flow. Errors toast (stale
-   *  version → retry), matching the manage-dialog rename behavior. */
+  /** Rename runs inline for any row or the current resource; failures toast
+   *  (a stale version asks the user to retry). */
   const handleRenameTarget = async () => {
     if (!renameTarget) return
     const target = renameTarget

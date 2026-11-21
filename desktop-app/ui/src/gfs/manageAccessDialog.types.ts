@@ -28,7 +28,9 @@ export interface GfsManageAccessDeps {
     bits: readonly string[],
     grantableBits?: readonly string[]
   ) => Promise<GfsFreshAuthority | null>
-  /** Always a server read: a role change must be judged on current grantable bits. */
+  /** Server-backed authority: reuses an affordances read at most
+   *  `GFS_AUTHORITY_STALE_TIME_MS` old, never the owner's listing bits, so a
+   *  role change is judged on grantable bits the server reported recently. */
   fetchAuthority: (resourceId: string, resourceName: string) => Promise<GfsServerAuthority | null>
   readAccessState: GfsActionGuardDeps['readAccessState']
   publishedGeneration: GfsActionGuardDeps['publishedGeneration']
