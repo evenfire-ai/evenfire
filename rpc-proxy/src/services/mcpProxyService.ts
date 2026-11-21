@@ -1,5 +1,5 @@
 import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
-import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
+import { ActionAuthorityCheckpointError, type AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
@@ -143,4 +143,49 @@ export async function resolveHostConnectionForUser(
     ...host,
     headers,
   }
+}
+
+/**
+ * Re-resolves a V1 Host connection before a wake-and-hold retry, so the retry
+ * carries a fresh edge assertion instead of the first resolve's, which may have
+ * expired during the hold. Uses the GET form (no direct-run binding) with the
+ * caller's RPC token.
+ *
+ * - A denial (control-api 403/404, or a user or Host mismatch) is returned for
+ *   the route to answer as it answers a denial at its first resolve.
+ * - A control-api 401 (`ControlApiHostAccessRejectedError`) is rethrown as is,
+ *   so it reaches the client as 401.
+ * - Any other failure of the control-api call (network, timeout, other non-2xx,
+ *   a response without an edge assertion) is rethrown as a 503
+ *   `authority_unavailable`, which is never wake-eligible: a control-api network
+ *   failure must not be read as the Host being down.
+ * - A connection whose URL differs from the first resolve throws.
+ *
+ * On success it rewrites the assertion header in place, synchronously after the
+ * await, because the route's forwarders read `host.headers` on the retry.
+ */
+export async function refreshV1HostConnection(
+  host: ResolvedServerConnection,
+  userId: string,
+  hostRef: string,
+  rpcAccessToken: string
+): Promise<HostAccessDenial | null> {
+  let resolved: Awaited<ReturnType<typeof fetchHostConnectionFromControlApi>>
+  try {
+    resolved = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken)
+  } catch (error) {
+    if (error instanceof Error && error.name === 'ControlApiHostAccessRejectedError') throw error
+    console.warn(
+      `[RPC_PROXY] host connection re-resolve failed host=${hostRef} error=${
+        error instanceof Error ? error.name : typeof error
+      }`
+    )
+    throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
+  }
+  if (isHostAccessDenied(resolved)) return resolved
+  if (resolved.url !== host.url) {
+    throw new Error('Control API returned a different Host URL on re-resolve')
+  }
+  host.headers[HOST_EDGE_ASSERTION_HEADER] = resolved.edgeAssertion
+  return null
 }

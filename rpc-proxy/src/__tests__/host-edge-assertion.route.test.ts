@@ -59,12 +59,19 @@ const originalFetch = globalThis.fetch
 let controlApiBody: Record<string, unknown>
 let controlApiHostAccessStatus: number
 let controlApiCalls: string[]
+// When set, answers each control-api Host-access call by its index (0 = the
+// route's first resolve); it may throw to simulate a network failure.
+let controlApiHostAccessAnswer: ((index: number) => Response) | null
 let hostCalls: HostCall[]
 // Answers the Host request with the given index (0 = first Host call).
 let hostAnswer: (index: number, path: string) => Response
 
 function headersOf(init?: RequestInit): Record<string, string> {
   return Object.fromEntries(new Headers(init?.headers).entries())
+}
+
+function hostAccessCalls(): string[] {
+  return controlApiCalls.filter(url => url.includes('/mcp-hosts/'))
 }
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -79,6 +86,7 @@ beforeEach(() => {
   controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion: EDGE_ASSERTION }
   controlApiHostAccessStatus = 200
   controlApiCalls = []
+  controlApiHostAccessAnswer = null
   hostCalls = []
   hostAnswer = () => jsonResponse(200, {})
   globalThis.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -86,6 +94,9 @@ beforeEach(() => {
     if (url.startsWith(config.controlApiBaseUrl.replace(/\/+$/, ''))) {
       controlApiCalls.push(url)
       if (url.endsWith('/wake')) return jsonResponse(200, { status: 'active' })
+      if (controlApiHostAccessAnswer) {
+        return controlApiHostAccessAnswer(hostAccessCalls().length - 1)
+      }
       if (controlApiHostAccessStatus !== 200) {
         return jsonResponse(controlApiHostAccessStatus, { error: 'rejected' })
       }
@@ -476,5 +487,196 @@ describe('authentication failures reach the client as 401', () => {
 
     expect(hostCalls).toHaveLength(1)
     expect(res.status).toBe(500)
+  })
+})
+
+// A single-attempt route (re-issued at most once after the wake) and a route
+// that retries until the hold deadline.
+const SINGLE_ATTEMPT_ROW = ROUTE_SCOPE_ROWS.find(row => row.label === 'approve')!
+const RETRY_UNTIL_DEADLINE_ROW = ROUTE_SCOPE_ROWS.find(row => row.label === 'task result')!
+const REFRESH_ROWS = [SINGLE_ATTEMPT_ROW, RETRY_UNTIL_DEADLINE_ROW]
+
+// The first resolve succeeds; every later Host-access call (a re-resolve before
+// a retry attempt) gets `reresolve(index)`.
+function firstResolveThen(reresolve: (index: number) => Response) {
+  return (index: number) => (index === 0 ? jsonResponse(200, controlApiBody) : reresolve(index))
+}
+
+describe('a V1 wake-and-hold retry re-resolves the Host connection', () => {
+  const originalWakeMaxHoldMs = config.wakeMaxHoldMs
+
+  beforeEach(() => {
+    // Bounds a retry-until-deadline route that keeps failing.
+    config.wakeMaxHoldMs = 3_000
+  })
+
+  afterEach(() => {
+    config.wakeMaxHoldMs = originalWakeMaxHoldMs
+  })
+
+  it.each(REFRESH_ROWS)('$label: the retry carries the re-resolved assertion', async row => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+    controlApiHostAccessAnswer = firstResolveThen(index =>
+      jsonResponse(200, {
+        ...OLD_SHAPE_CONNECTION,
+        edgeAssertion: `edge-assertion-refreshed-${index}`,
+      })
+    )
+    hostAnswer = hostDownThen(() => jsonResponse(200, {}))
+
+    const res = await send(row)
+
+    expect(res.status).toBe(200)
+    expect(hostAccessCalls()).toHaveLength(2)
+    expect(hostAccessCalls().every(url => url.includes('/mcp-hosts/chatllm'))).toBe(true)
+    expect(hostCalls).toHaveLength(2)
+    expect(hostCalls[0]!.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(EDGE_ASSERTION)
+    expect(hostCalls[1]!.path).toBe(row.hostPath)
+    expect(hostCalls[1]!.headers[HOST_EDGE_ASSERTION_HEADER]).toBe('edge-assertion-refreshed-1')
+  })
+
+  it('task result: every retry attempt re-resolves first (one control-api call per attempt)', async () => {
+    const row = RETRY_UNTIL_DEADLINE_ROW
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+    controlApiHostAccessAnswer = firstResolveThen(index =>
+      jsonResponse(200, {
+        ...OLD_SHAPE_CONNECTION,
+        edgeAssertion: `edge-assertion-refreshed-${index}`,
+      })
+    )
+    hostAnswer = index => {
+      if (index < 2) throw new TypeError('fetch failed')
+      return jsonResponse(200, {})
+    }
+
+    const res = await send(row)
+
+    expect(res.status).toBe(200)
+    // One first resolve plus one re-resolve per retry attempt (two attempts).
+    expect(hostAccessCalls()).toHaveLength(3)
+    expect(hostCalls.map(call => call.headers[HOST_EDGE_ASSERTION_HEADER])).toEqual([
+      EDGE_ASSERTION,
+      'edge-assertion-refreshed-1',
+      'edge-assertion-refreshed-2',
+    ])
+  })
+
+  it.each(REFRESH_ROWS)(
+    '$label: a control-api 401 on the re-resolve (expired RPC token) answers 401',
+    async row => {
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+      controlApiHostAccessAnswer = firstResolveThen(() => jsonResponse(401, { error: 'expired' }))
+      hostAnswer = hostDownThen(() => jsonResponse(200, {}))
+
+      const res = await send(row)
+
+      // Witness: the first attempt reached the Host and the retry re-resolved.
+      expect(hostCalls).toHaveLength(1)
+      expect(hostAccessCalls()).toHaveLength(2)
+      expect(res.status).toBe(401)
+      expect(res.body).toEqual({ error: 'Unauthorized' })
+    }
+  )
+
+  const DENIAL_CASES: Array<{ label: string; answer: () => Response }> = [
+    { label: 'control-api 403', answer: () => jsonResponse(403, { reason: 'host_disabled' }) },
+    { label: 'control-api 404', answer: () => jsonResponse(404, { error: 'not found' }) },
+    {
+      label: 'a userId mismatch',
+      answer: () =>
+        jsonResponse(200, {
+          ...OLD_SHAPE_CONNECTION,
+          userId: 'another-user',
+          edgeAssertion: EDGE_ASSERTION,
+        }),
+    },
+  ]
+
+  describe.each(REFRESH_ROWS)('$label', row => {
+    it.each(DENIAL_CASES)(
+      'a re-resolve denied by $label answers what the first resolve answers',
+      async ({ answer }) => {
+        authTokenMock.verifyRpcToken.mockReturnValue(
+          claimsWithScopes([row.scope, 'host:wake:write'])
+        )
+        // The route's answer when its first resolve gets the same control-api answer.
+        controlApiHostAccessAnswer = () => answer()
+        const firstResolveDenied = await send(row)
+        expect(hostCalls).toEqual([])
+        expect(firstResolveDenied.status).not.toBe(200)
+
+        controlApiCalls = []
+        controlApiHostAccessAnswer = firstResolveThen(answer)
+        hostAnswer = hostDownThen(() => jsonResponse(200, {}))
+
+        const res = await send(row)
+
+        expect(hostCalls).toHaveLength(1)
+        expect(hostAccessCalls()).toHaveLength(2)
+        expect(res.status).toBe(firstResolveDenied.status)
+        expect(res.body).toEqual(firstResolveDenied.body)
+      }
+    )
+  })
+
+  it.each(REFRESH_ROWS)('$label: a re-resolve that moves the Host URL answers 502', async row => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+    controlApiHostAccessAnswer = firstResolveThen(() =>
+      jsonResponse(200, {
+        ...OLD_SHAPE_CONNECTION,
+        url: 'http://other.mcp-host.svc.cluster.local:8080',
+        edgeAssertion: EDGE_ASSERTION,
+      })
+    )
+    hostAnswer = hostDownThen(() => jsonResponse(200, {}))
+
+    const res = await send(row)
+
+    expect(hostCalls).toHaveLength(1)
+    expect(hostAccessCalls()).toHaveLength(2)
+    expect(res.status).toBe(502)
+  })
+
+  const UNAVAILABLE_CASES: Array<{ label: string; answer: () => Response }> = [
+    {
+      label: 'a network failure',
+      answer: () => {
+        throw new TypeError('fetch failed')
+      },
+    },
+    {
+      label: 'a timeout',
+      answer: () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+      },
+    },
+    { label: 'a control-api 503', answer: () => jsonResponse(503, { error: 'unavailable' }) },
+    {
+      label: 'a 200 without an edge assertion',
+      answer: () => jsonResponse(200, { ...OLD_SHAPE_CONNECTION }),
+    },
+  ]
+
+  describe.each(REFRESH_ROWS)('$label', row => {
+    it.each(UNAVAILABLE_CASES)(
+      'a re-resolve that fails with $label answers 503 authority_unavailable at once',
+      async ({ answer }) => {
+        authTokenMock.verifyRpcToken.mockReturnValue(
+          claimsWithScopes([row.scope, 'host:wake:write'])
+        )
+        controlApiHostAccessAnswer = firstResolveThen(answer)
+        hostAnswer = hostDownThen(() => jsonResponse(200, {}))
+
+        const res = await send(row)
+
+        // Witness: the first attempt reached the Host. No Host call and no
+        // further control-api call follow the failed re-resolve.
+        expect(hostCalls).toHaveLength(1)
+        expect(hostCalls[0]!.path).toBe(row.hostPath)
+        expect(hostAccessCalls()).toHaveLength(2)
+        expect(res.status).toBe(503)
+        expect(res.body).toEqual({ error: 'authority_unavailable' })
+      }
+    )
   })
 })

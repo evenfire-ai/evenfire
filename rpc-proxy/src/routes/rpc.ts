@@ -32,6 +32,7 @@ import {
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
 import {
+  type HostAccessDenial,
   type HostAccessDenialCode,
   isHostAccessDenied,
   respondHostAccessDenied,
@@ -47,6 +48,7 @@ import {
   forwardRpcToServer,
   forwardTaskResultFromHost,
   listAllowedServersForUser,
+  refreshV1HostConnection,
   resolveHostConnectionForUser,
   resolveServerConnectionForUser,
   validateRpcRequest,
@@ -245,9 +247,29 @@ function mutatingCallSignal(timeoutMs: number | undefined, res: ExpressResponse)
     : AbortSignal.any([clientGone.signal, AbortSignal.timeout(timeoutMs)])
 }
 
-function wakeAndHoldV2Options(req: AuthedRequest, host: ResolvedServerConnection) {
+/**
+ * The authority refresh a wake-and-hold retry runs before each attempt: V2
+ * re-runs the action checkpoint, V1 re-resolves the Host connection for a fresh
+ * edge assertion. `respondDenied` is the route's answer for a denial at its
+ * first resolve, used when the V1 re-resolve is denied.
+ */
+function wakeAndHoldAuthorityOptions(
+  req: AuthedRequest,
+  hostRef: string,
+  host: ResolvedServerConnection,
+  respondDenied: (denial: HostAccessDenial) => void
+) {
   const initial = req.authorizedActionV2
-  if (!initial) return {}
+  if (!initial) {
+    const userId = req.auth!.sub
+    const rpcAccessToken = extractAuthToken(req)
+    return {
+      refreshV1Host: {
+        refresh: () => refreshV1HostConnection(host, userId, hostRef, rpcAccessToken),
+        respondDenied,
+      },
+    }
+  }
   return {
     authorizedActionV2: initial,
     reauthorizeV2: async () => {
@@ -621,7 +643,9 @@ export function createRpcRouter(): Router {
               // The per-request messageId makes a re-presented POST a
               // duplicate_delivery replay, so retrying until the deadline is safe.
               retryUntilDeadline: true,
-              ...wakeAndHoldV2Options(req, host),
+              ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+                respondHostAccessDenied(res, denial)
+              ),
               attemptUpstream: async (timeoutMs, deadlineMs) => {
                 const retried = await forwardHostMessageToHost(host, forwardedBody, {
                   async: isAsync,
@@ -829,7 +853,9 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -900,7 +926,9 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -989,7 +1017,9 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: forwardSearch,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1077,7 +1107,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: forwardSessionList,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1168,7 +1200,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: forwardTranscript,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1244,7 +1278,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1398,7 +1434,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1468,7 +1506,9 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1526,7 +1566,9 @@ export function createRpcRouter(): Router {
               deadlineMs: wakeDeadlineMs,
               // idempotent GET: a re-issued read cannot duplicate a side effect
               retryUntilDeadline: true,
-              ...wakeAndHoldV2Options(req, host),
+              ...wakeAndHoldAuthorityOptions(req, hostRef, host, () =>
+                res.status(404).json({ error: 'Host not found or not accessible' })
+              ),
               attemptUpstream: attemptTaskResult,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -1597,7 +1639,9 @@ export function createRpcRouter(): Router {
               claims: auth,
               rpcAccessToken,
               deadlineMs: wakeDeadlineMs,
-              ...wakeAndHoldV2Options(req, host),
+              ...wakeAndHoldAuthorityOptions(req, hostRef, host, () =>
+                res.status(404).json({ error: 'Host not found or not accessible' })
+              ),
               attemptUpstream: attemptCancel,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -1674,7 +1718,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1819,7 +1865,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attemptDownload,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
