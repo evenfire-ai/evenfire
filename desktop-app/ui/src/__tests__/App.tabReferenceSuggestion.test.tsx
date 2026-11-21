@@ -412,16 +412,49 @@ describe('App — the drawer suggests the file of the active tab', () => {
     expect(bridge.resolveForNavigation).toHaveBeenCalledWith(contract.gfsUri)
   })
 
-  it('suggests nothing while Files is on a folder', async () => {
+  it('suggests the folder Files is on and attaches it from the drawer as a folder', async () => {
     const { folder } = await views()
     const bridge = await startWith([folder])
     await bridge.open(await openGfsResourcePayload(folder))
     await openDrawer()
-    expect(await screen.findByLabelText('Agent message composer')).toBeTruthy()
-    await settledWatch(bridge)
-    expect(bridge.resolveImpl).toHaveBeenCalledWith(folder.gfsUri)
-    expect(screen.queryByRole('button', { name: /^Reference .* in this message$/ })).toBeNull()
-    expect(bridge.resolveForNavigation).not.toHaveBeenCalled()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Reference Reports in this message' })
+    )
+    const attached = await screen.findByRole('button', { name: 'Remove Reports' })
+    expect(attached.closest('.composer-attachment-chip')?.getAttribute('title')).toBe(
+      'Global Folder'
+    )
+    expect(chip('Reports')).toBeNull()
+    expect(bridge.resolveForNavigation).toHaveBeenCalledTimes(1)
+    expect(bridge.resolveForNavigation).toHaveBeenCalledWith(folder.gfsUri)
+  })
+
+  it('S-F5: changes inside the folder Files is on resolve the suggestion nothing more', async () => {
+    const { folder } = await views()
+    const bridge = await startWith([folder])
+    await bridge.open(await openGfsResourcePayload(folder))
+    await openDrawer()
+    expect(
+      await screen.findByRole('button', { name: 'Reference Reports in this message' })
+    ).toBeTruthy()
+    const dirKey = mainDriveKey('dir', folder.rid)
+    expect((await settledWatch(bridge))?.keys).toEqual([dirKey])
+    await wait(0)
+    const listChildren = bridge.gfs.listChildren!
+    const listed = listChildren.mock.calls.length
+    const settled = bridge.resolveForNavigation.mock.calls.length
+
+    const source = await new GfsWatchEventSource().start([dirKey])
+    try {
+      await act(async () => bridge.watch.deliver(await source.changed([dirKey])))
+      // Files does react to the change: it lists the folder again.
+      await waitFor(() => expect(listChildren.mock.calls.length).toBeGreaterThan(listed))
+      await settledWatch(bridge)
+      expect(bridge.resolveForNavigation.mock.calls.length).toBe(settled)
+      expect(chip('Reports')).toBeTruthy()
+    } finally {
+      await source.stop()
+    }
   })
 
   it('suggests nothing at the Files root', async () => {

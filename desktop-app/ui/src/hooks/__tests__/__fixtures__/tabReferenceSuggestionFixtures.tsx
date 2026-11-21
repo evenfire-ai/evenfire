@@ -16,7 +16,12 @@ import {
   gfscResourceView,
   resolvedNavigation,
 } from '../../../gfs/__fixtures__/navigationResolutionFixtures'
-import type { ComposerGlobalFileReference, ComposerReferenceAttachment } from '../../../uiTypes'
+import type { WorkspaceTab } from '../../../lib/workspaceTabs.types'
+import type {
+  ComposerGlobalFileReference,
+  ComposerGlobalFolderReference,
+  ComposerReferenceAttachment,
+} from '../../../uiTypes'
 import { useTabReferenceSuggestion } from '../../useTabReferenceSuggestion'
 
 type GfsResourceView = Awaited<ReturnType<typeof gfscResourceView>>
@@ -33,6 +38,18 @@ export function fileView(
     name,
     version,
     bytes: 11,
+  })
+}
+
+/** A folder as gfs-controller projects it. */
+export function folderView(index: number, name = `folder-${index}`): Promise<GfsResourceView> {
+  const suffix = index.toString(16).padStart(12, '0')
+  return gfscResourceView({
+    resourceId: `7d1e2f3a-4b5c-4d6e-8f7a-${suffix}`,
+    name,
+    version: 1,
+    bytes: 0,
+    kind: 'directory',
   })
 }
 
@@ -86,6 +103,45 @@ export async function pickedReferences(
   return onAdd.mock.calls[0]![0] as ComposerReferenceAttachment[]
 }
 
+function filesTabOn(uri: string): WorkspaceTab | undefined {
+  return activeWorkspaceTab(
+    openFilesTab(createEmptyWorkspaceTabsState(), { id: 'files-1', path: uri })
+  )
+}
+
+/** The reference the prefetch hook suggests for the folder `view`, open in Files. */
+export async function suggestedFolderCandidate(
+  view: GfsResourceView
+): Promise<ComposerGlobalFolderReference> {
+  const answer = await resolvedNavigation(view)
+  const previous = Object.getOwnPropertyDescriptor(window, 'clerum')
+  Object.defineProperty(window, 'clerum', {
+    configurable: true,
+    value: { gfs: { resolveForNavigation: async () => answer } },
+  })
+  try {
+    const hook = renderHook(() =>
+      useTabReferenceSuggestion({
+        activeTab: filesTabOn(view.gfsUri),
+        navItem: DESKTOP_ROUTES.files,
+        filesResolvedLocation: { gfsUri: view.gfsUri, kind: 'directory' },
+        authorityScope: 'dev:true:user-1:',
+        drawerVisible: true,
+      })
+    )
+    await act(async () => {})
+    const candidate = hook.result.current.candidate
+    hook.unmount()
+    if (candidate?.type !== 'global_folder') {
+      throw new Error('the prefetch hook suggested no folder for this folder')
+    }
+    return candidate
+  } finally {
+    if (previous) Object.defineProperty(window, 'clerum', previous)
+    else delete (window as { clerum?: unknown }).clerum
+  }
+}
+
 /** The reference the prefetch hook suggests for `view`, open in Files. */
 export async function suggestedCandidate(
   view: GfsResourceView
@@ -111,7 +167,9 @@ export async function suggestedCandidate(
     await act(async () => {})
     const candidate = hook.result.current.candidate
     hook.unmount()
-    if (!candidate) throw new Error('the prefetch hook suggested nothing for this file')
+    if (candidate?.type !== 'global_file') {
+      throw new Error('the prefetch hook suggested no file for this file')
+    }
     return candidate
   } finally {
     if (previous) Object.defineProperty(window, 'clerum', previous)

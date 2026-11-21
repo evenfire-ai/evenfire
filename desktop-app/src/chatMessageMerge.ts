@@ -24,6 +24,7 @@ type AttachmentRule = { identified: 'enrich' | 'server'; contentEcho: 'unique' |
 const ATTACHMENT_RULES: Record<ChatMessageAttachment['type'], AttachmentRule> = {
   uploaded_file: { identified: 'enrich', contentEcho: 'retain' },
   global_file: { identified: 'enrich', contentEcho: 'retain' },
+  global_folder: { identified: 'enrich', contentEcho: 'retain' },
   agent_file: { identified: 'enrich', contentEcho: 'retain' },
   response_file: { identified: 'enrich', contentEcho: 'unique' },
   plugin: { identified: 'server', contentEcho: 'retain' },
@@ -92,6 +93,17 @@ function enrichIdentifiedAttachment(
       resourceId: server.resourceId ?? local.resourceId,
       version: server.version ?? local.version,
       bytes: server.bytes ?? local.bytes,
+    }
+  }
+  if (server.type === 'global_folder') {
+    // The server chip is parsed from the folder's label alone: the content
+    // never carries a folder URI, so its identity only survives on the local chip.
+    if (!local.gfsUri) return server
+    return {
+      ...server,
+      gfsUri: server.gfsUri ?? local.gfsUri,
+      drive: server.drive ?? local.drive,
+      resourceId: server.resourceId ?? local.resourceId,
     }
   }
   if (server.type === 'agent_file') {

@@ -5,7 +5,10 @@ import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useTabReferenceSuggestionContext } from '@contexts/TabReferenceSuggestionContext'
-import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
+import {
+  FILE_REFERENCE_MAX_COUNT,
+  LOCATION_REFERENCE_MAX_COUNT,
+} from '@clerum/gfs-interaction-policy'
 import { Button, IconButton, MenuItem } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
@@ -29,6 +32,7 @@ import {
   composerImageBudget,
   composerImageCountedBytes,
 } from '@constants/attachments'
+import { LOCATION_REFERENCE_LIMIT_REASON } from '@constants/tabReferenceSuggestion'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
@@ -37,7 +41,12 @@ import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
 import { formatFileSize } from '@lib/composerFileAdmission'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
-import { countGlobalFileReferences, isGlobalFileReferenced } from '@lib/tabReferenceSuggestion'
+import {
+  countGlobalFileReferences,
+  countGlobalFolderReferences,
+  isGlobalFileReferenced,
+  isGlobalFolderReferenced,
+} from '@lib/tabReferenceSuggestion'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type {
   ComposerFileAttachment,
@@ -63,6 +72,7 @@ function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']
   if (type === 'plugin') return 'Plugin'
   if (type === 'connector') return 'Connector'
   if (type === 'global_file') return 'Global File'
+  if (type === 'global_folder') return 'Global Folder'
   return 'Agent File'
 }
 
@@ -135,6 +145,7 @@ function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
   if (attachment.type === 'plugin') return <IconWorkflows />
   if (attachment.type === 'connector') return <IconConnectors />
   if (attachment.type === 'global_file') return <GfsFileIcon name={attachment.label} />
+  // Folders and agent files share the icon the file browsers give a folder.
   return <IconContexts />
 }
 
@@ -911,28 +922,39 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const isDegraded = hostRuntimeStatus?.degraded?.reason === 'llm_key_missing'
   const hasComposerAttachments = composerAttachmentItems.length > 0
 
-  // A modal of the composer covers the chip, and a file already attached needs
-  // no suggestion. The chip is not an attachment: it stays out of the count and
-  // of "Clear all".
+  // A modal of the composer covers the chip, and a file or folder already
+  // attached needs no suggestion. The chip is not an attachment: it stays out of
+  // the count and of "Clear all".
+  const suggestionIsFolder = suggestedReference?.type === 'global_folder'
+  const suggestionAlreadyAttached =
+    suggestedReference !== null &&
+    (suggestionIsFolder
+      ? isGlobalFolderReferenced(composerReferenceAttachments, suggestedReference.gfsUri)
+      : isGlobalFileReferenced(composerReferenceAttachments, suggestedReference.gfsUri))
   const shownSuggestion =
     suggestedReference &&
     selectedAgent &&
     !globalFilesModalOpen &&
     !agentFilesModalOpen &&
-    !isGlobalFileReferenced(composerReferenceAttachments, suggestedReference.gfsUri)
+    !suggestionAlreadyAttached
       ? suggestedReference
       : null
-  const suggestionAtFileLimit =
-    countGlobalFileReferences(composerReferenceAttachments) >= FILE_REFERENCE_MAX_COUNT
+  // Each kind has its own cap: a folder never takes a file's slot. Another
+  // folder is not replaced on click; the user removes it first.
+  const suggestionLimitReason = suggestionIsFolder
+    ? countGlobalFolderReferences(composerReferenceAttachments) >= LOCATION_REFERENCE_MAX_COUNT
+      ? LOCATION_REFERENCE_LIMIT_REASON
+      : null
+    : countGlobalFileReferences(composerReferenceAttachments) >= FILE_REFERENCE_MAX_COUNT
+      ? `A message can reference at most ${FILE_REFERENCE_MAX_COUNT} files`
+      : null
   const suggestionBlockedReason = !shownSuggestion
     ? null
     : agentSending
       ? 'Available once the message is sent'
       : isDegraded
         ? 'Unavailable while the agent is degraded'
-        : suggestionAtFileLimit
-          ? `A message can reference at most ${FILE_REFERENCE_MAX_COUNT} files`
-          : null
+        : suggestionLimitReason
   // The cap is the one state the user must act on, so its reason is shown; a
   // send in progress or a degraded host already explain themselves elsewhere.
   const suggestionReasonVisible = suggestionBlockedReason !== null && !agentSending && !isDegraded

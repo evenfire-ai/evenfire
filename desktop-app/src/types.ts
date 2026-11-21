@@ -1349,7 +1349,14 @@ export interface MessageToolStep {
 
 export interface ChatMessageAttachment {
   id: string
-  type: 'plugin' | 'connector' | 'agent_file' | 'global_file' | 'uploaded_file' | 'response_file'
+  type:
+    | 'plugin'
+    | 'connector'
+    | 'agent_file'
+    | 'global_file'
+    | 'global_folder'
+    | 'uploaded_file'
+    | 'response_file'
   label: string
   tooltip?: string
   addedOrder?: number

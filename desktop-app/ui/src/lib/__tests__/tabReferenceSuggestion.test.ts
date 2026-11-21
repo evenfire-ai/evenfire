@@ -107,8 +107,12 @@ describe('deriveTabReferenceTarget — by active tab', () => {
     })
   })
 
-  it('offers nothing when Files is on a folder', () => {
-    expect(derive(filesTab(FILE_URI), { gfsUri: FILE_URI, kind: 'directory' }, 0)).toBeNull()
+  it('offers the folder Files is on', () => {
+    expect(derive(filesTab(FILE_URI), { gfsUri: FILE_URI, kind: 'directory' }, 0)).toEqual({
+      kind: 'folder',
+      gfsUri: FILE_URI,
+      prefetchKey: `${FILE_URI}#folder`,
+    })
   })
 
   it('offers nothing at the Files root', () => {

@@ -37,9 +37,10 @@ export function shownTabLocation(
 }
 
 /**
- * The file the active tab offers as a chat reference, or `null` when it offers
- * none (no file in view, an unavailable preview, a folder, or a URI without a
- * stable rid).
+ * What the active tab offers as a chat reference: its file, or the folder
+ * Files is open on. `null` when it offers none (nothing in view, an
+ * unavailable preview, the Files root, or a URI without a stable rid). A file
+ * open in Files offers the file only, never the folder that holds it.
  */
 export function deriveTabReferenceTarget(
   activeTab: WorkspaceTab | null | undefined,
@@ -61,9 +62,13 @@ export function deriveTabReferenceTarget(
     }
   }
   if (shown?.kind === 'files') {
-    if (shown.location.kind !== 'file') return null
     const gfsUri = normalizeGfsResourceUri(shown.location.gfsUri)
     if (!gfsUri) return null
+    // A folder has no version, so neither an observed change nor the children
+    // the agent creates inside it give it a new key.
+    if (shown.location.kind === 'directory') {
+      return { kind: 'folder', gfsUri, prefetchKey: `${gfsUri}#folder` }
+    }
     return { gfsUri, prefetchKey: `${gfsUri}#r${revision}` }
   }
   return null
@@ -84,6 +89,26 @@ export function isGlobalFileReferenced(
     reference =>
       reference.type === 'global_file' && normalizeGfsResourceUri(reference.gfsUri) === target
   )
+}
+
+/** Whether the composer already names the folder at `gfsUri`, told apart by normalized URI. */
+export function isGlobalFolderReferenced(
+  references: readonly ComposerReferenceAttachment[],
+  gfsUri: string
+): boolean {
+  const target = normalizeGfsResourceUri(gfsUri)
+  if (target === null) return false
+  return references.some(
+    reference =>
+      reference.type === 'global_folder' && normalizeGfsResourceUri(reference.gfsUri) === target
+  )
+}
+
+/** The folders a message would name, the kind the folder cap counts. */
+export function countGlobalFolderReferences(
+  references: readonly ComposerReferenceAttachment[]
+): number {
+  return references.filter(reference => reference.type === 'global_folder').length
 }
 
 /** The Global Files references a message would carry, the kind the file cap counts. */

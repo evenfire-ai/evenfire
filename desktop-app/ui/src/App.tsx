@@ -32,7 +32,10 @@ import type { CompactMenuCloseFocus } from '@components/SidebarNav/types'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
-import { TAB_REFERENCE_FILE_LIMIT_TOAST } from '@constants/tabReferenceSuggestion'
+import {
+  LOCATION_REFERENCE_LIMIT_REASON,
+  TAB_REFERENCE_FILE_LIMIT_TOAST,
+} from '@constants/tabReferenceSuggestion'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import {
   desktopQueryKeys,
@@ -1692,11 +1695,16 @@ export function App() {
   const invalidateTabReference = tabReferenceSuggestion.invalidate
   const acceptTabReference = React.useCallback<TabReferenceSuggestionValue['accept']>(
     candidate => {
+      if (candidate.type === 'global_folder') {
+        const outcome = vm.addSuggestedLocationReference(candidate)
+        if (outcome === 'full') vm.pushToast(LOCATION_REFERENCE_LIMIT_REASON, 'warn')
+        return outcome
+      }
       const outcome = vm.addSuggestedFileReference(candidate)
       if (outcome === 'full') vm.pushToast(TAB_REFERENCE_FILE_LIMIT_TOAST, 'warn')
       return outcome
     },
-    [vm.addSuggestedFileReference, vm.pushToast]
+    [vm.addSuggestedFileReference, vm.addSuggestedLocationReference, vm.pushToast]
   )
   const tabReferenceSuggestionValue = React.useMemo<TabReferenceSuggestionValue>(
     () => ({ candidate: tabReferenceSuggestion.candidate, accept: acceptTabReference }),

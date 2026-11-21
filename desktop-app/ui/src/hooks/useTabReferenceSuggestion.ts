@@ -2,9 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { TAB_REFERENCE_RETRY_DELAYS_MS } from '@constants/tabReferenceSuggestion'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
+import { buildComposerLocationReferences } from '@lib/composerLocationReferences'
 import { bumpRevision, deriveTabReferenceTarget } from '@lib/tabReferenceSuggestion'
-import type { TabReferenceRevision } from '@lib/tabReferenceSuggestion.types'
-import type { ComposerGlobalFileReference } from '@/uiTypes'
+import type {
+  SuggestedReference,
+  TabReferenceRevision,
+  TabReferenceTarget,
+} from '@lib/tabReferenceSuggestion.types'
+import type { ComposerGlobalFileReference, ComposerGlobalFolderReference } from '@/uiTypes'
 import type {
   TabReferenceSuggestion,
   TabReferenceSuggestionInput,
@@ -16,23 +21,47 @@ type CacheEntry = {
   key: string
   gfsUri: string
   scope: string
-  result: { status: 'ready'; candidate: ComposerGlobalFileReference } | { status: 'none' }
+  result: { status: 'ready'; candidate: SuggestedReference } | { status: 'none' }
 }
 
 type Outcome =
-  | { kind: 'usable'; candidate: ComposerGlobalFileReference }
+  | { kind: 'usable'; candidate: SuggestedReference }
   | { kind: 'unusable' }
   | { kind: 'transient' }
 
 const MAX_ATTEMPTS = TAB_REFERENCE_RETRY_DELAYS_MS.length + 1
 
+type ResolvedResource = Extract<NavigationResolution, { status: 'resolved' }>['resource']
+
+function classifyFolder(resource: ResolvedResource, gfsUri: string): Outcome {
+  if (resource.kind !== 'directory') return { kind: 'unusable' }
+  if (normalizeGfsResourceUri(resource.gfsUri) !== gfsUri) return { kind: 'unusable' }
+  const candidate: ComposerGlobalFolderReference = {
+    id: `global-folder:${resource.drive}:${resource.resourceId}`,
+    type: 'global_folder',
+    resourceId: resource.resourceId,
+    drive: resource.drive,
+    gfsUri: resource.gfsUri,
+    label: resource.name,
+  }
+  try {
+    buildComposerLocationReferences([candidate])
+  } catch {
+    // Not a valid location for this resource; asking again returns the same.
+    return { kind: 'unusable' }
+  }
+  return { kind: 'usable', candidate }
+}
+
 function classifyResolution(
   resolution: NavigationResolution,
   gfsUri: string,
+  targetIsFolder: boolean,
   minVersion: number | undefined
 ): Outcome {
   if (resolution?.status !== 'resolved') return { kind: 'transient' }
   const resource = resolution.resource
+  if (targetIsFolder) return classifyFolder(resource, gfsUri)
   if (resource.kind !== 'file') return { kind: 'unusable' }
   if (normalizeGfsResourceUri(resource.gfsUri) !== gfsUri) return { kind: 'unusable' }
   // The host refuses the whole turn when a reference declares the wrong size,
@@ -63,24 +92,29 @@ function classifyResolution(
 /**
  * Whether the cached entry may be shown for the current target. Besides its own
  * key, this serves a key the target has since moved past (a later revision or
- * reload of the same file) while that key revalidates: same file, same
- * authority and, for a preview, not older than the version on screen.
+ * reload of the same file) while that key revalidates: same resource, same
+ * kind, same authority and, for a preview, not older than the version on
+ * screen.
  */
 function displayable(
   cache: CacheEntry | null,
-  gfsUri: string | null,
+  target: TabReferenceTarget | null,
   scope: string,
   minVersion: number | undefined
 ): cache is CacheEntry & { result: { status: 'ready' } } {
-  if (!cache || gfsUri === null || cache.result.status !== 'ready') return false
-  if (cache.scope !== scope || cache.gfsUri !== gfsUri) return false
-  return minVersion === undefined || cache.result.candidate.version >= minVersion
+  if (!cache || target === null || cache.result.status !== 'ready') return false
+  if (cache.scope !== scope || cache.gfsUri !== target.gfsUri) return false
+  const candidate = cache.result.candidate
+  if (candidate.type === 'global_folder') return target.kind === 'folder'
+  if (target.kind === 'folder') return false
+  return minVersion === undefined || candidate.version >= minVersion
 }
 
 /**
- * The active tab's file as a resolved, ready-to-attach reference for the drawer
- * composer. The resolve runs before any click, so accepting the suggestion is
- * synchronous. One entry is cached and the latest request wins.
+ * The active tab's file, or the folder Files is open on, as a resolved,
+ * ready-to-attach reference for the drawer composer. The resolve runs before
+ * any click, so accepting the suggestion is synchronous. One entry is cached
+ * and the latest request wins.
  */
 export function useTabReferenceSuggestion({
   activeTab,
@@ -99,6 +133,7 @@ export function useTabReferenceSuggestion({
   )
   const gfsUri = target?.gfsUri ?? null
   const prefetchKey = target?.prefetchKey ?? null
+  const targetIsFolder = target?.kind === 'folder'
   const minVersion =
     target && activeTab?.kind === 'preview' ? activeTab.preview?.resourceVersion : undefined
 
@@ -195,7 +230,7 @@ export function useTabReferenceSuggestion({
     }
 
     window.clerum.gfs.resolveForNavigation(gfsUri).then(
-      resolution => settle(classifyResolution(resolution, gfsUri, minVersion)),
+      resolution => settle(classifyResolution(resolution, gfsUri, targetIsFolder, minVersion)),
       // The bridge is documented never to reject. If it does, the suggestion is
       // optional: it is retried like any transient failure, then dropped.
       () => settle({ kind: 'transient' })
@@ -203,10 +238,10 @@ export function useTabReferenceSuggestion({
     // No cleanup on purpose: StrictMode's mount/cleanup/mount must neither drop
     // the request in flight nor spend an attempt; the steps above decide what is
     // stale. `minVersion` is not a dep because a preview's key already has it.
-  }, [gfsUri, prefetchKey, authorityScope, drawerVisible, cache, retryNonce])
+  }, [gfsUri, prefetchKey, targetIsFolder, authorityScope, drawerVisible, cache, retryNonce])
 
   const candidate =
-    drawerVisible && displayable(cache, gfsUri, authorityScope, minVersion)
+    drawerVisible && displayable(cache, target, authorityScope, minVersion)
       ? cache.result.candidate
       : null
 

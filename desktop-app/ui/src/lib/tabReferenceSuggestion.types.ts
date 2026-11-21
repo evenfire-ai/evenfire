@@ -1,3 +1,4 @@
+import type { ComposerGlobalFileReference, ComposerGlobalFolderReference } from '@/uiTypes'
 import type { PreviewTabPayload } from './workspaceTabs.types'
 
 /**
@@ -7,13 +8,17 @@ import type { PreviewTabPayload } from './workspaceTabs.types'
 export type FilesResolvedLocation = { gfsUri: string; kind: 'file' | 'directory' } | null
 
 /**
- * The file the active tab points at, and the key its prefetch is cached under.
- * `gfsUri` is always in the canonical `gfs://<drive>/<rid>` form.
+ * What the active tab points at, and the key its prefetch is cached under:
+ * a file, or the folder Files is open on. `gfsUri` is always in the canonical
+ * `gfs://<drive>/<rid>` form. A file target carries no `kind`, so its shape
+ * is the same whether or not folders are offered.
  */
-export type TabReferenceTarget = {
-  gfsUri: string
-  prefetchKey: string
-}
+export type TabReferenceTarget =
+  | { kind?: undefined; gfsUri: string; prefetchKey: string }
+  | { kind: 'folder'; gfsUri: string; prefetchKey: string }
+
+/** A reference the active tab offers to the chat composer. */
+export type SuggestedReference = ComposerGlobalFileReference | ComposerGlobalFolderReference
 
 /**
  * Observed changes of whichever file was the target when each one arrived. It

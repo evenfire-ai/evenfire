@@ -13,6 +13,7 @@ import {
   COMPOSER_MAX_REQUEST_BODY_BYTES,
   COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES,
 } from '@constants/attachments'
+import { LOCATION_REFERENCE_LIMIT_REASON } from '@constants/tabReferenceSuggestion'
 import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
@@ -47,6 +48,7 @@ import {
   readHostModelSelection,
 } from '@lib/hostModelSelectionStore'
 import { createRetainedSendStore } from '@lib/retainedSendStore'
+import { countGlobalFolderReferences } from '@lib/tabReferenceSuggestion'
 import {
   mergeAuthoritativeServerMessages,
   messageServerTurnNumber,
@@ -916,6 +918,7 @@ export function useAgentChatController({
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
     addSuggestedFileReference,
+    addSuggestedLocationReference,
     restoreComposerImageAttachments,
     restoreComposerReferenceAttachments,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
@@ -972,15 +975,24 @@ export function useAgentChatController({
           `${imageOutcome.dropped} of ${images.length} ${imageOutcome.dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_ATTACHMENTS}-attachment limit`
         )
       }
-      if (referenceOutcome.dropped > 0) {
+      // Folders have a cap of their own, so they are reported apart from the
+      // file limit and left out of its counts.
+      const droppedFolders = referenceOutcome.droppedFolders
+      const droppedFileReferences = referenceOutcome.dropped - droppedFolders
+      if (droppedFileReferences > 0) {
+        const fileReferenceCount = references.length - countGlobalFolderReferences(references)
         droppedParts.push(
-          `${referenceOutcome.dropped} of ${references.length} ${referenceOutcome.dropped === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
+          `${droppedFileReferences} of ${fileReferenceCount} ${droppedFileReferences === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
         )
       }
-      const totalDropped = imageOutcome.dropped + referenceOutcome.dropped
-      const message = droppedParts.length
+      const totalDropped = imageOutcome.dropped + droppedFileReferences
+      const keptMessage = droppedParts.length
         ? `Attachments kept — ${droppedParts.join('; ')} and ${totalDropped === 1 ? 'was' : 'were'} dropped.`
         : 'Attachments kept'
+      const message =
+        droppedFolders > 0
+          ? `${droppedParts.length ? keptMessage : 'Attachments kept.'} ${LOCATION_REFERENCE_LIMIT_REASON}: ${droppedFolders === 1 ? 'a folder was' : `${droppedFolders} folders were`} dropped.`
+          : keptMessage
       pushToast(message, 'info', {
         action: {
           label: 'Discard all',
@@ -4804,6 +4816,7 @@ export function useAgentChatController({
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
     addSuggestedFileReference,
+    addSuggestedLocationReference,
     handleClearComposerAttachments: resetComposerAttachments,
     cancelTask,
   }
