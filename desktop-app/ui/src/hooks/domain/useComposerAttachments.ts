@@ -12,6 +12,7 @@ import {
 } from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { composerRequestBaseContent } from '@lib/composerHostRequest'
+import { buildComposerLocationReferences } from '@lib/composerLocationReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   countGlobalFileReferences,
@@ -130,11 +131,16 @@ export function mergeComposerReferenceAttachments(
   let dropped = 0
   let droppedFolders = 0
   for (const attachment of incoming) {
-    if (accepted.some(candidate => candidate.id === attachment.id)) {
+    const isFolder = attachment.type === 'global_folder'
+    // A folder comes back under another id after a resend; the same URI is the
+    // same folder, so it is already there rather than lost at the cap.
+    if (
+      accepted.some(candidate => candidate.id === attachment.id) ||
+      (attachment.type === 'global_folder' && isGlobalFolderReferenced(accepted, attachment.gfsUri))
+    ) {
       duplicates += 1
       continue
     }
-    const isFolder = attachment.type === 'global_folder'
     const full = isFolder
       ? countGlobalFolderReferences(accepted) >= LOCATION_REFERENCE_MAX_COUNT
       : accepted.length - countGlobalFolderReferences(accepted) >= FILE_REFERENCE_MAX_COUNT
@@ -389,8 +395,10 @@ export function useComposerAttachments({
       const references = composerReferencesRef.current
       let referencesProblem: string | null = null
       let fileReferences: ReturnType<typeof buildComposerFileReferences> = []
+      let locationReferences: ReturnType<typeof buildComposerLocationReferences> = []
       try {
         fileReferences = buildComposerFileReferences(references)
+        locationReferences = buildComposerLocationReferences(references)
       } catch (error) {
         referencesProblem = error instanceof Error ? error.message : String(error)
       }
@@ -410,6 +418,7 @@ export function useComposerAttachments({
                     references
                   ),
                   fileReferences,
+                  locationReferences,
                   hostRef: selectedAgent,
                   images,
                 },

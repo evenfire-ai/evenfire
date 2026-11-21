@@ -13,6 +13,7 @@
  */
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import {
   FILE_REFERENCE_MAX_COUNT,
   LOCATION_REFERENCE_MAX_COUNT,
@@ -25,6 +26,7 @@ import {
   fileView,
   folderView,
   pickedReferences,
+  resentReference,
   suggestedFolderCandidate,
 } from '../../__tests__/__fixtures__/tabReferenceSuggestionFixtures'
 import {
@@ -36,7 +38,8 @@ const hookMock = vi.hoisted(() => ({ useGfsBrowserController: vi.fn() }))
 vi.mock('@hooks/domain/useGfsBrowserController', () => hookMock)
 
 // Global Files references as the picker attaches them, and folders as the
-// suggestion prefetch builds them. Drawn from these pools, so every generated
+// suggestion prefetch builds them and as a resend rebuilds one of them (same
+// folder, another id). Drawn from these pools, so every generated
 // file or folder is one a producer can emit.
 let globalFilePool: ComposerReferenceAttachment[] = []
 let globalFolderPool: ComposerReferenceAttachment[] = []
@@ -51,6 +54,7 @@ beforeAll(async () => {
   for (const index of [1, 2, 3]) {
     globalFolderPool.push(await suggestedFolderCandidate(await folderView(100 + index)))
   }
+  globalFolderPool.push(resentReference(globalFolderPool[0]!))
 })
 
 /**
@@ -487,6 +491,20 @@ describe('composer merge invariants (R1-M6)', () => {
           }
           const ids = new Set(outcome.next.map(item => item.id))
           expect(ids.size).toBe(outcome.next.length)
+          // One folder is one place, whatever id it came back under.
+          const folderUris = outcome.next
+            .filter(item => item.type === 'global_folder')
+            .map(item => normalizeGfsResourceUri(item.gfsUri))
+          expect(new Set(folderUris).size).toBe(folderUris.length)
+          // A folder already in the composer under another id was not lost:
+          // when every incoming folder's place is held, no folder was dropped.
+          const heldUris = new Set(folderUris)
+          const incomingFolderUris = incoming
+            .filter(item => item.type === 'global_folder')
+            .map(item => normalizeGfsResourceUri(item.gfsUri))
+          if (incomingFolderUris.every(uri => heldUris.has(uri))) {
+            expect(outcome.droppedFolders).toBe(0)
+          }
           // Held references are never dropped (dedupe runs first).
           expect(outcome.next.slice(0, existing.length)).toEqual(existing)
         }

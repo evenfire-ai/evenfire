@@ -39,6 +39,7 @@ import {
   composerRequestBaseContent,
   mapComposerAttachmentsToHostRequest,
 } from '@lib/composerHostRequest'
+import { buildComposerLocationReferences } from '@lib/composerLocationReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   confirmHostModelSelectionFromSend,
@@ -158,6 +159,7 @@ const TRANSCRIPT_MEMO_LIMITS = {
 const MAX_RECONCILE_DELTA_PAGES = 5
 const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
   'The Host did not receive the selected Global Files; the message was sent without them.'
+const LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE = "This agent can't use folder references yet"
 // #678 D13 — a Host that predates `kind:'file'` either rejects the attachment
 // with LLM_INVALID_ATTACHMENT or drops it and still accepts the message.
 const HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE =
@@ -3482,8 +3484,10 @@ export function useAgentChatController({
       // must leave the composer and its draft as the user typed them, with the
       // reason on screen, instead of failing after the send cleared the composer.
       let fileReferencesForSend: ReturnType<typeof buildComposerFileReferences>
+      let locationReferencesForSend: ReturnType<typeof buildComposerLocationReferences>
       try {
         fileReferencesForSend = buildComposerFileReferences(effectiveReferences)
+        locationReferencesForSend = buildComposerLocationReferences(effectiveReferences)
       } catch (error) {
         const blocker = error instanceof Error ? error.message : String(error)
         setAgentError(blocker)
@@ -3512,6 +3516,7 @@ export function useAgentChatController({
       const requestForBudget = {
         content: effectiveContentForRequest,
         fileReferences: fileReferencesForSend,
+        locationReferences: locationReferencesForSend,
         hostRef: sendAgent,
         files: effectiveFiles,
         images: effectiveAttachments,
@@ -3910,6 +3915,7 @@ export function useAgentChatController({
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
         const fileReferences = fileReferencesForSend
+        const locationReferences = locationReferencesForSend
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -3924,6 +3930,7 @@ export function useAgentChatController({
             ? {}
             : { modelSelectionRevision: visualModelRevisionForSend }),
           ...(fileReferences.length > 0 ? { fileReferences } : {}),
+          ...(locationReferences.length > 0 ? { locationReferences } : {}),
         }
 
         // Handed to main from here, even if main refuses it before the POST.
@@ -4006,6 +4013,23 @@ export function useAgentChatController({
                 : `The Host did not receive ${droppedFiles.length} of the selected Global Files; the message was sent without them.`
             setAgentError(droppedMessage)
             pushToast(droppedMessage, 'error')
+          }
+        }
+        // The same rule for the folder: a Host or rpc-proxy that predates
+        // locationReferences runs the turn without it. The send stands.
+        let locationReferencesDropped = false
+        if (ackOk && !ackIsEmpty && locationReferences.length > 0) {
+          const acceptedLocationReferenceIds = new Set<string>(
+            Array.isArray(response.acceptedLocationReferenceIds)
+              ? response.acceptedLocationReferenceIds
+              : []
+          )
+          if (
+            locationReferences.some(reference => !acceptedLocationReferenceIds.has(reference.id))
+          ) {
+            locationReferencesDropped = true
+            setAgentError(LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE)
+            pushToast(LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE, 'error')
           }
         }
         // #678 D13 — the same rule for documents. An ack that lists which
@@ -4133,7 +4157,9 @@ export function useAgentChatController({
             }))
             // The dropped-files error above already told the user what happened;
             // a success toast right after it would contradict it.
-            if (!fileReferencesDropped) pushToast(`Message sent to ${sendAgent}.`, 'success')
+            if (!fileReferencesDropped && !locationReferencesDropped) {
+              pushToast(`Message sent to ${sendAgent}.`, 'success')
+            }
           }
           return
         }

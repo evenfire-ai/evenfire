@@ -9,6 +9,7 @@ import {
   fileView,
   folderView,
   pickedReferences,
+  resentReference,
   suggestedFolderCandidate,
 } from '../../__tests__/__fixtures__/tabReferenceSuggestionFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
@@ -128,5 +129,27 @@ describe('cancel keeps a folder reference', () => {
       `Attachments kept. ${LOCATION_REFERENCE_LIMIT_REASON}: a folder was dropped.`
     )
     expect(toast).not.toContain('file limit')
+  })
+
+  it('a resent folder restored over the same folder picked again is not reported as dropped', async () => {
+    const folder = await suggestedFolderCandidate(await folderView(3, 'Reports'))
+    const resent = resentReference(folder)
+    expect(resent.id).not.toBe(folder.id)
+    const rendered = await mounted()
+    act(() => rendered.result.current.handleAddComposerReferenceAttachments([resent]))
+    await sendAsync(rendered.result, 'task-resent-folder')
+    // The same folder is offered again by the tab while the task runs.
+    act(() => {
+      rendered.result.current.addSuggestedLocationReference(folder)
+    })
+
+    await act(async () => {
+      await rendered.result.current.cancelTask('task-resent-folder')
+    })
+
+    expect(rendered.result.current.composerReferenceAttachments.map(item => item.id)).toEqual([
+      folder.id,
+    ])
+    expect(keptToast(rendered.spies)).toBe('Attachments kept')
   })
 })

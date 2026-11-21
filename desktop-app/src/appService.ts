@@ -4427,6 +4427,9 @@ export class AppService {
     if (request.fileReferences !== undefined && !Array.isArray(request.fileReferences)) {
       throw new Error('File references must be a list.')
     }
+    if (request.locationReferences !== undefined && !Array.isArray(request.locationReferences)) {
+      throw new Error('Location references must be a list.')
+    }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(
       HOST_WAKEABLE_OPERATION_SCOPES,
@@ -4461,6 +4464,9 @@ export class AppService {
       // Structured references (#666): parsed at the IPC boundary; rpc-proxy
       // forwards them and mcp-host resolves each one.
       ...(request.fileReferences === undefined ? {} : { fileReferences: request.fileReferences }),
+      ...(request.locationReferences === undefined
+        ? {}
+        : { locationReferences: request.locationReferences }),
     }
     try {
       return await this.rpcClient.invokeHostMessage(

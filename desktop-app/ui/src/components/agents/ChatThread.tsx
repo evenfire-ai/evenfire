@@ -144,7 +144,9 @@ function extractWorkflowArtifactScopeFromProgress(
 function getChatMessageAttachmentIcon(attachment: ChatMessageAttachment) {
   if (attachment.type === 'plugin') return <IconWorkflows />
   if (attachment.type === 'connector') return <IconConnectors />
-  if (attachment.type === 'agent_file') return <IconContexts />
+  if (attachment.type === 'agent_file' || attachment.type === 'global_folder') {
+    return <IconContexts />
+  }
   return <GfsFileIcon name={attachment.filename || attachment.label} />
 }
 

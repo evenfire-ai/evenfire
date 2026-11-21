@@ -2,6 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
+import { COMPOSER_MAX_NON_IMAGE_BODY_BYTES } from '@constants/attachments'
+import { composerNonImageShareBytes } from '@lib/composerFileAdmission'
+import { composerRequestBaseContent } from '@lib/composerHostRequest'
+import { buildComposerLocationReferences } from '@lib/composerLocationReferences'
+import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   fileView,
   folderView,
@@ -151,5 +156,50 @@ describe('mergeComposerReferenceAttachments — folders', () => {
     const outcome = mergeComposerReferenceAttachments([folder, ...picked], [extra!])
     expect(outcome.next).toHaveLength(11)
     expect(outcome).toMatchObject({ kept: 0, dropped: 1, droppedFolders: 0 })
+  })
+})
+
+describe('useComposerAttachments — a folder in the attach-time budget', () => {
+  it('refuses a file that only fits without the structured folder', async () => {
+    const folder = await suggestedFolderCandidate(await folderView(11, 'Reports'))
+    const references = [folder]
+    const file = new File(['a'], 'a.txt', { type: 'text/plain' })
+    const folderJsonBytes = new TextEncoder().encode(
+      JSON.stringify(buildComposerLocationReferences(references))
+    ).length
+    const shareWithout = (draft: string) =>
+      composerNonImageShareBytes({
+        content: buildComposerRequestContent(composerRequestBaseContent(draft, 0, 1), references),
+        fileReferences: [],
+        locationReferences: [],
+        hostRef: 'agent-1',
+        files: [{ filename: 'a.txt' }],
+        images: [],
+      })
+    const length = COMPOSER_MAX_NON_IMAGE_BODY_BYTES - shareWithout('x') - folderJsonBytes + 2
+    expect(shareWithout('x'.repeat(length))).toBeLessThanOrEqual(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)
+    const { hook } = renderComposer()
+    act(() => {
+      hook.result.current.addSuggestedLocationReference(folder)
+    })
+    act(() => hook.result.current.handleAddComposerFiles([file], 'x'.repeat(length)))
+    expect(hook.result.current.composerFileAttachments).toEqual([])
+    expect(hook.result.current.composerFileRefusals.map(refusal => refusal.text)).toEqual([
+      expect.stringContaining('a.txt does not fit: the text and attachment details'),
+    ])
+  })
+
+  it('refuses every file while the composer holds two folders', async () => {
+    const first = await suggestedFolderCandidate(await folderView(12, 'Reports'))
+    const second = await suggestedFolderCandidate(await folderView(13, 'Invoices'))
+    const { hook } = renderComposer()
+    act(() => hook.result.current.handleAddComposerReferenceAttachments([first, second]))
+    act(() =>
+      hook.result.current.handleAddComposerFiles([new File(['a'], 'a.txt')], 'Summarize it')
+    )
+    expect(hook.result.current.composerFileAttachments).toEqual([])
+    expect(hook.result.current.composerFileRefusals.map(refusal => refusal.text)).toEqual([
+      'Only one folder per message.',
+    ])
   })
 })
