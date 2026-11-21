@@ -508,6 +508,9 @@ export function createRpcRouter(): Router {
           threadId: desktopSessionId,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
           ...(body.fileReferences === undefined ? {} : { fileReferences: body.fileReferences }),
+          ...(body.locationReferences === undefined
+            ? {}
+            : { locationReferences: body.locationReferences }),
           ...(body.modelSelectionRevision === undefined
             ? {}
             : { modelSelectionRevision: body.modelSelectionRevision }),
