@@ -110,7 +110,7 @@ describeRealPostgres('OIDC member link schema on real PostgreSQL', () => {
     })
   })
 
-  it('grants the runtime role UPDATE on connections and only SELECT/INSERT on links', async () => {
+  it('grants the runtime role only SELECT/INSERT on connections and on links', async () => {
     const privilege = async (table: string, kind: string) =>
       (
         await pool!.query<{ ok: boolean }>(
@@ -118,7 +118,10 @@ describeRealPostgres('OIDC member link schema on real PostgreSQL', () => {
           [table, kind]
         )
       ).rows[0]!.ok
-    expect(await privilege('oidc_connections', 'UPDATE')).toBe(true)
+    expect(await privilege('oidc_connections', 'SELECT')).toBe(true)
+    expect(await privilege('oidc_connections', 'INSERT')).toBe(true)
+    expect(await privilege('oidc_connections', 'UPDATE')).toBe(false)
+    expect(await privilege('oidc_connections', 'DELETE')).toBe(false)
     expect(await privilege('user_oidc_links', 'SELECT')).toBe(true)
     expect(await privilege('user_oidc_links', 'INSERT')).toBe(true)
     expect(await privilege('user_oidc_links', 'UPDATE')).toBe(false)

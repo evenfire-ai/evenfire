@@ -5,9 +5,9 @@ export const OIDC_MEMBER_LINK_MIGRATION = '0159_oidc_member_links'
 /**
  * OIDC member sign-in tables. `oidc_connections` records which issuer and
  * client a link was made under; `user_oidc_links` binds a provider subject to
- * an Evenfire user within one connection. Links are append-only for the
- * runtime role, and neither a connection nor a user can be deleted while a
- * link references it.
+ * an Evenfire user within one connection. Both are append-only for the
+ * runtime role (nothing in member sign-in updates a connection record), and
+ * neither a connection nor a user can be deleted while a link references it.
  */
 export async function applyOidcMemberLinkSchema(db: Pick<DbClient, 'query'>): Promise<void> {
   await db.query(`
@@ -33,9 +33,8 @@ export async function applyOidcMemberLinkSchema(db: Pick<DbClient, 'query'>): Pr
     REVOKE ALL PRIVILEGES ON TABLE oidc_connections, user_oidc_links FROM PUBLIC;
     REVOKE ALL PRIVILEGES ON TABLE oidc_connections, user_oidc_links
       FROM trace_maintenance_runtime, workflow_recipes_runtime;
-    GRANT SELECT, INSERT, UPDATE ON TABLE oidc_connections TO control_api_runtime;
-    GRANT SELECT, INSERT ON TABLE user_oidc_links TO control_api_runtime;
-    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE oidc_connections FROM control_api_runtime;
-    REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE user_oidc_links FROM control_api_runtime;
+    GRANT SELECT, INSERT ON TABLE oidc_connections, user_oidc_links TO control_api_runtime;
+    REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE oidc_connections, user_oidc_links
+      FROM control_api_runtime;
   `)
 }

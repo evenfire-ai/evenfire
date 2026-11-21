@@ -56,7 +56,7 @@ notification_deliveries	legacy_dml
 dynamic_clients	legacy_dml
 oauth_grants	legacy_dml
 oidc_protocol_attempts	legacy_dml
-oidc_connections	upsert
+oidc_connections	append
 user_oidc_links	append
 password_admission_rollout_state	none
 password_identifier_state	legacy_dml
