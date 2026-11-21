@@ -134,7 +134,9 @@ afterEach(() => {
 describe('ChatThread — in-chat Always approve', () => {
   it('sends decision approve with alwaysApprove:true through the central decider', async () => {
     progressByMessageId = { 'msg-1': await deriveApprovalProgress() }
-    const { getByTestId } = render(<ChatThread />)
+    const { getByTestId, queryByTestId } = render(<ChatThread />)
+    expect(queryByTestId('approval-shell-once-btn')).toBeNull()
+    expect(queryByTestId('approval-shell-command-btn')).toBeNull()
 
     await act(async () => {
       fireEvent.click(getByTestId('approval-always-approve-btn'))

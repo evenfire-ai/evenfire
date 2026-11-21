@@ -10,6 +10,8 @@ import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interacti
 import type { LlmProviderId } from '@clerum/llm-providers'
 import type { IncomingMessage as HostIncomingMessage } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
+import type { ApprovalMode } from './approval/approvalMode'
+import type { ShellCardDescriptor } from './approval/shellCard'
 import type { AttachmentReadLedgerSnapshot } from './attachments/attachmentReadBudget'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
@@ -605,6 +607,28 @@ export interface Conversation {
    * ⇔ the row has not been read yet; the durable default is 0.
    */
   modelSelectionRevision?: number
+  /**
+   * Stored approval mode (`sessions.approval_mode`, migration 019). Unknown
+   * or missing values read as `manual`. This is the stored choice, not the
+   * effective mode.
+   */
+  approval_mode: ApprovalMode
+  /**
+   * Channel type loaded from `sessions.channel_type`. Set at creation from
+   * the caller's `channelType`, never from the parsed session key. Absent
+   * when the column is null.
+   */
+  channel_type?: string
+  /**
+   * Last effective mode applied to this in-memory session. Unset until the
+   * first sync. Not persisted.
+   */
+  last_effective_approval_mode?: ApprovalMode
+  /**
+   * Auto-mode shell grants for this chat. Memory only: a cold reconstruct
+   * starts with `wholeTool: false` and an empty command set.
+   */
+  auto_shell_grants: { wholeTool: boolean; commands: Set<string> }
 }
 
 /**
@@ -772,6 +796,11 @@ export interface PendingApproval {
    * persisted.
    */
   reask?: 'denied' | 'denials_active'
+  /**
+   * Shell card projection. Absent after a restart; that card is answered as once.
+   * Not a database column.
+   */
+  shellCard?: ShellCardDescriptor
 }
 
 // ─── Loop Types ─────────────────────────────────────────────

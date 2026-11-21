@@ -336,12 +336,33 @@ only when the Host card can store a lasting grant
 
 | Button             | Value      | Effect on the conversation                                                                                                                                           |
 | ------------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Approve**        | `tool:a:…` | Runs that call only. For `shell_exec`, `http_request` or `cron_manage`, covers that tool for the rest of the task                                                    |
+| **Approve**        | `tool:a:…` | Runs that call only. For `cron_manage`, and in manual for `shell_exec` or `http_request`, covers that tool for the rest of the task                                  |
 | **Always approve** | `tool:l:…` | Runs the call and allowlists that exact tool name for later turns while the conversation stays in memory. Omitted when the Host sets `alwaysApproveAllowed` to false |
 | **Deny**           | `tool:d:…` | Cancels the call and blocks that tool name until it is approved                                                                                                      |
 
-The value is `tool:<a|l|d>:<16-char token>`
-(`main.ts:110-121`, matched by `decisionHandler.ts:93`). Typing `/approve`,
+In auto, a `shell_exec` call that the shell classifier did not approve posts
+the shell card instead (`shellCardMessageOptions`). Its text ends with
+"/approve allows this command once."
+
+| Button                 | Value      | Effect on the conversation                                                                                                                                                            |
+| ---------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Allow once**         | `tool:a:…` | Runs that call only and stores nothing                                                                                                                                                |
+| **Allow this command** | `tool:c:…` | Runs the call. Later calls of exactly the same command that would otherwise reach the classifier or this card run with no card. Shown only when the card text holds the whole command |
+| **Always allow shell** | `tool:s:…` | Runs the call. Later `shell_exec` calls that would otherwise reach the classifier or this card run with no card                                                                       |
+| **Deny**               | `tool:d:…` | Cancels the call, blocks `shell_exec` until it is approved, and clears both shell grants                                                                                              |
+
+The two shell grants last while the conversation stays in auto and in memory.
+A change of its effective mode clears them. If the conversation has left auto
+when a button is pressed, each Allow button runs only that call. A typed
+`/approve` or `/approve always` on a shell card also runs only that call. The
+approval mode decides which calls show a card at all: see
+[Configure approvals](configure-approvals.md#approval-modes).
+
+The value is `tool:<a|l|d|c|s>:<16-char token>`. channel-reader builds it and
+matches it with `TOOL_APPROVAL_ACTION_RE` in `channel-reader/src/main.ts`.
+`workflow-approval-request-reader` treats a Slack click as a tool approval only
+when its value matches `SLACK_TOOL_APPROVAL_ACTION_RE`
+(`slackToolApprovalActionIdentity` in `decisionHandler.ts`). Typing `/approve`,
 `/approve always`, or `/deny` works too. A denial re-ask, a forced cron card, a
 guardrail ask, a live-tool card, and an OAuth connect card cannot store a
 grant. Their Host payload

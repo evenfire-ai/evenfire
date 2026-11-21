@@ -43,6 +43,7 @@ import type {
   ReadyComposerFileAttachment,
 } from '../../uiTypes'
 import { AnnotationCanvas } from './AnnotationCanvas'
+import { ApprovalModePicker } from './ApprovalModePicker'
 import { ComposerAgentFilesModal } from './ComposerAgentFilesModal'
 import { ComposerGlobalFilesModal } from './ComposerGlobalFilesModal'
 import { ModelSelector } from './ModelSelector'
@@ -1245,7 +1246,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               // Rendered even before a chat exists (new-chat composer): with an
               // empty chatId the selector shows the host default and holds the pick
               // locally, and the first send piggybacks it onto message 1 (R2).
-              <ModelSelector agentRef={selectedAgent} chatId={activeChatId ?? ''} placement="up" />
+              <>
+                <ModelSelector
+                  agentRef={selectedAgent}
+                  chatId={activeChatId ?? ''}
+                  placement="up"
+                />
+                <ApprovalModePicker agentRef={selectedAgent} chatId={activeChatId ?? ''} />
+              </>
             )}
             <IconButton
               data-testid="send-button"

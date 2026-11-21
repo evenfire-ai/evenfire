@@ -14,11 +14,23 @@ import type { BudgetVerdict } from '../budget/types'
 import { config as appConfig } from '../config'
 import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
+// Phase 6 imports
+import {
+  type ApprovalConfigSnapshot,
+  approvalModeConfigWarnings,
+  effectiveApprovalMode,
+  normalizeApprovalMode,
+  readChannelCap,
+  readModeCeiling,
+} from '../core/approval/approvalMode'
+import { approverPolicyIsInvalid } from '../core/approval/approverPolicy'
+import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
+import type { ShellAction } from '../core/approval/shellCard'
+import type { ShellClassifierCaller } from '../core/approval/shellClassifier'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
 import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
 import { LlmErrorCode } from '../core/errors'
-// Phase 6 imports
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { STATELESS_CRON_APPROVAL_PROMPT } from '../core/extensions/mcpApprovalGateController'
@@ -57,6 +69,7 @@ import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClien
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveCallerRootBinding } from '../workspace/callerRootBinding'
 import type { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
+import { APPROVAL_NOTIFICATION_PARAMETER_LIMIT } from './approvalNotificationLimit'
 import { CronScheduler } from './cronScheduler'
 import { TaskExecutor, resolveTaskSessionKey } from './taskExecutor'
 import {
@@ -69,6 +82,8 @@ import {
   type FailoverSupportProvider,
   type TaskModelResolver,
 } from './types'
+
+export { approvalParametersWithinNotificationLimit } from './approvalNotificationLimit'
 
 /**
  * Pending approval info exposed via /status endpoint.
@@ -88,6 +103,7 @@ export interface PendingApprovalInfo {
   mcpServerName?: string
   /** false when the card must not offer "Always approve". Omitted when allowed. */
   alwaysApproveAllowed?: false
+  shellCard?: PendingApproval['shellCard']
 }
 
 /**
@@ -236,6 +252,7 @@ export class AgentStateMachine extends EventEmitter {
   // engine + policy + provider factory, or null when no policy is configured.
   // Null in dev/tests → no failover (byte-identical to today).
   private failoverSupportProvider: FailoverSupportProvider | null = null
+  private shellClassifierProvider: (() => ShellClassifierCaller | null) | null = null
 
   // #654 — live-catalog image-input capability resolver (provider, model →
   // evidence + policy admission). Null in dev/tests/unwired hosts → images
@@ -245,8 +262,12 @@ export class AgentStateMachine extends EventEmitter {
   // Persistent core event emitter (Gap 3 resolution: bridges agent-level events to SimpleEventEmitter)
   private coreEvents = new SimpleEventEmitter()
 
-  // Phase 6: Approval
+  // Phase 6: Approval. `approvalConfig` is the effective policy (tools,
+  // live-set, and the approver policy the channel cap reads).
+  // `approvalHostSpec` is the Host spec alone, or the dev env config, and is
+  // what the ceiling and the channel switch read.
   private approvalConfig: ApprovalConfig | undefined
+  private approvalHostSpec: ApprovalConfig | undefined
   private guardrailsConfig: GuardrailsConfig | undefined
 
   // Phase 7–8: Workspace memory & personalization
@@ -354,6 +375,14 @@ export class AgentStateMachine extends EventEmitter {
   setFailoverSupport(provider: FailoverSupportProvider): void {
     this.failoverSupportProvider = provider
     logger.info({ component: 'Agent' }, 'Failover support provider set')
+  }
+
+  /**
+   * Dedicated shell classifier. Read on each shell decision, so a credential
+   * or Host setting change applies to the next call. Absent keeps the chat pair.
+   */
+  setShellClassifierProvider(provider: () => ShellClassifierCaller | null): void {
+    this.shellClassifierProvider = provider
   }
 
   /**
@@ -657,9 +686,56 @@ export class AgentStateMachine extends EventEmitter {
     logger.info({ rules: config?.rules?.length ?? 0 }, 'Guardrails configured')
   }
 
-  setApprovalConfig(config: ApprovalConfig | undefined): void {
+  setApprovalConfig(config: ApprovalConfig | undefined, hostSpec?: ApprovalConfig): void {
     this.approvalConfig = config
+    this.approvalHostSpec = hostSpec
     logger.info({ defaultPolicy: config?.defaultPolicy || 'none' }, 'Approval policy configured')
+    for (const warning of approvalModeConfigWarnings(hostSpec)) {
+      logger.warn({ event: 'approval_config_invalid', field: warning.field }, warning.message)
+    }
+    if (approverPolicyIsInvalid(config)) {
+      logger.warn(
+        { event: 'approval_config_invalid', field: 'defaultPolicy' },
+        'defaultPolicy is not cli_only, channel_users or designated_approvers; every messaging-channel session runs manual'
+      )
+    }
+    this.sweepEffectiveApprovalModes()
+  }
+
+  approvalSnapshot(): ApprovalConfigSnapshot {
+    return { effective: this.approvalConfig, hostSpec: this.approvalHostSpec }
+  }
+
+  /**
+   * A new config can lower the ceiling or a channel cap for every in-memory
+   * session, including one that makes no tool call before the ceiling returns.
+   * The cap carries the approver policy, so a `defaultPolicy` or `approvers`
+   * change that no longer allows a session's owner lowers it here too.
+   * `listByPrefix('')` is the same objects the executors hold.
+   */
+  private sweepEffectiveApprovalModes(): void {
+    const snapshot = this.approvalSnapshot()
+    const ceiling = readModeCeiling(snapshot)
+    for (const { conversation } of this.conversationManager.getStore().listByPrefix('')) {
+      const stored = normalizeApprovalMode(conversation.approval_mode)
+      const effective = effectiveApprovalMode(
+        stored,
+        ceiling,
+        readChannelCap(snapshot, conversation.channel_type ?? undefined, conversation.user_id)
+      )
+      const synced = syncEffectiveMode(conversation, effective)
+      if (!synced.changed) continue
+      logger.info(
+        {
+          event: 'L2',
+          session: approvalLogId(conversation.id),
+          storedMode: stored,
+          previousEffectiveMode: synced.previous,
+          effectiveApprovalMode: effective,
+        },
+        'Effective approval mode changed'
+      )
+    }
   }
 
   /**
@@ -1124,7 +1200,8 @@ export class AgentStateMachine extends EventEmitter {
     requestId: string,
     alwaysApprove: boolean,
     channelType?: string,
-    channelId?: string
+    channelId?: string,
+    shellAction?: ShellAction
   ): Promise<{ success: boolean; error?: string }> {
     const entry = this.approvalMap.get(requestId)
     if (!entry) {
@@ -1185,9 +1262,28 @@ export class AgentStateMachine extends EventEmitter {
 
     // Resume execution (fire and forget).
     // Session release happens in onComplete/onFail callbacks.
-    executor.resumeAfterApproval(alwaysApprove, userId).catch(err => {
-      logger.error({ err: err }, `Resume after approval failed:`)
-    })
+    // The effective mode is the live answer-time value, not the mode that
+    // opened the card: a ceiling, switch or approver-policy change made while
+    // the card waited applies. rpc is the desktop surface; every other channel
+    // uses the channel descriptor flag.
+    const conversation = executor.sessionKey
+      ? this.conversationManager.getSessionByKey(executor.sessionKey)
+      : undefined
+    const live = this.approvalSnapshot()
+    const effectiveMode = effectiveApprovalMode(
+      normalizeApprovalMode(conversation?.approval_mode),
+      readModeCeiling(live),
+      readChannelCap(live, conversation?.channel_type, conversation?.user_id)
+    )
+    executor
+      .resumeAfterApproval(alwaysApprove, userId, {
+        ...(shellAction ? { shellAction } : {}),
+        effectiveMode,
+        surface: channelType === 'rpc' ? 'desktop' : 'channel',
+      })
+      .catch(err => {
+        logger.error({ err: err }, `Resume after approval failed:`)
+      })
 
     return { success: true }
   }
@@ -1551,6 +1647,7 @@ export class AgentStateMachine extends EventEmitter {
       modelName: effective?.model ?? this.modelName,
       contextWindowTokens: effective?.contextWindowTokens,
       approvalConfig: this.approvalConfig,
+      approvalConfigProvider: () => this.approvalSnapshot(),
       guardrailsConfig: this.guardrailsConfig,
       coreEvents: this.coreEvents,
       cronScheduler: this.cronScheduler,
@@ -1567,6 +1664,7 @@ export class AgentStateMachine extends EventEmitter {
       // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
       // no failover.
       failover: this.failoverSupportProvider?.() ?? undefined,
+      shellClassifierProvider: () => this.shellClassifierProvider?.() ?? null,
       imageInput: this.imageInputResolver ?? undefined,
       onApprovalNeeded: (requestId, taskId, approval) => {
         this.registerApproval(requestId, taskId, task, approval)
@@ -1896,7 +1994,7 @@ function approvalNotificationBody(
 
   const paramSummary =
     Object.keys(approval.parameters).length > 0
-      ? JSON.stringify(approval.parameters).substring(0, 200)
+      ? JSON.stringify(approval.parameters).substring(0, APPROVAL_NOTIFICATION_PARAMETER_LIMIT)
       : 'none'
 
   // Check if the user's channel can approve

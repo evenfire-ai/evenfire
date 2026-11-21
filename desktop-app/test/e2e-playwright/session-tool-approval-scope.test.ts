@@ -16,8 +16,22 @@
  *      its own card. cron_manage create/enable on stateless Hosts always asks,
  *      which is a separate fix and out of scope here.
  *   T5 (opt-in) an MCP tool approval does not cover a later shell_exec.
- * "Always" approval is not reachable from the Desktop UI (it offers Approve and
- * Deny only), so it is covered by mcp-host unit tests, not by this lane.
+ * "Always approve" is covered by mcp-host unit tests, not by this lane.
+ *
+ * Approval modes (session approval mode, capped by Host.spec.approval.modeCeiling):
+ *   CMD in auto, the shell card offers "Allow this command"; it runs that
+ *       command, and the identical command in the next task runs with no card
+ *       (the per-chat grant is stored).
+ *   ALL in allow_all, shell_exec runs with no card and cron_manage create still
+ *       shows a card.
+ * The canonical minikube Host sets no modeCeiling, so every chat is manual.
+ * Each mode row raises the ceiling on the chatllm Host for itself, waits until
+ * mcp-host reports it in a session read, and restores it afterwards. The patch runs under the T2
+ * mutation lease and tests the live `spec.approval`, so it never overwrites a
+ * concurrent change. No classifier-APPROVE row. The auto row pins
+ * spec.approval.shellClassifierModel to a model the classifier does not call,
+ * so the shell card still appears. With no pin, a Host that has an OpenAI
+ * credential judges shell with the Host's shell classifier model.
  *
  * Dedicated, explicitly opted-in lane against a real chatllm Host and its
  * configured LLM; nothing is mocked. Run from desktop-app/ with the branch
@@ -25,13 +39,17 @@
  *
  *   npm run build
  *   E2E_SESSION_TOOL_APPROVAL=1 E2E_K8S_CONTEXT=<branch-profile> \
+ *     MINIKUBE_PROFILE=<branch-profile> \
  *     npx playwright test --config test/e2e-playwright/playwright.session-tool-approval.config.ts
  *
  * Add E2E_SESSION_TOOL_APPROVAL_MCP=1 to also run T5; it needs the MongoDB MCP
  * server attached to the chatllm Host (same prerequisite as chat.test.ts test 5).
  */
 import type { Locator, Page, TestInfo } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { expect, test } from './fixtures.js'
 import {
   CHATLLM_HOST_REF,
@@ -53,8 +71,9 @@ const TURN_TIMEOUT = 300_000
 const CARD_TIMEOUT = 180_000
 const RUN_MCP_STEP = process.env.E2E_SESSION_TOOL_APPROVAL_MCP === '1'
 
+type ApprovalMode = 'manual' | 'auto' | 'allow_all'
 type ApprovalCard = { label: string; preview: string }
-type Decision = 'approve' | 'deny'
+type Decision = 'approve' | 'deny' | 'command'
 type ExpectedCard = { label: RegExp; preview?: string; decision: Decision }
 type HostLogEvent = Record<string, unknown> & { msg?: string }
 type LedgerWindow = Window & { __staCards?: ApprovalCard[]; __staObserver?: MutationObserver }
@@ -124,8 +143,12 @@ async function installCardLedger(page: Page): Promise<void> {
     const cards: ApprovalCard[] = []
     const seen = new WeakSet<Element>()
     const record = (): void => {
+      // A shell card (auto mode) renders the shell buttons and hides
+      // approval-approve-btn, so each card is keyed on whichever of the two it has.
       for (const button of Array.from(
-        document.querySelectorAll('[data-testid="approval-approve-btn"]')
+        document.querySelectorAll(
+          '[data-testid="approval-approve-btn"], [data-testid="approval-shell-once-btn"]'
+        )
       )) {
         if (seen.has(button)) continue
         seen.add(button)
@@ -218,7 +241,11 @@ async function runTurn(
     const stepper = suspendedCard(page, expected)
     await expect(stepper).toHaveCount(1, { timeout: CARD_TIMEOUT })
     const button = stepper.getByTestId(
-      expected.decision === 'approve' ? 'approval-approve-btn' : 'approval-deny-btn'
+      expected.decision === 'command'
+        ? 'approval-shell-command-btn'
+        : expected.decision === 'approve'
+          ? 'approval-approve-btn'
+          : 'approval-deny-btn'
     )
     await expect(button).toBeVisible()
     await humanClick(button, { beforeMs: [700, 1_200], afterMs: [700, 1_200] })
@@ -299,6 +326,186 @@ function expectShellStep(
   const step = steps.find(candidate => candidate.input === shellCommand(marker))
   expect(step, `${context}: completed Shell step for ${marker}`).toBeDefined()
   expect(step?.output, `${context}: Shell output for ${marker}`).toContain(marker)
+}
+
+type HostApproval = { uid: string; approval: Record<string, unknown> }
+
+function readHostApproval(): HostApproval {
+  const host = JSON.parse(
+    kubectl(['-n', 'mcp-host', 'get', 'host', CHATLLM_HOST_REF, '-o', 'json'])
+  ) as { metadata?: { uid?: string }; spec?: { approval?: Record<string, unknown> } }
+  const uid = host.metadata?.uid
+  const approval = host.spec?.approval
+  if (!uid) throw new Error(`Host ${CHATLLM_HOST_REF} has no metadata.uid`)
+  if (!approval) {
+    throw new Error(`Host ${CHATLLM_HOST_REF} has no spec.approval; the minikube overlay sets one`)
+  }
+  return { uid, approval }
+}
+
+/** One JSON patch of the chatllm Host, under the branch profile's T2 mutation lease. */
+function patchHost(operations: unknown[]): void {
+  const root = path.resolve(__dirname, '../../..')
+  execFileSync(
+    'bash',
+    [
+      path.join(root, 'scripts/minikube/with-t2-mutation-lock.sh'),
+      '--',
+      'kubectl',
+      `--context=${process.env.E2E_K8S_CONTEXT}`,
+      '--request-timeout=15s',
+      '-n',
+      'mcp-host',
+      'patch',
+      'host',
+      CHATLLM_HOST_REF,
+      '--type=json',
+      '-p',
+      JSON.stringify(operations),
+    ],
+    { cwd: root, timeout: 45_000, stdio: ['ignore', 'pipe', 'pipe'] }
+  )
+}
+
+/**
+ * Named precondition: raises `spec.approval.modeCeiling` on the chatllm Host
+ * for one row. Both patches test the Host uid and the whole live
+ * `spec.approval`, so a concurrent edit fails the patch instead of being
+ * overwritten. The canonical overlay sets no ceiling, so a ceiling that is
+ * already there is a leftover from an interrupted run and fails the row
+ * instead of being taken as the original. `restore` removes the ceiling again
+ * and refuses to overwrite a different value.
+ */
+function modeCeilingFixture(ceiling: ApprovalMode, extra: Record<string, string> = {}) {
+  const context = process.env.E2E_K8S_CONTEXT
+  if (!context || process.env.MINIKUBE_PROFILE !== context) {
+    throw new Error(
+      'Raising modeCeiling needs the branch-owned profile lease: set MINIKUBE_PROFILE to the E2E_K8S_CONTEXT value'
+    )
+  }
+  const original = readHostApproval()
+  if (original.approval.modeCeiling !== undefined) {
+    throw new Error(
+      `The chatllm Host already has spec.approval.modeCeiling=${String(
+        original.approval.modeCeiling
+      )}; the canonical overlay sets none, so an interrupted run left it. Remove it before rerunning.`
+    )
+  }
+  const raised = { ...original.approval, modeCeiling: ceiling, ...extra }
+  return {
+    /** The ceiling mcp-host reports once `restore` has run: absent reads manual. */
+    restoredCeiling: 'manual' as ApprovalMode,
+    apply: () => {
+      patchHost([
+        { op: 'test', path: '/metadata/uid', value: original.uid },
+        { op: 'test', path: '/spec/approval', value: original.approval },
+        { op: 'add', path: '/spec/approval/modeCeiling', value: ceiling },
+        ...Object.entries(extra).map(([key, value]) => ({
+          op: 'add',
+          path: `/spec/approval/${key}`,
+          value,
+        })),
+      ])
+      expect(readHostApproval().approval).toEqual(raised)
+      test.info().annotations.push({ type: 'mode-ceiling', description: ceiling })
+    },
+    restore: () => {
+      const current = readHostApproval()
+      if (current.uid === original.uid && isDeepStrictEqual(current.approval, original.approval)) {
+        return
+      }
+      // The JSON tests refuse to overwrite a concurrent change.
+      patchHost([
+        { op: 'test', path: '/metadata/uid', value: original.uid },
+        { op: 'test', path: '/spec/approval', value: raised },
+        { op: 'remove', path: '/spec/approval/modeCeiling' },
+        ...Object.keys(extra).map(key => ({
+          op: 'remove',
+          path: `/spec/approval/${key}`,
+        })),
+      ])
+      expect(readHostApproval().approval).toEqual(original.approval)
+    },
+  }
+}
+
+/**
+ * Cleanup for a row that raised the ceiling. Restore always runs; the wait for
+ * mcp-host to report the restored ceiling runs only after a passing body. A
+ * restore failure never replaces the row's own failure: it is rethrown with the
+ * row's failure as its cause, and the message says the ceiling may still be raised.
+ */
+async function restoreModeCeiling(
+  page: Page,
+  fixture: ReturnType<typeof modeCeilingFixture>,
+  rowFailure: unknown
+): Promise<void> {
+  try {
+    fixture.restore()
+    if (rowFailure === undefined) await waitForHostModeCeiling(page, fixture.restoredCeiling)
+  } catch (restoreError) {
+    throw new Error(
+      `modeCeiling restore failed; spec.approval.modeCeiling may still be raised on the chatllm Host: ${String(
+        restoreError
+      )}`,
+      { cause: rowFailure ?? restoreError }
+    )
+  }
+}
+
+/**
+ * mcp-host publishes its approval policy on each Host watch event, and every
+ * session read carries the live `modeCeiling`. Polls the session catalog
+ * through the Desktop's own IPC until the Host reports `ceiling`. Needs one
+ * chatllm session for this user; the first test of this serial describe
+ * creates it.
+ */
+async function waitForHostModeCeiling(page: Page, ceiling: ApprovalMode): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async hostRef => {
+          try {
+            const catalog = await window.clerum.rpc.listSessions(hostRef, undefined, {
+              agent: hostRef,
+              limit: 1,
+            })
+            return catalog.items[0]?.modeCeiling ?? 'no chatllm session to read the ceiling from'
+          } catch (error) {
+            // A waking Host can fail a read. Returned, not thrown, so the poll
+            // retries and a timeout shows the last error as the received value.
+            return `catalog read failed: ${error instanceof Error ? error.message : String(error)}`
+          }
+        }, CHATLLM_HOST_REF),
+      {
+        message: `mcp-host must report modeCeiling ${ceiling}`,
+        timeout: 60_000,
+        intervals: [500, 1_000],
+      }
+    )
+    .toBe(ceiling)
+}
+
+/** The active chatllm chat's approval fields, read from the Host. */
+async function activeSessionApproval(
+  page: Page
+): Promise<{ approvalMode?: string; modeCeiling?: string; effectiveApprovalMode?: string }> {
+  return page.evaluate(async hostRef => {
+    const chatId = await window.clerum.chat.getLastActive(hostRef)
+    if (!chatId) throw new Error(`No active ${hostRef} chat`)
+    const session = await window.clerum.rpc.loadSessionMessages(
+      hostRef,
+      hostRef,
+      chatId,
+      undefined,
+      { limit: 1 }
+    )
+    return {
+      approvalMode: session.approvalMode,
+      modeCeiling: session.modeCeiling,
+      effectiveApprovalMode: session.effectiveApprovalMode,
+    }
+  }, CHATLLM_HOST_REF)
 }
 
 test.beforeAll(() => {
@@ -429,6 +636,177 @@ test.describe.serial('per-task tool approval scope', () => {
       expectShellStep(steps, markerE, 'T4')
       expect(turn.approvalLog).toEqual(['shell_exec', 'cron_manage'])
     })
+  })
+
+  test('the picker stores auto and Allow this command answers the shell card', async ({
+    appPage,
+  }, testInfo) => {
+    const marker = markerFor(testInfo, 'CMD')
+    const ceiling = modeCeilingFixture('auto', { shellClassifierModel: 'gpt-4.1-mini' })
+    let rowFailure: unknown
+    try {
+      await test.step('an admin raises the Host ceiling to auto', async () => {
+        ceiling.apply()
+      })
+
+      await test.step('end user opens a fresh chatllm thread and sets auto', async () => {
+        await enterChatllmChat(appPage)
+        await waitForHostModeCeiling(appPage, 'auto')
+        await startFreshThread(appPage)
+        await selectChatModel(appPage, CHAT_MODEL)
+        await installCardLedger(appPage)
+        expect(await readCardLedger(appPage)).toEqual([])
+
+        await humanClick(appPage.getByTestId('approval-mode-picker'))
+        // The menu offers only modes up to the Host ceiling the renderer
+        // knows, and opening it re-reads that ceiling. The direct read above
+        // does not reach the renderer, so wait for the re-read to offer Auto.
+        await expect(appPage.getByTestId('approval-mode-option-auto')).toBeEnabled({
+          timeout: 30_000,
+        })
+        await humanClick(appPage.getByTestId('approval-mode-option-auto'))
+        await expect(appPage.getByTestId('approval-mode-label')).toHaveText('Auto-approve')
+        await expect(appPage.getByTestId('approval-mode-write-error')).toHaveCount(0)
+      })
+
+      await test.step('Allow this command runs that shell command', async () => {
+        const prompt = [
+          `Use the native shell_exec tool once to run exactly: ${shellCommand(marker)}`,
+          'Do not use any other tool, then reply with its output verbatim.',
+        ].join(' ')
+        const turn = await runTurn(
+          appPage,
+          testInfo,
+          'CMD',
+          prompt,
+          [
+            {
+              label: /^Shell requires approval$/,
+              preview: shellCommand(marker),
+              decision: 'command',
+            },
+          ],
+          [new RegExp(escapeRegExp(marker))]
+        )
+        const steps = await completedShellSteps(turn.response)
+        expectShellStep(steps, marker, 'CMD')
+        expect(turn.approvalLog).toEqual(['shell_exec'])
+        expect(await activeSessionApproval(appPage)).toEqual({
+          approvalMode: 'auto',
+          modeCeiling: 'auto',
+          effectiveApprovalMode: 'auto',
+        })
+      })
+
+      await test.step('the stored grant runs the identical command with no card', async () => {
+        const prompt = [
+          `Use the native shell_exec tool once to run exactly: ${shellCommand(marker)}`,
+          'Run it again even though you ran it before: its date output has changed.',
+          'Do not use any other tool, then reply with its new output verbatim.',
+        ].join(' ')
+        const turn = await runTurn(
+          appPage,
+          testInfo,
+          'CMD-GRANT',
+          prompt,
+          [],
+          [new RegExp(escapeRegExp(marker))]
+        )
+        // Liveness witness for "no card": this task selected shell_exec and the
+        // command completed in this response.
+        expect(turn.selectedTools).toContain('shell_exec')
+        const steps = await completedShellSteps(turn.response)
+        expectShellStep(steps, marker, 'CMD-GRANT')
+        expect(turn.approvalLog).toEqual([])
+      })
+    } catch (error) {
+      rowFailure = error
+      throw error
+    } finally {
+      await restoreModeCeiling(appPage, ceiling, rowFailure)
+    }
+  })
+
+  test('Allow all runs shell with no card and cron_manage create still asks', async ({
+    appPage,
+  }, testInfo) => {
+    const marker = markerFor(testInfo, 'ALL')
+    const ceiling = modeCeilingFixture('allow_all')
+    let rowFailure: unknown
+    try {
+      await test.step('an admin raises the Host ceiling to allow_all', async () => {
+        ceiling.apply()
+      })
+
+      await test.step('end user opens a fresh chatllm thread and confirms Allow all', async () => {
+        await enterChatllmChat(appPage)
+        await waitForHostModeCeiling(appPage, 'allow_all')
+        await startFreshThread(appPage)
+        await selectChatModel(appPage, CHAT_MODEL)
+        await installCardLedger(appPage)
+        expect(await readCardLedger(appPage)).toEqual([])
+
+        await humanClick(appPage.getByTestId('approval-mode-picker'))
+        // Offered once the menu's re-read of the Host ceiling shows allow_all.
+        await expect(appPage.getByTestId('approval-mode-option-allow-all')).toBeEnabled({
+          timeout: 30_000,
+        })
+        await humanClick(appPage.getByTestId('approval-mode-option-allow-all'))
+        // Allow all asks before it writes.
+        await expect(appPage.getByRole('dialog', { name: 'Confirm allow all' })).toBeVisible()
+        await humanClick(appPage.getByTestId('approval-mode-confirm-allow-all'))
+        await expect(appPage.getByTestId('approval-mode-label')).toHaveText('Allow all')
+        await expect(appPage.getByTestId('approval-mode-write-error')).toHaveCount(0)
+      })
+
+      await test.step('shell_exec runs with no card', async () => {
+        const prompt = [
+          `Use the native shell_exec tool once to run exactly: ${shellCommand(marker)}`,
+          'Do not use any other tool, then reply with its output verbatim.',
+        ].join(' ')
+        const turn = await runTurn(
+          appPage,
+          testInfo,
+          'ALL-SHELL',
+          prompt,
+          [],
+          [new RegExp(escapeRegExp(marker))]
+        )
+        // Liveness witness for "no card": this task selected shell_exec and the
+        // command completed in this response.
+        expect(turn.selectedTools).toContain('shell_exec')
+        const steps = await completedShellSteps(turn.response)
+        expectShellStep(steps, marker, 'ALL-SHELL')
+        expect(turn.approvalLog).toEqual([])
+        expect(await activeSessionApproval(appPage)).toEqual({
+          approvalMode: 'allow_all',
+          modeCeiling: 'allow_all',
+          effectiveApprovalMode: 'allow_all',
+        })
+      })
+
+      await test.step('cron_manage create still shows a card in allow_all', async () => {
+        const prompt = [
+          `Use the native cron_manage tool exactly once with action "create" to create a job named ${marker.toLowerCase()} that runs every day at 03:00 and replies "noop".`,
+          'Do not use any other tool and wait for me to decide the approval request in this app.',
+          'Then reply with the outcome of the cron_manage call.',
+        ].join(' ')
+        const turn = await runTurn(
+          appPage,
+          testInfo,
+          'ALL-CRON',
+          prompt,
+          [{ label: /^cron_manage requires approval$/, decision: 'deny' }],
+          [/cron_manage.*denied by the user/i]
+        )
+        expect(turn.approvalLog).toEqual(['cron_manage'])
+      })
+    } catch (error) {
+      rowFailure = error
+      throw error
+    } finally {
+      await restoreModeCeiling(appPage, ceiling, rowFailure)
+    }
   })
 
   test('an MCP tool approval does not cover a later shell_exec', async ({ appPage }, testInfo) => {

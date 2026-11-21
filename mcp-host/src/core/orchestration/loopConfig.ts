@@ -1,6 +1,7 @@
 import type { TaskBrakeConfig } from '../../budget/taskBrake'
 import type { ProgressReporter } from '../../progress/types.js'
 import type { VisualInputContext } from '../../visualInput/policy'
+import type { ApprovalModeInputs, GateCause } from '../approval/gateCause'
 import type { ToolLaneGuardrail } from '../guardrails'
 import {
   AgentEventEmitter,
@@ -70,6 +71,12 @@ export interface LoopConfig {
    * Absent → treated as interactive.
    */
   executionMode?: 'interactive' | 'unattended'
+
+  /**
+   * Set only for an interactive approval chain. Absent for cron and when
+   * approval is off, which keep today's per-task snapshot.
+   */
+  approvalMode?: ApprovalModeInputs
 
   // Progress reporting
   progressReporter?: ProgressReporter
@@ -175,7 +182,7 @@ export class DefaultLoopController implements LoopController {
   beforeTool(
     _toolName: string,
     _params: Record<string, unknown>
-  ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
+  ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval; cause?: GateCause } {
     return 'proceed' // Always proceed
   }
 
