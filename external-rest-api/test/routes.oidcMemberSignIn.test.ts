@@ -67,9 +67,11 @@ describe('External REST OIDC member sign-in', () => {
       token: SESSION_TOKEN,
       me: { id: 'user-1' },
     })
+    // Both requests arrive over HTTPS through the proxy, so each cookie must be Secure.
     const password = await request(buildApp())
       .post('/api/v1/auth/password-login')
       .set('Origin', 'https://profile.example.test')
+      .set('X-Forwarded-Proto', 'https')
       .send({ email: 'member@example.test', password: 'fixture-password' })
     expect(password.status).toBe(200)
 
@@ -84,6 +86,7 @@ describe('External REST OIDC member sign-in', () => {
     } as never)
     const oidc = await request(buildApp())
       .post('/api/v1/oidc/profile-flow/complete')
+      .set('X-Forwarded-Proto', 'https')
       .send(completeBody)
 
     expect(oidc.status).toBe(200)
@@ -92,6 +95,9 @@ describe('External REST OIDC member sign-in', () => {
     const passwordCookie = password.headers['set-cookie']
     expect(passwordCookie).toHaveLength(1)
     expect(String(passwordCookie[0])).toMatch(/^profile_session=session-token-fixture;/)
+    expect(String(passwordCookie[0])).toMatch(/; Secure(;|$)/)
+    expect(oidc.headers['set-cookie']).toHaveLength(1)
+    expect(String(oidc.headers['set-cookie'][0])).toMatch(/; Secure(;|$)/)
     expect(oidc.headers['set-cookie']).toEqual(passwordCookie)
   })
 
