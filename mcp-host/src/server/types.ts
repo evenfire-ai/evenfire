@@ -586,7 +586,10 @@ export interface SessionStateWire {
   approvalMode: ApprovalMode
   /** Live Host-spec ceiling. An env-only policy is manual outside dev mode. */
   modeCeiling: ApprovalMode
-  /** Live cap from the stored channel type, not from the session key. */
+  /**
+   * Live cap from the stored channel type, not from the session key, and,
+   * for a messaging session, the approver policy for its owner.
+   */
   channelCap: ApprovalMode
   /** min(stored, ceiling, channel cap), computed on this read. */
   effectiveApprovalMode: ApprovalMode

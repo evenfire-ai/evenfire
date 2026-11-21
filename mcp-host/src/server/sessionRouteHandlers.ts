@@ -44,8 +44,8 @@ export interface SessionRouteHandlerDeps {
    */
   redactTitle: (rawTitle: string) => string
   /**
-   * Live ceiling and channel cap. Read on each request, not captured when the
-   * handler is wired. Absent → manual ceiling.
+   * Live ceiling, channel switch and approver policy. Read on each request,
+   * not captured when the handler is wired. Absent → manual ceiling.
    */
   approvalSnapshot?: () => ApprovalConfigSnapshot
   /**
@@ -79,8 +79,12 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
   const sessionModel =
     deps.sessionModel ?? (() => ({ providerType: 'unknown', modelName: 'unknown' }))
 
+  // `owner` is the user the session key is built from. Every session these
+  // reads return is the caller's own `rpc` session, which the approver policy
+  // never caps; the cap still takes the owner, as every composition does.
   const approvalView = (
-    session: Conversation | ConversationSessionSummary | ConversationSessionMessages
+    session: Conversation | ConversationSessionSummary | ConversationSessionMessages,
+    owner: string
   ) => {
     const live =
       'key' in session ? getConversationManager().getSessionByKey(session.key) : undefined
@@ -97,7 +101,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     const selections = live ? live.modelSelections : session.modelSelections
     const snapshot = approvalSnapshot()
     const ceiling = readModeCeiling(snapshot)
-    const cap = readChannelCap(snapshot, channelType)
+    const cap = readChannelCap(snapshot, channelType, live ? live.user_id : owner)
     const approvalMode = normalizeApprovalMode(stored)
     const model = sessionModel(selections)
     const dedicated = deps.shellClassifierPair?.() ?? null
@@ -125,7 +129,8 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
   // totals, shared by the list and messages handlers (RPC token exposure
   // patch P1-1).
   const sessionStateView = (
-    session: Conversation | ConversationSessionSummary | ConversationSessionMessages
+    session: Conversation | ConversationSessionSummary | ConversationSessionMessages,
+    owner: string
   ) => {
     const state =
       session.state === ConversationState.Processing
@@ -178,7 +183,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     // session has had an LLM call; cache breakdown included only when the model
     // reports it). See `projectSessionTokens`.
     const tokens = projectSessionTokens(session)
-    return { state, activeTaskId, pendingApproval, tokens, ...approvalView(session) }
+    return { state, activeTaskId, pendingApproval, tokens, ...approvalView(session, owner) }
   }
 
   const handleSessionsList = async (
@@ -225,7 +230,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
         lastActivityAt: summary.lastActivityAt.toISOString(),
         // spec 15 — omit when unset; re-redact on read (defense in depth §5).
         ...(summary.title !== undefined ? { title: redactTitle(summary.title) } : {}),
-        ...sessionStateView(summary),
+        ...sessionStateView(summary, userSub),
       })),
       ...(nextCursor ? { nextCursor } : {}),
     }
@@ -255,7 +260,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     return {
       agent: agentName,
       chatId,
-      ...sessionStateView(page),
+      ...sessionStateView(page, userSub),
       totalTurns: page.totalTurns,
       ...windowBounds,
       turns: turns.map(t => ({

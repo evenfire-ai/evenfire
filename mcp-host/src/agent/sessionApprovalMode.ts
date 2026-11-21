@@ -1,12 +1,14 @@
 /**
  * PATCH approval-mode core. The route stores the requested mode. The ceiling
  * and the channel cap are read from the live snapshot at call time, and the
- * cap comes from the session's stored channel type, not from the key.
+ * cap comes from the session's stored channel type and owner, not from the
+ * key. The route serves `rpc` sessions, which the approver policy never caps.
  */
 import {
   type ApprovalConfigSnapshot,
   type ApprovalMode,
   readChannelCap,
+  readChannelSwitch,
   readModeCeiling,
 } from '../core/approval/approvalMode'
 import type { ConversationManager } from '../core/conversation/conversation'
@@ -48,7 +50,8 @@ export async function applySessionApprovalMode(
     rawMode,
     {
       ceiling: readModeCeiling(live),
-      cap: readChannelCap(live, conversation.channel_type),
+      cap: readChannelCap(live, conversation.channel_type, conversation.user_id),
+      channelSwitch: readChannelSwitch(live, conversation.channel_type),
     },
     'route',
     userSub

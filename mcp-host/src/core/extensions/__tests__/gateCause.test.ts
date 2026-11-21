@@ -415,9 +415,9 @@ describe('config-arrival sweep', () => {
     expect(readModeCeiling({ effective: open, hostSpec: policy('allow_all', false) })).toBe(
       'allow_all'
     )
-    expect(readChannelCap({ effective: open, hostSpec: policy('allow_all', false) }, 'slack')).toBe(
-      'manual'
-    )
+    expect(
+      readChannelCap({ effective: open, hostSpec: policy('allow_all', false) }, 'slack', 'user-1')
+    ).toBe('manual')
     expect(changed.auto_shell_grants.wholeTool).toBe(false)
     expect(changed.task_approved_tools).toEqual(new Set(['cron_manage']))
 

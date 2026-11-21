@@ -2198,5 +2198,73 @@
   {
     "suite": "main.approvalWiring.test.ts",
     "fullName": "main session reads: classifier pair reports the saved model a task runs, even when the Host subset hides it from selection"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approver policy on a running channel session a mode stored under an unset policy runs manual once designated_approvers leaves its owner out, and the sweep clears its grants"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approver policy on a running channel session a listed approver keeps allow_all until removed from approvers, then runs manual at the next tool call"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approver policy on a running channel session cli_only lowers every messaging session and leaves an rpc session at its mode"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approver policy on a running channel session channel_users and an unset policy leave a non-listed channel owner at allow_all"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approval config warnings logs defaultPolicy, never its value, when the policy in force is not a known value"
+  },
+  {
+    "suite": "shellCardApprovalRoute.test.ts",
+    "fullName": "shell card approval route command after the approver policy drops the owner resolves to once"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: a telegram non-approver who resends a pre-staged allow-all keeps it stored and runs manual"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: a teams non-approver who resends a pre-staged allow-all keeps it stored and runs manual"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap cli_only caps every email session at manual, a listed approver included"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap cli_only leaves an rpc session at allow_all"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap designated_approvers keeps a listed telegram owner at allow_all and caps any other owner"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap policy channel_users adds nothing to the switch"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap designated_approvers caps a listed approver whose channel block sets enabled: false"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap designated_approvers caps every Teams owner when the Host lists no Teams approvers"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap designated_approvers caps an email owner whose case differs from the listed approver"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap an invalid policy (an unknown string) caps every messaging owner, a listed approver included"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap reads the policy from the policy in force and the switch from the Host spec"
   }
 ]

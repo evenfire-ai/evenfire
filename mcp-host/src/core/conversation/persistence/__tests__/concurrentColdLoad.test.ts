@@ -17,7 +17,7 @@ import { createInProcessWorker } from './testHelpers'
 
 const USER = 'u-1'
 const KEY = `${USER}:rpc:host-a:chat-1`
-const LIVE = { ceiling: 'allow_all', cap: 'allow_all' } as const
+const LIVE = { ceiling: 'allow_all', cap: 'allow_all', channelSwitch: 'allow_all' } as const
 
 type StoreMode = 'sqlite' | 'dual'
 

@@ -432,14 +432,14 @@ describe('approval mode admission', () => {
       await manager.setApprovalMode(
         changed.conversation,
         'manual',
-        { ceiling: 'allow_all', cap: 'allow_all' },
+        { ceiling: 'allow_all', cap: 'allow_all', channelSwitch: 'allow_all' },
         'route',
         'deny-user'
       )
       await manager.setApprovalMode(
         changed.conversation,
         'auto',
-        { ceiling: 'allow_all', cap: 'allow_all' },
+        { ceiling: 'allow_all', cap: 'allow_all', channelSwitch: 'allow_all' },
         'route',
         'deny-user'
       )
@@ -1040,7 +1040,11 @@ describe('grant memory through admission', () => {
     })
     conversation.auto_shell_grants = { wholeTool: true, commands: new Set() }
     conversation.last_effective_approval_mode = 'auto'
-    const live = { ceiling: 'allow_all' as const, cap: 'allow_all' as const }
+    const live = {
+      ceiling: 'allow_all' as const,
+      cap: 'allow_all' as const,
+      channelSwitch: 'allow_all' as const,
+    }
     await manager.setApprovalMode(conversation, 'manual', live, 'route', 'writer-user')
     await manager.setApprovalMode(conversation, 'auto', live, 'route', 'writer-user')
     const cleared = await drive({
