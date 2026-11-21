@@ -290,6 +290,12 @@ function parseMemberEligibility(
     }
   }
 
+  // The domain list only limits allowed_domains creation. Without it (and on
+  // Entra, which creates for the pinned tenant) the list would load and be
+  // silently ignored, so an operator could believe creation is limited.
+  if (domainsRaw !== undefined && (creationRaw !== 'enabled' || entraIssuer)) {
+    bad.add(OPTIONAL_ENV.allowedEmailDomains)
+  }
   if (creationRaw !== undefined && creationRaw !== 'enabled') bad.add(OPTIONAL_ENV.accountCreation)
   if (creationRaw !== undefined && entraIssuer) bad.add(OPTIONAL_ENV.accountCreation)
   if (creationRaw === 'enabled' && allowedEmailDomains.length === 0) {

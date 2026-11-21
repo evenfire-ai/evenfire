@@ -262,10 +262,29 @@ describe('OIDC member sign-in configuration', () => {
 
   it('disables creation for a non-Entra issuer by default', () => {
     const provider = loadOidcProviderConfiguration(
-      { ...OIDC_ENV, ...GUARD, ...SWITCH, CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: 'example.test' },
+      { ...OIDC_ENV, ...GUARD, ...SWITCH },
       GENERATION_KEY
     )!
     expect(provider.memberSignIn?.accountCreation).toBe('disabled')
+    expect(provider.memberSignIn?.allowedEmailDomains).toEqual([])
+  })
+
+  it('refuses ALLOWED_EMAIL_DOMAINS without ACCOUNT_CREATION=enabled, and on Entra', () => {
+    for (const extra of [{}, { ...GUARD, ...SWITCH }]) {
+      expect(
+        refusal({ ...OIDC_ENV, ...extra, CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: 'example.test' })
+      ).toBe('Invalid OIDC provider configuration field(s): CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS')
+      expect(
+        refusal({ ...ENTRA_ENV, ...extra, CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: 'example.test' })
+      ).toBe('Invalid OIDC provider configuration field(s): CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS')
+    }
+    expect(
+      refusal({
+        ...ENTRA_ENV,
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+        CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: 'example.test',
+      })
+    ).toContain('CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS')
   })
 
   it('refuses account creation without domains, bad domains and a bad team id', () => {
@@ -280,9 +299,13 @@ describe('OIDC member sign-in configuration', () => {
       })
     ).toContain('CONTROL_API_OIDC_ACCOUNT_CREATION')
     for (const bad of ['localhost', '@example.test', 'a b.test', 'example.test,,x.test']) {
-      expect(refusal({ ...OIDC_ENV, CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: bad })).toContain(
-        'CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS'
-      )
+      expect(
+        refusal({
+          ...OIDC_ENV,
+          CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+          CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: bad,
+        })
+      ).toContain('CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS')
     }
     expect(refusal({ ...OIDC_ENV, CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: 'not-a-uuid' })).toContain(
       'CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID'
@@ -404,9 +427,6 @@ describe('OIDC member sign-in configuration', () => {
     expect(generation({ ...base, CONTROL_API_OIDC_REQUIRED_ROLE: 'admin' })).not.toBe(first)
     expect(generation({ ...base, CONTROL_API_OIDC_ALLOW_GUESTS: 'true' })).not.toBe(first)
     const plain = generation(OIDC_ENV)
-    expect(
-      generation({ ...OIDC_ENV, CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: 'example.test' })
-    ).not.toBe(plain)
     expect(
       generation({
         ...OIDC_ENV,
