@@ -1,10 +1,15 @@
 import type { NextFunction, Request, Response } from 'express'
+import { HOST_EDGE_RPC_PROXY_ROUTE_SCOPES } from '@clerum/action-context-contracts'
 import { config } from '../config'
 import { type ServiceClaims, requireScope } from './authMiddleware'
 import { declaresV2RuntimeAuthority, runtimeEdgeGuard } from './edgeRuntimeAuth'
 import type { RuntimeCallerContext } from './types'
 
-const authenticatedV2Search = runtimeEdgeGuard(['rpc-proxy'], ['session.read'])
+const authenticatedV2Search = runtimeEdgeGuard(
+  ['rpc-proxy'],
+  ['session.read'],
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions/search']
+)
 const authenticatedLegacySearch = requireScope('host:session:read')
 
 /**
