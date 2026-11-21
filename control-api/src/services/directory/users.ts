@@ -338,8 +338,6 @@ export async function updateAdminUserContext(
   })
 }
 
-const retirementLog = rootLogger.child({ component: 'desktop_user_retirement' })
-
 /**
  * True while OIDC member sign-in is switched on. A member removed then is kept
  * as a retired row even without link history: OIDC sign-in finds a hard-deleted
@@ -356,8 +354,9 @@ function memberSignInConfigured(): boolean {
     // An unreadable configuration may still have the switch on, so the row is
     // kept: a retained row can be purged later, a deleted one cannot be
     // restored. The OIDC routes log the settings at fault; this logs the class only.
-    retirementLog.warn(
+    rootLogger.warn(
       {
+        component: 'desktop_user_retirement',
         event: 'retirement_oidc_configuration_unreadable',
         errorClass: error instanceof Error ? error.constructor.name : typeof error,
       },
