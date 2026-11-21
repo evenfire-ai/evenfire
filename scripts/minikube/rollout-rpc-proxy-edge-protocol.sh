@@ -108,27 +108,23 @@ wait_proxy() {
   bash "$GATE" wait-proxy "${GATE_ARGS[@]}"
 }
 
-wait_proxy_legacy() {
-  bash "$GATE" wait-proxy-legacy "${GATE_ARGS[@]}"
-}
-
-wait_hosts_legacy() {
-  bash "$GATE" wait-hosts-legacy "${GATE_ARGS[@]}"
+wait_hosts_unsigned() {
+  bash "$GATE" wait-hosts-unsigned "${GATE_ARGS[@]}"
 }
 
 if [[ "$MODE" == "rollback-proxy" ]]; then
-  # Roll back HCC first. Its selected Deployment revision owns the compatible
-  # Host image/protocol and reconciles the Host fleet before the Proxy changes.
+  # Roll back HCC first. Its selected Deployment revision owns the Host
+  # image/protocol and reconciles the Host fleet off signed-assertion-v1; the
+  # Proxy may stop signing only after no Host requires the assertion.
   "${KC[@]}" rollout undo deployment/host-context-controller -n "$CONTROL_PLANE_NAMESPACE" \
     --to-revision="$HCC_REVISION" >/dev/null
   "${KC[@]}" rollout status deployment/host-context-controller -n "$CONTROL_PLANE_NAMESPACE" \
     --timeout="${TIMEOUT_SECONDS}s" >/dev/null
-  wait_hosts_legacy
+  wait_hosts_unsigned
   "${KC[@]}" rollout undo deployment/rpc-proxy -n "$PROXY_NAMESPACE" \
     --to-revision="$PROXY_REVISION" >/dev/null
   "${KC[@]}" rollout status deployment/rpc-proxy -n "$PROXY_NAMESPACE" \
     --timeout="${TIMEOUT_SECONDS}s" >/dev/null
-  bash "$GATE" wait-proxy-legacy "${GATE_ARGS[@]}"
   exit 0
 fi
 
@@ -146,61 +142,33 @@ fi
 
 hcc_selectors="$(jq -c '[.spec.template.spec.containers[]?.env[]? |
   select(.name == "CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL")]' <<<"$hcc_json")"
-hcc_selector_count="$(jq -r 'length' <<<"$hcc_selectors")"
-hcc_selector_missing=false
-if [[ "$hcc_selector_count" == "0" ]]; then
-  hcc_selector_missing=true
-  hcc_protocol="legacy-headers"
-else
-  if ! hcc_protocol="$(jq -er '
-    if length == 1 and (.[0].value | type == "string") and
-       (.[0] | has("valueFrom") | not)
-    then .[0].value
-    else error("protocol selector must be one explicit string value") end
-  ' <<<"$hcc_selectors")"; then
-    echo "ERROR: malformed, contradictory, or multiple HCC Host edge protocol selectors" >&2
-    exit 1
-  fi
-fi
-if [[ "$hcc_protocol" != "dedicated-header-v1" && "$hcc_protocol" != "legacy-headers" ]]; then
-  echo "ERROR: unsupported HCC Host edge protocol selector" >&2
+if ! hcc_protocol="$(jq -er '
+  if length == 1 and (.[0].value | type == "string") and
+     (.[0] | has("valueFrom") | not)
+  then .[0].value
+  else error("protocol selector must be one explicit string value") end
+' <<<"$hcc_selectors")"; then
+  echo "ERROR: missing, malformed, contradictory, or multiple HCC Host edge protocol selectors" >&2
   exit 1
 fi
-
-# A selector-free Deployment predates the explicit protocol field. Treat it as
-# legacy only after both live cohorts prove the supported compatible state.
-# This read-only check must finish before any coordinator restart begins.
-if [[ "$hcc_selector_missing" == true ]]; then
-  if ! wait_hosts_legacy || ! wait_proxy_legacy; then
-    echo "ERROR: selector-free HCC is not backed by a Ready legacy Host cohort and a Ready legacy-compatible Proxy" >&2
-    exit 1
-  fi
+# The only supported edge protocol. This read-only check finishes before any
+# coordinator restart begins.
+if [[ "$hcc_protocol" != "signed-assertion-v1" ]]; then
+  echo "ERROR: HCC Host edge protocol selector must be signed-assertion-v1" >&2
+  exit 1
 fi
 
 if [[ "$RESTART_ALL_NON_EDGE" == true ]]; then
   restart_all_non_edge
 fi
 
-if [[ "$hcc_protocol" == "dedicated-header-v1" ]]; then
-  # Strict Hosts are only advanced after the complete new Proxy cohort is
-  # observed. HCC also checks this condition at each Host Deployment write.
-  if [[ "$RESTART_PROXY" == true ]]; then
-    restart_and_wait "$PROXY_NAMESPACE" rpc-proxy
-  fi
-  wait_proxy
-  if [[ "$RESTART_HCC" == true ]]; then
-    restart_and_wait "$CONTROL_PLANE_NAMESPACE" host-context-controller
-  fi
-  restart_host_targets
-else
-  # Legacy-headers order: all HCC-managed Hosts must be legacy-compatible
-  # before the Proxy restarts, whatever label the Proxy carries.
-  if [[ "$RESTART_HCC" == true ]]; then
-    restart_and_wait "$CONTROL_PLANE_NAMESPACE" host-context-controller
-  fi
-  restart_host_targets
-  if [[ "$RESTART_PROXY" == true ]]; then
-    wait_hosts_legacy
-    restart_and_wait "$PROXY_NAMESPACE" rpc-proxy
-  fi
+# Hosts are only advanced after the complete signing Proxy cohort is observed.
+# HCC also checks this condition at each Host Deployment write.
+if [[ "$RESTART_PROXY" == true ]]; then
+  restart_and_wait "$PROXY_NAMESPACE" rpc-proxy
 fi
+wait_proxy
+if [[ "$RESTART_HCC" == true ]]; then
+  restart_and_wait "$CONTROL_PLANE_NAMESPACE" host-context-controller
+fi
+restart_host_targets
