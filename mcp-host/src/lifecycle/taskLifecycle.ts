@@ -75,6 +75,8 @@ export class TaskLifecycle extends EventEmitter {
       // Admission set the resolutions; a caller-supplied value never reaches here.
       acceptedFileReferenceIds:
         task.sourceMessage?.fileReferenceResolutions?.map(r => r.reference.id) ?? [],
+      acceptedLocationReferenceIds:
+        task.sourceMessage?.locationReferenceResolutions?.map(r => r.reference.id) ?? [],
       traceContext: task.traceContext ?? null,
       createdAt: now,
     }

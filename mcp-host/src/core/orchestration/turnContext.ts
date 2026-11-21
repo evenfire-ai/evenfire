@@ -18,7 +18,9 @@
  * `scheduled_for`) — see P1-004. Turns with `kind:'file'` attachments list
  * one `attached_file` line per file plus a fixed read instruction (#666);
  * turns with structured file references list one `referenced_file` line per
- * reference, with its availability, plus their own read instruction.
+ * reference, with its availability, plus their own read instruction; turns
+ * with a location reference list one `referenced_folder` line, plus the
+ * instruction to work there.
  */
 import { quotePromptValue } from '@clerum/gfs-interaction-policy'
 import type { GfsDownloadReceipt } from '../../internalTools/gfsDownloadStore'
@@ -82,6 +84,22 @@ export interface TurnContextReferencedFile {
   currentVersion?: number
 }
 
+/**
+ * A folder the user pointed at as the place this turn is about, as admission
+ * resolved it under the Host principal.
+ */
+export interface TurnContextReferencedFolder {
+  referenceId: string
+  name: string
+  /** True when gfsc reported the name; false when only the client claimed it. */
+  nameVerified: boolean
+  drive: string
+  resourceId: string
+  availability: string
+  /** The availability code; absent when the folder is available. */
+  code?: string
+}
+
 export interface TurnContextInput {
   date: Date
   channel: TurnContextChannel
@@ -89,6 +107,7 @@ export interface TurnContextInput {
   attachedFiles?: TurnContextAttachedFile[]
   attachmentSave?: { images: TurnContextAttachedImage[] }
   referencedFiles?: TurnContextReferencedFile[]
+  referencedFolders?: TurnContextReferencedFolder[]
   preparedGfsFiles?: PreparedGfsFile[]
 }
 
@@ -144,6 +163,12 @@ export const ATTACHMENT_SAVE_INSTRUCTION =
 export const REFERENCED_FILES_INSTRUCTION =
   "If the user's request refers to a referenced file, read it with clerum__gfs_read using its drive and resourceId. The Host pins each referenced file to its listed version; pass expectedVersion only to read the current_version of a stale reference. clerum__gfs_stat, clerum__gfs_resolve and clerum__gfs_list report the live file, so their version can be newer than the one listed here; clerum__gfs_read reads the listed version, and reads a newer one only once the reference is stale. A referenced file whose availability is neither available nor stale cannot be read in this turn; tell the user why instead of guessing."
 
+export const REFERENCED_FOLDERS_INSTRUCTION =
+  "The user pointed at these folders as the place this request is about. When the request creates, saves, lists or searches files and names no other place, use the folder's drive and resourceId (as `parentResourceId` for create/save tools, or with `clerum__gfs_list`)."
+
+export const UNAVAILABLE_FOLDERS_INSTRUCTION =
+  'When the request needs a place and names no other one, tell the user why, using its code, instead of choosing another place. A claimed_name is what the user sent, not a name the Host verified.'
+
 // Client-supplied values are written with quotePromptValue, which keeps each
 // one on its own line and inside its own field. Values the Host computed
 // (enums, integers) are written unquoted.
@@ -155,6 +180,13 @@ function referencedFileLine(file: TurnContextReferencedFile): string {
   line += ` class=${file.class} bytes=${file.byteLength} availability=${file.availability}`
   if (file.code) line += ` code=${file.code}`
   if (file.currentVersion !== undefined) line += ` current_version=${file.currentVersion}`
+  return line
+}
+
+function referencedFolderLine(folder: TurnContextReferencedFolder): string {
+  const nameField = folder.nameVerified ? 'name' : 'claimed_name'
+  let line = `referenced_folder: id=${quotePromptValue(folder.referenceId)} ${nameField}=${quotePromptValue(folder.name)} source=gfs drive=${quotePromptValue(folder.drive)} resourceId=${quotePromptValue(folder.resourceId)} availability=${folder.availability}`
+  if (folder.code) line += ` code=${folder.code}`
   return line
 }
 
@@ -249,6 +281,14 @@ export function buildTurnContextBlock(input: TurnContextInput): string {
     if (codes.has('disk_full')) lines.push(`For code=disk_full: ${GFS_DISK_FULL_GUIDANCE}`)
     if (codes.has('quota_exceeded'))
       lines.push(`For code=quota_exceeded: ${GFS_CACHE_FULL_GUIDANCE}`)
+  }
+  if (input.referencedFolders && input.referencedFolders.length > 0) {
+    lines.push(...input.referencedFolders.map(referencedFolderLine))
+    lines.push(
+      input.referencedFolders.some(folder => folder.availability === 'available')
+        ? REFERENCED_FOLDERS_INSTRUCTION
+        : UNAVAILABLE_FOLDERS_INSTRUCTION
+    )
   }
   return `<turn-context>\n${lines.join('\n')}\n</turn-context>\n\n`
 }

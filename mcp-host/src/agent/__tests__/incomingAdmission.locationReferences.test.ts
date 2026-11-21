@@ -139,7 +139,7 @@ describe('incoming admission with a location reference', () => {
     const response = await admit(message({ locationReferences: [ref] }))
     expect(resolve).toHaveBeenCalledTimes(1)
     expect(dispatched(dispatch).locationReferenceResolutions).toEqual([
-      { availability: 'available', reference: ref, name: 'Folder-1' },
+      { availability: 'available', reference: ref, name: 'Folder-1', nameSource: 'gfsc' },
     ])
     expect(response).toEqual({
       success: true,
@@ -251,7 +251,7 @@ describe('incoming admission with a location reference', () => {
       )
       const response = (await admit(message({ locationReferences: [ref] }))) as MessageResponse
       expect(dispatched(dispatch).locationReferenceResolutions).toEqual([
-        { availability, reference: ref, name: FOLDER_NAME },
+        { availability, reference: ref, name: FOLDER_NAME, nameSource: 'client' },
       ])
       expect(response).toMatchObject({ success: true, acceptedLocationReferenceIds: [ref.id] })
     }
@@ -262,7 +262,7 @@ describe('incoming admission with a location reference', () => {
     const { admit, dispatch } = makeAdmission(async () => fileView(2))
     await admit(message({ locationReferences: [ref] }))
     expect(dispatched(dispatch).locationReferenceResolutions).toEqual([
-      { availability: 'not_a_folder', reference: ref, name: 'notes-2.md' },
+      { availability: 'not_a_folder', reference: ref, name: 'notes-2.md', nameSource: 'gfsc' },
     ])
   })
 
@@ -284,7 +284,7 @@ describe('incoming admission with a location reference', () => {
     const response = (await admit(message({ locationReferences: [ref] }))) as MessageResponse
     expect(fileReferenceGfs).toHaveBeenCalledTimes(1)
     expect(dispatched(dispatch).locationReferenceResolutions).toEqual([
-      { availability: 'unsupported', reference: ref, name: FOLDER_NAME },
+      { availability: 'unsupported', reference: ref, name: FOLDER_NAME, nameSource: 'client' },
     ])
     expect(response.acceptedLocationReferenceIds).toEqual([ref.id])
   })

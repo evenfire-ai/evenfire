@@ -172,6 +172,7 @@ describe('resolveMessageReferences — model', () => {
                 availability: 'unsupported',
                 reference,
                 name: reference.name,
+                nameSource: 'client',
               })),
             })
             return

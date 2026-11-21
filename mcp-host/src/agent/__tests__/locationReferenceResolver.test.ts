@@ -167,7 +167,9 @@ describe('resolveMessageReferences — locations', () => {
     expect(await resolveMessageReferences([], [ref], gfsc)).toEqual({
       ok: true,
       resolutions: [],
-      locationResolutions: [{ availability: 'available', reference: ref, name: 'Folder-1' }],
+      locationResolutions: [
+        { availability: 'available', reference: ref, name: 'Folder-1', nameSource: 'gfsc' },
+      ],
     })
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
     expect(gfsc.resolve.mock.calls[0]![0]).toEqual({ uri: ref.source.gfsUri })
@@ -185,7 +187,9 @@ describe('resolveMessageReferences — locations', () => {
       expect(await resolveMessageReferences([], [ref], gfsc)).toEqual({
         ok: true,
         resolutions: [],
-        locationResolutions: [{ availability, reference: ref, name: 'My Folder' }],
+        locationResolutions: [
+          { availability, reference: ref, name: 'My Folder', nameSource: 'client' },
+        ],
       })
     }
   )
@@ -213,7 +217,12 @@ describe('resolveMessageReferences — locations', () => {
     expect(result).toMatchObject({
       ok: true,
       locationResolutions: [
-        { availability: 'available', reference: ref, name: 'Q3 Reports (moved)' },
+        {
+          availability: 'available',
+          reference: ref,
+          name: 'Q3 Reports (moved)',
+          nameSource: 'gfsc',
+        },
       ],
     })
   })
@@ -227,7 +236,9 @@ describe('resolveMessageReferences — locations', () => {
     )
     expect(result).toMatchObject({
       ok: true,
-      locationResolutions: [{ availability: 'available', reference: ref, name: 'Old Name' }],
+      locationResolutions: [
+        { availability: 'available', reference: ref, name: 'Old Name', nameSource: 'client' },
+      ],
     })
   })
 
@@ -236,7 +247,9 @@ describe('resolveMessageReferences — locations', () => {
     expect(await resolveMessageReferences([], [ref], null)).toEqual({
       ok: true,
       resolutions: [],
-      locationResolutions: [{ availability: 'unsupported', reference: ref, name: 'Folder-1' }],
+      locationResolutions: [
+        { availability: 'unsupported', reference: ref, name: 'Folder-1', nameSource: 'client' },
+      ],
     })
   })
 

@@ -20,7 +20,10 @@ import {
   resourceNameProblem,
 } from '@clerum/gfs-interaction-policy'
 import { FileReferenceErrorCode } from '../core/errors'
-import type { TurnContextReferencedFile } from '../core/orchestration/turnContext'
+import type {
+  TurnContextReferencedFile,
+  TurnContextReferencedFolder,
+} from '../core/orchestration/turnContext'
 import { GfscHttpError } from '../internalTools/gfsClient'
 import { GFS_FILE_LIMITS } from '../internalTools/gfsFilePolicy'
 import { logger } from '../logger'
@@ -101,6 +104,44 @@ export interface LocationReferenceResolution {
    * reference), otherwise the name Desktop sent.
    */
   name: string
+  /**
+   * Who supplied `name`. Absent on resolutions persisted before it existed;
+   * readers then infer it from the availability.
+   */
+  nameSource?: 'gfsc' | 'client'
+}
+
+/** The code each unavailable location is reported under in the turn block. */
+export const LOCATION_REFERENCE_AVAILABILITY_CODES: Record<
+  Exclude<LocationReferenceAvailability, 'available'>,
+  FileReferenceErrorCode
+> = {
+  not_found: FileReferenceErrorCode.NotFound,
+  denied: FileReferenceErrorCode.Denied,
+  not_a_folder: FileReferenceErrorCode.NotAFolder,
+  unsupported: FileReferenceErrorCode.Unsupported,
+}
+
+/** The `referenced_folder` entries for the turn-context block, in message order. */
+export function referencedFoldersForTurnContext(
+  resolutions: readonly LocationReferenceResolution[] | undefined
+): TurnContextReferencedFolder[] {
+  return (resolutions ?? []).map(({ availability, reference, name, nameSource }) => ({
+    referenceId: reference.id,
+    name,
+    // A client-claimed name must not reach the model as the folder's verified
+    // name. Without a recorded source, only an answer from gfsc (available,
+    // not_a_folder) can have named the resource.
+    nameVerified: nameSource
+      ? nameSource === 'gfsc'
+      : availability === 'available' || availability === 'not_a_folder',
+    drive: reference.source.drive,
+    resourceId: reference.source.resourceId,
+    availability,
+    ...(availability === 'available'
+      ? {}
+      : { code: LOCATION_REFERENCE_AVAILABILITY_CODES[availability] }),
+  }))
 }
 
 export type ParsedIncomingFileReferences =
@@ -411,21 +452,21 @@ async function resolveLocationOne(
   client: FileReferenceGfscClient | null,
   call: { signal: AbortSignal; deadlineMs: number }
 ): Promise<LocationReferenceResolution> {
-  const fallback = { reference, name: reference.name }
+  const fallback = { reference, name: reference.name, nameSource: 'client' as const }
   if (!client) return { availability: 'unsupported', ...fallback }
   const answer = await resolveGfs(reference.source.gfsUri, client, call)
   if ('availability' in answer) return { availability: answer.availability, ...fallback }
   // A folder has no version or size the reference pins, so only its identity
   // and kind are checked.
   const data = resolvedIdentity(answer.body, reference.source)
-  const name =
+  const named =
     typeof data.name === 'string' && resourceNameProblem(data.name) === null
-      ? data.name
-      : reference.name
+      ? { name: data.name, nameSource: 'gfsc' as const }
+      : { name: reference.name, nameSource: 'client' as const }
   return {
     availability: data.kind === 'directory' ? 'available' : 'not_a_folder',
     reference,
-    name,
+    ...named,
   }
 }
 
