@@ -270,7 +270,7 @@ describe('V2 checkpoint issues a Host edge assertion to rpc-proxy for a Host des
     const sent = checkpointRequest('host.status.read')
     const response = await checkpoint(sent).expect(200)
     const payload = verifyAsHost(response.body.hostEdgeAssertion)
-    // This PR's Host refuses v 2; the round trip stops at the claim validator.
+    // The Host does not accept v 2 yet; the round trip stops at the claim validator.
     expect(
       validateHostEdgeAssertionClaims(payload, {
         v: 2,
