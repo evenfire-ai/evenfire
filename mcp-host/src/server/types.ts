@@ -7,8 +7,11 @@ import type {
   AuthorityBindingV2,
   TrustedEdgeActionContextV2,
 } from '@clerum/action-context-contracts'
-import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
-import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
+import type { FileReferenceV1, LocationReferenceV1 } from '@clerum/gfs-interaction-policy'
+import type {
+  FileReferenceResolution,
+  LocationReferenceResolution,
+} from '../agent/fileReferenceResolver'
 import type { ModelWireEntry } from '../config/modelResolution.js'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import type { Attachment, TraceContextV1 } from '../core/types'
@@ -70,6 +73,14 @@ export interface IncomingMessage {
   fileReferences?: FileReferenceV1[]
   /** Server-owned: admission's resolution of `fileReferences`; callers cannot set it. */
   fileReferenceResolutions?: FileReferenceResolution[]
+  /**
+   * The Global Files folder the user pointed at as the place this request is
+   * about. The route validates it; admission resolves it against gfsc together
+   * with `fileReferences`.
+   */
+  locationReferences?: LocationReferenceV1[]
+  /** Server-owned: admission's resolution of `locationReferences`; callers cannot set it. */
+  locationReferenceResolutions?: LocationReferenceResolution[]
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'
@@ -109,6 +120,13 @@ export interface MessageResponse {
    * carried none and on every refusal.
    */
   acceptedFileReferenceIds?: string[]
+  /**
+   * Ids of every location reference the Host resolved and listed in the turn,
+   * whatever its availability. Absent when the message carried none and on
+   * every refusal; a client that sent a folder and gets a success without its
+   * id is talking to a Host that dropped it.
+   */
+  acceptedLocationReferenceIds?: string[]
   /**
    * Issue #654 — the session's model-selection revision after the Host accepted
    * a piggybacked `model`, or the winning revision on a CAS conflict.
