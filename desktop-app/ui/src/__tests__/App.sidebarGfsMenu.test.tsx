@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { StrictMode } from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
@@ -14,9 +14,17 @@ import {
   within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
 import { ERROR_TOAST_DURATION_MS } from '@constants/toasts'
 import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
+import { resolveGfsPreview } from '@lib/gfsPreview'
+import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import {
+  gfsActionNeedsAffordances,
+  gfsPendingRowActionAvailability,
+  gfsRowActionAvailability,
+} from '@lib/gfsRowActionAvailability'
 import { App } from '@/App'
 import {
   accessibleResource,
@@ -40,8 +48,13 @@ import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
 } from '../../../testSupport/appService.nativeCommitTestHarness'
-import { type ChromiumFocusShim, installChromiumFocusShim } from './__fixtures__/chromiumFocusShim'
-import { createPointerDriver } from './__fixtures__/pointerDriver'
+import {
+  type ChromiumFocusShim,
+  chromiumFocusRejection,
+  installChromiumFocusShim,
+  uninstallChromiumFocusShim,
+} from './__fixtures__/chromiumFocusShim'
+import { type PointerDriver, createPointerDriver } from './__fixtures__/pointerDriver'
 
 // The real App: real SidebarNav, FileExplorerTree, GfsActionHost, FilesPage
 // and SandboxUiPage. Only `window.clerum.*` is stubbed.
@@ -1194,5 +1207,935 @@ describe('App sidebar GFS resource menu', () => {
       pointer.moveTo(shareOf(menu))
       expect(submenuFor('notes.txt')).toBeTruthy()
     })
+  })
+
+  // Model-based oracle for the row menu's focus, levels and Share hover
+  // arming. Generated sequences of user events run on the real App (host,
+  // drawer, tree and menu); `fc.scheduler()` decides in which order the
+  // affordance reads of an opening land. At rest every command checks the
+  // DOM against a trivial model: a stack of open levels, the key that holds
+  // focus on each, where the pointer physically is, and whether it moved
+  // outside Share since the menu opened or the submenu was last closed or
+  // activated. Mocks stay at the boundary: the affordance reads and
+  // Chromium's focus rules (the shim).
+  describe('model-based oracle', () => {
+    type Row = 'notes' | 'summary'
+    // `okWithoutParent`: the row's bits arrived and its parent's read failed,
+    // so only Move is withheld.
+    type Bits = 'ok' | 'pending' | 'error' | 'okWithoutParent'
+    type Read = 'row' | 'parent'
+    type Answer = 'pending' | 'ok' | 'error'
+    type Spot = 'fuera' | 'share' | 'submenu' | 'otro'
+    type LevelKeys = { panel: string[]; submenu: string[] }
+
+    const SUMMARY_ID = 'e5'.repeat(16)
+    const ALL_BITS = ['read', 'write', 'delete', 'manage_acl']
+    const ROW_NAME: Record<Row, string> = { notes: 'notes.txt', summary: 'summary.txt' }
+    const NOTES = accessibleResource(NOTES_ID, 'notes.txt', 'file', {
+      version: 3,
+      permissions: ALL_BITS,
+    })
+    const SUMMARY = childView(SUMMARY_ID, 'summary.txt', 'file', { parentResourceId: REPORTS_ID })
+
+    /**
+     * The enabled item keys of each level, in order, per opened row and bit
+     * state. A forest root opens settled; the nested file opens pending and
+     * settles once both its own read and its parent's have answered. Pinned
+     * against the producers in the first test.
+     */
+    const ENABLED: Record<Row, Partial<Record<Bits, LevelKeys>>> = {
+      notes: {
+        ok: {
+          panel: ['share', 'rename', 'preview', 'download', 'delete'],
+          submenu: ['share-access', 'copy-link', 'copy-route'],
+        },
+      },
+      summary: {
+        pending: {
+          panel: ['share', 'preview', 'download'],
+          submenu: ['copy-link', 'copy-route'],
+        },
+        ok: {
+          panel: ['share', 'rename', 'move', 'preview', 'download', 'delete'],
+          submenu: ['share-access', 'copy-link', 'copy-route'],
+        },
+        error: {
+          panel: ['share', 'preview', 'download'],
+          submenu: ['copy-link', 'copy-route'],
+        },
+        okWithoutParent: {
+          panel: ['share', 'rename', 'preview', 'download', 'delete'],
+          submenu: ['share-access', 'copy-link', 'copy-route'],
+        },
+      },
+    }
+
+    /**
+     * The same keys from the producers the tree builds its menu with
+     * (`gfsPendingRowActionAvailability` / `gfsRowActionAvailability`, then
+     * the resource actions), with the menu's two layout rules: Share, Copy
+     * link and Copy ID go in the submenu behind a Share item that leads the
+     * panel, Delete closes it, and unsettled bits leave inert every action
+     * that needs them.
+     */
+    function producedKeys(row: Row, bits: Bits): LevelKeys {
+      const resource = row === 'notes' ? { ...NOTES, parentResourceId: null } : SUMMARY
+      const held = heldPermissionResponse(ALL_BITS)
+      const settled = bits === 'ok' || bits === 'okWithoutParent'
+      const availability = settled
+        ? gfsRowActionAvailability({
+            resource,
+            listing: row === 'notes' ? 'roots' : 'folder',
+            rowAffordances: row === 'notes' ? null : held,
+            parentAffordances: row === 'notes' || bits === 'okWithoutParent' ? null : held,
+          })
+        : gfsPendingRowActionAvailability(resource)
+      const handler = () => undefined
+      const canPreview = resolveGfsPreview(resource) !== null
+      const actions = getGfsMenuActions(
+        buildGfsResourceActions({
+          kind: 'file',
+          uri: resource.gfsUri,
+          handlers: {
+            'copy-link': handler,
+            'copy-route': handler,
+            'new-folder': handler,
+            'upload-file': handler,
+            rename: handler,
+            move: handler,
+            share: handler,
+            delete: handler,
+            preview: canPreview ? handler : undefined,
+            download: handler,
+          },
+          canRename: availability.canRename,
+          canMove: availability.canMove,
+          canCreateFolder: false,
+          canUpload: false,
+          canShare: availability.canManage,
+          canDelete: availability.canDelete,
+          canPreview,
+          canDownload: true,
+          mutating: false,
+        })
+      )
+      const enabled = (action: (typeof actions)[number]) =>
+        !action.disabled && (settled || !gfsActionNeedsAffordances(action.id))
+      const inSubmenu = (id: string) => ['share', 'copy-link', 'copy-route'].includes(id)
+      const submenuActions = actions.filter(action => inSubmenu(action.id))
+      return {
+        panel: [
+          ...(submenuActions.length > 0 ? ['share'] : []),
+          ...actions
+            .filter(action => !inSubmenu(action.id) && action.id !== 'delete' && enabled(action))
+            .map(action => action.id),
+          ...actions
+            .filter(action => action.id === 'delete' && enabled(action))
+            .map(() => 'delete'),
+        ],
+        submenu: submenuActions
+          .filter(enabled)
+          .map(action => (action.id === 'share' ? 'share-access' : action.id)),
+      }
+    }
+
+    type Model = {
+      drawer: boolean
+      menu: {
+        row: Row
+        bits: Bits
+        /** Key with focus on the panel; meaningful while no submenu is open. */
+        focus: string
+        submenu: { focus: string } | null
+        /** The nested row's two reads, as this opening waits for them. */
+        reads: Record<Read, Answer> | null
+      } | null
+      /** The row the last menu opened from: Escape returns focus there. */
+      opener: Row | null
+      pointer: Spot
+      movedOutSinceClose: boolean
+      /** Reads sent to main and not answered yet; a new opening shares them. */
+      inFlight: Record<Read, boolean>
+      /** `focus()` calls the menu itself makes, one per focus move it owns. */
+      menuFocusCalls: number
+    }
+
+    type World = {
+      s: Scheduler
+      queryClient: QueryClient
+      pointer: PointerDriver
+      shim: ChromiumFocusShim
+      /** Held answers, by resource id. */
+      releases: Map<string, Array<(outcome: 'ok' | 'error') => void>>
+      stats: { opened: boolean; executed: number }
+    }
+
+    type Cmd = AsyncCommand<Model, World>
+
+    const MENU_MODULE = 'GfsResourceMenu/index.tsx'
+    const READ_RESOURCE: Record<Read, string> = { row: SUMMARY_ID, parent: REPORTS_ID }
+    const keysOf = (m: Model) => ENABLED[m.menu!.row][m.menu!.bits]!
+    let affordanceFailure = ''
+    const coverage = new Map<string, number>()
+    const cover = (label: string) => coverage.set(label, (coverage.get(label) ?? 0) + 1)
+
+    // ── Real-side lookups ─────────────────────────────────────────────────
+    const rowEl = (row: Row) => screen.getByRole('button', { name: ROW_NAME[row] })
+    const menuEls = () =>
+      screen
+        .queryAllByRole('menu')
+        .filter(menu => menu.getAttribute('aria-label')?.startsWith('Actions for '))
+    const submenuEls = () =>
+      screen
+        .queryAllByRole('menu')
+        .filter(menu => menu.getAttribute('aria-label')?.startsWith('Share options for '))
+    const item = (level: HTMLElement, key: string) =>
+      level.querySelector<HTMLElement>(`[role="menuitem"][data-gfs-action="${key}"]`)!
+    const enabledKeys = (level: HTMLElement) =>
+      Array.from(level.querySelectorAll('[role="menuitem"]:not(:disabled)')).map(
+        node => node.getAttribute('data-gfs-action') ?? ''
+      )
+    function spotEl(spot: Spot): Element {
+      if (spot === 'fuera') return rowEl('notes')
+      if (spot === 'submenu') return item(submenuEls()[0]!, 'copy-link')
+      // Download is enabled in every bit state, so the pointer never rests
+      // on an inert control that Chromium would not send mouse events to.
+      return item(menuEls()[0]!, spot === 'share' ? 'share' : 'download')
+    }
+
+    // ── Model transitions ─────────────────────────────────────────────────
+    function openSubmenu(m: Model) {
+      m.menu!.submenu = { focus: keysOf(m).submenu[0]! }
+      m.menuFocusCalls += 1
+    }
+    /** An explicit close of the submenu: focus back on Share, hover disarmed. */
+    function closeSubmenu(m: Model) {
+      m.menu!.submenu = null
+      m.menu!.focus = 'share'
+      m.movedOutSinceClose = false
+      m.menuFocusCalls += 1
+      if (m.pointer === 'submenu') m.pointer = 'fuera'
+    }
+    /** One pointermove where the pointer is: over Share it may open, elsewhere it arms. */
+    function pointerStep(m: Model, at: Spot) {
+      if (at !== 'share') {
+        m.movedOutSinceClose = true
+        return
+      }
+      if (m.movedOutSinceClose && m.menu && !m.menu.submenu) {
+        openSubmenu(m)
+        cover('hover-opened')
+      }
+    }
+
+    // ── Rest and invariants ───────────────────────────────────────────────
+    async function rest(w: World) {
+      for (let pass = 0; pass < 200; pass += 1) {
+        if (w.s.count() > 0) {
+          await act(async () => {
+            await w.s.waitOne()
+          })
+          continue
+        }
+        await flushFrames()
+        await act(async () => {
+          await new Promise(resolve => window.setTimeout(resolve, 0))
+        })
+        if (w.s.count() === 0 && frames.length === 0) return
+      }
+      throw new Error('the menu never came to rest')
+    }
+
+    /** The pointer rests on what is left under it once its element is gone. */
+    function settlePointer(w: World) {
+      if (!w.pointer.at.isConnected) w.pointer.layoutShiftTo(spotEl('fuera'))
+    }
+
+    function checkAtRest(m: Model, w: World) {
+      const active = document.activeElement as HTMLElement | null
+      // S1: never a hidden, inert, detached or disabled element.
+      if (active && active !== document.body) {
+        expect(chromiumFocusRejection(active), 'S1: focus on a hidden element').toBeNull()
+        expect((active as HTMLButtonElement).disabled ?? false, 'S1: disabled').toBe(false)
+      }
+      // S2: one level per Escape, so the open levels match the model's stack.
+      expect(drawerOpen(), 'drawer level').toBe(m.drawer)
+      const menus = menuEls()
+      const submenus = submenuEls()
+      expect(menus.length, 'menu level').toBe(m.menu ? 1 : 0)
+      expect(submenus.length, 'submenu level').toBe(m.menu?.submenu ? 1 : 0)
+      if (m.menu) {
+        const keys = keysOf(m)
+        expect(menus[0]!.getAttribute('aria-label')).toBe(`Actions for ${ROW_NAME[m.menu.row]}`)
+        expect(enabledKeys(menus[0]!), 'panel keys').toEqual(keys.panel)
+        // V1′ / V1 and S3: focus on the key the model holds for the top level.
+        if (m.menu.submenu) {
+          expect(enabledKeys(submenus[0]!), 'submenu keys').toEqual(keys.submenu)
+          expect(submenus[0]!.contains(active), 'V1′: focus in the submenu').toBe(true)
+          expect(active?.getAttribute('data-gfs-action'), 'V1′: submenu key').toBe(
+            m.menu.submenu.focus
+          )
+        } else {
+          expect(menus[0]!.contains(active), 'V1: focus in the panel').toBe(true)
+          expect(active?.getAttribute('data-gfs-action'), 'V1: panel key').toBe(m.menu.focus)
+        }
+      } else if (m.drawer && m.opener) {
+        // V3: Escape returned focus to the row the menu opened from.
+        expect(active, 'V3: focus on the opener').toBe(rowEl(m.opener))
+      }
+      // The reads main still owes are the ones the model says are in flight,
+      // exactly one per resource: a reopening shares the pending read.
+      for (const [read, id] of Object.entries(READ_RESOURCE) as [Read, string][]) {
+        expect(w.releases.get(id)?.length ?? 0, `${read} read in flight`).toBe(
+          m.inFlight[read] ? 1 : 0
+        )
+      }
+      expect(
+        [...w.releases].filter(
+          ([id, held]) => held.length > 0 && !Object.values(READ_RESOURCE).includes(id)
+        ),
+        'reads of other resources'
+      ).toEqual([])
+      // C1: the menu moves focus only when the model says it does, and never
+      // onto an element Chromium refuses.
+      const calls = w.shim.callsFrom(MENU_MODULE)
+      expect(
+        calls.filter(call => call.rejected).map(call => call.rejected),
+        'C1: refused focus calls'
+      ).toEqual([])
+      expect(calls.length, 'C1: menu focus calls').toBe(m.menuFocusCalls)
+    }
+
+    // ── Commands ──────────────────────────────────────────────────────────
+    const press = (keys: string) => userEvent.setup().keyboard(keys)
+
+    abstract class MenuCommand implements Cmd {
+      abstract check: (m: Readonly<Model>) => boolean
+      abstract toString: () => string
+      protected abstract perform(m: Model, w: World): Promise<void> | void
+      async run(m: Model, w: World) {
+        w.stats.executed += 1
+        if (
+          m.menu?.reads &&
+          Object.values(m.menu.reads).filter(a => a === 'pending').length === 1
+        ) {
+          cover('between-reads')
+        }
+        await this.perform(m, w)
+        await rest(w)
+        settlePointer(w)
+        checkAtRest(m, w)
+      }
+    }
+
+    class Open extends MenuCommand {
+      constructor(
+        readonly row: Row,
+        readonly gesture: 'E1' | 'E2',
+        readonly pointerAt: 'fuera' | 'share'
+      ) {
+        super()
+      }
+      check = (m: Readonly<Model>) => m.drawer && !m.menu
+      async perform(m: Model, w: World) {
+        // Idle cached bits would settle the next opening in a microtask
+        // without passing through the scheduler. That warm-cache opening is
+        // real behaviour the model leaves out: S-4 covers focus when the bits
+        // are already settled on open. A read still in flight is shared.
+        w.queryClient.removeQueries({
+          predicate: query =>
+            query.queryKey[3] === 'affordances' && query.state.fetchStatus === 'idle',
+        })
+        const row = rowEl(this.row)
+        if (this.gesture === 'E1') {
+          act(() => row.focus())
+          await press('{Shift>}{F10}{/Shift}')
+        } else {
+          if (w.pointer.at !== row) w.pointer.moveTo(row)
+          w.pointer.contextClick()
+        }
+        await rest(w)
+        // The panel appears under the still pointer.
+        if (this.pointerAt === 'share') w.pointer.layoutShiftTo(spotEl('share'))
+        const bits: Bits = this.row === 'notes' ? 'ok' : 'pending'
+        m.menu = {
+          row: this.row,
+          bits,
+          focus: ENABLED[this.row][bits]!.panel[0]!,
+          submenu: null,
+          reads: null,
+        }
+        m.opener = this.row
+        m.movedOutSinceClose = false
+        m.pointer = this.pointerAt
+        if (bits === 'pending') {
+          m.menu.reads = { row: 'pending', parent: 'pending' }
+          m.inFlight = { row: true, parent: true }
+        }
+        w.stats.opened = true
+        m.menuFocusCalls += 1
+        cover(`open:${this.row}:${this.gesture}:${this.pointerAt}`)
+      }
+      toString = () => `Open(${this.row}, ${this.gesture}, ${this.pointerAt})`
+    }
+
+    /** One of the nested row's reads answers; the scheduler orders it. */
+    class SettleRead extends MenuCommand {
+      constructor(
+        readonly read: Read,
+        readonly outcome: 'ok' | 'error'
+      ) {
+        super()
+      }
+      check = (m: Readonly<Model>) => m.inFlight[this.read]
+      perform(m: Model, w: World) {
+        const id = READ_RESOURCE[this.read]
+        for (const release of w.releases.get(id)?.splice(0) ?? []) release(this.outcome)
+        m.inFlight[this.read] = false
+        const reads = m.menu?.reads
+        if (!reads || reads[this.read] !== 'pending') {
+          cover('settle:after-close')
+          return
+        }
+        reads[this.read] = this.outcome
+        if (reads.row === 'pending' || reads.parent === 'pending') {
+          cover('settle:first-of-two')
+          return
+        }
+        // The tree waits for both reads; a failed row read fails the menu,
+        // a failed parent read withholds only Move.
+        m.menu!.bits =
+          reads.row === 'error' ? 'error' : reads.parent === 'error' ? 'okWithoutParent' : 'ok'
+        cover(`settle:${m.menu!.bits}`)
+      }
+      toString = () => `SettleRead(${this.read}, ${this.outcome})`
+    }
+
+    class Nav extends MenuCommand {
+      constructor(readonly key: 'ArrowDown' | 'ArrowUp' | 'Home' | 'End') {
+        super()
+      }
+      check = (m: Readonly<Model>) => Boolean(m.menu)
+      async perform(m: Model) {
+        await press(`{${this.key}}`)
+        const menu = m.menu!
+        const level = menu.submenu ? keysOf(m).submenu : keysOf(m).panel
+        const current = level.indexOf(menu.submenu ? menu.submenu.focus : menu.focus)
+        const next =
+          this.key === 'Home'
+            ? 0
+            : this.key === 'End'
+              ? level.length - 1
+              : this.key === 'ArrowDown'
+                ? (current + 1) % level.length
+                : (current - 1 + level.length) % level.length
+        if (menu.submenu) menu.submenu.focus = level[next]!
+        else menu.focus = level[next]!
+        m.menuFocusCalls += 1
+      }
+      toString = () => `Nav(${this.key})`
+    }
+
+    class ActivateShare extends MenuCommand {
+      constructor(readonly key: 'ArrowRight' | 'Enter') {
+        super()
+      }
+      check = (m: Readonly<Model>) => Boolean(m.menu && !m.menu.submenu && m.menu.focus === 'share')
+      async perform(m: Model) {
+        await press(`{${this.key}}`)
+        // Enter activates Share like a click; ArrowRight only opens.
+        if (this.key === 'Enter') m.movedOutSinceClose = false
+        openSubmenu(m)
+      }
+      toString = () => `ActivateShare(${this.key})`
+    }
+
+    class MoveTo extends MenuCommand {
+      constructor(readonly spot: Spot) {
+        super()
+      }
+      check = (m: Readonly<Model>) =>
+        Boolean(m.menu) &&
+        m.pointer !== this.spot &&
+        (this.spot !== 'submenu' || Boolean(m.menu!.submenu))
+      perform(m: Model, w: World) {
+        w.pointer.moveTo(spotEl(this.spot))
+        // The first step of a move is still at its origin.
+        pointerStep(m, m.pointer)
+        pointerStep(m, this.spot)
+        m.pointer = this.spot
+      }
+      toString = () => `MoveTo(${this.spot})`
+    }
+
+    class Tremor extends MenuCommand {
+      check = (m: Readonly<Model>) => Boolean(m.menu)
+      perform(m: Model, w: World) {
+        w.pointer.microMove()
+        pointerStep(m, m.pointer)
+        if (m.pointer === 'share') cover('tremor-on-share')
+      }
+      toString = () => 'Tremor'
+    }
+
+    /** E6e, or a still-pointer scroll: the element under the pointer changes, nothing moves. */
+    class StillShift extends MenuCommand {
+      constructor(
+        readonly to: 'share' | 'otro',
+        readonly scroll: boolean
+      ) {
+        super()
+      }
+      check = (m: Readonly<Model>) => Boolean(m.menu) && m.pointer !== this.to
+      perform(m: Model, w: World) {
+        if (this.scroll) {
+          act(() => {
+            fireEvent.scroll(menuEls()[0]!)
+          })
+        }
+        w.pointer.layoutShiftTo(spotEl(this.to))
+        m.pointer = this.to
+      }
+      toString = () => `StillShift(${this.to}${this.scroll ? ', scroll' : ''})`
+    }
+
+    class ClickShare extends MenuCommand {
+      check = (m: Readonly<Model>) => Boolean(m.menu) && m.pointer === 'share'
+      perform(m: Model, w: World) {
+        w.pointer.click()
+        // The press focuses Share (Chromium's own focus, not the menu's);
+        // the click toggles the submenu and always disarms the hover.
+        m.movedOutSinceClose = false
+        if (m.menu!.submenu) {
+          m.menu!.submenu = null
+          m.menu!.focus = 'share'
+        } else {
+          openSubmenu(m)
+        }
+        cover('click-share')
+      }
+      toString = () => 'ClickShare'
+    }
+
+    class ArrowLeft extends MenuCommand {
+      check = (m: Readonly<Model>) => Boolean(m.menu)
+      async perform(m: Model) {
+        await press('{ArrowLeft}')
+        if (m.menu!.submenu) {
+          closeSubmenu(m)
+          cover('arrowleft-close')
+        }
+      }
+      toString = () => 'ArrowLeft'
+    }
+
+    class Escape extends MenuCommand {
+      check = (m: Readonly<Model>) => m.drawer && Boolean(m.menu)
+      async perform(m: Model) {
+        await press('{Escape}')
+        if (m.menu!.submenu) {
+          closeSubmenu(m)
+          cover('escape:submenu')
+        } else {
+          m.menu = null
+          m.pointer = 'fuera'
+          m.menuFocusCalls += 1
+          cover('escape:menu')
+        }
+      }
+      toString = () => 'Escape'
+    }
+
+    /** Escape with no menu closes the drawer, which ends what a run can do. */
+    class CloseDrawer extends MenuCommand {
+      check = (m: Readonly<Model>) => m.drawer && !m.menu
+      async perform(m: Model) {
+        await press('{Escape}')
+        m.drawer = false
+        cover('escape:drawer')
+      }
+      toString = () => 'CloseDrawer'
+    }
+
+    class Resize extends MenuCommand {
+      check = (m: Readonly<Model>) => Boolean(m.menu)
+      perform() {
+        act(() => {
+          window.dispatchEvent(new Event('resize'))
+        })
+      }
+      toString = () => 'Resize'
+    }
+
+    /** S4 is checked when the event fires, not at rest. */
+    class ContextMenuOnFocus extends MenuCommand {
+      check = (m: Readonly<Model>) => Boolean(m.menu)
+      perform() {
+        const target = document.activeElement as HTMLElement
+        const event = createEvent.contextMenu(target)
+        fireEvent(target, event)
+        expect(event.defaultPrevented, 'S4: contextmenu reached the native menu').toBe(true)
+        cover('contextmenu')
+      }
+      toString = () => 'ContextMenuOnFocus'
+    }
+
+    // ── World ─────────────────────────────────────────────────────────────
+    async function mountWorld(s: Scheduler): Promise<{ model: Model; real: World }> {
+      frames.length = 0
+      mediaListeners.clear()
+      compact = true
+      const { bridge } = installBridge()
+      bridge.gfs.listAccessible = vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource(REPORTS_ID, 'Reports', 'directory', { permissions: ['read'] }),
+          NOTES,
+        ])
+      )
+      bridge.gfs.listChildren = vi.fn(async (resourceId: string) =>
+        listChildrenPage(resourceId === REPORTS_ID ? [SUMMARY] : [])
+      )
+      const queryClient = renderApp()
+      await waitForShell()
+      fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+      openExplorer()
+      fireEvent.click(await screen.findByRole('button', { name: 'Expand Reports' }))
+      await screen.findByRole('button', { name: 'summary.txt' })
+      await flushFrames()
+
+      const produce = appServiceAffordanceProducer(async () => heldPermissionResponse(ALL_BITS))
+      const releases: World['releases'] = new Map()
+      // Every read waits for a Settle, which hands it to the scheduler.
+      bridge.gfs.affordances = vi.fn(
+        (resourceId: string, drive = 'main') =>
+          new Promise(resolve => {
+            if (!releases.has(resourceId)) releases.set(resourceId, [])
+            releases.get(resourceId)!.push(outcome =>
+              resolve(
+                s.schedule(Promise.resolve(), `affordances ${resourceId}`).then(() => {
+                  if (outcome === 'error') throw new Error(affordanceFailure)
+                  return produce(resourceId, drive)
+                })
+              )
+            )
+          })
+      )
+      const real: World = {
+        s,
+        queryClient,
+        pointer: createPointerDriver(rowEl('notes')),
+        shim: installChromiumFocusShim(),
+        releases,
+        stats: { opened: false, executed: 0 },
+      }
+      const model: Model = {
+        drawer: true,
+        menu: null,
+        opener: null,
+        pointer: 'fuera',
+        movedOutSinceClose: false,
+        inFlight: { row: false, parent: false },
+        menuFocusCalls: 0,
+      }
+      return { model, real }
+    }
+
+    async function unmountWorld(w: World | undefined) {
+      uninstallChromiumFocusShim()
+      if (w) {
+        // Reads left pending resolve into a tree that is about to unmount.
+        for (const held of w.releases.values()) for (const release of held.splice(0)) release('ok')
+        await act(async () => {
+          await w.s.waitAll()
+        })
+        w.queryClient.clear()
+      }
+      cleanup()
+      uninstallMockClerum()
+    }
+
+    // ── Arbitraries and fixed examples ────────────────────────────────────
+    const weighted = (weight: number, arbitrary: fc.Arbitrary<Cmd>) => ({ weight, arbitrary })
+    const opening: fc.Arbitrary<Cmd> = fc
+      .tuple(
+        fc.constantFrom<Row>('notes', 'summary'),
+        fc.constantFrom<'E1' | 'E2'>('E1', 'E2'),
+        fc.constantFrom<'fuera' | 'share'>('fuera', 'share')
+      )
+      .map(([row, gesture, at]) => new Open(row, gesture, at))
+    // Commands whose check fails are skipped, so Open weighs most: every
+    // other command needs a menu. Closing the drawer ends the run's useful
+    // part and weighs least.
+    const commands: fc.Arbitrary<Cmd>[] = [
+      fc.oneof(
+        weighted(24, opening),
+        weighted(
+          8,
+          fc
+            .tuple(
+              fc.constantFrom<Read>('row', 'parent'),
+              fc.constantFrom<'ok' | 'error'>('ok', 'error')
+            )
+            .map(([read, outcome]) => new SettleRead(read, outcome))
+        ),
+        weighted(
+          8,
+          fc
+            .constantFrom<
+              'ArrowDown' | 'ArrowUp' | 'Home' | 'End'
+            >('ArrowDown', 'ArrowUp', 'Home', 'End')
+            .map(key => new Nav(key))
+        ),
+        weighted(
+          6,
+          fc
+            .constantFrom<'ArrowRight' | 'Enter'>('ArrowRight', 'Enter')
+            .map(key => new ActivateShare(key))
+        ),
+        weighted(
+          12,
+          fc.constantFrom<Spot>('fuera', 'share', 'submenu', 'otro').map(spot => new MoveTo(spot))
+        ),
+        // Tremors come often and in a row: the second of two reaches a re-arm
+        // the first one caused.
+        weighted(10, fc.constant(new Tremor())),
+        weighted(
+          3,
+          fc
+            .tuple(fc.constantFrom<'share' | 'otro'>('share', 'otro'), fc.boolean())
+            .map(([to, scroll]) => new StillShift(to, scroll))
+        ),
+        weighted(6, fc.constant(new ClickShare())),
+        weighted(4, fc.constant(new ArrowLeft())),
+        weighted(6, fc.constant(new Escape())),
+        weighted(2, fc.constant(new Resize())),
+        weighted(2, fc.constant(new ContextMenuOnFocus())),
+        weighted(1, fc.constant(new CloseDrawer()))
+      ),
+    ]
+
+    const open = (
+      row: Row = 'notes',
+      gesture: 'E1' | 'E2' = 'E1',
+      at: 'fuera' | 'share' = 'fuera'
+    ) => new Open(row, gesture, at)
+    /** Key paths every run of the suite includes, named after their A3 rows. */
+    const EXAMPLES: Record<string, () => Cmd[]> = {
+      // Escape after a hover open: tremors on Share do not reopen.
+      H27: () => [
+        open(),
+        new MoveTo('share'),
+        new Escape(),
+        new Tremor(),
+        new Tremor(),
+        new Escape(),
+      ],
+      // A click closes and disarms; leaving Share and coming back reopens.
+      H28: () => [
+        open('notes', 'E2'),
+        new MoveTo('share'),
+        new ClickShare(),
+        new Tremor(),
+        new Tremor(),
+        new MoveTo('otro'),
+        new MoveTo('share'),
+      ],
+      // Back from the submenu to Share after Escape reopens it.
+      H30: () => [
+        open(),
+        new MoveTo('share'),
+        new MoveTo('submenu'),
+        new Escape(),
+        new MoveTo('share'),
+      ],
+      // Share slid under an armed still pointer: ArrowRight, Escape, tremors.
+      H34: () => [
+        open(),
+        new MoveTo('otro'),
+        new StillShift('share', true),
+        new ActivateShare('ArrowRight'),
+        new Escape(),
+        new Tremor(),
+        new Tremor(),
+        new Escape(),
+      ],
+      // A still scroll away from Share and back does not re-arm.
+      H35: () => [
+        open(),
+        new MoveTo('share'),
+        new Escape(),
+        new Nav('End'),
+        new StillShift('otro', true),
+        new Nav('Home'),
+        new StillShift('share', true),
+        new Tremor(),
+        new Tremor(),
+        new Escape(),
+      ],
+      // The tree's reopening: armed, closed, reopened under the pointer.
+      H36: () => [
+        open(),
+        new MoveTo('otro'),
+        new Escape(),
+        open('notes', 'E1', 'share'),
+        new Tremor(),
+        new Tremor(),
+        new Escape(),
+      ],
+      // Opened under the pointer: leaving Share arms, coming back opens.
+      H37: () => [open('notes', 'E1', 'share'), new MoveTo('fuera'), new MoveTo('share')],
+      // ArrowLeft closes and disarms like Escape.
+      ArrowLeft: () => [
+        open(),
+        new MoveTo('share'),
+        new ArrowLeft(),
+        new Tremor(),
+        new Tremor(),
+        new Escape(),
+      ],
+      // Commands between the two reads, then each way the pair settles.
+      Bits: () => [
+        open('summary'),
+        new Nav('ArrowDown'),
+        new SettleRead('row', 'ok'),
+        new Nav('ArrowDown'),
+        new MoveTo('share'),
+        new SettleRead('parent', 'ok'),
+        new Escape(),
+        new Escape(),
+        open('summary', 'E2'),
+        new ActivateShare('Enter'),
+        new SettleRead('parent', 'error'),
+        new Nav('ArrowDown'),
+        new SettleRead('row', 'ok'),
+        new Escape(),
+        new Escape(),
+        open('summary', 'E1', 'share'),
+        new SettleRead('row', 'error'),
+        new Tremor(),
+        new SettleRead('parent', 'ok'),
+        new Escape(),
+      ],
+      // Reads that land after the menu closed, and a reopening that shares
+      // the read still in flight; then the drawer closes.
+      LateBits: () => [
+        open('summary'),
+        new Escape(),
+        new SettleRead('row', 'ok'),
+        open('summary'),
+        new SettleRead('parent', 'ok'),
+        new SettleRead('row', 'ok'),
+        new Escape(),
+        new CloseDrawer(),
+      ],
+      // contextmenu on the panel and the submenu, scroll and resize at rest.
+      Surfaces: () => [
+        open(),
+        new ContextMenuOnFocus(),
+        new Nav('ArrowDown'),
+        new StillShift('otro', true),
+        new Resize(),
+        new Nav('Home'),
+        new ActivateShare('ArrowRight'),
+        new ContextMenuOnFocus(),
+        new Resize(),
+      ],
+    }
+
+    const RUNS = Number(process.env.GFS_MENU_ORACLE_RUNS ?? 100)
+    // Fixed by default so every run explores the same cases;
+    // GFS_MENU_ORACLE_SEED picks another, and `random` opts into a fresh one.
+    const SEED_SETTING = process.env.GFS_MENU_ORACLE_SEED ?? '20261121'
+    const SEED = SEED_SETTING === 'random' ? undefined : Number(SEED_SETTING)
+    // `off` runs only the generated sequences, to measure how many draws a
+    // defect needs without the fixed examples.
+    const WITH_EXAMPLES = process.env.GFS_MENU_ORACLE_EXAMPLES !== 'off'
+    const exampleScheduler = () => fc.sample(fc.scheduler(), { seed: 2111, numRuns: 1 })[0]!
+
+    beforeAll(async () => {
+      affordanceFailure = await affordancesFailureMessage(500)
+    })
+
+    it('pins the enabled keys of each level to the producers', () => {
+      for (const row of Object.keys(ENABLED) as Row[]) {
+        for (const bits of Object.keys(ENABLED[row]) as Bits[]) {
+          expect(producedKeys(row, bits), `${row} ${bits}`).toEqual(ENABLED[row][bits])
+        }
+      }
+    })
+
+    it('keeps focus, levels, hover arming and focus cost on the model at rest', async () => {
+      coverage.clear()
+      const examples = WITH_EXAMPLES ? Object.values(EXAMPLES).map(build => build()) : []
+      const exampleRuns = new WeakSet<object>(examples)
+      const generated: Array<World['stats']> = []
+      await fc.assert(
+        fc.asyncProperty(
+          fc.scheduler(),
+          // Every generated run starts by opening a menu: before that only
+          // Open and CloseDrawer apply.
+          fc
+            .tuple(opening, fc.commands(commands, { maxCommands: 60, size: 'max' }))
+            .map(([first, rest]): Iterable<Cmd> => [first, ...rest]),
+          async (s, cmds) => {
+            let world: { model: Model; real: World } | undefined
+            try {
+              world = await mountWorld(s)
+              const { model, real } = world
+              await fc.asyncModelRun(() => ({ model, real }), cmds)
+            } finally {
+              if (world && !exampleRuns.has(cmds)) generated.push(world.real.stats)
+              await unmountWorld(world?.real)
+            }
+          }
+        ),
+        {
+          numRuns: RUNS + examples.length,
+          seed: SEED,
+          // Shrinking remounts the App for every candidate: worth it locally,
+          // too slow for CI, as in the host's oracle.
+          endOnFailure: Boolean(process.env.CI),
+          interruptAfterTimeLimit: 150_000,
+          markInterruptAsFailure: true,
+          examples: examples.map(cmds => [exampleScheduler(), cmds] as [Scheduler, Iterable<Cmd>]),
+        }
+      )
+      const opened = generated.filter(stats => stats.opened).length
+      const executed = generated.reduce((sum, stats) => sum + stats.executed, 0)
+      process.stdout.write(
+        `gfs menu oracle: ${generated.length} generated runs, ${opened} opened a menu, ` +
+          `${(executed / Math.max(1, generated.length)).toFixed(1)} commands each; ` +
+          `coverage ${JSON.stringify(Object.fromEntries([...coverage].sort()))}\n`
+      )
+      // Guard against a vacuous pass, on the generated runs alone: they open a
+      // menu and run a real sequence (measured: every run opens, 14 to 17
+      // commands run on average across seeds).
+      expect(generated.length, 'generated runs').toBe(RUNS)
+      if (RUNS > 0) {
+        expect(opened / RUNS, 'generated runs that open a menu').toBeGreaterThanOrEqual(0.95)
+        expect(executed / RUNS, 'commands per generated run').toBeGreaterThanOrEqual(10)
+      }
+      if (WITH_EXAMPLES) {
+        // The fixed examples reach every path by construction.
+        for (const label of [
+          'hover-opened',
+          'tremor-on-share',
+          'click-share',
+          'arrowleft-close',
+          'escape:submenu',
+          'escape:menu',
+          'escape:drawer',
+          'settle:ok',
+          'settle:error',
+          'settle:okWithoutParent',
+          'settle:first-of-two',
+          'settle:after-close',
+          'between-reads',
+          'contextmenu',
+        ]) {
+          expect(coverage.get(label) ?? 0, label).toBeGreaterThan(0)
+        }
+      }
+    }, 200_000)
   })
 })
