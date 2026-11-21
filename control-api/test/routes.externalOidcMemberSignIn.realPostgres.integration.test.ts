@@ -87,11 +87,15 @@ function uniqueLabel(label: string): string {
 }
 
 /**
- * An Entra registration that creates accounts. It differs between the two
- * tests only in the member sign-in switch and its guard. Eligibility needs the
- * `tid` claim, so a sign-in also proves the route's default engine collects it.
+ * An Entra registration that creates accounts. The switch tests differ only in
+ * the member sign-in switch and its guard; the eligibility tests add settings.
+ * Eligibility needs the `tid` claim, so a sign-in also proves the route's
+ * default engine collects it.
  */
-function entraFake(memberSignIn: 'on' | 'off'): OidcMemberSignInFakeProvider {
+function entraFake(
+  memberSignIn: 'on' | 'off',
+  env: Record<string, string> = {}
+): OidcMemberSignInFakeProvider {
   return createOidcMemberSignInFakeProvider({
     issuer: ENTRA_ISSUER,
     memberSignInEnv: {
@@ -100,6 +104,7 @@ function entraFake(memberSignIn: 'on' | 'off'): OidcMemberSignInFakeProvider {
       ...(memberSignIn === 'off'
         ? { CONTROL_API_OIDC_MEMBER_SIGN_IN: undefined, CONTROL_API_OIDC_UNRELEASED: undefined }
         : {}),
+      ...env,
     },
   })
 }
@@ -257,6 +262,63 @@ describeRealPostgres(
         contract: completed.body.sessionContract,
         claims: { userId: link.rows[0]!.user_id, email: member.email },
       })
+    })
+
+    /**
+     * Completes one refused attempt through the route, then the same claims
+     * with only `fixed` changed, which must sign in. The refusal must write
+     * no row; the control proves the claims were otherwise eligible.
+     */
+    async function expectNotEligibleThenControl(
+      fake: OidcMemberSignInFakeProvider,
+      claims: FakeIdTokenClaims,
+      fixed: FakeIdTokenClaims
+    ) {
+      const before = await tableCounts()
+
+      const refused = await completeThroughRoute(fake, claims)
+
+      expect(refused.completed.status).toBe(200)
+      expect(refused.completed.body).toEqual({
+        outcome: 'refused',
+        memberAuthenticationActivated: true,
+        reason: 'not_eligible',
+      })
+      // The path ran: the default engine verified the proof before the refusal.
+      expect(await attemptStatus(refused.state)).toBe('completed')
+      expect(await tableCounts()).toEqual(before)
+
+      const control = await completeThroughRoute(fake, { ...claims, ...fixed })
+      expect(control.completed.status).toBe(200)
+      expect(control.completed.body).toMatchObject({ outcome: 'member_signed_in' })
+      expect((await tableCounts()).users).toBe(before.users + 1)
+    }
+
+    it('33 roles under REQUIRED_ROLE are not_eligible and write no row', async () => {
+      const requiredRole = 'Evenfire.Member'
+      const fake = entraFake('on', { CONTROL_API_OIDC_REQUIRED_ROLE: requiredRole })
+      const member = memberClaims('too-many-roles')
+      const roles = (count: number) => [
+        ...Array.from({ length: count - 1 }, (_, index) => `fixture-role-${index}`),
+        requiredRole,
+      ]
+
+      await expectNotEligibleThenControl(
+        fake,
+        { ...member.claims, roles: roles(33) },
+        { roles: roles(32) }
+      )
+    })
+
+    it('a foreign tid on an Entra provider is not_eligible and writes no row', async () => {
+      const fake = entraFake('on')
+      const member = memberClaims('foreign-tid')
+
+      await expectNotEligibleThenControl(
+        fake,
+        { ...member.claims, tid: '0f9e8d7c-6b5a-4f3e-8d2c-1b0a9f8e7d6c' },
+        { tid: ENTRA_TENANT_ID }
+      )
     })
   }
 )
