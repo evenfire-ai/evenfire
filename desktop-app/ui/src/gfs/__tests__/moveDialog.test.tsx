@@ -4,7 +4,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import { accessibleResource, listAccessiblePage } from '../__fixtures__/gfsProducerFixtures'
 import { GfsMoveDialog } from '../moveDialog'
+import type { GfsNumberedNameConsent } from '../moveDialog.types'
 
 /**
  * R4 spec §3 — Move destination navigation is paginated: destinations beyond
@@ -342,5 +344,88 @@ describe('GfsMoveDialog no-op destination guard', () => {
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
     expect(onMove).toHaveBeenCalledWith('arch-1', 'Archive')
     expect(onMove).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('GfsMoveDialog close lock', () => {
+  const destinations = () =>
+    listAccessiblePage([accessibleResource('archive', 'Archive', 'directory')])
+
+  it('keeps closing during busy by default: the owner only drops the presentation', async () => {
+    const onClose = vi.fn()
+    renderDialog({ listAccessible: destinations }, { busy: true, onClose })
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+
+    const close = within(dialog).getByRole<HTMLButtonElement>('button', {
+      name: 'Close move dialog',
+    })
+    const cancel = within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Cancel' })
+    expect(close.disabled).toBe(false)
+    expect(cancel.disabled).toBe(false)
+    fireEvent.click(close)
+    fireEvent.click(cancel)
+    fireEvent.mouseDown(dialog.parentElement!)
+    expect(onClose).toHaveBeenCalledTimes(3)
+  })
+
+  it('disables every close path when locked and keeps the numbered-name choice operable', async () => {
+    const onClose = vi.fn()
+    let consent!: Promise<boolean>
+    const onMoveWithOwnership = vi.fn(
+      async (
+        _destinationId: string,
+        _destinationName: string,
+        _isCurrent: () => boolean,
+        requestConsent: GfsNumberedNameConsent
+      ) => {
+        consent = requestConsent('notes (1).txt')
+        await consent
+      }
+    )
+    const view = renderDialog(
+      { listAccessible: destinations },
+      { onClose, onMove: undefined, onMoveWithOwnership }
+    )
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+    await within(dialog).findByRole('button', { name: 'Move as notes (1).txt' })
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <GfsMoveDialog
+          target={target}
+          sessionScope="anonymous"
+          sessionGeneration={SESSION_GENERATION}
+          initialCrumbs={[]}
+          onMoveWithOwnership={onMoveWithOwnership}
+          onRetryPermissionCheck={vi.fn(async () => undefined)}
+          onClose={onClose}
+          busy
+          closeLocked
+        />
+      </QueryClientProvider>
+    )
+
+    const close = within(dialog).getByRole<HTMLButtonElement>('button', {
+      name: 'Close move dialog',
+    })
+    const cancel = within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Cancel' })
+    expect(close.disabled).toBe(true)
+    expect(cancel.disabled).toBe(true)
+    fireEvent.click(close)
+    fireEvent.click(cancel)
+    fireEvent.mouseDown(dialog.parentElement!)
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: 'Move file notes.txt' })).toBe(dialog)
+
+    const keep = within(dialog).getByRole<HTMLButtonElement>('button', {
+      name: 'Keep current name',
+    })
+    expect(keep.disabled).toBe(false)
+    fireEvent.click(keep)
+    await act(async () => {
+      expect(await consent).toBe(false)
+    })
+    expect(within(dialog).queryByRole('button', { name: 'Move as notes (1).txt' })).toBeNull()
   })
 })

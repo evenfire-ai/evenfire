@@ -15770,7 +15770,9 @@ pre {
 .da-gfs-resource-menu__panel {
   position: fixed;
   /* The persistent sidebar owns dropdown + 1000. Resource menus are portaled
-     to body and must remain above it while the navigation expands/collapses. */
+     to body and must remain above it while the navigation expands/collapses.
+     Access-row menus inside a Share dialog mount in the dialog instead: at
+     body they would tie the window-level Share modal's layer. */
   z-index: calc(var(--layer-dropdown) + 1100);
   width: min(360px, calc(100vw - (var(--space-4) * 2)));
   max-height: calc(100vh - (var(--space-4) * 2));
@@ -16300,6 +16302,16 @@ pre {
   padding: var(--space-4);
   background: rgba(var(--overlay-rgb), 0.18);
   backdrop-filter: blur(12px) saturate(0.86);
+}
+
+.da-gfs-action-host {
+  display: contents;
+}
+
+/* The sidebar's actions open at the window root, so their backdrop dims the
+   sidebar too, unlike the Files dialogs scoped to the content panel. */
+.da-gfs-action-host .da-gfs-manage-modal {
+  z-index: var(--layer-window-dialog);
 }
 
 .da-gfs-manage-dialog {

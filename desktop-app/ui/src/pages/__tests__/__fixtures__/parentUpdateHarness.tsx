@@ -1,9 +1,16 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { expect, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, onlineManager } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { GfsActionHost } from '@components/GfsActionHost'
+import { useGfsActionHost } from '@components/GfsActionHost/context'
+import type {
+  GfsActionHostContextValue,
+  GfsHostActionTarget,
+} from '@components/GfsActionHost/types'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { readGfsAccessState, revokeGfsSessionAccess } from '@lib/gfsSessionAuthority'
 import { purgeGfsSessionCache } from '@lib/gfsWatchReaction'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -100,8 +107,15 @@ export async function waitSettled(rounds = 6) {
 /** Which seam an intercepted IPC call crosses. */
 export type InterceptedIpc = 'write' | 'preflight' | 'session'
 
+/**
+ * Who mounts the Share dialog: the Files page, or the sidebar's action host
+ * (opened on the same row, as the resource menu does).
+ */
+export type ParentUpdateOwner = 'files' | 'host'
+
 export interface ParentUpdateHarnessOptions {
   agentGrant?: boolean
+  owner?: ParentUpdateOwner
   /**
    * Takes over when an intercepted call settles. `settle` produces the value
    * the default mock would have returned, read at the moment it runs.
@@ -323,27 +337,100 @@ export async function mountParentUpdatePage(options: ParentUpdateHarnessOptions 
     runtimeConfigState: null,
   } as unknown as AuthContextValue
 
-  let harnessState = { generation: SESSION_GENERATION, mounted: true }
-  let setHarness!: (patch: Partial<{ generation: number; mounted: boolean }>) => void
+  const owner: ParentUpdateOwner = options.owner ?? 'files'
+  let host: GfsActionHostContextValue | null = null
+  // The row as the sidebar's tree holds it: the browser controller's listing.
+  let hostTarget: GfsHostActionTarget | null = null
+  // Set when another host action replaced Share; it covers the window from
+  // its permission check on, before its dialog renders.
+  let hostAway = false
+  const hostActionOpen = vi.fn<(open: boolean) => void>()
+  const refreshFilesLocation = vi.fn()
+
+  interface HarnessState {
+    generation: number
+    mounted: boolean
+    signedIn: boolean
+  }
+  const initialState: HarnessState = {
+    generation: SESSION_GENERATION,
+    mounted: true,
+    signedIn: true,
+  }
+  let harnessState = initialState
+  let setHarness!: (patch: Partial<HarnessState>) => void
+  /**
+   * Stands in for the sidebar's resource menu on the listed row, and for the
+   * Files surface's revoked state elsewhere in the app with its real retry.
+   */
+  function HostMenu() {
+    const value = useGfsActionHost()
+    const ctrl = useGfsBrowserController()
+    const row = ctrl.accessibleResources.find(item => item.resourceId === TARGET_ID) ?? null
+    useEffect(() => {
+      host = value
+      if (row) hostTarget = row
+    })
+    return (
+      <>
+        {row ? (
+          <button
+            type="button"
+            onClick={() => {
+              hostAway = false
+              value?.openGfsAction(row, 'share')
+            }}
+          >
+            Share Folder A
+          </button>
+        ) : null}
+        {ctrl.accessState === 'revoked' ? (
+          <button type="button" onClick={() => ctrl.retryAccess()}>
+            Retry file access
+          </button>
+        ) : null}
+      </>
+    )
+  }
   function Harness() {
-    const [state, setState] = useState({ generation: SESSION_GENERATION, mounted: true })
+    const [state, setState] = useState(initialState)
     harnessState = state
     setHarness = patch => setState(previous => ({ ...previous, ...patch }))
     const auth = useMemo(
-      () => ({ ...baseAuth, sessionGeneration: state.generation }) as AuthContextValue,
-      [state.generation]
+      () =>
+        (state.signedIn
+          ? { ...baseAuth, sessionGeneration: state.generation }
+          : {
+              ...baseAuth,
+              isAuthenticated: false,
+              me: null,
+              sessionGeneration: null,
+            }) as AuthContextValue,
+      [state.generation, state.signedIn]
     )
     return (
       <AuthContext.Provider value={auth}>
         <QueryClientProvider client={queryClient}>
-          {state.mounted ? <FilesPage pushToast={pushToast} /> : null}
+          {owner === 'files' ? (
+            state.mounted ? (
+              <FilesPage pushToast={pushToast} />
+            ) : null
+          ) : (
+            <GfsActionHost
+              pushToast={pushToast}
+              refreshFilesLocation={refreshFilesLocation}
+              onActionOpenChange={hostActionOpen}
+            >
+              <HostMenu />
+            </GfsActionHost>
+          )}
         </QueryClientProvider>
       </AuthContext.Provider>
     )
   }
   const view = render(<Harness />)
   await screen.findByRole('button', { name: 'Share Folder A' })
-  fireEvent.click(screen.getByRole('button', { name: 'Share Folder A' }))
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Share Folder A' })))
   await screen.findByRole('dialog', { name: 'Share folder Folder A' })
   await screen.findByTestId(`gfs-access-row-inherited-user:${MEMBER_ID}`)
   await waitFor(() =>
@@ -358,10 +445,13 @@ export async function mountParentUpdatePage(options: ParentUpdateHarnessOptions 
   const closeButton = () =>
     screen.getByRole('button', { name: 'Close share dialog' }) as HTMLButtonElement
   const confirmation = () => screen.queryByRole('alertdialog')
+  const otherHostAction = () => screen.queryByRole('dialog', { name: 'Rename folder' })
 
   return {
     ...view,
+    owner,
     queryClient,
+    refreshFilesLocation,
     pushToast,
     writes,
     revokeGrant,
@@ -379,9 +469,26 @@ export async function mountParentUpdatePage(options: ParentUpdateHarnessOptions 
     heldAffordances: (resourceId: string) => heldAffordanceReads.get(resourceId) ?? [],
     mainGeneration: () => mainGeneration,
     rendererGeneration: () => harnessState.generation,
-    filesMounted: () => harnessState.mounted,
+    /**
+     * Whether the user is where the Share dialog was opened: the Files section
+     * for FilesPage; for the host, no other action opened over Share since
+     * (counted from the moment it opens, not from when its dialog renders).
+     */
+    filesMounted: () => (owner === 'files' ? harnessState.mounted : !hostAway),
     returnToFiles: async () => {
-      await act(async () => setHarness({ mounted: true }))
+      if (owner === 'files') {
+        await act(async () => setHarness({ mounted: true }))
+        return
+      }
+      // A Rename still checking its permissions opens its dialog first.
+      await waitSettled(3)
+      const other = otherHostAction()
+      if (other) {
+        await act(async () =>
+          fireEvent.click(within(other).getByRole('button', { name: 'Cancel' }))
+        )
+      }
+      hostAway = false
     },
     openShare: async () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Share Folder A' }))
@@ -394,10 +501,30 @@ export async function mountParentUpdatePage(options: ParentUpdateHarnessOptions 
     publishGeneration: async (generation = mainGeneration) => {
       await act(async () => setHarness({ generation }))
     },
-    /** The user leaves the Files section (sidebar/titlebar): FilesPage unmounts. */
+    /**
+     * The user leaves the dialog's surface without closing it: FilesPage
+     * unmounts (sidebar/titlebar navigation); the host replaces Share with
+     * another action on the same row.
+     */
     navigateAway: async () => {
-      await act(async () => setHarness({ mounted: false }))
+      if (owner === 'files') {
+        await act(async () => setHarness({ mounted: false }))
+        return
+      }
+      const target = hostTarget
+      expect(target, 'the listed row the host acts on').not.toBeNull()
+      hostAway = true
+      await act(async () => host?.openGfsAction(target!, 'rename'))
+      await waitSettled(3)
     },
+    /** Sign-out: the cache is cleared and the session is no longer published. */
+    logout: async () => {
+      await act(async () => {
+        queryClient.clear()
+        setHarness({ signedIn: false, mounted: false })
+      })
+    },
+    hostActionOpen,
     revoke: () =>
       act(() => revokeGfsSessionAccess(queryClient, SESSION_SCOPE, harnessState.generation)),
     purge: () =>
@@ -455,6 +582,24 @@ export async function mountParentUpdatePage(options: ParentUpdateHarnessOptions 
     failureMessage: (status: number) =>
       gfsRouteFailureMessage(
         client => client.revokeGrant(PARENT_TWO_GRANT, 'fixture-token'),
+        status,
+        {
+          code: status === 401 ? 'unauthorized' : 'internal',
+          message: status === 401 ? 'session expired' : 'upstream failed',
+        }
+      ),
+    /** What the direct `gfs.grant` IPC rejects with, from the real grant route. */
+    grantFailureMessage: (status: number) =>
+      gfsRouteFailureMessage(
+        client =>
+          client.grant(
+            {
+              resourceId: PARENT_ONE,
+              subjects: [{ type: 'user', id: MEMBER_ID }],
+              permissions: ['read'],
+            },
+            'fixture-token'
+          ),
         status,
         {
           code: status === 401 ? 'unauthorized' : 'internal',

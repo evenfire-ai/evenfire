@@ -1,4 +1,5 @@
 import { hasGfsMoveSourcePermissions } from './gfsMovePermissions'
+import type { GfsResourceActionId } from './gfsResourceActions'
 import type {
   GfsRowActionAvailability,
   GfsRowActionAvailabilityInput,
@@ -32,4 +33,36 @@ export function gfsRowActionAvailability({
     canMove:
       Boolean(resource.parentResourceId) && hasGfsMoveSourcePermissions(parentAffordances?.held),
   }
+}
+
+/**
+ * The row actions to show while the bits are still loading or failed to load.
+ * Every bit-dependent action is offered so the menu can render it inert until
+ * the bits settle; Move still needs a known parent to be judged on at all.
+ */
+export function gfsPendingRowActionAvailability(resource: {
+  parentResourceId?: string | null
+}): GfsRowActionAvailability {
+  return {
+    canDelete: true,
+    canRename: true,
+    canWrite: true,
+    canManage: true,
+    canMove: Boolean(resource.parentResourceId),
+  }
+}
+
+// Link and ID copies need only the URI, preview and download only the
+// listing's `readable` flag, and opening a folder is navigation. Every other
+// action, including any added later, waits for the target's affordances.
+const ACTIONS_WITHOUT_AFFORDANCES: ReadonlySet<GfsResourceActionId> = new Set([
+  'copy-link',
+  'copy-route',
+  'preview',
+  'download',
+  'open-folder',
+])
+
+export function gfsActionNeedsAffordances(id: GfsResourceActionId): boolean {
+  return !ACTIONS_WITHOUT_AFFORDANCES.has(id)
 }
