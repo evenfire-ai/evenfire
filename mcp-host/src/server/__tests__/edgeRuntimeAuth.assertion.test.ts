@@ -544,4 +544,42 @@ describe('mounted Host routes behind the edge assertion', () => {
       await mounted.stop()
     }
   })
+
+  it('refuses direct session search without declared V2 authority', async () => {
+    const search = vi.fn().mockResolvedValue({ results: [], total: 0 })
+    const sessionsList = vi.fn().mockResolvedValue({ sessions: [], nextCursor: null })
+    const mounted = await mount(server => {
+      server.onSessionSearch(search)
+      server.onSessionsList(sessionsList)
+    })
+    const rpcToken = jwt.sign(
+      { sub: USER, typ: 'user', scopes: ['host:session:read'], hostRefs: [HOST_NAME] },
+      process.env.CONTROL_API_RPC_JWT_PRIVATE_KEY!,
+      { algorithm: 'RS256', issuer: 'control-api', audience: 'rpc-proxy', expiresIn: 300 }
+    )
+    const v1Headers = {
+      ...clearHeaders(),
+      [HOST_EDGE_ASSERTION_HEADER]: assertion({ scopes: ['host:session:read'] }),
+    }
+    try {
+      const bearer = await fetch(`${mounted.baseUrl}/v1/runtime/sessions/search?q=budget`, {
+        headers: { authorization: `Bearer ${rpcToken}` },
+      })
+      expect(bearer.status).toBe(401)
+      expect(await bearer.json()).toEqual({ error: 'V2 runtime authority required' })
+
+      const v1 = await fetch(`${mounted.baseUrl}/v1/runtime/sessions/search?q=budget`, {
+        headers: v1Headers,
+      })
+      expect(v1.status).toBe(401)
+      expect(await v1.json()).toEqual({ error: 'V2 runtime authority required' })
+      expect(search).not.toHaveBeenCalled()
+
+      const list = await fetch(`${mounted.baseUrl}/v1/runtime/sessions`, { headers: v1Headers })
+      expect(list.status).toBe(200)
+      expect(sessionsList).toHaveBeenCalledTimes(1)
+    } finally {
+      await mounted.stop()
+    }
+  })
 })
