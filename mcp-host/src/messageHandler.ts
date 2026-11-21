@@ -330,16 +330,22 @@ export class IncomingMessageHandler {
       { taskId: this.task.id, reason, priorTaskId, priorStatus },
       'Duplicate delivery suppressed'
     )
-    // #666 — a success names the attachments and file references the first
-    // delivery admitted, as the first response did; without them a client reads
+    // #666 — a success names the attachments, file and location references the
+    // first delivery admitted, as the first response did; without them a client reads
     // a Host that dropped them. `prior` is the record admission read, so a TTL
     // eviction since then cannot remove them.
-    const accepted: Pick<MessageResponse, 'acceptedAttachmentIds' | 'acceptedFileReferenceIds'> = {
+    const accepted: Pick<
+      MessageResponse,
+      'acceptedAttachmentIds' | 'acceptedFileReferenceIds' | 'acceptedLocationReferenceIds'
+    > = {
       ...(prior.acceptedAttachmentIds.length
         ? { acceptedAttachmentIds: [...prior.acceptedAttachmentIds] }
         : {}),
       ...(prior.acceptedFileReferenceIds.length
         ? { acceptedFileReferenceIds: [...prior.acceptedFileReferenceIds] }
+        : {}),
+      ...(prior.acceptedLocationReferenceIds.length
+        ? { acceptedLocationReferenceIds: [...prior.acceptedLocationReferenceIds] }
         : {}),
     }
     if (priorStatus === 'completed') {

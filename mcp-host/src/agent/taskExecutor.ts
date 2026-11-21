@@ -143,7 +143,10 @@ import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkfl
 import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
-import { referencedFilesForTurnContext } from './fileReferenceResolver'
+import {
+  referencedFilesForTurnContext,
+  referencedFoldersForTurnContext,
+} from './fileReferenceResolver'
 import {
   gfsManagedWorkspaceExecution,
   gfsStoreCallerIdentity,
@@ -1335,19 +1338,28 @@ export class TaskExecutor {
     // message of the turn. Only the first user message of the turn gets it;
     // `tool` messages keep their content untouched.
     // #666 — the block is also the only carrier of the `attached_file` and
-    // `referenced_file` lines, so a message with file attachments or resolved
-    // file references gets it with the cache off too; the attachment
-    // condition also registers `clerum__attachment_read`.
+    // `referenced_file` and `referenced_folder` lines, so a message with file
+    // attachments or resolved file or location references gets it with the
+    // cache off too; the attachment condition also registers
+    // `clerum__attachment_read`.
     const hasFileAttachments =
       this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
     const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
+    const hasLocationReferences =
+      (this.task.sourceMessage?.locationReferenceResolutions?.length ?? 0) > 0
     const promptAssemblyStart = Date.now()
     const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
     const promptAssemblyMs = Date.now() - promptAssemblyStart
     // The save instruction follows the registry that was actually built, so it
     // appears exactly when the model can call the tool.
     const saveAvailable = loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
-    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences || saveAvailable) {
+    if (
+      appConfig.promptCacheEnabled ||
+      hasFileAttachments ||
+      hasFileReferences ||
+      hasLocationReferences ||
+      saveAvailable
+    ) {
       this.prependTurnContextBlock(messages, saveAvailable)
     }
     if (this.turnTiming) {
@@ -1392,6 +1404,9 @@ export class TaskExecutor {
           : undefined,
         referencedFiles: referencedFilesForTurnContext(
           this.task.sourceMessage?.fileReferenceResolutions
+        ),
+        referencedFolders: referencedFoldersForTurnContext(
+          this.task.sourceMessage?.locationReferenceResolutions
         ),
         preparedGfsFiles: this.preparedGfsFiles,
       })
