@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import userEvent from '@testing-library/user-event'
 import * as api from '../../lib/api'
 import { HostIdentityTab } from '../HostIdentityTab'
+import { ThemeProvider } from '../ThemeContext'
 import { ToastProvider } from '../Toast'
 
 vi.mock('../../lib/api', () => ({
@@ -11,7 +12,10 @@ vi.mock('../../lib/api', () => ({
   updateHostPersonalization: vi.fn(),
 }))
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  window.localStorage.clear()
+})
 
 const initialFiles = {
   agents: '## Agent instructions',
@@ -37,9 +41,11 @@ describe('HostIdentityTab', () => {
 
   function renderTab(onActionsChange?: (actions: React.ReactNode | null) => void) {
     return render(
-      <ToastProvider>
-        <HostIdentityTab hostName="foo" onActionsChange={onActionsChange} />
-      </ToastProvider>
+      <ThemeProvider>
+        <ToastProvider>
+          <HostIdentityTab hostName="foo" onActionsChange={onActionsChange} />
+        </ToastProvider>
+      </ThemeProvider>
     )
   }
 
@@ -75,6 +81,26 @@ describe('HostIdentityTab', () => {
     await waitFor(() => expect(soul).toHaveTextContent('Values'), { timeout: 10000 })
     expect(screen.getByRole('heading', { name: 'SOUL.md' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Edit SOUL.md' })).toBeInTheDocument()
+  })
+
+  it.each([
+    { fileName: 'IDENTITY.md', label: 'Identity' },
+    { fileName: 'SOUL.md', label: 'Soul' },
+    { fileName: 'AGENTS.md', label: 'Agent instructions' },
+    { fileName: 'USER.md', label: 'User context' },
+  ])('uses the active light theme for the read-only $fileName view', async ({ label }) => {
+    window.localStorage.setItem('clerum.control-ui.theme', 'light')
+    renderTab()
+
+    await waitFor(() => expect(document.documentElement).toHaveAttribute('data-theme', 'light'))
+    await userEvent.setup().click(screen.getByRole('tab', { name: label }))
+
+    const article = await screen.findByRole('article', {
+      name: `Rendered ${label} document`,
+    })
+    await waitFor(() => expect(article).toHaveAttribute('data-color-mode', 'light'))
+    await waitFor(() => expect(article.querySelector('.wmde-markdown')).not.toBeNull())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('renders the admin notice before the accessible tabs after loading', async () => {
