@@ -183,6 +183,10 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
           res.status(409).json({ error: 'no_accepted_invitation' })
           return
         }
+        if (result.error === 'oidc_linked') {
+          res.status(409).json({ error: 'oidc_linked' })
+          return
+        }
       }
       res.status(200).json(result)
     } catch (error) {

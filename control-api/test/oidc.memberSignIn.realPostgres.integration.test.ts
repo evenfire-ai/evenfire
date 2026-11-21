@@ -29,14 +29,16 @@ import {
 import {
   acceptInvitationForEmail,
   acceptInvitationForEmailInTransaction,
+  createPasswordSetupInvitationForUser,
   deleteManagedUserForUser,
+  listManagedMembersForUser,
   setInvitationPasswordForEmail,
   softDeleteMember,
   updateMemberRole,
 } from '../src/services/directory/membership.js'
 import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import type { InviteRole } from '../src/services/directory/types.js'
-import { createAdminUser, retireDesktopUser } from '../src/services/directory/users.js'
+import { createAdminUser, listUsers, retireDesktopUser } from '../src/services/directory/users.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import {
   OIDC_MEMBER_SIGN_IN_FAKE_PUBLIC_IP,
@@ -50,8 +52,17 @@ import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const holder = vi.hoisted(() => ({ pool: null as unknown as Pool }))
 const network = vi.hoisted(() => ({ lookup: vi.fn(), transport: vi.fn() }))
+const invitationEmail = vi.hoisted(() => vi.fn())
 
 vi.mock('node:dns/promises', () => ({ lookup: () => network.lookup() }))
+
+// Password setup resend registers and emails the invitation it creates; no email leaves the suite.
+vi.mock('../src/services/invitationFlowRegistrationService.js', async importOriginal => ({
+  ...(await importOriginal<
+    typeof import('../src/services/invitationFlowRegistrationService.js')
+  >()),
+  registerAndSendInvitation: invitationEmail,
+}))
 
 vi.mock('../src/http/pinnedFetch.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/http/pinnedFetch.js')>()
@@ -86,6 +97,7 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue([{ address: OIDC_MEMBER_SIGN_IN_FAKE_PUBLIC_IP, family: 4 }])
   network.transport.mockReset().mockImplementation(input => oidcMemberSignInFakeTransport(input))
+  invitationEmail.mockReset().mockResolvedValue(undefined)
 })
 
 afterEach(() => {
@@ -1863,6 +1875,113 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
         status: 'accepted',
         accepted_user_id: googleUser.id,
       })
+    })
+
+    /** Every invitation row for the address except the orphaned one. */
+    async function otherInvitations(email: string, orphanedInvitationId: string) {
+      const result = await testPool.query<{
+        team_id: string | null
+        role: string
+        status: string
+        purpose: string
+      }>(
+        `SELECT team_id::text AS team_id, role, status, purpose FROM invitations
+          WHERE lower(email) = lower($1) AND id <> $2`,
+        [email, orphanedInvitationId]
+      )
+      return result.rows
+    }
+
+    /** Puts the member in a team that a new admin manages, for the Profile UI members list. */
+    async function managedByTeamAdmin(memberId: string, label: string): Promise<string> {
+      const teamId = await seedTeam(`${label}-managed-team`)
+      const managerId = await seedUser(`${uniqueLabel(`${label}-manager`)}@fixture.test`)
+      await seedMembership(teamId, managerId, 'admin')
+      await seedMembership(teamId, memberId, 'member')
+      return managerId
+    }
+
+    const MANAGED_MEMBER_LISTS = ['every managed member', 'one managed member'] as const
+
+    /** The member's entries in the manager's list; the full list also holds the manager. */
+    async function managedMembers(
+      list: (typeof MANAGED_MEMBER_LISTS)[number],
+      managerId: string,
+      memberId: string
+    ) {
+      const members =
+        list === 'every managed member'
+          ? await listManagedMembersForUser(managerId)
+          : await listManagedMembersForUser(managerId, memberId)
+      return members.filter(member => member.id === memberId)
+    }
+
+    it('the admin user list does not offer password setup to an account that OIDC sign-in re-created', async () => {
+      const orphan = await orphanedAdminInvitation('recreated-admin-list')
+      const userId = await recreatedThroughOidc(orphan.email, 'fake-entra-recreated-admin-list')
+
+      expect(await listUsers(orphan.email)).toMatchObject([
+        { id: userId, email: orphan.email, passwordPendingFromAcceptedInvitation: false },
+      ])
+    })
+
+    it('password setup resend refuses an account that OIDC sign-in re-created and copies no invitation', async () => {
+      const orphan = await orphanedAdminInvitation('recreated-resend')
+      const userId = await recreatedThroughOidc(orphan.email, 'fake-entra-recreated-resend')
+
+      expect(await createPasswordSetupInvitationForUser(userId)).toEqual({ error: 'oidc_linked' })
+
+      expect(await otherInvitations(orphan.email, orphan.invitationId)).toEqual([])
+      expect(invitationEmail).not.toHaveBeenCalled()
+      expect(await invitationState(orphan.invitationId)).toEqual({
+        status: 'accepted',
+        accepted_user_id: null,
+      })
+    })
+
+    it.each(MANAGED_MEMBER_LISTS)(
+      "a team manager's list of %s does not offer password setup to an account that OIDC sign-in re-created",
+      async list => {
+        const orphan = await orphanedAdminInvitation('recreated-managed-list')
+        const userId = await recreatedThroughOidc(orphan.email, 'fake-entra-recreated-managed-list')
+        const managerId = await managedByTeamAdmin(userId, 'recreated-managed-list')
+
+        expect(await managedMembers(list, managerId, userId)).toMatchObject([
+          { id: userId, email: orphan.email, passwordPendingFromAcceptedInvitation: false },
+        ])
+      }
+    )
+
+    it('control: an account without an OIDC link is still offered password setup, and resend copies the invitation', async () => {
+      const orphan = await orphanedAdminInvitation('recreated-unlinked-resend')
+      const user = await createAdminUser(orphan.email, 'Re-created Member')
+      const managerId = await managedByTeamAdmin(user.id, 'recreated-unlinked-resend')
+
+      expect(await listUsers(orphan.email)).toMatchObject([
+        { id: user.id, passwordPendingFromAcceptedInvitation: true },
+      ])
+      for (const list of MANAGED_MEMBER_LISTS) {
+        expect(await managedMembers(list, managerId, user.id)).toMatchObject([
+          { id: user.id, passwordPendingFromAcceptedInvitation: true },
+        ])
+      }
+
+      expect(await createPasswordSetupInvitationForUser(user.id)).toMatchObject({
+        sent: true,
+        email: orphan.email,
+        teamId: orphan.teamId,
+      })
+
+      expect(await otherInvitations(orphan.email, orphan.invitationId)).toEqual([
+        {
+          team_id: orphan.teamId,
+          role: 'admin',
+          status: 'pending',
+          purpose: 'member_invitation',
+        },
+      ])
+      expect(invitationEmail).toHaveBeenCalledTimes(1)
+      expect(invitationEmail.mock.calls[0]![0]).toBe(orphan.email)
     })
   })
 

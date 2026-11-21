@@ -205,6 +205,8 @@ const ADMIN_USER_SELECT = `SELECT u.id,
                    OR LOWER(i.email) = LOWER(u.email)
                  )
                  AND u.password_hash IS NULL
+                 -- Password setup resend refuses an OIDC-linked account, so it is never offered.
+                 AND NOT EXISTS (SELECT 1 FROM user_oidc_links l WHERE l.user_id = u.id)
             ) AS password_pending_from_accepted_invitation
        FROM users u
   LEFT JOIN profiles p ON p.user_id = u.id

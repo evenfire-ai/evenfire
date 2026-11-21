@@ -22,6 +22,7 @@ import {
   normalizeInvitationPurpose,
   normalizeInvitationTeamAssignments,
 } from './invitationStore.js'
+import { hasOidcLink } from './login.js'
 import type { InviteRole, TeamRole } from './types.js'
 import {
   normalizeChannels,
@@ -628,6 +629,12 @@ export async function createPasswordSetupInvitationForUser(userId: string) {
   if (user.password_hash) {
     return { error: 'password_already_set' as const }
   }
+  // An OIDC-linked account may have been created for the address of a
+  // removed member, whose accepted invitations still match it by email.
+  // Copying one would hand it that member's teams and roles (see hasOidcLink).
+  if (await hasOidcLink(pool, user.id)) {
+    return { error: 'oidc_linked' as const }
+  }
 
   const invitationResult = await pool.query(
     `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at, i.accepted_at,
@@ -1058,6 +1065,8 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
                        OR LOWER(i.email) = LOWER(u.email)
                      )
                      AND u.password_hash IS NULL
+                     -- Password setup resend refuses an OIDC-linked account.
+                     AND NOT EXISTS (SELECT 1 FROM user_oidc_links l WHERE l.user_id = u.id)
                 ) AS password_pending_from_accepted_invitation,
                 jsonb_agg(
                   jsonb_build_object(
@@ -1114,6 +1123,8 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
                        OR LOWER(i.email) = LOWER(u.email)
                      )
                      AND u.password_hash IS NULL
+                     -- Password setup resend refuses an OIDC-linked account.
+                     AND NOT EXISTS (SELECT 1 FROM user_oidc_links l WHERE l.user_id = u.id)
                 ) AS password_pending_from_accepted_invitation,
                 jsonb_agg(
                   jsonb_build_object(

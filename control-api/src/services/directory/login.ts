@@ -107,14 +107,17 @@ function teamlessMemberMembership(): MembershipRow {
 
 /**
  * True when the account has signed in with OIDC at least once. Such an account
- * is never healed from accepted invitations by email, just as OIDC sign-in
+ * is never matched to accepted invitations by email, just as OIDC sign-in
  * itself never heals: OIDC sign-in creates an account for an address whose
  * earlier holder may have been hard-deleted, and that holder's accepted
  * invitations outlive them with `accepted_user_id` set to NULL. Healing by
- * email would hand the new account the removed member's teams and roles. An
- * unlinked account is healed as before.
+ * email would hand the new account the removed member's teams and roles, so
+ * login does not heal it, and an admin's password setup resend
+ * (createPasswordSetupInvitationForUser) refuses it rather than copy those
+ * teams and roles into a new invitation. An unlinked account is healed as
+ * before.
  */
-async function hasOidcLink(
+export async function hasOidcLink(
   db: Pick<DbTransactionClient, 'query'>,
   userId: string
 ): Promise<boolean> {

@@ -9,6 +9,7 @@ const svc = vi.hoisted(() => ({
   adminDeleteUser: vi.fn(),
   createInvitation: vi.fn(),
   createInvitationForTeams: vi.fn(),
+  createPasswordSetupInvitationForUser: vi.fn(),
   createTeam: vi.fn(),
   findMembership: vi.fn(),
   getAdminUserContext: vi.fn(),
@@ -194,6 +195,21 @@ describe('routes/profileAdmin', () => {
     // A retired row still holds its address, so the guard asks for it too.
     expect(svc.listUsers).toHaveBeenCalledWith('existing@example.com', { includeRetired: true })
     expect(svc.createInvitationForTeams).not.toHaveBeenCalled()
+  })
+
+  it('refuses password setup resend for an OIDC-linked account with 409 oidc_linked', async () => {
+    svc.createPasswordSetupInvitationForUser.mockResolvedValue({ error: 'oidc_linked' })
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+    const res = await request(app)
+      .post('/admin/users/user-1/invitations/password-setup/resend')
+      .expect(409)
+
+    expect(res.body).toEqual({ error: 'oidc_linked' })
+    expect(svc.createPasswordSetupInvitationForUser).toHaveBeenCalledWith('user-1')
   })
 
   it('returns deleted context history for admin user and team views', async () => {
