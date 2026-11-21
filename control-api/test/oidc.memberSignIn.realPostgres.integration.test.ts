@@ -17,14 +17,21 @@ import {
   type InvitationPurpose,
   insertInvitationForTeams,
 } from '../src/services/directory/invitationStore.js'
-import { findFirstActiveMembership, googleLoginData } from '../src/services/directory/login.js'
 import {
+  findFirstActiveMembership,
+  googleLoginData,
+  passwordLoginData,
+} from '../src/services/directory/login.js'
+import {
+  acceptInvitationForEmail,
   acceptInvitationForEmailInTransaction,
   deleteManagedUserForUser,
+  setInvitationPasswordForEmail,
   softDeleteMember,
 } from '../src/services/directory/membership.js'
+import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import type { InviteRole } from '../src/services/directory/types.js'
-import { retireDesktopUser } from '../src/services/directory/users.js'
+import { createAdminUser, retireDesktopUser } from '../src/services/directory/users.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import {
   OIDC_MEMBER_SIGN_IN_FAKE_PUBLIC_IP,
@@ -673,8 +680,8 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     try {
       const result = signedIn(await signIn(defaultFake, proof))
 
-      // Soft, so that without the fix the Google login below still runs and
-      // shows the demotion this test exists for.
+      // Soft, so that the Google login below still runs when the invitation
+      // was accepted by mistake.
       expect.soft(result).toMatchObject({ userId, invitationsApplied: 0 })
       expect.soft(await invitationState(invitation.id)).toEqual({
         status: 'pending',
@@ -695,7 +702,8 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       info.mockRestore()
     }
 
-    // Every Google login heals memberships from the address's accepted invitations.
+    // The sign-in linked this account, and Google login never heals a linked
+    // account from the address's accepted invitations: the role stays admin.
     const google = await googleLoginData({ email })
 
     expect(google).toMatchObject({
@@ -1571,6 +1579,166 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
         expect(retirement).toMatchObject({ id: userId, outcome: 'deleted' })
         expect(await userRow(userId)).toEqual([])
       }
+    })
+  })
+
+  describe('a member removed while member sign-in was off and re-created later', () => {
+    const MEMBER_PASSWORD = 'recreated-member-password-fixture'
+
+    /**
+     * What every removal made while member sign-in was off leaves behind: the
+     * member accepted an admin invitation to a team, then was hard-deleted, so
+     * the membership is gone and the invitation stays accepted with no user.
+     */
+    async function orphanedAdminInvitation(label: string) {
+      const email = `${uniqueLabel(label)}@entra.fixture.test`
+      const teamId = await seedTeam(`${label}-team`)
+      const invitation = await seedInvitation({ email, teamId, role: 'admin' })
+      const accepted = await acceptInvitationForEmail(email, invitation.token)
+      if (!('data' in accepted) || !accepted.data) {
+        throw new Error(`invitation acceptance failed: ${JSON.stringify(accepted)}`)
+      }
+      const formerUserId = accepted.data.userId
+      expect(await membershipsOf(formerUserId)).toEqual([{ team_id: teamId, role: 'admin' }])
+
+      stubOidcEnvironment({})
+      const removal = await retireDesktopUser(
+        { kind: 'control_admin', controlAdminId: actorId },
+        formerUserId,
+        'removed while member sign-in was off',
+        uniqueLabel(`${label}-removal-key`),
+        `${label}-removal-request`
+      )
+      expect(removal).toMatchObject({ id: formerUserId, outcome: 'deleted' })
+      expect(await userCount(email)).toBe(0)
+      expect(await invitationState(invitation.id)).toEqual({
+        status: 'accepted',
+        accepted_user_id: null,
+      })
+      expect(await teamRows(teamId)).toEqual([])
+      return { email, teamId, invitationId: invitation.id }
+    }
+
+    async function teamRows(teamId: string) {
+      const result = await testPool.query<{ user_id: string; role: string; status: string }>(
+        `SELECT user_id::text AS user_id, role, status FROM team_members WHERE team_id = $1`,
+        [teamId]
+      )
+      return result.rows
+    }
+
+    /** Row 4: Entra creates a fresh, teamless account (no new-member team is set). */
+    async function recreatedThroughOidc(email: string, registrationId: string): Promise<string> {
+      const fake = entraFake(registrationId)
+      const result = signedIn(
+        await signIn(
+          fake,
+          await fake.signIn({
+            sub: uniqueLabel(`${registrationId}-subject`),
+            tid: ENTRA_TENANT_ID,
+            email,
+            email_verified: true,
+          }),
+          { contract: 'v1' }
+        )
+      )
+      expect(result).toMatchObject({ created: { account: true, link: true } })
+      expect(await membershipsOf(result.userId)).toEqual([])
+      return result.userId
+    }
+
+    /** The public forgot-password flow, without the email: a reset invitation, then its redemption. */
+    async function setPasswordThroughReset(email: string, userId: string): Promise<void> {
+      const reset = await createSilentPasswordResetInvitation({
+        email,
+        inviteeName: 'Re-created Member',
+      })
+      const redeemed = await setInvitationPasswordForEmail(email, reset.id, MEMBER_PASSWORD, userId)
+      expect(redeemed).toMatchObject({ data: { passwordUpdated: true } })
+    }
+
+    /** One password login; the global pace permit is cleared first, as the password suites do. */
+    async function passwordLogin(email: string) {
+      await testPool.query('DELETE FROM password_verification_pace')
+      return passwordLoginData({ email, password: MEMBER_PASSWORD })
+    }
+
+    it('password login does not restore the teams of an account that OIDC sign-in re-created', async () => {
+      const orphan = await orphanedAdminInvitation('recreated-password')
+      const userId = await recreatedThroughOidc(orphan.email, 'fake-entra-recreated-password')
+      await setPasswordThroughReset(orphan.email, userId)
+
+      const login = await passwordLogin(orphan.email)
+
+      expect(login).toMatchObject({
+        user: { id: userId, email: orphan.email },
+        membership: { team_id: null, role: 'member' },
+      })
+      expect(await teamRows(orphan.teamId)).toEqual([])
+      expect(await membershipsOf(userId)).toEqual([])
+      expect(await invitationState(orphan.invitationId)).toEqual({
+        status: 'accepted',
+        accepted_user_id: null,
+      })
+    })
+
+    it('Google login does not restore the teams of an account that OIDC sign-in re-created', async () => {
+      const orphan = await orphanedAdminInvitation('recreated-google')
+      const userId = await recreatedThroughOidc(orphan.email, 'fake-entra-recreated-google')
+
+      const google = await googleLoginData({ email: orphan.email })
+
+      expect(google).toMatchObject({
+        isNewUser: false,
+        user: { id: userId, email: orphan.email },
+        membership: { team_id: null, role: 'member' },
+      })
+      expect(await teamRows(orphan.teamId)).toEqual([])
+      expect(await membershipsOf(userId)).toEqual([])
+      expect(await invitationState(orphan.invitationId)).toEqual({
+        status: 'accepted',
+        accepted_user_id: null,
+      })
+    })
+
+    it('control: an account without an OIDC link is still healed by password and Google login', async () => {
+      // Password login heals an account with no active team.
+      const byPassword = await orphanedAdminInvitation('recreated-unlinked-password')
+      const passwordUser = await createAdminUser(byPassword.email, 'Re-created Member')
+      await setPasswordThroughReset(byPassword.email, passwordUser.id)
+
+      const login = await passwordLogin(byPassword.email)
+
+      expect(login).toMatchObject({
+        user: { id: passwordUser.id },
+        membership: { team_id: byPassword.teamId, role: 'admin' },
+      })
+      expect(await teamRows(byPassword.teamId)).toEqual([
+        { user_id: passwordUser.id, role: 'admin', status: 'active' },
+      ])
+      expect(await invitationState(byPassword.invitationId)).toEqual({
+        status: 'accepted',
+        accepted_user_id: passwordUser.id,
+      })
+
+      // Google login heals on every login.
+      const byGoogle = await orphanedAdminInvitation('recreated-unlinked-google')
+      const googleUser = await createAdminUser(byGoogle.email, 'Re-created Member')
+
+      const google = await googleLoginData({ email: byGoogle.email })
+
+      expect(google).toMatchObject({
+        isNewUser: false,
+        user: { id: googleUser.id },
+        membership: { team_id: byGoogle.teamId, role: 'admin' },
+      })
+      expect(await teamRows(byGoogle.teamId)).toEqual([
+        { user_id: googleUser.id, role: 'admin', status: 'active' },
+      ])
+      expect(await invitationState(byGoogle.invitationId)).toEqual({
+        status: 'accepted',
+        accepted_user_id: googleUser.id,
+      })
     })
   })
 

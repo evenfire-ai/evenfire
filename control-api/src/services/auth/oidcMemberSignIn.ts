@@ -73,8 +73,11 @@ const INVITATION_SAVEPOINT = 'oidc_member_invitation'
  * every one of its teams. If any team already had a team_members row, in any
  * status, everything the acceptance wrote is rolled back: the invitation stays
  * pending, unaccepted, and no team of it gains a membership. Accepted, it would
- * leave a role that a later Google login applies to the existing membership
- * (healAcceptedInvitationMemberships), so an inviter could demote an admin.
+ * leave the inviter's role on an accepted invitation, which an admin's password
+ * setup resend (createPasswordSetupInvitationForUser) copies into a new
+ * invitation whose link acceptance replaces the existing role, so an inviter
+ * could demote an admin. (Login never heals an OIDC-linked account from
+ * accepted invitations, so neither Google nor password login applies it.)
  *
  * The decision uses what the insert did, so a row that a concurrent
  * transaction committed first also leaves the invitation pending. An error
