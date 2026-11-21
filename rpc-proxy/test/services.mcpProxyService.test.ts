@@ -239,7 +239,6 @@ describe('services/mcpProxyService', () => {
         'x-clerum-edge-caller': 'rpc-proxy',
         'x-clerum-edge-host-ref': 'agent2',
         'x-clerum-edge-user-id': 'user-1',
-        'x-service-token': 'rpc-proxy',
       },
     })
   })

@@ -1,4 +1,3 @@
-import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER } from '@clerum/action-context-contracts'
 import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
@@ -121,14 +120,9 @@ export async function resolveHostConnectionForUser(
     ...host.headers,
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': hostRef,
-    'x-service-token': 'rpc-proxy',
   }
   delete headers.authorization
   if (authorizedActionV2) {
-    if (!config.mcpHostEdgeToken) {
-      throw new Error('RPC Proxy edge credential is unavailable for authorized V2 Host traffic')
-    }
-    headers[RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER] = config.mcpHostEdgeToken
     headers['x-clerum-edge-action-context'] = authorizedActionV2.trustedEdgeHeader
   } else {
     headers['x-clerum-edge-user-id'] = userId
