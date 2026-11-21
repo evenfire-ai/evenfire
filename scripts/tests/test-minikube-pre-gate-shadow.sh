@@ -1152,6 +1152,41 @@ assert_empty_incremental_docker_env_fails_closed() {
   cleanup_fixture "$d"
 }
 
+# A full setup leaves INCREMENTAL_TARGETS empty, and pre-gate-sync.sh runs with
+# set -u. On bash 3.2 (macOS /bin/bash) "${arr[@]}" on an empty array is an
+# unbound variable there, so the sync dies before writing its marker. This case
+# loads the file with set -u on, which run_incremental turns off. Its witness is
+# a run of this file under /bin/bash 3.2; bash 4.4 and later accept the old form.
+assert_an_empty_target_list_survives_set_u() {
+  local out rc=0
+  out="$(
+    (
+      set -u
+      PROJECT_DIR="$REPO_ROOT"
+      PROFILE="clerum-test"
+      KC="false"
+      log() { printf '[pre-gate-sync] %s\n' "$*"; }
+      rollout_if_present() { :; }
+      # shellcheck source=/dev/null
+      . "$REPO_ROOT/scripts/minikube/pre-gate-incremental.sh"
+      INCREMENTAL_TARGETS=()
+      if incremental_has_target control-api; then echo "has_target=yes"; else echo "has_target=no"; fi
+      echo "summary=$(incremental_target_summary)"
+      incremental_restart_targets
+      echo "restart=done"
+    ) 2>&1
+  )" || rc=$?
+  if [ "$rc" -eq 0 ] \
+     && grep -Fxq 'has_target=no' <<<"$out" \
+     && grep -Fxq 'summary=none' <<<"$out" \
+     && grep -Fxq 'restart=done' <<<"$out" \
+     && ! grep -Fq 'unbound variable' <<<"$out"; then
+    pass "an empty target list survives set -u (bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]})"
+  else
+    fail "an empty target list under set -u: rc=$rc out=$out"
+  fi
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
@@ -1201,6 +1236,7 @@ assert_a_targeted_build_carries_the_recorded_coordinate_forward
 assert_the_touched_scripts_parse
 assert_incremental_runtime_calls_are_bounded
 assert_empty_incremental_docker_env_fails_closed
+assert_an_empty_target_list_survives_set_u
 assert_every_defined_case_is_invoked
 
 exit $FAIL
