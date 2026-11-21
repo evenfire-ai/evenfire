@@ -1,6 +1,6 @@
 /**
  * Cause tags, live approval config, and the config-arrival sweep.
- * The admission decision itself stays today's until the decision table lands.
+ * The admission decision itself is covered by the decision-table tests.
  */
 import { describe, expect, it, vi } from 'vitest'
 import { AgentStateMachine } from '../../../agent/stateMachine'

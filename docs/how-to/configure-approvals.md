@@ -121,7 +121,8 @@ choice, so raising it again restores that choice.
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant
 already stored for it still covers a later create, including while the chat is
-allow-all. The mode does not change its forced create/enable gate.
+allow-all, except on a stateless Host: there every create and enable asks,
+whatever grant is stored. The mode does not change that forced gate.
 
 A guardrail `ask` shows its card in every interactive mode, scoped to that one
 call, with no Always option. Allow-all still runs these with no card: a tool an
