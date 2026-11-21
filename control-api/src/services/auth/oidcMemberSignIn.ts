@@ -226,14 +226,20 @@ async function signInResolvedMember(
   if (resolution.status === 'refused') return resolution
   const { account } = resolution
 
-  // An existing member's team is chosen before the invitations are applied:
-  // a member who already has a team keeps it, with its role read again
-  // afterwards. Invitations never change an existing membership here, but a
-  // concurrent removal may have ended it meanwhile; it then counts as no team.
-  // A teamless member, and an account created by this sign-in (whose only team
-  // so far is the new-member team), land in the team of the most recently
-  // created applied invitation; otherwise in their first active team, which
-  // for a new account is the new-member team; otherwise they are teamless.
+  // These rules pick the session's team for the sign-in that applies the
+  // invitations. An existing member's team is chosen before the invitations
+  // are applied, by the shared default-team rule (findFirstActiveMembership,
+  // the same as password login): the member keeps that team, with its role
+  // read again afterwards. Invitations never change an existing membership
+  // here, but a concurrent removal may have ended it meanwhile; it then counts
+  // as no team. A teamless member, and an account created by this sign-in
+  // (whose only team so far is the new-member team), land in the team of the
+  // most recently created applied invitation; otherwise in their first active
+  // team, which for a new account is the new-member team; otherwise they are
+  // teamless. A later sign-in finds the member with a team, so the shared
+  // default-team rule picks it, as password login would. That rule ranks the
+  // team with the most recently accepted invitation first, so it can differ
+  // from the team this sign-in chose.
   // currentMemberMembership's email-keyed healing is deliberately not used:
   // OIDC sign-in never restores teams from accepted invitations by email.
   const before = account.created.account
