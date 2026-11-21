@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
@@ -25,6 +26,11 @@ import {
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import type { Tone } from '@/uiTypes'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import {
+  type ChromiumFocusShim,
+  installChromiumFocusShim,
+} from '../../__tests__/__fixtures__/chromiumFocusShim'
+import { createPointerDriver } from '../../__tests__/__fixtures__/pointerDriver'
 import { FilesPage } from '../FilesPage'
 
 const hookMock = vi.hoisted(() => ({
@@ -8208,5 +8214,86 @@ describe('FilesPage — folder drag-and-drop', () => {
       .closest('.da-grid__row') as HTMLElement
     expect(folderRow.getAttribute('draggable')).toBe('true')
     expect(folderRow.getAttribute('title')).toBe('Drag Projects into a folder to move it')
+  })
+
+  // Entry focus of the row ⋮ menu under Chromium's focus boundary (jsdom alone
+  // accepts focus on the still-hidden first paint). The pointer is driven by
+  // one driver that replays Chromium's recorded event sequences.
+  describe('row menu focus with Chromium focus rules', () => {
+    let shim: ChromiumFocusShim
+
+    beforeEach(() => {
+      shim = installChromiumFocusShim()
+    })
+
+    afterEach(() => {
+      shim.uninstall()
+    })
+
+    async function renderNotesRow() {
+      const page = await listAccessiblePage([
+        accessibleResource('file-1', 'notes.txt', 'file', {
+          permissions: ['read', 'write', 'delete', 'manage_acl'],
+        }),
+      ])
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        accessibleResources: page.items,
+      })
+      renderFilesPage()
+      return screen.getByRole('button', { name: 'Options for notes.txt' })
+    }
+
+    const menu = () => screen.queryByRole('menu', { name: 'Actions for notes.txt' })
+    const share = () => within(menu()!).getByRole('menuitem', { name: 'Share' })
+    const submenu = () => screen.queryByRole('menu', { name: 'Share options for notes.txt' })
+
+    it('S-3 a click on the ⋮ trigger focuses the first menu item', async () => {
+      const trigger = await renderNotesRow()
+      const row = trigger.closest('.da-grid__row')
+      expect(row).toBeTruthy()
+      const pointer = createPointerDriver(row!)
+      pointer.moveTo(trigger)
+      await act(async () => {
+        pointer.click()
+      })
+
+      expect(menu()).toBeTruthy()
+      const first = menu()!.querySelector('[role="menuitem"]:not(:disabled)')
+      expect(first).toBeTruthy()
+      expect(document.activeElement).toBe(first)
+    })
+
+    it('S-23 reopening ⋮ with Enter disarms the hover an earlier opening had armed', async () => {
+      const trigger = await renderNotesRow()
+      const row = trigger.closest('.da-grid__row')
+      expect(row).toBeTruthy()
+      const pointer = createPointerDriver(row!)
+      pointer.moveTo(trigger)
+      await act(async () => {
+        pointer.click()
+      })
+      expect(document.activeElement).toBe(share())
+      const rename = within(menu()!).getByRole('menuitem', { name: 'Rename' })
+      pointer.moveTo(rename)
+      expect(submenu()).toBeNull()
+
+      await userEvent.setup().keyboard('{Escape}')
+      expect(menu()).toBeNull()
+      expect(document.activeElement).toBe(trigger)
+      // The panel is gone; the pointer rests on the row beneath it.
+      pointer.layoutShiftTo(row!)
+      await userEvent.setup().keyboard('{Enter}')
+      expect(menu()).toBeTruthy()
+      // The reopened panel lays Share under the still pointer.
+      pointer.layoutShiftTo(share())
+      pointer.microMove()
+      expect(submenu()).toBeNull()
+      // A second tremor: the first one may have re-armed the hover after
+      // React's handler already read it.
+      pointer.microMove()
+      expect(submenu()).toBeNull()
+      expect(document.activeElement).toBe(share())
+    })
   })
 })

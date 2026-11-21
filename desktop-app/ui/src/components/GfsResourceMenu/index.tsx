@@ -1,5 +1,9 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { IconButton, MenuItem } from '@components/Common'
 import {
@@ -160,8 +164,20 @@ export function GfsResourceMenu({
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
+  // Whether a pointer move over Share may open its submenu. It starts disarmed
+  // on every menu open, after every explicit close of the submenu and whenever
+  // Share is activated (click, Enter or Space), and only a pointermove that
+  // lands outside Share re-arms it. Without it, a pointer resting on Share
+  // (where the panel appeared, or after Escape closed the submenu) would
+  // reopen the submenu on the first 1px tremor and steal focus from a
+  // keyboard user. Boundary events (pointerover/enter, pointerleave)
+  // cannot stand in for that move: Chromium fires them on layout changes and
+  // scrolls while the pointer is still.
+  const shareHoverArmedRef = useRef(false)
   const [panelPosition, setPanelPosition] = useState<{ left: number; top: number } | null>(null)
   const [submenuPosition, setSubmenuPosition] = useState<{ left: number; top: number } | null>(null)
+  const panelPositioned = panelPosition !== null
+  const submenuPositioned = submenuPosition !== null
   const closeMenu = useCallback(() => {
     setOpen(false)
     setShareOpen(false)
@@ -316,6 +332,7 @@ export function GfsResourceMenu({
     (event: KeyboardEvent) => {
       if (shareOpen) {
         event.preventDefault()
+        shareHoverArmedRef.current = false
         setShareOpen(false)
         shareTriggerRef.current?.focus()
         return
@@ -326,9 +343,18 @@ export function GfsResourceMenu({
     [dismissMenu, shareOpen]
   )
 
+  // Entry focus waits for the positioned commit: the first commit paints the
+  // panel with `visibility: hidden`, and Chromium refuses focus on a hidden
+  // element, so focusing on `open` alone leaves focus on the opener. The deps
+  // are booleans so a scroll or resize that repositions the panel does not
+  // pull focus back to the first item.
+  useEffect(() => {
+    if (!open || !panelPositioned) return
+    panelRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()
+  }, [open, panelPositioned])
+
   useEffect(() => {
     if (!open) return
-    panelRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') dismissOneLevel(event)
     }
@@ -360,12 +386,24 @@ export function GfsResourceMenu({
     return () => document.removeEventListener('keydown', handleEscapeCapture, true)
   }, [anchorMode, dismissOneLevel, open])
 
+  // Same constraint as the panel's entry focus: the submenu's first commit is
+  // hidden until it is positioned.
   useEffect(() => {
-    if (!shareOpen) return
+    if (!shareOpen || !submenuPositioned) return
     submenuRef.current
       ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
       ?.focus()
-  }, [shareOpen])
+  }, [shareOpen, submenuPositioned])
+
+  useEffect(() => {
+    if (!open) return
+    const rearmShareHover = (event: Event) => {
+      if (shareTriggerRef.current?.contains(event.target as Node | null)) return
+      shareHoverArmedRef.current = true
+    }
+    document.addEventListener('pointermove', rearmShareHover)
+    return () => document.removeEventListener('pointermove', rearmShareHover)
+  }, [open])
 
   const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (!open) return
@@ -380,6 +418,7 @@ export function GfsResourceMenu({
       submenuRef.current?.contains(document.activeElement)
     ) {
       event.preventDefault()
+      shareHoverArmedRef.current = false
       setShareOpen(false)
       shareTriggerRef.current?.focus()
       return
@@ -398,6 +437,17 @@ export function GfsResourceMenu({
     if (event.key === 'ArrowUp') nextIndex = (nextIndex - 1 + items.length) % items.length
     items[nextIndex]?.focus()
   }
+
+  // Only real pointer movement opens Share: Chromium fires mouseenter and
+  // pointerenter/over when the panel appears or scrolls under a still pointer.
+  const openShareOnHover = () => {
+    if (!shareOpen && shareHoverArmedRef.current) setShareOpen(true)
+  }
+
+  // With focus in the portal, a ContextMenu key or right-click would reach
+  // Electron, which shows its native text menu over this one when the page
+  // has a selection.
+  const preventNativeContextMenu = (event: ReactMouseEvent) => event.preventDefault()
 
   const runAction = (action: GfsResourceMenuAction) => {
     dismissMenu()
@@ -525,6 +575,7 @@ export function GfsResourceMenu({
             if (open) {
               dismissMenu()
             } else {
+              shareHoverArmedRef.current = false
               setOpen(true)
             }
           }}
@@ -549,6 +600,7 @@ export function GfsResourceMenu({
                     : { left: 0, top: 0, visibility: 'hidden' }
                 }
                 onKeyDown={handleMenuKeyDown}
+                onContextMenu={preventNativeContextMenu}
               >
                 {actionGroups.map((group, groupIndex) => (
                   <Fragment key={`group-${groupIndex}`}>
@@ -567,10 +619,11 @@ export function GfsResourceMenu({
                         role="menuitem"
                         ref={action.submenu ? shareTriggerRef : undefined}
                         trailingIcon={action.submenu ? <IconChevronRight /> : undefined}
-                        onMouseEnter={action.submenu ? () => setShareOpen(true) : undefined}
+                        onPointerMove={action.submenu ? openShareOnHover : undefined}
                         onClick={() => {
                           if (action.disabled) return
                           if (action.submenu) {
+                            shareHoverArmedRef.current = false
                             action.onClick()
                           } else {
                             runAction(action)
@@ -595,6 +648,7 @@ export function GfsResourceMenu({
                       : { left: 0, top: 0, visibility: 'hidden' }
                   }
                   onKeyDown={handleMenuKeyDown}
+                  onContextMenu={preventNativeContextMenu}
                 >
                   {shareMenuChildren.map(action => (
                     <MenuItem

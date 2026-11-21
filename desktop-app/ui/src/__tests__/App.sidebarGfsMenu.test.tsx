@@ -1,15 +1,28 @@
 // @vitest-environment jsdom
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ERROR_TOAST_DURATION_MS } from '@constants/toasts'
 import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
 import { App } from '@/App'
 import {
   accessibleResource,
+  affordancesFailureMessage,
   affordancesResult,
+  childView,
   heldAffordances,
   listAccessiblePage,
   listChildrenPage,
@@ -27,6 +40,8 @@ import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
 } from '../../../testSupport/appService.nativeCommitTestHarness'
+import { type ChromiumFocusShim, installChromiumFocusShim } from './__fixtures__/chromiumFocusShim'
+import { createPointerDriver } from './__fixtures__/pointerDriver'
 
 // The real App: real SidebarNav, FileExplorerTree, GfsActionHost, FilesPage
 // and SandboxUiPage. Only `window.clerum.*` is stubbed.
@@ -716,5 +731,468 @@ describe('App sidebar GFS resource menu', () => {
     await waitFor(() => expect(deleteDialog.isConnected).toBe(false))
     expect(activeTabLabel()).toBe(tabBefore)
     expect(fileLocation()).toBe(locationBefore)
+  })
+
+  // Entry focus and Escape ownership of the row menu, under Chromium's focus
+  // boundary (jsdom alone accepts focus on the still-hidden first paint). The
+  // pointer is driven by one driver that replays Chromium's recorded event
+  // sequences; the keyboard by user-event.
+  describe('focus and Escape in the compact drawer, with Chromium focus rules', () => {
+    const SUMMARY_ID = 'd4'.repeat(16)
+    const ALL_BITS = ['read', 'write', 'delete', 'manage_acl']
+    let shim: ChromiumFocusShim
+
+    beforeEach(() => {
+      shim = installChromiumFocusShim()
+    })
+
+    afterEach(() => {
+      shim.uninstall()
+    })
+
+    async function openDrawerTree({ strict = false } = {}) {
+      compact = true
+      const { bridge } = installBridge()
+      // Reports holds one file, so its menu needs a read of its own bits
+      // (a forest root opens settled from the accessible listing).
+      const summary = childView(SUMMARY_ID, 'summary.txt', 'file', {
+        parentResourceId: REPORTS_ID,
+      })
+      bridge.gfs.listChildren = vi.fn(async (resourceId: string) =>
+        listChildrenPage(resourceId === REPORTS_ID ? [summary] : [])
+      )
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const tree = (
+        <QueryClientProvider client={queryClient}>
+          <AgentTaskTrackerProvider>
+            <App />
+          </AgentTaskTrackerProvider>
+        </QueryClientProvider>
+      )
+      render(strict ? <StrictMode>{tree}</StrictMode> : tree)
+      await waitForShell()
+      fireEvent.click(screen.getByTestId('compact-navigation-toggle'))
+      expect(drawerOpen()).toBe(true)
+      openExplorer()
+      const notes = await screen.findByRole('button', { name: 'notes.txt' })
+      return { bridge, queryClient, notes }
+    }
+
+    async function expandReports() {
+      fireEvent.click(await screen.findByRole('button', { name: 'Expand Reports' }))
+      return screen.findByRole('button', { name: 'summary.txt' })
+    }
+
+    /**
+     * From here on every affordance read waits until `settle`, which answers
+     * all of them through main's real producer (held bits or a 500).
+     */
+    function holdAffordances(bridge: Record<string, any>, queryClient: QueryClient) {
+      // Idle cached bits would settle the next opening in a microtask.
+      queryClient.removeQueries({
+        predicate: query =>
+          query.queryKey[3] === 'affordances' && query.state.fetchStatus === 'idle',
+      })
+      const produce = appServiceAffordanceProducer(async () => heldPermissionResponse(ALL_BITS))
+      const waiting: Array<{
+        resourceId: string
+        drive: string
+        resolve: (value: unknown) => void
+        reject: (error: Error) => void
+      }> = []
+      bridge.gfs.affordances = vi.fn(
+        (resourceId: string, drive = 'main') =>
+          new Promise((resolve, reject) => waiting.push({ resourceId, drive, resolve, reject }))
+      )
+      return {
+        waiting,
+        async settle(outcome: 'ok' | 'error') {
+          const failure = outcome === 'error' ? await affordancesFailureMessage(500) : null
+          await act(async () => {
+            for (const read of waiting.splice(0)) {
+              if (failure === null) read.resolve(await produce(read.resourceId, read.drive))
+              else read.reject(new Error(failure))
+            }
+          })
+          await flushFrames()
+        },
+      }
+    }
+
+    async function openByKeyboard(row: HTMLElement) {
+      act(() => row.focus())
+      expect(document.activeElement).toBe(row)
+      await userEvent.setup().keyboard('{Shift>}{F10}{/Shift}')
+      return screen.findByRole('menu', { name: `Actions for ${row.textContent?.trim()}` })
+    }
+
+    const press = (keys: string) => userEvent.setup().keyboard(keys)
+    const shareOf = (menu: HTMLElement) => within(menu).getByRole('menuitem', { name: 'Share' })
+    const enabledItems = (menu: HTMLElement) =>
+      Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'))
+    const submenuFor = (name: string) =>
+      screen.queryByRole('menu', { name: `Share options for ${name}` })
+    const rowMenu = (name: string) => screen.queryByRole('menu', { name: `Actions for ${name}` })
+    const rename = (menu: HTMLElement) =>
+      within(menu).getByRole('menuitem', { name: 'Rename' }) as HTMLButtonElement
+
+    it('S-1 Shift+F10 on a tree row focuses Share, and ArrowDown reaches the next item', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+
+      expect(document.activeElement).toBe(shareOf(menu))
+      await press('{ArrowDown}')
+      expect(document.activeElement).toBe(enabledItems(menu)[1])
+    })
+
+    it('S-2 a right-click on a tree row focuses Share, and ArrowDown reaches the next item', async () => {
+      const { notes } = await openDrawerTree()
+      createPointerDriver(notes).contextClick()
+      const menu = await screen.findByRole('menu', { name: 'Actions for notes.txt' })
+
+      expect(document.activeElement).toBe(shareOf(menu))
+      await press('{ArrowDown}')
+      expect(document.activeElement).toBe(enabledItems(menu)[1])
+    })
+
+    it('S-4 bits that settle after the menu opened leave focus on Share', async () => {
+      const { bridge, queryClient } = await openDrawerTree()
+      const summary = await expandReports()
+      const reads = holdAffordances(bridge, queryClient)
+      const menu = await openByKeyboard(summary)
+      expect(rename(menu).disabled).toBe(true)
+      expect(reads.waiting.length).toBeGreaterThan(0)
+
+      expect(document.activeElement).toBe(shareOf(menu))
+      await reads.settle('ok')
+      expect(rename(menu).disabled).toBe(false)
+      expect(document.activeElement).toBe(shareOf(menu))
+    })
+
+    it('S-5 bits that settle after ArrowDown leave focus on the item the user reached', async () => {
+      const { bridge, queryClient } = await openDrawerTree()
+      const summary = await expandReports()
+      const reads = holdAffordances(bridge, queryClient)
+      const menu = await openByKeyboard(summary)
+      expect(rename(menu).disabled).toBe(true)
+
+      await press('{ArrowDown}')
+      const reached = document.activeElement
+      expect(reached).toBe(enabledItems(menu)[1])
+      await reads.settle('ok')
+      expect(rename(menu).disabled).toBe(false)
+      expect(document.activeElement).toBe(reached)
+      expect((reached as HTMLElement).isConnected).toBe(true)
+    })
+
+    it('S-6 moving the pointer onto Share with focus on Rename moves focus into the submenu', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      act(() => rename(menu).focus())
+      expect(document.activeElement).toBe(rename(menu))
+
+      pointer.moveTo(shareOf(menu))
+      const submenu = submenuFor('notes.txt')
+      expect(submenu).toBeTruthy()
+      expect(document.activeElement).toBe(enabledItems(submenu!)[0])
+    })
+
+    it('S-8 Escape after the bits failed closes the menu and leaves the drawer open', async () => {
+      const { bridge, queryClient } = await openDrawerTree()
+      const summary = await expandReports()
+      const reads = holdAffordances(bridge, queryClient)
+      const menu = await openByKeyboard(summary)
+      expect(rename(menu).disabled).toBe(true)
+
+      await reads.settle('error')
+      expect(rename(menu).disabled).toBe(true)
+      await press('{Escape}')
+      expect(rowMenu('summary.txt')).toBeNull()
+      expect(drawerOpen()).toBe(true)
+      expect(document.activeElement).toBe(summary)
+    })
+
+    it('S-9 bits that settle after the menu closed move no focus', async () => {
+      const { bridge, queryClient } = await openDrawerTree()
+      const summary = await expandReports()
+      const reads = holdAffordances(bridge, queryClient)
+      const menu = await openByKeyboard(summary)
+      expect(rename(menu).disabled).toBe(true)
+
+      await press('{Escape}')
+      expect(rowMenu('summary.txt')).toBeNull()
+      // Escape itself returned focus to the row from the menu, so the shim does
+      // attribute this module's calls.
+      const callsAtClose = shim.callsFrom('GfsResourceMenu/index.tsx').length
+      expect(callsAtClose).toBeGreaterThan(0)
+      expect(reads.waiting.length).toBeGreaterThan(0)
+      await reads.settle('ok')
+      expect(reads.waiting).toHaveLength(0)
+      expect(shim.callsFrom('GfsResourceMenu/index.tsx')).toHaveLength(callsAtClose)
+      expect(document.activeElement).toBe(summary)
+    })
+
+    it('S-10 under StrictMode the menu takes entry focus once, and Escape returns it to the row', async () => {
+      const { notes } = await openDrawerTree({ strict: true })
+      shim.reset()
+      const menu = await openByKeyboard(notes)
+
+      const entry = shim
+        .callsFrom('GfsResourceMenu/index.tsx')
+        .filter(call => call.element.getAttribute('role') === 'menuitem')
+      expect(entry.map(call => [call.element, call.rejected])).toEqual([[shareOf(menu), null]])
+      expect(document.activeElement).toBe(shareOf(menu))
+      await press('{Escape}')
+      expect(rowMenu('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(notes)
+    })
+
+    it('S-11 a scroll or resize after ArrowDown leaves focus where the user put it', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      await press('{ArrowDown}')
+      const reached = enabledItems(menu)[1]
+      expect(document.activeElement).toBe(reached)
+
+      act(() => {
+        fireEvent.scroll(menu)
+        window.dispatchEvent(new Event('resize'))
+      })
+      await flushFrames()
+      expect(document.activeElement).toBe(reached)
+    })
+
+    it('S-12 Escape closes the menu first and leaves the drawer open; a second Escape closes the drawer', async () => {
+      const { notes } = await openDrawerTree()
+      await openByKeyboard(notes)
+
+      await press('{Escape}')
+      expect(rowMenu('notes.txt')).toBeNull()
+      expect(drawerOpen()).toBe(true)
+      expect(document.activeElement).toBe(notes)
+      await press('{Escape}')
+      expect(drawerOpen()).toBe(false)
+    })
+
+    it('S-13 ArrowRight on Share focuses the submenu, and ArrowLeft returns to Share', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+
+      await press('{ArrowRight}')
+      const submenu = submenuFor('notes.txt')
+      expect(submenu).toBeTruthy()
+      expect(document.activeElement).toBe(enabledItems(submenu!)[0])
+      await press('{ArrowLeft}')
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(shareOf(menu))
+    })
+
+    it('S-14 a contextmenu on the panel or the submenu never reaches the native menu', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+
+      const onPanel = createEvent.contextMenu(shareOf(menu))
+      fireEvent(shareOf(menu), onPanel)
+      expect(onPanel.defaultPrevented).toBe(true)
+      await press('{ArrowRight}')
+      const firstChild = enabledItems(submenuFor('notes.txt')!)[0]!
+      const onSubmenu = createEvent.contextMenu(firstChild)
+      fireEvent(firstChild, onSubmenu)
+      expect(onSubmenu.defaultPrevented).toBe(true)
+    })
+
+    it('S-17 hover then ArrowRight keeps focus in the submenu; Escape closes only the submenu', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      createPointerDriver(notes).moveTo(shareOf(menu))
+      const submenu = submenuFor('notes.txt')!
+      expect(submenu).toBeTruthy()
+
+      await press('{ArrowRight}')
+      expect(document.activeElement).toBe(enabledItems(submenu)[0])
+      await press('{Escape}')
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(rowMenu('notes.txt')).toBeTruthy()
+      expect(document.activeElement).toBe(shareOf(menu))
+    })
+
+    it('S-18 a click on Share after hover closes the submenu and leaves focus on Share', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      pointer.moveTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeTruthy()
+
+      pointer.click()
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(shareOf(menu))
+    })
+
+    it('S-19a Share arriving under a still pointer does not open the submenu', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+
+      // The panel appears under the pointer.
+      pointer.layoutShiftTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(shareOf(menu))
+      // After a real move away, a scroll or a shrinking panel slides Share back
+      // under the still pointer.
+      pointer.moveTo(rename(menu))
+      pointer.layoutShiftTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(shareOf(menu))
+    })
+
+    it('S-19b a submenu that covered Share and closes does not reopen under a still pointer', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      pointer.moveTo(shareOf(menu))
+      const submenu = submenuFor('notes.txt')
+      expect(submenu).toBeTruthy()
+      // A narrow window lays the submenu over Share: the pointer now rests on it.
+      pointer.layoutShiftTo(enabledItems(submenu!)[0]!)
+
+      await press('{Escape}')
+      expect(submenuFor('notes.txt')).toBeNull()
+      pointer.layoutShiftTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeNull()
+      await press('{Escape}')
+      expect(rowMenu('notes.txt')).toBeNull()
+    })
+
+    it('S-20 after Escape closes the hovered submenu, a tremor on Share does not reopen it', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      pointer.moveTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeTruthy()
+
+      await press('{Escape}')
+      pointer.microMove()
+      expect(submenuFor('notes.txt')).toBeNull()
+      // A second tremor: the first one may have re-armed the hover after
+      // React's handler already read it.
+      pointer.microMove()
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(shareOf(menu))
+      await press('{Escape}')
+      expect(rowMenu('notes.txt')).toBeNull()
+    })
+
+    it('S-20b after ArrowLeft closes the hovered submenu, tremors on Share do not reopen it', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      pointer.moveTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeTruthy()
+
+      await press('{ArrowLeft}')
+      expect(submenuFor('notes.txt')).toBeNull()
+      pointer.microMove()
+      expect(submenuFor('notes.txt')).toBeNull()
+      pointer.microMove()
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(shareOf(menu))
+      await press('{Escape}')
+      expect(rowMenu('notes.txt')).toBeNull()
+    })
+
+    it('S-21a a click that closes the submenu disarms hover until the pointer leaves Share', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      pointer.moveTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeTruthy()
+
+      pointer.click()
+      pointer.microMove()
+      expect(submenuFor('notes.txt')).toBeNull()
+      pointer.moveTo(rename(menu))
+      pointer.moveTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeTruthy()
+    })
+
+    it('S-21b returning from the submenu to Share after Escape reopens it', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      pointer.moveTo(shareOf(menu))
+      pointer.moveTo(enabledItems(submenuFor('notes.txt')!)[0]!)
+
+      await press('{Escape}')
+      expect(submenuFor('notes.txt')).toBeNull()
+      // The submenu is gone; the pointer now rests on the panel beside Share.
+      pointer.layoutShiftTo(menu)
+      pointer.moveTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeTruthy()
+    })
+
+    it('S-22 Share reached by a still-pointer scroll stays closed after ArrowRight and Escape', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      pointer.moveTo(rename(menu))
+      pointer.layoutShiftTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeNull()
+
+      await press('{ArrowRight}')
+      expect(submenuFor('notes.txt')).toBeTruthy()
+      await press('{Escape}')
+      pointer.microMove()
+      expect(submenuFor('notes.txt')).toBeNull()
+      // A second tremor: the first one may have re-armed the hover after
+      // React's handler already read it.
+      pointer.microMove()
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(shareOf(menu))
+      await press('{Escape}')
+      expect(rowMenu('notes.txt')).toBeNull()
+    })
+
+    it('S-24 a still-pointer scroll away from Share and back does not re-arm hover', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      pointer.moveTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeTruthy()
+      await press('{Escape}')
+
+      await press('{End}')
+      act(() => {
+        fireEvent.scroll(menu)
+      })
+      pointer.layoutShiftTo(rename(menu))
+      await press('{Home}')
+      act(() => {
+        fireEvent.scroll(menu)
+      })
+      pointer.layoutShiftTo(shareOf(menu))
+      pointer.microMove()
+      expect(submenuFor('notes.txt')).toBeNull()
+      // A second tremor: the first one may have re-armed the hover after
+      // React's handler already read it.
+      pointer.microMove()
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(shareOf(menu))
+      await press('{Escape}')
+      expect(rowMenu('notes.txt')).toBeNull()
+    })
+
+    it('S-25 a panel opened under the pointer does not open Share as the pointer leaves it', async () => {
+      const { notes } = await openDrawerTree()
+      const menu = await openByKeyboard(notes)
+      const pointer = createPointerDriver(notes)
+      pointer.layoutShiftTo(shareOf(menu))
+
+      pointer.moveTo(notes)
+      expect(submenuFor('notes.txt')).toBeNull()
+      expect(document.activeElement).toBe(shareOf(menu))
+      pointer.moveTo(shareOf(menu))
+      expect(submenuFor('notes.txt')).toBeTruthy()
+    })
   })
 })
