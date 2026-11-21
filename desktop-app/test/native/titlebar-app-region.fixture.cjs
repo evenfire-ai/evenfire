@@ -138,35 +138,43 @@ app.whenReady().then(async () => {
       <body><div id="root"></div><script src="${path.basename(harnessBundle)}"></script></body></html>`
     )
     window = new BrowserWindow({ show: true, x: -10000, y: -10000, width: 1200, height: 700 })
-    await window.loadFile(harnessPage)
-    await waitForLayout()
-
-    const gfsLabels = ['Refresh', 'Copy link', 'Open link']
     const setSidebarWidth = width =>
       window.webContents.executeJavaScript(
         `document.querySelector('.app-frame').style.setProperty('--sidebar-width', '${width}')`
       )
 
-    await setSidebarWidth('328px')
-    await waitForLayout()
-    const expanded = await regionMap(window)
-    console.log('expanded sidebar:', JSON.stringify(expanded))
-    assertRegions(expanded, 'expanded sidebar', gfsLabels)
+    // Each route mounts its own leading actions; the GFS pages and the sandbox
+    // app page are the two producers that portal buttons into the slot.
+    const surfaces = [
+      { leading: 'gfs', labels: ['Refresh', 'Copy link', 'Open link'] },
+      { leading: 'sandbox', labels: ['Refresh app content', 'Copy current app link'] },
+    ]
+    for (const { leading, labels } of surfaces) {
+      window.setContentSize(1200, 700)
+      await window.loadFile(harnessPage, { query: { leading } })
+      await waitForLayout()
 
-    await setSidebarWidth('74px')
-    await waitForLayout()
-    const collapsed = await regionMap(window)
-    console.log('collapsed sidebar:', JSON.stringify(collapsed))
-    assertRegions(collapsed, 'collapsed sidebar', gfsLabels)
+      await setSidebarWidth('328px')
+      await waitForLayout()
+      const expanded = await regionMap(window)
+      console.log(`${leading}, expanded sidebar:`, JSON.stringify(expanded))
+      assertRegions(expanded, `${leading}, expanded sidebar`, labels)
 
-    // Compact navigation shows the leading navigation toggle as well; App
-    // drops the sidebar width to 0 in that mode.
-    await setSidebarWidth('0px')
-    window.setContentSize(700, 700)
-    await waitForLayout()
-    const compact = await regionMap(window)
-    console.log('compact navigation:', JSON.stringify(compact))
-    assertRegions(compact, 'compact navigation', ['Open navigation', ...gfsLabels])
+      await setSidebarWidth('74px')
+      await waitForLayout()
+      const collapsed = await regionMap(window)
+      console.log(`${leading}, collapsed sidebar:`, JSON.stringify(collapsed))
+      assertRegions(collapsed, `${leading}, collapsed sidebar`, labels)
+
+      // Compact navigation shows the leading navigation toggle as well; App
+      // drops the sidebar width to 0 in that mode.
+      await setSidebarWidth('0px')
+      window.setContentSize(700, 700)
+      await waitForLayout()
+      const compact = await regionMap(window)
+      console.log(`${leading}, compact navigation:`, JSON.stringify(compact))
+      assertRegions(compact, `${leading}, compact navigation`, ['Open navigation', ...labels])
+    }
 
     console.log('titlebar app-region BrowserWindow fixture: PASS')
     app.exit(0)

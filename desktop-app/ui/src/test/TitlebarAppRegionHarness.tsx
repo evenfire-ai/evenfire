@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { TextInput } from '@components/Common'
 import { CompactNavigationToggle } from '@components/CompactNavigationToggle'
 import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
+import { SandboxUiTitlebarLeadingActions } from '@components/SandboxUiTitlebarLeadingActions'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 
 // Mounted by the native Electron app-region fixture. The title bar and the
@@ -16,6 +17,7 @@ function TitlebarAppRegionHarness() {
   const [actionsRoot, setActionsRoot] = useState<HTMLDivElement | null>(null)
   const [leadingRoot, setLeadingRoot] = useState<HTMLDivElement | null>(null)
   const noop = () => undefined
+  const leadingSurface = new URLSearchParams(window.location.search).get('leading')
 
   return (
     <div className="app-frame">
@@ -24,12 +26,18 @@ function TitlebarAppRegionHarness() {
         <TitlebarActionsPortal container={leadingRoot}>
           <CompactNavigationToggle expanded={false} onClick={noop} />
         </TitlebarActionsPortal>
-        <GfsResourceTitlebarActions
-          target={leadingRoot}
-          onRefresh={noop}
-          onCopyLink={noop}
-          onOpenLink={noop}
-        />
+        {leadingSurface === 'sandbox' ? (
+          <TitlebarActionsPortal container={leadingRoot}>
+            <SandboxUiTitlebarLeadingActions onRefresh={noop} onCopyLink={noop} />
+          </TitlebarActionsPortal>
+        ) : (
+          <GfsResourceTitlebarActions
+            target={leadingRoot}
+            onRefresh={noop}
+            onCopyLink={noop}
+            onOpenLink={noop}
+          />
+        )}
         <TitlebarActionsPortal container={actionsRoot}>
           <div className="top-bar top-bar--titlebar">
             <div className="header-left">
