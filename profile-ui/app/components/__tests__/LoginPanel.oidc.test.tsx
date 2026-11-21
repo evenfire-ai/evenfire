@@ -81,8 +81,10 @@ describe('LoginPanel OIDC sign-in button', () => {
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
   })
 
+  // The error statuses carry an enabled configuration with a label, so the status check
+  // alone has to hide the button.
   it('shows only the password form when configuration answers 404', async () => {
-    fetchMock.mockResolvedValue(answer(404, { error: 'oidc_not_configured' }))
+    fetchMock.mockResolvedValue(answer(404, enabledConfiguration()))
 
     render(<LoginPanel />)
 
@@ -92,8 +94,8 @@ describe('LoginPanel OIDC sign-in button', () => {
   })
 
   it.each([
-    ['a 503 answer', () => answer(503, { error: 'unavailable' })],
-    ['a 429 answer', () => answer(429, { error: 'rate_limited' })],
+    ['a 503 answer', () => answer(503, enabledConfiguration())],
+    ['a 429 answer', () => answer(429, enabledConfiguration())],
     ['a malformed body', () => answer(200, 'not json')],
     ['an empty display label', () => answer(200, enabledConfiguration({ displayLabel: '' }))],
     [
