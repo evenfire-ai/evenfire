@@ -350,6 +350,8 @@ export type ActionAuthorityCheckpointResponseV2 =
       }>
       destination: null | Readonly<{ kind: 'host' | 'mcp_server'; ref: string; url: string }>
       hostMessageAdmissionReceipt?: string
+      /** Present only on an allowed checkpoint whose destination is a Host. */
+      hostEdgeAssertion?: string
     }>
   | Readonly<{ version: 2; status: 'denied'; code: 'forbidden' }>
   | Readonly<{ version: 2; status: 'not_found'; code: 'not_found' }>

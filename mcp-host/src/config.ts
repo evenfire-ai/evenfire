@@ -1,7 +1,6 @@
 /**
  * Configuration settings loaded from environment variables.
  */
-import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT } from '@clerum/action-context-contracts'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
@@ -23,15 +22,6 @@ import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConf
 /** Route families projected by WRC into a recipe-bound mcp-host. */
 export const PLUGIN_WORKLOAD_SDK_CAPABILITIES = ['promptBridge', 'clientNotifications'] as const
 export type PluginWorkloadSdkCapability = (typeof PLUGIN_WORKLOAD_SDK_CAPABILITIES)[number]
-
-export function parseRpcProxyEdgeToken(raw: string | undefined, required: boolean): string {
-  const supplied = raw?.trim() ?? ''
-  const token = supplied || (required ? '' : RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT)
-  if (token && (token.length < 16 || token.length > 4096)) {
-    throw new Error('MCP_HOST_RPC_PROXY_EDGE_TOKEN is missing or invalid')
-  }
-  return token
-}
 
 /**
  * Parse the WRC capability projection without silently accepting typos. An
@@ -68,9 +58,6 @@ export interface Config {
 
   // Kubernetes namespace
   namespace: string
-
-  /** Dedicated service credential for RPC Proxy → MCP Host trusted runtime routes. */
-  rpcProxyEdgeToken: string
 
   // Namespace where installed LlmHook workloads/Services live (spec §8.2). The
   // guardrail hook resolver derives in-cluster endpoints against this namespace.
@@ -1003,11 +990,6 @@ if (!devMode) {
   )
 }
 
-const rpcProxyEdgeToken = parseRpcProxyEdgeToken(
-  process.env.MCP_HOST_RPC_PROXY_EDGE_TOKEN,
-  !devMode
-)
-
 export const config: Config = {
   devMode,
   devHostConfig: getDevHostConfig(),
@@ -1023,7 +1005,6 @@ export const config: Config = {
 
   // Kubernetes namespace
   namespace: getEnv('CLERUM_NAMESPACE', 'default')!,
-  rpcProxyEdgeToken,
 
   // Namespace where installed LlmHook workloads/Services live (spec §8.2).
   llmHooksNamespace: getEnv('CLERUM_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,

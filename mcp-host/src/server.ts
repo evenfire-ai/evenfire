@@ -9,6 +9,7 @@ import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
 import { register } from 'prom-client'
+import { HOST_EDGE_RPC_PROXY_ROUTE_SCOPES } from '@clerum/action-context-contracts'
 import { readOpenedArtifactBuffer, redactArtifactForDelivery } from './artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from './artifacts/artifactRedaction'
 import './internalTools/gfsDownloadMetrics'
@@ -460,21 +461,33 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/status',
-      runtimeEdgeGuard(['rpc-proxy'], ['host.status.read']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['host.status.read'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/status']
+      ),
       async (req, res) => {
         await handleStatusRoute(req, res, this.routeDeps())
       }
     )
     this.app.get(
       '/v1/runtime/activity',
-      runtimeEdgeGuard(['rpc-proxy'], ['host.activity.read', 'host.activity.read_all']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['host.activity.read', 'host.activity.read_all'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/activity']
+      ),
       async (req, res) => {
         await handleActivityRoute(req, res, this.routeDeps())
       }
     )
     this.app.get(
       '/v1/runtime/activity/stream',
-      runtimeEdgeGuard(['rpc-proxy'], ['host.activity.read', 'host.activity.read_all']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['host.activity.read', 'host.activity.read_all'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/activity/stream']
+      ),
       async (req, res) => {
         await handleActivityStreamRoute(req, res, this.routeDeps())
       }
@@ -484,7 +497,8 @@ export class RPCServer {
       '/v1/runtime/messages',
       runtimeEdgeGuard(
         ['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader'],
-        ['chat.message.invoke']
+        ['chat.message.invoke'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/messages']
       ),
       async (req, res) => {
         // Stage 3 (stateless-agents) — reversible DRAINING fence. While the
@@ -508,7 +522,11 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/approvals/approve',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader'], ['task.manage']),
+      runtimeEdgeGuard(
+        ['rpc-proxy', 'channel-reader'],
+        ['task.manage'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/approvals/approve']
+      ),
       async (req, res) => {
         await handleApprovalRoute(req, res, true, this.routeDeps())
       }
@@ -516,7 +534,11 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/approvals/deny',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader'], ['task.manage']),
+      runtimeEdgeGuard(
+        ['rpc-proxy', 'channel-reader'],
+        ['task.manage'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/approvals/deny']
+      ),
       async (req, res) => {
         await handleApprovalRoute(req, res, false, this.routeDeps())
       }
@@ -599,7 +621,11 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/sessions',
-      runtimeEdgeGuard(['rpc-proxy'], ['session.read']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['session.read'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions']
+      ),
       async (req, res) => {
         await handleSessionsListRoute(req, res, this.routeDeps())
       }
@@ -614,7 +640,11 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/sessions/:agent/:chatId/messages',
-      runtimeEdgeGuard(['rpc-proxy'], ['session.read']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['session.read'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions/:agent/:chatId/messages']
+      ),
       async (req, res) => {
         await handleSessionMessagesRoute(req, res, this.routeDeps())
       }
@@ -622,7 +652,13 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/sessions/:agent/:chatId/context-breakdown',
-      runtimeEdgeGuard(['rpc-proxy'], ['session.read']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['session.read'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES[
+          'GET /v1/runtime/sessions/:agent/:chatId/context-breakdown'
+        ]
+      ),
       async (req, res) => {
         await handleContextBreakdownRoute(req, res, this.routeDeps())
       }
@@ -632,7 +668,8 @@ export class RPCServer {
       '/v1/runtime/tasks/:taskId/result',
       runtimeEdgeGuard(
         ['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader'],
-        ['task.read']
+        ['task.read'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/tasks/:taskId/result']
       ),
       async (req, res) => {
         await handleTaskResultRoute(req, res, req.params.taskId as string, this.routeDeps())
@@ -641,7 +678,11 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/tasks/:taskId/cancel',
-      runtimeEdgeGuard(['rpc-proxy'], ['task.manage']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['task.manage'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/tasks/:taskId/cancel']
+      ),
       async (req, res) => {
         const taskId = String(req.params.taskId || '').trim()
         if (!taskId) {
@@ -697,14 +738,22 @@ export class RPCServer {
     // verified edge user + hostRef the handlers scope the session lookup to.
     this.app.get(
       '/v1/runtime/models',
-      runtimeEdgeGuard(['rpc-proxy'], ['model.read']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['model.read'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/models']
+      ),
       async (req, res) => {
         await handleModelsListRoute(req, res, this.routeDeps())
       }
     )
     this.app.post(
       '/v1/runtime/model',
-      runtimeEdgeGuard(['rpc-proxy'], ['model.select']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['model.select'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/model']
+      ),
       async (req, res) => {
         await handleSetModelRoute(req, res, this.routeDeps())
       }
@@ -713,7 +762,11 @@ export class RPCServer {
     // has enforced host:session:write and injects the verified edge user + hostRef.
     this.app.patch(
       '/v1/runtime/sessions/:agent/:chatId/name',
-      runtimeEdgeGuard(['rpc-proxy'], ['session.manage']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        ['session.manage'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['PATCH /v1/runtime/sessions/:agent/:chatId/name']
+      ),
       async (req, res) => {
         await handleSetTitleRoute(req, res, this.routeDeps())
       }
@@ -735,7 +788,8 @@ export class RPCServer {
       '/v1/runtime/tasks/:taskId/progress/stream',
       runtimeEdgeGuard(
         ['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader'],
-        ['task.read']
+        ['task.read'],
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/tasks/:taskId/progress/stream']
       ),
       async (req, res) => {
         await handleProgressStreamRoute(req, res, req.params.taskId as string, this.routeDeps())
@@ -774,7 +828,11 @@ export class RPCServer {
     this.app.get(
       '/v1/runtime/artifacts',
       rejectWorkflowRuntimeArtifacts,
-      runtimeEdgeGuard(['rpc-proxy']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        undefined,
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/artifacts']
+      ),
       limitArtifactCalls,
       (req, res) => {
         try {
@@ -817,7 +875,11 @@ export class RPCServer {
     this.app.get(
       '/v1/runtime/artifacts/:filename/download',
       rejectWorkflowRuntimeArtifacts,
-      runtimeEdgeGuard(['rpc-proxy']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        undefined,
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/artifacts/:filename/download']
+      ),
       limitArtifactCalls,
       (req, res) => {
         const filename = req.params.filename as string

@@ -196,7 +196,8 @@ function validateHostEdgeAssertionClaims(payload, expected) {
     return edgeAssertionFailure('expected version must be 1 or 2')
   }
   if (payload.v !== expected.v) return edgeAssertionFailure('version mismatch')
-  const keys = expected.v === 1 ? HOST_EDGE_ASSERTION_V1_CLAIM_KEYS : HOST_EDGE_ASSERTION_V2_CLAIM_KEYS
+  const keys =
+    expected.v === 1 ? HOST_EDGE_ASSERTION_V1_CLAIM_KEYS : HOST_EDGE_ASSERTION_V2_CLAIM_KEYS
   const payloadKeys = Object.keys(payload)
   if (payloadKeys.length !== keys.length || !keys.every(key => Object.hasOwn(payload, key))) {
     return edgeAssertionFailure('claim keys do not match the declared version')
@@ -566,12 +567,16 @@ function validateCheckpointTimestamp(value) {
   return checkpointString(value, 64) && Number.isFinite(Date.parse(value))
 }
 
-function isHostMessageAdmissionReceipt(value) {
+function isCompactJws(value) {
   return (
     typeof value === 'string' &&
     value.length <= 8192 &&
     /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)
   )
+}
+
+function isHostMessageAdmissionReceipt(value) {
+  return isCompactJws(value)
 }
 
 function validateHostMessageAdmissionContext(value) {
@@ -729,7 +734,8 @@ function validateActionAuthorityCheckpointResponse(value) {
           'attribution',
           'destination',
         ].concat(
-          value.hostMessageAdmissionReceipt === undefined ? [] : ['hostMessageAdmissionReceipt']
+          value.hostMessageAdmissionReceipt === undefined ? [] : ['hostMessageAdmissionReceipt'],
+          value.hostEdgeAssertion === undefined ? [] : ['hostEdgeAssertion']
         )
       ) ||
       !AUTHORIZATION_REVISION_PATTERN.test(value.authorizationRevision) ||
@@ -739,6 +745,10 @@ function validateActionAuthorityCheckpointResponse(value) {
       (value.validUntil !== null && !validateCheckpointTimestamp(value.validUntil)) ||
       (value.hostMessageAdmissionReceipt !== undefined &&
         !isHostMessageAdmissionReceipt(value.hostMessageAdmissionReceipt)) ||
+      (value.hostEdgeAssertion !== undefined &&
+        (!isCompactJws(value.hostEdgeAssertion) ||
+          !value.destination ||
+          value.destination.kind !== 'host')) ||
       (value.validUntil !== null && Date.parse(value.validUntil) < Date.parse(value.checkedAt)) ||
       !hasExactKeys(value.attribution, [
         'userId',
