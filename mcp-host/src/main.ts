@@ -971,8 +971,9 @@ async function initializeProvider(
 
 /**
  * Publish this host's approval policy. Effective tools stay
- * `spec.approval || CLERUM_APPROVAL_CONFIG`. The ceiling and channel cap read
- * `spec.approval` alone, except dev mode, which passes the env config.
+ * `spec.approval || CLERUM_APPROVAL_CONFIG`. The ceiling and the channel switch
+ * read `spec.approval` alone, except dev mode, which passes the env config. The
+ * approver policy in the channel cap reads the effective policy.
  * Runs before credential reconciliation so a later event cannot be overwritten
  * by an older completion.
  */
