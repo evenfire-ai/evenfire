@@ -62,8 +62,9 @@ function savedAnnouncement(view: HostApprovalModeView): string {
  *
  * "Allow all" asks before it writes; the confirmation replaces the menu inside
  * the popover, takes focus, keeps Tab inside, and hands focus back to the chip
- * when it is confirmed, cancelled or dismissed. When a lower limit closes it
- * instead, focus goes to the Allow-all row (see below).
+ * when it is confirmed, cancelled or closed with Escape. A click outside
+ * closes it and leaves focus where the user clicked. When a lower limit closes
+ * it instead, focus goes to the Allow-all row (see below).
  *
  * The composer mounts the picker without a key, so a chat switch only changes
  * its props. The menu and the confirmation reset during that render, so nothing
