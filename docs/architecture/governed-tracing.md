@@ -13,11 +13,11 @@ decision fields before persistence.
 
 The physical event families remain separate:
 
-| Family | Grain | Examples |
-|---|---|---|
-| `agent_run` | One normalized source occurrence in an agent or workflow run | lifecycle, tool call, LLM call, approval, token usage |
-| `administrative` | One control-plane intent, action, or linked outcome | membership, host, recipe, or policy mutation |
-| `infrastructure_telemetry` | One operational transition or bounded workload interval | reconcile, health, lifecycle, capacity, usage |
+| Family                     | Grain                                                        | Examples                                              |
+| -------------------------- | ------------------------------------------------------------ | ----------------------------------------------------- |
+| `agent_run`                | One normalized source occurrence in an agent or workflow run | lifecycle, tool call, LLM call, approval, token usage |
+| `administrative`           | One control-plane intent, action, or linked outcome          | membership, host, recipe, or policy mutation          |
+| `infrastructure_telemetry` | One operational transition or bounded workload interval      | reconcile, health, lifecycle, capacity, usage         |
 
 `AgentRunEventEnvelopeV1` is the canonical persisted Agent Event Envelope. Producer input and
 server bindings are deliberately separate types so caller-controlled fields cannot masquerade as
@@ -82,28 +82,28 @@ infrastructure and never activates GCP.
 The base Deployment sets both cost flags to `false`. An authorized T3 overlay must enable and
 configure the worker, never the Control UI or HTTP process:
 
-| Variable                                       | Purpose                                                                                 |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `TRACING_INFRASTRUCTURE_COST_ENABLED`          | Enables Postgres-backed cost rollup in the maintenance worker                           |
-| `TRACING_INFRASTRUCTURE_COST_ROLLUP_INTERVAL_MS` | Requested-capacity rollup cadence; defaults to one hour                               |
-| `TRACING_INFRASTRUCTURE_COST_LOOKBACK_DAYS` | Closed UTC inventory days revisited for gaps and late evidence; defaults to 7             |
+| Variable                                               | Purpose                                                                                          |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `TRACING_INFRASTRUCTURE_COST_ENABLED`                  | Enables Postgres-backed cost rollup in the maintenance worker                                    |
+| `TRACING_INFRASTRUCTURE_COST_ROLLUP_INTERVAL_MS`       | Requested-capacity rollup cadence; defaults to one hour                                          |
+| `TRACING_INFRASTRUCTURE_COST_LOOKBACK_DAYS`            | Closed UTC inventory days revisited for gaps and late evidence; defaults to 7                    |
 | `TRACING_INFRASTRUCTURE_COST_FINALIZATION_DELAY_HOURS` | Delay after UTC day close before requested-capacity evidence becomes final; defaults to 24 hours |
-| `TRACING_GCP_BILLING_ENABLED`                  | Enables the off-transaction BigQuery import lane                                        |
-| `TRACING_GCP_BILLING_QUERY_PROJECT_ID`         | Project in which the bounded BigQuery job runs                                          |
-| `TRACING_GCP_BILLING_NORMALIZED_VIEW`          | Statically configured `project.dataset.view` allowlist target                           |
-| `TRACING_GCP_BILLING_LOCATION`                 | Exact BigQuery job location                                                             |
-| `TRACING_GCP_BILLING_MAX_BYTES_BILLED`         | Per-query byte ceiling; defaults to 1 GB                                                |
-| `TRACING_GCP_BILLING_IMPORT_INTERVAL_MS`       | Import cadence; defaults to one hour                                                    |
-| `TRACING_GCP_BILLING_MAX_LAG_HOURS`            | Maximum accepted export age; defaults to 96 hours                                       |
-| `TRACING_GCP_BILLING_LOOKBACK_DAYS`            | Closed UTC days revisited for late billing data; defaults to 7, maximum 31              |
-| `TRACING_GCP_BILLING_FINALIZATION_DELAY_HOURS` | Export-watermark delay required before a billed day becomes final; defaults to 96 hours |
-| `TRACING_GCP_PRICING_ENABLED`                  | Enables normalized account-pricing import for immutable snapshots                       |
-| `TRACING_GCP_PRICING_QUERY_PROJECT_ID`         | Project in which the bounded pricing-view query runs                                    |
-| `TRACING_GCP_PRICING_NORMALIZED_VIEW`          | Approved `project.dataset.view` with CPU and memory effective account rates             |
-| `TRACING_GCP_PRICING_LOCATION`                 | Exact BigQuery location of the pricing view                                             |
-| `TRACING_GCP_PRICING_MAX_BYTES_BILLED`         | Per-query pricing-view ceiling; defaults to 100 MB                                      |
-| `TRACING_GCP_PRICING_IMPORT_INTERVAL_MS`       | Pricing refresh cadence; defaults to 24 hours                                           |
-| `TRACING_GCP_PRICING_MAX_LAG_HOURS`            | Maximum accepted pricing evidence age; defaults to 72 hours                             |
+| `TRACING_GCP_BILLING_ENABLED`                          | Enables the off-transaction BigQuery import lane                                                 |
+| `TRACING_GCP_BILLING_QUERY_PROJECT_ID`                 | Project in which the bounded BigQuery job runs                                                   |
+| `TRACING_GCP_BILLING_NORMALIZED_VIEW`                  | Statically configured `project.dataset.view` allowlist target                                    |
+| `TRACING_GCP_BILLING_LOCATION`                         | Exact BigQuery job location                                                                      |
+| `TRACING_GCP_BILLING_MAX_BYTES_BILLED`                 | Per-query byte ceiling; defaults to 1 GB                                                         |
+| `TRACING_GCP_BILLING_IMPORT_INTERVAL_MS`               | Import cadence; defaults to one hour                                                             |
+| `TRACING_GCP_BILLING_MAX_LAG_HOURS`                    | Maximum accepted export age; defaults to 96 hours                                                |
+| `TRACING_GCP_BILLING_LOOKBACK_DAYS`                    | Closed UTC days revisited for late billing data; defaults to 7, maximum 31                       |
+| `TRACING_GCP_BILLING_FINALIZATION_DELAY_HOURS`         | Export-watermark delay required before a billed day becomes final; defaults to 96 hours          |
+| `TRACING_GCP_PRICING_ENABLED`                          | Enables normalized account-pricing import for immutable snapshots                                |
+| `TRACING_GCP_PRICING_QUERY_PROJECT_ID`                 | Project in which the bounded pricing-view query runs                                             |
+| `TRACING_GCP_PRICING_NORMALIZED_VIEW`                  | Approved `project.dataset.view` with CPU and memory effective account rates                      |
+| `TRACING_GCP_PRICING_LOCATION`                         | Exact BigQuery location of the pricing view                                                      |
+| `TRACING_GCP_PRICING_MAX_BYTES_BILLED`                 | Per-query pricing-view ceiling; defaults to 100 MB                                               |
+| `TRACING_GCP_PRICING_IMPORT_INTERVAL_MS`               | Pricing refresh cadence; defaults to 24 hours                                                    |
+| `TRACING_GCP_PRICING_MAX_LAG_HOURS`                    | Maximum accepted pricing evidence age; defaults to 72 hours                                      |
 
 ADC obtains the workload identity at runtime. No service-account key or billing credential belongs
 in a Secret, ConfigMap, browser request, or persisted trace payload. When either GCP import is
@@ -140,11 +140,21 @@ HCC, WRC, and mcp-host perform only bounded synchronous enqueue on their critica
 database, normalization, cost rollup, reconciliation, and retention work execute off-path with
 separate concurrency and connection budgets.
 
-Retention deletes at most 1,000 rows per wake across the three event families and infrastructure
-costs. The maintenance worker is deliberately non-HTTP, so it does not register process-local
-Prometheus series that cannot be scraped. Each completed wake emits structured operational fields
-for duration, saturated retention grains, family-to-stream registration gaps, inventory volume,
-and GCP import outcomes; overlap, lock, failure, and shutdown outcomes are emitted separately.
+Retention deletes at most 1,000 items per wake across agent runs, administrative events,
+infrastructure telemetry, infrastructure costs, and approval prompts. Each deleted event counts
+once and removes both the event and its stream pointer. The three event families prune oldest
+first. Equal timestamps use stream sequence for agent runs and administrative events, and event ID
+for telemetry. Telemetry requires both the family row and the stream pointer to be older than the
+applicable 30- or 90-day cutoff. Each family and its stream pointers are deleted in one statement
+so immediate and deferred constraints observe the same pair integrity.
+
+The maintenance worker is non-HTTP and reports retention through structured logs. A completed wake
+reports overall duration, `retentionDurationMsByGrain` (the sum of completed attempts for each grain),
+saturated grains, registration gaps, inventory volume, and GCP import outcomes. The failed-wake
+record includes the completed attempt times even if the transaction rolls back. If a prune attempt
+failed, it also reports `retentionGrain` and `retentionGrainDurationMs` with the error. A COMMIT
+failure has completed attempt timings and no failing grain. Overlap, lock, failure, and shutdown
+outcomes have separate log entries.
 Producer-specific flush, drop, retry, and gap counters remain on the existing scrapeable HTTP
 surfaces. Sustained non-empty `saturatedGrains` in the worker logs indicates that retention
 throughput is not keeping pace.
