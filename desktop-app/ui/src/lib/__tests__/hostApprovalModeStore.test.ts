@@ -475,6 +475,56 @@ describe('hostApprovalModeStore — Host limit', () => {
     expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
   })
 
+  it('a PATCH answer does not replace the ceiling of a refresh that started after the PATCH', async () => {
+    const patch = deferred<SessionApprovalSnapshot>()
+    const readHostModeCeiling = vi.fn(async () => 'auto' as const)
+    const { client, setApprovalMode } = transport({ readHostModeCeiling })
+    setApprovalMode.mockReturnValueOnce(patch.promise)
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'manual' }))
+
+    // The chat's PATCH leaves, then the menu opens on the blank chat and its refresh answers first.
+    const pick = selectHostApprovalMode(client, AGENT, CHAT, 'auto')
+    expect(setApprovalMode).toHaveBeenCalledTimes(1)
+    await refreshHostApprovalModeLimit(client, AGENT, null)
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+    // The Host answered the PATCH before an admin lowered the ceiling to auto.
+    patch.resolve(snapshot('auto', { modeCeiling: 'allow_all' }))
+    await expect(pick).resolves.toBe(true)
+
+    // The PATCH answer applied to its own chat.
+    expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Auto-approve')
+    expect(readHostApprovalMode(AGENT, CHAT).modeLimit).toBe('allow_all')
+    // The Host-wide ceiling keeps the refresh's answer: that request started after the PATCH.
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+  })
+
+  it('the re-read after a failed PATCH does not replace the ceiling of a refresh that started after it', async () => {
+    const reread = deferred<SessionApprovalSnapshot>()
+    const readHostModeCeiling = vi.fn(async () => 'auto' as const)
+    const { client, setApprovalMode, readSessionApproval } = transport({ readHostModeCeiling })
+    // No answer for the PATCH, so the store re-reads the chat.
+    setApprovalMode.mockRejectedValueOnce(new Error('fetch failed'))
+    readSessionApproval.mockReturnValueOnce(reread.promise)
+    noteHostApprovalModeFromSession(AGENT, CHAT, snapshot('manual', { modeCeiling: 'manual' }))
+
+    const pick = selectHostApprovalMode(client, AGENT, CHAT, 'auto')
+    await vi.waitFor(() => expect(readSessionApproval).toHaveBeenCalledWith(AGENT, CHAT))
+    // The menu opens on the blank chat while the re-read is out, and its refresh answers first.
+    await refreshHostApprovalModeLimit(client, AGENT, null)
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+    // The Host answered the re-read before an admin lowered the ceiling to auto.
+    reread.resolve(snapshot('auto', { modeCeiling: 'allow_all' }))
+    await expect(pick).resolves.toBe(false)
+
+    // The re-read applied to its own chat: the Host had saved the pick.
+    expect(setApprovalMode).toHaveBeenCalledTimes(1)
+    expect(readSessionApproval).toHaveBeenCalledTimes(1)
+    expect(readHostApprovalMode(AGENT, CHAT).label).toBe('Auto-approve')
+    expect(readHostApprovalMode(AGENT, CHAT).modeLimit).toBe('allow_all')
+    // The Host-wide ceiling keeps the refresh's answer: that request started after the re-read.
+    expect(readHostApprovalMode(AGENT, null).modeLimit).toBe('auto')
+  })
+
   it('shares one read between refreshes of the same chat that overlap', async () => {
     const answer = deferred<'auto'>()
     const readHostModeCeiling = vi.fn(() => answer.promise)
