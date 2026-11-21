@@ -499,4 +499,43 @@ describe('App — the drawer suggests the file of the active tab', () => {
       await source.stop()
     }
   })
+
+  it('re-resolves the file open in Files when the watch resyncs it, and the chip shows the new result', async () => {
+    const { contract, folder } = await views()
+    const bridge = await startWith([contract, folder])
+    await openFilesOnFile(bridge, folder, contract)
+    await openDrawer()
+    expect(await screen.findByRole('button', { name: 'Reference contract.bin in this message' }))
+    const fileKey = mainDriveKey('file', contract.rid)
+    expect((await settledWatch(bridge))?.keys).toEqual([fileKey])
+    await wait(0)
+    const settled = bridge.resolveForNavigation.mock.calls.length
+
+    // The same resource, renamed while the stream was down: only a fresh
+    // resolve can show it.
+    const renamed = await gfscResourceView({
+      resourceId: contract.resourceId,
+      parentResourceId: FOLDER_ID,
+      name: 'contract-signed.bin',
+      version: 3,
+      bytes: 40,
+    })
+    expect(renamed.gfsUri).toBe(contract.gfsUri)
+    bridge.resolveForNavigation.mockImplementation(async () => resolvedNavigation(renamed))
+
+    const source = await new GfsWatchEventSource().start()
+    try {
+      const resync = (await source.opened([fileKey])).find(event => event.type === 'resync')
+      expect(resync).toEqual({ type: 'resync', keys: [fileKey] })
+      await act(async () => bridge.watch.deliver([resync!]))
+      await waitFor(() => expect(bridge.resolveForNavigation.mock.calls.length).toBe(settled + 1))
+      expect(bridge.resolveForNavigation.mock.calls.at(-1)).toEqual([contract.gfsUri])
+      expect(
+        await screen.findByRole('button', { name: 'Reference contract-signed.bin in this message' })
+      ).toBeTruthy()
+      expect(chip('contract.bin')).toBeNull()
+    } finally {
+      await source.stop()
+    }
+  })
 })
