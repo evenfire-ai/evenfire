@@ -175,6 +175,7 @@ function hostConnectionBody(): Response {
     hostRef: HOST,
     url: 'http://host-a.mcp-host.svc.cluster.local:8080',
     bindingStatus: 'recorded',
+    edgeAssertion: 'edge-assertion-fixture',
   })
 }
 

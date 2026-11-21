@@ -19,6 +19,7 @@ describe('control-api canonical host access client', () => {
             userId: 'user-1',
             hostRef: 'host-a',
             url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+            edgeAssertion: 'edge-assertion-fixture',
           }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         )
@@ -32,6 +33,7 @@ describe('control-api canonical host access client', () => {
       name: 'host-a',
       url: 'http://host-a.mcp-host.svc.cluster.local:8080',
       headers: {},
+      edgeAssertion: 'edge-assertion-fixture',
     })
 
     expect(fetchImpl).toHaveBeenCalledOnce()
@@ -49,6 +51,7 @@ describe('control-api canonical host access client', () => {
             hostRef: 'host-a',
             url: 'http://host-a.mcp-host.svc.cluster.local:8080',
             bindingStatus: 'recorded',
+            edgeAssertion: 'edge-assertion-fixture',
           }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         )
@@ -64,6 +67,7 @@ describe('control-api canonical host access client', () => {
       url: 'http://host-a.mcp-host.svc.cluster.local:8080',
       headers: {},
       attributionBindingStatus: 'recorded',
+      edgeAssertion: 'edge-assertion-fixture',
     })
 
     expect(fetchImpl).toHaveBeenCalledOnce()

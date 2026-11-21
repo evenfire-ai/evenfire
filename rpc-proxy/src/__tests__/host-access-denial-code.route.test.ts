@@ -206,6 +206,7 @@ const CONTROL_API_CONNECTION = {
   hostRef: 'chatllm',
   url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
   bindingStatus: 'recorded',
+  edgeAssertion: 'edge-assertion-fixture',
 }
 
 /**
@@ -431,6 +432,7 @@ describe('passthrough and non-authorization responses are left untouched', () =>
         userId: CLAIMS.sub,
         hostRef: 'chatllm',
         url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        edgeAssertion: 'edge-assertion-fixture',
       },
     }
   })
@@ -551,6 +553,7 @@ describe('an mcp-host 403 never reaches the client with a reserved Host-access c
         userId: CLAIMS.sub,
         hostRef: 'chatllm',
         url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        edgeAssertion: 'edge-assertion-fixture',
       },
     }
     hostAnswer = {

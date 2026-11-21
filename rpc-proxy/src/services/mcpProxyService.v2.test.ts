@@ -53,6 +53,7 @@ describe('v2 checkpoint destination routing', () => {
           userId: 'user',
           hostRef: 'chatllm',
           url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+          edgeAssertion: 'edge-assertion-fixture',
         }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       )
@@ -63,6 +64,7 @@ describe('v2 checkpoint destination routing', () => {
       headers: {
         'x-clerum-edge-caller': 'rpc-proxy',
         'x-clerum-edge-user-id': 'user',
+        'x-clerum-edge-assertion': 'edge-assertion-fixture',
       },
     })
     expect(connection?.headers['x-service-token']).toBeUndefined()

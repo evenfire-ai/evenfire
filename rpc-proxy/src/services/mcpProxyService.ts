@@ -1,3 +1,4 @@
+import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
 import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
@@ -99,22 +100,28 @@ export async function resolveHostConnectionForUser(
   const expectedRef = `${config.hostNamespace}/${hostRef}`
   const authorizedActionV2 = edgeContext?.authorizedActionV2
   const destination = authorizedActionV2?.checkpoint.destination
-  const host = authorizedActionV2
-    ? destination?.kind === 'host' && destination.ref === expectedRef
-      ? {
-          name: hostRef,
-          url: destination.url,
-          headers: {},
-          attributionBindingStatus: undefined,
-        }
-      : (() => {
-          throw new Error('Invalid v2 host destination binding')
-        })()
-    : await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
-        directRunBinding: edgeContext?.directRunBinding,
-      })
-  if (isHostAccessDenied(host)) return host
-  if (!host) return null
+  let host: ResolvedServerConnection
+  if (authorizedActionV2) {
+    if (destination?.kind !== 'host' || destination.ref !== expectedRef) {
+      throw new Error('Invalid v2 host destination binding')
+    }
+    host = {
+      name: hostRef,
+      url: destination.url,
+      headers: {},
+      attributionBindingStatus: undefined,
+    }
+  } else {
+    const resolved = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
+      directRunBinding: edgeContext?.directRunBinding,
+    })
+    if (isHostAccessDenied(resolved)) return resolved
+    const { edgeAssertion, ...connection } = resolved
+    host = {
+      ...connection,
+      headers: { ...connection.headers, [HOST_EDGE_ASSERTION_HEADER]: edgeAssertion },
+    }
+  }
 
   const headers: Record<string, string> = {
     ...host.headers,
