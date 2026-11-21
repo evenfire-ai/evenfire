@@ -1,10 +1,14 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
+import { config } from '../src/config.js'
 import { type DbClient, type DbTransactionClient, initDb, withTransaction } from '../src/db.js'
 import type { PinnedFetchOptions } from '../src/http/pinnedFetch.js'
 import { rootLogger } from '../src/observability/logger.js'
-import type { OidcProviderConfiguration } from '../src/oidc/configuration.js'
+import {
+  type OidcProviderConfiguration,
+  loadOidcProviderConfiguration,
+} from '../src/oidc/configuration.js'
 import type { VerifiedOidcIdentityProof } from '../src/oidc/protocol.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import { authenticateExternalUserSession } from '../src/services/auth/externalSessionAuthentication.js'
@@ -1547,17 +1551,64 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       ).env
       stubOidcEnvironment(switchWithoutGuard)
       const userId = await seedUser(`${uniqueLabel('unreadable-removal')}@fixture.test`)
+      const warn = vi.spyOn(rootLogger, 'warn')
+      try {
+        const retirement = await retireDesktopUser(
+          retirementActor(),
+          userId,
+          'removed while the OIDC configuration is broken',
+          uniqueLabel('unreadable-removal-key'),
+          'unreadable-removal-request'
+        )
 
-      const retirement = await retireDesktopUser(
-        retirementActor(),
-        userId,
-        'removed while the OIDC configuration is broken',
-        uniqueLabel('unreadable-removal-key'),
-        'unreadable-removal-request'
-      )
+        expect(retirement).toMatchObject({ id: userId, outcome: 'retired' })
+        expect(await userRow(userId)).toEqual([{ lifecycle_state: 'retired' }])
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ event: 'retirement_oidc_configuration_unreadable' }),
+          'OIDC configuration is unreadable; the removed member is kept as a retired row'
+        )
+      } finally {
+        warn.mockRestore()
+      }
+    })
 
-      expect(retirement).toMatchObject({ id: userId, outcome: 'retired' })
-      expect(await userRow(userId)).toEqual([{ lifecycle_state: 'retired' }])
+    it('still hard-deletes the member when the configuration cannot be read but the switch is unset', async () => {
+      const {
+        CONTROL_API_OIDC_MEMBER_SIGN_IN: _switch,
+        CONTROL_API_OIDC_UNRELEASED: _guard,
+        ...switchOff
+      } = entraFake('fake-entra-unreadable-switch-off').env
+      const { CONTROL_API_OIDC_TENANT_ID: _tenant, ...entraWithoutTenant } = switchOff
+      // Each fails to load, and none can switch member sign-in on.
+      const unreadable = [
+        { env: entraWithoutTenant, field: 'CONTROL_API_OIDC_TENANT_ID' },
+        {
+          env: { ...switchOff, CONTROL_API_OIDC_UNKNOWN_FIXTURE_SETTING: 'fixture' },
+          field: 'CONTROL_API_OIDC_UNKNOWN_FIXTURE_SETTING',
+        },
+        {
+          env: { ...entraWithoutTenant, CONTROL_API_OIDC_MEMBER_SIGN_IN: '  ' },
+          field: 'CONTROL_API_OIDC_MEMBER_SIGN_IN',
+        },
+      ]
+      for (const { env, field } of unreadable) {
+        stubOidcEnvironment(env)
+        expect(() => loadOidcProviderConfiguration(process.env, config.oauthEncryptionKey)).toThrow(
+          field
+        )
+        const userId = await seedUser(`${uniqueLabel('unreadable-switch-off')}@fixture.test`)
+
+        const retirement = await retireDesktopUser(
+          retirementActor(),
+          userId,
+          'removed while member sign-in is off and the configuration is broken',
+          uniqueLabel('unreadable-switch-off-key'),
+          'unreadable-switch-off-request'
+        )
+
+        expect(retirement).toMatchObject({ id: userId, outcome: 'deleted' })
+        expect(await userRow(userId)).toEqual([])
+      }
     })
 
     it('still hard-deletes the member while member sign-in is off', async () => {

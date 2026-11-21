@@ -353,7 +353,8 @@ export async function updateAdminUserContext(
  * as a retired row even without link history: OIDC sign-in finds a hard-deleted
  * member's address unused and, where it creates accounts, would create the
  * member again. The check reads the configuration at removal time only, so a
- * member removed while member sign-in was off is still hard-deleted.
+ * member removed while member sign-in was off is still hard-deleted. A
+ * configuration that cannot be read counts as on only while the switch is set.
  */
 function memberSignInConfigured(): boolean {
   try {
@@ -361,11 +362,16 @@ function memberSignInConfigured(): boolean {
       loadOidcProviderConfiguration(process.env, config.oauthEncryptionKey)?.memberSignIn != null
     )
   } catch (error) {
-    // An unreadable configuration may still have the switch on, so the row is
-    // kept, which fails safe: a deleted member cannot be restored, while a
-    // retired row only holds its address (nothing in control-api purges it;
-    // reusing the address needs an admin fix). The OIDC routes log the
-    // settings at fault; this logs the class only.
+    // Only the exact switch value turns member sign-in on, so with the switch
+    // unset (or blank) it is off whatever else failed to load: the member is
+    // hard-deleted, and dropping the error is correct because the OIDC routes
+    // log the settings at fault on their own requests.
+    if (!process.env.CONTROL_API_OIDC_MEMBER_SIGN_IN?.trim()) return false
+    // With the switch set, an unreadable configuration may still have it on,
+    // so the row is kept, which fails safe: a deleted member cannot be
+    // restored, while a retired row only holds its address (nothing in
+    // control-api purges it; reusing the address needs an admin fix). This
+    // logs the class only.
     rootLogger.warn(
       {
         component: 'desktop_user_retirement',
