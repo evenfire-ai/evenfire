@@ -3,6 +3,7 @@ import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import type { ResolvedServerConnection, RpcAccessClaims } from '../types.js'
 import { type HostWakeApiResponse, requestHostWakeFromControlApi } from './controlApiRestService.js'
+import type { HostAccessDenial } from './hostAccessDenial.js'
 import { forwardHostHealth } from './mcpHostRestService.js'
 
 /** Strip control characters and newlines from user-derived hostRef before log interpolation. */
@@ -758,6 +759,17 @@ export type RespondWithWakeAndHoldOptions = {
   authorizedActionV2?: AuthorizedActionV2
   reauthorizeV2?: () => Promise<void>
   /**
+   * V1 requests: re-resolves the Host connection before each retry attempt, so
+   * the retry carries a fresh edge assertion. A returned denial ends the retry
+   * through `respondDenied`, the route's answer for a denial at its first
+   * resolve. Called where `reauthorizeV2` is called, for requests without
+   * `authorizedActionV2`.
+   */
+  refreshV1Host?: {
+    refresh: () => Promise<HostAccessDenial | null>
+    respondDenied: (denial: HostAccessDenial) => void
+  }
+  /**
    * Re-issues the original upstream request with a deadline-bounded timeout.
    * The route's FIRST attempt runs without a client-side timeout for mutating
    * calls; `timeoutMs` only ever applies to these hold retries. `deadlineMs`
@@ -844,7 +856,15 @@ export async function respondWithWakeAndHold(
           const remainingMs = deadlineMs - Date.now()
           if (remainingMs < minAttemptTimeoutMs) break
           attempts++
-          if (options.reauthorizeV2) await options.reauthorizeV2()
+          if (options.reauthorizeV2) {
+            await options.reauthorizeV2()
+          } else if (options.refreshV1Host) {
+            const denial = await options.refreshV1Host.refresh()
+            if (denial) {
+              options.refreshV1Host.respondDenied(denial)
+              return
+            }
+          }
           await options.attemptUpstream(Math.min(config.upstreamTimeoutMs, remainingMs), deadlineMs)
           return
         } catch (error) {

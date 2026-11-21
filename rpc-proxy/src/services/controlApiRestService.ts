@@ -20,7 +20,15 @@ type UserAllowedHost = {
   hostRef: string
   url: string
   bindingStatus?: 'recorded' | 'unavailable'
+  edgeAssertion: string
 }
+
+/**
+ * A V1 Host connection together with the edge assertion control-api signed for
+ * this user, Host and RPC token. The resolver moves the assertion into the
+ * Host request headers; it is never part of the connection the routes see.
+ */
+export type ResolvedHostConnection = ResolvedServerConnection & { edgeAssertion: string }
 
 function controlApiHeaders(rpcAccessToken: string): Record<string, string> {
   return {
@@ -225,7 +233,7 @@ export async function fetchHostConnectionFromControlApi(
     directRunBinding?: DirectRunBindingRequest
     fetchImpl?: typeof fetch
   } = {}
-): Promise<ResolvedServerConnection | HostAccessDenial> {
+): Promise<ResolvedHostConnection | HostAccessDenial> {
   const directRunBinding = options.directRunBinding
   const response = await (options.fetchImpl ?? fetch)(
     `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
@@ -276,12 +284,19 @@ export async function fetchHostConnectionFromControlApi(
   ) {
     throw new Error('Control API MCP host binding response was invalid')
   }
+  // The Host accepts rpc-proxy traffic only with this assertion: a control-api
+  // that does not issue one cannot authorize a Host request.
+  const edgeAssertion = parsed.edgeAssertion
+  if (typeof edgeAssertion !== 'string' || edgeAssertion === '') {
+    throw new Error('Control API MCP host response has no edge assertion')
+  }
 
   return {
     name: resolvedHostRef,
     url,
     headers: {},
     ...(attributionBindingStatus ? { attributionBindingStatus } : {}),
+    edgeAssertion,
   }
 }
 

@@ -227,7 +227,12 @@ describe('services/mcpProxyService', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       mkResponse(
         200,
-        JSON.stringify({ userId: 'user-1', hostRef: 'agent2', url: 'http://agent2.mcp-host:8080' })
+        JSON.stringify({
+          userId: 'user-1',
+          hostRef: 'agent2',
+          url: 'http://agent2.mcp-host:8080',
+          edgeAssertion: 'edge-assertion-fixture',
+        })
       )
     )
     const host = await resolveHostConnectionForUser('user-1', 'agent2', 'rpc-token')
@@ -235,11 +240,11 @@ describe('services/mcpProxyService', () => {
       name: 'agent2',
       url: 'http://agent2.mcp-host:8080',
       headers: {
+        'x-clerum-edge-assertion': 'edge-assertion-fixture',
         'x-clerum-edge-access-scope': 'user',
         'x-clerum-edge-caller': 'rpc-proxy',
         'x-clerum-edge-host-ref': 'agent2',
         'x-clerum-edge-user-id': 'user-1',
-        'x-service-token': 'rpc-proxy',
       },
     })
   })
