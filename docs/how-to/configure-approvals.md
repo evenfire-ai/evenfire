@@ -223,6 +223,13 @@ the new config arrives, even for a session that makes no tool call before the
 change is undone. A card answered after the change resolves under the lower
 mode.
 
+Check the spelling of `allowModeChange` and the channel names. The CRD drops
+an unknown key under `spec.approval.channels` instead of storing it. `kubectl
+apply` refuses such a key by default (strict field validation), but a client
+that does not validate strictly gets only a warning, and the channel then keeps
+its default: on for Telegram, Slack and Teams. After the edit, read the Host
+back (`kubectl get host <name> -o yaml`) and confirm the field is there.
+
 A slower older Host event does not restore the ceiling, the channel cap or the
 approver policy. The config that stays is the latest observed Host event.
 
