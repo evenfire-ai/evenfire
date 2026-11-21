@@ -1,13 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync, randomUUID } from 'node:crypto'
+import { once } from 'node:events'
+import type { Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
-import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
+import {
+  HOST_EDGE_ASSERTION_AUDIENCE,
+  HOST_EDGE_ASSERTION_CLAIM_TYPE,
+  HOST_EDGE_ASSERTION_HEADER,
+  HOST_EDGE_ASSERTION_JWT_TYPE,
+} from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
-import { createRpcHostActivityStreamRouter } from '../routes/rpcHostActivityStream.js'
+import {
+  createRpcHostActivityStreamRouter,
+  resetHostActivityStreamRuntimeForTests,
+} from '../routes/rpcHostActivityStream.js'
 import { createRpcHostProgressStreamRouter } from '../routes/rpcHostProgressStream.js'
-import { createRpcHostStatusStreamRouter } from '../routes/rpcHostStatusStream.js'
+import {
+  createRpcHostStatusStreamRouter,
+  resetHostStatusStreamRuntimeForTests,
+} from '../routes/rpcHostStatusStream.js'
 
 // The Host edge assertion through the real rpc-proxy routes. Only the RPC token
 // verifier is mocked; the real routers, resolver and control-api client run, and
@@ -679,4 +695,187 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection', () => {
       }
     )
   })
+})
+
+// A V1 assertion built the way control-api signs it (RS256, the assertion JWT
+// type, the Host runtime audience), so the Host stub below decides on its real
+// `exp` and not on a hand-typed marker.
+const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
+
+function signEdgeAssertion(expSeconds: number, scopes: string[]): string {
+  return jwt.sign(
+    {
+      typ: HOST_EDGE_ASSERTION_CLAIM_TYPE,
+      v: 1,
+      iss: 'control-api',
+      sub: USER_ID,
+      host: `${config.hostNamespace}/chatllm`,
+      jti: randomUUID(),
+      iat: Math.floor(Date.now() / 1000),
+      exp: expSeconds,
+      teamId: 'team-1',
+      scopes,
+    },
+    EDGE_KEYS.privateKey,
+    {
+      algorithm: 'RS256',
+      audience: HOST_EDGE_ASSERTION_AUDIENCE,
+      header: { alg: 'RS256', typ: HOST_EDGE_ASSERTION_JWT_TYPE },
+    }
+  )
+}
+
+type HostVerdict = { at: number; status: number }
+
+/**
+ * The Host's check of the assertion at instant `at`: signature, audience and
+ * expiry. An expired assertion gets the Host's 401; any other verification
+ * failure is a broken fixture and fails the test.
+ */
+function hostChecksAssertion(headers: Record<string, string>, at: number): Response | null {
+  try {
+    jwt.verify(headers[HOST_EDGE_ASSERTION_HEADER] ?? '', EDGE_KEYS.publicKey, {
+      algorithms: ['RS256'],
+      audience: HOST_EDGE_ASSERTION_AUDIENCE,
+      clockTimestamp: Math.floor(at / 1000),
+    })
+    return null
+  } catch (error) {
+    if (error instanceof Error && error.name === 'TokenExpiredError') return HOST_401()
+    throw error
+  }
+}
+
+describe('streams and the assertion expiry', () => {
+  const originalStreamIntervalMs = config.streamIntervalMs
+  let server: Server
+  let baseUrl: string
+
+  beforeEach(async () => {
+    config.streamIntervalMs = 100
+    resetHostStatusStreamRuntimeForTests()
+    resetHostActivityStreamRuntimeForTests()
+    server = makeApp().listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  })
+
+  afterEach(async () => {
+    config.streamIntervalMs = originalStreamIntervalMs
+    server.closeAllConnections()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  })
+
+  // Reads the SSE response through the real HTTP server until `done` holds.
+  async function readStream(path: string, done: (text: string) => boolean): Promise<string> {
+    const controller = new AbortController()
+    const res = await originalFetch(`${baseUrl}${path}`, {
+      headers: { authorization: 'Bearer tok' },
+      signal: controller.signal,
+    })
+    expect(res.status).toBe(200)
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+    let text = ''
+    while (!done(text)) {
+      const { value, done: ended } = await reader.read()
+      if (ended) break
+      text += decoder.decode(value, { stream: true })
+    }
+    controller.abort()
+    return text
+  }
+
+  it('status stream: polls succeed until the assertion exp, then the stream ends with auth-expired', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))
+    const expSeconds = Math.floor(Date.now() / 1000) + 2
+    controlApiBody = {
+      ...OLD_SHAPE_CONNECTION,
+      edgeAssertion: signEdgeAssertion(expSeconds, ['host:status:read']),
+    }
+    const verdicts: HostVerdict[] = []
+    hostAnswer = index => {
+      const at = Date.now()
+      const answer =
+        hostChecksAssertion(hostCalls[index]!.headers, at) ??
+        jsonResponse(200, { agent: { state: 'idle' }, queue: { pending: 0 } })
+      verdicts.push({ at, status: answer.status })
+      return answer
+    }
+
+    const text = await readStream('/rpc/hosts/chatllm/status/stream', body =>
+      body.includes('event: closed')
+    )
+
+    const accepted = verdicts.filter(verdict => verdict.status === 200)
+    const refused = verdicts.filter(verdict => verdict.status === 401)
+    // Witness: polls reached the Host and succeeded before the expiry.
+    expect(accepted.length).toBeGreaterThan(0)
+    expect(accepted.every(verdict => verdict.at < expSeconds * 1000)).toBe(true)
+    expect(text).toContain('event: status')
+    // After the expiry each poll is refused; the third refusal ends the stream.
+    expect(refused).toHaveLength(3)
+    expect(refused.every(verdict => verdict.at >= expSeconds * 1000)).toBe(true)
+    expect(text).toContain('event: auth-expired')
+    expect(text).toContain('"reason":"auth-expired"')
+    // One resolve for the whole stream.
+    expect(hostAccessCalls()).toHaveLength(1)
+  }, 10_000)
+
+  // Each stream forwards only its own event names.
+  const PASSTHROUGH_STREAM_ROWS = [
+    { ...ROUTE_SCOPE_ROWS.find(row => row.label === 'activity stream')!, hostEvent: 'activity' },
+    { ...ROUTE_SCOPE_ROWS.find(row => row.label === 'progress stream')!, hostEvent: 'tool_start' },
+  ]
+
+  it.each(PASSTHROUGH_STREAM_ROWS)(
+    '$label: verified once at the start, it keeps flowing past the assertion exp',
+    async row => {
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope]))
+      const expSeconds = Math.floor(Date.now() / 1000) + 1
+      controlApiBody = {
+        ...OLD_SHAPE_CONNECTION,
+        edgeAssertion: signEdgeAssertion(expSeconds, [row.scope]),
+      }
+      const verdicts: HostVerdict[] = []
+      let lateEventAt = 0
+      hostAnswer = index => {
+        const at = Date.now()
+        const refusal = hostChecksAssertion(hostCalls[index]!.headers, at)
+        verdicts.push({ at, status: refusal ? refusal.status : 200 })
+        if (refusal) return refusal
+        const encoder = new TextEncoder()
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(`event: ${row.hostEvent}\ndata: {"marker":"before-exp"}\n\n`)
+            )
+            setTimeout(
+              () => {
+                lateEventAt = Date.now()
+                controller.enqueue(
+                  encoder.encode(`event: ${row.hostEvent}\ndata: {"marker":"after-exp"}\n\n`)
+                )
+              },
+              expSeconds * 1000 + 300 - Date.now()
+            )
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        })
+      }
+
+      const text = await readStream(row.path, body => body.includes('after-exp'))
+
+      expect(verdicts).toEqual([{ at: expect.any(Number), status: 200 }])
+      expect(hostCalls).toHaveLength(1)
+      expect(hostCalls[0]!.path).toBe(row.hostPath)
+      expect(text).toContain('before-exp')
+      expect(text).toContain('after-exp')
+      expect(lateEventAt).toBeGreaterThanOrEqual(expSeconds * 1000)
+    },
+    10_000
+  )
 })
