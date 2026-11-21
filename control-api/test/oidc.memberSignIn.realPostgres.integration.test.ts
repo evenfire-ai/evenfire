@@ -896,8 +896,24 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
         email,
         email_verified: true,
       })
+      const info = vi.spyOn(rootLogger, 'info')
+      let result: ReturnType<typeof signedIn>
+      try {
+        result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
 
-      const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
+        // The path ran: the multi-team invitation was attempted and rolled back.
+        expect(info).toHaveBeenCalledWith(
+          {
+            component: 'oidc_member_sign_in',
+            event: 'oidc_member_invitation_left_pending',
+            invitationId: multiTeam.invitation.id,
+            reason: 'existing_membership',
+          },
+          'OIDC member sign-in left an invitation pending'
+        )
+      } finally {
+        info.mockRestore()
+      }
 
       expect(result).toMatchObject({ userId, invitationsApplied: 1 })
       expect(await invitationState(multiTeam.invitation.id)).toEqual({
