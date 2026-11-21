@@ -107,10 +107,12 @@ function teamlessMemberMembership(): MembershipRow {
 
 /**
  * True when the account has signed in with OIDC at least once. Such an account
- * is never matched to accepted invitations by email, just as OIDC sign-in
- * itself never heals: OIDC sign-in creates an account for an address whose
- * earlier holder may have been hard-deleted, and that holder's accepted
- * invitations outlive them with `accepted_user_id` set to NULL. Healing by
+ * is never healed from, or offered password setup from, accepted invitations
+ * matched by email, just as OIDC sign-in itself never heals. (The default-team
+ * order in findFirstActiveMembership still reads them, read-only, to rank
+ * memberships the account already has.) OIDC sign-in creates an account for
+ * an address whose earlier holder may have been hard-deleted, and that holder's
+ * accepted invitations outlive them with `accepted_user_id` set to NULL. Healing by
  * email would hand the new account the removed member's teams and roles, so
  * login does not heal it, and an admin's password setup resend
  * (createPasswordSetupInvitationForUser) refuses it rather than copy those
