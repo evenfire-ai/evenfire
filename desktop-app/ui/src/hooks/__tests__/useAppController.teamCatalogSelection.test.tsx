@@ -12,11 +12,25 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { ComposerPanel } from '@components/agents/ComposerPanel'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '@constants/navigation'
 import type { AccessCatalog } from '../../../../src/types'
+import type { AppNotification } from '../../uiTypes'
 import {
   HARNESS_ME,
   installAppControllerClerum,
   renderAppController,
 } from '../domain/__tests__/__fixtures__/appControllerHarness'
+import {
+  bootApp,
+  createDeferred,
+  errorToasts,
+  gfsPreview,
+  messageIdFor,
+  openDrawerOverFiles,
+  routeIndexThroughStore,
+  seedChats,
+  selectInDrawer,
+  visibleConversation,
+  waitForSettled,
+} from '../domain/__tests__/__fixtures__/drawerSelectionFixtures'
 import { ipcHostAccessDenied } from '../domain/__tests__/__fixtures__/ipcErrors'
 import { uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
 import { desktopQueryKeys } from '../domain/queryKeys'
@@ -121,7 +135,7 @@ function catalogQueryData(app: ReturnType<typeof renderAppController>) {
 
 /** A session in Team A whose catalog is produced per team by the given function. */
 function installTeamSession(catalogForTeam: (teamId: string) => AccessCatalog) {
-  const { handle } = installAppControllerClerum({
+  const { clerum, handle } = installAppControllerClerum({
     me: { teamId: 'team-a', teamName: 'Team A' },
     teamDirectory: { items: [], currentTeamId: 'team-a' },
   })
@@ -159,7 +173,7 @@ function installTeamSession(catalogForTeam: (teamId: string) => AccessCatalog) {
     await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-b'))
   }
 
-  return { refreshCatalog, moveToTeamB }
+  return { clerum, refreshCatalog, moveToTeamB }
 }
 
 async function expectComposerSends(
@@ -450,5 +464,238 @@ describe('useAppController agent selection and sending do not depend on the team
       expect(app.result.current.isHostAccessBlocked(TEAM_A_AGENT)).toBe(false)
       await expectComposerSends(app, panel, TEAM_A_AGENT, 'send after the server allowed the read')
     })
+  })
+})
+
+/** A catalog that lists every given agent for the team, so none is held after a switch. */
+function catalogListing(teamId: string, agents: string[]): AccessCatalog {
+  const base = productionCatalog(teamId, agents[0]!)
+  return {
+    ...base,
+    teamAgentNames: agents,
+    agentNames: agents,
+    agentContextByName: Object.fromEntries(agents.map(agent => [agent, null])),
+    agentProviderByName: Object.fromEntries(agents.map(agent => [agent, null])),
+    agentDisplayByName: Object.fromEntries(agents.map(agent => [agent, agent])),
+  }
+}
+
+/**
+ * A pending request for a concrete chat names a chat of the team it was made
+ * in. A team switch re-runs the selection for the new team, which must not
+ * replay that request there; `latest`/`none` requests name no chat and remain
+ * valid across the switch.
+ */
+describe('useAppController — a concrete drawer chat request does not cross a team switch', () => {
+  let unmount: (() => void) | undefined
+
+  afterEach(() => {
+    cleanup()
+    unmount?.()
+    unmount = undefined
+    vi.restoreAllMocks()
+    uninstallMockClerum()
+  })
+
+  async function bootWithDrawerChat(agents: string[] = [TEAM_A_AGENT]) {
+    const session = installTeamSession(teamId => catalogListing(teamId, agents))
+    routeIndexThroughStore(session.clerum)
+    await seedChats(session.clerum, TEAM_A_AGENT, ['a-1', 'a-2'])
+    const app = await bootApp()
+    unmount = app.unmount
+    await openDrawerOverFiles(app, TEAM_A_AGENT, 'a-1')
+    return { ...session, app }
+  }
+
+  const lastActiveCallsFor = (
+    clerum: { chat: { setLastActive: { mock: { calls: unknown[][] } } } },
+    chatId: string
+  ) => clerum.chat.setLastActive.mock.calls.filter(([, id]) => id === chatId).length
+
+  it.each(TEAM_TRANSITIONS)(
+    'does not reopen a drawer chat requested in the previous team after %s',
+    async transition => {
+      const { app, clerum, moveToTeamB } = await bootWithDrawerChat()
+      selectInDrawer(app, TEAM_A_AGENT, 'a-2')
+      await waitFor(() =>
+        expect(visibleConversation(app)).toEqual({
+          activeChatId: 'a-2',
+          messageIds: [messageIdFor('a-2')],
+        })
+      )
+      await waitForSettled(app)
+      act(() => {
+        app.result.current.openPreviewSection(gfsPreview())
+      })
+      await waitForSettled(app)
+      const requestedChatOpenings = lastActiveCallsFor(clerum, 'a-2')
+
+      await moveToTeamB(app, transition)
+      await waitForSettled(app)
+
+      expect(app.result.current.selectedAgent).toBe(TEAM_A_AGENT)
+      expect(visibleConversation(app)).toEqual({ activeChatId: null, messageIds: [] })
+      expect(lastActiveCallsFor(clerum, 'a-2')).toBe(requestedChatOpenings)
+      expect(errorToasts(app)).toEqual([])
+    }
+  )
+
+  it.each(['team.switch', 'activity stream stop'] as const)(
+    'drops a drawer chat requested while the switch awaits %s',
+    async gate => {
+      const { app, clerum } = await bootWithDrawerChat()
+      const release = createDeferred<void>()
+      const reached = createDeferred<void>()
+      if (gate === 'team.switch') {
+        const switchTeam = window.clerum.team.switch
+        Object.assign(window.clerum.team, {
+          switch: vi.fn(async (teamId: string) => {
+            reached.resolve()
+            await release.promise
+            return switchTeam(teamId)
+          }),
+        })
+      } else {
+        // A sent message opens the agent's activity stream; the team teardown
+        // awaits its stop.
+        clerum.rpc.subscribeHostActivity.mockImplementation(async () => async () => {
+          reached.resolve()
+          await release.promise
+        })
+        await act(async () => {
+          await app.result.current.handleSendAgentMessage('message before the switch')
+        })
+        await waitFor(() => expect(clerum.rpc.subscribeHostActivity).toHaveBeenCalled())
+      }
+
+      let switching!: Promise<boolean>
+      act(() => {
+        switching = app.result.current.handleEnsureTeamContext({ teamId: 'team-b' })
+      })
+      await act(async () => {
+        await reached.promise
+      })
+      selectInDrawer(app, TEAM_A_AGENT, 'a-2')
+      await waitFor(() =>
+        expect(clerum.chat.setLastActive).toHaveBeenCalledWith(TEAM_A_AGENT, 'a-2')
+      )
+      const requestedChatOpenings = lastActiveCallsFor(clerum, 'a-2')
+      await act(async () => {
+        release.resolve()
+        await switching
+      })
+      await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-b'))
+      await waitForSettled(app)
+
+      expect(visibleConversation(app)).toEqual({ activeChatId: null, messageIds: [] })
+      expect(lastActiveCallsFor(clerum, 'a-2')).toBe(requestedChatOpenings)
+    }
+  )
+
+  it('keeps the request when the team switch fails, and opens it on entering chat', async () => {
+    const { app } = await bootWithDrawerChat()
+    // Request the older chat, so entering chat without the request would land
+    // on the newest one instead.
+    selectInDrawer(app, TEAM_A_AGENT, 'a-2')
+    await waitFor(() => expect(visibleConversation(app).activeChatId).toBe('a-2'))
+    await waitForSettled(app)
+    selectInDrawer(app, TEAM_A_AGENT, 'a-1')
+    await waitFor(() => expect(visibleConversation(app).activeChatId).toBe('a-1'))
+    await waitForSettled(app)
+    Object.assign(window.clerum.team, {
+      switch: vi.fn(async () => {
+        throw new Error('team switch refused')
+      }),
+    })
+
+    await act(async () => {
+      await expect(
+        app.result.current.handleEnsureTeamContext({ teamId: 'team-b' })
+      ).rejects.toThrow('team switch refused')
+    })
+    expect(app.result.current.currentTeamId).toBe('team-a')
+
+    // A chat tab activated without a selection of its own: only the surviving
+    // request decides which conversation opens.
+    act(() => {
+      app.result.current.activateWorkspaceChatTab(TEAM_A_AGENT, null)
+    })
+    await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.chat))
+    await waitForSettled(app)
+    expect(visibleConversation(app)).toEqual({
+      activeChatId: 'a-1',
+      messageIds: [messageIdFor('a-1')],
+    })
+  })
+
+  it('opens a notification chat of the new team after switching to it', async () => {
+    const { app, clerum } = await bootWithDrawerChat()
+    await seedChats(clerum, TEAM_A_AGENT, ['b-1'])
+    const notification: AppNotification = {
+      id: 'notification-team-b',
+      kind: 'assistant_reply',
+      agentName: TEAM_A_AGENT,
+      chatId: 'b-1',
+      teamId: 'team-b',
+      text: 'Agent replied in Team B',
+      timestamp: Date.now(),
+      read: false,
+    }
+
+    await act(async () => {
+      await app.result.current.handleOpenNotification(notification)
+    })
+    await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-b'))
+    await waitForSettled(app)
+
+    expect(visibleConversation(app)).toEqual({
+      activeChatId: 'b-1',
+      messageIds: [messageIdFor('b-1')],
+    })
+    expect(errorToasts(app)).toEqual([])
+  })
+
+  it('does not revive another agent’s orphaned chat request after T1 → T2 → T1', async () => {
+    const OTHER_AGENT = 'team-a-second-agent'
+    const { app, clerum } = await bootWithDrawerChat([TEAM_A_AGENT, OTHER_AGENT])
+    await seedChats(clerum, OTHER_AGENT, ['o-1'])
+
+    // The other agent's request is still waiting for its chat list when the
+    // user picks the first agent again, so nothing ever consumes it.
+    const otherCatalog = createDeferred<Awaited<ReturnType<typeof clerum.readIndex>>>()
+    clerum.chat.getIndex.mockImplementation((agent: string) =>
+      agent === OTHER_AGENT ? otherCatalog.promise : clerum.readIndex(agent)
+    )
+    selectInDrawer(app, OTHER_AGENT, 'o-1')
+    await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledWith(OTHER_AGENT))
+    const otherAgentNavigation = app.result.current.captureWorkspaceNavigation()
+    selectInDrawer(app, TEAM_A_AGENT, 'a-1')
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(TEAM_A_AGENT))
+    await act(async () => otherCatalog.resolve(await clerum.readIndex(OTHER_AGENT)))
+    clerum.chat.getIndex.mockImplementation((agent: string) => clerum.readIndex(agent))
+    await waitForSettled(app)
+
+    await act(async () => {
+      await app.result.current.handleEnsureTeamContext({ teamId: 'team-b' })
+    })
+    await act(async () => {
+      await app.result.current.handleEnsureTeamContext({ teamId: 'team-a' })
+    })
+    await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-a'))
+    await waitForSettled(app)
+
+    let restored: number | null = null
+    act(() => {
+      restored = app.result.current.restoreWorkspaceNavigation(
+        otherAgentNavigation,
+        app.result.current.navigationIntentSequence
+      )
+    })
+    expect(typeof restored).toBe('number')
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(OTHER_AGENT))
+    await waitForSettled(app)
+
+    expect(visibleConversation(app)).toEqual({ activeChatId: null, messageIds: [] })
+    expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith(OTHER_AGENT, 'o-1')
   })
 })
