@@ -133,13 +133,15 @@ async function invitationListResponse(
 /**
  * How an acceptance writes the invitation's team memberships.
  * - `upsert`: the invitee accepted this invitation themselves (invitation link,
- *   password login). The invited role replaces an existing one and a removed
- *   membership becomes active again.
- * - `insert_only`: the invitation is applied without the invitee choosing it
- *   (OIDC sign-in). A membership is added only for a team where the user has no
- *   team_members row in any status; an existing row, including a removed one,
- *   is never changed, so an invitation can neither demote nor restore a member.
- *   The acceptance reports a team that kept its row as `existing_membership`.
+ *   password login), or an OIDC sign-in created the account in this same
+ *   transaction, so it has no earlier memberships to protect. The invited role
+ *   replaces an existing one and a removed membership becomes active again.
+ * - `insert_only`: OIDC sign-in of an EXISTING account, which applies the
+ *   invitation without the invitee choosing it. A membership is added only for
+ *   a team where the user has no team_members row in any status; an existing
+ *   row, including a removed one, is never changed, so an invitation can
+ *   neither demote nor restore a member. The acceptance reports a team that
+ *   kept its row as `existing_membership`.
  */
 export type InvitationMembershipWrite = 'upsert' | 'insert_only'
 
