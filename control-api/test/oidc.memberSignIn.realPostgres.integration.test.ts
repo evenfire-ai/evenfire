@@ -1140,6 +1140,35 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     }
   })
 
+  it('a member linked by sign-in and then retired is refused with account_disabled', async () => {
+    const email = `${uniqueLabel('linked-retired')}@fixture.test`
+    const userId = await seedUser(email)
+    const subject = uniqueLabel('linked-retired-subject')
+    const claims = { sub: subject, email, email_verified: true }
+    const first = signedIn(await signIn(defaultFake, await defaultFake.signIn(claims)))
+    expect(first).toMatchObject({ userId, created: { account: false, link: true } })
+
+    const retirement = await retireDesktopUser(
+      { kind: 'control_admin', controlAdminId: actorId },
+      userId,
+      'linked member retired',
+      uniqueLabel('linked-retired-key'),
+      'linked-retired-request'
+    )
+    expect(retirement).toMatchObject({ id: userId, outcome: 'retired' })
+    const proof = await defaultFake.signIn(claims)
+    const before = await watchedTables()
+
+    expect(await signIn(defaultFake, proof)).toEqual({
+      status: 'refused',
+      reason: 'account_disabled',
+    })
+    expect(await watchedTables()).toEqual(before)
+    expect(await linkCount(subject)).toBe(1)
+    // Only the first sign-in's session row: the refusal issued none.
+    expect(await sessionCount(userId)).toBe(1)
+  })
+
   describe('removing a member who never signed in with OIDC', () => {
     const retirementActor = () => ({ kind: 'control_admin' as const, controlAdminId: actorId })
 
