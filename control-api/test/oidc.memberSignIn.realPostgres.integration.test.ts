@@ -17,7 +17,7 @@ import {
   type InvitationPurpose,
   insertInvitationForTeams,
 } from '../src/services/directory/invitationStore.js'
-import { googleLoginData } from '../src/services/directory/login.js'
+import { findFirstActiveMembership, googleLoginData } from '../src/services/directory/login.js'
 import {
   acceptInvitationForEmailInTransaction,
   deleteManagedUserForUser,
@@ -1322,6 +1322,121 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       })
     }
   })
+
+  it.each(['lower id', 'higher id'] as const)(
+    "an existing teamless member invited to two new teams lands in the newer-created invitation's team: newest has the %s",
+    async newest => {
+      const email = `${uniqueLabel('latest-existing')}@fixture.test`
+      const userId = await seedUser(email)
+      const { older, newer } = await seedTwoInvitations(
+        email,
+        [
+          { teamId: await seedTeam('latest-existing-a'), role: 'member' },
+          { teamId: await seedTeam('latest-existing-b'), role: 'inviter' },
+        ],
+        newest
+      )
+      const proof = await defaultFake.signIn({
+        sub: uniqueLabel('latest-existing-subject'),
+        email,
+        email_verified: true,
+      })
+
+      const result = signedIn(await signIn(defaultFake, proof, { contract: 'v1' }))
+
+      expect(result).toMatchObject({
+        userId,
+        created: { account: false, link: true },
+        invitationsApplied: 2,
+      })
+      for (const invitation of [older, newer]) {
+        expect(await invitationState(invitation.id)).toEqual({
+          status: 'accepted',
+          accepted_user_id: userId,
+        })
+      }
+      const memberships = await membershipsOf(userId)
+      expect(memberships).toHaveLength(2)
+      expect(memberships).toEqual(
+        expect.arrayContaining([
+          { team_id: older.teamId, role: older.role },
+          { team_id: newer.teamId, role: newer.role },
+        ])
+      )
+      expect(verifyExternalSessionToken(result.token)).toMatchObject({
+        userId,
+        teamId: newer.teamId,
+        role: newer.role,
+      })
+    }
+  )
+
+  it.each(['lower id', 'higher id'] as const)(
+    "a new account invited to two teams lands in the newer-created invitation's team, not the fallback's: newest has the %s",
+    async newest => {
+      const newMemberTeam = await seedTeam('latest-new-account-member-team')
+      const fake = entraFake(`fake-entra-latest-new-account-${newest.replace(' ', '-')}`, {
+        CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: newMemberTeam,
+      })
+      const email = `${uniqueLabel('latest-new-account')}@entra.fixture.test`
+      const { older, newer } = await seedTwoInvitations(
+        email,
+        [
+          { teamId: await seedTeam('latest-new-account-a'), role: 'member' },
+          { teamId: await seedTeam('latest-new-account-b'), role: 'inviter' },
+        ],
+        newest
+      )
+      // Every row this sign-in writes shares one NOW(), so the first-active-team
+      // fallback ties on the two invited teams. An invitation for this address
+      // to the older team, accepted after the sign-in began (as one accepted by
+      // a concurrent transaction would be), makes that fallback rank the older
+      // team first. Only the newest-invitation rule then picks the newer team.
+      const concurrent = await seedInvitation({ email, teamId: older.teamId, role: older.role })
+      await testPool.query(
+        `UPDATE invitations
+            SET status = 'accepted', accepted_at = NOW() + INTERVAL '1 hour'
+          WHERE id = $1`,
+        [concurrent.id]
+      )
+
+      const result = signedIn(
+        await signIn(
+          fake,
+          await fake.signIn({
+            sub: uniqueLabel('latest-new-account-subject'),
+            tid: ENTRA_TENANT_ID,
+            email,
+            email_verified: true,
+          }),
+          { contract: 'v1' }
+        )
+      )
+
+      expect(result).toMatchObject({
+        created: { account: true, link: true },
+        invitationsApplied: 2,
+      })
+      const memberships = await membershipsOf(result.userId)
+      expect(memberships).toHaveLength(3)
+      expect(memberships).toEqual(
+        expect.arrayContaining([
+          { team_id: newMemberTeam, role: 'member' },
+          { team_id: older.teamId, role: older.role },
+          { team_id: newer.teamId, role: newer.role },
+        ])
+      )
+      expect(verifyExternalSessionToken(result.token)).toMatchObject({
+        userId: result.userId,
+        teamId: newer.teamId,
+        role: newer.role,
+      })
+      // Witness that the setup forces the fallback elsewhere: on its own it
+      // ranks the older team first.
+      const fallback = await findFirstActiveMembership(testPool, result.userId)
+      expect(fallback.rows[0]).toMatchObject({ team_id: older.teamId })
+    }
+  )
 
   it('a member linked by sign-in and then retired is refused with account_disabled', async () => {
     const email = `${uniqueLabel('linked-retired')}@fixture.test`
