@@ -8,7 +8,7 @@ import { McpRuntimeProvider } from '@contexts/McpRuntimeContext'
 import { NavigationContext } from '@contexts/NavigationContext'
 import type { NavigationContextValue } from '@contexts/NavigationContext'
 import { QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { ComposerPanel } from '@components/agents/ComposerPanel'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '@constants/navigation'
 import type { AccessCatalog } from '../../../../src/types'
@@ -29,6 +29,7 @@ import {
   seedChats,
   selectInDrawer,
   visibleConversation,
+  waitFor,
   waitForSettled,
 } from '../domain/__tests__/__fixtures__/drawerSelectionFixtures'
 import { ipcHostAccessDenied } from '../domain/__tests__/__fixtures__/ipcErrors'

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, waitFor } from '@testing-library/react'
+import { act } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { installAppControllerClerum } from '../domain/__tests__/__fixtures__/appControllerHarness'
 import {
@@ -15,6 +15,7 @@ import {
   seedChats,
   selectInDrawer,
   visibleConversation,
+  waitFor,
   waitForSettled,
 } from '../domain/__tests__/__fixtures__/drawerSelectionFixtures'
 import { type MockClerum, uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
@@ -246,7 +247,7 @@ describe('useAppController — drawer selection across non-chat tab changes', ()
     expect(visibleConversation(app)).toEqual({ activeChatId: null, messageIds: [] })
   })
 
-  it('characterizes pre-existing: a same-agent “latest” drawer pick stays unconsumed across non-chat tab changes', async () => {
+  it('accepted cost: a same-agent “latest” drawer pick stays unconsumed across non-chat tab changes', async () => {
     await seedChats(clerum, 'agent-x', ['x-1', 'x-2'])
     app = await bootApp()
     await openDrawerOverFiles(app, 'agent-x', 'x-1')
