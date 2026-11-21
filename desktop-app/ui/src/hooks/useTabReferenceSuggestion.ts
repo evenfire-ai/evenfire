@@ -175,9 +175,9 @@ export function useTabReferenceSuggestion({
       attemptsRef.current = { requestKey, n }
       if (n >= MAX_ATTEMPTS) {
         // A candidate shown while revalidating is dropped here too: the key
-        // moved because the file changed after that candidate was resolved, so
-        // keeping it would offer a version known to be stale until the next
-        // change.
+        // moved, so the file may have changed (a watched change, a resync, a
+        // reload or another view of it) after that candidate was resolved.
+        // Without a fresh answer that cannot be ruled out, so it is not offered.
         setCache({ key: prefetchKey, gfsUri, scope, result: { status: 'none' } })
         return
       }
