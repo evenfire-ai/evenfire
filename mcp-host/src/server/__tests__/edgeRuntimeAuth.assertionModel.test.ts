@@ -14,7 +14,8 @@ import { signHostEdgeTestAssertion } from '../../__tests__/rpcProxyEdgeTestHeade
 // guard: random command sequences build a request (assertion, clear headers,
 // clock), and after each command the Host verdict must equal the verdict of a
 // reference model that accepts only a single V1 assertion bound to the clear
-// user, the clear team and this Host, inside its lifetime.
+// user, the clear team, this Host and the route scope, inside its lifetime,
+// on a request without a V2 action context.
 
 const HOST_NAME = 'chatllm'
 const NAMESPACE = 'mcp-host'
@@ -23,6 +24,7 @@ const OTHER_HOST = `${NAMESPACE}/other-host`
 const USERS = ['11111111-1111-4111-8111-111111111111', '99999999-9999-4999-8999-999999999999']
 const TEAMS: Array<string | null> = [null, 'team-a', 'team-b']
 const MESSAGE_SCOPE = HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/messages']
+const STATUS_SCOPE = HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/status']
 
 type Issued = {
   token: string
@@ -30,6 +32,7 @@ type Issued = {
   sub: string
   teamId: string | null
   host: string
+  scope: string
   exp: number
 }
 type Model = {
@@ -38,14 +41,19 @@ type Model = {
   teamId: string | null
   assertion: Issued | null
   duplicated: boolean
+  actionContext: boolean
 }
 type Real = { baseUrl: string; handlerCalls: () => number }
 type Verdict = { status: number; body: unknown }
 
 const MISSING: Verdict = { status: 401, body: { error: 'Missing runtime edge assertion' } }
 const INVALID: Verdict = { status: 401, body: { error: 'Invalid runtime edge assertion' } }
+// V1 context headers next to a V2 action context are refused before any
+// assertion is read.
+const MIXED: Verdict = { status: 401, body: { error: 'Missing runtime edge caller context' } }
 
 function expected(model: Model): Verdict {
+  if (model.actionContext) return MIXED
   const a = model.assertion
   if (!a) return MISSING
   const accepted =
@@ -54,23 +62,24 @@ function expected(model: Model): Verdict {
     a.sub === model.user &&
     a.teamId === model.teamId &&
     a.host === THIS_HOST &&
+    a.scope === MESSAGE_SCOPE &&
     Math.floor(model.nowMs / 1000) < a.exp
   return accepted ? { status: 200, body: { userId: model.user, teamId: model.teamId } } : INVALID
 }
 
-function issue(model: Model, v: 1 | 2, host: string): Issued {
+function issue(model: Model, v: 1 | 2, host: string, scope: string): Issued {
   const iat = Math.floor(model.nowMs / 1000)
   const exp = iat + HOST_EDGE_ASSERTION_MAX_TTL_SECONDS
   const token = signHostEdgeTestAssertion({
     sub: model.user,
     host,
     teamId: model.teamId,
-    scopes: [MESSAGE_SCOPE],
+    scopes: [scope],
     v,
     iat,
     exp,
   })
-  return { token, v, sub: model.user, teamId: model.teamId, host, exp }
+  return { token, v, sub: model.user, teamId: model.teamId, host, scope, exp }
 }
 
 function send(real: Real, model: Model): Promise<Verdict> {
@@ -86,6 +95,7 @@ function send(real: Real, model: Model): Promise<Verdict> {
     model.user,
   ]
   if (model.teamId !== null) raw.push('x-clerum-edge-team-id', model.teamId)
+  if (model.actionContext) raw.push('x-clerum-edge-action-context', 'v2-action-context')
   if (model.assertion) {
     raw.push(HOST_EDGE_ASSERTION_HEADER, model.assertion.token)
     if (model.duplicated) raw.push(HOST_EDGE_ASSERTION_HEADER, model.assertion.token)
@@ -125,15 +135,18 @@ abstract class Step implements fc.AsyncCommand<Model, Real> {
 }
 
 class IssueAssertion extends Step {
-  constructor(private readonly v: 1 | 2) {
+  constructor(
+    private readonly v: 1 | 2,
+    private readonly scope: string
+  ) {
     super()
   }
   apply(model: Model) {
-    model.assertion = issue(model, this.v, THIS_HOST)
+    model.assertion = issue(model, this.v, THIS_HOST, this.scope)
     model.duplicated = false
   }
   toString() {
-    return `issue V${this.v}`
+    return `issue V${this.v} for ${this.scope}`
   }
 }
 
@@ -167,7 +180,8 @@ class SwapHostIdentity extends Step {
     model.assertion = issue(
       { ...model, user: current.sub, teamId: current.teamId },
       current.v,
-      current.host === THIS_HOST ? OTHER_HOST : THIS_HOST
+      current.host === THIS_HOST ? OTHER_HOST : THIS_HOST,
+      current.scope
     )
   }
   toString() {
@@ -191,6 +205,15 @@ class DropAssertion extends Step {
   }
   toString() {
     return 'drop the assertion header'
+  }
+}
+
+class ToggleActionContext extends Step {
+  apply(model: Model) {
+    model.actionContext = !model.actionContext
+  }
+  toString() {
+    return 'toggle the V2 action context header'
   }
 }
 
@@ -253,13 +276,19 @@ describe('rpc-proxy edge assertion model', () => {
   it('matches the reference model on every command sequence', async () => {
     const startMs = new Date('2026-11-21T12:00:00.000Z').getTime()
     const commands = [
-      fc.constantFrom(1 as const, 2 as const).map(v => new IssueAssertion(v)),
+      fc
+        .tuple(
+          fc.constantFrom(1 as const, 2 as const),
+          fc.constantFrom(MESSAGE_SCOPE, STATUS_SCOPE)
+        )
+        .map(([v, scope]) => new IssueAssertion(v, scope)),
       fc.constant(new MutateClearUser()),
       fc.constantFrom(...TEAMS).map(teamId => new MutateTeam(teamId)),
       fc.constant(new SwapHostIdentity()),
       fc.constant(new AdvancePastExpiry()),
       fc.constant(new DropAssertion()),
       fc.constant(new DuplicateAssertion()),
+      fc.constant(new ToggleActionContext()),
     ]
     await fc.assert(
       fc.asyncProperty(fc.commands(commands, { maxCommands: 12 }), async cmds => {
@@ -269,6 +298,7 @@ describe('rpc-proxy edge assertion model', () => {
           teamId: null,
           assertion: null,
           duplicated: false,
+          actionContext: false,
         }
         await fc.asyncModelRun(() => ({ model, real }), cmds)
       }),
