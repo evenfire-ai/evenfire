@@ -13,6 +13,18 @@ export type OidcRefusalReason =
   | 'no_account'
   | 'provider_configuration'
 
+/**
+ * Why a `provider_configuration` refusal happened. It is for the operator's log
+ * only and never leaves control-api: the browser sees the reason alone.
+ */
+export type OidcRefusalCause = 'connection_mismatch' | 'unknown_new_member_team'
+
+export type OidcRefusal = Readonly<{
+  status: 'refused'
+  reason: OidcRefusalReason
+  cause?: OidcRefusalCause
+}>
+
 export type OidcResolvedAccount = Readonly<{
   userId: string
   /** The stored `users.email`, not the provider's claim. */
@@ -25,7 +37,7 @@ export type OidcResolvedAccount = Readonly<{
 
 export type OidcResolution =
   | Readonly<{ status: 'resolved'; account: OidcResolvedAccount; guest: boolean }>
-  | Readonly<{ status: 'refused'; reason: OidcRefusalReason }>
+  | OidcRefusal
 
 type Query = Pick<DbClient, 'query'>
 
@@ -38,8 +50,10 @@ type LockedUser = {
 
 type OidcIdentity = Readonly<{ connectionId: string; issuer: string; subject: string }>
 
-function refused(reason: OidcRefusalReason): OidcResolution {
-  return Object.freeze({ status: 'refused', reason })
+function refused(reason: OidcRefusalReason, cause?: OidcRefusalCause): OidcResolution {
+  return Object.freeze(
+    cause === undefined ? { status: 'refused', reason } : { status: 'refused', reason, cause }
+  )
 }
 
 function resolved(
@@ -189,7 +203,7 @@ export async function resolveOidcAccount(
   const guest = eligibility.guest
 
   if ((await ensureOidcConnection(db, provider)) === 'mismatch') {
-    return refused('provider_configuration')
+    return refused('provider_configuration', 'connection_mismatch')
   }
 
   const identity: OidcIdentity = {
@@ -235,7 +249,7 @@ export async function resolveOidcAccount(
   // Row 4: create the account.
   if (!(await accountCreationAllowed(db, policy, claimEmail))) return refused('no_account')
   if (policy.newMemberTeamId !== null && !(await newMemberTeamExists(db, policy.newMemberTeamId))) {
-    return refused('provider_configuration')
+    return refused('provider_configuration', 'unknown_new_member_team')
   }
 
   const name = proof.attributes.name || null

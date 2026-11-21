@@ -312,10 +312,29 @@ export function createExternalOidcProfileFlowRouter(
       return
     }
     if (result.status === 'refused') {
-      logger.info(
-        { event: 'oidc_member_refused', ...audit, reason: result.reason },
-        'OIDC member sign-in refused'
-      )
+      if (result.cause === undefined) {
+        logger.info(
+          { event: 'oidc_member_refused', ...audit, reason: result.reason },
+          'OIDC member sign-in refused'
+        )
+      } else {
+        // A configuration refusal names its cause for the operator; the cause
+        // never goes into the response.
+        logger.warn(
+          {
+            event: 'oidc_member_refused',
+            ...audit,
+            reason: result.reason,
+            cause: result.cause,
+            ...(result.cause === 'connection_mismatch'
+              ? { action: 'use a new registration id' }
+              : {}),
+          },
+          result.cause === 'connection_mismatch'
+            ? 'OIDC member sign-in refused: the registration id is recorded for another issuer or client; use a new registration id'
+            : 'OIDC member sign-in refused: the configured new-member team does not exist'
+        )
+      }
       res.status(200).json({
         outcome: 'refused',
         memberAuthenticationActivated: true,

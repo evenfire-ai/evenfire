@@ -11,7 +11,7 @@ import {
   issueExternalUserSession,
 } from './externalSessionIssuance.js'
 import {
-  type OidcRefusalReason,
+  type OidcRefusal,
   type OidcResolvedAccount,
   resolveOidcAccount,
 } from './oidcAccountResolution.js'
@@ -25,7 +25,7 @@ export type OidcMemberSignInResult =
       created: { account: boolean; link: boolean }
       invitationsApplied: number
     }>
-  | Readonly<{ status: 'refused'; reason: OidcRefusalReason }>
+  | OidcRefusal
 
 type OidcMemberSignInInput = Readonly<{
   proof: VerifiedOidcIdentityProof

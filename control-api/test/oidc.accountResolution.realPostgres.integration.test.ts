@@ -758,7 +758,11 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
 
     const result = await resolve(fake, proof)
 
-    expect(result).toEqual({ status: 'refused', reason: 'provider_configuration' })
+    expect(result).toEqual({
+      status: 'refused',
+      reason: 'provider_configuration',
+      cause: 'unknown_new_member_team',
+    })
     expect(await usersWithEmail(email)).toEqual([])
     expect(await linksFor(subject)).toEqual([])
     expect(await watchedTables()).toEqual(before)
@@ -784,6 +788,7 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
       expect(await resolve(fake, proof)).toEqual({
         status: 'refused',
         reason: 'provider_configuration',
+        cause: 'connection_mismatch',
       })
       expect(await linksFor(subject)).toEqual([])
     }

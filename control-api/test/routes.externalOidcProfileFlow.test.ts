@@ -383,6 +383,42 @@ describe('Control API OIDC member sign-in completion', () => {
     }
   )
 
+  it.each([
+    ['connection_mismatch', { action: 'use a new registration id' }],
+    ['unknown_new_member_team', {}],
+  ] as const)(
+    'a provider_configuration refusal logs its cause %s and keeps it off the wire',
+    async (cause, extra) => {
+      const signInMember = vi
+        .fn()
+        .mockResolvedValue({ status: 'refused', reason: 'provider_configuration', cause })
+      const app = appWithMemberSignIn(signInMember)
+
+      const response = await request(app).post(COMPLETE_PATH).send(completeBody)
+
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({
+        outcome: 'refused',
+        memberAuthenticationActivated: true,
+        reason: 'provider_configuration',
+      })
+      expect(JSON.stringify(response.body)).not.toContain(cause)
+      expect(signInMember).toHaveBeenCalledTimes(1)
+      expect(flowLog.info).not.toHaveBeenCalled()
+      expect(flowLog.warn).toHaveBeenCalledTimes(1)
+      expect(flowLog.warn.mock.calls[0]?.[0]).toEqual({
+        event: 'oidc_member_refused',
+        registrationId: provider.registrationId,
+        issuer: provider.issuer,
+        subjectFingerprint: expect.stringMatching(/^[0-9a-f]{16}$/),
+        reason: 'provider_configuration',
+        cause,
+        ...extra,
+      })
+      expect(loggedText()).not.toMatch(/opaque-provider-subject|member@example/)
+    }
+  )
+
   it('sign-in failure is a non-retryable 503 and the log has no err detail', async () => {
     const failure = Object.assign(
       new Error(`duplicate key value violates unique constraint for ${MEMBER_EMAIL}`),
