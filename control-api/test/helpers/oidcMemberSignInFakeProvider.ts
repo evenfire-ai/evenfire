@@ -10,6 +10,7 @@ import {
   loadOidcProviderConfiguration,
   readOidcClientSecret,
 } from '../../src/oidc/configuration.js'
+import { MEMBER_POLICY_EVIDENCE_CLAIM_NAMES } from '../../src/oidc/memberEligibility.js'
 import { OidcProtocolEngine, type VerifiedOidcIdentityProof } from '../../src/oidc/protocol.js'
 import {
   OIDC_R5_PUBLIC_IP,
@@ -56,7 +57,7 @@ export type OidcMemberSignInFakeProviderOptions = {
 
 export type OidcMemberSignInFakeProvider = {
   provider: OidcProviderConfiguration
-  /** Built with policyEvidenceClaimNames ['tid','idp','roles','acct']. */
+  /** Built with the route's own policy evidence claim names (MEMBER_POLICY_EVIDENCE_CLAIM_NAMES). */
   engine: OidcProtocolEngine
   /** The exact `CONTROL_API_OIDC_*` environment the provider was loaded from. */
   env: Record<string, string>
@@ -84,7 +85,6 @@ const CLIENT_ID = 'fake-member-sign-in-client'
 const CLIENT_SECRET = 'fake-member-sign-in-client-secret'
 const REDIRECT_URI = 'https://control.example.test/api/v1/oidc/callback'
 const GENERATION_KEY_HEX = 'cd'.repeat(32)
-const POLICY_EVIDENCE_CLAIM_NAMES = ['tid', 'idp', 'roles', 'acct'] as const
 const ID_TOKEN_LIFETIME_SECONDS = 300
 
 type SigningKey = { privateKey: KeyObject; publicKey: KeyObject; kid: string }
@@ -222,7 +222,7 @@ export function createOidcMemberSignInFakeProvider(
     db: options.db ?? new OidcR5MemoryAttemptDb().client,
     getClientSecret: () => readOidcClientSecret(provider, env),
     encryptionKeyHex: GENERATION_KEY_HEX,
-    policyEvidenceClaimNames: POLICY_EVIDENCE_CLAIM_NAMES,
+    policyEvidenceClaimNames: MEMBER_POLICY_EVIDENCE_CLAIM_NAMES,
     now: () => Date.now(),
   })
 

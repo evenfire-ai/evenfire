@@ -5,6 +5,7 @@ import { pool } from '../../db.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import { rootLogger } from '../../observability/logger.js'
 import { loadOidcProviderConfiguration } from '../../oidc/configuration.js'
+import { MEMBER_POLICY_EVIDENCE_CLAIM_NAMES } from '../../oidc/memberEligibility.js'
 import { OidcProtocolEngine, type VerifiedOidcIdentityProof } from '../../oidc/protocolEngine.js'
 import {
   OidcAttemptRejectedError,
@@ -28,9 +29,6 @@ const CODE_RE = /^[\x21-\x7e]{1,4096}$/
 const ISSUER_MAX_LENGTH = 2048
 const ERROR_CODE_RE = /^[A-Za-z0-9_]{1,64}$/
 const OIDC_SETTING_NAME_RE = /CONTROL_API_OIDC_[A-Z_]+/g
-
-/** The claims member eligibility reads (tenant, guest markers, roles), kept as verified evidence. */
-const POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze(['tid', 'idp', 'roles', 'acct'])
 
 type Provider = NonNullable<ReturnType<typeof loadOidcProviderConfiguration>>
 type Engine = Pick<
@@ -71,7 +69,7 @@ function defaultEngine(provider: Provider): OidcProtocolEngine {
     db: pool,
     getClientSecret: () => process.env[provider.clientSecretRef] ?? '',
     encryptionKeyHex: config.oauthEncryptionKey,
-    policyEvidenceClaimNames: POLICY_EVIDENCE_CLAIM_NAMES,
+    policyEvidenceClaimNames: MEMBER_POLICY_EVIDENCE_CLAIM_NAMES,
   })
   engines.clear()
   engines.set(provider.configurationGeneration, engine)

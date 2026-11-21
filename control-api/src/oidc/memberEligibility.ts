@@ -31,6 +31,18 @@ function isPlausibleEmail(value: unknown): value is string {
   )
 }
 
+/**
+ * The claims member eligibility reads (tenant, guest markers, roles) beyond the
+ * email claims the protocol engine always keeps. The member sign-in route builds
+ * its engine with exactly these, so each is kept as verified evidence.
+ */
+export const MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze([
+  'tid',
+  'idp',
+  'roles',
+  'acct',
+] as const)
+
 /** Claims whose "unsupported" observation means we cannot judge eligibility. */
 const ELIGIBILITY_CLAIMS = ['tid', 'idp', 'roles', 'acct', 'email_verified'] as const
 
