@@ -23,6 +23,7 @@ import {
   readChannelCap,
   readModeCeiling,
 } from '../core/approval/approvalMode'
+import { approverPolicyIsInvalid } from '../core/approval/approverPolicy'
 import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
 import type { ShellAction } from '../core/approval/shellCard'
 import type { ShellClassifierCaller } from '../core/approval/shellClassifier'
@@ -261,9 +262,10 @@ export class AgentStateMachine extends EventEmitter {
   // Persistent core event emitter (Gap 3 resolution: bridges agent-level events to SimpleEventEmitter)
   private coreEvents = new SimpleEventEmitter()
 
-  // Phase 6: Approval. `approvalConfig` is the effective policy (tools and
-  // live-set). `approvalHostSpec` is the Host spec alone, or the dev env
-  // config, and is what the ceiling and channel cap read.
+  // Phase 6: Approval. `approvalConfig` is the effective policy (tools,
+  // live-set, and the approver policy the channel cap reads).
+  // `approvalHostSpec` is the Host spec alone, or the dev env config, and is
+  // what the ceiling and the channel switch read.
   private approvalConfig: ApprovalConfig | undefined
   private approvalHostSpec: ApprovalConfig | undefined
   private guardrailsConfig: GuardrailsConfig | undefined
@@ -691,6 +693,12 @@ export class AgentStateMachine extends EventEmitter {
     for (const warning of approvalModeConfigWarnings(hostSpec)) {
       logger.warn({ event: 'approval_config_invalid', field: warning.field }, warning.message)
     }
+    if (approverPolicyIsInvalid(config)) {
+      logger.warn(
+        { event: 'approval_config_invalid', field: 'defaultPolicy' },
+        'defaultPolicy is not cli_only, channel_users or designated_approvers; every messaging-channel session runs manual'
+      )
+    }
     this.sweepEffectiveApprovalModes()
   }
 
@@ -701,6 +709,8 @@ export class AgentStateMachine extends EventEmitter {
   /**
    * A new config can lower the ceiling or a channel cap for every in-memory
    * session, including one that makes no tool call before the ceiling returns.
+   * The cap carries the approver policy, so a `defaultPolicy` or `approvers`
+   * change that no longer allows a session's owner lowers it here too.
    * `listByPrefix('')` is the same objects the executors hold.
    */
   private sweepEffectiveApprovalModes(): void {
@@ -711,7 +721,7 @@ export class AgentStateMachine extends EventEmitter {
       const effective = effectiveApprovalMode(
         stored,
         ceiling,
-        readChannelCap(snapshot, conversation.channel_type ?? undefined)
+        readChannelCap(snapshot, conversation.channel_type ?? undefined, conversation.user_id)
       )
       const synced = syncEffectiveMode(conversation, effective)
       if (!synced.changed) continue
@@ -1253,8 +1263,9 @@ export class AgentStateMachine extends EventEmitter {
     // Resume execution (fire and forget).
     // Session release happens in onComplete/onFail callbacks.
     // The effective mode is the live answer-time value, not the mode that
-    // opened the card. rpc is the desktop surface; every other channel uses
-    // the channel descriptor flag.
+    // opened the card: a ceiling, switch or approver-policy change made while
+    // the card waited applies. rpc is the desktop surface; every other channel
+    // uses the channel descriptor flag.
     const conversation = executor.sessionKey
       ? this.conversationManager.getSessionByKey(executor.sessionKey)
       : undefined
@@ -1262,7 +1273,7 @@ export class AgentStateMachine extends EventEmitter {
     const effectiveMode = effectiveApprovalMode(
       normalizeApprovalMode(conversation?.approval_mode),
       readModeCeiling(live),
-      readChannelCap(live, conversation?.channel_type)
+      readChannelCap(live, conversation?.channel_type, conversation?.user_id)
     )
     executor
       .resumeAfterApproval(alwaysApprove, userId, {

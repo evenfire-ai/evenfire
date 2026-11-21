@@ -17,13 +17,13 @@ import {
   parseApprovalModeCommand,
   raisesApprovalMode,
   readChannelCap,
+  readChannelSwitch,
   readModeCeiling,
 } from '../core/approval/approvalMode'
+import { type ApproverPolicyRefusal, approverPolicyRefusal } from '../core/approval/approverPolicy'
 import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
 import type { ConversationManager } from '../core/conversation/conversation'
 import { FileReferenceErrorCode, LlmErrorCode } from '../core/errors'
-import { ApprovalResolver } from '../core/extensions/approvalResolver'
-import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import {
   chatTransportSupportsImageInput,
   imageInputDenialMessage,
@@ -99,7 +99,10 @@ export interface IncomingAdmissionDeps {
   }
   /** Live session store for the first-message mode and the messaging command. */
   getConversationManager?: () => ConversationManager
-  /** Live ceiling and channel cap. Read when a writer runs, not at wiring time. */
+  /**
+   * Live ceiling, channel switch and approver policy. Read when a writer runs,
+   * not at wiring time.
+   */
   approvalSnapshot?: () => ApprovalConfigSnapshot
 }
 
@@ -129,92 +132,13 @@ function carriedApprovalMode(message: IncomingMessage): ApprovalMode | undefined
   return undefined
 }
 
-type ApprovalModeRefusal = 'channel' | 'policy_cli_only' | 'not_approver' | 'policy_invalid'
+type ApprovalModeRefusal = 'channel' | ApproverPolicyRefusal
 
 const APPROVAL_MODE_REFUSAL_TEXT: Record<ApprovalModeRefusal, string> = {
   channel: 'This channel is limited to manual.',
   policy_cli_only: "This Host's approval policy does not let a messaging channel raise the mode.",
   not_approver: 'Only a designated approver can raise the mode.',
   policy_invalid: "This Host's approval policy is not valid, so the mode cannot be raised.",
-}
-
-const approvalResolver = new ApprovalResolver()
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/**
- * The config `canUserApprove` reads for a designated-approvers raise, or null
- * to refuse. That function trusts the CRD schema, which a dev-mode or
- * ConfigMap policy skips: an absent `channels` would throw, and a string
- * `approvers` would match by substring, so either shape refuses here, as does
- * a non-boolean `enabled`. An absent `enabled` reads as enabled, the same
- * opt-out rule as an absent channel block. `canUserApprove` reads a missing
- * key as disabled, so the entry is passed with `enabled: true`. Only
- * `enabled: false` refuses a listed approver.
- */
-function designatedApproverConfig(
-  config: ApprovalConfig,
-  channelType: string
-): ApprovalConfig | null {
-  const channels: unknown = config.channels
-  if (!isPlainObject(channels)) return null
-  const entry = channels[channelType]
-  if (entry === undefined) return config
-  if (!isPlainObject(entry)) return null
-  const { approvers, enabled } = entry
-  if (
-    approvers !== undefined &&
-    !(Array.isArray(approvers) && approvers.every(approver => typeof approver === 'string'))
-  ) {
-    return null
-  }
-  if (enabled !== undefined && typeof enabled !== 'boolean') return null
-  if (enabled !== undefined) return config
-  return {
-    ...config,
-    channels: { ...channels, [channelType]: { ...entry, enabled: true } },
-  } as ApprovalConfig
-}
-
-/**
- * The approver policy for a messaging-channel raise. Unset (absent, null or
- * empty) and `channel_users` add no check, so the channel switch alone
- * decides. `cli_only` and `designated_approvers` use `canUserApprove`:
- * cli_only refuses every channel sender, and designated_approvers needs the
- * sender in that channel's `approvers`, in a block not set `enabled: false`.
- * Any other value refuses: the CRD enum does not cover a dev-mode or
- * ConfigMap policy.
- */
-function approverPolicyRefusal(
-  message: IncomingMessage,
-  config: ApprovalConfig | undefined
-): ApprovalModeRefusal | null {
-  if (!config) return null
-  const policy: unknown = config.defaultPolicy
-  if (policy === undefined || policy === null || policy === '' || policy === 'channel_users') {
-    return null
-  }
-  if (policy !== 'cli_only' && policy !== 'designated_approvers') {
-    logger.warn(
-      { event: 'approval_config_invalid', field: 'defaultPolicy' },
-      'defaultPolicy is not cli_only, channel_users or designated_approvers; a messaging channel cannot raise the mode'
-    )
-    return 'policy_invalid'
-  }
-  const resolved =
-    policy === 'cli_only' ? config : designatedApproverConfig(config, message.channelType)
-  const allowed =
-    resolved !== null &&
-    approvalResolver.canUserApprove(
-      message.sender,
-      message.channelType,
-      message.channelId,
-      resolved
-    )
-  if (allowed) return null
-  return policy === 'cli_only' ? 'policy_cli_only' : 'not_approver'
 }
 
 function approvalModeReply(
@@ -407,7 +331,11 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             source: normalizedMessage.channelType,
           })
           const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
-          const channelCap = readChannelCap(live, conversation.channel_type)
+          // The switch decides what the command stores and whether the reply
+          // names the channel. The cap, which adds the approver policy for
+          // this session's owner, decides the effective mode.
+          const channelSwitch = readChannelSwitch(live, conversation.channel_type)
+          const channelCap = readChannelCap(live, conversation.channel_type, conversation.user_id)
           const ceiling = readModeCeiling(live)
           const current = normalizeApprovalMode(conversation.approval_mode)
           const logCommandRefusal = (reason: ApprovalModeRefusal, outcome: string): void => {
@@ -422,14 +350,30 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
               `Approval mode command refused; ${outcome}`
             )
           }
-          // The approver policy gates raises only, after the channel check.
-          // A mode at or below the stored one, and manual, always pass. The
-          // policy is the one in force (`effective`), as notifications use.
-          // A refused raise stores nothing: the stored mode stays as it was.
+          // The command refuses a raise the approver policy does not allow,
+          // after the channel check. A mode at or below the stored one, and
+          // manual, always pass. The policy is the one in force (`effective`),
+          // as notifications use, applied to the session's owner and stored
+          // channel type exactly as `readChannelCap` applies it. A refused
+          // raise stores nothing: the stored mode stays as it was. The policy
+          // also caps the running mode, so the reply's effective mode reads
+          // the cap.
+          const sessionChannel = conversation.channel_type
           const policyRefusal =
-            channelCap === 'allow_all' && raisesApprovalMode(current, command)
-              ? approverPolicyRefusal(normalizedMessage, live.effective)
+            channelSwitch === 'allow_all' &&
+            sessionChannel !== undefined &&
+            raisesApprovalMode(current, command)
+              ? approverPolicyRefusal(live.effective, {
+                  userId: conversation.user_id,
+                  channelType: sessionChannel,
+                })
               : null
+          if (policyRefusal === 'policy_invalid') {
+            logger.warn(
+              { event: 'approval_config_invalid', field: 'defaultPolicy' },
+              'defaultPolicy is not cli_only, channel_users or designated_approvers; a messaging channel cannot raise the mode'
+            )
+          }
           if (policyRefusal) {
             logCommandRefusal(policyRefusal, 'stored mode unchanged')
             return {
@@ -445,13 +389,13 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           const stored = await manager.setApprovalMode(
             conversation,
             command,
-            { ceiling, cap: channelCap },
+            { ceiling, cap: channelCap, channelSwitch },
             'command',
             normalizedMessage.sender
           )
           // With the channel switch off, the command stores manual.
           const refusal: ApprovalModeRefusal | null =
-            command !== 'manual' && channelCap !== 'allow_all' ? 'channel' : null
+            command !== 'manual' && channelSwitch !== 'allow_all' ? 'channel' : null
           if (refusal) logCommandRefusal(refusal, 'stored manual')
           return {
             success: true,
@@ -613,7 +557,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         if (!created) return undefined
         const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
         const ceiling = readModeCeiling(live)
-        const cap = readChannelCap(live, conversation.channel_type)
+        const cap = readChannelCap(live, conversation.channel_type, conversation.user_id)
         const effective = effectiveApprovalMode(requested, ceiling, cap)
         logger.info(
           {

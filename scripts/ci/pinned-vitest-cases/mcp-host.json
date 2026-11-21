@@ -2134,5 +2134,181 @@
   {
     "suite": "guardrailGate.test.ts",
     "fullName": "mode-set guardrail rewrite and redaction an X1 run keeps the rewrite and redacts via post_tool_use"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: a telegram raise by a sender not in approvers is refused and stores nothing"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: a email raise by a sender not in approvers is refused and stores nothing"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: an email raise from a sender whose case differs from the listed approver is refused"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: email may always lower the mode or keep it"
+  },
+  {
+    "suite": "approvedToolRedaction.integration.test.ts",
+    "fullName": "post_tool_use redaction of an approved call redacts the result in manual after an ordinary card is approved"
+  },
+  {
+    "suite": "approvedToolRedaction.integration.test.ts",
+    "fullName": "post_tool_use redaction of an approved call redacts the result in allow_all after a guardrail ask card is approved"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm flags split mid-token (rm -rf /*) before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs rm operand split mid-token (rm -rf /tmp/x)"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm after a comment ending in a backslash before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm after backslash-CRLF before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm with its root operand on a continuation after a comment line before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks dd with its device target on a continuation after a comment line before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm with a # inside an argument and its root operand on a continuation after a comment line before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks dd with a # inside an argument and its device target on a continuation after backslash-CRLF before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs rm with a # inside an argument and a /tmp/x operand split mid-token after a comment line"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute blocks rm with its root operand on a continuation after backslash-CRLF before spawn"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs rm with a /tmp/x operand split mid-token after a comment line"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs dd reading a disk into an image file after a comment line"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute runs rm with a /tmp/x operand split mid-token after backslash-CRLF"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute checks a 150 KB repeated rm backslash-LF command in linear time"
+  },
+  {
+    "suite": "shellUxGuard.test.ts",
+    "fullName": "ShellTool.execute checks a 150 KB repeated comment line and rm backslash-LF command in linear time"
+  },
+  {
+    "suite": "shellClassifier.test.ts",
+    "fullName": "shell classifier applies the provider table and the 8192 character argument limit"
+  },
+  {
+    "suite": "shellClassifier.test.ts",
+    "fullName": "shell classifier calls gpt-5.5 with effort none and does not call other OpenAI models"
+  },
+  {
+    "suite": "shellCardApprovalRoute.test.ts",
+    "fullName": "shell card approval route command from a channel whose flag is false resolves to once"
+  },
+  {
+    "suite": "main.approvalWiring.test.ts",
+    "fullName": "main hands the dedicated classifier to admission admission judges shell with the dedicated gpt-5.5 classifier main builds, not the chat model"
+  },
+  {
+    "suite": "main.approvalWiring.test.ts",
+    "fullName": "main session reads: classifier pair reports the classifier unavailable when the Host pins a model it does not call"
+  },
+  {
+    "suite": "main.approvalWiring.test.ts",
+    "fullName": "main session reads: classifier pair reports the saved model a task runs, even when the Host subset hides it from selection"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approver policy on a running channel session a mode stored under an unset policy runs manual once designated_approvers leaves its owner out, and the sweep clears its grants"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approver policy on a running channel session a listed approver keeps allow_all until removed from approvers, then runs manual at the next tool call"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approver policy on a running channel session cli_only lowers every messaging session and leaves an rpc session at its mode"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approver policy on a running channel session channel_users and an unset policy leave a non-listed channel owner at allow_all"
+  },
+  {
+    "suite": "approvalModeLiveConfig.integration.test.ts",
+    "fullName": "approval config warnings logs defaultPolicy, never its value, when the policy in force is not a known value"
+  },
+  {
+    "suite": "shellCardApprovalRoute.test.ts",
+    "fullName": "shell card approval route command after the approver policy drops the owner resolves to once"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: a telegram non-approver who resends a pre-staged allow-all keeps it stored and runs manual"
+  },
+  {
+    "suite": "incomingAdmission.test.ts",
+    "fullName": "approver policy on a messaging-channel mode raise designated_approvers: a teams non-approver who resends a pre-staged allow-all keeps it stored and runs manual"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap cli_only caps every email session at manual, a listed approver included"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap cli_only leaves an rpc session at allow_all"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap designated_approvers keeps a listed telegram owner at allow_all and caps any other owner"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap policy channel_users adds nothing to the switch"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap designated_approvers caps a listed approver whose channel block sets enabled: false"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap designated_approvers caps every Teams owner when the Host lists no Teams approvers"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap designated_approvers caps an email owner whose case differs from the listed approver"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap an invalid policy (an unknown string) caps every messaging owner, a listed approver included"
+  },
+  {
+    "suite": "approvalMode.test.ts",
+    "fullName": "approver policy in the channel cap reads the policy from the policy in force and the switch from the Host spec"
   }
 ]

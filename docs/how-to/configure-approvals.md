@@ -50,7 +50,7 @@ Example policy JSON:
 }
 ```
 
-In dev mode (`CLERUM_DEV_MODE`), which has no Host watch, `modeCeiling` and `allowModeChange` are read from this JSON. Outside dev mode those keys in `CLERUM_APPROVAL_CONFIG` are ignored. A Host whose policy comes only from the ConfigMap has ceiling `manual`, so every session runs as manual, until a ceiling is set on the Host CR. Its channel switches keep their defaults, so Telegram, Slack and Teams sessions can then rise unless `allowModeChange: false` is copied onto the CR too. See [Host CRD](../crds/host.md#approval-mode-ceiling).
+In dev mode (`CLERUM_DEV_MODE`), which has no Host watch, `modeCeiling` and `allowModeChange` are read from this JSON. Outside dev mode those keys in `CLERUM_APPROVAL_CONFIG` are ignored. A Host whose policy comes only from the ConfigMap has ceiling `manual`, so every session runs as manual, until a ceiling is set on the Host CR. mcp-host uses `spec.approval` or `CLERUM_APPROVAL_CONFIG` as one whole object and never merges the two, so adding `spec.approval` replaces the ConfigMap policy: a `defaultPolicy`, channel block or `tools` override left only in the ConfigMap stops applying. Copy `defaultPolicy`, `channels` (with each channel's `approvers` and `allowModeChange`) and `tools` into the CR in the same edit that sets the ceiling. A channel switch not on the CR keeps its default, so Telegram, Slack and Teams sessions can then rise unless `allowModeChange: false` is on the CR. See [Host CRD](../crds/host.md#approval-mode-ceiling).
 
 `defaultPolicy` values (Host CRD / runtime):
 
@@ -104,11 +104,14 @@ and platform defaults — treat “require approval” as the safe baseline.
 ## Approval modes
 
 Each interactive session stores `manual`, `auto`, or `allow_all`. A new session
-is `manual`. Rank is `manual` < `auto` < `allow_all`. Desktop labels the higher
-two "Auto-approve" and "Allow all". A messaging command uses `allow-all`. The
-effective mode is the minimum of the stored choice, the ceiling, and the
-channel cap. A lower ceiling or cap keeps the stored choice, so raising it
-again restores that choice.
+is `manual`, except a Desktop chat whose first message carries a mode picked
+before the chat existed: that chat stores the carried mode. Rank is
+`manual` < `auto` < `allow_all`. Desktop labels the higher two "Auto-approve"
+and "Allow all". A messaging command uses `allow-all`. The effective mode is
+the minimum of the stored choice, the ceiling, and the channel cap. On a
+messaging channel the cap also carries the approver policy (see
+[Approver policy](#approver-policy)). A lower ceiling or cap keeps the stored
+choice, so raising it again restores that choice.
 
 | Mode | What a gated call does |
 | --- | --- |
@@ -118,7 +121,8 @@ again restores that choice.
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant
 already stored for it still covers a later create, including while the chat is
-allow-all. The mode does not change its forced create/enable gate.
+allow-all, except on a stateless Host: there every create and enable asks,
+whatever grant is stored. The mode does not change that forced gate.
 
 A guardrail `ask` shows its card in every interactive mode, scoped to that one
 call, with no Always option. Allow-all still runs these with no card: a tool an
@@ -147,19 +151,24 @@ running under the user's own OAuth identity; and edits to shared identity files.
 
 ### Channel cap
 
-The cap comes from the session's channel type, not from the session key.
+The cap comes from the session's channel type, not from the session key, and,
+on a messaging channel, from the [approver policy](#approver-policy) for the
+session's owner.
 
 | Session | Cap |
 | --- | --- |
-| Desktop (`rpc`) | `allow_all` |
-| Telegram, Slack, or Microsoft Teams | `allow_all` unless `approval.channels.<type>.allowModeChange` is `false`. The switch defaults to on |
-| Email | `allow_all` only when `approval.channels.email.allowModeChange` is `true`. The switch defaults to off, because the From address can be forged |
+| Desktop (`rpc`) | `allow_all`. The approver policy never applies |
+| Telegram, Slack, or Microsoft Teams | `allow_all` unless `approval.channels.<type>.allowModeChange` is `false`. The switch defaults to on. `manual` for an owner the approver policy does not allow |
+| Email | `allow_all` only when `approval.channels.email.allowModeChange` is `true`. The switch defaults to off, because the From address can be forged. `manual` for an owner the approver policy does not allow |
 | Any other channel | `manual` |
 
 A malformed value caps that channel at `manual`: a `channels` value or channel
 block that is not an object, or an `allowModeChange` that is not a boolean.
 mcp-host logs `approval_config_invalid` with the field name when the config
 arrives.
+
+The table assumes the approver policy allows the channel session's owner. For
+an owner it does not allow, the column is the same as a switch that is off.
 
 | Ceiling | Desktop can use | A channel whose switch is on can use | A channel whose switch is off can use |
 | --- | --- | --- | --- |
@@ -173,35 +182,57 @@ the command stores `manual` and says the channel is limited to manual.
 Turning the switch off again lowers every session on that channel at the
 next tool call.
 
+### Approver policy
+
 An explicit `defaultPolicy` also limits who can raise the mode from a
-messaging channel: under `cli_only` no channel sender can, and under
-`designated_approvers` only a sender listed in that channel's `approvers`
-can, unless that channel block sets `enabled: false`. An entry must equal the
-ID the channel reports:
+messaging channel, and who keeps a raised mode. The owner of a messaging
+session is the sender it belongs to. Under `cli_only`, no owner can raise the
+mode or keep a raised one. Under `designated_approvers`, only an owner listed
+in that channel's `approvers` can, unless that channel block sets
+`enabled: false`. Every other messaging session runs as `manual`, whatever it
+stored and whenever it stored it. Desktop sessions are never affected. An
+entry must equal the ID the channel reports:
 
 - Telegram: the Telegram user ID.
 - Slack: the Slack user ID.
 - Microsoft Teams: the `from.id` of the Bot Framework activity. Under
   `designated_approvers`, a Host with no `teams.approvers` list refuses every
-  Teams raise.
+  Teams raise and runs every Teams session as `manual`.
 - Email: the From address, compared case-sensitively, so
   `Ana@example.com` and `ana@example.com` are different entries.
 
 A refused raise leaves the stored mode unchanged, and the reply says why;
-lowering the mode is always allowed. An unset
-policy or `channel_users` adds no check, and any other value refuses every
-raise and logs `approval_config_invalid` for `defaultPolicy`.
+lowering the mode is always allowed. The reply's effective mode includes the
+policy, so an owner it does not allow sees `manual`. An unset policy or
+`channel_users` adds no check. Any other value runs every messaging session as
+`manual`, refuses every raise, and logs `approval_config_invalid` for
+`defaultPolicy`.
+
+The policy on the Host CR is read live, like the ceiling. Changing
+`defaultPolicy`, or removing an owner from `approvers`, lowers that owner's
+sessions at their next tool call, with no restart. The stored choice is kept, so allowing the owner
+again restores it.
 
 ### Kill switch
 
-Lower `modeCeiling`, or set a channel's `allowModeChange` to false, with an
-edit to the Host CR. That stops new unattended tool calls at the next tool
-call of every affected session, with no restart. Mode-scoped grants are
-cleared as soon as the new config arrives, even for a session that makes no
-tool call before the ceiling is raised again.
+Lower `modeCeiling`, set a channel's `allowModeChange` to false, or narrow
+the approver policy (set `defaultPolicy` to `cli_only` or
+`designated_approvers`, or remove an owner from a channel's `approvers`), with
+an edit to the Host CR. That stops new unattended tool calls at the next tool call of every
+affected session, with no restart. Mode-scoped grants are cleared as soon as
+the new config arrives, even for a session that makes no tool call before the
+change is undone. A card answered after the change resolves under the lower
+mode.
 
-A slower older Host event does not restore the ceiling or channel cap. The
-config that stays is the latest observed Host event.
+Check the spelling of `allowModeChange` and the channel names. The CRD drops
+an unknown key under `spec.approval.channels` instead of storing it. `kubectl
+apply` refuses such a key by default (strict field validation), but a client
+that does not validate strictly gets only a warning, and the channel then keeps
+its default: on for Telegram, Slack and Teams. After the edit, read the Host
+back (`kubectl get host <name> -o yaml`) and confirm the field is there.
+
+A slower older Host event does not restore the ceiling, the channel cap or the
+approver policy. The config that stays is the latest observed Host event.
 
 `cron_manage` asks exactly when manual would. Its task grant stays across the
 change. The switch does not stop a `shell_exec` the tool still tracks until
@@ -216,8 +247,9 @@ startup.
 
 The classifier approves only commands that read, list or search inside the workspace, read-only git commands, and commands that compute a result without writing files, reading secrets or using the network. Deletes, installs, network calls, secrets, identity and memory files, scheduling, privilege changes and hidden commands show the card. So does a command that argues for its own approval. An approval is a model's judgment, not a security boundary: in auto, `http_request` still runs with no card.
 
-When the Host has an OpenAI credential, auto judges shell with
-`spec.approval.shellClassifierModel`. Absent or blank means `gpt-5.5`. That
+When the Host's model provider (`spec.model.provider`) is `openai`, auto
+judges shell with `spec.approval.shellClassifierModel`, using the Host's
+OpenAI key. Absent or blank means `gpt-5.5`. That
 call does not follow the chat model: a `gpt-5.4-mini` chat, and a failover
 pair, are still judged by the shell classifier model. The call asks for
 reasoning effort `none`, so the short reply is not spent on hidden reasoning.
@@ -229,11 +261,15 @@ The OpenAI models the classifier may call are an allowlist. It contains
 `gpt-4.1`, `gpt-4.1-mini`, and `gpt-5.4-mini` show the shell card. Pinning
 `shellClassifierModel` to one of those shows the card too.
 
-With no OpenAI credential, auto judges shell on Claude and on Bedrock
+On any other provider, the classifier model is not used: mcp-host builds it
+only from the credentials of the Host's own provider, so neither an
+`openai-api-key` in the Host's Secret nor an OpenAI fallback's key enables it.
+Auto then judges shell on Claude and on Bedrock
 Anthropic models, using the model serving the turn. When failover is serving
 a fallback, that pair is the one checked and called. A pair the table refuses
 shows the card. Azure, the subscription providers, and Vertex and Gemini show
-the card. `http_request` still runs with no card.
+the card. `http_request` still runs with no card. In dev mode, which reads keys
+from the environment, any `OPENAI_API_KEY` enables the classifier model.
 
 An explicit `tools.shell_exec: true` keeps a card on every shell call in auto,
 with no classifier and no shell memory. Remove the line if auto should judge

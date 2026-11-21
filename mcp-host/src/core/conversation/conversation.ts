@@ -587,17 +587,22 @@ export class ConversationManager {
    * Store a mode from the route or the messaging command.
    *
    * The route persists the requested mode, including a choice above the ceiling.
-   * The command persists `auto` or `allow_all` only when the channel cap is
-   * `allow_all`; otherwise it persists `manual`. `persistApprovalMode` is the
-   * durability barrier and moves the in-memory mirror only after the write is
-   * acknowledged. The effective mode is then synced, and L1 is logged with
-   * hashed session and user ids. `userId` is the acting user; L1 hashes
-   * `conversation.user_id`, not this argument.
+   * The command persists `auto` or `allow_all` only when the channel switch
+   * (`live.channelSwitch`, `readChannelSwitch`) is `allow_all`; otherwise it
+   * persists `manual`. The switch, not the cap, decides what the command
+   * stores, so a sender the approver policy caps at manual can still lower
+   * the stored mode; the command refuses that sender's raises before this
+   * call. The effective mode is min(stored, `live.ceiling`, `live.cap`), and
+   * `live.cap` is `readChannelCap`, which carries the approver policy.
+   * `persistApprovalMode` is the durability barrier and moves the in-memory
+   * mirror only after the write is acknowledged. The effective mode is then
+   * synced, and L1 is logged with hashed session and user ids. `userId` is the
+   * acting user; L1 hashes `conversation.user_id`, not this argument.
    */
   async setApprovalMode(
     conversation: Conversation,
     requested: ApprovalMode,
-    live: { ceiling: ApprovalMode; cap: ApprovalMode },
+    live: { ceiling: ApprovalMode; cap: ApprovalMode; channelSwitch: ApprovalMode },
     writer: 'route' | 'command',
     userId?: string
   ): Promise<{
@@ -608,7 +613,7 @@ export class ConversationManager {
   }> {
     void userId
     const stored: ApprovalMode =
-      writer === 'command' && (live.cap !== 'allow_all' || requested === 'manual')
+      writer === 'command' && (live.channelSwitch !== 'allow_all' || requested === 'manual')
         ? 'manual'
         : requested
     await this.store.persistApprovalMode(conversation, stored)

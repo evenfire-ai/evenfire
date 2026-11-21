@@ -32,9 +32,13 @@
  * (null) and every mode is offered. `refreshHostApprovalModeLimit` re-reads
  * the limit when the picker opens, because an admin can change the ceiling at
  * any time. A refresh, a PATCH answer and the re-read after a failed PATCH
- * replace the Host-wide ceiling; a session or catalog read made elsewhere
- * fills it only while it is unknown, because a catalog page can be served
- * from a cache after a newer answer.
+ * replace the Host-wide ceiling, unless a request that started later has
+ * already answered: the server may have answered the older request before an
+ * admin changed the ceiling. Start order only stands in for the order in which
+ * the Host read its ceiling, so the ceiling kept is not always the newest (see
+ * `noteHostCeiling`). A session or catalog read made elsewhere fills
+ * it only while it is unknown, because a catalog page can be served from a
+ * cache after a newer answer.
  */
 import type { ApprovalMode } from '../../../src/types'
 
@@ -93,8 +97,15 @@ export interface HostApprovalModeTransport {
   readHostModeCeiling?: (agentRef: string) => Promise<ApprovalMode | null>
 }
 
-/** Where a snapshot came from. Only `fresh` replaces a known Host-wide ceiling. */
-type SnapshotSource = 'fresh' | 'passive'
+/**
+ * Where a snapshot came from. A fresh answer (a limit refresh, a PATCH answer,
+ * the re-read after a failed PATCH) carries the `ceilingRequestSeq` its
+ * request started at; only a fresh answer replaces a known Host-wide ceiling.
+ * A passive read (chat open, reconcile, chat list) carries none.
+ */
+type SnapshotSource = { kind: 'fresh'; requestSeq: number } | { kind: 'passive' }
+
+const PASSIVE: SnapshotSource = { kind: 'passive' }
 
 interface Entry {
   scopeGeneration: number
@@ -139,10 +150,24 @@ let writeIdSeq = 0
  */
 let writeSeq = 0
 /**
- * Host-wide ceiling per agentRef in this scope, from the latest snapshot of
- * any of the Host's sessions. Absent: unknown. Cleared on a scope reset.
+ * Bumps as each request that answers with the Host ceiling starts: a limit
+ * refresh, a PATCH, the re-read after a failed PATCH. Store-wide and
+ * monotonic across scopes, like `writeSeq`. A separate counter, because reads
+ * do not bump `writeSeq`, so two reads can share a `writeSeq` value.
  */
-const hostCeilings = new Map<string, ApprovalMode>()
+let ceilingRequestSeq = 0
+
+function freshRequest(): SnapshotSource {
+  ceilingRequestSeq += 1
+  return { kind: 'fresh', requestSeq: ceilingRequestSeq }
+}
+
+/**
+ * Host-wide ceiling per agentRef in this scope, with the `ceilingRequestSeq`
+ * of the request that answered it (0 for a passive fill, which any fresh
+ * answer replaces). Absent: unknown. Cleared on a scope reset.
+ */
+const hostCeilings = new Map<string, { ceiling: ApprovalMode; requestSeq: number }>()
 /** Limit refreshes in flight, per chat key. Cleared on a scope reset. */
 const limitRefreshes = new Map<string, Promise<void>>()
 
@@ -192,7 +217,7 @@ function isDefiniteRejection(error: unknown): boolean {
  */
 function limitFor(entry: Entry): ApprovalMode | null {
   if (entry.limitKnown) return lowerMode(entry.modeCeiling, entry.channelCap)
-  return hostCeilings.get(entry.agentRef) ?? null
+  return hostCeilings.get(entry.agentRef)?.ceiling ?? null
 }
 
 function buildView(entry: Entry): HostApprovalModeView {
@@ -258,16 +283,37 @@ function current(entry: Entry): boolean {
 }
 
 /**
- * Records the Host-wide ceiling. A fresh answer replaces it; a passive read
- * fills it only while it is unknown. Every chat of the Host is notified,
- * because chats without their own snapshot (the blank chat among them) take
- * their limit and label from it.
+ * Records the Host-wide ceiling. A passive read fills it only while it is
+ * unknown. A fresh answer replaces it unless a request that started later
+ * has already answered, the rule the mode follows with `writeSeq`. Each
+ * request has its own sequence, so no two fresh answers tie. When the value
+ * changes, every chat of the Host is notified, because chats without their
+ * own snapshot (the blank chat among them) take their limit and label from it.
+ *
+ * Known limit of ordering on the client: Desktop sees when a request started
+ * and when its answer landed, not when the Host read its ceiling. Around an
+ * admin's change, two interleavings look the same here:
+ * - The request that started first was read first and is answered last. It
+ *   carries the older ceiling, and this rule drops it.
+ * - The request that started first reached the Host after the later one, so
+ *   it carries the newer ceiling. This rule drops it too and keeps the older.
+ * Without an order from the Host no client rule gets both right. A wrong
+ * ceiling changes only what chats without their own snapshot offer and show;
+ * the Host enforces its own ceiling, and the next menu opening reads it again.
  */
 function noteHostCeiling(agentRef: string, ceiling: unknown, source: SnapshotSource): void {
   if (!agentRef || !isMode(ceiling)) return
   const known = hostCeilings.get(agentRef)
-  if (known === ceiling || (source === 'passive' && known !== undefined)) return
-  hostCeilings.set(agentRef, ceiling)
+  if (source.kind === 'passive') {
+    if (known) return
+    hostCeilings.set(agentRef, { ceiling, requestSeq: 0 })
+  } else {
+    if (known && known.requestSeq > source.requestSeq) return
+    // Recorded even when the value is the same, so an older answer that
+    // lands later cannot replace it.
+    hostCeilings.set(agentRef, { ceiling, requestSeq: source.requestSeq })
+    if (known?.ceiling === ceiling) return
+  }
   for (const entry of entries.values()) {
     if (entry.agentRef === agentRef && current(entry)) notify(entry)
   }
@@ -343,7 +389,8 @@ function noteSessionRead(
 ): void {
   if (!agentRef || !chatId) return
   // The ceiling is Host-wide: a read too old for this chat's mode still
-  // says what the Host's ceiling was.
+  // says what the Host's ceiling was, unless a request that started later
+  // has already answered for it.
   noteHostCeiling(agentRef, snapshot.modeCeiling, source)
   const entry = getEntry(agentRef, chatId)
   if (entry.writing) return
@@ -359,7 +406,7 @@ export function noteHostApprovalModeFromSession(
   snapshot: SessionApprovalSnapshot,
   readEpoch?: number
 ): void {
-  noteSessionRead(agentRef, chatId, snapshot, readEpoch, 'passive')
+  noteSessionRead(agentRef, chatId, snapshot, readEpoch, PASSIVE)
 }
 
 /**
@@ -389,13 +436,15 @@ export function refreshHostApprovalModeLimit(
     try {
       if (readOwnSession && chatId !== null) {
         const readEpoch = writeSeq
+        const source = freshRequest()
         const snapshot = await transport.readSessionApproval(agentRef, chatId)
         if (generation !== scopeGeneration) return
-        noteSessionRead(agentRef, chatId, snapshot, readEpoch, 'fresh')
+        noteSessionRead(agentRef, chatId, snapshot, readEpoch, source)
       } else if (transport.readHostModeCeiling) {
+        const source = freshRequest()
         const ceiling = await transport.readHostModeCeiling(agentRef)
         if (generation !== scopeGeneration) return
-        noteHostCeiling(agentRef, ceiling, 'fresh')
+        noteHostCeiling(agentRef, ceiling, source)
       }
     } catch (error) {
       console.warn('[hostApprovalModeStore] approval-mode limit refresh failed:', error)
@@ -555,10 +604,11 @@ export async function selectHostApprovalMode(
   const firstSendsBegunAtStart = entry.firstSendsBegun
   entry.writing = true
   notify(entry)
+  const patchSource = freshRequest()
   try {
     const result = await transport.setApprovalMode(agentRef, chatId, mode)
     if (!current(entry)) return false
-    applySnapshot(entry, result, 'fresh')
+    applySnapshot(entry, result, patchSource)
     settleSaveFailure(false)
     return true
   } catch (error) {
@@ -589,9 +639,10 @@ export async function selectHostApprovalMode(
       return false
     }
     try {
+      const rereadSource = freshRequest()
       const read = await transport.readSessionApproval(agentRef, chatId)
       if (!current(entry)) return false
-      applySnapshot(entry, read, 'fresh')
+      applySnapshot(entry, read, rereadSource)
     } catch (readError) {
       console.warn('[hostApprovalModeStore] session re-read failed:', readError)
     }
@@ -623,8 +674,8 @@ export function clearHostApprovalModeSaveFailure(agentRef: string, chatId: strin
 
 export function resetHostApprovalModeStore(): void {
   scopeGeneration += 1
-  // writeSeq stays monotonic. A read captured before this reset must still
-  // lose to a write that happens after it.
+  // writeSeq and ceilingRequestSeq stay monotonic. A read captured before
+  // this reset must still lose to a write that happens after it.
   entries.clear()
   hostCeilings.clear()
   limitRefreshes.clear()

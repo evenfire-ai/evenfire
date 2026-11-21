@@ -507,6 +507,47 @@ describe('shell card approval route', () => {
     expect(executeSingleTool).toHaveBeenCalledTimes(1)
   })
 
+  it('command after the approver policy drops the owner resolves to once', async () => {
+    const approvers = (ids: string[]): ApprovalConfig => ({
+      defaultPolicy: 'designated_approvers',
+      modeCeiling: 'allow_all',
+      channels: { telegram: { enabled: true, approvers: ids, allowModeChange: true } },
+    })
+    agent.setApprovalConfig(approvers(['user-1']), approvers(['user-1']))
+    const task = taskFor('telegram', 'C-1')
+    expect(
+      await suspend(
+        task,
+        card(
+          bodyFixture.requestId,
+          'shell_exec',
+          { command: COMMAND },
+          {
+            authorization_scope: 'exact_invocation',
+            shellCard: BOTH_FLAGS,
+          }
+        )
+      )
+    ).toBe(true)
+    const conv = conversationFor(task)
+    expect(conv.channel_type).toBe('telegram')
+    expect(conv.user_id).toBe('user-1')
+    conv.approval_mode = 'auto'
+    agent.setApprovalConfig(approvers(['user-2']), approvers(['user-2']))
+
+    const posted = await answerAndRun(
+      task,
+      { ...bodyFixture, userId: 'user-1', channelType: 'telegram', channelId: 'C-1' },
+      'channel'
+    )
+
+    expect(posted.approvalHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ approved: true, shellAction: 'command' })
+    )
+    expect(executeSingleTool).toHaveBeenCalledTimes(1)
+    expect(conv.auto_shell_grants).toEqual({ wholeTool: false, commands: new Set() })
+  })
+
   it('deny records a denial and resets auto_shell_grants', async () => {
     openAuto()
     const task = taskFor('telegram', 'C-1')

@@ -809,6 +809,126 @@ describe('useAgentChatController — characterization (D.0)', () => {
         })
       })
 
+      describe('the read after the first send’s ack (R36)', () => {
+        /** The Host's answer for the new chat: it stores and runs the held Allow all. */
+        const heldAllowAllSession = (agent: string, chatId: string) => ({
+          agent,
+          chatId,
+          state: 'idle',
+          turns: [],
+          approvalMode: 'allow_all',
+          modeCeiling: 'allow_all',
+          channelCap: 'allow_all',
+          effectiveApprovalMode: 'allow_all',
+          shellClassifierAvailable: true,
+        })
+
+        /**
+         * Holds the one-turn read of the chat the first send creates; every
+         * other read answers with no approval fields.
+         */
+        function holdReadAfterAck() {
+          const read = deferred<ReturnType<typeof heldAllowAllSession>>()
+          let held = false
+          clerum.rpc.loadSessionMessages.mockImplementation(
+            async (
+              _hostRef: string,
+              _agent: string,
+              chatId: string,
+              _hostRefs?: unknown,
+              query?: { limit?: number }
+            ) => {
+              if (!held && chatId === sentThreadId() && query?.limit === 1) {
+                held = true
+                return read.promise
+              }
+              return { agent: '', chatId: '', turns: [] }
+            }
+          )
+          return read
+        }
+
+        async function sendHeldAllowAll(taskId: string) {
+          clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId })
+          clerum.rpc.getTaskResult.mockResolvedValue({ response: 'ok' })
+          const read = holdReadAfterAck()
+          const transport = approvalTransport()
+          const controller = renderController()
+          await settleMount()
+          await act(async () => {
+            await selectHostApprovalMode(transport, 'agent-x', null, 'allow_all')
+          })
+          const sendPromise = controller.result.current.handleSendAgentMessage('first message')
+          await waitForProgressHandler(taskId)
+          const chatId = sentThreadId()!
+          await waitFor(() =>
+            expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+              'agent-x',
+              'agent-x',
+              chatId,
+              undefined,
+              { limit: 1 }
+            )
+          )
+          const finishSend = async () => {
+            await act(async () => {
+              clerum.emitTaskProgress(taskId, {
+                type: 'terminal',
+                data: { taskId, status: 'completed' },
+              })
+            })
+            await act(async () => {
+              await sendPromise
+            })
+          }
+          return { controller, transport, read, chatId, finishSend }
+        }
+
+        it('keeps a pick that lands while the read is in flight', async () => {
+          const { transport, read, chatId, finishSend } = await sendHeldAllowAll('task-pick')
+          expect(readHostApprovalMode('agent-x', chatId).label).toBe('Allow all')
+
+          // The pick starts after the read left and is answered before it.
+          transport.setApprovalMode.mockResolvedValueOnce(approvalSnapshot('manual'))
+          let accepted: boolean | undefined
+          await act(async () => {
+            accepted = await selectHostApprovalMode(transport, 'agent-x', chatId, 'manual')
+          })
+          expect(accepted).toBe(true)
+          expect(readHostApprovalMode('agent-x', chatId).label).toBeNull()
+
+          // The Host answered the read before the PATCH landed.
+          await act(async () => {
+            read.resolve(heldAllowAllSession('agent-x', chatId))
+            await new Promise(resolve => setTimeout(resolve, 0))
+          })
+
+          expect(readHostApprovalMode('agent-x', chatId).storedMode).toBe('manual')
+          expect(readHostApprovalMode('agent-x', chatId).label).toBeNull()
+          await finishSend()
+        })
+
+        it('drops the read when the auth scope changes while it is in flight', async () => {
+          const { controller, read, chatId, finishSend } = await sendHeldAllowAll('task-scope')
+          await finishSend()
+          expect(readHostApprovalMode('agent-x', chatId).label).toBe('Allow all')
+
+          // Another team: the store starts over and the same ids name its chat.
+          controller.rerender({ currentTeamId: 'team-after', chatAuthorityTeamId: 'team-after' })
+          await waitFor(() => expect(readHostApprovalMode('agent-x', chatId).label).toBeNull())
+
+          await act(async () => {
+            read.resolve(heldAllowAllSession('agent-x', chatId))
+            await new Promise(resolve => setTimeout(resolve, 0))
+          })
+
+          const view = readHostApprovalMode('agent-x', chatId)
+          expect(view.storedMode).toBe('manual')
+          expect(view.label).toBeNull()
+          expect(view.modeLimit).toBeNull()
+        })
+      })
+
       it('later messages carry no mode and do not lock the picker once the first send is acknowledged', async () => {
         clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-first' })
         clerum.rpc.getTaskResult.mockResolvedValue({ status: 'completed', response: 'ok' })

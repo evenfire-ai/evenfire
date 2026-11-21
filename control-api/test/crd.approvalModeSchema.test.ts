@@ -6,7 +6,7 @@ import { parse } from 'yaml'
 
 // Parses charts/clerum-crds/crds/host.yaml the same way
 // crd.secretReferenceCoverage.test.ts does. The approval mode ceiling is an
-// admission enum, and allowModeChange exists only on the three channel objects
+// admission enum, and allowModeChange exists only on the four channel objects
 // the control-api schema accepts.
 const crdsDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../charts/clerum-crds/crds')
 const hostYamlPath = resolve(crdsDir, 'host.yaml')

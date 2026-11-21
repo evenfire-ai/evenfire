@@ -656,10 +656,14 @@ let shellClassifierCache: {
 } | null = null
 
 /**
- * Dedicated shell classifier for a Host that holds an OpenAI credential.
- * The chat model is not the judge. No credential, or a provider that cannot
- * be built, returns null and admission keeps the chat or failover pair.
- * The credential is hashed only as a cache key and is never logged.
+ * Dedicated shell classifier for a Host whose model provider is OpenAI. The
+ * ConfigStore holds only the Host provider's credentials
+ * (`apiKeysFromConfigStore`), so any other provider has no OpenAI key here.
+ * Dev mode reads every provider's key from the env, so an OPENAI_API_KEY
+ * there is used whatever the Host model. The chat model is not the judge. No
+ * OpenAI key, or a provider that cannot be built, returns null and admission
+ * keeps the chat or failover pair. The credential is hashed only as a cache
+ * key and is never logged.
  */
 function shellClassifierCaller(): ShellClassifierCaller | null {
   const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
@@ -967,8 +971,9 @@ async function initializeProvider(
 
 /**
  * Publish this host's approval policy. Effective tools stay
- * `spec.approval || CLERUM_APPROVAL_CONFIG`. The ceiling and channel cap read
- * `spec.approval` alone, except dev mode, which passes the env config.
+ * `spec.approval || CLERUM_APPROVAL_CONFIG`. The ceiling and the channel switch
+ * read `spec.approval` alone, except dev mode, which passes the env config. The
+ * approver policy in the channel cap reads the effective policy.
  * Runs before credential reconciliation so a later event cannot be overwritten
  * by an older completion.
  */
@@ -1932,6 +1937,34 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
 }
 
 /**
+ * The agent state machine, with the per-task sources it reads from this
+ * module.
+ */
+function createAgent(queue: MessageQueue, lifecycle: TaskLifecycle): AgentStateMachine {
+  const created = new AgentStateMachine(queue, lifecycle, {
+    maxTaskDuration: config.agentMaxTaskDuration,
+    maxToolCallsPerTask: config.agentMaxToolCallsPerTask,
+    autoStart: true,
+    taskDelay: config.agentTaskDelay,
+    approvalTimeout: config.agentApprovalTimeout,
+  })
+
+  // R2 — inject the per-task model resolver. Closes over the module globals
+  // (currentHost + configStore) so it always reads the live keys/allowlist; a
+  // key rotation or allowlist reload is picked up on the next task with no
+  // re-wiring.
+  created.setTaskModelResolver(resolveTaskModel)
+  created.setImageInputResolver(resolveImageInput)
+
+  // R5 — inject the provider-fallback support. Closes over the module globals
+  // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
+  // reads the live policy + sticky failover state. Null when no policy.
+  created.setFailoverSupport(currentFailoverSupport)
+  created.setShellClassifierProvider(shellClassifierCaller)
+  return created
+}
+
+/**
  * Initialize the message queue and agent.
  */
 async function initializeAgent(): Promise<void> {
@@ -1945,14 +1978,8 @@ async function initializeAgent(): Promise<void> {
   taskLifecycle = new TaskLifecycle()
   messageQueue.setLifecycle(taskLifecycle)
 
-  // Create agent state machine
-  agent = new AgentStateMachine(messageQueue, taskLifecycle, {
-    maxTaskDuration: config.agentMaxTaskDuration,
-    maxToolCallsPerTask: config.agentMaxToolCallsPerTask,
-    autoStart: true,
-    taskDelay: config.agentTaskDelay,
-    approvalTimeout: config.agentApprovalTimeout,
-  })
+  // Create agent state machine. Set once here (the agent is created once).
+  agent = createAgent(messageQueue, taskLifecycle)
 
   logger.info(
     {
@@ -1964,19 +1991,6 @@ async function initializeAgent(): Promise<void> {
     },
     '[Main] Agent config: taskDelay=ms, maxTaskDuration=ms, maxToolCalls=, maxQueueSize=, approvalTimeout=ms'
   )
-
-  // R2 — inject the per-task model resolver. Closes over the module globals
-  // (currentHost + configStore) so it always reads the live keys/allowlist; a
-  // key rotation or allowlist reload is picked up on the next task with no
-  // re-wiring. Set once here (the agent is created once).
-  agent.setTaskModelResolver(resolveTaskModel)
-  agent.setImageInputResolver(resolveImageInput)
-
-  // R5 — inject the provider-fallback support. Closes over the module globals
-  // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
-  // reads the live policy + sticky failover state. Null when no policy.
-  agent.setFailoverSupport(currentFailoverSupport)
-  agent.setShellClassifierProvider(shellClassifierCaller)
 
   // Phase 6: publish approval once. Host changes publish again from onHostChange,
   // before credential reconciliation. initializeProvider does not.
@@ -3993,6 +4007,10 @@ async function main(): Promise<void> {
 export const mainRpcTestSeams = {
   setAgent(next: AgentStateMachine | null): void {
     agent = next
+  },
+  /** The agent initializeAgent builds, without the rest of the boot. */
+  createAgent(queue: MessageQueue, lifecycle: TaskLifecycle): AgentStateMachine {
+    return createAgent(queue, lifecycle)
   },
   setMessageQueue(next: MessageQueue | null): void {
     messageQueue = next
