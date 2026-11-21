@@ -480,3 +480,68 @@ describe('runtimeEdgeGuard rpc-proxy edge assertion', () => {
     expect(accepted.handlerCalls).toBe(1)
   })
 })
+
+describe('mounted Host routes behind the edge assertion', () => {
+  type Mounted = { baseUrl: string; stop: () => Promise<void> }
+  async function mount(
+    configure: (server: InstanceType<typeof import('../../server').RPCServer>) => void
+  ): Promise<Mounted> {
+    process.env.CLERUM_ENABLE_AUTH = 'true'
+    vi.resetModules()
+    const { RPCServer } = await import('../../server')
+    const server = new RPCServer(0)
+    configure(server)
+    await server.start()
+    const address = (
+      server as unknown as { server: { address: () => AddressInfo } }
+    ).server.address()
+    return { baseUrl: `http://127.0.0.1:${address.port}`, stop: () => server.stop() }
+  }
+
+  it('rebuilds V1 message metadata from the verified caller, discarding body keys', async () => {
+    const messageHandler = vi.fn().mockResolvedValue({ success: true, taskId: 'task-1' })
+    const mounted = await mount(server => server.onMessage(messageHandler))
+    const send = (headers: Record<string, string>) =>
+      fetch(`${mounted.baseUrl}/v1/runtime/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({
+          sender: USER,
+          channelType: 'rpc',
+          channelId: HOST_NAME,
+          threadId: 'chat-1',
+          content: 'hello',
+          timestamp: new Date().toISOString(),
+          messageId: 'm1',
+          hostRef: HOST_NAME,
+          metadata: {
+            teamId: 'other-team',
+            budget: { limit: 1_000_000 },
+            credentialPolicy: 'shared',
+          },
+        }),
+      })
+    try {
+      const userScoped = await send({
+        ...clearHeaders(),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion(),
+      })
+      expect(userScoped.status).toBe(200)
+      expect(messageHandler).toHaveBeenCalledTimes(1)
+      expect(messageHandler.mock.calls[0][0].metadata).toEqual({ accessScope: 'user' })
+
+      const teamScoped = await send({
+        ...clearHeaders({ 'x-clerum-edge-team-id': TEAM }),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion({ teamId: TEAM }),
+      })
+      expect(teamScoped.status).toBe(200)
+      expect(messageHandler).toHaveBeenCalledTimes(2)
+      expect(messageHandler.mock.calls[1][0].metadata).toEqual({
+        accessScope: 'team',
+        teamId: TEAM,
+      })
+    } finally {
+      await mounted.stop()
+    }
+  })
+})

@@ -393,9 +393,13 @@ export async function handleMessageRoute(
             }
             message.metadata = sanitized
           }
-        } else if (caller.teamId) {
-          // Explicit v1 compatibility adapter. V2 never copies team metadata.
-          message.metadata = { ...(message.metadata ?? {}), teamId: caller.teamId }
+        } else {
+          // V1: the verified caller is the only source of access scope. Body
+          // metadata is discarded and rebuilt as rpc-proxy sends it.
+          message.metadata =
+            typeof caller.teamId === 'string'
+              ? { accessScope: 'team', teamId: caller.teamId }
+              : { accessScope: 'user' }
         }
       } else {
         json(res, 401, { error: 'Missing rpc edge caller context' })
