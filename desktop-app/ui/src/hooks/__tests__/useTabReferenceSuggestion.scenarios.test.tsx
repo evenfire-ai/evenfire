@@ -584,6 +584,22 @@ describe('useTabReferenceSuggestion — observed changes', () => {
     expect(hook.result.current.candidate).toBeNull()
   })
 
+  it('S-10b: after a watched change, giving up on the revalidation drops the old candidate', async () => {
+    const hook = await cachedOn(A, answers.a1)
+    invalidateWith(hook, aChanged)
+    expect(calls).toHaveLength(2)
+    await settle(calls[1], answers.unavailable)
+    expect(hook.result.current.candidate).toEqual(referenceOf(views.a1))
+    await advance(FIRST_RETRY_MS)
+    await settle(calls[2], answers.unavailable)
+    expect(hook.result.current.candidate).toEqual(referenceOf(views.a1))
+    await advance(SECOND_RETRY_MS)
+    await settle(calls[3], answers.unavailable)
+    await advance(SECOND_RETRY_MS * 2)
+    expect(calls).toHaveLength(4)
+    expect(hook.result.current.candidate).toBeNull()
+  })
+
   it('S-10b: a revalidation that resolves to a folder replaces the candidate', async () => {
     const hook = await cachedOn(A, answers.a1)
     invalidateWith(hook, aChanged)
