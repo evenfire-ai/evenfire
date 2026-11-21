@@ -915,6 +915,7 @@ export function useAgentChatController({
     handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    addSuggestedFileReference,
     restoreComposerImageAttachments,
     restoreComposerReferenceAttachments,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
@@ -4802,6 +4803,7 @@ export function useAgentChatController({
     handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    addSuggestedFileReference,
     handleClearComposerAttachments: resetComposerAttachments,
     cancelTask,
   }

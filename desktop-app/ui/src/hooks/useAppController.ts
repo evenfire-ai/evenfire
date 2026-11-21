@@ -1631,6 +1631,7 @@ export function useAppController() {
     availableTeamIds,
     teamDirectoryHydrated: teamsData.teamDirectoryHydrated,
     authenticatedPrincipalIdentity,
+    authorityScope,
     email: auth.email,
     password: auth.password,
     desktopSetupAuthorizationToken: auth.desktopSetupAuthorizationToken,
@@ -1800,6 +1801,7 @@ export function useAppController() {
     handleAddComposerReferenceAttachments: chat.handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment: chat.handleRemoveComposerReferenceAttachment,
     handleClearComposerAttachments: chat.handleClearComposerAttachments,
+    addSuggestedFileReference: chat.addSuggestedFileReference,
     cancelTask: chat.cancelTask,
 
     // MCP Server

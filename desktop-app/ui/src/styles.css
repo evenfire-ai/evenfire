@@ -8289,6 +8289,73 @@ body.sidebar-resizing {
   text-overflow: ellipsis;
 }
 
+.composer-suggested-reference {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.composer-suggested-reference-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 34px;
+  max-width: 260px;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px dashed rgba(var(--edge-rgb), 0.45);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  padding: var(--space-0-5) var(--space-1);
+  cursor: pointer;
+}
+
+.composer-suggested-reference-chip:hover:enabled {
+  background: var(--list-item-hover-bg);
+  border-color: rgba(var(--accent-rgb), 0.34);
+  color: var(--text);
+}
+
+.composer-suggested-reference-chip:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
+.composer-suggested-reference-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.composer-suggested-reference-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.composer-suggested-reference-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-suggested-reference-reason {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--font-size-2xs);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .composer-attachment-remove {
   border: none;
   background: transparent;
