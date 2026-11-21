@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
+import { adminDeleteTeam } from '../src/services/directory/teams.js'
 import { adminDeleteUser, retireDesktopUser } from '../src/services/directory/users.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.js'
@@ -51,6 +52,31 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
       [connectionId, `subject-${id}`, id]
     )
     return id
+  }
+
+  async function seedTeamWithMembers(userIds: readonly string[]): Promise<string> {
+    const teamId = randomUUID()
+    await testPool.query(`INSERT INTO teams (id, name) VALUES ($1, $2)`, [
+      teamId,
+      `oidc-retirement-team-${teamId}`,
+    ])
+    for (const userId of userIds) {
+      await testPool.query(
+        `INSERT INTO team_members (team_id, user_id, role, status) VALUES ($1, $2, 'admin', 'active')`,
+        [teamId, userId]
+      )
+    }
+    return teamId
+  }
+
+  async function retire(userId: string, key: string) {
+    return retireDesktopUser(
+      { kind: 'control_admin', controlAdminId: actorId },
+      userId,
+      'oidc-linked member retired',
+      key,
+      `${key}-request`
+    )
   }
 
   beforeAll(async () => {
@@ -117,6 +143,48 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
     expect(result).toMatchObject({ id: userId, outcome: 'deleted' })
     const user = await testPool.query(`SELECT 1 FROM users WHERE id = $1::uuid`, [userId])
     expect(user.rowCount).toBe(0)
+  })
+
+  it('deletes a team whose last member was retired as a retained row', async () => {
+    const userId = await seedLinkedUser('last-member-retire')
+    const teamId = await seedTeamWithMembers([userId])
+    expect(await retire(userId, 'oidc-retire-last-member-v1')).toMatchObject({
+      outcome: 'retired',
+    })
+    // The retired row keeps its membership row, still marked active.
+    const kept = await testPool.query(
+      `SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2::uuid`,
+      [teamId, userId]
+    )
+    expect(kept.rows).toEqual([{ status: 'active' }])
+
+    await expect(adminDeleteTeam(teamId)).resolves.toEqual({ ok: true, id: teamId })
+
+    const team = await testPool.query(`SELECT 1 FROM teams WHERE id = $1`, [teamId])
+    expect(team.rowCount).toBe(0)
+    // team_members cascades from teams; the retired user row stays.
+    const memberships = await testPool.query(`SELECT 1 FROM team_members WHERE team_id = $1`, [
+      teamId,
+    ])
+    expect(memberships.rowCount).toBe(0)
+    const user = await testPool.query(`SELECT lifecycle_state FROM users WHERE id = $1::uuid`, [
+      userId,
+    ])
+    expect(user.rows).toEqual([{ lifecycle_state: 'retired' }])
+  })
+
+  it('still refuses to delete a team that has an active member next to a retired one', async () => {
+    const retiredId = await seedLinkedUser('retired-next-to-active')
+    const activeId = await seedUser('active-next-to-retired')
+    const teamId = await seedTeamWithMembers([retiredId, activeId])
+    expect(await retire(retiredId, 'oidc-retire-next-to-active-v1')).toMatchObject({
+      outcome: 'retired',
+    })
+
+    await expect(adminDeleteTeam(teamId)).resolves.toEqual({ error: 'team_not_empty' })
+
+    const team = await testPool.query(`SELECT 1 FROM teams WHERE id = $1`, [teamId])
+    expect(team.rowCount).toBe(1)
   })
 
   it('refuses adminDeleteUser for a linked member', async () => {
