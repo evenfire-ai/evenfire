@@ -103,7 +103,7 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
     expect(links.rowCount).toBe(1)
   })
 
-  it('still hard-deletes an unlinked member without history', async () => {
+  it('still hard-deletes an unlinked member without history while member sign-in is off', async () => {
     const userId = await seedUser('unlinked-retire')
 
     const result = await retireDesktopUser(

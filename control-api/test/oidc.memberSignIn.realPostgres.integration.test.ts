@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { type DbClient, type DbTransactionClient, initDb, withTransaction } from '../src/db.js'
@@ -18,9 +18,11 @@ import {
 } from '../src/services/directory/invitationStore.js'
 import {
   acceptInvitationForEmailInTransaction,
+  deleteManagedUserForUser,
   softDeleteMember,
 } from '../src/services/directory/membership.js'
 import type { InviteRole } from '../src/services/directory/types.js'
+import { retireDesktopUser } from '../src/services/directory/users.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import {
   OIDC_MEMBER_SIGN_IN_FAKE_PUBLIC_IP,
@@ -71,6 +73,18 @@ beforeEach(() => {
     .mockResolvedValue([{ address: OIDC_MEMBER_SIGN_IN_FAKE_PUBLIC_IP, family: 4 }])
   network.transport.mockReset().mockImplementation(input => oidcMemberSignInFakeTransport(input))
 })
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
+
+/** Retirement reads the OIDC configuration from process.env: exactly these settings. */
+function stubOidcEnvironment(env: Record<string, string>): void {
+  for (const name of Object.keys(process.env)) {
+    if (name.startsWith('CONTROL_API_OIDC_') && !(name in env)) vi.stubEnv(name, undefined)
+  }
+  for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value)
+}
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -1124,6 +1138,113 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
         role: newer.role,
       })
     }
+  })
+
+  describe('removing a member who never signed in with OIDC', () => {
+    const retirementActor = () => ({ kind: 'control_admin' as const, controlAdminId: actorId })
+
+    async function userRow(userId: string) {
+      const result = await testPool.query<{ lifecycle_state: string }>(
+        `SELECT lifecycle_state FROM users WHERE id = $1::uuid`,
+        [userId]
+      )
+      return result.rows
+    }
+
+    it('keeps a retired row while member sign-in is on, so OIDC cannot recreate the member', async () => {
+      const fake = entraFake('fake-entra-retained-removal')
+      await seedConnection(fake.provider)
+      stubOidcEnvironment(fake.env)
+      const email = `${uniqueLabel('retained-removal')}@entra.fixture.test`
+      const userId = await seedUser(email)
+
+      const retirement = await retireDesktopUser(
+        retirementActor(),
+        userId,
+        'removed before OIDC sign-in',
+        uniqueLabel('retained-removal-key'),
+        'retained-removal-request'
+      )
+
+      expect(retirement).toMatchObject({ id: userId, outcome: 'retired' })
+      expect(await userRow(userId)).toEqual([{ lifecycle_state: 'retired' }])
+      // Entra creates accounts, so a hard-deleted member would come back (row 4).
+      expect(policyOf(fake).accountCreation).toBe('entra')
+      const proof = await fake.signIn({
+        sub: uniqueLabel('retained-removal-subject'),
+        tid: ENTRA_TENANT_ID,
+        email,
+        email_verified: true,
+      })
+      const before = await watchedTables()
+
+      expect(await signIn(fake, proof)).toEqual({
+        status: 'refused',
+        reason: 'account_needs_attention',
+      })
+      expect(await watchedTables()).toEqual(before)
+      expect(await userCount(email)).toBe(1)
+    })
+
+    it("keeps a retired row when a team manager removes the member's account", async () => {
+      const fake = entraFake('fake-entra-retained-managed-removal')
+      stubOidcEnvironment(fake.env)
+      const teamId = await seedTeam('retained-managed-removal-team')
+      const managerId = await seedUser(`${uniqueLabel('retained-manager')}@fixture.test`)
+      const userId = await seedUser(`${uniqueLabel('retained-managed')}@fixture.test`)
+      await seedMembership(teamId, managerId, 'admin')
+      await seedMembership(teamId, userId, 'member')
+
+      const removal = await deleteManagedUserForUser(managerId, userId, {
+        reason: 'removed by a team admin before OIDC sign-in',
+        idempotencyKey: uniqueLabel('retained-managed-key'),
+        requestId: 'retained-managed-request',
+      })
+
+      expect(removal).toMatchObject({ outcome: { id: userId, outcome: 'retired' } })
+      expect(await userRow(userId)).toEqual([{ lifecycle_state: 'retired' }])
+    })
+
+    it('keeps a retired row when the OIDC configuration cannot be read', async () => {
+      // The switch without its release guard: the loader refuses the configuration.
+      const { CONTROL_API_OIDC_UNRELEASED: _guard, ...switchWithoutGuard } = entraFake(
+        'fake-entra-unreadable-removal'
+      ).env
+      stubOidcEnvironment(switchWithoutGuard)
+      const userId = await seedUser(`${uniqueLabel('unreadable-removal')}@fixture.test`)
+
+      const retirement = await retireDesktopUser(
+        retirementActor(),
+        userId,
+        'removed while the OIDC configuration is broken',
+        uniqueLabel('unreadable-removal-key'),
+        'unreadable-removal-request'
+      )
+
+      expect(retirement).toMatchObject({ id: userId, outcome: 'retired' })
+      expect(await userRow(userId)).toEqual([{ lifecycle_state: 'retired' }])
+    })
+
+    it('still hard-deletes the member while member sign-in is off', async () => {
+      const { CONTROL_API_OIDC_MEMBER_SIGN_IN: _switch, ...switchOff } = entraFake(
+        'fake-entra-switch-off-removal'
+      ).env
+      for (const env of [{}, switchOff]) {
+        stubOidcEnvironment(env)
+        const userId = await seedUser(`${uniqueLabel('hard-deleted-removal')}@fixture.test`)
+
+        const retirement = await retireDesktopUser(
+          retirementActor(),
+          userId,
+          'removed while member sign-in is off',
+          uniqueLabel('hard-deleted-removal-key'),
+          'hard-deleted-removal-request'
+        )
+
+        expect(retirement).toMatchObject({ id: userId, outcome: 'deleted' })
+        expect(await userRow(userId)).toEqual([])
+      }
+    })
   })
 
   it('the issued token authenticates as the member', async () => {

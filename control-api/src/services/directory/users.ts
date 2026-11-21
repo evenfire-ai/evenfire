@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
+import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import { rootLogger } from '../../observability/logger.js'
+import { loadOidcProviderConfiguration } from '../../oidc/configuration.js'
 import {
   type GfsDesktopOperatorLifecycleActor,
   GfsDesktopOperatorLinkError,
@@ -335,6 +338,35 @@ export async function updateAdminUserContext(
   })
 }
 
+const retirementLog = rootLogger.child({ component: 'desktop_user_retirement' })
+
+/**
+ * True while OIDC member sign-in is switched on. A member removed then is kept
+ * as a retired row even without link history: OIDC sign-in finds a hard-deleted
+ * member's address unused and, where it creates accounts, would create the
+ * member again. The check reads the configuration at removal time only, so a
+ * member removed while member sign-in was off is still hard-deleted.
+ */
+function memberSignInConfigured(): boolean {
+  try {
+    return (
+      loadOidcProviderConfiguration(process.env, config.oauthEncryptionKey)?.memberSignIn != null
+    )
+  } catch (error) {
+    // An unreadable configuration may still have the switch on, so the row is
+    // kept: a retained row can be purged later, a deleted one cannot be
+    // restored. The OIDC routes log the settings at fault; this logs the class only.
+    retirementLog.warn(
+      {
+        event: 'retirement_oidc_configuration_unreadable',
+        errorClass: error instanceof Error ? error.constructor.name : typeof error,
+      },
+      'OIDC configuration is unreadable; the removed member is kept as a retired row'
+    )
+    return true
+  }
+}
+
 /**
  * Approval canApprove reads an enabled medium account and ignores lifecycle
  * state, so both the hard-delete and the tombstone paths have to disable it.
@@ -362,9 +394,10 @@ async function disableWorkflowApprovalMedium(db: DbClient, userId: string): Prom
  * Retire a Desktop user under one caller-owned transaction.
  *
  * A user with operator-link or OIDC-link history is retained as a lifecycle
- * tombstone. The legacy physical delete remains available only when no such
- * history exists, and its durable operation row makes retries safe even after
- * the user row is gone. Every non-terminal failure throws so the transaction rolls back the
+ * tombstone, and so is every user removed while OIDC member sign-in is on.
+ * The legacy physical delete remains available only when neither applies, and
+ * its durable operation row makes retries safe even after the user row is
+ * gone. Every non-terminal failure throws so the transaction rolls back the
  * pending operation, governed events, link state, and user mutation together.
  */
 export async function retireDesktopUser(
@@ -518,7 +551,7 @@ export async function retireDesktopUser(
     // RESTRICT): the member is retained as a retired row, never purged.
     const hasLinkHistory = hasOperatorLinkHistory || historyRow?.has_oidc_link === true
 
-    if (!hasLinkHistory && options.retainWithoutLinkHistory !== true) {
+    if (!hasLinkHistory && options.retainWithoutLinkHistory !== true && !memberSignInConfigured()) {
       await disableWorkflowApprovalMedium(db, targetUserId)
       const deleted = await db.query(
         `DELETE FROM users
@@ -658,8 +691,9 @@ export type RetireDesktopUserInTransactionInput = {
   requestId: string | null
   /**
    * Always leave a `retired` tombstone, even without operator-link or OIDC-link
-   * history (where retireDesktopUser hard-deletes). A hand-over needs the tombstone and
-   * must not fail on FKs that a hard delete could hit.
+   * history while member sign-in is off (where retireDesktopUser hard-deletes).
+   * A hand-over needs the tombstone and must not fail on FKs that a hard delete
+   * could hit.
    */
   retainWithoutLinkHistory?: boolean
 }
