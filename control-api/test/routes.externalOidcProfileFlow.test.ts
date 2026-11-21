@@ -7,10 +7,15 @@ import { createOidcR5ProtocolFixture } from './helpers/oidcR5ProtocolFixture.js'
 
 const provider = createOidcR5ProtocolFixture({ hostPrefix: 'profile-route-contract' }).provider
 
-function appFor(engine: object) {
+function appFor(
+  engine: object,
+  options: { memberSignIn?: boolean; signInMember?: (...args: never[]) => unknown } = {}
+) {
   const router = createExternalOidcProfileFlowRouter({
-    getProvider: () => provider,
+    getProvider: () =>
+      options.memberSignIn ? { ...provider, memberAuthenticationActivated: true } : provider,
     createEngine: () => engine as never,
+    ...(options.signInMember ? { signInMember: options.signInMember as never } : {}),
   })
   const app = express()
   app.use(express.json())
@@ -136,5 +141,128 @@ describe('Control API OIDC Profile UI foundation boundary', () => {
       retrySameAttempt: false,
     })
     expect(JSON.stringify(response.body)).not.toContain('finalize')
+  })
+})
+
+describe('Control API OIDC member sign-in (dev spike)', () => {
+  const completeBody = {
+    state: 'S'.repeat(43),
+    code: 'provider-code',
+    browserBinding: 'B'.repeat(43),
+    issuer: provider.issuer,
+  }
+  const proof = {
+    issuer: provider.issuer,
+    subject: 'opaque-provider-subject',
+    registrationId: provider.registrationId,
+    attributes: { source: 'validated_id_token', email: 'member@example.test', emailVerified: true },
+  }
+
+  it('never signs a member in while the switch is off', async () => {
+    const signInMember = vi.fn()
+    const completeIdentityProofAttempt = vi.fn().mockResolvedValue(proof)
+    const app = appFor({ completeIdentityProofAttempt }, { signInMember })
+    const response = await request(app)
+      .post('/external/oidc/profile-flow/complete')
+      .send(completeBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      outcome: 'identity_proof_verified',
+      memberAuthenticationActivated: false,
+    })
+    expect(completeIdentityProofAttempt).toHaveBeenCalledTimes(1)
+    expect(signInMember).not.toHaveBeenCalled()
+  })
+
+  it('reports the switch in the Profile UI configuration', async () => {
+    const response = await request(appFor({}, { memberSignIn: true })).get(
+      '/external/oidc/profile-flow/configuration'
+    )
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      redirectUri: provider.redirectUri,
+      memberAuthenticationActivated: true,
+    })
+  })
+
+  it('returns the member session for a verified identity while the switch is on', async () => {
+    const signInMember = vi.fn().mockResolvedValue({
+      status: 'signed_in',
+      userId: 'user-1',
+      token: 'session-token-fixture',
+      contract: 'v1',
+    })
+    const completeIdentityProofAttempt = vi.fn().mockResolvedValue(proof)
+    const app = appFor({ completeIdentityProofAttempt }, { memberSignIn: true, signInMember })
+    const response = await request(app)
+      .post('/external/oidc/profile-flow/complete')
+      .send(completeBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      outcome: 'member_signed_in',
+      memberAuthenticationActivated: true,
+      token: 'session-token-fixture',
+      sessionContract: 'v1',
+    })
+    expect(signInMember).toHaveBeenCalledWith(proof)
+    expect(JSON.stringify(response.body)).not.toMatch(/opaque-provider-subject|member@example/)
+  })
+
+  it('issues no session when no member matches the verified identity', async () => {
+    const signInMember = vi
+      .fn()
+      .mockResolvedValue({ status: 'refused', reason: 'email_unverified' })
+    const app = appFor(
+      { completeIdentityProofAttempt: vi.fn().mockResolvedValue(proof) },
+      { memberSignIn: true, signInMember }
+    )
+    const response = await request(app)
+      .post('/external/oidc/profile-flow/complete')
+      .send(completeBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      outcome: 'identity_proof_verified',
+      memberAuthenticationActivated: true,
+      memberSignIn: 'no_matching_member',
+    })
+    expect(signInMember).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(response.body)).not.toContain('email_unverified')
+  })
+
+  it('asks for a new attempt when session issuance fails after the attempt was consumed', async () => {
+    const signInMember = vi.fn().mockRejectedValue(new Error('database unavailable'))
+    const app = appFor(
+      { completeIdentityProofAttempt: vi.fn().mockResolvedValue(proof) },
+      { memberSignIn: true, signInMember }
+    )
+    const response = await request(app)
+      .post('/external/oidc/profile-flow/complete')
+      .send(completeBody)
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'oidc_storage_unavailable', retrySameAttempt: false })
+    expect(signInMember).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not attempt sign-in when the identity proof is rejected', async () => {
+    const signInMember = vi.fn()
+    const app = appFor(
+      {
+        completeIdentityProofAttempt: vi
+          .fn()
+          .mockRejectedValue(new OidcPersistenceFailure('claim', undefined, undefined, false)),
+      },
+      { memberSignIn: true, signInMember }
+    )
+    const response = await request(app)
+      .post('/external/oidc/profile-flow/complete')
+      .send(completeBody)
+
+    expect(response.status).toBe(503)
+    expect(response.body.error).toBe('oidc_storage_unavailable')
+    expect(signInMember).not.toHaveBeenCalled()
   })
 })

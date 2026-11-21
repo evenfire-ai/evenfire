@@ -1,9 +1,12 @@
+import { PROFILE_ROUTES } from '../../../constants/routes'
 import {
   type OidcProfileConfiguration,
   OidcProfileFlowError,
   browserCookieName,
   clearBrowserCookie,
+  completeOidcProfileFlow,
   getOidcProfileConfiguration,
+  memberSignedInRedirect,
   noStoreResult,
   noStoreText,
   parseCallbackParameters,
@@ -90,8 +93,7 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   try {
-    const result = await postOidcProfileFlow<{ outcome: 'identity_proof_verified' }>(
-      'complete',
+    const result = await completeOidcProfileFlow(
       {
         state: callback.state,
         code: callback.code,
@@ -100,8 +102,19 @@ export async function GET(request: Request): Promise<Response> {
       },
       request
     )
-    if (result?.outcome !== 'identity_proof_verified') {
-      throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
+    if (result.kind === 'member_signed_in') {
+      return memberSignedInRedirect(
+        PROFILE_ROUTES.root,
+        result.sessionCookie,
+        clearBrowserCookie(browserCookieName(callback.state))
+      )
+    }
+    if (result.kind === 'no_matching_member') {
+      return terminalFailure(
+        'Your identity was verified, but no Evenfire account matches it. Ask your administrator to add you, then sign in again.',
+        403,
+        callback.state
+      )
     }
     return terminalFailure(
       'Identity proof was verified. Member sign-in is not enabled.',

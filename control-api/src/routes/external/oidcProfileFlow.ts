@@ -1,9 +1,11 @@
-import { type Response, Router } from 'express'
+import { type Request, type Response, Router } from 'express'
+import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
+import { rootLogger } from '../../observability/logger.js'
 import { loadOidcProviderConfiguration } from '../../oidc/configuration.js'
-import { OidcProtocolEngine } from '../../oidc/protocolEngine.js'
+import { OidcProtocolEngine, type VerifiedOidcIdentityProof } from '../../oidc/protocolEngine.js'
 import {
   OidcAttemptRejectedError,
   OidcCallerCancelledError,
@@ -13,6 +15,12 @@ import {
   OidcProviderUnavailableError,
 } from '../../oidc/protocolResult.js'
 import { OIDC_OPERATION_DEADLINE_MS } from '../../oidc/protocolTransport.js'
+import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
+import { selectExternalSessionRepresentation } from '../../services/auth/externalSessionIssuance.js'
+import {
+  type OidcMemberSignInResult,
+  signInOidcVerifiedMember,
+} from '../../services/auth/oidcMemberSignIn.js'
 
 const BROWSER_BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
@@ -25,10 +33,15 @@ type Engine = Pick<
   'beginIdentityProofAttempt' | 'completeIdentityProofAttempt' | 'cancelIdentityProofAttempt'
 >
 
+type SignInMember = (proof: VerifiedOidcIdentityProof) => Promise<OidcMemberSignInResult>
+
 export type ExternalOidcProfileFlowDependencies = Readonly<{
   getProvider?: () => Provider | undefined
   createEngine?: (provider: Provider) => Engine
+  signInMember?: SignInMember
 }>
+
+const logger = rootLogger.child({ component: 'oidc_profile_flow' })
 
 function defaultProvider(): Provider | undefined {
   return loadOidcProviderConfiguration(process.env, config.oauthEncryptionKey)
@@ -40,6 +53,30 @@ function defaultEngine(provider: Provider): OidcProtocolEngine {
     getClientSecret: () => process.env[provider.clientSecretRef] ?? '',
     encryptionKeyHex: config.oauthEncryptionKey,
   })
+}
+
+/**
+ * Issues the Profile UI session exactly as password login does: no requested contract
+ * and no client version, so the same representation is selected.
+ */
+async function defaultSignInMember(
+  proof: VerifiedOidcIdentityProof
+): Promise<OidcMemberSignInResult> {
+  const policy = await resolveEffectiveUserAccessPolicy()
+  const selection = selectExternalSessionRepresentation({}, policy)
+  if (selection.status !== 'selected') {
+    throw new Error('Profile UI session representation is unavailable')
+  }
+  return signInOidcVerifiedMember({
+    attributes: proof.attributes,
+    contract: selection.contract,
+    policy,
+  })
+}
+
+/** Correlates sign-ins without writing the provider subject itself to logs. */
+function subjectFingerprint(proof: VerifiedOidcIdentityProof): string {
+  return createHash('sha256').update(`${proof.issuer}\n${proof.subject}`).digest('hex').slice(0, 16)
 }
 
 function safeFailure(error: unknown, res: Response, includeRetryability = false): void {
@@ -101,6 +138,7 @@ export function createExternalOidcProfileFlowRouter(
 ): Router {
   const getProvider = dependencies.getProvider ?? defaultProvider
   const createEngine = dependencies.createEngine ?? defaultEngine
+  const signInMember = dependencies.signInMember ?? defaultSignInMember
   const router = Router()
   const edgeRateLimits = createExternalClientRateLimiters(
     'oidc_profile_flow',
@@ -115,7 +153,7 @@ export function createExternalOidcProfileFlowRouter(
       if (!provider) return res.status(404).json({ error: 'oidc_not_configured' })
       return res.status(200).json({
         redirectUri: provider.redirectUri,
-        memberAuthenticationActivated: false,
+        memberAuthenticationActivated: provider.memberAuthenticationActivated,
       })
     } catch {
       return res.status(503).json({ error: 'oidc_configuration_unavailable' })
@@ -166,8 +204,9 @@ export function createExternalOidcProfileFlowRouter(
     ) {
       return res.status(400).json({ error: 'invalid_oidc_attempt' })
     }
+    let proof: VerifiedOidcIdentityProof
     try {
-      await createEngine(provider).completeIdentityProofAttempt(
+      proof = await createEngine(provider).completeIdentityProofAttempt(
         {
           state,
           code,
@@ -176,14 +215,62 @@ export function createExternalOidcProfileFlowRouter(
         },
         { signal: oidcOperationSignal(req) }
       )
+    } catch (error) {
+      return safeFailure(error, res, true)
+    }
+    if (!provider.memberAuthenticationActivated) {
       return res.status(200).json({
         outcome: 'identity_proof_verified',
         memberAuthenticationActivated: false,
       })
-    } catch (error) {
-      safeFailure(error, res, true)
     }
+    return completeMemberSignIn(proof, req, res)
   })
+
+  async function completeMemberSignIn(
+    proof: VerifiedOidcIdentityProof,
+    req: Request,
+    res: Response
+  ): Promise<void> {
+    const audit = {
+      event: 'oidc_member_sign_in',
+      registrationId: proof.registrationId,
+      issuer: proof.issuer,
+      subjectFingerprint: subjectFingerprint(proof),
+      requestId: req.get('x-request-id'),
+    }
+    let result: OidcMemberSignInResult
+    try {
+      result = await signInMember(proof)
+    } catch (error) {
+      // The attempt is already consumed: the browser must start a new one.
+      logger.error({ ...audit, outcome: 'failed', err: error }, 'OIDC member sign-in failed')
+      res.status(503).json({ error: 'oidc_storage_unavailable', retrySameAttempt: false })
+      return
+    }
+    if (result.status === 'refused') {
+      logger.info(
+        { ...audit, outcome: 'refused', reason: result.reason },
+        'OIDC member sign-in refused'
+      )
+      res.status(200).json({
+        outcome: 'identity_proof_verified',
+        memberAuthenticationActivated: true,
+        memberSignIn: 'no_matching_member',
+      })
+      return
+    }
+    logger.info(
+      { ...audit, outcome: 'signed_in', userId: result.userId, sessionContract: result.contract },
+      'OIDC member signed in'
+    )
+    res.status(200).json({
+      outcome: 'member_signed_in',
+      memberAuthenticationActivated: true,
+      token: result.token,
+      sessionContract: result.contract,
+    })
+  }
 
   router.post('/external/oidc/profile-flow/cancel', async (req, res) => {
     let provider: Provider | undefined

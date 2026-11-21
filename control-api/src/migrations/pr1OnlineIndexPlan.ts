@@ -1,4 +1,8 @@
 import type { DbClient } from '../db.js'
+import {
+  GOVERNED_TRACE_RETENTION_MIGRATION,
+  TELEMETRY_RETENTION_PREDICATES,
+} from './governedTraceRetention.js'
 import { MIGRATION_EXECUTION_POLICY } from './migrationExecutionPolicy.js'
 import { type RUNNER_MIGRATION_VERSIONS, runBoundedTransaction } from './migrationRunner.js'
 
@@ -139,9 +143,23 @@ export const PR2_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
   }),
 ])
 
-const ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
+export const ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
   ...PR1_ONLINE_INDEX_PLAN,
   ...PR2_ONLINE_INDEX_PLAN,
+  onlineIndex({
+    migrationVersion: GOVERNED_TRACE_RETENTION_MIGRATION,
+    name: 'idx_infra_telemetry_retention_samples',
+    table: 'infrastructure_telemetry_events',
+    keys: ['occurred_at', 'event_id'],
+    where: TELEMETRY_RETENTION_PREDICATES.samples,
+  }),
+  onlineIndex({
+    migrationVersion: GOVERNED_TRACE_RETENTION_MIGRATION,
+    name: 'idx_infra_telemetry_retention_other',
+    table: 'infrastructure_telemetry_events',
+    keys: ['occurred_at', 'event_id'],
+    where: TELEMETRY_RETENTION_PREDICATES.other,
+  }),
 ])
 
 export type PostSchemaConstraintValidation = Readonly<{
