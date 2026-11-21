@@ -17,6 +17,14 @@ const ENV = {
 
 const OIDC_ENV_NAMES = new Set<string>(Object.values(ENV))
 
+/**
+ * Optional switch, outside the all-or-none registration set. Only `enabled` turns
+ * member sign-in on; when it is absent the flow stops at the identity proof.
+ * It is not part of the configuration generation: toggling it does not
+ * invalidate attempts that are already in flight.
+ */
+const MEMBER_SIGN_IN_ENV = 'CONTROL_API_OIDC_MEMBER_SIGN_IN'
+
 const OidcPublicConfigurationSchema = z
   .object({
     [ENV.registrationId]: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/),
@@ -49,7 +57,7 @@ export type OidcProviderConfiguration = Readonly<{
   scopes: readonly ['openid', 'profile', 'email']
   trustGeneration: string
   configurationGeneration: string
-  memberAuthenticationActivated: false
+  memberAuthenticationActivated: boolean
 }>
 
 function invalid(field: string, detail: string): never {
@@ -141,10 +149,16 @@ export function loadOidcProviderConfiguration(
   generationKey: string
 ): OidcProviderConfiguration | undefined {
   const unknownNames = Object.keys(environment).filter(
-    key => key.startsWith('CONTROL_API_OIDC_') && !OIDC_ENV_NAMES.has(key)
+    key =>
+      key.startsWith('CONTROL_API_OIDC_') && !OIDC_ENV_NAMES.has(key) && key !== MEMBER_SIGN_IN_ENV
   )
   if (unknownNames.length > 0) {
     throw new Error(`Unsupported OIDC configuration field: ${unknownNames.sort().join(', ')}`)
+  }
+
+  const memberSignIn = environment[MEMBER_SIGN_IN_ENV]
+  if (memberSignIn !== undefined && memberSignIn !== 'enabled') {
+    throw new Error(`Invalid OIDC provider configuration field(s): ${MEMBER_SIGN_IN_ENV}`)
   }
 
   const configuredNames = [...OIDC_ENV_NAMES].filter(name => environment[name] !== undefined)
@@ -226,7 +240,7 @@ export function loadOidcProviderConfiguration(
     ],
     trustGeneration: input[ENV.trustGeneration],
     configurationGeneration,
-    memberAuthenticationActivated: false,
+    memberAuthenticationActivated: memberSignIn === 'enabled',
   })
 }
 
