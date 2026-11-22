@@ -226,7 +226,7 @@ const ADMIN_USER_SELECT = `SELECT u.id,
   LEFT JOIN teams t ON t.id = tm.team_id`
 
 const ADMIN_USER_GROUP_ORDER = `GROUP BY u.id, u.email, u.name, u.picture, p.display_name, u.lifecycle_state, ca.id
-  ORDER BY u.email ASC`
+  ORDER BY (u.lifecycle_state = 'active') DESC, u.email ASC`
 
 export async function createAdminUser(email: string, name: string) {
   const normalizedEmail = email.trim().toLowerCase()
@@ -258,12 +258,15 @@ export async function createAdminUser(email: string, name: string) {
 }
 
 /**
- * The Control UI user list: active users only. A retired user keeps its
- * team_members rows, so listing it would show a removed member with their
- * teams. `includeRetired` is for the invitation guard alone: a retired row
- * still holds its address, and an invitation to it could never be accepted.
- * Each item carries its `lifecycleState`, so the guard can tell a removed
- * member's address from an active member's.
+ * The Control UI user list. By default it lists active users only: that is
+ * for the Users page roster and the host grant pickers, because a retired
+ * user keeps its team_members rows, so listing it would show a removed
+ * member with their teams. `includeRetired` is for `GET /admin/users`, whose
+ * callers resolve stored user ids to names, and for the invitation guard: a
+ * retired row still holds its address, and an invitation to it could never be
+ * accepted. Each item carries its `lifecycleState`, so the guard can tell a
+ * removed member's address from an active member's. Retired rows sort after
+ * active ones, so the row cap never drops an active user for a retired one.
  */
 export async function listUsers(
   searchQuery = '',

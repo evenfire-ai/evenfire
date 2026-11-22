@@ -193,7 +193,7 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
     expect(team.rowCount).toBe(1)
   })
 
-  it('leaves a retired member out of the admin user list, which still lists active members', async () => {
+  it('leaves a retired member out of the default user list (Users page and host grant pickers)', async () => {
     const retiredId = await seedLinkedUser('listed-retired')
     const activeId = await seedUser('listed-active')
     const teamId = await seedTeamWithMembers([retiredId, activeId])
@@ -227,6 +227,28 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
     // Control: the invitation guard still finds the retired address.
     expect((await listUsers(retiredEmail, { includeRetired: true })).map(user => user.id)).toEqual([
       retiredId,
+    ])
+  })
+
+  it('lists active users before retired ones with includeRetired, even when the retired email sorts first', async () => {
+    const tag = randomUUID()
+    const retiredId = await seedLinkedUser('order-retired')
+    const activeId = await seedUser('order-active')
+    await testPool.query(`UPDATE users SET email = $2 WHERE id = $1::uuid`, [
+      retiredId,
+      `a-order-${tag}@fixture.test`,
+    ])
+    await testPool.query(`UPDATE users SET email = $2 WHERE id = $1::uuid`, [
+      activeId,
+      `z-order-${tag}@fixture.test`,
+    ])
+    expect(await retire(retiredId, 'oidc-retire-order-v1')).toMatchObject({ outcome: 'retired' })
+
+    const listed = await listUsers(`-order-${tag}@fixture.test`, { includeRetired: true })
+
+    expect(listed.map(user => [user.id, user.lifecycleState])).toEqual([
+      [activeId, 'active'],
+      [retiredId, 'retired'],
     ])
   })
 

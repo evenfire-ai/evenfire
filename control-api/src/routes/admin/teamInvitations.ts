@@ -32,7 +32,7 @@ async function findExistingMemberByEmail(email: string): Promise<ExistingMember 
 
 /**
  * An active member is pointed to their record. A removed (retired) member is
- * not: the admin user list no longer shows them, so there is no member to
+ * not: the Users page does not list them, so there is no member to
  * open, and no path makes a retired user active again.
  */
 function sendExistingMemberConflict(res: Response, member: ExistingMember): void {

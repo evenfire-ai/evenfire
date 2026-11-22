@@ -40,7 +40,7 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
   router.get('/admin/users', async (req, res, next) => {
     try {
       const q = String(req.query.q || '')
-      res.status(200).json({ items: await listUsers(q) })
+      res.status(200).json({ items: await listUsers(q, { includeRetired: true }) })
     } catch (error) {
       next(error)
     }

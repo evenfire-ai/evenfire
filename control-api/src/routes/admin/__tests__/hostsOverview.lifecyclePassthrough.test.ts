@@ -25,6 +25,7 @@ vi.mock('../hostSecrets.js', () => ({
 
 // Import AFTER vi.mock so the mocked dependencies wire up.
 const { createAdminHostsOverviewRouter } = await import('../hostsOverview.js')
+const { listUsers } = await import('../../../services/directory/index.js')
 
 describe('admin hosts read surface — lifecycle status passthrough (issue #791, Addendum 6)', () => {
   function buildApp(gateway: unknown) {
@@ -126,5 +127,20 @@ describe('admin hosts read surface — lifecycle status passthrough (issue #791,
         message: 'Communication channel status is reconciling.',
       },
     ])
+  })
+
+  it('GET /admin/hosts/:name/detail lists users with the default (active-only) filter for the grant pickers', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({ metadata: { name: 'foo' } }),
+      listResource: vi.fn().mockResolvedValue([]),
+    }
+    vi.mocked(listUsers).mockResolvedValueOnce([{ id: 'u1', email: 'u@example.com' }] as never)
+
+    const res = await request(buildApp(gateway)).get('/api/v1/admin/hosts/foo/detail')
+
+    // Positive: the picker list reached the response; negative: no includeRetired option.
+    expect(res.status).toBe(200)
+    expect(res.body.users).toEqual([{ id: 'u1', email: 'u@example.com' }])
+    expect(vi.mocked(listUsers).mock.calls).toEqual([['']])
   })
 })

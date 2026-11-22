@@ -23,6 +23,10 @@ const svc = vi.hoisted(() => ({
   listUsersByAgent: vi.fn(),
   listUsersByContext: vi.fn(),
   listUsers: vi.fn(),
+  listAllTeams: vi.fn(),
+  listAllPendingInvitationsAdmin: vi.fn(),
+  listTeamAgentsByTeam: vi.fn(),
+  listTeamContextsByTeam: vi.fn(),
   listMembers: vi.fn(),
   listPendingInvitationsForTeam: vi.fn(),
   listTeams: vi.fn(),
@@ -123,6 +127,8 @@ describe('routes/profileAdmin', () => {
     app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
 
     await request(app).get('/admin/users?q=test').expect(200)
+    // R5-3: the lookup list includes retired users, so a stored id still resolves to a name.
+    expect(svc.listUsers).toHaveBeenCalledWith('test', { includeRetired: true })
     await request(app)
       .put('/admin/users/u1/contexts')
       .send({ contextIds: ['ctx-a'] })
@@ -532,5 +538,25 @@ describe('routes/profileAdmin', () => {
       .set('Idempotency-Key', 'admin-delete-conflict')
       .send({ reason: 'policy retirement' })
       .expect(409, { error: 'idempotency_conflict' })
+  })
+
+  it('keeps the Users page roster active-only: the overview lists users with the default filter', async () => {
+    svc.listAllTeams.mockResolvedValue([])
+    svc.listUsers.mockResolvedValue([{ id: 'u1', email: 'u@example.com' }])
+    svc.listAllPendingInvitationsAdmin.mockResolvedValue([])
+    svc.listTeamAgentsByTeam.mockResolvedValue({})
+    svc.listTeamContextsByTeam.mockResolvedValue({})
+    ;(gatewayStub.listResource as any).mockResolvedValue([])
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+    const res = await request(app).get('/admin/profile-admin/overview').expect(200)
+
+    // Positive: the roster reached the response; negative: no includeRetired option.
+    expect(res.body.users).toEqual([{ id: 'u1', email: 'u@example.com' }])
+    expect(svc.listUsers).toHaveBeenCalledTimes(1)
+    expect(svc.listUsers.mock.calls[0]).toEqual([''])
   })
 })
