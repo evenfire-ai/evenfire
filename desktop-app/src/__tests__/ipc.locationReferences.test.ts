@@ -8,6 +8,7 @@ import {
   buildGfsFileReference,
   buildGfsLocationReference,
   classifyBytes,
+  parseLocationReferenceV1,
 } from '@clerum/gfs-interaction-policy'
 import vectorFile from '../../../packages/gfs-interaction-policy/fixtures/location-reference-vectors.v1.json'
 import type { AppService } from '../appService.js'
@@ -89,6 +90,13 @@ function folder(name = 'Reports') {
   return built.value
 }
 
+/** What the shared contract accepts for `input`: the value the boundary must forward. */
+function parsedFolder(input: unknown) {
+  const parsed = parseLocationReferenceV1(input)
+  if (!parsed.ok) throw new Error(`expected a valid folder: ${parsed.code}`)
+  return parsed.value
+}
+
 type Vector = { name: string; input: unknown; expected: { ok: boolean } }
 const vectors = (vectorFile as { vectors: Vector[] }).vectors
 const validVectors = vectors.filter(vector => vector.expected.ok)
@@ -101,7 +109,11 @@ describe('rpc:invokeHostMessage locationReferences', () => {
     await send({ fileReferences, locationReferences })
     expect(service.invokeHostMessage).toHaveBeenCalledWith(
       'agent-x',
-      expect.objectContaining({ content: 'hi', fileReferences, locationReferences }),
+      expect.objectContaining({
+        content: 'hi',
+        fileReferences,
+        locationReferences: [parsedFolder(locationReferences[0])],
+      }),
       undefined,
       undefined
     )
@@ -120,6 +132,8 @@ describe('rpc:invokeHostMessage locationReferences', () => {
     async (_name, input) => {
       await send({ locationReferences: [input] })
       expect(service.invokeHostMessage).toHaveBeenCalledTimes(1)
+      const request = service.invokeHostMessage.mock.calls[0][1] as Record<string, unknown>
+      expect(request.locationReferences).toEqual([parsedFolder(input)])
     }
   )
 
