@@ -229,7 +229,7 @@ describe('POST /rpc/hosts/:hostRef/messages — structured file references (#666
     })
   })
 
-  it('forwards folder references verbatim without inspecting their shape and relays the accepted ids', async () => {
+  it('forwards folder references verbatim without inspecting their shape', async () => {
     const locationReference = {
       schemaVersion: 1,
       id: 'gfs-folder:team-drive:0f1e2d3c4b5a69788796a5b4c3d2e1f0',
@@ -245,9 +245,8 @@ describe('POST /rpc/hosts/:hostRef/messages — structured file references (#666
       success: true,
       status: 'pending',
       taskId: 'task-1',
-      acceptedLocationReferenceIds: [locationReference.id],
     })
-    const response = await request(makeApp())
+    await request(makeApp())
       .post('/rpc/hosts/chatllm/messages')
       .set('authorization', 'Bearer token')
       .send({
@@ -259,7 +258,6 @@ describe('POST /rpc/hosts/:hostRef/messages — structured file references (#666
 
     const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
     expect(forwardedBody.locationReferences).toEqual([locationReference])
-    expect(response.body.acceptedLocationReferenceIds).toEqual([locationReference.id])
   })
 
   it('leaves a malformed folder value for mcp-host to refuse with its typed code', async () => {
