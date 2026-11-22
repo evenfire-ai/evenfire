@@ -100,6 +100,14 @@ export interface TurnContextReferencedFolder {
   code?: string
 }
 
+/** Which folder tools the turn's built registry holds; absent means none. */
+export interface TurnContextFolderTools {
+  /** clerum__gfs_create_file, clerum__gfs_create_folder or clerum__gfs_save_attachment. */
+  write: boolean
+  /** clerum__gfs_list. */
+  list: boolean
+}
+
 export interface TurnContextInput {
   date: Date
   channel: TurnContextChannel
@@ -108,6 +116,7 @@ export interface TurnContextInput {
   attachmentSave?: { images: TurnContextAttachedImage[] }
   referencedFiles?: TurnContextReferencedFile[]
   referencedFolders?: TurnContextReferencedFolder[]
+  folderTools?: TurnContextFolderTools
   preparedGfsFiles?: PreparedGfsFile[]
 }
 
@@ -163,11 +172,37 @@ export const ATTACHMENT_SAVE_INSTRUCTION =
 export const REFERENCED_FILES_INSTRUCTION =
   "If the user's request refers to a referenced file, read it with clerum__gfs_read using its drive and resourceId. The Host pins each referenced file to its listed version; pass expectedVersion only to read the current_version of a stale reference. clerum__gfs_stat, clerum__gfs_resolve and clerum__gfs_list report the live file, so their version can be newer than the one listed here; clerum__gfs_read reads the listed version, and reads a newer one only once the reference is stale. A referenced file whose availability is neither available nor stale cannot be read in this turn; tell the user why instead of guessing."
 
-export const REFERENCED_FOLDERS_INSTRUCTION =
-  "The user pointed at these folders as the place this request is about. When the request creates, saves, lists or searches files and names no other place, use the folder's drive and resourceId (as `parentResourceId` for create/save tools, or with `clerum__gfs_list`)."
+const FOLDERS_INTRO = 'The user pointed at these folders as the place this request is about.'
+
+// Without a write tool the model would otherwise fall back to some other
+// writable place, which is exactly what pointing at a folder rules out.
+const FOLDERS_NO_WRITE =
+  'Creating or saving files in these folders is not possible in this turn: when the request asks for it, tell the user so instead of storing the file anywhere else.'
+
+export const REFERENCED_FOLDERS_INSTRUCTION = `${FOLDERS_INTRO} When the request creates, saves or lists files and names no other place, use the folder's drive and resourceId (as \`parentResourceId\` for create/save tools, or with \`clerum__gfs_list\`).`
+
+export const WRITE_ONLY_FOLDERS_INSTRUCTION = `${FOLDERS_INTRO} When the request creates or saves files and names no other place, use the folder's drive and resourceId as \`parentResourceId\` for create/save tools.`
+
+export const READ_ONLY_FOLDERS_INSTRUCTION = `${FOLDERS_INTRO} When the request lists files and names no other place, use the folder's drive and resourceId with \`clerum__gfs_list\`. ${FOLDERS_NO_WRITE}`
+
+export const TOOLLESS_FOLDERS_INSTRUCTION = `${FOLDERS_INTRO} ${FOLDERS_NO_WRITE}`
+
+// The instruction names only tools the turn's registry holds, so the model is
+// never told to work in a folder through a tool it cannot call.
+function availableFoldersInstruction(tools: TurnContextFolderTools | undefined): string {
+  if (tools?.write)
+    return tools.list ? REFERENCED_FOLDERS_INSTRUCTION : WRITE_ONLY_FOLDERS_INSTRUCTION
+  return tools?.list ? READ_ONLY_FOLDERS_INSTRUCTION : TOOLLESS_FOLDERS_INSTRUCTION
+}
 
 export const UNAVAILABLE_FOLDERS_INSTRUCTION =
-  'When the request needs a place and names no other one, tell the user why, using its code, instead of choosing another place. A claimed_name is what the user sent, not a name the Host verified.'
+  'When the request needs a place and names no other one, tell the user why, using its code, instead of choosing another place.'
+
+// Rendered whenever any folder line uses claimed_name, whatever its
+// availability: an available folder whose gfsc name breaks the name rules
+// also falls back to the name the client sent.
+export const CLAIMED_FOLDER_NAME_NOTE =
+  'A claimed_name is what the user sent, not a name the Host verified.'
 
 // Client-supplied values are written with quotePromptValue, which keeps each
 // one on its own line and inside its own field. Values the Host computed
@@ -286,9 +321,11 @@ export function buildTurnContextBlock(input: TurnContextInput): string {
     lines.push(...input.referencedFolders.map(referencedFolderLine))
     lines.push(
       input.referencedFolders.some(folder => folder.availability === 'available')
-        ? REFERENCED_FOLDERS_INSTRUCTION
+        ? availableFoldersInstruction(input.folderTools)
         : UNAVAILABLE_FOLDERS_INSTRUCTION
     )
+    if (input.referencedFolders.some(folder => !folder.nameVerified))
+      lines.push(CLAIMED_FOLDER_NAME_NOTE)
   }
   return `<turn-context>\n${lines.join('\n')}\n</turn-context>\n\n`
 }

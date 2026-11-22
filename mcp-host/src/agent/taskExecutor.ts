@@ -68,6 +68,7 @@ import {
 import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
   type PreparedGfsFile,
+  type TurnContextFolderTools,
   attachedFilesForTurnContext,
   attachedImagesForTurnContext,
   buildTurnContextBlock,
@@ -165,6 +166,15 @@ import { sourceMessageForResume } from './sourceMessageForResume'
 import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
 import type { AgentConfig, ExecutorFailoverSupport } from './types'
+
+// The tools that take a referenced folder as `parentResourceId`.
+// clerum__gfs_copy needs gfs.write too, which always registers create_file.
+const FOLDER_WRITE_TOOLS = [
+  'clerum__gfs_create_file',
+  'clerum__gfs_create_folder',
+  GFS_SAVE_ATTACHMENT_TOOL,
+] as const
+const GFS_LIST_TOOL = 'clerum__gfs_list'
 
 export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'failed'
 
@@ -1353,6 +1363,12 @@ export class TaskExecutor {
     // The save instruction follows the registry that was actually built, so it
     // appears exactly when the model can call the tool.
     const saveAvailable = loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
+    // The folder instruction follows the same registry: a Host with gfs.read
+    // and no gfs.write resolves the folder but has no tool that writes into it.
+    const folderTools: TurnContextFolderTools = {
+      write: FOLDER_WRITE_TOOLS.some(name => loopConfig.toolRegistry.get(name) !== null),
+      list: loopConfig.toolRegistry.get(GFS_LIST_TOOL) !== null,
+    }
     if (
       appConfig.promptCacheEnabled ||
       hasFileAttachments ||
@@ -1360,7 +1376,7 @@ export class TaskExecutor {
       hasLocationReferences ||
       saveAvailable
     ) {
-      this.prependTurnContextBlock(messages, saveAvailable)
+      this.prependTurnContextBlock(messages, saveAvailable, folderTools)
     }
     if (this.turnTiming) {
       // buildLoopConfig assembles the tool registry (MCP schemas) and the
@@ -1382,7 +1398,11 @@ export class TaskExecutor {
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[], saveAvailable: boolean): void {
+  private prependTurnContextBlock(
+    messages: ChatMessage[],
+    saveAvailable: boolean,
+    folderTools: TurnContextFolderTools
+  ): void {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
@@ -1408,6 +1428,7 @@ export class TaskExecutor {
         referencedFolders: referencedFoldersForTurnContext(
           this.task.sourceMessage?.locationReferenceResolutions
         ),
+        folderTools,
         preparedGfsFiles: this.preparedGfsFiles,
       })
       const isCron = this.task.cronJobId !== undefined

@@ -556,19 +556,42 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
 
     function fileReferenceFailure(failure: FileReferenceCheckFailure): TaskError {
       const provider = deps.hostProvider() ?? 'unknown'
+      const folders = locationReferences.length === 1 ? 'folder' : 'folders'
+      // The failure does not say which reference caused it, so the text names
+      // every kind the message carried. The file-only texts are what clients
+      // already show and must stay as they are.
+      const messages: Record<FileReferenceCheckFailure, string> = !locationReferences.length
+        ? {
+            invalid: 'A referenced file does not match the file it names. Pick the file again.',
+            transient: 'The referenced files could not be checked. Send the message again.',
+            contract: 'The file service returned an unexpected answer for a referenced file.',
+            credentials:
+              'The Host could not authenticate to the file service to check the referenced files.',
+          }
+        : !fileReferences.length
+          ? {
+              invalid:
+                'A referenced folder does not match the folder it names. Pick the folder again.',
+              transient: `The referenced ${folders} could not be checked. Send the message again.`,
+              contract: 'The file service returned an unexpected answer for a referenced folder.',
+              credentials: `The Host could not authenticate to the file service to check the referenced ${folders}.`,
+            }
+          : {
+              invalid: 'A referenced file or folder does not match what it names. Pick it again.',
+              transient:
+                'The referenced files and folders could not be checked. Send the message again.',
+              contract:
+                'The file service returned an unexpected answer for a referenced file or folder.',
+              credentials:
+                'The Host could not authenticate to the file service to check the referenced files and folders.',
+            }
       if (failure === 'invalid')
         return {
           code: FileReferenceErrorCode.Invalid,
-          message: 'A referenced file does not match the file it names. Pick the file again.',
+          message: messages.invalid,
           retryable: false,
           provider,
         }
-      const messages: Record<Exclude<FileReferenceCheckFailure, 'invalid'>, string> = {
-        transient: 'The referenced files could not be checked. Send the message again.',
-        contract: 'The file service returned an unexpected answer for a referenced file.',
-        credentials:
-          'The Host could not authenticate to the file service to check the referenced files.',
-      }
       return {
         code: FileReferenceErrorCode.CheckFailed,
         message: messages[failure],
