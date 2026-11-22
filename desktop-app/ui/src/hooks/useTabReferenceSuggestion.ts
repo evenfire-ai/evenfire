@@ -44,6 +44,11 @@ function classifyFolder(resource: ResolvedResource, gfsUri: string): Outcome {
     gfsUri: resource.gfsUri,
     label: resource.name,
   }
+  // Hardening: gfs-controller always answers `gfs://<drive>/<rid>` with a
+  // lowercase rid and a name that already passes the reference name rule, so
+  // the builder cannot refuse a resource that got this far. It would refuse
+  // one if either side changed (an uppercase rid, a name the rule rejects);
+  // offering it then would only fail later, at send, after the click.
   try {
     buildComposerLocationReferences([candidate])
   } catch {
@@ -105,6 +110,11 @@ function displayable(
   if (!cache || target === null || cache.result.status !== 'ready') return false
   if (cache.scope !== scope || cache.gfsUri !== target.gfsUri) return false
   const candidate = cache.result.candidate
+  // Hardening: a candidate is only cached for a target of its own kind, the URI
+  // already matched, and a rid names one resource whose kind never changes, so
+  // a cached candidate always has the kind of its target.
+  // The two kind checks keep a folder from being offered for a file tab, or a
+  // file for a folder, if a target ever stopped being keyed by rid alone.
   if (candidate.type === 'global_folder') return target.kind === 'folder'
   if (target.kind === 'folder') return false
   return minVersion === undefined || candidate.version >= minVersion
