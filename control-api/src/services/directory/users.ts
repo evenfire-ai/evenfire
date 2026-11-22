@@ -259,9 +259,9 @@ export async function createAdminUser(email: string, name: string) {
 
 /**
  * The Control UI user list. By default it lists active users only: that is
- * for the Users page roster and the host grant pickers, because a retired
- * user keeps its team_members rows, so listing it would show a removed
- * member with their teams. `includeRetired` is for `GET /admin/users`, whose
+ * for the Users page roster (the host detail bundle uses the default too),
+ * because a retired user keeps its team_members rows, so listing it would
+ * show a removed member with their teams. `includeRetired` is for `GET /admin/users`, whose
  * callers resolve stored user ids to names, and for the invitation guard: a
  * retired row still holds its address, and an invitation to it could never be
  * accepted. Each item carries its `lifecycleState`, so the guard can tell a

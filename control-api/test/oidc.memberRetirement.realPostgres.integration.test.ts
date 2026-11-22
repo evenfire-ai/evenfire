@@ -193,7 +193,7 @@ describeRealPostgres('OIDC-linked member retirement on real PostgreSQL', () => {
     expect(team.rowCount).toBe(1)
   })
 
-  it('leaves a retired member out of the default user list (Users page and host grant pickers)', async () => {
+  it('leaves a retired member out of the default user list (Users page and host detail bundle)', async () => {
     const retiredId = await seedLinkedUser('listed-retired')
     const activeId = await seedUser('listed-active')
     const teamId = await seedTeamWithMembers([retiredId, activeId])
