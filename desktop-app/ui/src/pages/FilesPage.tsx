@@ -836,7 +836,8 @@ export function FilesPage({
   }
 
   useEffect(() => {
-    if (!openLinkOpen && !moveTarget && !renameTarget && !pendingFolderMove) return
+    // The Move dialog owns its Escape: closing it here too would close it twice.
+    if (!openLinkOpen && !renameTarget && !pendingFolderMove) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       if (pendingFolderMove) {
@@ -844,12 +845,11 @@ export function FilesPage({
         return
       }
       setOpenLinkOpen(false)
-      closeMoveDialog()
       setRenameTarget(null)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [openLinkOpen, moveTarget, pendingFolderMove, renameTarget])
+  }, [openLinkOpen, pendingFolderMove, renameTarget])
 
   const handleDownload = async (uri: string, name: string) => {
     try {

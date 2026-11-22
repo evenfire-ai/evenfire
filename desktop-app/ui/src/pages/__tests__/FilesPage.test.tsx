@@ -5217,6 +5217,83 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
   })
 
+  it('closes the move dialog on Escape without moving anything', async () => {
+    const moveResource = vi.fn(async (resourceId: string) => ({ resourceId, version: 4 }))
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([
+        childView('sub-1', 'Subfolder', 'directory', {
+          parentResourceId: 'folder-1',
+          path: '/Product/Subfolder',
+          version: 6,
+          bytes: 0,
+        }),
+      ])
+    )
+    const resolvedSource = await resolveResource(
+      resolvedFile('child-1', 'notes.txt', {
+        gfsUri: 'gfs://main/child1',
+        parentResourceId: 'folder-1',
+        path: '/Product/notes.txt',
+        version: 3,
+        bytes: 12,
+      })
+    )
+    const resolve = vi.fn(async () => resolvedSource)
+    const affordances = vi.fn(async (resourceId: string) =>
+      affordancesResult(
+        heldAffordances(resourceId === 'folder-1' ? ['read', 'write', 'delete'] : ['read', 'write'])
+      )
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances, listChildren, resolve } },
+    })
+    const productCrumb = {
+      resourceId: 'folder-1',
+      gfsUri: 'gfs://main/folder-1',
+      name: 'Product',
+      kind: 'directory' as const,
+      version: 1,
+      bytes: 0,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: productCrumb,
+      crumbs: [productCrumb],
+      items: [
+        {
+          resourceId: 'child-1',
+          rid: 'child-1',
+          gfsUri: 'gfs://main/child-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+      ],
+      affordances: delegationAffordances(new Set(['read', 'write', 'delete']), false),
+      moveResource,
+    })
+
+    renderFilesPage(vi.fn())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    await within(dialog).findByRole('button', { name: 'Subfolder' })
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+
+    await waitFor(() => expect(dialog.isConnected).toBe(false))
+    expect(screen.queryByRole('dialog', { name: 'Move file notes.txt' })).toBeNull()
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
   it('moves a dragged file onto a folder only after confirming destination write access', async () => {
     const pushToast = vi.fn()
     const moveResource = vi.fn(async () => ({}))

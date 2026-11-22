@@ -316,6 +316,17 @@ export function GfsMoveDialog({
     settleNumberedNameConsent(false)
     onClose()
   }
+  // On window, like the other GFS dialogs: the dialog takes no initial focus,
+  // so a listener on its panel would miss an Escape pressed from the page.
+  const closeDialogRef = useRef(closeDialog)
+  closeDialogRef.current = closeDialog
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeDialogRef.current()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
   useEffect(() => {
     const previousIdentity = previousDialogIdentityRef.current
     const currentIdentity = dialogIdentityRef.current

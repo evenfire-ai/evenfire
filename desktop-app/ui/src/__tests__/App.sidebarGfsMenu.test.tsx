@@ -482,15 +482,14 @@ describe('App sidebar GFS resource menu', () => {
   })
 
   it.each([
-    { action: 'Delete', row: 'notes.txt', dialog: 'Delete notes.txt?', escapeCloses: true },
-    { action: 'Rename', row: 'notes.txt', dialog: 'Rename file', escapeCloses: true },
-    { action: 'New folder', row: 'Reports', dialog: 'New folder', escapeCloses: true },
-    { action: 'Share', row: 'notes.txt', dialog: 'Share file notes.txt', escapeCloses: true },
-    // The Move dialog has no Escape of its own: the drawer still leaves it alone.
-    { action: 'Move to', row: 'notes.txt', dialog: 'Move file notes.txt', escapeCloses: false },
+    { action: 'Delete', row: 'notes.txt', dialog: 'Delete notes.txt?' },
+    { action: 'Rename', row: 'notes.txt', dialog: 'Rename file' },
+    { action: 'New folder', row: 'Reports', dialog: 'New folder' },
+    { action: 'Share', row: 'notes.txt', dialog: 'Share file notes.txt' },
+    { action: 'Move to', row: 'notes.txt', dialog: 'Move file notes.txt' },
   ])(
     'Escape in the compact drawer with the host $action dialog open leaves the drawer open',
-    async ({ action, row, dialog: dialogName, escapeCloses }) => {
+    async ({ action, row, dialog: dialogName }) => {
       compact = true
       const { bridge } = installBridge()
       // Every host action offered: write on the folder, manage_acl on the file,
@@ -545,13 +544,7 @@ describe('App sidebar GFS resource menu', () => {
       fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
 
       expect(drawerOpen()).toBe(true)
-      if (escapeCloses) {
-        await waitFor(() => expect(dialog.isConnected).toBe(false))
-      } else {
-        expect(dialog.isConnected).toBe(true)
-        fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
-        await waitFor(() => expect(dialog.isConnected).toBe(false))
-      }
+      await waitFor(() => expect(dialog.isConnected).toBe(false))
       expect(drawerOpen()).toBe(true)
 
       fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })

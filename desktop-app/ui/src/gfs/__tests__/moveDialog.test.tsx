@@ -368,6 +368,18 @@ describe('GfsMoveDialog close lock', () => {
     expect(onClose).toHaveBeenCalledTimes(3)
   })
 
+  it('closes on Escape pressed outside the dialog, like its close buttons', async () => {
+    const onClose = vi.fn()
+    renderDialog({ listAccessible: destinations }, { onClose })
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    // The dialog takes no initial focus: Escape arrives from the page behind it.
+    expect(dialog.contains(document.activeElement)).toBe(false)
+
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('disables every close path when locked and keeps the numbered-name choice operable', async () => {
     const onClose = vi.fn()
     let consent!: Promise<boolean>
@@ -415,8 +427,11 @@ describe('GfsMoveDialog close lock', () => {
     fireEvent.click(close)
     fireEvent.click(cancel)
     fireEvent.mouseDown(dialog.parentElement!)
+    fireEvent.keyDown(document.body, { key: 'Escape' })
     expect(onClose).not.toHaveBeenCalled()
     expect(screen.getByRole('dialog', { name: 'Move file notes.txt' })).toBe(dialog)
+    // Escape while locked must not settle the pending numbered-name choice either.
+    expect(within(dialog).getByRole('button', { name: 'Move as notes (1).txt' })).toBeTruthy()
 
     const keep = within(dialog).getByRole<HTMLButtonElement>('button', {
       name: 'Keep current name',
