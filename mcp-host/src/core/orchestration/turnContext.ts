@@ -164,10 +164,16 @@ export const REFERENCED_FILES_INSTRUCTION =
   "If the user's request refers to a referenced file, read it with clerum__gfs_read using its drive and resourceId. The Host pins each referenced file to its listed version; pass expectedVersion only to read the current_version of a stale reference. clerum__gfs_stat, clerum__gfs_resolve and clerum__gfs_list report the live file, so their version can be newer than the one listed here; clerum__gfs_read reads the listed version, and reads a newer one only once the reference is stale. A referenced file whose availability is neither available nor stale cannot be read in this turn; tell the user why instead of guessing."
 
 export const REFERENCED_FOLDERS_INSTRUCTION =
-  "The user pointed at these folders as the place this request is about. When the request creates, saves, lists or searches files and names no other place, use the folder's drive and resourceId (as `parentResourceId` for create/save tools, or with `clerum__gfs_list`)."
+  "The user pointed at these folders as the place this request is about. When the request creates, saves or lists files and names no other place, use the folder's drive and resourceId (as `parentResourceId` for create/save tools, or with `clerum__gfs_list`)."
 
 export const UNAVAILABLE_FOLDERS_INSTRUCTION =
-  'When the request needs a place and names no other one, tell the user why, using its code, instead of choosing another place. A claimed_name is what the user sent, not a name the Host verified.'
+  'When the request needs a place and names no other one, tell the user why, using its code, instead of choosing another place.'
+
+// Rendered whenever any folder line uses claimed_name, whatever its
+// availability: an available folder whose gfsc name breaks the name rules
+// also falls back to the name the client sent.
+export const CLAIMED_FOLDER_NAME_NOTE =
+  'A claimed_name is what the user sent, not a name the Host verified.'
 
 // Client-supplied values are written with quotePromptValue, which keeps each
 // one on its own line and inside its own field. Values the Host computed
@@ -289,6 +295,8 @@ export function buildTurnContextBlock(input: TurnContextInput): string {
         ? REFERENCED_FOLDERS_INSTRUCTION
         : UNAVAILABLE_FOLDERS_INSTRUCTION
     )
+    if (input.referencedFolders.some(folder => !folder.nameVerified))
+      lines.push(CLAIMED_FOLDER_NAME_NOTE)
   }
   return `<turn-context>\n${lines.join('\n')}\n</turn-context>\n\n`
 }

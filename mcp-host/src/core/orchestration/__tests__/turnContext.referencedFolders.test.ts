@@ -20,6 +20,11 @@ import {
 
 const rid = (n: number) => n.toString(16).padStart(32, '0')
 
+// Literal text, not the exported constants: what the model reads is the contract.
+const CLAIMED_NAME_NOTE_LINE = 'A claimed_name is what the user sent, not a name the Host verified.'
+const UNAVAILABLE_LINE =
+  'When the request needs a place and names no other one, tell the user why, using its code, instead of choosing another place.'
+
 function folder(n: number, name = `Desktop-${n}`): LocationReferenceV1 {
   const built = buildGfsLocationReference({
     drive: 'main',
@@ -55,6 +60,9 @@ describe('referenced_folder lines', () => {
     )
     expect(block).toContain(REFERENCED_FOLDERS_INSTRUCTION)
     expect(block).not.toContain(UNAVAILABLE_FOLDERS_INSTRUCTION)
+    // No GFS tool searches a folder, so the instruction must not offer it.
+    expect(block).not.toMatch(/search/i)
+    expect(block).not.toContain(CLAIMED_NAME_NOTE_LINE)
   })
 
   it('marks the Desktop name as claimed when the gfsc name breaks the name rules', async () => {
@@ -66,6 +74,8 @@ describe('referenced_folder lines', () => {
     expect(block).not.toMatch(/ name="/)
     // The folder itself was verified, so the instruction to work there stays.
     expect(block).toContain(REFERENCED_FOLDERS_INSTRUCTION)
+    // The fallback name still needs its explanation on an available folder.
+    expect(lines(block).filter(line => line === CLAIMED_NAME_NOTE_LINE)).toHaveLength(1)
   })
 
   it('infers the name source from the availability for a resolution persisted without one', async () => {
@@ -108,6 +118,8 @@ describe('referenced_folder lines', () => {
     )
     expect(block).toContain(UNAVAILABLE_FOLDERS_INSTRUCTION)
     expect(block).not.toContain(REFERENCED_FOLDERS_INSTRUCTION)
+    // gfsc named it, so there is no claimed_name to explain.
+    expect(block).not.toContain(CLAIMED_NAME_NOTE_LINE)
   })
 
   it.each([
@@ -125,7 +137,8 @@ describe('referenced_folder lines', () => {
         `referenced_folder: id="${ref.id}" claimed_name="Payroll" source=gfs drive="main" resourceId="${rid(1)}" availability=${availability} code=${code}`
       )
       expect(block).not.toMatch(/ name="Payroll"/)
-      expect(block).toContain(UNAVAILABLE_FOLDERS_INSTRUCTION)
+      expect(lines(block)).toContain(UNAVAILABLE_LINE)
+      expect(lines(block).filter(line => line === CLAIMED_NAME_NOTE_LINE)).toHaveLength(1)
       expect(block).not.toContain(REFERENCED_FOLDERS_INSTRUCTION)
     }
   )
@@ -205,5 +218,6 @@ describe('referenced_folder lines', () => {
     expect(block).not.toContain('referenced_folder')
     expect(block).not.toContain(REFERENCED_FOLDERS_INSTRUCTION)
     expect(block).not.toContain(UNAVAILABLE_FOLDERS_INSTRUCTION)
+    expect(block).not.toContain(CLAIMED_NAME_NOTE_LINE)
   })
 })
