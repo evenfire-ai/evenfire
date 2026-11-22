@@ -638,15 +638,17 @@ export function FilesPage({
     handleAuthorityFailure: (error, scope, generation) =>
       failClosedOnAuthorizationError(error, scope ?? requestedScope, generation),
     pushToast,
+    // Session currency only, not page liveness: an upload queue or a confirmed
+    // dialog action keeps running after the user leaves Files. Each mutation is
+    // still cut by `admitEffect`, which asks main for its live generation, and
+    // by `readAccessState()` once the session's access was revoked.
     isCurrent: () =>
-      pageActiveRef.current &&
       isGfsSessionAuthorityCurrent(
         requestedScope,
         requestedGeneration,
         moveWorkspaceRef.current.sessionScope,
         moveWorkspaceRef.current.sessionGeneration
-      ) &&
-      ctrl.readAccessState() === 'active',
+      ) && ctrl.readAccessState() === 'active',
   })
   const fetchRowAuthority = (resourceId: string, resourceName: string, drive: string) =>
     fetchGfsAuthority(
