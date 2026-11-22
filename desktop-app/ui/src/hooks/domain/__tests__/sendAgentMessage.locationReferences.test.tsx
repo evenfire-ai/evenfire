@@ -27,7 +27,7 @@ const hookMock = vi.hoisted(() => ({ useGfsBrowserController: vi.fn() }))
 vi.mock('@hooks/domain/useGfsBrowserController', () => hookMock)
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const NOT_RECEIVED = "This agent can't use folder references yet"
+const NOT_RECEIVED = "This agent can't use folder references yet; the message was sent without it."
 const SENT_TOAST = ['Message sent to agent-x.', 'success'] as const
 const SYNC: HostDispatch = { success: true, response: 'done' }
 const ASYNC: HostDispatch = { success: true, taskId: 'task-folder', status: 'pending' }

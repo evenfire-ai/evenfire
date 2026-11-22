@@ -159,7 +159,8 @@ const TRANSCRIPT_MEMO_LIMITS = {
 const MAX_RECONCILE_DELTA_PAGES = 5
 const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
   'The Host did not receive the selected Global Files; the message was sent without them.'
-const LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE = "This agent can't use folder references yet"
+const LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE =
+  "This agent can't use folder references yet; the message was sent without it."
 // #678 D13 — a Host that predates `kind:'file'` either rejects the attachment
 // with LLM_INVALID_ATTACHMENT or drops it and still accepts the message.
 const HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE =
