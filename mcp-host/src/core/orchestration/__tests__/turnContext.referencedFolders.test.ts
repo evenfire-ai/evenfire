@@ -14,6 +14,7 @@ import {
 import { GfscHttpError } from '../../../internalTools/gfsClient'
 import {
   REFERENCED_FOLDERS_INSTRUCTION,
+  type TurnContextFolderTools,
   UNAVAILABLE_FOLDERS_INSTRUCTION,
   buildTurnContextBlock,
 } from '../turnContext'
@@ -36,7 +37,13 @@ function folder(n: number, name = `Desktop-${n}`): LocationReferenceV1 {
   return built.value
 }
 
-async function blockFor(reference: LocationReferenceV1, answer: () => unknown) {
+const ALL_FOLDER_TOOLS: TurnContextFolderTools = { write: true, list: true }
+
+async function blockFor(
+  reference: LocationReferenceV1,
+  answer: () => unknown,
+  { folderTools }: { folderTools?: TurnContextFolderTools } = { folderTools: ALL_FOLDER_TOOLS }
+) {
   const client: FileReferenceGfscClient = { resolve: async () => answer() }
   const resolved = await resolveMessageReferences([], [reference], client)
   if (!resolved.ok) throw new Error(`fixture resolution failed: ${resolved.failure}`)
@@ -44,6 +51,7 @@ async function blockFor(reference: LocationReferenceV1, answer: () => unknown) {
     date: new Date('2026-11-21T10:00:00Z'),
     channel: { type: 'rpc' },
     referencedFolders: referencedFoldersForTurnContext(resolved.locationResolutions),
+    folderTools,
   })
 }
 
@@ -64,6 +72,43 @@ describe('referenced_folder lines', () => {
     expect(block).not.toMatch(/search/i)
     expect(block).not.toContain(CLAIMED_NAME_NOTE_LINE)
   })
+
+  const FOLDER_INTRO = 'The user pointed at these folders as the place this request is about.'
+  const NO_WRITE =
+    'Creating or saving files in these folders is not possible in this turn: when the request asks for it, tell the user so instead of storing the file anywhere else.'
+
+  it.each([
+    [
+      'create, save and list tools',
+      { write: true, list: true },
+      `${FOLDER_INTRO} When the request creates, saves or lists files and names no other place, use the folder's drive and resourceId (as \`parentResourceId\` for create/save tools, or with \`clerum__gfs_list\`).`,
+    ],
+    [
+      'create and save tools only',
+      { write: true, list: false },
+      `${FOLDER_INTRO} When the request creates or saves files and names no other place, use the folder's drive and resourceId as \`parentResourceId\` for create/save tools.`,
+    ],
+    [
+      'the list tool only',
+      { write: false, list: true },
+      `${FOLDER_INTRO} When the request lists files and names no other place, use the folder's drive and resourceId with \`clerum__gfs_list\`. ${NO_WRITE}`,
+    ],
+    ['no folder tool', { write: false, list: false }, `${FOLDER_INTRO} ${NO_WRITE}`],
+    ['no folder tools reported', undefined, `${FOLDER_INTRO} ${NO_WRITE}`],
+  ] as const)(
+    'tells the model about an available folder with %s',
+    async (_label, folderTools, instruction) => {
+      const block = await blockFor(folder(1), () => views.directory['1'], { folderTools })
+      // Witness: the folder resolved as available.
+      expect(lines(block).filter(line => line.startsWith('referenced_folder:'))).toEqual([
+        `referenced_folder: id="${folder(1).id}" name="Folder-1" source=gfs drive="main" resourceId="${rid(1)}" availability=available`,
+      ])
+      expect(lines(block)).toContain(instruction)
+      // A tool the registry does not hold is never named.
+      if (!folderTools?.write) expect(block).not.toContain('parentResourceId')
+      if (!folderTools?.list) expect(block).not.toContain('clerum__gfs_list')
+    }
+  )
 
   it('marks the Desktop name as claimed when the gfsc name breaks the name rules', async () => {
     const ref = folder(1, 'Old Name')
