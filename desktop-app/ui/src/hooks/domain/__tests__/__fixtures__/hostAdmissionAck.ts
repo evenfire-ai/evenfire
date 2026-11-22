@@ -49,7 +49,7 @@ export async function hostAdmissionAck(
   request: Record<string, unknown>,
   resources: GfsResourceView[],
   dispatch: HostDispatch,
-  options: { async?: boolean } = {}
+  options: { async?: boolean; gfscTimesOut?: boolean } = {}
 ): Promise<HostAck> {
   const [{ createIncomingAdmission }, { ok }] = await loadProducers()
   const byUri = new Map(resources.map(resource => [resource.gfsUri, resource]))
@@ -67,6 +67,11 @@ export async function hostAdmissionAck(
       status: 'available',
       client: {
         resolve: async ({ uri }: { uri: string }) => {
+          // What a gfsc call cut by `AbortSignal.timeout` rejects with; the
+          // Host's own check classifies it and words the refusal.
+          if (options.gfscTimesOut) {
+            throw Object.assign(new Error('gfsc did not answer in time'), { name: 'TimeoutError' })
+          }
           const resource = byUri.get(uri)
           if (!resource) throw new Error(`gfsc double: no resource at ${uri}`)
           return ok(resource)
@@ -83,6 +88,6 @@ export async function hostAdmissionAck(
       messageId: 'msg-1',
       hostRef: String(request.channelId),
     },
-    options
+    { async: options.async }
   )
 }

@@ -7,6 +7,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
 import { COMPOSER_MAX_NON_IMAGE_BODY_BYTES } from '@constants/attachments'
+import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import { composerNonImageShareBytes } from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerLocationReferences } from '@lib/composerLocationReferences'
@@ -55,6 +56,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   uninstallMockClerum()
+  resetComposerDraftStore()
 })
 
 async function mounted() {
@@ -79,7 +81,10 @@ async function send(
 }
 
 /** The Host answers with its own admission of the request desktop sent. */
-function hostAnswers(dispatch: HostDispatch, options: { dropLocations?: boolean } = {}) {
+function hostAnswers(
+  dispatch: HostDispatch,
+  options: { dropLocations?: boolean; gfscTimesOut?: boolean } = {}
+) {
   clerum.rpc.invokeHostMessage.mockImplementation(
     async (_host: string, request: Record<string, unknown>) => {
       // An rpc-proxy or Host that predates the field forwards the rest.
@@ -87,6 +92,7 @@ function hostAnswers(dispatch: HostDispatch, options: { dropLocations?: boolean 
       const received = options.dropLocations ? rest : { ...rest, locationReferences }
       return hostAdmissionAck(received, [reportsView, reportFileView], dispatch, {
         async: 'taskId' in dispatch,
+        gfscTimesOut: options.gfscTimesOut,
       })
     }
   )
@@ -202,5 +208,53 @@ describe('sendAgentMessage — a Host that did not receive the folder', () => {
     )
     expect(rendered.result.current.agentError).toBeNull()
     expect(rendered.spies.pushToast).not.toHaveBeenCalledWith(NOT_RECEIVED, 'error')
+  })
+})
+
+describe('sendAgentMessage — a Host that refuses the folder', () => {
+  it('shows the Host refusal about the folder and keeps the folder and the text to recover', async () => {
+    hostAnswers(SYNC, { gfscTimesOut: true })
+    const rendered = await mounted()
+    const text = 'Create a summary in this folder'
+    await send(rendered, [reports], text)
+
+    // The Host's own refusal of the request desktop sent.
+    const [request] = sentRequests()
+    const refusal = (await hostAdmissionAck(request!, [], SYNC, { gfscTimesOut: true })) as {
+      success?: boolean
+      error?: { code?: string; message?: string }
+    }
+    expect(refusal.success).toBe(false)
+    const refusalText = refusal.error?.message ?? ''
+    // A folder-only message is refused in folder words, never in file words.
+    expect(refusalText).toContain('folder')
+    expect(refusalText).not.toMatch(/\bfiles?\b/)
+
+    // Witness: the refusal reached the chat as an error with the Host's code.
+    expect(rendered.result.current.chatMessages.at(-1)).toMatchObject({
+      role: 'assistant',
+      isError: true,
+      errorCode: refusal.error?.code,
+      content: refusalText,
+    })
+    expect(rendered.spies.pushToast).toHaveBeenCalledWith(
+      `Message to agent-x failed: ${refusalText}`,
+      'error'
+    )
+    expect(rendered.spies.pushToast).not.toHaveBeenCalledWith(...SENT_TOAST)
+    expect(rendered.spies.pushToast).not.toHaveBeenCalledWith(NOT_RECEIVED, 'error')
+    const failed = rendered.result.current.failedAgentSend
+    expect(failed?.message).toBe(refusalText)
+    expect(failed?.references.map(item => item.id)).toEqual([reports.id])
+
+    const chat = rendered.result.current.activeChatId
+    act(() => rendered.result.current.handleRecoverFailedAgentSend())
+
+    expect(getComposerDraft(chat, 'agent-x')).toBe(text)
+    expect(rendered.result.current.composerReferenceAttachments.map(item => item.id)).toEqual([
+      reports.id,
+    ])
+    expect(rendered.result.current.failedAgentSend).toBeNull()
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
   })
 })
