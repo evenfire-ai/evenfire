@@ -28,23 +28,23 @@ type ViewIndex = keyof typeof views.directory
 const rid = (n: number) => n.toString(16).padStart(32, '0')
 const FOLDER_NAME = 'Clients-SENTINEL-FOLDER'
 
-function folder(n: number, name = FOLDER_NAME): LocationReferenceV1 {
+function folder(n: number, name = FOLDER_NAME, drive = 'main'): LocationReferenceV1 {
   const built = buildGfsLocationReference({
-    drive: 'main',
+    drive,
     resourceId: rid(n),
-    gfsUri: `gfs://main/${rid(n)}`,
+    gfsUri: `gfs://${drive}/${rid(n)}`,
     name,
   })
   if (!built.ok) throw new Error(built.message)
   return built.value
 }
 
-function file(n: number): FileReferenceV1 {
+function file(n: number, drive = 'main'): FileReferenceV1 {
   const name = `notes-${n}.md`
   const built = buildGfsFileReference({
-    drive: 'main',
+    drive,
     resourceId: rid(n),
-    gfsUri: `gfs://main/${rid(n)}`,
+    gfsUri: `gfs://${drive}/${rid(n)}`,
     version: 3,
     name,
     declaredMediaType: 'text/markdown',
@@ -334,6 +334,95 @@ describe('incoming admission with a location reference', () => {
     ])
     expect(JSON.stringify(info.mock.calls)).not.toContain('SENTINEL-FOLDER')
     expect(JSON.stringify(info.mock.calls)).not.toContain('Folder-1')
+  })
+})
+
+describe('incoming admission refusal text', () => {
+  // A reference on another drive than the real gfsc view of the same rid is
+  // the "unexpected answer" a mismatched gfsc reply produces.
+  const failures = {
+    contract: async ({ uri }: { uri: string }) =>
+      uri.endsWith(rid(1)) ? fileView(1) : directoryView(2),
+    transient: () => Promise.reject(new GfscHttpError(503, 'down')),
+    invalid: () => Promise.reject(new GfscHttpError(400, 'bad')),
+    credentials: async () => directoryView(2),
+  } as const
+  const kinds = {
+    file: (drive: string) => ({ fileReferences: [file(1, drive)] }),
+    folder: (drive: string) => ({ locationReferences: [folder(2, FOLDER_NAME, drive)] }),
+    mixed: (drive: string) => ({
+      fileReferences: [file(1, drive)],
+      locationReferences: [folder(2, FOLDER_NAME, drive)],
+    }),
+  } as const
+
+  it.each([
+    // The file-only texts are what clients already show; they must not change.
+    ['file', 'invalid', 'A referenced file does not match the file it names. Pick the file again.'],
+    ['file', 'transient', 'The referenced files could not be checked. Send the message again.'],
+    ['file', 'contract', 'The file service returned an unexpected answer for a referenced file.'],
+    [
+      'file',
+      'credentials',
+      'The Host could not authenticate to the file service to check the referenced files.',
+    ],
+    [
+      'folder',
+      'invalid',
+      'A referenced folder does not match the folder it names. Pick the folder again.',
+    ],
+    ['folder', 'transient', 'The referenced folder could not be checked. Send the message again.'],
+    [
+      'folder',
+      'contract',
+      'The file service returned an unexpected answer for a referenced folder.',
+    ],
+    [
+      'folder',
+      'credentials',
+      'The Host could not authenticate to the file service to check the referenced folder.',
+    ],
+    [
+      'mixed',
+      'invalid',
+      'A referenced file or folder does not match what it names. Pick it again.',
+    ],
+    [
+      'mixed',
+      'transient',
+      'The referenced files and folders could not be checked. Send the message again.',
+    ],
+    [
+      'mixed',
+      'contract',
+      'The file service returned an unexpected answer for a referenced file or folder.',
+    ],
+    [
+      'mixed',
+      'credentials',
+      'The Host could not authenticate to the file service to check the referenced files and folders.',
+    ],
+  ] as const)('a %s message refused as %s says what it carried', async (kind, failure, text) => {
+    const { admit, dispatch, fileReferenceGfs, warn } = makeAdmission(failures[failure])
+    if (failure === 'credentials')
+      fileReferenceGfs.mockReturnValue({
+        status: 'credentials_failed',
+        errorClass: 'TokenReadError',
+      })
+    const drive = failure === 'contract' ? 'elsewhere' : 'main'
+    const response = await admit(message(kinds[kind](drive)))
+    expect(response).toEqual({
+      success: false,
+      error: {
+        code: failure === 'invalid' ? 'FILE_REFERENCE_INVALID' : 'FILE_REFERENCE_CHECK_FAILED',
+        message: text,
+        retryable: failure === 'transient',
+        provider: 'zai',
+      },
+    })
+    // Witness: the refusal came from the failure this case set up.
+    expect(events(warn, 'file_reference_refused')).toEqual([expect.objectContaining({ failure })])
+    expect(dispatch).not.toHaveBeenCalled()
   })
 })
 
