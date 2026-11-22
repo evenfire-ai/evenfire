@@ -125,14 +125,13 @@ Then point the platform at your public URLs. In base and the minikube configs
 these are unset or `127.0.0.1`/`localhost` values that only work with
 port-forwards; set them in your overlay:
 
-| Variable                                                                                   | Where                                                                                                |
-| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `CONTROL_API_CONTROL_UI_BASE_URL`                                                          | `control-api-config`                                                                                 |
-| `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`                                                  | `control-api-config` (canonical operator setting; projected to External REST after overlay assembly) |
-| `CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL`, `CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL` | `control-api-config`                                                                                 |
-| `CONTROL_API_OAUTH_CALLBACK_BASE_URL`                                                      | `control-api-config`                                                                                 |
-| `CONTROL_API_GOOGLE_CLIENT_ID` (placeholder in base)                                       | `control-api-config`                                                                                 |
-| `RPC_PROXY_CORS_ORIGIN`, `RPC_PROXY_OAUTH_CALLBACK_BASE_URL`                               | `rpc-proxy-config`                                                                                   |
+| Variable                                                                                                                              | Where                |
+| ------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `CONTROL_API_CONTROL_UI_BASE_URL`                                                                                                     | `control-api-config` |
+| `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`, `CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL`, `CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL` | `control-api-config` |
+| `CONTROL_API_OAUTH_CALLBACK_BASE_URL`                                                                                                 | `control-api-config` |
+| `CONTROL_API_GOOGLE_CLIENT_ID` (placeholder in base)                                                                                  | `control-api-config` |
+| `RPC_PROXY_CORS_ORIGIN`, `RPC_PROXY_OAUTH_CALLBACK_BASE_URL`                                                                          | `rpc-proxy-config`   |
 
 Set `CONTROL_API_OAUTH_CALLBACK_BASE_URL` and `RPC_PROXY_OAUTH_CALLBACK_BASE_URL`
 to the same public origin, with no path or trailing slash. If you use OAuth
@@ -176,24 +175,29 @@ If you run a perimeter firewall, these are the destinations the platform uses:
 
 Your overlay lists `deploy/base` as a resource and adds what base leaves out.
 Use [`deploy/overlays/minikube/kustomization.yaml`](../../deploy/overlays/minikube/kustomization.yaml)
-as the reference. Set the public Profile UI origin only in the existing
-`control-api-config` ConfigMap's `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` key.
-The root Kustomization projects the final value into External REST's
-`desktop-profile-ui-config` after overlay patches are applied. Do not configure
-a second Profile UI URL in the `profiles` namespace.
+as the reference.
 
-Keep `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` in `control-api-config` and let
-the root Kustomization project it into `desktop-profile-ui-config`. Both
-Deployments read these ConfigMap values as environment variables. If an overlay
-replaces either ConfigMap, preserve the keys referenced by the base Deployment
-and keep the canonical value in `control-api-config`; missing keys prevent the
-affected service from starting. Applying an updated ConfigMap does not change
-environment variables in existing Pods. After changing this origin, apply the
-complete overlay, then restart and wait for both backend Deployments:
+Set the existing `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` key only in the
+`control-api-config` ConfigMap. The root Kustomization projects that final
+operator value into External REST for Desktop discovery, and supported renders
+require that source key. Control API retains its existing `envFrom` precedence:
+a later Secret can give Control API a different effective Profile UI origin.
+This accepted ConfigMap/Secret divergence is not synchronized. If you manually
+configure External REST outside the supported Kustomize projection, it may use
+its independently supplied value. The optional discovery field is omitted when
+its effective value is absent or invalid. If an overlay replaces
+`control-api-config`, keep `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`; Kustomize
+requires it to render the External REST ConfigMap.
+
+Applying a ConfigMap does not update environment variables in existing Pods.
+After changing the operator value, apply the complete overlay, then restart and
+wait for both backend Deployments:
 
 ```sh
 KCTX=<your-context>
+OVERLAY=<path-to-your-overlay>
 kubectl --context "$KCTX" cluster-info
+kubectl --context "$KCTX" apply -k "$OVERLAY"
 kubectl --context "$KCTX" -n control-plane rollout restart deploy/control-api
 kubectl --context "$KCTX" -n profiles rollout restart deploy/external-rest-api
 kubectl --context "$KCTX" -n control-plane rollout status deploy/control-api
@@ -303,11 +307,9 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    Secrets and public-key ConfigMaps that carry them. Then run
    [`deploy/scripts/apply-inter-service-tokens.sh`](../../deploy/scripts/apply-inter-service-tokens.sh)
    for the service-to-service tokens with the same explicit context:
-
    ```bash
    CONTEXT="$KCTX" bash deploy/scripts/apply-inter-service-tokens.sh
    ```
-
    Know these before you run them:
    - `gen-jwt-keys.sh` generates **new** keys on every run. Running it again
      rotates every key, including the OAuth encryption key. Run it once and
