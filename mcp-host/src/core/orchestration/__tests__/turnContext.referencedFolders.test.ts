@@ -78,38 +78,6 @@ describe('referenced_folder lines', () => {
     expect(lines(block).filter(line => line === CLAIMED_NAME_NOTE_LINE)).toHaveLength(1)
   })
 
-  it('infers the name source from the availability for a resolution persisted without one', async () => {
-    const client: FileReferenceGfscClient = { resolve: async () => views.directory['1'] }
-    const denied: FileReferenceGfscClient = {
-      resolve: async () => {
-        throw new GfscHttpError(403, 'forbidden')
-      },
-    }
-    const legacy = []
-    for (const [ref, gfsc] of [
-      [folder(1), client],
-      [folder(2, 'Payroll'), denied],
-    ] as const) {
-      const resolved = await resolveMessageReferences([], [ref], gfsc)
-      if (!resolved.ok) throw new Error('unexpected failure')
-      // Witness: the producer records the source today.
-      expect(resolved.locationResolutions[0]).toHaveProperty('nameSource')
-      const { nameSource: _dropped, ...older } = resolved.locationResolutions[0]!
-      legacy.push(older)
-    }
-    const block = buildTurnContextBlock({
-      date: new Date('2026-11-21T10:00:00Z'),
-      channel: { type: 'rpc' },
-      referencedFolders: referencedFoldersForTurnContext(legacy),
-    })
-    expect(lines(block)).toContain(
-      `referenced_folder: id="${folder(1).id}" name="Folder-1" source=gfs drive="main" resourceId="${rid(1)}" availability=available`
-    )
-    expect(lines(block)).toContain(
-      `referenced_folder: id="${folder(2).id}" claimed_name="Payroll" source=gfs drive="main" resourceId="${rid(2)}" availability=denied code=FILE_REFERENCE_DENIED`
-    )
-  })
-
   it('lists a file named as a folder with its code and no folder instruction', async () => {
     const ref = folder(2)
     const block = await blockFor(ref, () => views.file['2'])

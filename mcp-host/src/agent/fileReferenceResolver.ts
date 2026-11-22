@@ -104,11 +104,8 @@ export interface LocationReferenceResolution {
    * reference), otherwise the name Desktop sent.
    */
   name: string
-  /**
-   * Who supplied `name`. Absent on resolutions persisted before it existed;
-   * readers then infer it from the availability.
-   */
-  nameSource?: 'gfsc' | 'client'
+  /** Who supplied `name`. */
+  nameSource: 'gfsc' | 'client'
 }
 
 /** The code each unavailable location is reported under in the turn block. */
@@ -129,12 +126,8 @@ export function referencedFoldersForTurnContext(
   return (resolutions ?? []).map(({ availability, reference, name, nameSource }) => ({
     referenceId: reference.id,
     name,
-    // A client-claimed name must not reach the model as the folder's verified
-    // name. Without a recorded source, only an answer from gfsc (available,
-    // not_a_folder) can have named the resource.
-    nameVerified: nameSource
-      ? nameSource === 'gfsc'
-      : availability === 'available' || availability === 'not_a_folder',
+    // A client-claimed name must not reach the model as the folder's verified name.
+    nameVerified: nameSource === 'gfsc',
     drive: reference.source.drive,
     resourceId: reference.source.resourceId,
     availability,

@@ -306,7 +306,14 @@ describe('incoming admission with a location reference', () => {
   })
 
   it('T-H8: never forwards caller-supplied location resolutions', async () => {
-    const forged = [{ availability: 'available' as const, reference: folder(1), name: 'x' }]
+    const forged = [
+      {
+        availability: 'available' as const,
+        reference: folder(1),
+        name: 'x',
+        nameSource: 'gfsc' as const,
+      },
+    ]
     const { admit, dispatch, resolve } = makeAdmission(async () => directoryView(1))
     const response = await admit(message({ locationReferenceResolutions: forged }))
     expect(dispatch).toHaveBeenCalledTimes(1)
@@ -335,7 +342,9 @@ describe('replayedIncomingMessage with location references', () => {
     const ref = folder(1)
     const original = message({
       locationReferences: [ref],
-      locationReferenceResolutions: [{ availability: 'available', reference: ref, name: 'x' }],
+      locationReferenceResolutions: [
+        { availability: 'available', reference: ref, name: 'x', nameSource: 'gfsc' },
+      ],
     })
     const replayed = replayedIncomingMessage(original)
     expect(replayed.locationReferences).toEqual([ref])
