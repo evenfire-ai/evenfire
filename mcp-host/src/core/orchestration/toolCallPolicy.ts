@@ -5,7 +5,9 @@ import { effectiveApprovalMode } from '../approval/approvalMode'
 import type { ApprovalMode } from '../approval/approvalMode'
 import { type ModeDecision, decideApproval } from '../approval/decideApproval'
 import type { GateCause } from '../approval/gateCause'
+import { GIT_REDIRECT_TEXT, matchTypedGitRead } from '../approval/gitRedirect'
 import { approvalLogId, syncEffectiveMode } from '../approval/grantMemory'
+import { nativeApprovalCause } from '../approval/nativeApprovalCause'
 import { shellCardDescriptor } from '../approval/shellCard'
 import type { ShellVerdict } from '../approval/shellClassifier'
 import { isDenied } from '../conversation/denialPolicy'
@@ -26,7 +28,8 @@ import { executeSingleTool } from './toolUseLoopSingleTool'
 const CANCELLED_TEXT = 'Not executed: the task was cancelled.'
 
 export type ToolCallAdmission =
-  | { kind: 'result'; toolResult: ToolResult; stopBatch?: boolean }
+  /** `report`: emit tool start and complete progress for this result (the git redirect). */
+  | { kind: 'result'; toolResult: ToolResult; stopBatch?: boolean; report?: true }
   | { kind: 'suspend'; approval: PendingApproval; cause?: GateCause }
   | { kind: 'execute'; call: ToolCall; toolIdentity?: ToolIdentity; cause?: GateCause }
 
@@ -395,6 +398,8 @@ async function applyApprovalMode(
   let cause: GateCause | undefined = gate === 'proceed' ? 'none' : gate.cause
   let approval = gate === 'proceed' ? undefined : gate.approval
   let decision = readDecision(config, call, cause)
+  const redirected = typedGitRedirect(config, call, cause, decision)
+  if (redirected) return redirected
   if (decision.kind === 'classify') {
     const verdict = await config.approvalMode!.classify(call, approval?.description ?? '')
     if (verdict === 'CANCELLED') return stopAdmission(call)
@@ -410,6 +415,77 @@ async function applyApprovalMode(
     decision = readDecision(config, call, cause, verdict)
   }
   return materialize(decision, call, config, cause, approval, toolIdentity)
+}
+
+const GIT_READ = 'git_read'
+
+/**
+ * True when `git_read` would run with no card in auto for any arguments:
+ * registered for this task, no tool-lane guardrails (its verdict would depend
+ * on arguments the redirect does not have), not denied, and its CRD cause
+ * (`approvalAlso` included) gives a run cell.
+ */
+function gitReadCardFree(config: LoopConfig): boolean {
+  const tool = config.toolRegistry.get(GIT_READ)
+  if (!tool) return false
+  if (config.guardrails !== undefined) return false
+  if (isDenied(config.conversation, GIT_READ)) return false
+  const approvalTools = config.approvalMode?.approvalTools
+  if (!approvalTools) return false
+  const decision = decideApproval({
+    mode: 'auto',
+    toolName: GIT_READ,
+    cause: nativeApprovalCause(tool, GIT_READ, {}, approvalTools()),
+    grants: {
+      task: config.conversation.task_approved_tools ?? new Set<string>(),
+      always: config.conversation.auto_approved_tools ?? new Set<string>(),
+      autoShell: { wholeTool: false, commands: new Set<string>() },
+    },
+    classifierAvailable: false,
+  })
+  return decision.kind === 'run'
+}
+
+/**
+ * In auto, a typed read-only git shell command that would be classified or
+ * carded (A3, or A5 for a denied shell) is answered with a fixed text that
+ * points to `git_read`, once per command text per task. Grants, admin-forced,
+ * live and guardrail causes, and every manual or allow-all cell keep today's
+ * path.
+ */
+function typedGitRedirect(
+  config: LoopConfig,
+  call: ToolCall,
+  cause: GateCause | undefined,
+  decision: ModeDecision
+): ToolCallAdmission | undefined {
+  if (call.name !== 'shell_exec') return undefined
+  const command = call.arguments.command
+  if (typeof command !== 'string') return undefined
+  const eligible =
+    (decision.cell === 'A3' && (decision.kind === 'classify' || decision.kind === 'card')) ||
+    (decision.kind === 'card' && decision.cell === 'A5' && cause === 'denied')
+  if (!eligible) return undefined
+  if (matchTypedGitRead(command) === null) return undefined
+  const conversation = config.conversation
+  if (conversation.task_git_redirected?.has(command) === true) return undefined
+  if (!gitReadCardFree(config)) return undefined
+  ;(conversation.task_git_redirected ??= new Set()).add(command)
+  conversation.git_redirect_pending = true
+  logger.info(
+    { event: 'git_redirect', session: approvalLogId(conversation.id) },
+    'Typed git command redirected to git_read'
+  )
+  return {
+    kind: 'result',
+    report: true,
+    toolResult: {
+      tool_call_id: call.id,
+      name: call.name,
+      content: GIT_REDIRECT_TEXT,
+      is_error: false,
+    },
+  }
 }
 
 /**

@@ -510,6 +510,14 @@ export interface Conversation {
    */
   task_approved_tools?: Set<string>
   /**
+   * Typed git shell commands this task already redirected to `git_read`
+   * (exact text). Sending the same text again takes the normal path. Cleared
+   * with `task_approved_tools`; ephemeral, so a cold resume may redirect once more.
+   */
+  task_git_redirected?: Set<string>
+  /** A redirect happened; the next model turn's batch is counted for compliance. */
+  git_redirect_pending?: boolean
+  /**
    * Guardrail doom-loop counter (spec §6.4) — tracks consecutive identical
    * `(resolved tool, effective-input)` tool calls across turns within a task.
    * Ephemeral (like `auto_approved_tools`): not persisted; resets on resume.

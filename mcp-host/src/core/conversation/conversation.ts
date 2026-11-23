@@ -312,8 +312,10 @@ export class ConversationManager {
     conversation.traceContext = traceContext
     conversation.updated_at = new Date()
 
-    // A new user message starts a new task: plain session-scoped approvals end here.
+    // A new user message starts a new task: plain session-scoped approvals and
+    // the typed-git redirects end here.
     conversation.task_approved_tools?.clear()
+    conversation.task_git_redirected?.clear()
 
     // Materialize the auto-title (spec 15) in RAM before persisting so the
     // dual-store projection and the durable COALESCE write agree. `??=` keeps
