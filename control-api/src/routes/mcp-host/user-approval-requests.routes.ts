@@ -22,6 +22,7 @@ import {
   createApprovalRequest,
   getApprovalRecipeBinding,
   getStatus,
+  isRetiredUser,
   parseWorkflowTriggerIntent,
   triggerGrantCheck,
 } from '../../services/userApprovalRequestService.js'
@@ -609,6 +610,19 @@ export function createUserApprovalRequestsRoutes(
             return res.status(400).json({
               error: 'workflowTriggerRunIntent requires payload.metadata.workflowTrigger',
             })
+          }
+
+          // A removed member can never decide: the request would stay pending until it expires.
+          if (targetUserId && (await isRetiredUser(targetUserId))) {
+            req.log?.info(
+              {
+                event: 'auth_denied',
+                reason: 'approval_target_retired',
+                route: 'user_approval_requests_request',
+              },
+              'auth denied'
+            )
+            return res.status(422).json({ error: 'approval_target_retired' })
           }
 
           const allowed = await allowlistCheck(

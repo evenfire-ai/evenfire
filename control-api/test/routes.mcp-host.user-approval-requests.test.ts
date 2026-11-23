@@ -720,6 +720,32 @@ describe('User Approval Request Routes', () => {
       })
     })
 
+    it('returns 422 approval_target_retired for a removed target before any request is written', async () => {
+      const { accessToken } = issueTestTokens()
+      const targetUserId = '00000000-0000-0000-0000-000000000001'
+      vi.mocked(userApprovalRequestService.isRetiredUser).mockResolvedValueOnce(true)
+      vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValue(true)
+
+      const res = await request(app)
+        .post('/api/v1/workflow-approvals/request')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .set('Idempotency-Key', 'retired-key')
+        .send({
+          recipeNamespace: NS,
+          recipeName: RECIPE,
+          target: { userId: targetUserId },
+          payload: { message: 'Please approve this' },
+        })
+      expect(res.status).toBe(422)
+      expect(res.body).toEqual({ error: 'approval_target_retired' })
+      expect(userApprovalRequestService.isRetiredUser).toHaveBeenCalledWith(targetUserId)
+      expect(userApprovalRequestService.allowlistCheck).not.toHaveBeenCalled()
+      expect(userApprovalRequestService.createApprovalRequest).not.toHaveBeenCalled()
+      expect(
+        workflowTriggerApprovalService.createWorkflowTriggerApprovalRequest
+      ).not.toHaveBeenCalled()
+    })
+
     it('creates approval on happy path', async () => {
       const { accessToken } = issueTestTokens()
       vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(true)
@@ -728,6 +754,7 @@ describe('User Approval Request Routes', () => {
         status: 'pending' as const,
         expiresAt: '2026-01-01T00:00:00Z',
       })
+      vi.mocked(userApprovalRequestService.isRetiredUser).mockResolvedValueOnce(false)
 
       const res = await request(app)
         .post('/api/v1/workflow-approvals/request')
@@ -744,6 +771,9 @@ describe('User Approval Request Routes', () => {
         approvalRequestId: 'new-id',
         status: 'pending',
       })
+      expect(userApprovalRequestService.isRetiredUser).toHaveBeenCalledWith(
+        '00000000-0000-0000-0000-000000000001'
+      )
     })
 
     it('allows a shared mcp-host to create a sandbox recipe approval bound to its caller key', async () => {
