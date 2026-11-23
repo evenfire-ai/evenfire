@@ -568,14 +568,14 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
 
     // Witness: the same direct call consumes a pending, unexpired invitation.
     const pending = await consume('inv6-pending', { label: 'inv6-pending' })
-    expect(pending.consumed).toBe(true)
+    expect(pending.consumed).toBe('accepted')
     expect(pending.after).toMatchObject({ status: 'accepted', accepted_user_id: pending.userId })
     await expect(memberships(pending.userId)).resolves.toEqual([
       { team_id: teamId, role: 'member', status: 'active' },
     ])
 
     const revoked = await consume('inv6-revoked', { label: 'inv6-revoked', status: 'revoked' })
-    expect(revoked.consumed).toBe(false)
+    expect(revoked.consumed).toBe('not_pending')
     expect(revoked.after).toEqual(revoked.before)
     expect(revoked.after).toEqual({ status: 'revoked', accepted_user_id: null, accepted_at: null })
     await expect(memberships(revoked.userId)).resolves.toEqual([])
@@ -584,13 +584,13 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
       label: 'inv6-expired',
       expiresAt: new Date(Date.now() - 60 * 1000),
     })
-    expect(expired.consumed).toBe(false)
+    expect(expired.consumed).toBe('not_pending')
     expect(expired.after).toEqual(expired.before)
     expect(expired.after).toEqual({ status: 'pending', accepted_user_id: null, accepted_at: null })
     await expect(memberships(expired.userId)).resolves.toEqual([])
 
     const reset = await consume('inv6-reset', { label: 'inv6-reset', purpose: 'password_reset' })
-    expect(reset.consumed).toBe(false)
+    expect(reset.consumed).toBe('not_pending')
     expect(reset.after).toEqual(reset.before)
     expect(reset.after).toEqual({ status: 'pending', accepted_user_id: null, accepted_at: null })
     await expect(memberships(reset.userId)).resolves.toEqual([])
