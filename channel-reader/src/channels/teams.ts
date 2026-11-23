@@ -120,9 +120,8 @@ function adaptiveCard(
       version: '1.4',
       body: [
         {
-          type: 'TextBlock',
-          text: content,
-          wrap: true,
+          type: 'RichTextBlock',
+          inlines: [{ type: 'TextRun', text: content }],
         },
       ],
       actions: actions.map(action => ({

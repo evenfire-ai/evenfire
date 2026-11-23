@@ -157,7 +157,11 @@ export class OidcR5MemoryAttemptDb {
   }
 }
 
-function signIdToken(privateKey: KeyObject, claims: Record<string, unknown>, kid: string): string {
+export function signIdToken(
+  privateKey: KeyObject,
+  claims: Record<string, unknown>,
+  kid: string
+): string {
   const header = Buffer.from(JSON.stringify({ alg: 'RS256', kid, typ: 'JWT' })).toString(
     'base64url'
   )
@@ -333,7 +337,7 @@ export function createOidcR5ProtocolFixture(options: OidcR5FixtureOptions = {}) 
   }
 }
 
-function jsonResponse(body: unknown, status = 200): PinnedRawResponse {
+export function jsonResponse(body: unknown, status = 200): PinnedRawResponse {
   return {
     status,
     headers: { 'content-type': 'application/json' },

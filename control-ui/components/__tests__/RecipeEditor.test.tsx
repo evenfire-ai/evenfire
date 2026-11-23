@@ -1326,6 +1326,56 @@ describe('RecipeEditor — per-step requiresApproval', () => {
     expect(timeoutInput.value).toBe('3600')
   })
 
+  it('offers only active members as approvers and flags a removed stored approver', async () => {
+    vi.mocked(api.getAdminUsers).mockResolvedValue({
+      items: [
+        {
+          id: 'u-active',
+          email: 'alice@example.com',
+          name: 'Alice',
+          picture: null,
+          displayName: null,
+          activeTeamCount: 1,
+          lifecycleState: 'active',
+        },
+        {
+          id: 'u-retired',
+          email: 'rita@example.com',
+          name: 'Rita',
+          picture: null,
+          displayName: null,
+          activeTeamCount: 0,
+          lifecycleState: 'retired',
+        },
+      ],
+    })
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(getTextareaWithValue(), { target: { value: STEPS_JSON_WITH_APPROVAL } })
+    fireEvent.click(screen.getByText(/Step: deploy/))
+    const select = (await screen.findByLabelText(/Known approval user/)) as HTMLSelectElement
+    const optionTexts = () => Array.from(select.options).map(option => option.textContent)
+
+    // Positive control: the active member is offered; the removed one is not.
+    expect(optionTexts()).toContain('Alice (alice@example.com)')
+    expect(optionTexts().join('|')).not.toContain('Rita')
+    expect(screen.queryByText(/This approver has been removed/)).toBeNull()
+
+    // A step that stores the removed member's id shows it disabled and says why.
+    fireEvent.change(screen.getByLabelText(/Approval target value/), {
+      target: { value: 'u-retired' },
+    })
+    const removed = Array.from(select.options).find(option => option.value === 'u-retired')
+    expect(removed?.textContent).toBe('Rita (removed)')
+    expect(removed?.disabled).toBe(true)
+    expect(select.value).toBe('u-retired')
+    expect(optionTexts()).toContain('Alice (alice@example.com)')
+    expect(
+      screen.getByText(
+        'This approver has been removed. Choose another approver; approval requests to a removed member fail.'
+      )
+    ).toBeInTheDocument()
+  })
+
   it('shows validation error when message is missing and blocks deploy', async () => {
     render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
     const jsonArea = getTextareaWithValue()

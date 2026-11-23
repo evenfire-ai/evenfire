@@ -180,6 +180,7 @@ async function runTaskWith(
       ? { contextWindowTokens: options.contextWindowTokens }
       : {}),
     approvalConfig: undefined,
+    approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
     config: {
       maxTaskDuration: 300000,
       maxToolCallsPerTask: options.readEveryResponse ? 100 : 10,

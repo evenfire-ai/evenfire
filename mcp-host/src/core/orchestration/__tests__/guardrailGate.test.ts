@@ -6,6 +6,7 @@
  * tool-loop suite).
  */
 import { describe, expect, it, vi } from 'vitest'
+import type { ApprovalModeInputs } from '../../approval/gateCause'
 import { ConversationManager } from '../../conversation/conversation'
 import { pendingApprovalWireFields } from '../../conversation/pendingApprovalView'
 import type { Decision, ToolLaneGuardrail } from '../../guardrails'
@@ -104,6 +105,61 @@ function makeConfig(
 }
 
 const call: ToolCall = { id: 'c1', name: 'do_thing', arguments: { a: 1 } }
+
+describe('executeToolCalls abort during admission', () => {
+  it('marks the rest of the batch not executed when the signal aborts during admission', async () => {
+    const controller = new AbortController()
+    let release: () => void = () => undefined
+    const held = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const first = new StubTool('first')
+    ;(
+      first as StubTool & {
+        validateParams: (
+          params: Record<string, unknown>
+        ) => Promise<{ is_valid: boolean; errors: string[] }>
+      }
+    ).validateParams = async () => {
+      controller.abort()
+      await held
+      return { is_valid: true, errors: [] }
+    }
+    const second = new StubTool('second')
+    const config = makeConfig(first, undefined)
+    config.toolRegistry = registry({ first, second })
+    config.abortSignal = controller.signal
+
+    const pending = executeToolCalls(
+      [
+        { id: 'c1', name: 'first', arguments: {} },
+        { id: 'c2', name: 'second', arguments: {} },
+      ],
+      config,
+      0
+    )
+    release()
+    const result = await pending
+
+    expect(result.cancelled).toBe(true)
+    expect(first.calls).toEqual([])
+    expect(second.calls).toEqual([])
+    expect(result.toolResults).toEqual([
+      {
+        tool_call_id: 'c1',
+        name: 'first',
+        content: 'Not executed: the task was cancelled.',
+        is_error: true,
+      },
+      {
+        tool_call_id: 'c2',
+        name: 'second',
+        content: 'Not executed: the task was cancelled.',
+        is_error: true,
+      },
+    ])
+  })
+})
 
 describe('guardrail gate in executeToolCalls', () => {
   it('deny → bounded error result, tool never executes', async () => {
@@ -432,6 +488,97 @@ describe('exact guardrail ask one-shot binding', () => {
     )
 
     expect(admission.kind).toBe('suspend')
+  })
+})
+
+describe('mode-set guardrail rewrite and redaction', () => {
+  function modeInputs(mode: 'manual' | 'allow_all'): ApprovalModeInputs {
+    return {
+      storedMode: () => mode,
+      ceiling: () => 'allow_all',
+      channelCap: () => 'allow_all',
+      classifierAvailable: () => false,
+      classify: async () => 'ESCALATE',
+    }
+  }
+
+  function rewritingGuardrail(): ToolLaneGuardrail {
+    return {
+      async decide(_id, input) {
+        return {
+          decision: 'allow',
+          reasonCode: 'rewrite',
+          effectiveInput: { ...input, rewritten: true },
+          source: 'host_rule',
+        }
+      },
+      async transformResult(_id, _input, result) {
+        return { content: `[redacted:${result.content}]`, isError: result.isError }
+      },
+    }
+  }
+
+  function suspending(config: LoopConfig): LoopConfig {
+    return {
+      ...config,
+      loopController: {
+        ...config.loopController,
+        beforeTool: () => ({
+          type: 'suspend',
+          cause: 'ordinary',
+          approval: {
+            request_id: 'mode-grant',
+            tool_name: 'http_request',
+            authorization_scope: 'turn_tools',
+            parameters: { a: 1 },
+            description: 'needs approval',
+            tool_call_id: 'c1',
+            context_snapshot: [],
+          },
+        }),
+      },
+    }
+  }
+
+  it('a mode-set manual task grant keeps the rewrite and redacts via post_tool_use', async () => {
+    const tool = new StubTool('http_request')
+    const config = suspending(
+      makeConfig(tool, rewritingGuardrail(), {
+        id: 'conv-manual-rewrite',
+        task_approved_tools: new Set(['http_request']),
+        auto_approved_tools: new Set<string>(),
+        auto_shell_grants: { wholeTool: false, commands: new Set<string>() },
+      })
+    )
+    config.approvalMode = modeInputs('manual')
+    const { toolResults, pendingApproval } = await executeToolCalls(
+      [{ id: 'c1', name: 'http_request', arguments: { a: 1 } }],
+      config,
+      0
+    )
+    expect(pendingApproval).toBeUndefined()
+    expect(tool.calls).toEqual([{ a: 1, rewritten: true }])
+    expect(toolResults[0].content).toBe('[redacted:ok]')
+  })
+
+  it('an X1 run keeps the rewrite and redacts via post_tool_use', async () => {
+    const tool = new StubTool('http_request')
+    const config = suspending(
+      makeConfig(tool, rewritingGuardrail(), {
+        id: 'conv-x1-rewrite',
+        auto_approved_tools: new Set<string>(),
+        auto_shell_grants: { wholeTool: false, commands: new Set<string>() },
+      })
+    )
+    config.approvalMode = modeInputs('allow_all')
+    const { toolResults, pendingApproval } = await executeToolCalls(
+      [{ id: 'c1', name: 'http_request', arguments: { a: 1 } }],
+      config,
+      0
+    )
+    expect(pendingApproval).toBeUndefined()
+    expect(tool.calls).toEqual([{ a: 1, rewritten: true }])
+    expect(toolResults[0].content).toBe('[redacted:ok]')
   })
 })
 

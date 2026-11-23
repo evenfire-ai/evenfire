@@ -47,7 +47,8 @@ provenance (see the example below).
   scoped to that exact invocation. Its description reads
   `Guardrail requires approval (<reason>)`. You approve it on the usual
   surfaces. Once it is approved, the call runs without a second prompt from
-  `spec.approval`.
+  `spec.approval`. The card shows in every approval mode, including auto and
+  allow-all, and offers no Always option.
 - Tasks started by a person's message (Desktop App chat or a messaging
   channel; task source `channel`) are interactive. `cron` and `internal`
   tasks are **unattended**. In an unattended run an `ask` becomes

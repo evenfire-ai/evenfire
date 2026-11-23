@@ -964,6 +964,72 @@ describe('TelegramAdapter — fetchMessages()', () => {
     })
   })
 
+  it.each([
+    ['a', 'approve'],
+    ['l', 'approveAlways'],
+    ['c', 'command'],
+    ['s', 'shell'],
+    ['d', 'deny'],
+  ] as const)('re-encodes tool:%s instead of falling back to deny', async (code, decision) => {
+    const adapter = new TelegramAdapter()
+    await adapter.connect({ telegramBotToken: TEST_TOKEN })
+    const handler = getCallbackHandler(grammy.instances[0]!)
+    await adapter.fetchMessages('111222', new Set(['123456']), telegramOptions('private'))
+
+    const callbackData = `tool:${code}:abcdefghijklmnop`
+    const ctx = makeCallbackCtx({
+      senderId: '123456',
+      data: callbackData,
+      chatId: '111222',
+      callbackId: `callback-tool-${code}`,
+      messageId: 77,
+    })
+    await handler(ctx)
+
+    const messages = await adapter.fetchMessages(
+      '111222',
+      new Set(['123456']),
+      telegramOptions('private')
+    )
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      content: callbackData,
+      rawData: {
+        telegramToolApprovalActionToken: 'abcdefghijklmnop',
+        telegramToolApprovalDecision: decision,
+      },
+    })
+    expect(Buffer.byteLength(callbackData, 'utf8')).toBeLessThanOrEqual(64)
+    if (code !== 'd') expect(messages[0]!.content).not.toMatch(/^tool:d:/)
+  })
+
+  it('rejects an unknown tool code instead of re-encoding it as deny', async () => {
+    const adapter = new TelegramAdapter()
+    await adapter.connect({ telegramBotToken: TEST_TOKEN })
+    const handler = getCallbackHandler(grammy.instances[0]!)
+    await adapter.fetchMessages('111222', new Set(['123456']), telegramOptions('private'))
+
+    const ctx = makeCallbackCtx({
+      senderId: '123456',
+      data: 'tool:q:abcdefghijklmnop',
+      chatId: '111222',
+      callbackId: 'callback-tool-unknown',
+      messageId: 77,
+    })
+    await handler(ctx)
+
+    const messages = await adapter.fetchMessages(
+      '111222',
+      new Set(['123456']),
+      telegramOptions('private')
+    )
+    expect(messages).toHaveLength(0)
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+      text: 'Unsupported button.',
+      show_alert: true,
+    })
+  })
+
   it('ignores repeated approval button callbacks from the same user for two seconds', async () => {
     const adapter = new TelegramAdapter()
     await adapter.connect({ telegramBotToken: TEST_TOKEN })

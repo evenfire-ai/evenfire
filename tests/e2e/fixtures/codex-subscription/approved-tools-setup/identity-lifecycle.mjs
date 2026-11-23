@@ -427,8 +427,10 @@ async function appendFixturePermissions(db, journal, action, append, includeWork
 
 /**
  * Legacy deletion is permitted only for fresh active users with no operator-link
- * history, matching adminDeleteUser's retention boundary. Retained-history cases
- * fail closed for governed retirement; no lifecycle history is erased here.
+ * or OIDC-link history, matching adminDeleteUser's retention boundary. Operator
+ * links are checked below; an OIDC link blocks the delete through its ON DELETE
+ * RESTRICT foreign key. Retained-history cases fail closed for governed
+ * retirement; no lifecycle history is erased here.
  * Parent FOR UPDATE locks also block new FK-dependent grants/memberships while
  * existing dependent rows are locked and checked within this same transaction.
  */

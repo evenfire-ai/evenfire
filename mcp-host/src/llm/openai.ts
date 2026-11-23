@@ -19,6 +19,7 @@ import { assertVisualRequestFits } from '../visualInput/requestPolicy'
 import type { ImageTransportOperation } from './imageInput'
 import type { EndpointProfile } from './openaiFamily/endpointProfile'
 import { applyOptionPolicy, officialOpenAIProfile } from './openaiFamily/endpointProfiles'
+import { OPENAI_RESPONSES_REASONING_FAMILY } from './openaiFamily/modelParamPolicy'
 import { chatCompletionsProtocol } from './openaiFamily/protocols/chatCompletions'
 import { responsesProtocol } from './openaiFamily/protocols/responses'
 import type {
@@ -30,7 +31,7 @@ import type {
 import { classifyFamilyError } from './openaiFamily/shared'
 import type { LlmProvider } from './registryCore'
 import { fromWireResponse, toWireRequest } from './toolWireNames'
-import type { ClassifiedError, SingleTurnProvider } from './types'
+import type { ClassifiedError, ReasoningEffortOption, SingleTurnProvider } from './types'
 
 const PROTOCOLS: Record<WireProtocolId, WireProtocol> = {
   'openai-chat': chatCompletionsProtocol,
@@ -98,14 +99,32 @@ export class OpenAIProvider implements SingleTurnProvider {
 
   // ─── Single-Turn Methods ──────────────────────────────────
 
+  /**
+   * gpt-4.1 and the other non-reasoning models answer 400 if `reasoning.effort`
+   * is present. Other profiles in this driver ignore the option.
+   */
+  private forwardsReasoningEffort(): boolean {
+    return this.profile.id === 'openai' && OPENAI_RESPONSES_REASONING_FAMILY.test(this.defaultModel)
+  }
+
   async completeSingleTurn(
     messages: CoreChatMessage[],
-    rawOptions?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
+    rawOptions?: {
+      max_tokens?: number
+      temperature?: number
+      signal?: AbortSignal
+      reasoning_effort?: ReasoningEffortOption
+    }
   ): Promise<CompletionResponse> {
     const options = applyOptionPolicy(rawOptions, this.profile.options)
     const ctx = this.encodeContext()
     const payload = this.protocol.encodeText(
-      { messages, max_tokens: options?.max_tokens, temperature: options?.temperature },
+      {
+        messages,
+        max_tokens: options?.max_tokens,
+        temperature: options?.temperature,
+        reasoning_effort: this.forwardsReasoningEffort() ? options?.reasoning_effort : undefined,
+      },
       ctx
     )
     assertVisualRequestFits(messages, messages, false, this.getVisualDeliveryLimits('complete'))

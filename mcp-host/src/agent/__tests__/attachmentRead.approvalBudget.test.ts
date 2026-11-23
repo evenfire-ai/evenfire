@@ -149,6 +149,7 @@ async function fixture(readInitially = true) {
       mcpManager: new McpManager(),
       workspaceService: undefined,
       approvalConfig: undefined,
+      approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
       coreEvents: new SimpleEventEmitter(),
       cronScheduler: null,
       taskLifecycle: lifecycle,
