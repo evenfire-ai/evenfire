@@ -225,17 +225,23 @@ It was written for GKE; read it before you run it elsewhere.
 
 ## Install order
 
-For the authenticated RPC Proxy → MCP Host protocol, production must upgrade
-compatible RPC Proxy replicas before strict HCC/Host behavior and roll HCC/Hosts
-back before rolling Proxy back. The in-repository executable barrier currently
-covers the supported Minikube path. Production GCP rollout/rollback orchestration
-is owned by `keyper-labs/evenfire-infra`; this OSS repository does not publish its
-exact workflow path. Do not enable the strict production Host protocol until that
-orchestrator enforces both directions of the barrier.
-The strict protocol also needs the dedicated edge credential
-(`RPC_PROXY_MCP_HOST_EDGE_TOKEN` in `rpc-proxy-secrets` and in the `mcp-host`
-Secret `rpc-proxy-edge-credentials`). No script in this repository creates it,
-and the default `legacy-headers` protocol does not use it.
+The RPC Proxy → MCP Host edge has one protocol, `signed-assertion-v1`, with no
+transitional mode. control-api signs a short-lived edge assertion (RS256, at most
+300 seconds) with the RPC signing key it already holds
+(`CONTROL_API_RPC_JWT_PRIVATE_KEY`), RPC Proxy forwards it as
+`x-clerum-edge-assertion`, and each MCP Host verifies it with the RPC public key
+(`CLERUM_AUTH_JWT_PUBLIC_KEY`). No extra secret is needed.
+
+- **Upgrade order:** control-api, then RPC Proxy, then HCC and the Hosts. HCC
+  writes no Host Deployment until the whole RPC Proxy pod cohort carries
+  `clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1`.
+- **Rollback order:** HCC and the Hosts first, then RPC Proxy, then control-api.
+  RPC Proxy may stop forwarding the assertion only after no Host requires it.
+
+The in-repository executable barrier covers the supported Minikube path. Production
+GCP rollout and rollback orchestration is owned by `keyper-labs/evenfire-infra`;
+this OSS repository does not publish its exact workflow path. That orchestrator
+must enforce both orders before this release reaches production.
 
 [minikube.md](minikube.md) and `scripts/minikube/full-setup.sh` show the full
 dependency graph. The minikube scripts are bound to a minikube profile; the

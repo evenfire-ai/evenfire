@@ -597,7 +597,7 @@ All runtime routes are namespaced under `/v1/runtime/*`. Unmatched paths fall th
 | `POST` | `/v1/runtime/approvals/approve` | Approve a pending tool execution                            |
 | `POST` | `/v1/runtime/approvals/deny`    | Deny a pending tool execution                               |
 
-Except for the three unauthenticated routes (`/v1/runtime`, `/v1/runtime/live`, `/v1/runtime/health`), these routes are wrapped in a runtime edge guard: callers must send `x-clerum-edge-caller` and `x-clerum-edge-host-ref` (plus `x-clerum-edge-user-id` when the caller is `rpc-proxy`), and the host-ref must match the pod's own `CLERUM_HOST_NAME` (403 otherwise). The accepted caller value is per route: `/v1/runtime/status` accepts only `rpc-proxy`; the approval routes accept `rpc-proxy` or `channel-reader`; `/v1/runtime/messages` also accepts `workflow-approval-request-reader`. An `Authorization` header is rejected with 401 on these routes.
+Except for the three unauthenticated routes (`/v1/runtime`, `/v1/runtime/live`, `/v1/runtime/health`), these routes are wrapped in a runtime edge guard: callers must send `x-clerum-edge-caller` and `x-clerum-edge-host-ref` (plus `x-clerum-edge-user-id` when the caller is `rpc-proxy`), and the host-ref must match the pod's own `CLERUM_HOST_NAME` (403 otherwise). Caller `rpc-proxy` must also send `x-clerum-edge-assertion`: a short-lived RS256 JWT that control-api signs with the RPC key (`aud: "evenfire-host-runtime-edge"`, at most 300 s). The Host verifies it with `CLERUM_AUTH_JWT_PUBLIC_KEY`, checks that its claims match the clear edge headers, and checks that its `scopes` contain the route's scope from `HOST_EDGE_RPC_PROXY_ROUTE_SCOPES` (`@clerum/action-context-contracts`); otherwise it answers 401 `Missing runtime edge assertion` or `Invalid runtime edge assertion`. The accepted caller value is per route: `/v1/runtime/status` accepts only `rpc-proxy`; the approval routes accept `rpc-proxy` or `channel-reader`; `/v1/runtime/messages` also accepts `workflow-approval-request-reader`. An `Authorization` header is rejected with 401 on these routes.
 
 **POST /v1/runtime/messages** request:
 
@@ -1573,7 +1573,7 @@ Host CRD (spec.approval)
 | `POST` | `/v1/runtime/approvals/approve`    | Approve a pending tool execution                                        |
 | `POST` | `/v1/runtime/approvals/deny`       | Deny a pending tool execution                                           |
 | `GET`  | `/v1/runtime/tasks/:taskId/result` | Poll for final result after channel-based approval (two-phase response) |
-| `GET`  | `/v1/runtime/status`               | Includes `pendingApprovals` array                                       |
+| `GET`  | `/v1/runtime/status`               | Includes `pendingApprovals` (`since` of each, no request ids)           |
 
 All four require the `x-clerum-edge-*` caller headers (see [HTTP RPC API](#http-rpc-api)).
 
@@ -1606,18 +1606,13 @@ All four require the `x-clerum-edge-*` caller headers (see [HTTP RPC API](#http-
 {
   "agent": { "state": "awaiting_approval", "..." },
   "queue": { "..." },
-  "pendingApprovals": [
-    {
-      "requestId": "1709123456789-tc_1",
-      "userId": "123456789",
-      "toolName": "shell_exec",
-      "parameters": { "command": "rm -rf /tmp/old-data" },
-      "description": "Tool shell_exec requires approval",
-      "since": "2026-02-25T14:00:00.000Z"
-    }
-  ]
+  "pendingApprovals": [{ "since": "2026-02-25T14:00:00.000Z" }]
 }
 ```
+
+The status route only says that approvals are pending and since when. The
+`requestId` of each approval comes from the task's own progress stream
+(`GET /v1/runtime/tasks/:taskId/progress/stream`, `suspended` events).
 
 ### Configuration
 
@@ -1746,16 +1741,20 @@ Then in Telegram:
 **Option 2: CLI-based approval (for scripts/debugging)**
 
 Every `/v1/runtime/*` route below is behind the runtime edge guard, so each call must
-carry the edge headers: `x-clerum-edge-caller` (one of `rpc-proxy`, `channel-reader`,
-`workflow-approval-request-reader`), `x-clerum-edge-host-ref` (must match the running
-host's `CLERUM_HOST_NAME`), and — when the caller is `rpc-proxy` — `x-clerum-edge-user-id`.
-There is no dev-mode bypass; without them the guard returns `401`. An `Authorization`
-header on these routes is also rejected with `401`.
+carry the edge headers: `x-clerum-edge-caller`, `x-clerum-edge-host-ref` (must match the
+running host's `CLERUM_HOST_NAME`) and the caller's context headers. There is no
+dev-mode bypass; without them the guard returns `401`. An `Authorization` header on these
+routes is also rejected with `401`. Caller `rpc-proxy` also needs an edge assertion that
+only control-api can sign, so a script acts as the Telegram `channel-reader`, the way
+channel-reader itself does: send the message, read the approval's `requestId` from the
+task's progress stream, then approve.
 
 ```bash
-EDGE=(-H "x-clerum-edge-caller: rpc-proxy" -H "x-clerum-edge-host-ref: chatllm" -H "x-clerum-edge-user-id: 123")
+EDGE=(-H "x-clerum-edge-caller: channel-reader" -H "x-clerum-edge-host-ref: chatllm"
+      -H "x-clerum-edge-channel-type: telegram" -H "x-clerum-edge-channel-id: test"
+      -H "x-clerum-edge-sender: 123")
 
-# Send a message that triggers a tool
+# Send a message that triggers a tool; the answer carries the taskId
 curl -X POST http://localhost:8080/v1/runtime/messages "${EDGE[@]}" -H "Content-Type: application/json" -d '{
   "content": "List files in /tmp",
   "channelType": "telegram",
@@ -1766,14 +1765,16 @@ curl -X POST http://localhost:8080/v1/runtime/messages "${EDGE[@]}" -H "Content-
   "hostRef": "chatllm"
 }'
 
-# Check pending approvals
-curl http://localhost:8080/v1/runtime/status "${EDGE[@]}" | jq '.pendingApprovals'
+# Read the approval request: each `suspended` event carries data.requestId
+curl -N http://localhost:8080/v1/runtime/tasks/<taskId>/progress/stream "${EDGE[@]}"
 
 # Approve
 curl -X POST http://localhost:8080/v1/runtime/approvals/approve "${EDGE[@]}" -H "Content-Type: application/json" -d '{
   "userId": "123",
-  "requestId": "<from status response>",
-  "alwaysApprove": false
+  "requestId": "<from the suspended event>",
+  "alwaysApprove": false,
+  "channelType": "telegram",
+  "channelId": "test"
 }'
 ```
 

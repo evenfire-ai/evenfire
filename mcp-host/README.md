@@ -575,10 +575,15 @@ These routes are not directly callable by end users. Every route above except
 which requires the `x-clerum-edge-caller` header (one of `rpc-proxy`,
 `channel-reader`, `workflow-approval-request-reader`), `x-clerum-edge-host-ref`
 matching this pod's own host (403 otherwise), and `x-clerum-edge-user-id` when
-the caller is `rpc-proxy`. A request carrying an `Authorization` header is
-rejected with 401 on these routes. In practice you reach mcp-host through
-rpc-proxy or channel-reader, which set those headers; the body below is what
-they forward.
+the caller is `rpc-proxy`. Caller `rpc-proxy` must also send
+`x-clerum-edge-assertion`, a short-lived RS256 JWT signed by control-api
+(`aud: "evenfire-host-runtime-edge"`, at most 300 s). The Host verifies it with
+`CLERUM_AUTH_JWT_PUBLIC_KEY` and `CLERUM_AUTH_JWT_ISSUER`, and checks that it
+binds the clear edge headers and grants the route's scope
+(`HOST_EDGE_RPC_PROXY_ROUTE_SCOPES` in `@clerum/action-context-contracts`). A
+request carrying an `Authorization` header is rejected with 401 on these routes.
+In practice you reach mcp-host through rpc-proxy or channel-reader, which set
+those headers; the body below is what they forward.
 
 ### Canonical message request example
 
