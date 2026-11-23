@@ -3590,5 +3590,49 @@
   {
     "suite": "gitRead.runner.test.ts",
     "fullName": "spawnGit outcomes an argument list the OS refuses (E2BIG) could not start; it never throws"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git reflog show -p returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git reflog show --patch returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --notes returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --show-notes returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --format=%N returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git for-each-ref --format=%(raw) returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git for-each-ref --format=%(contents) returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git for-each-ref --format=%(refname) returns content: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git reflog returns content: false"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "gitReadReturnsContent is false only for valid names-only calls; an invalid call counts as content"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a core.worktree elsewhere in the workspace is refused for a call from the repository directory"
   }
 ]
