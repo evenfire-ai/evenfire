@@ -25,5 +25,5 @@
     "test": "node --test test/*.test.cjs",
     "test:crypto": "node --test test/policy-*.test.cjs test/crypto-*.test.cjs"
   },
-  "license": "MIT"
+  "license": "MPL-2.0"
 }

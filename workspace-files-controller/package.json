@@ -20,7 +20,7 @@
     "clerum",
     "sharedfilesystem"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MPL-2.0",
   "dependencies": {
     "express": "^5.2.1",
     "jose": "^6.2.1",
