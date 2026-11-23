@@ -97,6 +97,7 @@ function makeDeps(
     },
     modelName: 'test-model',
     approvalConfig: undefined,
+    approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
     coreEvents: new SimpleEventEmitter(),
     cronScheduler: null,
     taskLifecycle: new TaskLifecycle(),

@@ -21,6 +21,8 @@ export function makeFakeConversation(overrides: Partial<Conversation> = {}): Con
     state: ConversationState.Idle,
     turns: [],
     auto_approved_tools: new Set<string>(),
+    approval_mode: 'manual',
+    auto_shell_grants: { wholeTool: false, commands: new Set() },
     created_at: now,
     updated_at: now,
     ...overrides,
