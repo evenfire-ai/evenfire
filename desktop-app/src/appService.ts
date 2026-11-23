@@ -60,6 +60,8 @@ import {
   AccessCatalog,
   AgentWithMcpServers,
   ApprovalDecisionResult,
+  ApprovalMode,
+  ApprovalModeResult,
   ChatAuthorityScope,
   ContextBreakdownResult,
   DependencyHealth,
@@ -90,6 +92,7 @@ import {
   SessionsListQuery,
   SessionsListResult,
   SetHostModelResult,
+  ShellAction,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
   TeamMember,
@@ -244,6 +247,10 @@ const HOST_MODEL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.model
 // HOST_FINITE_OPERATION_SCOPES (whose every entry carries wake, asserted by
 // appService.wakeScopeMatrix.issue791.test.ts) for exactly that reason.
 const HOST_SESSION_TITLE_SCOPES: RpcScope[] = ['host:session:write']
+// Mode changes use the approve route's scope and copy its wake-and-hold, so
+// this call asks for host:approval:write and host:wake:write. Rename stays
+// non-wake on HOST_SESSION_TITLE_SCOPES.
+const HOST_APPROVAL_MODE_SCOPES: RpcScope[] = ['host:approval:write', 'host:wake:write']
 const HOST_ARTIFACT_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.artifact
 const HOST_APPROVAL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.approval
 const MCP_SERVERS_LIST_SCOPES: RpcScope[] = ['mcp:servers:list']
@@ -4428,10 +4435,17 @@ export class AppService {
       throw new Error('File references must be a list.')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
-    const rpc = await this.issueRpcTokenForHostRefs(
-      HOST_WAKEABLE_OPERATION_SCOPES,
-      effectiveHostRefs
-    )
+    // A non-manual hold is stored on the first message, which rpc-proxy accepts
+    // only when the token also has host:approval:write. manual stays on the
+    // usual three message scopes and the field is not forwarded.
+    const heldApprovalMode =
+      request.approvalMode === 'auto' || request.approvalMode === 'allow_all'
+        ? request.approvalMode
+        : undefined
+    const messageScopes: RpcScope[] = heldApprovalMode
+      ? [...HOST_WAKEABLE_OPERATION_SCOPES, 'host:approval:write']
+      : HOST_WAKEABLE_OPERATION_SCOPES
+    const rpc = await this.issueRpcTokenForHostRefs(messageScopes, effectiveHostRefs)
     const outgoingAttachmentCount = Array.isArray(request.attachments)
       ? request.attachments.length
       : 0
@@ -4458,6 +4472,7 @@ export class AppService {
       ...(request.modelSelectionRevision === undefined
         ? {}
         : { modelSelectionRevision: request.modelSelectionRevision }),
+      ...(heldApprovalMode ? { approvalMode: heldApprovalMode } : {}),
       // Structured references (#666): parsed at the IPC boundary; rpc-proxy
       // forwards them and mcp-host resolves each one.
       ...(request.fileReferences === undefined ? {} : { fileReferences: request.fileReferences }),
@@ -4474,10 +4489,7 @@ export class AppService {
       if (availabilityError) throw availabilityError
       if (AppService.shouldRefreshRpcToken(error)) {
         this.rpcTokenManager.clear()
-        const retried = await this.issueRpcTokenForHostRefs(
-          HOST_WAKEABLE_OPERATION_SCOPES,
-          effectiveHostRefs
-        )
+        const retried = await this.issueRpcTokenForHostRefs(messageScopes, effectiveHostRefs)
         try {
           return await this.rpcClient.invokeHostMessage(
             retried.token,
@@ -5270,7 +5282,7 @@ export class AppService {
     taskId: string,
     toolCallId: string,
     hostRefs?: string[],
-    options: { teamId?: string | null; alwaysApprove?: boolean } = {}
+    options: { teamId?: string | null; alwaysApprove?: boolean; shellAction?: ShellAction } = {}
   ): Promise<ApprovalDecisionResult> {
     const targetHostRef = String(hostRef || '').trim()
     const targetTaskId = String(taskId || '').trim()
@@ -5290,7 +5302,8 @@ export class AppService {
         targetHostRef,
         targetTaskId,
         targetToolCallId,
-        options.alwaysApprove === true
+        options.alwaysApprove === true,
+        options.shellAction
       )
     } catch (error) {
       // §4.5-7: align with invoke/getTaskResult — a 401/expired-scope means the
@@ -5319,7 +5332,8 @@ export class AppService {
           targetHostRef,
           targetTaskId,
           targetToolCallId,
-          options.alwaysApprove === true
+          options.alwaysApprove === true,
+          options.shellAction
         )
       }
       throw error
@@ -5620,6 +5634,58 @@ export class AppService {
           targetAgent,
           targetChatId,
           title
+        )
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Stores the session approval mode. The token is scoped to this one host and
+   * carries approve's scopes, approval-write plus wake, because the route
+   * wakes like approve. A 400, 401 or 404 leaves the stored mode unchanged.
+   * The renderer keeps the old label, except that a 404 for a chat whose
+   * session row it has not seen holds the pick for the first send. Any other
+   * failure is reconciled from the next session read.
+   */
+  async setApprovalMode(
+    hostRef: string,
+    agent: string,
+    chatId: string,
+    mode: ApprovalMode
+  ): Promise<ApprovalModeResult> {
+    const targetHostRef = String(hostRef || '').trim()
+    const targetAgent = String(agent || '').trim()
+    const targetChatId = String(chatId || '').trim()
+    if (!targetHostRef || !targetAgent || !targetChatId) {
+      throw new Error('hostRef, agent, and chatId are required')
+    }
+    if (mode !== 'manual' && mode !== 'auto' && mode !== 'allow_all') {
+      throw new Error('mode must be manual, auto, or allow_all')
+    }
+    const effectiveHostRefs = [targetHostRef]
+    const rpc = await this.issueRpcTokenForHostRefs(HOST_APPROVAL_MODE_SCOPES, effectiveHostRefs)
+    try {
+      return await this.rpcClient.setApprovalMode(
+        rpc.token,
+        targetHostRef,
+        targetAgent,
+        targetChatId,
+        mode
+      )
+    } catch (error) {
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        const retried = await this.issueRpcTokenForHostRefs(
+          HOST_APPROVAL_MODE_SCOPES,
+          effectiveHostRefs
+        )
+        return this.rpcClient.setApprovalMode(
+          retried.token,
+          targetHostRef,
+          targetAgent,
+          targetChatId,
+          mode
         )
       }
       throw error

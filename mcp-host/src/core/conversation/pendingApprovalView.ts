@@ -3,13 +3,19 @@
  * durable session summaries, message pages, the REST pending-approval list, the
  * tool:approval_needed event and the SSE `suspended` event.
  *
- * Whether a card may store a grant is decided by its durable
- * `authorization_scope` alone (persisted on `pending_approvals`, migration 016):
- * only an ordinary `turn_tools` card may. Exact-invocation and legacy unknown
- * scopes authorize just the call they show, so every view reports
- * `alwaysApproveAllowed: false` for them, the same decision approve() enforces.
+ * `alwaysApproveAllowed` is decided by the card's durable `authorization_scope`
+ * alone (persisted on `pending_approvals`, migration 016): only an ordinary
+ * `turn_tools` card offers it, so every view reports
+ * `alwaysApproveAllowed: false` for exact-invocation and legacy unknown scopes.
+ * What approve() stores also depends on the effective mode at answer time: a
+ * name grant needs manual (cron_manage aside; an Always answer in another mode
+ * is logged as `always_approve_ignored`). An auto shell card is
+ * exact_invocation, yet while the mode is still auto it may store a whole-tool
+ * shell grant, or a command grant where its `shellCard` descriptor offers the
+ * command on the answering surface.
  */
 import type { PendingApprovalRow } from '../../db/worker/protocol'
+import type { ShellCardDescriptor } from '../approval/shellCard'
 import type { PendingApproval } from '../types'
 import { normalizeAuthorizationScope, normalizeConnectReason } from './persistence/reconstruct'
 
@@ -52,14 +58,16 @@ export function mayStoreGrant(approval: Pick<PendingApproval, 'authorization_sco
 /**
  * The client-facing fields of a pending approval. `mcpServerName` rides only a
  * connect_required card; `alwaysApproveAllowed` is present (false) only when the
- * card cannot store a grant.
+ * card cannot store a grant. `shellCard` is in-memory only: a restarted card
+ * has no descriptor and is answered as once.
  */
 export function pendingApprovalWireFields(
-  approval: Pick<PendingApproval, 'reason' | 'mcpServerName' | 'authorization_scope'>
+  approval: Pick<PendingApproval, 'reason' | 'mcpServerName' | 'authorization_scope' | 'shellCard'>
 ): {
   reason?: 'approval_required' | 'connect_required'
   mcpServerName?: string
   alwaysApproveAllowed?: false
+  shellCard?: ShellCardDescriptor
 } {
   return {
     ...(approval.reason ? { reason: approval.reason } : {}),
@@ -67,5 +75,6 @@ export function pendingApprovalWireFields(
       ? { mcpServerName: approval.mcpServerName }
       : {}),
     ...(mayStoreGrant(approval) ? {} : { alwaysApproveAllowed: false as const }),
+    ...(approval.shellCard ? { shellCard: approval.shellCard } : {}),
   }
 }

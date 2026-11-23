@@ -124,6 +124,8 @@ const legacyRoutes: Route[] = [
   { method: 'get', suffix: '/status/stream' },
   { method: 'get', suffix: '/activity/stream' },
   { method: 'get', suffix: '/tasks/task-1/progress/stream' },
+  // Outside the preflight wrappers; the route calls validateHostRef itself.
+  { method: 'patch', suffix: '/sessions/agent/chat/approval-mode', body: { mode: 'auto' } },
 ]
 const invalidCapturedRefs = [
   '*',
