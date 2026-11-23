@@ -9,11 +9,24 @@ type SyncHandler = (event: MainEvent) => void
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
+  let settled = false
+  const cleanup = () => {
+    if (settled) return
+    resolve(undefined as T)
+  }
+  pendingDeferredCleanups.add(cleanup)
   const promise = new Promise<T>(done => {
-    resolve = done
+    resolve = value => {
+      if (settled) return
+      settled = true
+      pendingDeferredCleanups.delete(cleanup)
+      done(value)
+    }
   })
   return { promise, resolve }
 }
+
+const pendingDeferredCleanups = new Set<() => void>()
 
 const harness = vi.hoisted(() => {
   const state = {
@@ -208,6 +221,11 @@ describe('macOS Quit drain', () => {
     harness.nativeSet.mockReset().mockResolvedValue(undefined)
     harness.nativeGet.mockReset().mockResolvedValue(null)
     harness.nativeDelete.mockReset().mockResolvedValue(true)
+    harness.logout.mockReset().mockResolvedValue(7)
+    harness.sessionGeneration = 0
+    harness.invalidateSandboxUiSession = null
+    harness.sessionCleared = null
+    harness.registeredLogout = null
   })
 
   async function startMain(): Promise<void> {
@@ -218,8 +236,31 @@ describe('macOS Quit drain', () => {
 
   afterEach(async () => {
     try {
-      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      pendingDeferredCleanups.forEach(cleanup => cleanup())
+      const { openTokenStoreAdmission, waitForTokenStoreOperations } =
+        await import('../tokenStore.ts')
       openTokenStoreAdmission()
+      await waitForTokenStoreOperations()
+      await new Promise(resolve => setImmediate(resolve))
+
+      const { app } = await import('electron')
+      vi.mocked(app.quit).mockReset()
+      vi.mocked(app.exit).mockReset()
+      vi.restoreAllMocks()
+      harness.appListeners.clear()
+      harness.onHandlers.clear()
+      harness.handleHandlers.clear()
+      harness.windows.length = 0
+      harness.readyResolver = null
+      harness.initialize.mockReset().mockResolvedValue(undefined)
+      harness.logout.mockReset().mockResolvedValue(7)
+      harness.nativeSet.mockReset().mockResolvedValue(undefined)
+      harness.nativeGet.mockReset().mockResolvedValue(null)
+      harness.nativeDelete.mockReset().mockResolvedValue(true)
+      harness.sessionGeneration = 0
+      harness.invalidateSandboxUiSession = null
+      harness.sessionCleared = null
+      harness.registeredLogout = null
     } finally {
       if (originalPlatformDescriptor) {
         Object.defineProperty(process, 'platform', originalPlatformDescriptor)
@@ -235,7 +276,17 @@ describe('macOS Quit drain', () => {
     await startMain()
     harness.nativeSet.mockReset()
     const releases: Array<() => void> = []
-    harness.nativeSet.mockImplementation(() => new Promise<void>(resolve => releases.push(resolve)))
+    harness.nativeSet.mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          const release = () => {
+            pendingDeferredCleanups.delete(release)
+            resolve()
+          }
+          pendingDeferredCleanups.add(release)
+          releases.push(release)
+        })
+    )
     const { TokenStore } = await import('../tokenStore.ts')
     const { app } = await import('electron')
     const quit = vi.mocked(app.quit)
