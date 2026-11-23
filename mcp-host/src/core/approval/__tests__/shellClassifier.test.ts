@@ -104,11 +104,13 @@ function baseInput(overrides?: {
     providerType: overrides?.providerType ?? 'claude',
     modelName: overrides?.modelName ?? 'claude-sonnet',
     taskSignal: overrides?.taskSignal ?? new AbortController().signal,
-    usage: {
-      reporter: overrides?.reporter,
-      context: overrides?.context ?? USAGE_CONTEXT,
-      staticContext: STATIC_CONTEXT,
-    },
+    usage: overrides?.reporter
+      ? {
+          reporter: overrides.reporter,
+          context: overrides.context ?? USAGE_CONTEXT,
+          staticContext: STATIC_CONTEXT,
+        }
+      : undefined,
     sessionLogId: overrides?.sessionLogId ?? 'session-log-id',
   }
 }

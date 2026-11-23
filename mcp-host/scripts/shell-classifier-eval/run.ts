@@ -181,10 +181,6 @@ async function evaluate(
         providerType,
         modelName,
         taskSignal: new AbortController().signal,
-        usage: {
-          context: { source_kind: 'unknown' },
-          staticContext: { host_ref: 'eval', context_ref: null, llm_secret_name: null },
-        },
         sessionLogId: 'shell-classifier-eval',
       })
       // ESCALATE without a model call (argument limit, a throw before the

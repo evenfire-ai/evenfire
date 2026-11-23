@@ -2451,6 +2451,11 @@ export class TaskExecutor {
       },
       classify: (call, description) => {
         const caller = this.classifierCaller()
+        // `setUsageReporter` sets the reporter and the static context
+        // together. Without both, usage reporting is not wired, and the call
+        // reports nothing rather than billing a placeholder Host.
+        const reporter = this.deps.usageReporter
+        const staticContext = this.deps.usageStaticContext
         return classifyToolCall({
           toolName: call.name,
           description,
@@ -2459,15 +2464,10 @@ export class TaskExecutor {
           providerType: caller.providerType,
           modelName: caller.modelName,
           taskSignal: this.abortController.signal,
-          usage: {
-            reporter: this.deps.usageReporter,
-            context: this.buildDefaultUsageContext(),
-            staticContext: this.deps.usageStaticContext ?? {
-              host_ref: '',
-              context_ref: null,
-              llm_secret_name: null,
-            },
-          },
+          usage:
+            reporter && staticContext
+              ? { reporter, context: this.buildDefaultUsageContext(), staticContext }
+              : undefined,
           sessionLogId: approvalLogId(conversation.id),
         })
       },

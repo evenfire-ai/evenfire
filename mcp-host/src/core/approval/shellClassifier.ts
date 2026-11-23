@@ -76,6 +76,22 @@ Answer ESCALATE if the command does any of the following, or if you are not sure
 
 Answer with one word: APPROVE or ESCALATE.`
 
+/**
+ * Where a classifier call's tokens are reported. The reporter and the Host's
+ * static context arrive together (`setUsageReporter`), so the call carries
+ * both or neither. Absent means usage reporting is not wired, and nothing is
+ * enqueued.
+ */
+export type ShellClassifierUsage = {
+  reporter: UsageReporter
+  context: UsageContext
+  staticContext: {
+    host_ref: string
+    context_ref: string | null
+    llm_secret_name: string | null
+  }
+}
+
 type ClassifyInput = {
   toolName: string
   description: string
@@ -84,15 +100,7 @@ type ClassifyInput = {
   providerType: string
   modelName: string
   taskSignal: AbortSignal
-  usage: {
-    reporter?: UsageReporter
-    context: UsageContext
-    staticContext: {
-      host_ref: string
-      context_ref: string | null
-      llm_secret_name: string | null
-    }
-  }
+  usage?: ShellClassifierUsage
   sessionLogId: string
 }
 
@@ -163,7 +171,7 @@ function userMessage(input: ClassifyInput, delimiter: string): string {
 }
 
 function enqueueUsage(input: ClassifyInput, usage: TokenUsage | undefined): void {
-  if (!input.usage.reporter || !usage) return
+  if (!input.usage || !usage) return
   try {
     const event = buildLlmUsageEvent({
       requestId: newRequestId(),
@@ -282,15 +290,7 @@ export async function classifyToolCall(input: {
   providerType: string
   modelName: string
   taskSignal: AbortSignal
-  usage: {
-    reporter?: UsageReporter
-    context: UsageContext
-    staticContext: {
-      host_ref: string
-      context_ref: string | null
-      llm_secret_name: string | null
-    }
-  }
+  usage?: ShellClassifierUsage
   sessionLogId: string
 }): Promise<ShellVerdict> {
   const started = Date.now()

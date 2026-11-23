@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { config as appConfig } from '../../config'
+import type { AdapterStaticContext } from '../../core/adapters/llmPortAdapter'
 import type { ApprovalMode } from '../../core/approval/approvalMode'
 import { approvalLogId } from '../../core/approval/grantMemory'
 import type { ShellClassifierCaller } from '../../core/approval/shellClassifier'
@@ -131,6 +132,7 @@ interface DriveOptions {
   /** When set, shell is judged by this caller instead of the chat provider. */
   shellClassifier?: ShellClassifierCaller
   usageReporter?: UsageReporter
+  usageStaticContext?: AdapterStaticContext
 }
 
 interface DriveResult {
@@ -248,6 +250,7 @@ async function drive(options: DriveOptions): Promise<DriveResult> {
       ? { shellClassifierProvider: () => options.shellClassifier ?? null }
       : {}),
     ...(options.usageReporter ? { usageReporter: options.usageReporter } : {}),
+    ...(options.usageStaticContext ? { usageStaticContext: options.usageStaticContext } : {}),
   }
   const executor = new TaskExecutor(task, deps)
   await executor.run()
@@ -284,6 +287,12 @@ function infoEvents(spy: { mock: { calls: unknown[][] } }, event: string): unkno
         typeof fields === 'object' &&
         (fields as { event?: string }).event === event
     )
+}
+
+const HOST_USAGE_CONTEXT: AdapterStaticContext = {
+  host_ref: 'ns/approval-host',
+  context_ref: null,
+  llm_secret_name: null,
 }
 
 describe('approval mode admission', () => {
@@ -570,6 +579,7 @@ describe('approval mode admission', () => {
         },
       },
       usageReporter: { enqueue } as unknown as UsageReporter,
+      usageStaticContext: HOST_USAGE_CONTEXT,
     })
     expect(ran.classifyCalls).toBe(0)
     expect(ran.approval).toBeUndefined()
@@ -578,7 +588,42 @@ describe('approval mode admission', () => {
     expect(seen[0]?.max_tokens).toBe(16)
     expect(seen[0]?.reasoning_effort).toBe('none')
     expect(enqueue).toHaveBeenCalled()
-    expect(enqueue.mock.calls[0]?.[0]).toMatchObject({ provider: 'openai', model: 'gpt-5.5' })
+    // With the Host static context set, the chat turns report too, so the
+    // classifier's event is found by its model rather than by position.
+    expect(enqueue.mock.calls.map(call => call[0])).toContainEqual(
+      expect.objectContaining({
+        provider: 'openai',
+        model: 'gpt-5.5',
+        host_ref: HOST_USAGE_CONTEXT.host_ref,
+      })
+    )
+  })
+
+  it('reports no classifier usage when the reporter has no Host static context', async () => {
+    // setUsageReporter sets both together; a reporter alone is a wiring gap
+    // and must not bill the classifier call to a placeholder Host.
+    const enqueue = vi.fn()
+    const seen: unknown[] = []
+    const ran = await drive({
+      mode: 'auto',
+      primaryType: 'openai',
+      calls: [shell('sh-no-static', 'printf admission-ok')],
+      shellClassifier: {
+        providerType: 'openai',
+        modelName: 'gpt-5.5',
+        provider: {
+          completeSingleTurn: async (_messages, options) => {
+            seen.push(options ?? {})
+            return { content: 'APPROVE', usage, finish_reason: FinishReason.Stop }
+          },
+        },
+      },
+      usageReporter: { enqueue } as unknown as UsageReporter,
+    })
+    expect(seen).toHaveLength(1)
+    expect(ran.approval).toBeUndefined()
+    expect(ran.completed).toBe(true)
+    expect(enqueue).not.toHaveBeenCalled()
   })
 
   it('A3 APPROVE stores nothing, ESCALATE cards with the descriptor, and an unavailable classifier does not call classify', async () => {
