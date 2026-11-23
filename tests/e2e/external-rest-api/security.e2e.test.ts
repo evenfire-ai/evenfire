@@ -249,6 +249,7 @@ describe('external-rest-api e2e security suite', () => {
         EXTERNAL_REST_API_CORS_ORIGIN: 'http://localhost:3000',
         EXTERNAL_REST_API_GOOGLE_CLIENT_ID: 'e2e-google-client-id',
         EXTERNAL_REST_API_CONTROL_API_BASE_URL: `http://127.0.0.1:${controlApiPort}/api/v1`,
+        CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: 'https://profile.example.test',
         EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN: 'e2e-service-token',
         EXTERNAL_REST_API_CONTROL_API_SERVICE_NAME: 'external-rest-api',
         EXTERNAL_REST_API_JWT_PUBLIC_KEY: TEST_SESSION_PUBLIC_KEY,

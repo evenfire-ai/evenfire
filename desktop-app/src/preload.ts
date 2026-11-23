@@ -10,6 +10,7 @@ import type {
   GfsWatchSubscriptionResult,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
+  ProfileUiDispatchFailure,
   SandboxUiDeepLinkEnvelope,
   SandboxUiReleasedEvent,
 } from './types.js'
@@ -104,6 +105,153 @@ function cancellableGfsInvoke<T>(
     .finally(() => signal.removeEventListener('abort', onAbort)) as Promise<T>
 }
 
+const profileUiDocumentLease = crypto.randomUUID()
+const profileUiDispatchListeners = new Set<(failure: ProfileUiDispatchFailure) => void>()
+type ProfileUiDispatchCorrelation = {
+  documentLease: string
+  dispatchDeadline: number
+  timer: ReturnType<typeof setTimeout>
+}
+const acceptedProfileUiDispatches = new Map<string, ProfileUiDispatchCorrelation>()
+const earlyProfileUiDispatchFailures = new Map<string, ProfileUiDispatchCorrelation>()
+const MAX_PROFILE_UI_DISPATCH_CORRELATIONS = 128
+
+function publishProfileUiDispatchFailure(failure: ProfileUiDispatchFailure): void {
+  if (profileUiDispatchListeners.size === 0) return
+  for (const callback of profileUiDispatchListeners) callback(failure)
+}
+
+function authorizeProfileUiDispatchFailure(
+  correlationId: string,
+  record: ProfileUiDispatchCorrelation
+): void {
+  if (Date.now() > record.dispatchDeadline) {
+    clearTimeout(record.timer)
+    acceptedProfileUiDispatches.delete(correlationId)
+    return
+  }
+  const authorized =
+    ipcRenderer.sendSync('auth:authorizeProfileUiDispatchFailure', {
+      correlationId,
+      documentLease: record.documentLease,
+      dispatchDeadline: record.dispatchDeadline,
+    }) === true
+  if (!authorized) {
+    clearTimeout(record.timer)
+    acceptedProfileUiDispatches.delete(correlationId)
+  }
+}
+
+ipcRenderer.on(
+  'auth:profileUiDispatchFailurePending',
+  (
+    _event,
+    payload: { correlationId?: unknown; documentLease?: unknown; dispatchDeadline?: unknown }
+  ) => {
+    const correlationId = payload?.correlationId
+    const documentLease = payload?.documentLease
+    const dispatchDeadline = payload?.dispatchDeadline
+    if (
+      typeof correlationId !== 'string' ||
+      documentLease !== profileUiDocumentLease ||
+      typeof dispatchDeadline !== 'number' ||
+      !Number.isSafeInteger(dispatchDeadline) ||
+      Date.now() > dispatchDeadline
+    ) {
+      return
+    }
+    const accepted = acceptedProfileUiDispatches.get(correlationId)
+    if (accepted && accepted.dispatchDeadline === dispatchDeadline) {
+      authorizeProfileUiDispatchFailure(correlationId, accepted)
+      return
+    }
+    if (
+      earlyProfileUiDispatchFailures.has(correlationId) ||
+      earlyProfileUiDispatchFailures.size >= MAX_PROFILE_UI_DISPATCH_CORRELATIONS
+    ) {
+      return
+    }
+    const timer = setTimeout(
+      () => {
+        earlyProfileUiDispatchFailures.delete(correlationId)
+      },
+      Math.max(0, dispatchDeadline - Date.now())
+    )
+    earlyProfileUiDispatchFailures.set(correlationId, {
+      documentLease,
+      dispatchDeadline,
+      timer,
+    })
+  }
+)
+
+ipcRenderer.on('auth:profileUiDispatchFailed', (_event, payload: ProfileUiDispatchFailure) => {
+  const correlationId = payload?.correlationId
+  const accepted =
+    typeof correlationId === 'string' ? acceptedProfileUiDispatches.get(correlationId) : undefined
+  if (
+    !accepted ||
+    payload.documentLease !== profileUiDocumentLease ||
+    accepted.documentLease !== profileUiDocumentLease ||
+    accepted.dispatchDeadline !== payload.dispatchDeadline ||
+    Date.now() > accepted.dispatchDeadline
+  ) {
+    return
+  }
+  clearTimeout(accepted.timer)
+  acceptedProfileUiDispatches.delete(correlationId)
+  publishProfileUiDispatchFailure(payload)
+})
+
+function invokeProfileUiAction<T extends { dispatchAccepted?: unknown; correlationId?: unknown }>(
+  channel: string,
+  payload: Record<string, unknown>
+): Promise<T> {
+  return (
+    ipcRenderer.invoke(channel, { ...payload, documentLease: profileUiDocumentLease }) as Promise<T>
+  ).then(result => {
+    const correlationId = result?.correlationId
+    const dispatchDeadline = (result as T & { dispatchDeadline?: unknown })?.dispatchDeadline
+    if (
+      result?.dispatchAccepted !== true ||
+      typeof correlationId !== 'string' ||
+      typeof dispatchDeadline !== 'number' ||
+      !Number.isSafeInteger(dispatchDeadline) ||
+      Date.now() > dispatchDeadline
+    )
+      return result
+    const earlyFailure = earlyProfileUiDispatchFailures.get(correlationId)
+    if (earlyFailure && earlyFailure.dispatchDeadline === dispatchDeadline) {
+      clearTimeout(earlyFailure.timer)
+      earlyProfileUiDispatchFailures.delete(correlationId)
+      const timer = setTimeout(
+        () => {
+          acceptedProfileUiDispatches.delete(correlationId)
+        },
+        Math.max(0, dispatchDeadline - Date.now())
+      )
+      const record = { documentLease: profileUiDocumentLease, dispatchDeadline, timer }
+      acceptedProfileUiDispatches.set(correlationId, record)
+      authorizeProfileUiDispatchFailure(correlationId, record)
+    } else {
+      if (acceptedProfileUiDispatches.size < MAX_PROFILE_UI_DISPATCH_CORRELATIONS) {
+        const timer = setTimeout(
+          () => {
+            acceptedProfileUiDispatches.delete(correlationId)
+          },
+          Math.max(0, dispatchDeadline - Date.now())
+        )
+        acceptedProfileUiDispatches.set(correlationId, {
+          documentLease: profileUiDocumentLease,
+          dispatchDeadline,
+          timer,
+        })
+      }
+    }
+    return result
+  })
+}
+
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
   return typeof value === 'string' && DESKTOP_COMMAND_IDS.has(value as DesktopCommandId)
 }
@@ -160,11 +308,16 @@ const clerum = Object.freeze({
     probeLocalhostReachable: () => ipcRenderer.invoke('auth:probeLocalhostReachable'),
     openDeploymentDocs: () => ipcRenderer.invoke('auth:openDeploymentDocs'),
     openHostedSignup: () => ipcRenderer.invoke('auth:openHostedSignup'),
-    startDesktopSetup: (email: string) => ipcRenderer.invoke('auth:startDesktopSetup', { email }),
+    startDesktopSetup: (email: string) =>
+      invokeProfileUiAction('auth:startDesktopSetup', { email }),
     openForgotPassword: (email?: string) =>
-      ipcRenderer.invoke('auth:openForgotPassword', { email }),
+      invokeProfileUiAction('auth:openForgotPassword', { email }),
     openProfileSettings: (email?: string, options?: ProfileSettingsOpenOptions) =>
-      ipcRenderer.invoke('auth:openProfileSettings', { email, ...options }),
+      invokeProfileUiAction('auth:openProfileSettings', { email, ...options }),
+    onProfileUiDispatchFailed: (callback: (failure: ProfileUiDispatchFailure) => void) => {
+      profileUiDispatchListeners.add(callback)
+      return () => profileUiDispatchListeners.delete(callback)
+    },
     completeDesktopSetup: (email: string, authorizationToken: string) =>
       ipcRenderer.invoke('auth:completeDesktopSetup', { email, authorizationToken }),
     onDesktopSetupToken: (

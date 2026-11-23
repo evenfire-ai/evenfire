@@ -47,6 +47,18 @@ signed-out boundary. If that optional save fails, authentication still ends and
 a later health check retries discovery and persistence. A failed team switch
 that clears the session also clears its live RPC override.
 
+Profile UI origin persistence follows the saved environment's REST and RPC
+binding. If the same live environment changes from R1 to R2 and back to the
+identical R1 binding while an R1 discovery is in flight, that response may be
+used after the return if the existing checks still pass; it is not guaranteed
+to contain the server's newest configuration. It cannot be used as R2 while
+R2 remains current. In the accepted N31 sequence, a failed R2 save can leave
+the in-memory profile cache ahead of the file; a later same-profile R1 save may
+then omit the previously saved Profile UI origin. That origin does not become
+valid for R2. Discovery uses its existing fallback behavior when the origin is
+absent. Successful same-binding saves and trusted RPC enrichment retain their
+existing origin behavior.
+
 ## Setup paths
 
 Three ways to add an environment; all of them end with the same saved

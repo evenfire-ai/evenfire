@@ -27,8 +27,8 @@ vi.mock('../appService.js', () => ({ AppService: class {} }))
 const sharedUrl = 'https://profile.example/apps/open?team=team-1'
 const service = {
   createSandboxUiDeepLink: vi.fn(
-    async (_teamId: string | undefined, writeClipboard?: (url: string) => Promise<void>) => {
-      await writeClipboard?.(sharedUrl)
+    async (_teamId?: string, writeClipboard?: (url: string) => Promise<void>) => {
+      if (writeClipboard) await writeClipboard(sharedUrl)
       return { url: sharedUrl }
     }
   ),

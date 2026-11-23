@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import syncFs from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -67,9 +68,13 @@ async function selectSiblingAfterIndexFailure() {
   const store = new TokenStore({ isolatedUserDataPath: directory })
   const service = new AppService()
   ;(service as unknown as { tokenStore: InstanceType<typeof TokenStore> }).tokenStore = store
-  const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment')
-  discovery.mockRejectedValueOnce(new Error('initial optional discovery unavailable'))
-  discovery.mockResolvedValue({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: rpc, appName: 'A' })
+  const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironmentForEndpoint')
+  discovery.mockResolvedValue({
+    externalRestApiBaseUrl: rest,
+    rpcProxyBaseUrl: rpc,
+    appName: 'A',
+    responseUrl: `${rest}/api/v1/desktop/environment`,
+  })
   vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue(testLoginResult())
   vi.spyOn(AuthClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
   const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
@@ -85,40 +90,43 @@ async function selectSiblingAfterIndexFailure() {
   expect(fetch).toHaveBeenCalledWith(`${rpc}/health`, expect.any(Object))
   discovery.mockRejectedValue(new Error('subsequent optional discovery unavailable'))
   const index = path.join(saved.storagePath, 'index.json')
-  const write = fs.writeFile.bind(fs)
-  const failure = vi.spyOn(fs, 'writeFile').mockImplementation(async (file, ...args) => {
-    if (String(file) === index) throw new Error('fixture profile index write denied')
-    return write(file, ...args)
+  const rename = syncFs.renameSync.bind(syncFs)
+  const failure = vi.spyOn(syncFs, 'renameSync').mockImplementation((source, destination) => {
+    if (String(destination).endsWith('.runtime-config-transaction.json')) {
+      throw new Error('fixture profile index commit denied')
+    }
+    return rename(source, destination)
   })
-  await expect(service.selectRuntimeConfig(b.id)).rejects.toThrow('profile index write denied')
+  await expect(service.selectRuntimeConfig(b.id)).rejects.toThrow('profile index commit denied')
   failure.mockRestore()
-  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
+  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(a)
   expect(config.getActiveEnvKey()).toBe(key)
   expect(service.getSessionGeneration()).toBeGreaterThan(generation)
   expect(service.getCachedUserId()).toBe('user-a')
   expect(await store.getSessionToken(key)).toBe('synthetic-session-a')
   expect(chat.getChatStoreBindingGeneration()).toBe(chatGeneration)
-  return { service, config, store, b, key, rpc, fetch, index }
+  return { service, config, store, a, b, key, rpc, fetch, index }
 }
 
 it('does not route a surviving session through another profile after an index write rejection', async () => {
-  const { service, config, fetch, b, rpc } = await selectSiblingAfterIndexFailure()
+  const { service, config, fetch, a, rpc } = await selectSiblingAfterIndexFailure()
   fetch.mockClear()
   const health = await service.getDependenciesHealth()
-  expect(health.rpcProxy.ok).toBe(false)
-  expect(fetch).not.toHaveBeenCalledWith(`${rpc}/health`, expect.any(Object))
-  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
-  expect(config.config.rpcProxyBaseUrl).toBe('')
+  expect(health.rpcProxy.ok).toBe(true)
+  expect(fetch).toHaveBeenCalledWith(`${rpc}/health`, expect.any(Object))
+  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(a)
+  expect(config.config.rpcProxyBaseUrl).toBe(rpc)
 })
 
 it('does not persist another directory profile discovery on logout after an index write rejection', async () => {
-  const { service, config, store, b, key, index } = await selectSiblingAfterIndexFailure()
+  const { service, config, store, a, b, key, rpc, index } = await selectSiblingAfterIndexFailure()
   await service.logout()
   expect(service.getCachedUserId()).toBeNull()
   expect(await store.getSessionToken(key)).toBeNull()
-  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
-  expect(config.config.rpcProxyBaseUrl).toBe('')
-  // A later successful native save persists B, never A's stale discovery.
+  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(a)
+  expect(config.config.rpcProxyBaseUrl).toBe(rpc)
+  // A later successful selection persists B without copying A's RPC projection.
   await service.selectRuntimeConfig(b.id)
   expect(JSON.parse(await fs.readFile(index, 'utf8')).activeProfileId).toBe(b.id)
+  expect(config.config.rpcProxyBaseUrl).toBe('')
 })
