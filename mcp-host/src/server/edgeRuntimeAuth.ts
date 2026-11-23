@@ -16,6 +16,7 @@ import {
   validateHostEdgeAssertionClaims,
 } from '@clerum/action-context-contracts'
 import { config } from '../config'
+import { logger } from '../logger'
 import type { RuntimeCallerContext, RuntimeCallerKind } from './types'
 
 const EDGE_CALLER_HEADER = 'x-clerum-edge-caller'
@@ -266,13 +267,33 @@ const RPC_PROXY_ROUTE_SCOPE_VALUES: ReadonlySet<string> = new Set(
   Object.values(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES)
 )
 
-type EdgeAssertionVerdict = 'accepted' | 'missing' | 'invalid'
+type EdgeAssertionRefusalReason =
+  | 'missing'
+  | 'not-a-string'
+  | 'v2-refused'
+  | 'no-verification-key'
+  | 'verify-failed'
+  | 'typ-mismatch'
+  | 'claims-rejected'
+
+type EdgeAssertionVerdict =
+  | { accepted: true }
+  | {
+      accepted: false
+      reason: EdgeAssertionRefusalReason
+      errorName?: string
+      claimError?: string
+    }
+
+// Same bound the logger applies to an error name it summarizes.
+const ERROR_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 
 /**
  * Verifies the edge assertion control-api signed for an rpc-proxy request and binds it to the
  * caller the handler will see and to the route scope. Only version 1 is accepted: a request that
  * carries V2 authority is refused, because the Host does not yet compare V2 claims with the
- * trusted action context. A Host without a verification key refuses every assertion.
+ * trusted action context. A Host without a verification key refuses every assertion. A refusal
+ * names its reason from a closed set; the guard logs it and never returns it to the caller.
  */
 function verifyRpcProxyEdgeAssertion(
   req: Request,
@@ -280,10 +301,14 @@ function verifyRpcProxyEdgeAssertion(
   requiredScope: HostEdgeRpcProxyScope
 ): EdgeAssertionVerdict {
   const raw = req.headers[HOST_EDGE_ASSERTION_HEADER]
-  if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) return 'missing'
-  if (typeof raw !== 'string') return 'invalid'
-  if (declaresV2RuntimeAuthority(req) || context.actionContextV2) return 'invalid'
-  if (!config.authJwtPublicKey) return 'invalid'
+  if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
+    return { accepted: false, reason: 'missing' }
+  }
+  if (typeof raw !== 'string') return { accepted: false, reason: 'not-a-string' }
+  if (declaresV2RuntimeAuthority(req) || context.actionContextV2) {
+    return { accepted: false, reason: 'v2-refused' }
+  }
+  if (!config.authJwtPublicKey) return { accepted: false, reason: 'no-verification-key' }
 
   let decoded: jwt.Jwt
   try {
@@ -293,12 +318,20 @@ function verifyRpcProxyEdgeAssertion(
       audience: HOST_EDGE_ASSERTION_AUDIENCE,
       complete: true,
     })
-  } catch {
+  } catch (error) {
     // Every verification failure (signature, algorithm, issuer, audience,
-    // expiry, malformed token) is the same refusal; the reason is not exposed.
-    return 'invalid'
+    // expiry, malformed token) is the same refusal to the caller; the guard
+    // logs the error name, never its message or the token.
+    const name = error instanceof Error ? error.name : ''
+    return {
+      accepted: false,
+      reason: 'verify-failed',
+      errorName: ERROR_NAME_RE.test(name) ? name : 'Error',
+    }
   }
-  if (decoded.header.typ !== HOST_EDGE_ASSERTION_JWT_TYPE) return 'invalid'
+  if (decoded.header.typ !== HOST_EDGE_ASSERTION_JWT_TYPE) {
+    return { accepted: false, reason: 'typ-mismatch' }
+  }
 
   const claims = validateHostEdgeAssertionClaims(decoded.payload, {
     v: 1,
@@ -308,7 +341,8 @@ function verifyRpcProxyEdgeAssertion(
     teamId: context.teamId ?? null,
     requiredScope,
   })
-  return claims.ok ? 'accepted' : 'invalid'
+  if (!claims.ok) return { accepted: false, reason: 'claims-rejected', claimError: claims.error }
+  return { accepted: true }
 }
 
 /**
@@ -372,12 +406,23 @@ export function runtimeEdgeGuard(
         context as RuntimeCallerContext & { userId: string },
         rpcProxyScope as HostEdgeRpcProxyScope
       )
-      if (verdict === 'missing') {
-        res.status(401).json({ error: 'Missing runtime edge assertion' })
-        return
-      }
-      if (verdict === 'invalid') {
-        res.status(401).json({ error: 'Invalid runtime edge assertion' })
+      if (!verdict.accepted) {
+        logger.warn(
+          {
+            event: 'runtime_edge_assertion_refused',
+            reason: verdict.reason,
+            scope: rpcProxyScope,
+            ...(verdict.errorName ? { errorName: verdict.errorName } : {}),
+            ...(verdict.claimError ? { claimError: verdict.claimError } : {}),
+          },
+          '[Server] Refused rpc-proxy edge assertion'
+        )
+        res.status(401).json({
+          error:
+            verdict.reason === 'missing'
+              ? 'Missing runtime edge assertion'
+              : 'Invalid runtime edge assertion',
+        })
         return
       }
     }
