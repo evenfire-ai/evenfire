@@ -248,6 +248,49 @@ describe('git_read protected content (history, refs, stash, index, worktree)', (
     ).toEqual({ content: GIT_READ_REFUSALS.protected_history, is_error: true })
   })
 
+  it('the follow check sees a protected name git would quote (non-ASCII), renamed out or matched by a glob', async () => {
+    const quoted = path.join(fx.root, 'quoted')
+    fs.mkdirSync(path.join(quoted, '.gfs-downloads'), { recursive: true })
+    gitwAt('2026-02-01T00:00:00Z', quoted, 'init', '-q')
+    fs.writeFileSync(path.join(quoted, 'a.txt'), 'WITNESS-Q\n')
+    fs.writeFileSync(path.join(quoted, '.gfs-downloads', 'Informe año.txt'), 'NEEDLE-GFS-ANO v1\n')
+    gitwAt('2026-02-01T00:00:00Z', quoted, 'add', '-A')
+    gitwAt('2026-02-01T00:00:00Z', quoted, 'commit', '-qm', 'q1')
+    gitwAt('2026-02-02T00:00:00Z', quoted, 'mv', '.gfs-downloads/Informe año.txt', 'notes.txt')
+    gitwAt('2026-02-02T00:00:00Z', quoted, 'commit', '-qm', 'q2')
+    // The check's old form: without -z the name is C-quoted.
+    const unquoted = controlGit(
+      fx.root,
+      quoted,
+      'log',
+      '--follow',
+      '--name-status',
+      '--format=',
+      ...NT,
+      '--',
+      'notes.txt'
+    ).out
+    expect(unquoted).toContain('".gfs-downloads/Informe a\\303\\261o.txt"')
+    expect(
+      controlGit(fx.root, quoted, 'log', '--follow', '-p', ...NT, '--', 'notes.txt').out
+    ).toContain('NEEDLE-GFS-ANO')
+    const refused = { content: GIT_READ_REFUSALS.protected_history, is_error: true }
+    const run = async (params: Record<string, unknown>) => {
+      const out = await tool.execute({ directory: 'quoted', ...params })
+      return { content: out.content, is_error: out.is_error }
+    }
+    expect(
+      await run({ subcommand: 'log', options: ['patch', 'follow'], paths: ['notes.txt'] })
+    ).toEqual(refused)
+    expect(
+      await run({ subcommand: 'log', options: ['patch', 'follow'], paths: ['.gfs-download*'] })
+    ).toEqual(refused)
+    // Witness: the same call on an ordinary file still runs.
+    expect(
+      (await run({ subcommand: 'log', options: ['patch', 'follow'], paths: ['a.txt'] })).content
+    ).toContain('WITNESS-Q')
+  })
+
   it('log --follow -p over the whole tree is refused when its history has a protected name', async () => {
     expect(needles(control('log', '--follow', '-p', ...NT, '--', '.')).length).toBeGreaterThan(0)
     expect(await call({ subcommand: 'log', options: ['patch', 'follow'], paths: ['.'] })).toEqual({

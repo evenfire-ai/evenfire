@@ -338,9 +338,18 @@ export function peelEndpoints(revision: string): string[] {
   return parts.map(part => (part.startsWith('^') ? part.slice(1) : part)).filter(Boolean)
 }
 
-/** Every name in `git log --name-status` output, raw or `-z`. */
+/**
+ * Every name in `git log --name-status -z` output. With `-z` git prints names
+ * raw; without it, a name with non-ASCII bytes, a quote or a backslash is
+ * C-quoted and its protected segment would not be seen.
+ */
 function namesInStatusOutput(output: string): string[] {
-  return output.split(/[\0\n\t]/).filter(token => token.length > 0)
+  return output.split(/[\0\n]/).filter(token => token.length > 0)
+}
+
+/** A follow-check name that is protected, or that git still quoted (fail closed). */
+function protectedOrQuoted(name: string): boolean {
+  return name.startsWith('"') || isProtectedWorkspacePath(name)
 }
 
 /** Runs the preflight; on `ok`, the command may run in `cwd` with `env`. */
@@ -462,6 +471,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
         'log',
         '--follow',
         '--name-status',
+        '-z',
         '--format=',
         '--no-textconv',
         '--no-ext-diff',
@@ -480,7 +490,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     if (check.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
     if (check.outcome !== 'exited') return { kind: 'refused', category: 'preflight_failed' }
     if (check.exitCode !== 0) return { kind: 'git_failed', stderr: check.stderr }
-    if (namesInStatusOutput(check.stdout).some(isProtectedWorkspacePath)) {
+    if (namesInStatusOutput(check.stdout).some(protectedOrQuoted)) {
       return { kind: 'refused', category: 'protected_history' }
     }
   }
