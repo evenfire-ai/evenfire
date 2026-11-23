@@ -47,11 +47,17 @@ export const MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze([
 const ELIGIBILITY_CLAIMS = ['tid', 'idp', 'roles', 'acct', 'email_verified'] as const
 
 /**
- * The `idp` value Entra puts in a member's token for its own tenant.
- * UNVERIFIED: confirm on a real tenant (scope Decision 6)
+ * Whether an `idp` claim value names the pinned tenant's own directory.
+ * Microsoft's "ID token claims reference" page documents `idp` as identical to
+ * the `iss` claim unless the user's account is not in the same tenant as the
+ * issuer, and says that when the claim is absent `iss` can be used instead. So
+ * the proof's own issuer counts. The v1 issuer form
+ * `https://sts.windows.net/<tenant>/` names the same pinned tenant, so it counts
+ * too. Any other value is a guest's home directory.
+ * UNVERIFIED: not yet confirmed against ID tokens captured from a real tenant.
  */
-export function entraTenantIdp(tenantId: string): string {
-  return `https://sts.windows.net/${tenantId}/`
+export function isEntraSameTenantIdp(idp: unknown, issuer: string, tenantId: string): boolean {
+  return idp === issuer || idp === `https://sts.windows.net/${tenantId}/`
 }
 
 function observe(proof: VerifiedOidcIdentityProof, name: string): OidcVerifiedClaimObservation {
@@ -74,11 +80,13 @@ export function evaluateOidcEligibility(
     const acct = observe(proof, 'acct')
     const idp = observe(proof, 'idp')
     // A member only when each marker that is present says so: `acct` exactly
-    // the number 0 and `idp` the tenant's own issuer. Any other present value
-    // counts as a guest, so an unexpected shape fails closed.
+    // the number 0 and `idp` a same-tenant value (see isEntraSameTenantIdp).
+    // Any other present value counts as a guest, so an unexpected shape fails
+    // closed.
     const memberByAcct = acct.status !== 'present' || acct.value === 0
     const memberByIdp =
-      idp.status !== 'present' || idp.value === entraTenantIdp(policy.entraTenantId)
+      idp.status !== 'present' ||
+      isEntraSameTenantIdp(idp.value, proof.issuer, policy.entraTenantId)
     guest = !(memberByAcct && memberByIdp)
     if (guest && !policy.allowGuests) return NOT_ELIGIBLE
   }

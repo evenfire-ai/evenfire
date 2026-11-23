@@ -1,16 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { OidcMemberSignInPolicy } from '../src/oidc/configuration.js'
-import {
-  entraTenantIdp,
-  evaluateOidcEligibility,
-  oidcEmailState,
-} from '../src/oidc/memberEligibility.js'
+import { evaluateOidcEligibility, oidcEmailState } from '../src/oidc/memberEligibility.js'
 import type {
   OidcVerifiedClaimObservation,
   VerifiedOidcIdentityProof,
 } from '../src/oidc/protocolEngine.js'
 
 const TENANT = '11111111-2222-3333-4444-555555555555'
+const ISSUER = 'https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0'
 
 const present = (value: unknown): OidcVerifiedClaimObservation =>
   ({ status: 'present', value }) as OidcVerifiedClaimObservation
@@ -22,6 +19,7 @@ function proof(
   email: string | null = 'member@example.test'
 ): VerifiedOidcIdentityProof {
   return {
+    issuer: ISSUER,
     attributes: { source: 'validated_id_token', ...(email === null ? {} : { email }) },
     verifiedClaims: { source: 'validated_id_token', claims },
   } as unknown as VerifiedOidcIdentityProof
@@ -40,12 +38,6 @@ function policy(overrides: Partial<OidcMemberSignInPolicy> = {}): OidcMemberSign
 }
 const entra = (overrides: Partial<OidcMemberSignInPolicy> = {}) =>
   policy({ entraTenantId: TENANT, ...overrides })
-
-describe('entraTenantIdp', () => {
-  it('builds the v1 issuer literal for a tenant', () => {
-    expect(entraTenantIdp(TENANT)).toBe(`https://sts.windows.net/${TENANT}/`)
-  })
-})
 
 describe('evaluateOidcEligibility', () => {
   const ok = { eligible: true, guest: false }
@@ -67,10 +59,48 @@ describe('evaluateOidcEligibility', () => {
     ['Entra with an unsupported tid', proof({ tid: unsupported }), entra(), no],
     [
       'Entra member whose idp is the tenant issuer',
-      proof({ tid: present(TENANT), idp: present(entraTenantIdp(TENANT)) }),
+      proof({
+        tid: present(TENANT),
+        idp: present('https://sts.windows.net/11111111-2222-3333-4444-555555555555/'),
+      }),
       entra(),
       ok,
     ],
+    [
+      'Entra member whose idp equals the v2.0 issuer (documented same-tenant value)',
+      proof({
+        tid: present(TENANT),
+        idp: present('https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0'),
+      }),
+      entra(),
+      ok,
+    ],
+    ...(
+      [
+        [
+          'another tenant v2.0 issuer',
+          `https://login.microsoftonline.com/${'99999999-8888-7777-6666-555555555555'}/v2.0`,
+        ],
+        [
+          'another tenant v1 issuer',
+          'https://sts.windows.net/99999999-8888-7777-6666-555555555555/',
+        ],
+        ['live.com', 'live.com'],
+      ] as const
+    ).flatMap(([shape, value]) => [
+      [
+        `Entra guest by idp ${shape} with allowGuests false`,
+        proof({ tid: present(TENANT), idp: present(value) }),
+        entra(),
+        no,
+      ] as const,
+      [
+        `Entra guest by idp ${shape} with allowGuests true`,
+        proof({ tid: present(TENANT), idp: present(value) }),
+        entra({ allowGuests: true }),
+        guestOk,
+      ] as const,
+    ]),
     [
       'Entra guest by idp with allowGuests false',
       proof({ tid: present(TENANT), idp: present('live.com') }),
@@ -144,7 +174,11 @@ describe('evaluateOidcEligibility', () => {
     ],
     [
       'Entra member with acct === 0 and the tenant idp (control)',
-      proof({ tid: present(TENANT), acct: present(0), idp: present(entraTenantIdp(TENANT)) }),
+      proof({
+        tid: present(TENANT),
+        acct: present(0),
+        idp: present('https://sts.windows.net/11111111-2222-3333-4444-555555555555/'),
+      }),
       entra(),
       ok,
     ],
