@@ -1,4 +1,14 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import {
+  type MockInstance,
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import express, { type Request, type Response } from 'express'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync, randomUUID } from 'node:crypto'
@@ -32,8 +42,11 @@ const originalEnv = new Map<string, string | undefined>()
 
 type GuardModule = typeof import('../edgeRuntimeAuth')
 type ConfigModule = typeof import('../../config')
+type LoggerModule = typeof import('../../logger')
 let guard: GuardModule
 let runtimeConfig: ConfigModule['config']
+// Bound to the module graph `guard` was loaded from, so a spy on it sees the guard's calls.
+let loggerModule: LoggerModule
 
 beforeAll(async () => {
   for (const key of envKeys) originalEnv.set(key, process.env[key])
@@ -41,6 +54,7 @@ beforeAll(async () => {
   process.env.CLERUM_NAMESPACE = NAMESPACE
   vi.resetModules()
   guard = await import('../edgeRuntimeAuth')
+  loggerModule = await import('../../logger')
   runtimeConfig = (await import('../../config')).config
 })
 
@@ -478,6 +492,189 @@ describe('runtimeEdgeGuard rpc-proxy edge assertion', () => {
     })
     expect(accepted.status).toBe(200)
     expect(accepted.handlerCalls).toBe(1)
+  })
+})
+
+describe('runtimeEdgeGuard logs each refused edge assertion', () => {
+  const REFUSAL_MESSAGE = '[Server] Refused rpc-proxy edge assertion'
+  // Captured from the environment the Host config reads, never from `runtimeConfig`,
+  // which the blank-key row empties.
+  const pem = process.env.CLERUM_AUTH_JWT_PUBLIC_KEY ?? ''
+  let warn: MockInstance<LoggerModule['logger']['warn']>
+
+  beforeEach(() => {
+    warn = vi.spyOn(loggerModule.logger, 'warn')
+  })
+
+  afterEach(() => {
+    warn.mockRestore()
+  })
+
+  const v2Headers = () => ({
+    'x-clerum-edge-caller': 'rpc-proxy',
+    'x-clerum-edge-host-ref': HOST_NAME,
+    'x-clerum-edge-action-context': v2ActionContext(),
+  })
+  const expired = () => {
+    const now = Math.floor(Date.now() / 1000)
+    return assertion({ iat: now - 400, exp: now - 100 })
+  }
+  const foreignKey = () =>
+    generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    }).privateKey
+
+  const rows: Array<{
+    name: string
+    headers: () => Record<string, string>
+    body: typeof MISSING
+    fields: Record<string, string>
+    withoutVerificationKey?: true
+  }> = [
+    {
+      name: 'no header',
+      headers: () => clearHeaders(),
+      body: MISSING,
+      fields: { reason: 'missing' },
+    },
+    {
+      name: 'blank header',
+      headers: () => ({ ...clearHeaders(), [HOST_EDGE_ASSERTION_HEADER]: ' ' }),
+      body: MISSING,
+      fields: { reason: 'missing' },
+    },
+    {
+      name: 'V2 context without an assertion',
+      headers: v2Headers,
+      body: MISSING,
+      fields: { reason: 'missing' },
+    },
+    {
+      name: 'V2 context with an assertion',
+      headers: () => ({ ...v2Headers(), [HOST_EDGE_ASSERTION_HEADER]: v2Assertion() }),
+      body: INVALID,
+      fields: { reason: 'v2-refused' },
+    },
+    {
+      name: 'Host without a verification key',
+      headers: () => ({ ...clearHeaders(), [HOST_EDGE_ASSERTION_HEADER]: assertion() }),
+      body: INVALID,
+      fields: { reason: 'no-verification-key' },
+      withoutVerificationKey: true,
+    },
+    {
+      name: 'foreign key',
+      headers: () => ({
+        ...clearHeaders(),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion({ privateKey: foreignKey() }),
+      }),
+      body: INVALID,
+      fields: { reason: 'verify-failed', errorName: 'JsonWebTokenError' },
+    },
+    {
+      name: 'expired assertion',
+      headers: () => ({ ...clearHeaders(), [HOST_EDGE_ASSERTION_HEADER]: expired() }),
+      body: INVALID,
+      fields: { reason: 'verify-failed', errorName: 'TokenExpiredError' },
+    },
+    {
+      name: 'other issuer',
+      headers: () => ({
+        ...clearHeaders(),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion({ issuer: 'another-issuer' }),
+      }),
+      body: INVALID,
+      fields: { reason: 'verify-failed', errorName: 'JsonWebTokenError' },
+    },
+    {
+      name: 'wrong JWT typ header',
+      headers: () => ({
+        ...clearHeaders(),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion({ headerType: 'JWT' }),
+      }),
+      body: INVALID,
+      fields: { reason: 'typ-mismatch' },
+    },
+    {
+      name: 'other user',
+      headers: () => ({
+        ...clearHeaders({ 'x-clerum-edge-user-id': OTHER_USER }),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion({ sub: USER }),
+      }),
+      body: INVALID,
+      fields: { reason: 'claims-rejected', claimError: 'sub mismatch' },
+    },
+    {
+      name: 'other Host',
+      headers: () => ({
+        ...clearHeaders(),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion({ host: `${NAMESPACE}/other-host` }),
+      }),
+      body: INVALID,
+      fields: { reason: 'claims-rejected', claimError: 'host mismatch' },
+    },
+    {
+      name: 'other team',
+      headers: () => ({
+        ...clearHeaders({ 'x-clerum-edge-team-id': 'team-b' }),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion({ teamId: TEAM }),
+      }),
+      body: INVALID,
+      fields: { reason: 'claims-rejected', claimError: 'teamId mismatch' },
+    },
+    {
+      name: 'route scope absent',
+      headers: () => ({
+        ...clearHeaders(),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion({
+          scopes: [HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/status']],
+        }),
+      }),
+      body: INVALID,
+      fields: { reason: 'claims-rejected', claimError: 'route scope missing' },
+    },
+  ]
+
+  for (const row of rows) {
+    it(`logs one refusal with its reason: ${row.name}`, async () => {
+      const headers = row.headers()
+      const configuredKey = runtimeConfig.authJwtPublicKey
+      let refused: Awaited<ReturnType<typeof probe>>
+      try {
+        if (row.withoutVerificationKey) runtimeConfig.authJwtPublicKey = ''
+        refused = await probe(headers)
+      } finally {
+        runtimeConfig.authJwtPublicKey = configuredKey
+      }
+      expect(refused).toEqual({ status: 401, body: row.body, handlerCalls: 0 })
+
+      const expected = {
+        event: 'runtime_edge_assertion_refused',
+        scope: MESSAGE_SCOPE,
+        ...row.fields,
+      }
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]).toEqual([expected, REFUSAL_MESSAGE])
+      // The logger redacts by key: every logged key must survive it.
+      expect(loggerModule.redactUnknown(warn.mock.calls[0][0])).toEqual(expected)
+
+      // Liveness witness for the absence checks below: the call asserted above.
+      const logged = JSON.stringify(warn.mock.calls)
+      const token = headers[HOST_EDGE_ASSERTION_HEADER]
+      if (token !== undefined && token.trim() !== '') expect(logged).not.toContain(token)
+      expect(logged).not.toContain(USER)
+      expect(logged).not.toContain(OTHER_USER)
+      expect(pem).toContain('BEGIN PUBLIC KEY')
+      expect(logged).not.toContain(JSON.stringify(pem).slice(1, -1))
+    })
+  }
+
+  it('logs nothing for an accepted assertion', async () => {
+    const accepted = await probe({ ...clearHeaders(), [HOST_EDGE_ASSERTION_HEADER]: assertion() })
+    expect(accepted).toEqual({ status: 200, body: { userId: USER, teamId: null }, handlerCalls: 1 })
+    expect(warn).not.toHaveBeenCalled()
   })
 })
 
