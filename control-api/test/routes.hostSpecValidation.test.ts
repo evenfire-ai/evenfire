@@ -911,5 +911,61 @@ describe('validateHostSpec', () => {
     it('still accepts an empty channels object', async () => {
       expect(await validateHostSpec({ approval: { channels: {} } }, deps())).toBeNull()
     })
+
+    // The channel schema is strict: a misspelled key is refused, not dropped.
+    it('rejects an unknown channel key under channels', async () => {
+      const res = await validateHostSpec(
+        { approval: { channels: { discord: { enabled: true } } } },
+        deps()
+      )
+      expect(res).toEqual({
+        errors: [{ field: 'spec.approval.channels', message: expect.stringContaining('discord') }],
+      })
+    })
+
+    it('rejects an unknown key inside one channel', async () => {
+      const res = await validateHostSpec(
+        { approval: { channels: { slack: { enabled: true, allowModeChnage: false } } } },
+        deps()
+      )
+      expect(res).toEqual({
+        errors: [
+          {
+            field: 'spec.approval.channels.slack',
+            message: expect.stringContaining('allowModeChnage'),
+          },
+        ],
+      })
+    })
+
+    it('rejects a non-boolean allowModeChange', async () => {
+      const res = await validateHostSpec(
+        { approval: { channels: { teams: { allowModeChange: 'false' } } } },
+        deps()
+      )
+      expect(res).toEqual({
+        errors: [
+          {
+            field: 'spec.approval.channels.teams.allowModeChange',
+            message: expect.stringContaining('boolean'),
+          },
+        ],
+      })
+    })
+
+    it('rejects a non-array approvers', async () => {
+      const res = await validateHostSpec(
+        { approval: { channels: { telegram: { approvers: '123456' } } } },
+        deps()
+      )
+      expect(res).toEqual({
+        errors: [
+          {
+            field: 'spec.approval.channels.telegram.approvers',
+            message: expect.stringContaining('array'),
+          },
+        ],
+      })
+    })
   })
 })
