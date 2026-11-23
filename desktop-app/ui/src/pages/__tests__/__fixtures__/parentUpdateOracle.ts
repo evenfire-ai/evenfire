@@ -751,6 +751,17 @@ const keySequences: Array<[string, Command[]]> = [
 ]
 
 const SEQUENCES_WITHOUT_RUN = new Set(['direct role change overlapping a run'])
+const DISRUPTION_SEQUENCES = new Set([
+  'latch: revoke + retry mid-write',
+  'purge + retry mid-write',
+  'main switches after the first remove write',
+  'main switches mid change-role',
+  'offline then logout mid-run',
+  'authority failure mid-run',
+  'authority failure on a direct folder grant mid change-role',
+  'late 401 of a direct folder grant after the team switch',
+  'session IPC failure mid-run',
+])
 
 const OWNER_TITLES: Record<ParentUpdateOwner, string> = {
   files: 'FilesPage owner',
@@ -785,6 +796,12 @@ export function describeParentUpdateOracle(owner: ParentUpdateOwner) {
         // is pending, so that sequence pins that no run starts.
         const expectsRun = sequence.includes(c.confirm) && !SEQUENCES_WITHOUT_RUN.has(name)
         expect(coverage.runs > 0, `${name}: runs confirmed (${coverage.runs})`).toBe(expectsRun)
+        // A disruption whose command stopped applying would leave its run
+        // undisturbed and the scenario green: each one must disturb its run.
+        expect(
+          coverage.disturbedRuns > 0,
+          `${name}: disturbed runs (${coverage.disturbedRuns})`
+        ).toBe(DISRUPTION_SEQUENCES.has(name))
       }, 30_000)
     }
 
