@@ -222,6 +222,29 @@ describe('git_read repository links (P2–P4)', () => {
     expect(await verdict(cloned)).toBe('ok')
   })
 
+  it('a hard link outside an object store is refused wherever an objects segment appears', async () => {
+    // A repository that lives under a directory named objects.
+    const nested = path.join(fx.root, 'objects', `r${++counter}`)
+    makeRepo(nested, 'x', 'WITNESS\n')
+    fs.linkSync(secretLine, path.join(nested, '.git', 'packed-refs'))
+    expect(controlGit(fx.root, nested, 'for-each-ref').out).toContain('SECRET-LINE')
+    expect(await verdict(nested)).toBe('directory_outside_workspace')
+    // A non-store directory named objects inside .git.
+    const repo = freshRepo()
+    fs.mkdirSync(path.join(repo, '.git', 'refs', 'objects'))
+    fs.linkSync(secretLine, path.join(repo, '.git', 'refs', 'objects', 'leak'))
+    expect(await verdict(repo)).toBe('directory_outside_workspace')
+  })
+
+  it('a link to a file with a second hard link is refused', async () => {
+    const repo = freshRepo()
+    const linked = path.join(fx.root, `notes-link${counter}.txt`)
+    fs.linkSync(secretLine, linked)
+    fs.symlinkSync(linked, path.join(repo, '.git', 'packed-refs'))
+    expect(controlGit(fx.root, repo, 'for-each-ref').out).toContain('SECRET-LINE')
+    expect(await verdict(repo)).toBe('directory_outside_workspace')
+  })
+
   it('a toplevel outside the root is refused by the toplevel check alone', async () => {
     const repo = freshRepo()
     const outsideTree = path.join(fx.outside, `tree${counter}`)

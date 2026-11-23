@@ -274,11 +274,10 @@ export function walkRepositoryLinks(
 ): void {
   const seen = new Set<string>()
   let entries = 0
-  // Object files may be hard links (`git clone --local`, submodule clones
-  // under `.git/modules/*/objects`); git reads them only as objects.
-  const inStore = (real: string): boolean =>
-    objectStores.some(store => isInside(real, store)) ||
-    path.relative(realRoot, real).split(path.sep).includes('objects')
+  // Files inside an object store may be hard links (`git clone --local`
+  // links objects, packs and objects/info); git reads them as store data.
+  const inStore = (real: string): boolean => objectStores.some(store => isInside(real, store))
+  const linkedElsewhere = (real: string): boolean => !inStore(real) && fs.lstatSync(real).nlink > 1
   const walk = (dir: string): void => {
     const real = fs.realpathSync(dir)
     if (seen.has(real)) return
@@ -295,14 +294,53 @@ export function walkRepositoryLinks(
         }
         confine(target, realRoot)
         if (fs.statSync(target).isDirectory()) walk(target)
+        else if (linkedElsewhere(target)) throw new GitReadRefusal('directory_outside_workspace')
       } else if (dirent.isDirectory()) {
         walk(child)
-      } else if (!inStore(child) && fs.lstatSync(child).nlink > 1) {
+      } else if (linkedElsewhere(child)) {
         throw new GitReadRefusal('directory_outside_workspace')
       }
     }
   }
   for (const dir of dirs) walk(dir)
+}
+
+/**
+ * The object stores of submodule git dirs under `<common dir>/modules`: a
+ * directory holding a `HEAD` file and an `objects` directory, at any depth
+ * (nested submodules). Their clones hard-link store files like a local clone.
+ */
+export function submoduleObjectStores(commonDir: string, realRoot: string): string[] {
+  const stores: string[] = []
+  const visit = (dir: string, depth: number): void => {
+    let dirents: fs.Dirent[]
+    try {
+      dirents = fs.readdirSync(dir, { withFileTypes: true })
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ENOTDIR') return
+      throw new GitReadRefusal('preflight_failed')
+    }
+    const names = new Set(dirents.map(d => d.name))
+    if (names.has('HEAD') && names.has('objects')) {
+      let store: string
+      try {
+        store = fs.realpathSync(path.join(dir, 'objects'))
+      } catch {
+        throw new GitReadRefusal('repository_link_unresolved')
+      }
+      confine(store, realRoot)
+      stores.push(store)
+    }
+    if (depth >= 16) return
+    for (const dirent of dirents) {
+      if (dirent.isDirectory() && dirent.name !== 'objects') {
+        visit(path.join(dir, dirent.name), depth + 1)
+      }
+    }
+  }
+  visit(path.join(commonDir, 'modules'), 0)
+  return stores
 }
 
 export interface PreflightContext {
@@ -447,7 +485,11 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     confine(objects, realRoot)
 
     // P5, then P4 over every store P5 accepted.
-    const stores = [objects, ...checkAlternates(objects, realRoot)]
+    const stores = [
+      objects,
+      ...checkAlternates(objects, realRoot),
+      ...submoduleObjectStores(commonDir, realRoot),
+    ]
     walkRepositoryLinks([gitDir, commonDir, ...stores], realRoot, stores)
   } catch (error) {
     return { kind: 'refused', category: refusalOf(error) }
