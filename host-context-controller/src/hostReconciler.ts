@@ -4404,9 +4404,12 @@ export class HostReconciler {
           mutationAllowed,
           read,
           replace: async body => {
-            // A replace that moves a Host onto the protocol label waits for the
-            // RPC Proxy cohort; a Host already labelled needs no barrier.
+            // A replace that moves the pod template onto the protocol label waits
+            // for the RPC Proxy cohort. A Host already labelled, or a held
+            // replica-only replace that keeps its old template, needs no barrier.
             if (
+              body.spec?.template?.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] ===
+                RPC_PROXY_EDGE_PROTOCOL_V1 &&
               deploymentBeingReplaced?.spec?.template?.metadata?.labels?.[
                 RPC_PROXY_EDGE_PROTOCOL_LABEL
               ] !== RPC_PROXY_EDGE_PROTOCOL_V1
