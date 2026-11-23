@@ -74,9 +74,10 @@ function isMessagingChannelType(value: string | undefined): value is MessagingCh
  * `rpc` is allow_all. telegram, slack, and teams are allow_all unless
  * `allowModeChange` is `false`; email is allow_all only when it is `true`.
  * An absent `channels`, channel block, or field takes that default. A value
- * that is present but malformed (a non-object `channels` or entry, or a
- * non-boolean field) caps the channel at manual; `approvalModeConfigWarnings`
- * names it. Every other channel type is manual.
+ * that is present but malformed caps at manual: a non-object `channels` caps
+ * every messaging channel, and a non-object entry or a non-boolean field caps
+ * that channel. `approvalModeConfigWarnings` names it. Every other channel
+ * type is manual.
  *
  * Not an effective-mode input: use `readChannelCap`, which adds the approver
  * policy. Only the messaging command reads the switch alone, to decide what

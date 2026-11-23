@@ -76,6 +76,22 @@ Answer ESCALATE if the command does any of the following, or if you are not sure
 
 Answer with one word: APPROVE or ESCALATE.`
 
+/**
+ * Where a classifier call's tokens are reported. The reporter and the Host's
+ * static context arrive together (`setUsageReporter`), so the call carries
+ * both or neither. Absent means usage reporting is not wired, and nothing is
+ * enqueued.
+ */
+export type ShellClassifierUsage = {
+  reporter: UsageReporter
+  context: UsageContext
+  staticContext: {
+    host_ref: string
+    context_ref: string | null
+    llm_secret_name: string | null
+  }
+}
+
 type ClassifyInput = {
   toolName: string
   description: string
@@ -84,15 +100,7 @@ type ClassifyInput = {
   providerType: string
   modelName: string
   taskSignal: AbortSignal
-  usage: {
-    reporter?: UsageReporter
-    context: UsageContext
-    staticContext: {
-      host_ref: string
-      context_ref: string | null
-      llm_secret_name: string | null
-    }
-  }
+  usage?: ShellClassifierUsage
   sessionLogId: string
 }
 
@@ -163,7 +171,7 @@ function userMessage(input: ClassifyInput, delimiter: string): string {
 }
 
 function enqueueUsage(input: ClassifyInput, usage: TokenUsage | undefined): void {
-  if (!input.usage.reporter || !usage) return
+  if (!input.usage || !usage) return
   try {
     const event = buildLlmUsageEvent({
       requestId: newRequestId(),
@@ -180,9 +188,18 @@ function enqueueUsage(input: ClassifyInput, usage: TokenUsage | undefined): void
     })
     if (!event) return
     input.usage.reporter.enqueue(event)
-  } catch {
-    // A reporter failure must not change the verdict.
+  } catch (error) {
+    // A reporter failure must not change the verdict. Only the error's class
+    // is logged: the event carries ids, and the message may echo them.
+    logger.warn(
+      { event: 'shell_classifier_usage_failed', errorClass: errorClassOf(error) },
+      'Shell classifier usage event was not enqueued'
+    )
   }
+}
+
+function errorClassOf(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : typeof error
 }
 
 /**
@@ -195,7 +212,7 @@ function logClassifierFailure(
   error: unknown,
   timedOut: boolean
 ): void {
-  const errorClass = error instanceof Error ? error.constructor.name : typeof error
+  const errorClass = errorClassOf(error)
   const fields = error as { status?: unknown; httpStatus?: unknown } | null | undefined
   const status = typeof fields?.status === 'number' ? fields.status : fields?.httpStatus
   logger.warn(
@@ -245,7 +262,13 @@ async function judge(input: ClassifyInput): Promise<ShellVerdict> {
     )
     enqueueUsage(input, response.usage)
     if (input.taskSignal.aborted) return 'CANCELLED'
-    if (timeout.signal.aborted) return 'ESCALATE'
+    if (timeout.signal.aborted) {
+      // The reply came after the 10s timeout fired. Nothing was thrown, so
+      // the abort reason (an AbortError DOMException) is the logged class,
+      // as for a provider that rejects on the abort.
+      logClassifierFailure(input, timeout.signal.reason, true)
+      return 'ESCALATE'
+    }
     return verdictFromContent(response.content)
   } catch (error) {
     // A task abort ends the task; it is not a classifier failure, so it is
@@ -267,15 +290,7 @@ export async function classifyToolCall(input: {
   providerType: string
   modelName: string
   taskSignal: AbortSignal
-  usage: {
-    reporter?: UsageReporter
-    context: UsageContext
-    staticContext: {
-      host_ref: string
-      context_ref: string | null
-      llm_secret_name: string | null
-    }
-  }
+  usage?: ShellClassifierUsage
   sessionLogId: string
 }): Promise<ShellVerdict> {
   const started = Date.now()

@@ -45,16 +45,16 @@ export interface SessionRouteHandlerDeps {
   redactTitle: (rawTitle: string) => string
   /**
    * Live ceiling, channel switch and approver policy. Read on each request,
-   * not captured when the handler is wired. Absent → manual ceiling.
+   * not captured when the handler is wired.
    */
-  approvalSnapshot?: () => ApprovalConfigSnapshot
+  approvalSnapshot: () => ApprovalConfigSnapshot
   /**
    * Provider id and model name a task for this session runs with: the saved
    * selection on the Host provider, or the boot fallback while it serves. The
    * caller resolves it the same way as the task model; this handler does not
    * construct a provider per session.
    */
-  sessionModel?: (selections: Record<string, string> | undefined) => {
+  sessionModel: (selections: Record<string, string> | undefined) => {
     providerType: string
     modelName: string
   }
@@ -73,11 +73,8 @@ export interface SessionRouteHandlerDeps {
 }
 
 export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
-  const { getConversationManager, redactToolError, redactTitle } = deps
-  const approvalSnapshot =
-    deps.approvalSnapshot ?? (() => ({ effective: undefined, hostSpec: undefined }))
-  const sessionModel =
-    deps.sessionModel ?? (() => ({ providerType: 'unknown', modelName: 'unknown' }))
+  const { getConversationManager, redactToolError, redactTitle, approvalSnapshot, sessionModel } =
+    deps
 
   // `owner` is the user the session key is built from. Every session these
   // reads return is the caller's own `rpc` session, which the approver policy

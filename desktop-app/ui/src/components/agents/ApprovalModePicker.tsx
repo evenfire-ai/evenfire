@@ -3,7 +3,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Button, Pill } from '@components/Common'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useHostApprovalMode } from '@hooks/useHostApprovalMode'
-import type { ApprovalMode, HostApprovalModeView } from '@lib/hostApprovalModeStore'
+import { type ApprovalMode, type HostApprovalModeView, MODE_RANK } from '@lib/hostApprovalModeStore'
 
 export interface ApprovalModePickerProps {
   agentRef: string
@@ -22,8 +22,6 @@ const MODE_OPTIONS: ReadonlyArray<{ mode: ApprovalMode; label: string; testId: s
   { mode: 'auto', label: 'Auto-approve', testId: 'approval-mode-option-auto' },
   { mode: 'allow_all', label: 'Allow all', testId: 'approval-mode-option-allow-all' },
 ]
-
-const MODE_RANK: Record<ApprovalMode, number> = { manual: 0, auto: 1, allow_all: 2 }
 
 function modeName(mode: ApprovalMode): string {
   return MODE_OPTIONS.find(option => option.mode === mode)?.label ?? 'Manual'

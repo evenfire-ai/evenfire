@@ -255,9 +255,8 @@ export interface TaskExecutorDeps {
   /**
    * Live approval snapshot. Interactive tasks read tools, the live set, the
    * ceiling and the channel cap (switch and approver policy) through this.
-   * Absent uses `approvalConfig`.
    */
-  approvalConfigProvider?: () => ApprovalConfigSnapshot
+  approvalConfigProvider: () => ApprovalConfigSnapshot
   guardrailsConfig?: GuardrailsConfig
   coreEvents: SimpleEventEmitter
   cronScheduler: CronScheduler | null
@@ -2174,10 +2173,11 @@ export class TaskExecutor {
    * - task.source = 'channel'  → source_kind = 'channel', sender + channel_type from sourceMessage
    * - task.source = 'cron'     → source_kind = 'cron', cron_job_id from task.cronJobId
    * - task.source = 'internal' → source_kind = 'desktop'
+   * - any other source         → source_kind = 'unknown'
    * Workflow-recipe LLM calls go through workflowService and are tagged
    * separately at that call site.
    */
-  private buildDefaultUsageContext(): UsageContext | undefined {
+  private buildDefaultUsageContext(): UsageContext {
     const t = this.task
     if (t.source === 'channel') {
       if (t.sourceMessage?.channelType === 'rpc') {
@@ -2388,12 +2388,7 @@ export class TaskExecutor {
   }
 
   private approvalSnapshot(): ApprovalConfigSnapshot {
-    return (
-      this.deps.approvalConfigProvider?.() ?? {
-        effective: this.deps.approvalConfig,
-        hostSpec: this.deps.approvalConfig,
-      }
-    )
+    return this.deps.approvalConfigProvider()
   }
 
   /** Live membership for clerum__gfs_download. Undefined means the set is empty. */
@@ -2456,6 +2451,11 @@ export class TaskExecutor {
       },
       classify: (call, description) => {
         const caller = this.classifierCaller()
+        // `setUsageReporter` sets the reporter and the static context
+        // together. Without both, usage reporting is not wired, and the call
+        // reports nothing rather than billing a placeholder Host.
+        const reporter = this.deps.usageReporter
+        const staticContext = this.deps.usageStaticContext
         return classifyToolCall({
           toolName: call.name,
           description,
@@ -2464,19 +2464,10 @@ export class TaskExecutor {
           providerType: caller.providerType,
           modelName: caller.modelName,
           taskSignal: this.abortController.signal,
-          usage: {
-            reporter: this.deps.usageReporter,
-            context: this.buildDefaultUsageContext() ?? {
-              source_kind: 'unknown',
-              traceContext: null,
-              task_id: this.taskId,
-            },
-            staticContext: this.deps.usageStaticContext ?? {
-              host_ref: '',
-              context_ref: null,
-              llm_secret_name: null,
-            },
-          },
+          usage:
+            reporter && staticContext
+              ? { reporter, context: this.buildDefaultUsageContext(), staticContext }
+              : undefined,
           sessionLogId: approvalLogId(conversation.id),
         })
       },

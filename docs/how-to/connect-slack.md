@@ -361,8 +361,8 @@ approval mode decides which calls show a card at all: see
 The value is `tool:<a|l|d|c|s>:<16-char token>`. channel-reader builds it and
 matches it with `TOOL_APPROVAL_ACTION_RE` in `channel-reader/src/main.ts`.
 `workflow-approval-request-reader` treats a Slack click as a tool approval only
-when its value matches `SLACK_TOOL_APPROVAL_ACTION_RE`
-(`slackToolApprovalActionIdentity` in `decisionHandler.ts`). Typing `/approve`,
+when its value passes `isToolApprovalActionValue` (`src/toolApprovalAction.ts`,
+called from `slackToolApprovalActionIdentity` in `decisionHandler.ts`). Typing `/approve`,
 `/approve always`, or `/deny` works too. A denial re-ask, a forced cron card, a
 guardrail ask, a live-tool card, and an OAuth connect card cannot store a
 grant. Their Host payload

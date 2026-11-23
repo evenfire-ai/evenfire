@@ -22,7 +22,7 @@ function preMigrationDb(): Database.Database {
 }
 
 describe('migration 018 — sessions.denied_tools', () => {
-  it('appends last to the ordered migration list', () => {
+  it('is followed directly by 019-sessions-approval-mode in the ordered migration list', () => {
     const names = migrations.map(m => m.name)
     const index = names.indexOf(migration.name)
     expect(names[index + 1]).toBe('019-sessions-approval-mode')

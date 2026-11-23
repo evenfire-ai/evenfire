@@ -69,6 +69,7 @@ describe('OIDC Profile UI foundation service boundary', () => {
     expect(response.body).toEqual({
       redirectUri: OIDC_ENV.CONTROL_API_OIDC_REDIRECT_URI,
       memberAuthenticationActivated: false,
+      displayLabel: OIDC_ENV.CONTROL_API_OIDC_DISPLAY_LABEL,
     })
     expect(JSON.stringify(response.body)).not.toContain(OIDC_ENV.CONTROL_API_OIDC_CLIENT_SECRET)
   })

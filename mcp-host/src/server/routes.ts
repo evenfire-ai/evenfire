@@ -6,6 +6,7 @@ import {
 } from '@clerum/action-context-contracts'
 import { parseIncomingFileReferences } from '../agent/fileReferenceResolver'
 import { config } from '../config'
+import { approvalLogId } from '../core/approval/grantMemory'
 import type { ShellAction } from '../core/approval/shellCard'
 import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
@@ -16,6 +17,7 @@ import {
   assertRuntimeActionCurrent,
   authorityBindingFromTrustedEdge,
 } from '../runtime/actionAuthority'
+import { serializeSessionKey } from '../session/types'
 import { getRuntimeCallerContext, runtimeActionTargetMatches } from './edgeRuntimeAuth'
 import { badRequest, json } from './httpUtils'
 import type {
@@ -1946,6 +1948,10 @@ export async function handleSetApprovalModeRoute(
   res: Response,
   handlers: RouteHandlers
 ): Promise<void> {
+  // Hash of the rpc session key, set once the target is validated. It is not
+  // the `session` of the approval logs, which hash Conversation.id; the route
+  // never sees that id.
+  let sessionKeyLogId: string | undefined
   try {
     const caller = getRuntimeCallerContext(req)
     if (caller?.caller !== 'rpc-proxy' || !caller.userId) {
@@ -1962,6 +1968,14 @@ export async function handleSetApprovalModeRoute(
       json(res, 501, { error: 'Set approval mode handler not configured' })
       return
     }
+    sessionKeyLogId = approvalLogId(
+      serializeSessionKey({
+        userId: caller.userId,
+        channelType: 'rpc',
+        channelId: agent,
+        threadId: chatId,
+      })
+    )
     const body = (req.body as Record<string, unknown>) || {}
     const rawMode = typeof body.mode === 'string' ? body.mode : ''
     const result = await handlers.setApprovalModeHandler(caller.userId, agent, chatId, rawMode)
@@ -1980,8 +1994,17 @@ export async function handleSetApprovalModeRoute(
       effectiveApprovalMode: result.effectiveApprovalMode,
     })
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error setting approval mode')
-    json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+    // Not `err`: a store error's message can carry Conversation.id, which
+    // embeds the user id. Only the class and the hashed session key are kept.
+    logger.error(
+      {
+        errorClass: error instanceof Error ? error.constructor.name : typeof error,
+        ...(sessionKeyLogId ? { sessionKey: sessionKeyLogId } : {}),
+      },
+      '[Server] Error setting approval mode'
+    )
+    // A fixed body: the error message can carry Conversation.id.
+    json(res, 500, { error: 'Set approval mode failed' })
   }
 }
 

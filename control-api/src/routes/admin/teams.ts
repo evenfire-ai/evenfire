@@ -153,7 +153,8 @@ export function createAdminTeamsRouter(gateway: K8sGateway): Router {
 
   /**
    * Hard-delete an empty team plus its invitations, inactive memberships, and team
-   * context/agent links (DB CASCADE). Active members block deletion (409 team_not_empty).
+   * context/agent links (DB CASCADE). Active members block deletion (409 team_not_empty); a
+   * retired user's retained membership does not.
    * Audit history is retained, so teams referenced by workflow audit rows cannot be deleted
    * (409 team_has_audit_history).
    */

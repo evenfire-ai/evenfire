@@ -40,7 +40,7 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
   router.get('/admin/users', async (req, res, next) => {
     try {
       const q = String(req.query.q || '')
-      res.status(200).json({ items: await listUsers(q) })
+      res.status(200).json({ items: await listUsers(q, { includeRetired: true }) })
     } catch (error) {
       next(error)
     }
@@ -181,6 +181,10 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
         }
         if (result.error === 'no_accepted_invitation') {
           res.status(409).json({ error: 'no_accepted_invitation' })
+          return
+        }
+        if (result.error === 'oidc_linked') {
+          res.status(409).json({ error: 'oidc_linked' })
           return
         }
       }

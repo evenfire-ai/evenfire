@@ -7,7 +7,7 @@ import {
   authorizeActionV2,
 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
-import { getHostRpcPreflight } from '../hostRpcPreflight.js'
+import { getHostRpcPreflight, safeAgentSegment, safePathSegment } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
   bindHostRpcScope,
@@ -65,20 +65,6 @@ import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 import type { ResolvedServerConnection } from '../types.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
-
-function isSafeUpstreamPathSegment(value: string): boolean {
-  return (
-    value.length > 0 &&
-    value !== '.' &&
-    value !== '..' &&
-    value.length <= 500 &&
-    !/[/\\\u0000-\u001f\u007f]/.test(value)
-  )
-}
-
-function isSafeUpstreamAgentSegment(value: string): boolean {
-  return isSafeUpstreamPathSegment(value) && value.length <= 200 && !value.includes(':')
-}
 
 type ShellAction = 'once' | 'command' | 'shell'
 type ApprovalMode = 'manual' | 'auto' | 'allow_all'
@@ -533,15 +519,20 @@ export function createRpcRouter(): Router {
         })
         // First-message mode. This body is an allowlist: forward approvalMode
         // only for a stored value when the token also has host:approval:write,
-        // the mode PATCH's scope. Carrying the field without that scope is 403.
-        // A message without the field needs only host:message:invoke. An
-        // invalid value is dropped.
+        // the mode PATCH's scope. Carrying the field without that scope is 403,
+        // checked before the value. With the scope, a value that is not a
+        // stored mode is 400, as on the PATCH. A message without the field
+        // needs only host:message:invoke.
         const carriesApprovalMode = Object.prototype.hasOwnProperty.call(body, 'approvalMode')
         if (carriesApprovalMode && !auth.scopes.includes('host:approval:write')) {
           res.status(403).json({ error: 'Forbidden: missing scope' })
           return
         }
         const approvalMode = carriesApprovalMode ? readApprovalMode(body.approvalMode) : undefined
+        if (carriesApprovalMode && !approvalMode) {
+          res.status(400).json({ error: 'approvalMode must be manual, auto, or allow_all' })
+          return
+        }
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -1380,11 +1371,7 @@ export function createRpcRouter(): Router {
         const hostRef = String(req.params.hostRef || '').trim()
         const agent = String(req.params.agent || '').trim()
         const chatId = String(req.params.chatId || '').trim()
-        if (
-          !isSafeUpstreamPathSegment(hostRef) ||
-          !isSafeUpstreamAgentSegment(agent) ||
-          !isSafeUpstreamPathSegment(chatId)
-        ) {
+        if (!safePathSegment(hostRef) || !safeAgentSegment(agent) || !safePathSegment(chatId)) {
           res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
           return
         }

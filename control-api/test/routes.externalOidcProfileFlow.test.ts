@@ -1,9 +1,62 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { OidcPersistenceFailure, OidcProviderUnavailableError } from '../src/oidc/protocolResult.js'
 import { createExternalOidcProfileFlowRouter } from '../src/routes/external/oidcProfileFlow.js'
 import { createOidcR5ProtocolFixture } from './helpers/oidcR5ProtocolFixture.js'
+
+/** What the route's own logger (component oidc_profile_flow) is asked to write. */
+const flowLog = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}))
+
+/** Every OidcProtocolEngine built in this file, with the arguments that matter here. */
+const engineConstructions = vi.hoisted(
+  () => [] as Array<{ generation: string; policyEvidenceClaimNames: unknown }>
+)
+
+vi.mock('../src/observability/logger.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/observability/logger.js')>()
+  const rootLogger = new Proxy(actual.rootLogger, {
+    get(target, prop, receiver) {
+      if (prop !== 'child') return Reflect.get(target, prop, receiver)
+      return (bindings: Record<string, unknown>, options?: object) =>
+        bindings?.component === 'oidc_profile_flow' ? flowLog : target.child(bindings, options)
+    },
+  })
+  return { ...actual, rootLogger }
+})
+
+// The route's default engine is the real class, recorded on construction. Its
+// network and storage operations are stubbed: the engine cache test only needs
+// to see how many engines the route builds, and with which settings.
+vi.mock('../src/oidc/protocolEngine.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/oidc/protocolEngine.js')>()
+  class RecordedOidcProtocolEngine extends actual.OidcProtocolEngine {
+    constructor(...args: ConstructorParameters<typeof actual.OidcProtocolEngine>) {
+      super(...args)
+      engineConstructions.push({
+        generation: args[0].configurationGeneration,
+        policyEvidenceClaimNames: args[1].policyEvidenceClaimNames,
+      })
+    }
+
+    override async beginIdentityProofAttempt() {
+      return {
+        authorizationUrl: 'https://issuer.example.test/authorize?state=opaque-state',
+        expiresAt: new Date('2026-10-30T18:00:00.000Z'),
+      }
+    }
+
+    override async cancelIdentityProofAttempt() {
+      return true
+    }
+  }
+  return { ...actual, OidcProtocolEngine: RecordedOidcProtocolEngine }
+})
 
 const provider = createOidcR5ProtocolFixture({ hostPrefix: 'profile-route-contract' }).provider
 
@@ -23,6 +76,10 @@ function appFor(
   return app
 }
 
+beforeEach(() => {
+  for (const method of Object.values(flowLog)) method.mockReset()
+})
+
 describe('Control API OIDC Profile UI foundation boundary', () => {
   it('returns only the safe callback configuration and inactive-mode marker', async () => {
     const app = appFor({})
@@ -32,6 +89,7 @@ describe('Control API OIDC Profile UI foundation boundary', () => {
     expect(response.body).toEqual({
       redirectUri: provider.redirectUri,
       memberAuthenticationActivated: false,
+      displayLabel: provider.displayLabel,
     })
   })
 
@@ -144,59 +202,100 @@ describe('Control API OIDC Profile UI foundation boundary', () => {
   })
 })
 
-describe('Control API OIDC member sign-in (dev spike)', () => {
+describe('Control API OIDC member sign-in completion', () => {
+  const COMPLETE_PATH = '/external/oidc/profile-flow/complete'
   const completeBody = {
     state: 'S'.repeat(43),
     code: 'provider-code',
     browserBinding: 'B'.repeat(43),
     issuer: provider.issuer,
   }
+  const MEMBER_EMAIL = 'member@example.test'
+  const SUBJECT = 'opaque-provider-subject'
   const proof = {
     issuer: provider.issuer,
-    subject: 'opaque-provider-subject',
+    subject: SUBJECT,
     registrationId: provider.registrationId,
-    attributes: { source: 'validated_id_token', email: 'member@example.test', emailVerified: true },
+    attributes: { source: 'validated_id_token', email: MEMBER_EMAIL, emailVerified: true },
+  }
+  const REFUSAL_REASONS = [
+    'account_disabled',
+    'identity_conflict',
+    'account_needs_attention',
+    'email_claim_missing',
+    'email_unverified',
+    'not_eligible',
+    'no_account',
+    'provider_configuration',
+  ] as const
+
+  /** Every call the route made to its logger, Error objects expanded to their own properties. */
+  function loggedText(): string {
+    const calls = Object.entries(flowLog).map(([level, method]) => [level, method.mock.calls])
+    return JSON.stringify(calls, (_key, value) =>
+      value instanceof Error ? { message: value.message, stack: value.stack, ...value } : value
+    )
   }
 
-  it('never signs a member in while the switch is off', async () => {
-    const signInMember = vi.fn()
+  function loggedEvents(): Array<Record<string, unknown>> {
+    return Object.values(flowLog).flatMap(method =>
+      method.mock.calls.map(call => call[0] as Record<string, unknown>)
+    )
+  }
+
+  function appWithMemberSignIn(signInMember: (...args: never[]) => unknown, memberSignIn = true) {
+    return appFor(
+      { completeIdentityProofAttempt: vi.fn().mockResolvedValue(proof) },
+      { memberSignIn, signInMember }
+    )
+  }
+
+  it('configuration includes displayLabel', async () => {
+    const response = await request(appFor({}, { memberSignIn: true })).get(
+      '/external/oidc/profile-flow/configuration'
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      redirectUri: provider.redirectUri,
+      memberAuthenticationActivated: true,
+      displayLabel: provider.displayLabel,
+    })
+  })
+
+  it('switch off never calls signInMember and returns the exact proof body', async () => {
+    // Answers like the real sign-in, so a missing switch check fails on the
+    // assertions below rather than on an undefined result.
+    const signInMember = vi.fn().mockResolvedValue({ status: 'refused', reason: 'no_account' })
     const completeIdentityProofAttempt = vi.fn().mockResolvedValue(proof)
     const app = appFor({ completeIdentityProofAttempt }, { signInMember })
-    const response = await request(app)
-      .post('/external/oidc/profile-flow/complete')
-      .send(completeBody)
+
+    const response = await request(app).post(COMPLETE_PATH).send(completeBody)
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({
       outcome: 'identity_proof_verified',
       memberAuthenticationActivated: false,
     })
+    // The proof was verified, so the sign-in decision was reached and declined.
     expect(completeIdentityProofAttempt).toHaveBeenCalledTimes(1)
     expect(signInMember).not.toHaveBeenCalled()
   })
 
-  it('reports the switch in the Profile UI configuration', async () => {
-    const response = await request(appFor({}, { memberSignIn: true })).get(
-      '/external/oidc/profile-flow/configuration'
-    )
-    expect(response.status).toBe(200)
-    expect(response.body).toEqual({
-      redirectUri: provider.redirectUri,
-      memberAuthenticationActivated: true,
-    })
-  })
-
-  it('returns the member session for a verified identity while the switch is on', async () => {
+  it('member_signed_in carries the token', async () => {
     const signInMember = vi.fn().mockResolvedValue({
       status: 'signed_in',
       userId: 'user-1',
       token: 'session-token-fixture',
       contract: 'v1',
+      created: { account: true, link: true },
+      invitationsApplied: 2,
     })
-    const completeIdentityProofAttempt = vi.fn().mockResolvedValue(proof)
-    const app = appFor({ completeIdentityProofAttempt }, { memberSignIn: true, signInMember })
+    const app = appWithMemberSignIn(signInMember)
+
     const response = await request(app)
-      .post('/external/oidc/profile-flow/complete')
+      .post(COMPLETE_PATH)
+      .set('x-request-id', 'request-fixture-1')
       .send(completeBody)
 
     expect(response.status).toBe(200)
@@ -206,45 +305,159 @@ describe('Control API OIDC member sign-in (dev spike)', () => {
       token: 'session-token-fixture',
       sessionContract: 'v1',
     })
-    expect(signInMember).toHaveBeenCalledWith(proof)
+    // The positive control for the switch-off test: with the switch on, the
+    // route calls sign-in once, with the proof and the provider it loaded.
+    expect(signInMember).toHaveBeenCalledTimes(1)
+    expect(signInMember).toHaveBeenCalledWith(
+      proof,
+      expect.objectContaining({
+        registrationId: provider.registrationId,
+        configurationGeneration: provider.configurationGeneration,
+        memberAuthenticationActivated: true,
+      })
+    )
     expect(JSON.stringify(response.body)).not.toMatch(/opaque-provider-subject|member@example/)
+
+    const context = {
+      registrationId: provider.registrationId,
+      issuer: provider.issuer,
+      subjectFingerprint: expect.stringMatching(/^[0-9a-f]{16}$/),
+      userId: 'user-1',
+      requestId: 'request-fixture-1',
+    }
+    expect(flowLog.info.mock.calls.map(call => call[0])).toEqual([
+      { event: 'oidc_member_account_created', ...context },
+      { event: 'oidc_member_link_created', ...context },
+      { event: 'oidc_member_invitation_applied', ...context, count: 2 },
+      { event: 'oidc_member_signed_in', ...context, sessionContract: 'v1' },
+    ])
+    expect(flowLog.error).not.toHaveBeenCalled()
+    expect(loggedText()).not.toMatch(/session-token-fixture|opaque-provider-subject|member@example/)
   })
 
-  it('issues no session when no member matches the verified identity', async () => {
-    const signInMember = vi
-      .fn()
-      .mockResolvedValue({ status: 'refused', reason: 'email_unverified' })
-    const app = appFor(
-      { completeIdentityProofAttempt: vi.fn().mockResolvedValue(proof) },
-      { memberSignIn: true, signInMember }
-    )
-    const response = await request(app)
-      .post('/external/oidc/profile-flow/complete')
+  it('logs only the sign-in event for an existing linked member with no invitations', async () => {
+    const signInMember = vi.fn().mockResolvedValue({
+      status: 'signed_in',
+      userId: 'user-2',
+      token: 'session-token-fixture',
+      contract: 'v2',
+      created: { account: false, link: false },
+      invitationsApplied: 0,
+    })
+
+    const response = await request(appWithMemberSignIn(signInMember))
+      .post(COMPLETE_PATH)
       .send(completeBody)
 
     expect(response.status).toBe(200)
-    expect(response.body).toEqual({
-      outcome: 'identity_proof_verified',
-      memberAuthenticationActivated: true,
-      memberSignIn: 'no_matching_member',
-    })
-    expect(signInMember).toHaveBeenCalledTimes(1)
-    expect(JSON.stringify(response.body)).not.toContain('email_unverified')
+    expect(response.body).toMatchObject({ outcome: 'member_signed_in', sessionContract: 'v2' })
+    expect(loggedEvents().map(event => event.event)).toEqual(['oidc_member_signed_in'])
+    expect(loggedEvents()[0]).toMatchObject({ userId: 'user-2' })
   })
 
-  it('asks for a new attempt when session issuance fails after the attempt was consumed', async () => {
-    const signInMember = vi.fn().mockRejectedValue(new Error('database unavailable'))
-    const app = appFor(
-      { completeIdentityProofAttempt: vi.fn().mockResolvedValue(proof) },
-      { memberSignIn: true, signInMember }
+  it.each(REFUSAL_REASONS)(
+    'each refusal reason passes through as outcome refused: %s',
+    async reason => {
+      const signInMember = vi.fn().mockResolvedValue({ status: 'refused', reason })
+      const app = appWithMemberSignIn(signInMember)
+
+      const response = await request(app).post(COMPLETE_PATH).send(completeBody)
+
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({
+        outcome: 'refused',
+        memberAuthenticationActivated: true,
+        reason,
+      })
+      expect(signInMember).toHaveBeenCalledTimes(1)
+      expect(loggedEvents()).toEqual([
+        {
+          event: 'oidc_member_refused',
+          registrationId: provider.registrationId,
+          issuer: provider.issuer,
+          subjectFingerprint: expect.stringMatching(/^[0-9a-f]{16}$/),
+          reason,
+        },
+      ])
+      expect(loggedText()).not.toMatch(/opaque-provider-subject|member@example/)
+    }
+  )
+
+  it.each([
+    ['connection_mismatch', { action: 'use a new registration id' }],
+    ['unknown_new_member_team', {}],
+    ['email_domain_claim_missing', { action: 'add the xms_edov optional claim to the ID token' }],
+  ] as const)(
+    'a provider_configuration refusal logs its cause %s and keeps it off the wire',
+    async (cause, extra) => {
+      const signInMember = vi
+        .fn()
+        .mockResolvedValue({ status: 'refused', reason: 'provider_configuration', cause })
+      const app = appWithMemberSignIn(signInMember)
+
+      const response = await request(app).post(COMPLETE_PATH).send(completeBody)
+
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({
+        outcome: 'refused',
+        memberAuthenticationActivated: true,
+        reason: 'provider_configuration',
+      })
+      expect(JSON.stringify(response.body)).not.toContain(cause)
+      expect(signInMember).toHaveBeenCalledTimes(1)
+      expect(flowLog.info).not.toHaveBeenCalled()
+      expect(flowLog.warn).toHaveBeenCalledTimes(1)
+      expect(flowLog.warn.mock.calls[0]?.[0]).toEqual({
+        event: 'oidc_member_refused',
+        registrationId: provider.registrationId,
+        issuer: provider.issuer,
+        subjectFingerprint: expect.stringMatching(/^[0-9a-f]{16}$/),
+        reason: 'provider_configuration',
+        cause,
+        ...extra,
+      })
+      expect(flowLog.warn.mock.calls[0]?.[1]).toBe(
+        {
+          connection_mismatch:
+            'OIDC member sign-in refused: the registration id is recorded for another issuer or client; use a new registration id',
+          unknown_new_member_team:
+            'OIDC member sign-in refused: the configured new-member team does not exist',
+          email_domain_claim_missing:
+            'OIDC member sign-in refused: the ID token has no xms_edov claim; add it as an optional claim in the app registration',
+        }[cause]
+      )
+      expect(loggedText()).not.toMatch(/opaque-provider-subject|member@example/)
+    }
+  )
+
+  it('sign-in failure is a non-retryable 503 and the log has no err detail', async () => {
+    const failure = Object.assign(
+      new Error(`duplicate key value violates unique constraint for ${MEMBER_EMAIL}`),
+      { code: '23505', detail: `Key (lower(email))=(${MEMBER_EMAIL}) already exists.` }
     )
-    const response = await request(app)
-      .post('/external/oidc/profile-flow/complete')
-      .send(completeBody)
+    const signInMember = vi.fn().mockRejectedValue(failure)
+    const app = appWithMemberSignIn(signInMember)
+
+    const response = await request(app).post(COMPLETE_PATH).send(completeBody)
 
     expect(response.status).toBe(503)
     expect(response.body).toEqual({ error: 'oidc_storage_unavailable', retrySameAttempt: false })
     expect(signInMember).toHaveBeenCalledTimes(1)
+    // The failure is logged, with the error reduced to its class and code.
+    expect(flowLog.error).toHaveBeenCalledTimes(1)
+    expect(flowLog.error.mock.calls[0]?.[0]).toEqual({
+      event: 'oidc_member_sign_in_failed',
+      registrationId: provider.registrationId,
+      issuer: provider.issuer,
+      subjectFingerprint: expect.stringMatching(/^[0-9a-f]{16}$/),
+      errorClass: 'Error',
+      code: '23505',
+    })
+    const logged = loggedText()
+    expect(logged).not.toContain('detail')
+    expect(logged).not.toContain(MEMBER_EMAIL)
+    expect(logged).not.toContain('duplicate key')
+    expect(logged).not.toContain(SUBJECT)
   })
 
   it('does not attempt sign-in when the identity proof is rejected', async () => {
@@ -257,12 +470,137 @@ describe('Control API OIDC member sign-in (dev spike)', () => {
       },
       { memberSignIn: true, signInMember }
     )
-    const response = await request(app)
-      .post('/external/oidc/profile-flow/complete')
-      .send(completeBody)
+    const response = await request(app).post(COMPLETE_PATH).send(completeBody)
 
     expect(response.status).toBe(503)
     expect(response.body.error).toBe('oidc_storage_unavailable')
     expect(signInMember).not.toHaveBeenCalled()
+  })
+
+  it('the engine is created once per configuration generation', async () => {
+    const generations = {
+      a: { ...provider, configurationGeneration: 'engine-cache-generation-a' },
+      b: { ...provider, configurationGeneration: 'engine-cache-generation-b' },
+    }
+    let current = generations.a
+    // The default createEngine, so the engine the route builds is the real class.
+    const router = createExternalOidcProfileFlowRouter({ getProvider: () => current })
+    const app = express()
+    app.use(express.json())
+    app.use(router)
+    const attempt = () =>
+      request(app)
+        .post('/external/oidc/profile-flow/attempts')
+        .send({ browserBinding: 'B'.repeat(43) })
+    const cancel = () =>
+      request(app)
+        .post('/external/oidc/profile-flow/cancel')
+        .send({ state: 'S'.repeat(43), browserBinding: 'B'.repeat(43) })
+    engineConstructions.length = 0
+
+    expect((await attempt()).status).toBe(200)
+    expect((await cancel()).status).toBe(200)
+    expect(engineConstructions.map(entry => entry.generation)).toEqual([
+      'engine-cache-generation-a',
+    ])
+
+    current = generations.b
+    expect((await attempt()).status).toBe(200)
+    // One entry only: going back to the first generation builds its engine again.
+    current = generations.a
+    expect((await cancel()).status).toBe(200)
+
+    expect(engineConstructions).toEqual([
+      {
+        generation: 'engine-cache-generation-a',
+        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
+      },
+      {
+        generation: 'engine-cache-generation-b',
+        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
+      },
+      {
+        generation: 'engine-cache-generation-a',
+        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
+      },
+    ])
+  })
+
+  describe('with the default getProvider', () => {
+    const REGISTRATION_ENV = {
+      CONTROL_API_OIDC_REGISTRATION_ID: 'company-login',
+      CONTROL_API_OIDC_DISPLAY_LABEL: 'Company login',
+      CONTROL_API_OIDC_ISSUER: 'https://issuer.example.test/tenant/v2.0',
+      CONTROL_API_OIDC_CLIENT_ID: 'test-client-id',
+      CONTROL_API_OIDC_CLIENT_SECRET: 'a-test-only-oidc-provider-fixture-secret',
+      CONTROL_API_OIDC_CLIENT_AUTH_METHOD: 'client_secret_basic',
+      CONTROL_API_OIDC_REDIRECT_URI: 'https://profile.example.test/api/oidc/callback',
+      CONTROL_API_OIDC_RESPONSE_MODE: 'query',
+      CONTROL_API_OIDC_TRUST_GENERATION: 'config-2026-11-21-1',
+    } as const
+
+    function stubOidcEnvironment(guard: string | undefined): void {
+      for (const [name, value] of Object.entries(REGISTRATION_ENV)) vi.stubEnv(name, value)
+      vi.stubEnv('CONTROL_API_OIDC_MEMBER_SIGN_IN', 'enabled')
+      vi.stubEnv('CONTROL_API_OIDC_UNRELEASED', guard)
+    }
+
+    afterEach(() => {
+      vi.unstubAllEnvs()
+    })
+
+    it('the switch without the guard answers 503 oidc_configuration_unavailable with the default getProvider', async () => {
+      const signInMember = vi.fn()
+      const createEngine = vi.fn()
+      const app = express()
+      app.use(express.json())
+      app.use(createExternalOidcProfileFlowRouter({ createEngine, signInMember }))
+
+      // Positive control: with the guard acknowledged, the same environment loads.
+      stubOidcEnvironment('acknowledged')
+      const configured = await request(app).get('/external/oidc/profile-flow/configuration')
+      expect(configured.status).toBe(200)
+      expect(configured.body).toEqual({
+        redirectUri: REGISTRATION_ENV.CONTROL_API_OIDC_REDIRECT_URI,
+        memberAuthenticationActivated: true,
+        displayLabel: REGISTRATION_ENV.CONTROL_API_OIDC_DISPLAY_LABEL,
+      })
+      expect(flowLog.error).not.toHaveBeenCalled()
+
+      for (const guard of [
+        undefined,
+        'yes',
+        'Acknowledged',
+        'ACKNOWLEDGED',
+        ' acknowledged',
+        'acknowledged ',
+      ]) {
+        flowLog.error.mockReset()
+        stubOidcEnvironment(guard)
+
+        const configuration = await request(app).get('/external/oidc/profile-flow/configuration')
+        const attempt = await request(app)
+          .post('/external/oidc/profile-flow/attempts')
+          .send({ browserBinding: 'B'.repeat(43) })
+        const completion = await request(app).post(COMPLETE_PATH).send(completeBody)
+
+        for (const response of [configuration, attempt, completion]) {
+          expect(response.status).toBe(503)
+          expect(response.body).toEqual({ error: 'oidc_configuration_unavailable' })
+        }
+        // Loud: every refusal names the guard setting, and nothing else about it.
+        expect(flowLog.error).toHaveBeenCalledTimes(3)
+        for (const [payload] of flowLog.error.mock.calls) {
+          expect(payload).toEqual({
+            event: 'oidc_configuration_unavailable',
+            errorClass: 'Error',
+            fields: ['CONTROL_API_OIDC_UNRELEASED'],
+          })
+        }
+        expect(loggedText()).not.toContain(REGISTRATION_ENV.CONTROL_API_OIDC_CLIENT_SECRET)
+      }
+      expect(createEngine).not.toHaveBeenCalled()
+      expect(signInMember).not.toHaveBeenCalled()
+    })
   })
 })
