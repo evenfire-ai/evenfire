@@ -292,9 +292,9 @@ describe('macOS Quit drain', () => {
     const quit = vi.mocked(app.quit)
     quit.mockClear()
     const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
-    await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
     let second: Promise<void> | undefined
     try {
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
       const closed = harness.windows[0].on.mock.calls.find((c: unknown[]) => c[0] === 'closed')?.[1]
       expect(closed).toBeTypeOf('function')
       closed()
