@@ -308,7 +308,7 @@ describe('git_read argv templates', () => {
         options: ['abbrev_ref', 'show_toplevel'],
         revisions: ['HEAD'],
       })
-    ).toEqual(['rev-parse', '--abbrev-ref', '--show-toplevel', 'HEAD'])
+    ).toEqual(['rev-parse', '--abbrev-ref', '--show-toplevel', 'HEAD', '--'])
     expect(argv({ subcommand: 'ls_files', paths: ['src'] })).toEqual(['ls-files', '--', 'src'])
     expect(argv({ subcommand: 'ls_tree', options: ['recursive', 'name_only'] })).toEqual([
       'ls-tree',
@@ -330,6 +330,7 @@ describe('git_read argv templates', () => {
       '-n',
       '--end-of-options',
       'HEAD',
+      '--',
     ])
     expect(argv({ subcommand: 'rev_list', options: ['all'] })).toEqual([
       'rev-list',
@@ -337,6 +338,7 @@ describe('git_read argv templates', () => {
       '--exclude=refs/notes/*',
       '--all',
       '--end-of-options',
+      '--',
     ])
     expect(argv({ subcommand: 'merge_base', revisions: ['HEAD', 'main'] })).toEqual([
       'merge-base',
@@ -359,6 +361,7 @@ describe('git_read argv templates', () => {
       '-n',
       '5',
       '--end-of-options',
+      '--',
     ])
     expect(argv({ subcommand: 'worktree_list' })).toEqual(['worktree', 'list'])
     expect(argv({ subcommand: 'remote' })).toEqual(['remote', '-v'])

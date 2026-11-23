@@ -184,7 +184,12 @@ export class GitReadTool implements Tool {
         result.stderr.length > 0 ? result.stderr : `git exited with code ${result.exitCode}.`
       return done(cut(stderr).text, true)
     }
-    const out = cut(result.stdout)
+    // rev-parse echoes the closing `--` the argv adds; drop it.
+    const stdout =
+      check.params.subcommand === 'rev_parse'
+        ? result.stdout.replace(/(^|\n)--\n?$/, '$1')
+        : result.stdout
+    const out = cut(stdout)
     let content = withTruncation(out.text, out.cut)
     if (await this.hasSubmodules(check.params, run)) {
       content = `${content}${content === '' || content.endsWith('\n') ? '' : '\n'}${GIT_READ_SUBMODULE_NOTE}`

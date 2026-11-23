@@ -164,6 +164,8 @@ export function buildGitReadArgv(p: GitReadParams): string[] {
         ...flag(o.has('abbrev_ref'), '--abbrev-ref'),
         ...flag(o.has('show_toplevel'), '--show-toplevel'),
         ...p.revisions,
+        // A word that is not a revision is then refused, never looked up as a path.
+        '--',
       ]
     case 'ls_files':
       return ['ls-files', '--', ...p.paths]
@@ -188,7 +190,7 @@ export function buildGitReadArgv(p: GitReadParams): string[] {
       return ['stash', 'list']
     case 'shortlog':
       // shortlog reads stdin without a revision.
-      return ['shortlog', '-s', '-n', '--end-of-options', p.revisions[0] ?? 'HEAD']
+      return ['shortlog', '-s', '-n', '--end-of-options', p.revisions[0] ?? 'HEAD', '--']
     case 'rev_list':
       return [
         'rev-list',
@@ -196,6 +198,7 @@ export function buildGitReadArgv(p: GitReadParams): string[] {
         ...flag(o.has('all'), '--exclude=refs/notes/*', '--all'),
         '--end-of-options',
         ...p.revisions,
+        '--',
       ]
     case 'merge_base':
       return ['merge-base', '--end-of-options', ...p.revisions]
@@ -211,6 +214,7 @@ export function buildGitReadArgv(p: GitReadParams): string[] {
         String(p.maxCount ?? GIT_READ_DEFAULT_MAX_COUNT),
         '--end-of-options',
         ...p.revisions,
+        '--',
       ]
     case 'for_each_ref':
       return [

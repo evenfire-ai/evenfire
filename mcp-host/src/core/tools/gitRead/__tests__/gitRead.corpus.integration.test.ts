@@ -225,6 +225,31 @@ describe('git_read corpus on real git', () => {
     ).toMatchObject({ content: '', is_error: false })
   })
 
+  it('a revision that names an outside path gives the same answer whether the path exists or not', async () => {
+    const tool = new GitReadTool({
+      root: fx.root,
+      gitPath,
+      timeoutMs: 30_000,
+      verifyCallerRoot: false,
+    })
+    const existing = fx.outside
+    const missing = path.join(fx.outside, 'no-such-path')
+    for (const subcommand of ['rev_parse', 'rev_list', 'shortlog', 'reflog']) {
+      const answers = []
+      for (const revision of [existing, missing]) {
+        const result = await tool.execute({ directory: 'repo', subcommand, revisions: [revision] })
+        expect(result.is_error).toBe(true)
+        answers.push(result.content.replace(revision, '<p>'))
+      }
+      expect(answers[0]).toBe(answers[1])
+    }
+    // The closing -- the argv adds is not echoed back.
+    expect(
+      (await tool.execute({ directory: 'repo', subcommand: 'rev_parse', revisions: ['HEAD'] }))
+        .content
+    ).toMatch(/^[0-9a-f]{40}\n$/)
+  })
+
   it("other git failures return git's stderr as an error", async () => {
     const tool = new GitReadTool({
       root: fx.root,
