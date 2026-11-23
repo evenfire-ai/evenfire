@@ -3361,7 +3361,7 @@
   },
   {
     "suite": "gitRead.repositoryLinks.integration.test.ts",
-    "fullName": "git_read repository links (P2–P4) a recorded linked worktree outside the root is refused; one inside runs"
+    "fullName": "git_read repository links (P2–P4) worktree_list refuses a recorded worktree outside the root or recorded relatively; other calls run"
   },
   {
     "suite": "gitRead.repositoryLinks.integration.test.ts",

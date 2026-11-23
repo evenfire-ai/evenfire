@@ -29,12 +29,12 @@ let looseSource: string
 let secretLine: string
 let counter = 0
 
-async function verdict(repoDir: string): Promise<string> {
+async function verdict(repoDir: string, subcommand = 'status'): Promise<string> {
   const result = await runPreflight({
     root: fx.root,
     verifyCallerRoot: false,
     gitPath,
-    params: params({ subcommand: 'status', directory: path.relative(fx.root, repoDir) }),
+    params: params({ subcommand, directory: path.relative(fx.root, repoDir) }),
     timeoutMs: 10_000,
     spawn: spawnGit,
   })
@@ -245,7 +245,7 @@ describe('git_read repository links (P2–P4)', () => {
     expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
-  it('a recorded linked worktree outside the root is refused; one inside runs', async () => {
+  it('worktree_list refuses a recorded worktree outside the root or recorded relatively; other calls run', async () => {
     const repo = freshRepo()
     const head = gitw(repo, 'rev-parse', 'HEAD').trim()
     const plant = (name: string, gitdir: string): void => {
@@ -260,11 +260,23 @@ describe('git_read repository links (P2–P4)', () => {
     expect(controlGit(fx.root, repo, 'worktree', 'list').out).toContain(
       path.join(fx.outside, 'probe-target')
     )
-    expect(await verdict(repo)).toBe('directory_outside_workspace')
+    expect(await verdict(repo, 'worktree_list')).toBe('directory_outside_workspace')
+    // Other calls never stat recorded worktrees: a sibling worktree is legitimate.
+    expect(await verdict(repo, 'status')).toBe('ok')
+    expect(await verdict(repo, 'log')).toBe('ok')
+
+    const relative = freshRepo()
+    const relHead = gitw(relative, 'rev-parse', 'HEAD').trim()
+    const admin = path.join(relative, '.git', 'worktrees', 'rel')
+    fs.mkdirSync(admin, { recursive: true })
+    fs.writeFileSync(path.join(admin, 'HEAD'), `${relHead}\n`)
+    fs.writeFileSync(path.join(admin, 'commondir'), '../..\n')
+    fs.writeFileSync(path.join(admin, 'gitdir'), '../../../q/.git\n')
+    expect(await verdict(relative, 'worktree_list')).toBe('directory_outside_workspace')
 
     const clean = freshRepo()
     gitw(clean, 'worktree', 'add', '-q', '--detach', path.join(fx.root, `wt${counter}`))
-    expect(await verdict(clean)).toBe('ok')
+    expect(await verdict(clean, 'worktree_list')).toBe('ok')
   })
 
   it('a toplevel outside the root is refused by the toplevel check alone', async () => {

@@ -329,7 +329,10 @@ export function checkLinkedWorktrees(commonDir: string, realRoot: string): void 
       if (code === 'ENOENT' || code === 'ENOTDIR') continue
       throw new GitReadRefusal('preflight_failed')
     }
-    const lexical = path.resolve(path.join(admin, name), recorded)
+    // git records absolute paths. A relative one resolves against different
+    // bases across git versions (2.39 uses the cwd), so it is refused.
+    if (!path.isAbsolute(recorded)) throw new GitReadRefusal('directory_outside_workspace')
+    const lexical = path.resolve(recorded)
     let real = lexical
     try {
       real = fs.realpathSync(lexical)
@@ -618,7 +621,8 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     confine(objects, realRoot)
 
     // P5, then P4 over every store P5 accepted.
-    checkLinkedWorktrees(commonDir, realRoot)
+    // Only worktree list stats the recorded paths; other calls never do.
+    if (ctx.params.subcommand === 'worktree_list') checkLinkedWorktrees(commonDir, realRoot)
     const stores = [
       objects,
       ...checkAlternates(objects, realRoot),
