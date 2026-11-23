@@ -1187,6 +1187,90 @@ describe('shared channel details layout', () => {
 })
 
 describe('prevent removing the last supported channel provider', () => {
+  it('does not start conversation deletion while a validated Save is pending', async () => {
+    mockChannel('fixture-pending-save', {
+      telegramSettings: { botHandle: '@fixture_bot' },
+      telegram: [{ channelId: 'fixture-chat', title: 'Fixture chat', chatType: 'private' }],
+    })
+    let completeWrite!: (value: unknown) => void
+    vi.mocked(api.apiSend).mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          completeWrite = resolve
+        })
+    )
+    await renderLoadedPage()
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), {
+      target: { value: '@fixture_replacement' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.apiSend).mock.calls[0]).toEqual([
+      'PUT',
+      '/api/v1/admin/communication-channels/fixture-pending-save',
+      expect.objectContaining({
+        spec: expect.objectContaining({
+          telegramSettings: expect.objectContaining({ botHandle: '@fixture_replacement' }),
+        }),
+      }),
+    ])
+    expect(screen.getByRole('button', { name: 'Saving...' })).toBeDisabled()
+    expect(screen.getByLabelText(/Telegram bot handle/)).toBeDisabled()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Actions for Fixture chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+    completeWrite({})
+    await waitFor(() => expect(screen.queryByText('Saving...')).not.toBeInTheDocument())
+  })
+
+  it('blocks overlapping Save during deletion and keeps last-provider validation after a failed write', async () => {
+    mockChannel('fixture-pending-deletion', {
+      telegramSettings: { botHandle: '@fixture_bot' },
+      telegram: [{ channelId: 'fixture-chat', title: 'Fixture chat', chatType: 'private' }],
+    })
+    let failWrite!: (reason: Error) => void
+    vi.mocked(api.apiSend).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failWrite = reject
+        })
+    )
+    await renderLoadedPage()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Actions for Fixture chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalledTimes(1))
+    const [method, path, body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      { spec: ChannelSpec },
+    ]
+    expect(method).toBe('PUT')
+    expect(path).toBe('/api/v1/admin/communication-channels/fixture-pending-deletion')
+    expect(body.spec).toHaveProperty('telegramSettings.botHandle', '@fixture_bot')
+    expect(body.spec.telegram).toEqual([])
+    expect(screen.getByRole('button', { name: 'Saving...' })).toBeDisabled()
+    expect(screen.getByLabelText(/Telegram bot handle/)).toBeDisabled()
+    // Exercise the handler too, independently of the disabled submit button.
+    fireEvent.submit(screen.getByRole('button', { name: 'Saving...' }).closest('form')!)
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+
+    failWrite(new Error('fixture write failed'))
+    expect(await screen.findByText('fixture write failed')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Actions for Fixture chat' })).toBeEnabled()
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), { target: { value: '' } })
+    await user.click(screen.getByRole('button', { name: 'Actions for Fixture chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+    expect(
+      await screen.findByText('Keep at least one channel provider configured before saving.')
+    ).toBeVisible()
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     {
       provider: 'Telegram',
