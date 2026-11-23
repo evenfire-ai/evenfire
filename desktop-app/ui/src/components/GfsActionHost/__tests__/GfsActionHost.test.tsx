@@ -316,6 +316,31 @@ describe('GfsActionHost — opening an action', () => {
     expect(overlayOpen(h)).toBe(true)
   })
 
+  it('an action chosen while another one runs is ignored; the running one keeps its dialog', async () => {
+    const h = await harness()
+    const renameTarget = await listedRow('file-t', 'notes.txt', 'file')
+    const deleteTarget = await listedRow('file-u', 'draft.txt', 'file')
+    const landed = deferred<Awaited<ReturnType<typeof renameResourceResult>>>()
+    h.bridge.renameResource.mockImplementation(() => landed.promise)
+    await openRename(h, renameTarget)
+    typeName('renamed.txt')
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(h.bridge.renameResource).toHaveBeenCalledTimes(1))
+
+    h.open(deleteTarget, 'delete')
+    await act(async () => {})
+
+    expect(screen.getByRole('dialog', { name: /rename file/i })).toBeTruthy()
+    expect(screen.queryByRole('dialog', { name: 'Delete draft.txt?' })).toBeNull()
+    expect(h.bridge.affordances.mock.calls.map(([resourceId]) => resourceId)).toEqual(['file-t'])
+
+    await act(async () => landed.resolve(await renameResourceResult('file-t', 'renamed.txt', 4)))
+    await waitFor(() => expect(toastMessages(h)).toEqual(['Renamed to renamed.txt']))
+    await waitFor(() => expect(dialog()).toBeNull())
+    expect(h.bridge.deleteResource).not.toHaveBeenCalled()
+    expect(overlayOpen(h)).toBe(false)
+  })
+
   it('copy and download run without a dialog and leave the active action alone', async () => {
     const h = await harness()
     const target = await listedRow('file-t', 'notes.txt', 'file')
