@@ -468,9 +468,11 @@ function typedGitRedirect(
   if (!eligible) return undefined
   if (matchTypedGitRead(command) === null) return undefined
   const conversation = config.conversation
-  if (conversation.task_git_redirected?.has(command) === true) return undefined
+  // Whitespace variants are the same command: re-sending one is the escape.
+  const key = command.trim().split(/\s+/).join(' ')
+  if (conversation.task_git_redirected?.has(key) === true) return undefined
   if (!gitReadCardFree(config)) return undefined
-  ;(conversation.task_git_redirected ??= new Set()).add(command)
+  ;(conversation.task_git_redirected ??= new Set()).add(key)
   conversation.git_redirect_pending = true
   logger.info(
     { event: 'git_redirect', session: approvalLogId(conversation.id) },

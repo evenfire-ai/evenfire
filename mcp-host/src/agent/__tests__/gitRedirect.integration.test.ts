@@ -232,6 +232,15 @@ describe('typed-git redirect', () => {
     expect(result.toolMessages[1]).toContain('On branch')
   })
 
+  it('a whitespace variant of a redirected command takes the normal path', async () => {
+    const result = await run({
+      mode: 'auto',
+      turns: [[shell('git status')], [shell('  git   status ')]],
+    })
+    expect(result.toolMessages.map(redirected)).toEqual([true, false])
+    expect(result.classifyCalls).toBe(1)
+  })
+
   it('a new user message redirects the same text again', async () => {
     const manager = new ConversationManager()
     const first = await run({ mode: 'auto', turns: [[shell('git status')]], manager })

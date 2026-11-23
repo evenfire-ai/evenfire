@@ -511,7 +511,8 @@ export interface Conversation {
   task_approved_tools?: Set<string>
   /**
    * Typed git shell commands this task already redirected to `git_read`
-   * (exact text). Sending the same text again takes the normal path. Cleared
+   * (trimmed, whitespace collapsed). Sending the same command again takes the
+   * normal path. Cleared
    * with `task_approved_tools`; ephemeral, so a cold resume may redirect once more.
    */
   task_git_redirected?: Set<string>
