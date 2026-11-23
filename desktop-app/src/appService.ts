@@ -4804,8 +4804,9 @@ export class AppService {
               return
             }
             if (event === 'auth-expired') {
-              // Upstream rejected the captured RPC token (TTL is 300s; this
-              // is normal on long-lived sessions). Drop the cached token so
+              // rpc-proxy ends the stream before the held edge assertion
+              // (bounded by the RPC token, TTL 300s) expires, or after the
+              // Host refused three polls in a row. Drop the cached token so
               // the upcoming retry calls authClient.issueRpcToken with the
               // long-lived session and gets a fresh one — no relogin needed.
               this.rpcTokenManager.clear()

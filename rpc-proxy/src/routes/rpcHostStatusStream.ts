@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
@@ -12,16 +13,22 @@ import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAcc
 import {
   UpstreamHostError,
   forwardHostStatus,
+  isHeldEdgeAssertionNearExpiry,
   resolveHostConnectionForUser,
 } from '../services/mcpProxyService.js'
 
 /**
- * Stream gives up after this many back-to-back upstream auth failures and
- * emits `auth-expired` so the desktop client knows to clear its cached RPC
- * token and reconnect with a fresh one. The token TTL is 300s; status polls
- * fire every `streamIntervalMs` (default 5s), so 3 strikes keeps a stuck
- * stream from spamming forever while still tolerating a single transient
- * 401 race during normal token rotation.
+ * The stream ends with `auth-expired`, so the desktop client clears its cached
+ * RPC token and reconnects with a fresh one, in two cases:
+ * - Normal: the held edge assertion, which ends no later than the RPC token, is
+ *   within `RPC_PROXY_UPSTREAM_TIMEOUT_MS` + 2 s of its `exp` (10 s with the
+ *   8 s default, 62 s with the minikube overlay's 60000). The stream checks this
+ *   before each poll; a fresh token gives a cycle of about 290 s by default,
+ *   about 238 s on minikube.
+ * - Abnormal: the Host refuses this many consecutive polls with 401/403. Polls
+ *   fire every `streamIntervalMs` (default 3 s); the threshold tolerates one or
+ *   two transient refusals and keeps a stream the Host refuses from polling
+ *   forever.
  */
 const AUTH_FAILURE_THRESHOLD = 3
 
@@ -156,6 +163,17 @@ export function createRpcHostStatusStreamRouter(): Router {
           if (closed || pollInFlight) return
           pollInFlight = true
           try {
+            // The stream does not renew the held edge assertion. End the
+            // stream before a poll could reach the Host after `exp`.
+            if (
+              isHeldEdgeAssertionNearExpiry(host.headers[HOST_EDGE_ASSERTION_HEADER], Date.now())
+            ) {
+              writeEvent('auth-expired', {
+                message: 'Host access is about to expire. Reconnect with a fresh token.',
+              })
+              cleanup('auth-expired')
+              return
+            }
             const status = await forwardHostStatus(host)
             if (!status) {
               writeEvent('error', { message: sanitizedStreamErrorMessage() })
@@ -177,14 +195,15 @@ export function createRpcHostStatusStreamRouter(): Router {
                 error instanceof Error ? error.message : String(error)
               }`
             )
-            // After AUTH_FAILURE_THRESHOLD strikes, the upstream is rejecting
-            // the captured RPC token (almost certainly expired). Emit a
-            // dedicated `auth-expired` event so the desktop client clears
-            // its token cache and reconnects via getOrIssue() instead of
-            // tight-looping with the same stale token forever.
+            // After AUTH_FAILURE_THRESHOLD strikes, the Host has refused the
+            // poll that many times in a row (edge assertion, host access or
+            // caller context). Emit a dedicated `auth-expired` event so the
+            // desktop client clears its token cache and reconnects with a
+            // fresh token instead of polling the Host with the same
+            // connection forever.
             if (!closed && isAuthFailure && consecutiveAuthFailures >= AUTH_FAILURE_THRESHOLD) {
               writeEvent('auth-expired', {
-                message: 'RPC token rejected by host. Reconnect with a fresh token.',
+                message: 'Host refused the status poll. Reconnect with a fresh token.',
               })
               cleanup('auth-expired')
               return
@@ -200,7 +219,6 @@ export function createRpcHostStatusStreamRouter(): Router {
         }
 
         writeEvent('open', { hostRef, observedAt: new Date().toISOString() })
-        void pollAndEmit()
         intervalId = setInterval(() => {
           void pollAndEmit()
         }, config.streamIntervalMs)
@@ -211,6 +229,9 @@ export function createRpcHostStatusStreamRouter(): Router {
           writeEvent('error', { message: 'Status stream expired. Reconnect required.' })
           cleanup('max-lifetime')
         }, config.streamMaxLifetimeMs)
+        // After the timers exist: the first poll can end the stream
+        // synchronously (near-expiry check), and cleanup must clear them.
+        void pollAndEmit()
 
         req.on('close', () => {
           cleanup('client-disconnect')
