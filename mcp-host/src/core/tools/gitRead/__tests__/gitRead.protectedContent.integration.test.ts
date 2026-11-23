@@ -558,6 +558,55 @@ describe('git_read protected content (history, refs, stash, index, worktree)', (
       }
     })
 
+    it('notes history is not read: --all skips notes refs, and a notes ref or commit is refused', async () => {
+      gitwAt('2026-01-08T00:00:00Z', copy, 'notes', 'add', '-f', '-C', ids.BLOB1, 'HEAD')
+      const notesCommit = gitwAt(
+        '2026-01-08T00:00:00Z',
+        copy,
+        'rev-parse',
+        'refs/notes/commits'
+      ).trim()
+      const head = gitwAt('2026-01-08T00:00:00Z', copy, 'rev-parse', 'HEAD').trim()
+      const excl = [...protectedExcludePathspecs()]
+      // A worktree file named like the note's path, so blame gets past its own file check.
+      fs.writeFileSync(path.join(copy, head), 'ordinary\n')
+      const leaks = (...argv: string[]) =>
+        needles(controlGit(fx.root, copy, ...argv).out).length > 0
+      // Controls: each route prints the protected note blob.
+      expect(leaks('log', '-p', '--all', '--no-notes', ...NT, '--', ...excl), 'log --all').toBe(
+        true
+      )
+      // The note's own path in the notes commit (a re-added note has an empty diff).
+      expect(leaks('show', ...NT, `${notesCommit}:${head}`), 'show notes').toBe(true)
+      expect(leaks('grep', '-e', 'NEEDLE', 'refs/notes/commits', '--', ...excl), 'grep notes').toBe(
+        true
+      )
+      expect(leaks('blame', '--no-textconv', notesCommit, '--', head), 'blame notes').toBe(true)
+      const run = async (params: Record<string, unknown>) => {
+        const out = await copyTool.execute({ directory: 'copy', ...params })
+        return { content: out.content, is_error: out.is_error }
+      }
+      const all = await run({ subcommand: 'log', options: ['patch', 'all'], max_count: 1000 })
+      expect(all.is_error).toBe(false)
+      expect(needles(all.content)).toEqual([])
+      expect(all.content).toContain('WITNESS-A')
+      const refused = { content: GIT_READ_REFUSALS.notes_history, is_error: true }
+      for (const params of [
+        { subcommand: 'show', revisions: [notesCommit] },
+        { subcommand: 'show', revisions: ['refs/notes/commits'] },
+        { subcommand: 'grep', pattern: 'NEEDLE', revisions: ['refs/notes/commits'] },
+        { subcommand: 'log', options: ['patch'], revisions: [notesCommit] },
+        { subcommand: 'blame', revisions: [notesCommit], paths: [head] },
+        { subcommand: 'show', revisions: [`${notesCommit}:${head}`] },
+        { subcommand: 'diff', revisions: [`${head}..${notesCommit}`] },
+      ]) {
+        expect(await run(params)).toEqual(refused)
+      }
+      fs.rmSync(path.join(copy, head))
+      // Witness: an ordinary commit still shows.
+      expect((await run({ subcommand: 'show', revisions: ['HEAD'] })).is_error).toBe(false)
+    })
+
     it('a replace ref to a protected blob does not print', async () => {
       const aBlob = gitwAt('2026-01-08T00:00:00Z', copy, 'rev-parse', 'HEAD:a.txt').trim()
       gitwAt('2026-01-08T00:00:00Z', copy, 'replace', '-f', aBlob, ids.BLOB1)

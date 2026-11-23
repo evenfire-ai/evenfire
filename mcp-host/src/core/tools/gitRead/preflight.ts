@@ -32,6 +32,7 @@ export type GitReadRefusalCategory =
   | 'protected_history'
   | 'timeout'
   | 'worktree_link'
+  | 'notes_history'
 
 export class GitReadRefusal extends Error {
   constructor(readonly category: GitReadRefusalCategory) {
@@ -510,6 +511,42 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
         if (peel.outcome !== 'exited' || peel.exitCode !== 0) {
           return { kind: 'refused', category: 'not_a_commit' }
         }
+      }
+    }
+  }
+
+  // Notes history is not read: a notes commit's tree holds note blobs under
+  // commit-id paths, which no exclusion matches. A content call refuses any
+  // revision (or the HEAD it defaults to) that a notes ref reaches.
+  if (isContentCall(params)) {
+    const notes = await run(['for-each-ref', '--format=%(objectname)', 'refs/notes/'])
+    if (notes.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
+    if (notes.outcome !== 'exited' || notes.exitCode !== 0) {
+      return { kind: 'refused', category: 'preflight_failed' }
+    }
+    const tips = notes.stdout.split('\n').filter(line => line.length > 0)
+    const defaultsToHead =
+      params.revisions.length === 0 && (params.subcommand === 'show' || params.subcommand === 'log')
+    const endpoints = defaultsToHead ? ['HEAD'] : params.revisions.flatMap(peelEndpoints)
+    for (const endpoint of tips.length > 0 ? endpoints : []) {
+      const commit = await run([
+        'rev-parse',
+        '--verify',
+        '-q',
+        '--end-of-options',
+        `${endpoint}^{commit}`,
+      ])
+      if (commit.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
+      // Not a commit: the real command fails or the peel step refused it.
+      if (commit.outcome !== 'exited' || commit.exitCode !== 0) continue
+      const sha = commit.stdout.trim()
+      for (const tip of tips) {
+        const ancestor = await run(['merge-base', '--is-ancestor', sha, tip])
+        if (ancestor.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
+        if (ancestor.outcome !== 'exited' || (ancestor.exitCode !== 0 && ancestor.exitCode !== 1)) {
+          return { kind: 'refused', category: 'preflight_failed' }
+        }
+        if (ancestor.exitCode === 0) return { kind: 'refused', category: 'notes_history' }
       }
     }
   }

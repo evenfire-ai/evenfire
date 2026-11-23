@@ -12,6 +12,8 @@ import type { GitReadParams } from './definition'
 import { isContentCall, protectedExcludePathspecs } from './protectedContent'
 
 const NO_TEXTCONV = ['--no-textconv', '--no-ext-diff'] as const
+// `--all` never walks notes: a note can be made from a protected blob, and a
+// notes commit's paths are commit ids that no exclusion pathspec matches.
 
 /** `log` and `reflog` without `max_count` show this many entries. */
 export const GIT_READ_DEFAULT_MAX_COUNT = 50
@@ -40,7 +42,7 @@ function logArgv(p: GitReadParams): string[] {
     ...flag(o.has('name_only'), '--name-only'),
     ...flag(o.has('name_status'), '--name-status'),
     ...flag(o.has('graph'), '--graph'),
-    ...flag(o.has('all'), '--all'),
+    ...flag(o.has('all'), '--exclude=refs/notes/*', '--all'),
     ...flag(follow, '--follow'),
     ...flag(o.has('word_diff'), '--word-diff=plain'),
     ...value('-U', p.unified),
@@ -191,7 +193,7 @@ export function buildGitReadArgv(p: GitReadParams): string[] {
       return [
         'rev-list',
         '--count',
-        ...flag(o.has('all'), '--all'),
+        ...flag(o.has('all'), '--exclude=refs/notes/*', '--all'),
         '--end-of-options',
         ...p.revisions,
       ]

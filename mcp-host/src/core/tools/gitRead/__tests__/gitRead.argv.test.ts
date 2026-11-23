@@ -80,6 +80,7 @@ describe('git_read argv templates', () => {
       '--stat',
       '--name-only',
       '--graph',
+      '--exclude=refs/notes/*',
       '--all',
       '--since=2 weeks ago',
       '--until=yesterday',
@@ -333,6 +334,7 @@ describe('git_read argv templates', () => {
     expect(argv({ subcommand: 'rev_list', options: ['all'] })).toEqual([
       'rev-list',
       '--count',
+      '--exclude=refs/notes/*',
       '--all',
       '--end-of-options',
     ])
