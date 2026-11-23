@@ -15,7 +15,7 @@ const LITERAL_ENV = {
   PAGER: 'cat',
   GIT_NO_REPLACE_OBJECTS: '1',
   GIT_CEILING_DIRECTORIES: '/srv/parent',
-  GIT_CONFIG_COUNT: '13',
+  GIT_CONFIG_COUNT: '14',
   GIT_CONFIG_KEY_0: 'core.fsmonitor',
   GIT_CONFIG_VALUE_0: 'false',
   GIT_CONFIG_KEY_1: 'core.hooksPath',
@@ -42,6 +42,8 @@ const LITERAL_ENV = {
   GIT_CONFIG_VALUE_11: 'never',
   GIT_CONFIG_KEY_12: 'safe.bareRepository',
   GIT_CONFIG_VALUE_12: 'explicit',
+  GIT_CONFIG_KEY_13: 'diff.autoRefreshIndex',
+  GIT_CONFIG_VALUE_13: 'false',
 }
 
 const POISON = {
@@ -74,7 +76,7 @@ describe('gitReadEnv', () => {
     expect(gitReadEnv('/srv/parent')).toEqual(LITERAL_ENV)
   })
 
-  it('forces the 13 keys in a fixed order', () => {
+  it('forces the 14 keys in a fixed order', () => {
     expect(GIT_READ_FORCED_KEYS.map(([key]) => key)).toEqual([
       'core.fsmonitor',
       'core.hooksPath',
@@ -89,6 +91,7 @@ describe('gitReadEnv', () => {
       'protocol.ext.allow',
       'protocol.file.allow',
       'safe.bareRepository',
+      'diff.autoRefreshIndex',
     ])
   })
 

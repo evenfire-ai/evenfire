@@ -10,8 +10,10 @@
 /**
  * Config keys forced through `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`. They
  * stop git from running programs (fsmonitor, hooks, pager, ssh, signing,
- * alternate-refs commands), from recursing into submodules and from using any
- * transport. `diff.external` is not forced: an empty value breaks `git diff`.
+ * alternate-refs commands), from recursing into submodules, from using any
+ * transport, and from rewriting the index on a worktree diff
+ * (`diff.autoRefreshIndex`; `GIT_OPTIONAL_LOCKS=0` covers only status).
+ * `diff.external` is not forced: an empty value breaks `git diff`.
  */
 export const GIT_READ_FORCED_KEYS: readonly (readonly [string, string])[] = [
   ['core.fsmonitor', 'false'],
@@ -27,6 +29,7 @@ export const GIT_READ_FORCED_KEYS: readonly (readonly [string, string])[] = [
   ['protocol.ext.allow', 'never'],
   ['protocol.file.allow', 'never'],
   ['safe.bareRepository', 'explicit'],
+  ['diff.autoRefreshIndex', 'false'],
 ]
 
 /**

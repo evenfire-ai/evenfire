@@ -4,6 +4,7 @@
  * preflight included, gets exactly the literal environment with the ceiling.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { spawnSync } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { gitReadEnv } from '../env'
@@ -282,6 +283,43 @@ describe('git_read corpus on real git', () => {
     expect((await tool.execute({ directory: 'repo', subcommand: 'status' })).content).not.toContain(
       'Submodule changes'
     )
+  })
+
+  it('a worktree diff or status leaves .git/index unchanged', async () => {
+    const indexFile = path.join(repo, '.git', 'index')
+    const later = (): void => {
+      const when = new Date(Date.now() + 60_000)
+      fs.utimesSync(path.join(repo, 'app.py'), when, when)
+    }
+    // Control: git's own worktree diff refreshes and rewrites the index, even
+    // with GIT_OPTIONAL_LOCKS=0, when a tracked file's stat data changed.
+    later()
+    const before = fs.readFileSync(indexFile)
+    spawnSync(gitPath, ['diff'], {
+      cwd: repo,
+      env: { PATH: '/usr/bin:/bin', HOME: repo, GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' },
+    })
+    expect(fs.readFileSync(indexFile).equals(before)).toBe(false)
+    const tool = new GitReadTool({
+      root: fx.root,
+      gitPath,
+      timeoutMs: 30_000,
+      verifyCallerRoot: false,
+    })
+    for (const params of [
+      { subcommand: 'diff' },
+      { subcommand: 'diff', options: ['stat'] },
+      { subcommand: 'status' },
+    ]) {
+      fs.utimesSync(
+        path.join(repo, 'app.py'),
+        new Date(Date.now() + 120_000),
+        new Date(Date.now() + 120_000)
+      )
+      const snapshot = fs.readFileSync(indexFile)
+      expect((await tool.execute({ directory: 'repo', ...params })).is_error).toBe(false)
+      expect(fs.readFileSync(indexFile).equals(snapshot)).toBe(true)
+    }
   })
 
   it('every git spawn gets the literal environment and the ceiling', async () => {

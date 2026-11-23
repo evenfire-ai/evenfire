@@ -6,9 +6,12 @@ import { INERT_CONFIG_KEYS, checkConfigEntries, parseConfigListZ, runPreflight }
 import type { GitSpawn, GitSpawnResult } from '../runner'
 import { params } from './gitFixtures'
 
-/** Captured from git 2.50.1 under git_read's environment: subsections with dots, a tab and a quote. */
+/**
+ * Captured from git 2.50.1 under git_read's environment: subsections with dots,
+ * a tab and a quote. The last command key was added with diff.autoRefreshIndex.
+ */
 const CAPTURED =
-  'local\u0000core.repositoryformatversion\u0000local\u0000core.filemode\u0000local\u0000core.bare\u0000local\u0000core.logallrefupdates\u0000local\u0000core.ignorecase\u0000local\u0000core.precomposeunicode\u0000local\u0000remote.a.b.url\u0000local\u0000branch.tab\there.remote\u0000local\u0000branch.qu"ote.merge\u0000local\u0000user.name\u0000command\u0000core.fsmonitor\u0000command\u0000core.hookspath\u0000command\u0000core.pager\u0000command\u0000core.sshcommand\u0000command\u0000core.alternaterefscommand\u0000command\u0000submodule.recurse\u0000command\u0000status.submodulesummary\u0000command\u0000log.showsignature\u0000command\u0000gpg.program\u0000command\u0000protocol.allow\u0000command\u0000protocol.ext.allow\u0000command\u0000protocol.file.allow\u0000command\u0000safe.barerepository\u0000'
+  'local\u0000core.repositoryformatversion\u0000local\u0000core.filemode\u0000local\u0000core.bare\u0000local\u0000core.logallrefupdates\u0000local\u0000core.ignorecase\u0000local\u0000core.precomposeunicode\u0000local\u0000remote.a.b.url\u0000local\u0000branch.tab\there.remote\u0000local\u0000branch.qu"ote.merge\u0000local\u0000user.name\u0000command\u0000core.fsmonitor\u0000command\u0000core.hookspath\u0000command\u0000core.pager\u0000command\u0000core.sshcommand\u0000command\u0000core.alternaterefscommand\u0000command\u0000submodule.recurse\u0000command\u0000status.submodulesummary\u0000command\u0000log.showsignature\u0000command\u0000gpg.program\u0000command\u0000protocol.allow\u0000command\u0000protocol.ext.allow\u0000command\u0000protocol.file.allow\u0000command\u0000safe.barerepository\u0000command\u0000diff.autorefreshindex\u0000'
 
 const COMMAND = CAPTURED.slice(CAPTURED.indexOf('command\u0000'))
 
