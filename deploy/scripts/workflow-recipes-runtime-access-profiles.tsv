@@ -56,6 +56,8 @@ notification_deliveries	none
 dynamic_clients	none
 oauth_grants	none
 oidc_protocol_attempts	none
+oidc_connections	none
+user_oidc_links	none
 password_admission_rollout_state	none
 password_identifier_state	none
 password_verification_pace	none
