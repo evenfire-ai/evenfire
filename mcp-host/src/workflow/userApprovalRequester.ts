@@ -483,7 +483,7 @@ async function requestApproval(
       }
       if (res.status === 422 && errorCode === 'approval_target_retired') {
         throw new Error(
-          'The approver for this approval step has been removed. Choose another approver in the workflow recipe.'
+          'The approver for this approval request has been removed. Choose another approver.'
         )
       }
       throw new Error(`Approval request failed (${res.status})`)

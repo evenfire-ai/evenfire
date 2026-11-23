@@ -34,7 +34,7 @@ describe('user approval requester retired approver mapping', () => {
     } as unknown as McpHostRuntimeAuth
 
     await expect(gateStep(params, auth)).rejects.toThrow(
-      'The approver for this approval step has been removed. Choose another approver in the workflow recipe.'
+      'The approver for this approval request has been removed. Choose another approver.'
     )
     // One request call, and no status poll after it.
     expect(fetchMock).toHaveBeenCalledTimes(1)
