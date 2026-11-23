@@ -323,10 +323,13 @@ describe('provider channel tabs', () => {
           'utf8'
         )
       ) as CommunicationChannelItem
-      const providerlessChannel: CommunicationChannelItem = {
-        metadata: { name: 'fixture-providerless', namespace: 'channels' },
-        spec: { hostRef: 'agent-a' },
-      }
+      // Copied verbatim from the producer-owned fixture in
+      // control-api/test/routes.adminCommunicationChannelCredentials.test.ts:
+      // "B4: POST CC with NO provider fields (hostRef only)" (head 9df4c4174).
+      // That route test proves the API accepts this legacy providerless record.
+      const providerlessChannel: CommunicationChannelItem = JSON.parse(
+        readFileSync(resolve(__dirname, 'fixtures/communicationChannel.providerless.json'), 'utf8')
+      )
       const supportedChannel: CommunicationChannelItem = {
         metadata: { name: 'fixture-supported', namespace: 'channels' },
         spec: { hostRef: 'agent-a', [provider]: [{ channelId: 'fixture-conversation' }] },
