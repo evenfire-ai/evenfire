@@ -1,6 +1,6 @@
 {
   "name": "clerum-stdio-bridge",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "stdio-to-StreamableHTTP bridge sidecar for MCP servers",
   "main": "dist/main.js",
   "engines": {
@@ -20,7 +20,7 @@
     "bridge",
     "sidecar"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MPL-2.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
   },

@@ -21,7 +21,7 @@
     "runtime",
     "control-plane"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MPL-2.0",
   "dependencies": {
     "@clerum/llm-providers": "file:../llm-providers"
   },

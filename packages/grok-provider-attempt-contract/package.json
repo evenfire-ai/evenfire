@@ -16,5 +16,5 @@
     "build": "node --check index.cjs",
     "test": "node --test index.test.cjs"
   },
-  "license": "MIT"
+  "license": "MPL-2.0"
 }

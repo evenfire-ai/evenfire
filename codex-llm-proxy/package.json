@@ -14,7 +14,7 @@
     "test": "npm run typecheck:test && vitest run",
     "test:watch": "vitest"
   },
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MPL-2.0",
   "dependencies": {
     "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",
     "express": "^4.21.2",

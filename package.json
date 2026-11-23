@@ -1,5 +1,6 @@
 {
   "name": "clerum",
+  "license": "MPL-2.0",
   "private": true,
   "scripts": {
     "app": "make local-app",

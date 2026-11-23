@@ -1,6 +1,6 @@
 {
   "name": "@clerum/workflow-sdk",
-  "version": "1.0.37-beta.0",
+  "version": "1.0.38-beta.0",
   "description": "Clerum Workflow SDK — TypeScript library for workflow coordinator Pods",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -27,7 +27,7 @@
     "kubernetes",
     "mcp"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MPL-2.0",
   "dependencies": {
     "@clerum/workflow-runtime-core": "file:../workflow-runtime-core"
   },

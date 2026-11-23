@@ -1,6 +1,7 @@
 {
   "name": "@clerum/desktop-app-links",
   "version": "0.1.1",
+  "license": "MPL-2.0",
   "private": true,
   "type": "commonjs",
   "main": "index.cjs",
