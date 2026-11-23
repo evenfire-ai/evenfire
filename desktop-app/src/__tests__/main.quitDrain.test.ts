@@ -9,11 +9,24 @@ type SyncHandler = (event: MainEvent) => void
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
+  let settled = false
+  const cleanup = () => {
+    if (settled) return
+    resolve(undefined as T)
+  }
+  pendingDeferredCleanups.add(cleanup)
   const promise = new Promise<T>(done => {
-    resolve = done
+    resolve = value => {
+      if (settled) return
+      settled = true
+      pendingDeferredCleanups.delete(cleanup)
+      done(value)
+    }
   })
   return { promise, resolve }
 }
+
+const pendingDeferredCleanups = new Set<() => void>()
 
 const harness = vi.hoisted(() => {
   const state = {
@@ -93,7 +106,7 @@ vi.mock('electron', () => ({
     dock: undefined,
     isPackaged: false,
     isReady: () => true,
-    getPath: () => process.env.SPEC125_SCRATCH,
+    getPath: () => process.env.TOKEN_STORE_TEST_USER_DATA,
     setName: vi.fn(),
     setAppUserModelId: vi.fn(),
     setAsDefaultProtocolClient: vi.fn(),
@@ -208,6 +221,11 @@ describe('macOS Quit drain', () => {
     harness.nativeSet.mockReset().mockResolvedValue(undefined)
     harness.nativeGet.mockReset().mockResolvedValue(null)
     harness.nativeDelete.mockReset().mockResolvedValue(true)
+    harness.logout.mockReset().mockResolvedValue(7)
+    harness.sessionGeneration = 0
+    harness.invalidateSandboxUiSession = null
+    harness.sessionCleared = null
+    harness.registeredLogout = null
   })
 
   async function startMain(): Promise<void> {
@@ -218,8 +236,31 @@ describe('macOS Quit drain', () => {
 
   afterEach(async () => {
     try {
-      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      pendingDeferredCleanups.forEach(cleanup => cleanup())
+      const { openTokenStoreAdmission, waitForTokenStoreOperations } =
+        await import('../tokenStore.ts')
       openTokenStoreAdmission()
+      await waitForTokenStoreOperations()
+      await new Promise(resolve => setImmediate(resolve))
+
+      const { app } = await import('electron')
+      vi.mocked(app.quit).mockReset()
+      vi.mocked(app.exit).mockReset()
+      vi.restoreAllMocks()
+      harness.appListeners.clear()
+      harness.onHandlers.clear()
+      harness.handleHandlers.clear()
+      harness.windows.length = 0
+      harness.readyResolver = null
+      harness.initialize.mockReset().mockResolvedValue(undefined)
+      harness.logout.mockReset().mockResolvedValue(7)
+      harness.nativeSet.mockReset().mockResolvedValue(undefined)
+      harness.nativeGet.mockReset().mockResolvedValue(null)
+      harness.nativeDelete.mockReset().mockResolvedValue(true)
+      harness.sessionGeneration = 0
+      harness.invalidateSandboxUiSession = null
+      harness.sessionCleared = null
+      harness.registeredLogout = null
     } finally {
       if (originalPlatformDescriptor) {
         Object.defineProperty(process, 'platform', originalPlatformDescriptor)
@@ -235,15 +276,25 @@ describe('macOS Quit drain', () => {
     await startMain()
     harness.nativeSet.mockReset()
     const releases: Array<() => void> = []
-    harness.nativeSet.mockImplementation(() => new Promise<void>(resolve => releases.push(resolve)))
+    harness.nativeSet.mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          const release = () => {
+            pendingDeferredCleanups.delete(release)
+            resolve()
+          }
+          pendingDeferredCleanups.add(release)
+          releases.push(release)
+        })
+    )
     const { TokenStore } = await import('../tokenStore.ts')
     const { app } = await import('electron')
     const quit = vi.mocked(app.quit)
     quit.mockClear()
     const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
-    await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
     let second: Promise<void> | undefined
     try {
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
       const closed = harness.windows[0].on.mock.calls.find((c: unknown[]) => c[0] === 'closed')?.[1]
       expect(closed).toBeTypeOf('function')
       closed()
@@ -280,9 +331,35 @@ describe('macOS Quit drain', () => {
     }
   })
 
+  it('reopens admission when a synchronous listener cancels a no-work Quit', async () => {
+    await startMain()
+    const { TokenStore } = await import('../tokenStore.ts')
+    const willQuit = harness.appListeners.get('will-quit')
+    expect(willQuit).toBeTypeOf('function')
+    const event = {
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true
+      },
+    }
+    let write: Promise<void> | undefined
+    try {
+      willQuit?.(event)
+      event.preventDefault()
+      write = new TokenStore().setSessionToken('synthetic-canceled-quit', 'cancel-aaaaaaaaaaaa')
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
+      await write
+      expect(event.defaultPrevented).toBe(true)
+    } finally {
+      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      openTokenStoreAdmission()
+      await write
+    }
+  })
+
   it('cancels Quit before a token-dependent main-window initializer can block', async () => {
     const firstNativeWrite = deferred<void>()
-    const initializerWrite = deferred<void>()
+    const initializerRead = deferred<string | null>()
     harness.initialize.mockRejectedValueOnce(new Error('synthetic first initialization failure'))
     const initializationError = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
@@ -295,9 +372,8 @@ describe('macOS Quit drain', () => {
       initializationError.mockRestore()
     }
     harness.initialize.mockClear()
-    harness.nativeSet
-      .mockImplementationOnce(() => firstNativeWrite.promise)
-      .mockImplementationOnce(() => initializerWrite.promise)
+    harness.nativeSet.mockImplementationOnce(() => firstNativeWrite.promise)
+    harness.nativeGet.mockImplementationOnce(() => initializerRead.promise)
     const { TokenStore } = await import('../tokenStore.ts')
     const { app } = await import('electron')
     const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
@@ -321,24 +397,27 @@ describe('macOS Quit drain', () => {
       expect(vetoed).toBe(true)
 
       harness.initialize.mockImplementation(async () => {
-        await new TokenStore().setSessionToken(
-          'synthetic-initializer-token',
-          'initializer-aaaaaaaaaaaa'
-        )
+        await new TokenStore().getSessionToken('initializer-aaaaaaaaaaaa')
       })
       harness.appListeners.get('activate')?.()
       await vi.waitFor(() => expect(harness.initialize).toHaveBeenCalled())
-      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(2))
+      await vi.waitFor(() =>
+        expect(harness.nativeGet).toHaveBeenCalledWith(
+          'Evenfire',
+          'session-token::initializer-aaaaaaaaaaaa'
+        )
+      )
       expect(harness.windows).toHaveLength(0)
 
       firstNativeWrite.resolve()
       await first
-      initializerWrite.resolve()
+      initializerRead.resolve('synthetic-initializer-token')
       await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
+      expect(harness.nativeSet).toHaveBeenCalledTimes(1)
       expect(vi.mocked(app.quit)).not.toHaveBeenCalled()
     } finally {
       firstNativeWrite.resolve()
-      initializerWrite.resolve()
+      initializerRead.resolve('synthetic-initializer-token')
       const { openTokenStoreAdmission } = await import('../tokenStore.ts')
       openTokenStoreAdmission()
       await first
