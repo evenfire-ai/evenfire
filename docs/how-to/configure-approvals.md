@@ -124,6 +124,13 @@ already stored for it still covers a later create, including while the chat is
 allow-all, except on a stateless Host: there every create and enable asks,
 whatever grant is stored. The mode does not change that forced gate.
 
+Any change of a session's effective mode, up or down, clears its mode-scoped
+grants: every task grant (a plain approval that covers the rest of the task)
+except `cron_manage`'s, so the `http_request` one goes too, not only the
+`shell_exec` one; the Always grant for `shell_exec`; and the auto shell grants
+(Allow this command and Always allow shell). Always grants for other tools
+stay.
+
 A guardrail `ask` shows its card in every interactive mode, scoped to that one
 call, with no Always option. Allow-all still runs these with no card: a tool an
 admin forces to ask with `spec.approval.tools.<tool>: true`, a tool the user
@@ -226,9 +233,10 @@ Lower `modeCeiling`, set a channel's `allowModeChange` to false, or narrow
 the approver policy (set `defaultPolicy` to `cli_only` or
 `designated_approvers`, or remove an owner from a channel's `approvers`), with
 an edit to the Host CR. That stops new unattended tool calls at the next tool call of every
-affected session, with no restart. Mode-scoped grants are cleared as soon as
-the new config arrives, even for a session that makes no tool call before the
-change is undone. A card answered after the change resolves under the lower
+affected session, with no restart. Mode-scoped grants (see
+[Approval modes](#approval-modes)) are cleared as soon as the new config
+arrives, even for a session that makes no tool call before the change is
+undone. A card answered after the change resolves under the lower
 mode.
 
 Check the spelling of `allowModeChange` and the channel names. The CRD drops
