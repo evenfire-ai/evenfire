@@ -3,6 +3,7 @@
 import React from 'react'
 import dynamic from 'next/dynamic'
 import type { MDEditorProps } from '@uiw/react-md-editor'
+import { useTheme } from '@components/ThemeContext'
 import { cn } from '@lib/cn'
 import type { MarkdownEditorProps } from './types'
 
@@ -19,10 +20,12 @@ export function MarkdownEditor({
   placeholder,
   value,
 }: MarkdownEditorProps) {
+  const { themeMode } = useTheme()
+
   return (
     <div
       className={cn('cu-markdown-editor', invalid && 'cu-markdown-editor--invalid', className)}
-      data-color-mode="dark"
+      data-color-mode={themeMode}
     >
       <MDEditor
         height="100%"
