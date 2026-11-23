@@ -128,14 +128,16 @@ a new ID, after fresh GFS authorization.
 `shell_exec` remains the trust boundary:
 
 - The working directory and `HOME` are the caller workspace. A supplied allowlisted or dynamic `HOME` cannot relocate execution outside it.
-- `shell_exec`, `http_request` and `cron_manage` are approved per tool. A plain
-  approval of one of them covers that tool for the rest of the current task:
-  every iteration, including resumes after other approvals in the same task.
-  The next user message starts a new task and asks again. An "always" approval
-  keeps the tool approved for later tasks of the conversation while the
-  conversation stays in memory. Either approval stores only that tool's name.
-  No approval grants `'*'` or covers another tool, so a `shell_exec` approval
-  does not approve `http_request` or `cron_manage`. A Host restart or
+- `shell_exec`, `http_request`, `cron_manage` and `git_read` are approved per
+  tool. A plain approval of one of them covers that tool for the rest of the
+  current task: every iteration, including resumes after other approvals in
+  the same task. The next user message starts a new task and asks again. An
+  "always" approval keeps the tool approved for later tasks of the
+  conversation while the conversation stays in memory. Either approval stores
+  only that tool's name. No approval grants `'*'`. The one cross-tool rule: a
+  `shell_exec` approval also covers `git_read`, which reads less than the
+  shell. A `shell_exec` approval does not approve `http_request` or
+  `cron_manage`. A Host restart or
   a cold resume asks again. A guardrail rule with `action: 'ask'`
   (`exact_invocation`) or a persisted legacy approval without a scope
   authorizes only that one frozen call.
@@ -218,8 +220,9 @@ a new ID, after fresh GFS authorization.
 8. One approval of `shell_exec` covers later shell commands for the rest of the
    task (with "always", for the rest of the conversation while it stays in
    memory), including commands the model issues after it has read untrusted
-   GFS content. The shell runs with the Host UID. The approval covers only
-   `shell_exec`: `http_request` and `cron_manage` are asked for separately. A
+   GFS content. The shell runs with the Host UID. The approval covers
+   `shell_exec` and the read-only `git_read`: `http_request` and `cron_manage`
+   are asked for separately. A
    configured `clerum__gfs_download` approval is still asked for each call.
    Operators who need per-call approval add a guardrail rule with
    `action: 'ask'` for `shell_exec`, which restores per-call approval.

@@ -22,7 +22,8 @@ output of `json_transform` reaches the model wrapped as tool output, like
 `file_read`'s.
 
 `git_read` is read-only git in a workspace repository, without a shell. It is
-registered when git 2.38 or newer is installed in `/usr/bin` or `/bin`. It
+registered when a root-owned git 2.38 or newer is installed in `/usr/bin` or
+`/bin` and the shell and file tools share one workspace root. It
 never returns the content of platform-managed paths, in any revision, and it
 refuses a repository whose configuration can run programs or whose files
 link outside the workspace. Its approval follows the shell and `file_read`:
