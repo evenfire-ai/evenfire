@@ -14,8 +14,9 @@ export type GateCause =
   | 'guardrail_ask'
 
 /**
- * Live inputs for a later decision. Getters are read at admission time.
- * This task only threads them; it does not apply the decision table.
+ * Live inputs for the approval decision. The tool-call policy reads the
+ * getters at admission time and applies the decision table to them
+ * (`readDecision` in toolCallPolicy.ts calls `decideApproval`).
  */
 export interface ApprovalModeInputs {
   storedMode(): ApprovalMode
