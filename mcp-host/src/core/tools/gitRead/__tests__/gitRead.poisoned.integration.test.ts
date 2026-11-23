@@ -201,19 +201,35 @@ describe('git_read poisoned repositories', () => {
   })
 
   it('p06 post-index-change hook, through core.hooksPath and .git/hooks: no fire', async () => {
-    const dir = newRepo()
-    const hook = path.join(dir, '.git', 'hooks', 'post-index-change')
-    fs.writeFileSync(hook, `#!/bin/sh\n${touch('p06')}\n`, { mode: 0o755 })
-    const later = (): void => {
-      const when = new Date(Date.now() + 5000)
-      fs.utimesSync(path.join(dir, 'a.txt'), when, when)
+    // A fresh future mtime on an unmodified tracked file makes git status
+    // refresh and rewrite the index, which runs post-index-change.
+    let tick = 0
+    const restat = (dir: string): void => {
+      const when = new Date(Date.now() + 60_000 + (tick += 10_000))
+      fs.utimesSync(path.join(dir, 'b.bin'), when, when)
     }
-    later()
-    control(dir, 'git status')
-    expect(fired('p06')).toBe(true)
-    later()
-    expect((await gitRead(dir, { subcommand: 'status' })).is_error).toBe(false)
-    expect(fired('p06')).toBe(false)
+    const check = async (dir: string, id: string): Promise<void> => {
+      restat(dir)
+      control(dir, 'git status')
+      expect(fired(id)).toBe(true)
+      restat(dir)
+      expect((await gitRead(dir, { subcommand: 'status' })).is_error).toBe(false)
+      expect(fired(id)).toBe(false)
+      // The control still fires afterwards: the hook was live during the git_read call.
+      restat(dir)
+      control(dir, 'git status')
+      expect(fired(id)).toBe(true)
+    }
+
+    const dir = newRepo()
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-index-change'),
+      `#!/bin/sh\n${touch('p06')}\n`,
+      {
+        mode: 0o755,
+      }
+    )
+    await check(dir, 'p06')
 
     const other = newRepo()
     fs.mkdirSync(path.join(other, 'hk'))
@@ -221,10 +237,7 @@ describe('git_read poisoned repositories', () => {
       mode: 0o755,
     })
     appendConfig(other, '[core]\n\thooksPath = hk\n')
-    control(other, 'git status')
-    expect(fired('p06b')).toBe(true)
-    expect((await gitRead(other, { subcommand: 'status' })).is_error).toBe(false)
-    expect(fired('p06b')).toBe(false)
+    await check(other, 'p06b')
   })
 
   it('p07 include.path and includeIf to a workspace file: refused', async () => {
