@@ -23,10 +23,16 @@ output of `json_transform` reaches the model wrapped as tool output, like
 
 `git_read` is read-only git in a workspace repository, without a shell. It is
 registered when a root-owned git 2.38 or newer is installed in `/usr/bin` or
-`/bin` and the shell and file tools share one workspace root. It
-never returns the content of platform-managed paths, in any revision, and it
-refuses a repository whose configuration can run programs or whose files
-link outside the workspace. Its approval follows the shell and `file_read`:
+`/bin` and the shell and file tools share one workspace root. It is built
+not to return the content of platform-managed paths, and it refuses a
+repository whose configuration has settings it does not accept (drivers,
+filters, includes, signing tools and the like), whose files link outside the
+workspace, or whose index names paths outside the worktree. It also refuses
+revisions in git notes history. In `auto`, a call that returns only names and
+ids (`status`, `log` without a patch, branches, tags, refs, listings) runs with
+no card; a call that can return file content (`show`, `diff`, `grep`,
+`blame`, `cat_file`, `log` with a patch or pickaxe) shows a card for that one
+call. Its approval follows the shell and `file_read`:
 
 - `tools.shell_exec: true` or `tools.file_read: true` also make `git_read`
   ask. `tools.git_read: false` runs it with no card only when neither is
@@ -142,7 +148,7 @@ choice, so raising it again restores that choice.
 | Mode | What a gated call does |
 | --- | --- |
 | `manual` | Today's card. The classifier is not called. |
-| `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. A typed read-only `git` command is answered once with a pointer to `git_read` instead; sending it again takes the shell path. `http_request` and `git_read` run with no card. Every other tool still shows a card. |
+| `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. A typed `git` command that only lists repository state (`git status`, `git log` without a patch, branch and tag listings) is answered once with a pointer to `git_read` instead, when no guardrail rule is configured; sending it again takes the shell path. `http_request` runs with no card, and so does a `git_read` call that returns only names and ids; a `git_read` call that can return file content shows a card. Every other tool still shows a card. |
 | `allow_all` | Runs every call that would have shown a card, except `cron_manage` and a guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules), which still show their card. |
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant

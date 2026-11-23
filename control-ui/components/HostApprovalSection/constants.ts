@@ -70,7 +70,7 @@ export const NATIVE_TOOLS: NativeToolMeta[] = [
     codeDefault: 'required',
     description: 'Read-only git in a workspace repository (no shell).',
     riskHint:
-      'Skip makes git_read run without a card, unless shell_exec or file_read is set to Required. It cannot run programs and never returns protected content.',
+      'Skip makes git_read run without a card, including reads of file content, unless shell_exec or file_read is set to Required. Under the default, auto asks before git_read reads file content.',
   },
   {
     name: 'http_request',
