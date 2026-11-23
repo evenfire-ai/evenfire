@@ -658,6 +658,11 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
       }
     })
     for (const real of [gitDir, commonDir, top]) confine(real, realRoot)
+    // The call's directory must be inside the worktree git reports. With a
+    // core.worktree elsewhere, git reads that worktree, not the paths the
+    // call names under its directory, which the guardrail and the blame
+    // realpath check judge.
+    if (!isInside(cwd, top)) throw new GitReadRefusal('not_a_repository')
     topLevel = top
 
     // P3. The object store.

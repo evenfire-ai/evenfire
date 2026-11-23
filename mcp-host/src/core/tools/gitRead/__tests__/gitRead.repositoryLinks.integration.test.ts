@@ -254,6 +254,24 @@ describe('git_read repository links (P2–P4)', () => {
     expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
+  it('a core.worktree elsewhere in the workspace is refused for a call from the repository directory', async () => {
+    const repo = freshRepo()
+    const inner = path.join(fx.root, `inner${counter}`)
+    fs.mkdirSync(path.join(repo, 'sub'), { recursive: true })
+    fs.mkdirSync(path.join(inner, 'sub'), { recursive: true })
+    fs.writeFileSync(path.join(repo, 'sub', 'a'), 'REPO-COPY-LINE\n')
+    fs.writeFileSync(path.join(inner, 'sub', 'a'), 'INNER-COPY-LINE\n')
+    gitw(repo, 'add', '-A')
+    gitw(repo, 'commit', '-qm', 'sub')
+    gitw(repo, 'config', 'core.worktree', inner)
+    // Control: git reads the configured worktree, not the repository directory.
+    expect(controlGit(fx.root, repo, 'grep', '-e', 'COPY-LINE').out).toContain('INNER-COPY-LINE')
+    for (const subcommand of ['status', 'diff', 'ls_files', 'log']) {
+      expect(await verdict(repo, subcommand)).toBe('not_a_repository')
+    }
+    // A submodule's own core.worktree is its toplevel: see the recursive clone row.
+  })
+
   it('a recursive clone with submodules runs, in the superproject and inside the submodule', async () => {
     const child = freshRepo()
     const source = freshRepo()
