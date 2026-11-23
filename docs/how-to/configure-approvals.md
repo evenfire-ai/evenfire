@@ -150,12 +150,19 @@ choice, so raising it again restores that choice.
 | --- | --- |
 | `manual` | Today's card. The classifier is not called. |
 | `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. A typed `git` command that only lists repository state (`git status`, `git log` without a patch, branch and tag listings) is answered once with a pointer to `git_read` instead, when no guardrail rule is configured; sending it again takes the shell path. `http_request` runs with no card, and so does a `git_read` call that returns only names and ids; a `git_read` call that can return file content shows a card. Every other tool still shows a card. |
-| `allow_all` | Runs every call that would have shown a card, except `cron_manage` and a guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules), which still show their card. |
+| `allow_all` | Runs every call that would have shown a card, except two. `cron_manage` asks exactly when manual would (see below). A guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules) still shows its card. |
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant
 already stored for it still covers a later create, including while the chat is
 allow-all, except on a stateless Host: there every create and enable asks,
 whatever grant is stored. The mode does not change that forced gate.
+
+Any change of a session's effective mode, up or down, clears its mode-scoped
+grants: every task grant (a plain approval that covers the rest of the task)
+except `cron_manage`'s, so the `http_request` one goes too, not only the
+`shell_exec` one; the Always grant for `shell_exec`; and the auto shell grants
+(Allow this command and Always allow shell). Always grants for other tools
+stay.
 
 A guardrail `ask` shows its card in every interactive mode, scoped to that one
 call, with no Always option. Allow-all still runs these with no card: a tool an
@@ -185,7 +192,7 @@ An `allow_all` ceiling accepts, among other things: shell that can read the
 process environment, the runtime-token Secret, and the Host GFS token; HTTP to
 any public host on ports 80 and 443 when the allowlist is empty; MCP servers
 running under the user's own OAuth identity; and edits to shared identity files.
-`cron_manage` still asks, and a guardrail `ask` still shows its card. In `auto`, `http_request` runs with no card unless
+`cron_manage` still asks exactly when manual would, and a guardrail `ask` still shows its card. In `auto`, `http_request` runs with no card unless
 `tools.http_request` is `true`, which keeps the card.
 
 ### Channel cap
@@ -201,10 +208,11 @@ session's owner.
 | Email | `allow_all` only when `approval.channels.email.allowModeChange` is `true`. The switch defaults to off, because the From address can be forged. `manual` for an owner the approver policy does not allow |
 | Any other channel | `manual` |
 
-A malformed value caps that channel at `manual`: a `channels` value or channel
-block that is not an object, or an `allowModeChange` that is not a boolean.
-mcp-host logs `approval_config_invalid` with the field name when the config
-arrives.
+A malformed value caps sessions at `manual`. A `channels` value that is not an object
+caps every messaging channel: Telegram, email, Slack and Microsoft Teams. A
+channel block that is not an object, or an `allowModeChange` that is not a
+boolean, caps that channel only. Desktop is not affected. mcp-host logs
+`approval_config_invalid` with the field name when the config arrives.
 
 The table assumes the approver policy allows the channel session's owner. For
 an owner it does not allow, the column is the same as a switch that is off.
@@ -258,9 +266,10 @@ Lower `modeCeiling`, set a channel's `allowModeChange` to false, or narrow
 the approver policy (set `defaultPolicy` to `cli_only` or
 `designated_approvers`, or remove an owner from a channel's `approvers`), with
 an edit to the Host CR. That stops new unattended tool calls at the next tool call of every
-affected session, with no restart. Mode-scoped grants are cleared as soon as
-the new config arrives, even for a session that makes no tool call before the
-change is undone. A card answered after the change resolves under the lower
+affected session, with no restart. Mode-scoped grants (see
+[Approval modes](#approval-modes)) are cleared as soon as the new config
+arrives, even for a session that makes no tool call before the change is
+undone. A card answered after the change resolves under the lower
 mode.
 
 Check the spelling of `allowModeChange` and the channel names. The CRD drops

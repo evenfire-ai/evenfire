@@ -1563,25 +1563,28 @@ describe('ChannelReader shell card choices', () => {
 
   it('rejects an unknown tool code without sendDenial', async () => {
     const rpc = rpcClient()
-    const { adapter } = adapterFor('telegram')
+    rpc.authorizeProviderMessage = vi.fn(async () => ({ authorized: true }))
+    const { adapter, sent } = adapterFor('telegram')
     const reader = new ChannelReader({
       rpcClient: rpc,
       adapters: new Map([['telegram', adapter]]),
     })
+    const source = telegramMessage({
+      content: 'tool:q:abcdefghijklmnop',
+      messageId: 'unknown-tool-code',
+      providerIdentity: {
+        medium: 'telegram',
+        providerUserId: '123456',
+        providerChannelId: '424242',
+        providerEventId: 'telegram:424242:unknown-tool-code',
+      },
+    })
 
-    await reader.handleMessages([
-      telegramMessage({
-        content: 'tool:q:abcdefghijklmnop',
-        messageId: 'unknown-tool-code',
-        providerIdentity: {
-          medium: 'telegram',
-          providerUserId: '123456',
-          providerChannelId: '424242',
-          providerEventId: 'telegram:424242:unknown-tool-code',
-        },
-      }),
-    ])
+    await reader.handleMessages([source])
 
+    // Liveness: the message reached the provider gate, upstream of the code parse.
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledWith(source.providerIdentity)
+    expect(sent.map(message => message.content)).toEqual(['That approval choice is not supported.'])
     expect(rpc.sendDenial).not.toHaveBeenCalled()
     expect(rpc.sendApproval).not.toHaveBeenCalled()
     expect(rpc.sendMessage).not.toHaveBeenCalled()

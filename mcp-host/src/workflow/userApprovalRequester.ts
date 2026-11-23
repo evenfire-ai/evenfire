@@ -481,6 +481,11 @@ async function requestApproval(
           'Workflow approval request conflicted with an earlier trigger attempt. Send the workflow request again as a new channel message, or change the workflow inputs.'
         )
       }
+      if (res.status === 422 && errorCode === 'approval_target_retired') {
+        throw new Error(
+          'The approver for this approval request has been removed. Choose another approver.'
+        )
+      }
       throw new Error(`Approval request failed (${res.status})`)
     }
 

@@ -9,23 +9,41 @@ import {
   revokePendingInvitation,
 } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
+import type { UserLifecycleState } from '../../services/directory/users.js'
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
-async function findExistingMemberByEmail(
-  email: string
-): Promise<{ id: string; email: string } | null> {
+type ExistingMember = { id: string; email: string; lifecycleState: UserLifecycleState }
+
+/**
+ * Includes retired users: a retired row still holds the address and the
+ * invitation could never be accepted, so it is refused too.
+ */
+async function findExistingMemberByEmail(email: string): Promise<ExistingMember | null> {
   const normalizedEmail = email.trim().toLowerCase()
   if (!normalizedEmail) return null
-  const matches = await listUsers(normalizedEmail)
+  const matches = await listUsers(normalizedEmail, { includeRetired: true })
   return (
     matches.find(member => String(member.email || '').toLowerCase() === normalizedEmail) || null
   )
 }
 
-function sendExistingMemberConflict(res: Response, member: { id: string; email: string }): void {
+/**
+ * An active member is pointed to their record. A removed (retired) member is
+ * not: the Users page does not list them, so there is no member to
+ * open, and no path makes a retired user active again.
+ */
+function sendExistingMemberConflict(res: Response, member: ExistingMember): void {
+  if (member.lifecycleState === 'retired') {
+    res.status(409).json({
+      error: 'member_email_retired',
+      message: "This email belongs to a removed member and can't be invited again.",
+      email: member.email,
+    })
+    return
+  }
   res.status(409).json({
     error: 'member_email_exists',
     message:

@@ -8,7 +8,7 @@ type MembershipRow = {
   team_name: string | null
 }
 
-async function findFirstActiveMembership(
+export async function findFirstActiveMembership(
   db: {
     query: (
       text: string,
@@ -105,14 +105,48 @@ function teamlessMemberMembership(): MembershipRow {
   }
 }
 
-export async function currentMemberMembership(
+/**
+ * True when the account has signed in with OIDC at least once. Such an account
+ * is never healed from, or offered password setup from, accepted invitations
+ * matched by email, just as OIDC sign-in itself never heals. (The default-team
+ * order in findFirstActiveMembership still reads them, read-only, to rank
+ * memberships the account already has.) OIDC sign-in creates an account for
+ * an address whose earlier holder may have been hard-deleted, and that holder's
+ * accepted invitations outlive them with `accepted_user_id` set to NULL. Healing by
+ * email would hand the new account the removed member's teams and roles, so
+ * login does not heal it, and an admin's password setup resend
+ * (createPasswordSetupInvitationForUser) refuses it rather than copy those
+ * teams and roles into a new invitation. An unlinked account is healed as
+ * before.
+ */
+export async function hasOidcLink(
+  db: Pick<DbTransactionClient, 'query'>,
+  userId: string
+): Promise<boolean> {
+  const result = await db.query(`SELECT 1 FROM user_oidc_links WHERE user_id = $1 LIMIT 1`, [
+    userId,
+  ])
+  return result.rows.length > 0
+}
+
+/** Heals and adopts the address's accepted invitations, unless the account is OIDC-linked. */
+async function healAcceptedInvitationsUnlessOidcLinked(
+  db: Pick<DbTransactionClient, 'query'>,
+  userId: string,
+  email: string
+): Promise<void> {
+  if (await hasOidcLink(db, userId)) return
+  await healAcceptedInvitationMemberships(db, userId, email)
+  await linkAcceptedInvitationsToUser(db, userId, email)
+}
+
+async function currentMemberMembership(
   db: Pick<DbTransactionClient, 'query'>,
   user: { id: string; email: string }
 ): Promise<MembershipRow> {
   let membership = await findFirstActiveMembership(db, user.id)
   if ((membership.rowCount ?? 0) === 0) {
-    await healAcceptedInvitationMemberships(db, user.id, user.email)
-    await linkAcceptedInvitationsToUser(db, user.id, user.email)
+    await healAcceptedInvitationsUnlessOidcLinked(db, user.id, user.email)
     membership = await findFirstActiveMembership(db, user.id)
   }
   return (membership.rows[0] as MembershipRow | undefined) || teamlessMemberMembership()
@@ -166,8 +200,7 @@ export async function googleLoginData(input: { email: string; name?: string; pic
       [user.id, input.name || null]
     )
 
-    await healAcceptedInvitationMemberships(db, user.id, input.email)
-    await linkAcceptedInvitationsToUser(db, user.id, input.email)
+    await healAcceptedInvitationsUnlessOidcLinked(db, user.id, input.email)
 
     const membership = await findFirstActiveMembership(db, user.id)
 

@@ -171,7 +171,7 @@ const hostCeilings = new Map<string, { ceiling: ApprovalMode; requestSeq: number
 /** Limit refreshes in flight, per chat key. Cleared on a scope reset. */
 const limitRefreshes = new Map<string, Promise<void>>()
 
-const MODE_RANK: Record<ApprovalMode, number> = { manual: 0, auto: 1, allow_all: 2 }
+export const MODE_RANK: Record<ApprovalMode, number> = { manual: 0, auto: 1, allow_all: 2 }
 
 function lowerMode(a: ApprovalMode, b: ApprovalMode): ApprovalMode {
   return MODE_RANK[a] <= MODE_RANK[b] ? a : b
@@ -181,7 +181,7 @@ function keyFor(agentRef: string, chatId: string | null): string {
   return `${agentRef}::${chatId ?? ''}`
 }
 
-function isMode(value: unknown): value is ApprovalMode {
+export function isMode(value: unknown): value is ApprovalMode {
   return value === 'manual' || value === 'auto' || value === 'allow_all'
 }
 

@@ -118,6 +118,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       ...PR2_MIGRATION_VERSIONS,
       '0157_governed_trace_retention_indexed',
       '0158_governed_trace_retention_hardening',
+      '0159_oidc_member_links',
     ])
   })
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { approvalParametersWithinNotificationLimit } from '../../../agent/stateMachine'
+import { approvalParametersWithinNotificationLimit } from '../../../agent/approvalNotificationLimit'
 import { projectGfsApproval } from '../../../visualInput/suspension'
 import type { PendingApproval } from '../../types'
 import type { ApprovalMode } from '../approvalMode'

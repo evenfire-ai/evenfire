@@ -104,11 +104,13 @@ function baseInput(overrides?: {
     providerType: overrides?.providerType ?? 'claude',
     modelName: overrides?.modelName ?? 'claude-sonnet',
     taskSignal: overrides?.taskSignal ?? new AbortController().signal,
-    usage: {
-      reporter: overrides?.reporter,
-      context: overrides?.context ?? USAGE_CONTEXT,
-      staticContext: STATIC_CONTEXT,
-    },
+    usage: overrides?.reporter
+      ? {
+          reporter: overrides.reporter,
+          context: overrides.context ?? USAGE_CONTEXT,
+          staticContext: STATIC_CONTEXT,
+        }
+      : undefined,
     sessionLogId: overrides?.sessionLogId ?? 'session-log-id',
   }
 }
@@ -352,6 +354,53 @@ describe('shell classifier', () => {
     expect(cancelled).toBe('CANCELLED')
     expect(called).toBe(1)
     expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('escalates and warns as a timeout when the reply arrives after the 10s timeout', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    let resolvedAfterAbort = false
+
+    const pending = classifyToolCall(
+      baseInput({
+        description: DESCRIPTION,
+        args: { command: COMMAND, parameters: PARAM },
+        provider: {
+          // Resolves, does not reject, once the timeout aborts its signal.
+          completeSingleTurn: (_messages, options) =>
+            new Promise(resolve => {
+              options?.signal?.addEventListener(
+                'abort',
+                () => {
+                  resolvedAfterAbort = true
+                  resolve(modelResponse('APPROVE'))
+                },
+                { once: true }
+              )
+            }),
+        },
+      })
+    )
+    await vi.advanceTimersByTimeAsync(10_000)
+    const verdict = await pending
+
+    expect(resolvedAfterAbort).toBe(true)
+    expect(verdict).toBe('ESCALATE')
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [fields, message] = warn.mock.calls[0] as [Record<string, unknown>, string]
+    expect(fields).toEqual({
+      event: 'shell_classifier_failed',
+      session: 'session-log-id',
+      providerType: 'claude',
+      modelName: 'claude-sonnet',
+      errorClass: 'DOMException',
+      reason: 'timeout',
+    })
+    const line = JSON.stringify([fields, message])
+    for (const secret of [COMMAND, PARAM, DESCRIPTION, 'APPROVE', 'You review one shell command']) {
+      expect(line).not.toContain(secret)
+    }
   })
 
   it('logs a throw before the provider call once, as an error', async () => {
@@ -670,6 +719,46 @@ describe('shell classifier', () => {
     expect(conversation.input_tokens).toBe(41)
     expect(recordSessionUsage).not.toHaveBeenCalled()
     expect(await histogramCounts()).toEqual(before)
+  })
+
+  it('keeps the verdict and warns with the error class when the usage reporter throws', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    class ReporterFailure extends Error {}
+    const enqueue = vi.fn(() => {
+      throw new ReporterFailure(THROWN)
+    })
+    const reporter = { enqueue } as unknown as UsageReporter
+
+    const verdict = await classifyToolCall(
+      baseInput({
+        reporter,
+        description: DESCRIPTION,
+        args: { command: COMMAND, parameters: PARAM },
+        provider: { completeSingleTurn: async () => modelResponse('APPROVE') },
+      })
+    )
+
+    expect(verdict).toBe('APPROVE')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [fields, message] = warn.mock.calls[0] as [Record<string, unknown>, string]
+    expect(fields).toEqual({
+      event: 'shell_classifier_usage_failed',
+      errorClass: 'ReporterFailure',
+    })
+    const line = JSON.stringify([fields, message])
+    for (const secret of [
+      COMMAND,
+      PARAM,
+      DESCRIPTION,
+      THROWN,
+      'session-log-id',
+      'user-1',
+      'task-1',
+    ]) {
+      expect(line).not.toContain(secret)
+    }
   })
 
   it('logs one L3 line with the normalized verdict and no sensitive text', async () => {

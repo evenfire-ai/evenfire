@@ -15,12 +15,19 @@ import type { ToolRegistry } from '../../core/interfaces'
 import { BasicSafety } from '../../core/safety/safety'
 import { createSessionRouteHandlers } from '../sessionRouteHandlers'
 
+/** No Host approval config: every session reads manual. */
+const noApprovalConfig = () => ({ effective: undefined, hostSpec: undefined })
+/** No Host model, as main.ts reports it: no classifier. */
+const noHostModel = () => ({ providerType: 'unknown', modelName: 'unknown' })
+
 function makeHandlersUnderTest() {
   const convManager = new ConversationManager()
   const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
     getConversationManager: () => convManager,
     redactToolError: (_toolName, rawError) => rawError,
     redactTitle: rawTitle => rawTitle,
+    approvalSnapshot: noApprovalConfig,
+    sessionModel: noHostModel,
   })
   return { convManager, handleSessionsList, handleSessionMessages }
 }
@@ -233,6 +240,8 @@ describe('createSessionRouteHandlers — handleSessionsList title projection (sp
       redactToolError: (_t, e) => e,
       redactTitle: raw =>
         safety.sanitizeFreeformContent(raw, { secretWarning: 'secret in title' }).content,
+      approvalSnapshot: noApprovalConfig,
+      sessionModel: noHostModel,
     })
 
     const conv = await convManager.getOrCreate('user-A:rpc:agent-x:chat-1')
@@ -270,6 +279,8 @@ describe('createSessionRouteHandlers — Always approve eligibility on every vie
         getConversationManager: () => manager,
         redactToolError: (_toolName, rawError) => rawError,
         redactTitle: rawTitle => rawTitle,
+        approvalSnapshot: noApprovalConfig,
+        sessionModel: noHostModel,
       }),
     }
   }
@@ -356,6 +367,7 @@ describe('createSessionRouteHandlers — classifier pair while failover serves (
       getConversationManager: () => convManager,
       redactToolError: (_toolName, rawError) => rawError,
       redactTitle: rawTitle => rawTitle,
+      approvalSnapshot: noApprovalConfig,
       sessionModel: () => session,
       servedModel: () => served,
     })
@@ -395,6 +407,7 @@ describe('createSessionRouteHandlers — classifier pair while failover serves (
       getConversationManager: () => convManager,
       redactToolError: (_toolName, rawError) => rawError,
       redactTitle: rawTitle => rawTitle,
+      approvalSnapshot: noApprovalConfig,
       sessionModel: () => ({ providerType: 'openai', modelName: 'gpt-5.4-mini' }),
       servedModel: () => ({ provider: 'zai', model: 'glm-4.6', fallback: true }),
       shellClassifierPair: () => ({ providerType: 'openai', modelName: 'gpt-5.5' }),
@@ -412,6 +425,7 @@ describe('createSessionRouteHandlers — classifier pair while failover serves (
       getConversationManager: () => convManager,
       redactToolError: (_toolName, rawError) => rawError,
       redactTitle: rawTitle => rawTitle,
+      approvalSnapshot: noApprovalConfig,
       sessionModel: () => ({ providerType: 'claude', modelName: 'claude-sonnet-4-5' }),
       shellClassifierPair: () => ({ providerType: 'openai', modelName: 'gpt-4.1-mini' }),
     })

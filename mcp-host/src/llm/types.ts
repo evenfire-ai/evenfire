@@ -62,15 +62,15 @@ export interface ClassifiedError {
 }
 
 /**
- * Single-turn LLM transport. No loop, no tool execution.
- */
-/**
  * Effort on one completion. The API accepts `none` and `xhigh`. The installed
  * SDK union is only `low` | `medium` | `high` | null, so the OpenAI encoder
  * casts at the wire boundary.
  */
 export type ReasoningEffortOption = 'none' | 'low' | 'medium' | 'high' | 'xhigh'
 
+/**
+ * Single-turn LLM transport. No loop, no tool execution.
+ */
 export interface SingleTurnProvider {
   /** The request contract binds distinct image sources, even when their bytes repeat. */
   readonly requiresImageSourceIdentity?: boolean

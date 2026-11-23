@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
@@ -53,6 +55,45 @@ function makeApp() {
   app.use(createRpcRouter())
   app.use(apiErrorHandler)
   return app
+}
+
+// supertest resolves `.` and `..` segments (and their %2E spellings) before
+// sending, so a dot segment reaches the route only over a raw request.
+async function rawPatch(path: string, body: unknown): Promise<{ status: number; body: unknown }> {
+  const server = makeApp().listen(0, '127.0.0.1')
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.once('listening', resolve)
+    })
+    const { port } = server.address() as AddressInfo
+    const payload = JSON.stringify(body)
+    return await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path,
+          method: 'PATCH',
+          headers: {
+            authorization: 'Bearer user-token',
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(payload),
+          },
+        },
+        res => {
+          let text = ''
+          res.setEncoding('utf8')
+          res.on('data', chunk => (text += chunk))
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(text) }))
+        }
+      )
+      req.once('error', reject)
+      req.end(payload)
+    })
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
 }
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -325,6 +366,25 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
 
     expect(fetchMock).not.toHaveBeenCalled()
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '/rpc/hosts/chatllm/sessions/./c1/approval-mode',
+    '/rpc/hosts/chatllm/sessions/../c1/approval-mode',
+    '/rpc/hosts/chatllm/sessions/chatllm/./approval-mode',
+    '/rpc/hosts/chatllm/sessions/chatllm/../approval-mode',
+  ])('refuses a dot segment before resolving the host: %s', async path => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await rawPatch(path, { mode: 'auto' })
+
+    expect(res).toEqual({
+      status: 400,
+      body: { error: 'Invalid hostRef, agent, or chatId' },
+    })
+    expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it.each([

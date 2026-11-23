@@ -5,6 +5,7 @@ import {
   type HostApprovalModeView,
   clearHostApprovalModeSaveFailure,
   getHostApprovalModeSnapshot,
+  isMode,
   readHostApprovalMode,
   refreshHostApprovalModeLimit,
   selectHostApprovalMode,
@@ -20,10 +21,6 @@ export interface UseHostApprovalModeResult extends HostApprovalModeView {
   refreshLimit: () => Promise<void>
   /** The store's current view of this chat, read outside a render. */
   readView: () => HostApprovalModeView
-}
-
-function isApprovalMode(value: unknown): value is ApprovalMode {
-  return value === 'manual' || value === 'auto' || value === 'allow_all'
 }
 
 export function useHostApprovalMode(
@@ -60,7 +57,7 @@ export function useHostApprovalMode(
           limit: 1,
         })
         const ceiling = catalog.items[0]?.modeCeiling
-        return isApprovalMode(ceiling) ? ceiling : null
+        return isMode(ceiling) ? ceiling : null
       },
     }),
     []
