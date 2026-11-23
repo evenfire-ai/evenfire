@@ -45,6 +45,16 @@ describe('matchTypedGitRead', () => {
     'git',
     'gitk status',
     'git status\nrm x',
+    'cd a&&b&&c && git log',
+    'git log < f',
+    'git branch -D x',
+    'git tag -d v1',
+    'git tag -v v1',
+    'git tag -v',
+    'git branch --contains',
+    'git branch --set-upstream-to=x',
+    'git diff --output=x',
+    'git log --output=out.txt -p',
   ])('does not redirect %s', command => {
     expect(matchTypedGitRead(command)).toBeNull()
   })

@@ -28,8 +28,8 @@ const READ_ONLY_SUBCOMMANDS: ReadonlySet<string> = new Set([
   'for-each-ref',
 ])
 
-/** `branch` / `tag` options that only list refs. */
-const LIST_FLAGS: ReadonlySet<string> = new Set([
+/** `branch` options that only list refs. */
+const BRANCH_LIST_FLAGS: ReadonlySet<string> = new Set([
   '-a',
   '-r',
   '-v',
@@ -41,14 +41,16 @@ const LIST_FLAGS: ReadonlySet<string> = new Set([
   '--remotes',
   '--verbose',
 ])
+/** `tag` options that only list refs (`tag -v` verifies, which runs gpg). */
+const TAG_LIST_FLAGS: ReadonlySet<string> = new Set(['--list', '-l'])
 /** List filters that take a value as the next word. */
 const LIST_FILTERS: ReadonlySet<string> = new Set(['--contains', '--merged', '--no-merged'])
 
-function listsRefsOnly(args: readonly string[]): boolean {
+function listsRefsOnly(args: readonly string[], flags: ReadonlySet<string>): boolean {
   let listMode = false
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
-    if (LIST_FLAGS.has(arg)) {
+    if (flags.has(arg)) {
       if (arg === '--list' || arg === '-l') listMode = true
       continue
     }
@@ -70,6 +72,8 @@ function listsRefsOnly(args: readonly string[]): boolean {
 }
 
 function readOnly(subcommand: string, args: readonly string[]): boolean {
+  // `--output=<file>` writes a file on diff, log and show.
+  if (args.some(arg => arg.startsWith('--output'))) return false
   if (READ_ONLY_SUBCOMMANDS.has(subcommand)) return true
   switch (subcommand) {
     case 'stash':
@@ -84,8 +88,9 @@ function readOnly(subcommand: string, args: readonly string[]): boolean {
         args[0] === 'get-url'
       )
     case 'branch':
+      return listsRefsOnly(args, BRANCH_LIST_FLAGS)
     case 'tag':
-      return listsRefsOnly(args)
+      return listsRefsOnly(args, TAG_LIST_FLAGS)
     default:
       return false
   }
@@ -100,7 +105,7 @@ function readOnly(subcommand: string, args: readonly string[]): boolean {
 export function matchTypedGitRead(command: string): { subcommand: string } | null {
   if (/[;|$`<>\n\r]/.test(command)) return null
   let rest = command.trim()
-  const cd = /^cd\s+\S+\s*&&\s*/.exec(rest)
+  const cd = /^cd\s+[^\s&]+\s*&&\s*/.exec(rest)
   if (cd) rest = rest.slice(cd[0].length)
   if (rest.includes('&')) return null
   const words = rest.split(/\s+/)
