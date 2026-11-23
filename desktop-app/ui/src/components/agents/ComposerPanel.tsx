@@ -1482,7 +1482,11 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           onClose={() => setAgentFilesModalOpen(false)}
         />
       ) : null}
-      <span className="visually-hidden" aria-live="polite">
+      <span
+        className="visually-hidden"
+        aria-live="polite"
+        data-testid="composer-suggestion-announcement"
+      >
         {suggestionAnnouncement ? (
           <span key={suggestionAnnouncement.id}>{suggestionAnnouncement.text}</span>
         ) : null}

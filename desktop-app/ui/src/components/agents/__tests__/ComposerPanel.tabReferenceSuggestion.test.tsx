@@ -180,12 +180,8 @@ function Harness({
 const chip = (label = 'report.md') =>
   screen.queryByRole('button', { name: `Reference ${label} in this message` })
 
-function liveRegion(container: HTMLElement): HTMLElement {
-  const region = Array.from(container.querySelectorAll<HTMLElement>('[aria-live="polite"]')).find(
-    element => element.className === 'visually-hidden'
-  )
-  if (!region) throw new Error('the composer has no polite live region')
-  return region
+function liveRegion(): HTMLElement {
+  return screen.getByTestId('composer-suggestion-announcement')
 }
 
 async function openMenuItem(name: string) {
@@ -346,8 +342,8 @@ describe('ComposerPanel — suggested reference announcement', () => {
   it('announces the chip when it appears and not again when the same file revalidates', async () => {
     const view = await fileView(1, 'report.md')
     const candidate = await suggestedCandidate(view)
-    const { container, rerender } = render(<Harness candidate={null} />)
-    const region = liveRegion(container)
+    const { rerender } = render(<Harness candidate={null} />)
+    const region = liveRegion()
     const mutations: MutationRecord[] = []
     const observer = new MutationObserver(records => mutations.push(...records))
     observer.observe(region, { childList: true, subtree: true, characterData: true })
@@ -372,8 +368,8 @@ describe('ComposerPanel — suggested reference announcement', () => {
 
   it('does not announce again when the same file revalidates under a new name', async () => {
     const candidate = await suggestedCandidate(await fileView(1, 'report.md'))
-    const { container, rerender } = render(<Harness candidate={candidate} />)
-    const region = liveRegion(container)
+    const { rerender } = render(<Harness candidate={candidate} />)
+    const region = liveRegion()
     await waitFor(() => expect(region.textContent).toBe('Suggested reference: report.md'))
     const mutations: MutationRecord[] = []
     const observer = new MutationObserver(records => mutations.push(...records))
@@ -393,8 +389,8 @@ describe('ComposerPanel — suggested reference announcement', () => {
   it('announces a different file when the suggestion moves to it', async () => {
     const report = await suggestedCandidate(await fileView(1, 'report.md'))
     const notes = await suggestedCandidate(await fileView(2, 'notes.md'))
-    const { container, rerender } = render(<Harness candidate={report} />)
-    const region = liveRegion(container)
+    const { rerender } = render(<Harness candidate={report} />)
+    const region = liveRegion()
     await waitFor(() => expect(region.textContent).toBe('Suggested reference: report.md'))
     rerender(<Harness candidate={notes} />)
     await waitFor(() => expect(region.textContent).toBe('Suggested reference: notes.md'))
