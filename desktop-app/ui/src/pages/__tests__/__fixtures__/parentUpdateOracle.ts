@@ -299,14 +299,19 @@ const commands = {
     },
     model => !model.loggedOut
   ),
-  retryAccess: command('RetryAccess', async (model, real) => {
-    const retry = screen.queryByRole('button', { name: 'Retry file access' })
-    if (!retry) return
-    impure(model)
-    await act(async () => fireEvent.click(retry))
-    expect(real.page.accessState(), 'a retry restores access').toBe('active')
-    model.retried += 1
-  }),
+  retryAccess: command(
+    'RetryAccess',
+    async (model, real) => {
+      const retry = screen.queryByRole('button', { name: 'Retry file access' })
+      if (!retry) return
+      impure(model)
+      await act(async () => fireEvent.click(retry))
+      expect(real.page.accessState(), 'a retry restores access').toBe('active')
+      model.retried += 1
+    },
+    // Signed out, the app shows no Files surface and so no Retry.
+    model => !model.loggedOut
+  ),
   navigateAway: command('NavigateAway', async (model, real) => {
     if (!real.page.filesMounted()) return
     impure(model)
