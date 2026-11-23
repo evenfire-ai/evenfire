@@ -2003,7 +2003,8 @@ export async function handleSetApprovalModeRoute(
       },
       '[Server] Error setting approval mode'
     )
-    json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+    // A fixed body: the error message can carry Conversation.id.
+    json(res, 500, { error: 'Set approval mode failed' })
   }
 }
 

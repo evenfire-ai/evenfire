@@ -325,7 +325,7 @@ describe('handleSetApprovalModeRoute', () => {
     expect(conv.approval_mode).toBe('auto')
   })
 
-  it('logs a store failure with only its class and the hashed session key', async () => {
+  it('answers a store failure with a fixed 500 and logs only its class and the hashed session key', async () => {
     const store = new InMemoryConversationStore()
     const manager = new ConversationManager(store)
     await seedRpc(manager)
@@ -347,6 +347,11 @@ describe('handleSetApprovalModeRoute', () => {
       )
       expect(persist).toHaveBeenCalledTimes(1)
       expect(captured.statusCode).toBe(500)
+      expect(captured.jsonBody).toEqual({ error: 'Set approval mode failed' })
+      const body = JSON.stringify(captured.jsonBody)
+      for (const raw of [conv?.id ?? '', rpcKey(), USER, CHAT, AGENT]) {
+        expect(body).not.toContain(raw)
+      }
       expect(error).toHaveBeenCalledTimes(1)
       const [fields, message] = error.mock.calls[0] as [Record<string, unknown>, string]
       expect(fields).toEqual({ errorClass: 'Error', sessionKey: approvalLogId(rpcKey()) })
