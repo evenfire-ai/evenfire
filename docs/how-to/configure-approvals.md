@@ -117,7 +117,7 @@ choice, so raising it again restores that choice.
 | --- | --- |
 | `manual` | Today's card. The classifier is not called. |
 | `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. `http_request` runs with no card. Every other tool still shows a card. |
-| `allow_all` | Runs every call that would have shown a card, except `cron_manage` and a guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules), which still show their card. |
+| `allow_all` | Runs every call that would have shown a card, except two. `cron_manage` asks exactly when manual would (see below). A guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules) still shows its card. |
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant
 already stored for it still covers a later create, including while the chat is
@@ -152,7 +152,7 @@ An `allow_all` ceiling accepts, among other things: shell that can read the
 process environment, the runtime-token Secret, and the Host GFS token; HTTP to
 any public host on ports 80 and 443 when the allowlist is empty; MCP servers
 running under the user's own OAuth identity; and edits to shared identity files.
-`cron_manage` still asks, and a guardrail `ask` still shows its card. In `auto`, `http_request` runs with no card unless
+`cron_manage` still asks exactly when manual would, and a guardrail `ask` still shows its card. In `auto`, `http_request` runs with no card unless
 `tools.http_request` is `true`, which keeps the card.
 
 ### Channel cap
