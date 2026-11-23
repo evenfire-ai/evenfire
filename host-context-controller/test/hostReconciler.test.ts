@@ -337,6 +337,37 @@ describe('HostReconciler', () => {
       expect(appsApi.readNamespacedDeployment).not.toHaveBeenCalledWith(rpcProxyRead)
       expect(coreApi.listNamespacedPod).not.toHaveBeenCalledWith(rpcProxyPodList)
     })
+
+    it('replaces a held Host Deployment that keeps its retired template without reading the RPC Proxy cohort', async () => {
+      const { reconciler, appsApi, coreApi } = createReconciler()
+      const existing = existingHostDeployment(reconciler, 'legacy-headers')
+      existing.metadata!.labels![RPC_PROXY_EDGE_PROTOCOL_LABEL] = 'legacy-headers'
+      existing.spec!.replicas = 0
+      routeDeploymentReads(appsApi, rpcProxyDeployment('dedicated-header-v1'), existing)
+
+      await expect(
+        (reconciler as any).ensureDeployment(makeHost(), [], undefined, {
+          stateless: true,
+          state: 'suspended',
+          suspensionBlocked: true,
+          allowScaleUpDuringHold: true,
+        })
+      ).resolves.toBe(true)
+
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+      const replaced = appsApi.replaceNamespacedDeployment.mock.calls[0]![0]
+        .body as k8s.V1Deployment
+      expect(replaced.spec?.replicas).toBe(1)
+      expect(replaced.spec?.template.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL]).toBe(
+        'legacy-headers'
+      )
+      expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith({
+        namespace: 'mcp-host',
+        name: 'alpha-host',
+      })
+      expect(appsApi.readNamespacedDeployment).not.toHaveBeenCalledWith(rpcProxyRead)
+      expect(coreApi.listNamespacedPod).not.toHaveBeenCalledWith(rpcProxyPodList)
+    })
   })
 
   it('keys GFS lifecycle evidence by namespace/name/uid and refuses a missing uid (#696)', () => {
