@@ -272,7 +272,7 @@ export async function runToolUseLoop(
 
           if (loopController.shouldAccept(result.content, iteration)) {
             // A final answer ends the turn a redirect waited on: nothing to count.
-            config.conversation.git_redirect_pending = false
+            if (config.conversation) config.conversation.git_redirect_pending = false
             return responseResult(
               config,
               iteration,

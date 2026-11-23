@@ -210,7 +210,8 @@ export async function executeToolCalls(
 
   // Compliance with a typed-git redirect is counted on the next model turn's
   // batch: the redirect's own batch sets the flag after this check.
-  if (config.conversation.git_redirect_pending && calls.length > 0) {
+  // `conversation` is required by type; partial test configs may omit it.
+  if (config.conversation?.git_redirect_pending && calls.length > 0) {
     gitRedirectCounter.inc({ followed: calls.some(c => c.name === 'git_read') ? 'yes' : 'no' })
     config.conversation.git_redirect_pending = false
   }
