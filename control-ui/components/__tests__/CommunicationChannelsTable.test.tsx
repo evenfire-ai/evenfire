@@ -1,6 +1,9 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { parse } from 'yaml'
 import type { CommunicationChannelItem } from '../../lib/communicationChannels'
 import { CommunicationChannelsTable } from '../CommunicationChannelsTable'
 import { ToastProvider } from '../Toast'
@@ -308,6 +311,50 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
 })
 
 describe('provider channel tabs', () => {
+  it.each(['telegram', 'slack', 'teams'] as const)(
+    'intentionally hides email-only and providerless records in the %s tab',
+    provider => {
+      const emailChannel = parse(
+        readFileSync(
+          resolve(
+            __dirname,
+            '../../../deploy/overlays/minikube/instances/communicationchannel.yaml'
+          ),
+          'utf8'
+        )
+      ) as CommunicationChannelItem
+      const providerlessChannel: CommunicationChannelItem = {
+        metadata: { name: 'fixture-providerless', namespace: 'channels' },
+        spec: { hostRef: 'agent-a' },
+      }
+      const supportedChannel: CommunicationChannelItem = {
+        metadata: { name: 'fixture-supported', namespace: 'channels' },
+        spec: { hostRef: 'agent-a', [provider]: [{ channelId: 'fixture-conversation' }] },
+      }
+      render(
+        <ToastProvider>
+          <CommunicationChannelsTable
+            items={[emailChannel, providerlessChannel, supportedChannel]}
+            provider={provider}
+            onChanged={vi.fn()}
+          />
+        </ToastProvider>
+      )
+
+      expect(screen.getByText('Communication channels (1)')).toBeVisible()
+      expect(screen.getByRole('cell', { name: 'fixture-supported' })).toBeVisible()
+      expect(
+        screen.getByRole('button', { name: 'Actions for channel fixture-supported' })
+      ).toBeEnabled()
+      for (const hidden of [emailChannel, providerlessChannel]) {
+        expect(screen.queryByRole('cell', { name: hidden.metadata!.name })).not.toBeInTheDocument()
+        expect(
+          screen.queryByRole('button', { name: `Actions for channel ${hidden.metadata!.name}` })
+        ).not.toBeInTheDocument()
+      }
+    }
+  )
+
   it('separates provider references, preserves shared channels, and scopes search', () => {
     const items: CommunicationChannelItem[] = [
       {
