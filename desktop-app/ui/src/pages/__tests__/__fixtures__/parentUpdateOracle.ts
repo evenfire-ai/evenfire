@@ -687,7 +687,7 @@ const keySequences: Array<[string, Command[]]> = [
     [c.openRemove, c.goOffline, c.confirm, c.step, c.step, c.logout, c.step],
   ],
   [
-    'direct role change overlapping a run',
+    'Remove stays disabled while a direct role change is pending',
     [
       c.directRoleChange,
       c.openRemove,
@@ -750,7 +750,9 @@ const keySequences: Array<[string, Command[]]> = [
   ],
 ]
 
-const SEQUENCES_WITHOUT_RUN = new Set(['direct role change overlapping a run'])
+const SEQUENCES_WITHOUT_RUN = new Set([
+  'Remove stays disabled while a direct role change is pending',
+])
 const DISRUPTION_SEQUENCES = new Set([
   'latch: revoke + retry mid-write',
   'purge + retry mid-write',
