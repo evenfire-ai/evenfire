@@ -115,6 +115,7 @@ function makeAdmission(
     })),
     fileReferenceGfs: () => ({ status: 'unsupported' }),
     logger,
+    approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
     ...overrides,
   }
   const spies: Spies = {

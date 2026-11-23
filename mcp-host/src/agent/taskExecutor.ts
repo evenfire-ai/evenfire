@@ -255,9 +255,8 @@ export interface TaskExecutorDeps {
   /**
    * Live approval snapshot. Interactive tasks read tools, the live set, the
    * ceiling and the channel cap (switch and approver policy) through this.
-   * Absent uses `approvalConfig`.
    */
-  approvalConfigProvider?: () => ApprovalConfigSnapshot
+  approvalConfigProvider: () => ApprovalConfigSnapshot
   guardrailsConfig?: GuardrailsConfig
   coreEvents: SimpleEventEmitter
   cronScheduler: CronScheduler | null
@@ -2388,12 +2387,7 @@ export class TaskExecutor {
   }
 
   private approvalSnapshot(): ApprovalConfigSnapshot {
-    return (
-      this.deps.approvalConfigProvider?.() ?? {
-        effective: this.deps.approvalConfig,
-        hostSpec: this.deps.approvalConfig,
-      }
-    )
+    return this.deps.approvalConfigProvider()
   }
 
   /** Live membership for clerum__gfs_download. Undefined means the set is empty. */

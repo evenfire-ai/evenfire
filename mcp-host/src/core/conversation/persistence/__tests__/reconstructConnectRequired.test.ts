@@ -147,6 +147,10 @@ describe('U5 — connect_required durable round-trip', () => {
       workspaceService: undefined,
       modelName: 'fixture-model',
       approvalConfig: { defaultPolicy: 'channel_users', channels: {} },
+      approvalConfigProvider: () => ({
+        effective: deps.approvalConfig,
+        hostSpec: deps.approvalConfig,
+      }),
       config: {
         maxTaskDuration: 30_000,
         maxToolCallsPerTask: 10,

@@ -103,7 +103,7 @@ export interface IncomingAdmissionDeps {
    * Live ceiling, channel switch and approver policy. Read when a writer runs,
    * not at wiring time.
    */
-  approvalSnapshot?: () => ApprovalConfigSnapshot
+  approvalSnapshot: () => ApprovalConfigSnapshot
 }
 
 const MESSAGING_CHANNELS = new Set(['telegram', 'email', 'slack', 'teams'])
@@ -350,7 +350,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             source: normalizedMessage.channelType,
           })
           sessionLogId = approvalLogId(conversation.id)
-          const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
+          const live = deps.approvalSnapshot()
           // The switch decides what the command stores and whether the reply
           // names the channel. The cap, which adds the approver policy for
           // this session's owner, decides the effective mode.
@@ -580,7 +580,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         })
         sessionLogId = approvalLogId(conversation.id)
         if (!created) return undefined
-        const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
+        const live = deps.approvalSnapshot()
         const ceiling = readModeCeiling(live)
         const cap = readChannelCap(live, conversation.channel_type, conversation.user_id)
         const effective = effectiveApprovalMode(requested, ceiling, cap)

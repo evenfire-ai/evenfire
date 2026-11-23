@@ -153,6 +153,10 @@ function makeScenario(options: {
       defaultPolicy: 'channel_users',
       channels: {},
     },
+    approvalConfigProvider: () => ({
+      effective: deps.approvalConfig,
+      hostSpec: deps.approvalConfig,
+    }),
     config: {
       maxTaskDuration: 300_000,
       maxToolCallsPerTask: 10,
