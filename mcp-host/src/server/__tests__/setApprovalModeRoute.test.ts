@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applySessionApprovalMode } from '../../agent/sessionApprovalMode'
 import type { ApprovalConfigSnapshot } from '../../core/approval/approvalMode'
+import { approvalLogId } from '../../core/approval/grantMemory'
 import { classifierAvailable } from '../../core/approval/shellClassifier'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { InMemoryConversationStore } from '../../core/conversation/conversationStore'
@@ -19,6 +20,7 @@ import { runMigrations } from '../../db/migrate'
 import { applyPragmas } from '../../db/pragmas'
 import { createDispatcher, dispatch } from '../../db/worker/dispatcher'
 import type { SessionRow } from '../../db/worker/protocol'
+import { logger } from '../../logger'
 import { serializeSessionKey } from '../../session'
 import { handleSetApprovalModeRoute } from '../routes'
 import { createSessionRouteHandlers } from '../sessionRouteHandlers'
@@ -321,6 +323,41 @@ describe('handleSetApprovalModeRoute', () => {
     expect(conv.state).toBe(ConversationState.AwaitingApproval)
     expect(conv.pending_approval?.request_id).toBe('req-wait')
     expect(conv.approval_mode).toBe('auto')
+  })
+
+  it('logs a store failure with only its class and the hashed session key', async () => {
+    const store = new InMemoryConversationStore()
+    const manager = new ConversationManager(store)
+    await seedRpc(manager)
+    const conv = manager.getSessionByKey(rpcKey())
+    expect(conv?.id).toContain(USER)
+    const persist = vi.spyOn(store, 'persistApprovalMode').mockImplementation(async failing => {
+      // The SQLite store's message when it has no durable target.
+      throw new Error(
+        `persistApprovalMode: no sessionKey for conversation ${failing.id}; refusing a write with no durable target`
+      )
+    })
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+    try {
+      const captured = makeRes()
+      await handleSetApprovalModeRoute(
+        makeReq({ caller: RPC_CALLER, body: { mode: 'auto' } }),
+        captured.res,
+        makeHandlers({ setApprovalModeHandler: realHandler(manager) })
+      )
+      expect(persist).toHaveBeenCalledTimes(1)
+      expect(captured.statusCode).toBe(500)
+      expect(error).toHaveBeenCalledTimes(1)
+      const [fields, message] = error.mock.calls[0] as [Record<string, unknown>, string]
+      expect(fields).toEqual({ errorClass: 'Error', sessionKey: approvalLogId(rpcKey()) })
+      expect(message).toBe('[Server] Error setting approval mode')
+      const line = JSON.stringify([fields, message])
+      for (const raw of [conv?.id ?? '', rpcKey(), USER, CHAT, AGENT]) {
+        expect(line).not.toContain(raw)
+      }
+    } finally {
+      error.mockRestore()
+    }
   })
 
   it('reloads the stored mode after a cold restart', async () => {
