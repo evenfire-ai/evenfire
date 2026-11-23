@@ -8,7 +8,7 @@
  * - API 400 (credentials-required) surfaces the specific error message via StatusBanner
  *
  * Create polish:
- * - provider setup uses a Telegram/Slack/Teams segmented selector with provider-scoped credentials
+ * - provider setup uses a Telegram/Slack/Teams icon dropdown with provider-scoped credentials
  * - route fields are absent because conversations are confirmed from Profile UI
  */
 import React from 'react'
@@ -70,18 +70,29 @@ async function fillStep1AndContinue() {
   fireEvent.change(screen.getByPlaceholderText(/channel-name/i), {
     target: { value: 'my-channel' },
   })
-  fireEvent.click(screen.getByRole('button', { name: /agent reference/i }))
+  fireEvent.click(screen.getByRole('button', { name: /^agent\b/i }))
   fireEvent.click(screen.getByRole('option', { name: 'agent-a' }))
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-  await screen.findByRole('button', { name: 'Create channel' })
+  await screen.findByRole('button', { name: 'Communication channel provider' })
+}
+
+function submitFromProviderStep() {
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+  const create = screen.queryByRole('button', { name: 'Create channel' })
+  if (create) fireEvent.click(create)
+}
+
+function selectProvider(name: string) {
+  fireEvent.click(screen.getByRole('button', { name: 'Communication channel provider' }))
+  fireEvent.click(screen.getByRole('option', { name }))
 }
 
 function selectTelegramAndToken() {
-  fireEvent.click(screen.getByRole('radio', { name: 'Telegram' }))
+  selectProvider('Telegram')
   fireEvent.change(screen.getByPlaceholderText('@your_bot'), {
     target: { value: '@clerum_test_bot' },
   })
-  fireEvent.change(screen.getByLabelText('Telegram Bot Token'), {
+  fireEvent.change(screen.getByLabelText('Telegram bot token'), {
     target: { value: '123456789:ABCDEF' },
   })
 }
@@ -118,7 +129,7 @@ describe('CreateCommunicationChannelPage — B5 namespace honesty', () => {
     await fillStep1AndContinue()
     selectTelegramAndToken()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
 
     await waitFor(() => {
       expect(api.apiSend).toHaveBeenCalled()
@@ -151,7 +162,7 @@ describe('CreateCommunicationChannelPage — B6 credential save confirmation / e
 
     await fillStep1AndContinue()
     selectTelegramAndToken()
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
 
     await waitFor(() => {
       expect(screen.getByRole('status')).toHaveTextContent('Communication channel created.')
@@ -173,7 +184,7 @@ describe('CreateCommunicationChannelPage — B6 credential save confirmation / e
 
     await fillStep1AndContinue()
     selectTelegramAndToken()
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
 
     await waitFor(() => {
       // The cu-banner--error should contain the specific API message, not a generic one
@@ -204,27 +215,46 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     await fillStep1AndContinue()
 
     expect(
-      screen.getByRole('radiogroup', { name: 'Communication channel provider' })
+      screen.getByRole('button', { name: 'Communication channel provider' })
     ).toBeInTheDocument()
-    expect(screen.getByRole('radio', { name: 'Telegram' })).toBeInTheDocument()
-    expect(screen.getByRole('radio', { name: 'Slack' })).toBeInTheDocument()
-    expect(screen.queryByRole('radio', { name: 'Email' })).not.toBeInTheDocument()
-    expect(screen.getByLabelText('Telegram Bot Token')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Communication channel provider' }))
+    expect(screen.getByRole('option', { name: 'Telegram' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Slack' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Email' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: 'Telegram' }))
+    expect(screen.getByLabelText('Telegram bot token')).toBeInTheDocument()
     expect(screen.getByPlaceholderText('@your_bot')).toBeInTheDocument()
-    expect(
-      screen.getByRole('checkbox', { name: /answer only when the bot is mentioned/i })
-    ).toBeChecked()
+    expect(screen.getByRole('button', { name: 'Telegram reply behavior' })).toHaveTextContent(
+      'Only when mentioned'
+    )
     expect(screen.queryByLabelText('Slack Signing Secret')).not.toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: /telegram chat type/i })).not.toBeInTheDocument()
     expect(screen.queryByPlaceholderText(/Telegram channel ID/i)).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
+    expect(screen.getByRole('button', { name: 'Slack reply behavior' })).toHaveTextContent(
+      'Only when mentioned'
+    )
+    expect(screen.getByRole('button', { name: 'Slack reply location' })).toHaveTextContent(
+      'In the conversation'
+    )
     expect(
-      screen.getByRole('checkbox', { name: /answer only when the app is mentioned/i })
-    ).toBeChecked()
+      screen.getByLabelText(/When enabled, app responses are posted in a Slack thread/)
+    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Slack reply location' }))
+    fireEvent.click(screen.getByRole('option', { name: 'In threads' }))
+    expect(screen.getByRole('button', { name: 'Slack reply location' })).toHaveTextContent(
+      'In threads'
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Slack reply behavior' }))
+    fireEvent.click(screen.getByRole('option', { name: 'All messages' }))
+    expect(screen.getByRole('button', { name: 'Slack reply behavior' })).toHaveTextContent(
+      'All messages'
+    )
+
     expect(screen.getByLabelText('Slack Signing Secret')).toBeInTheDocument()
     expect(screen.getByLabelText('Slack Bot User OAuth Token')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Telegram Bot Token')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Telegram bot token')).not.toBeInTheDocument()
   })
 
   it('shows a Teams bot create command using generated .env labels and channel endpoint', async () => {
@@ -236,10 +266,19 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
-    expect(
-      screen.getByRole('checkbox', { name: /answer only when the bot is mentioned/i })
-    ).toBeChecked()
+    selectProvider('Microsoft Teams')
+    expect(screen.getByRole('button', { name: 'Reply behavior' })).toHaveTextContent(
+      'Only when mentioned'
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reply behavior' }))
+    fireEvent.click(screen.getByRole('option', { name: 'All messages' }))
+    expect(screen.getByRole('button', { name: 'Reply behavior' })).toHaveTextContent('All messages')
+    fireEvent.click(screen.getByRole('button', { name: 'Reply behavior' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Only when mentioned' }))
+    expect(screen.getByRole('button', { name: 'Reply behavior' })).toHaveTextContent(
+      'Only when mentioned'
+    )
 
     const botNameInput = screen.getByLabelText(/^Name/)
     fireEvent.change(botNameInput, {
@@ -285,7 +324,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
 
     const steps = screen.getByText(/Run this from any directory/i).closest('ol')
@@ -317,7 +356,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
 
     expect(
       screen.getByRole('button', { name: 'Copy Teams file support command' })
@@ -350,12 +389,12 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), {
       target: { value: 'Evenfire Bot' },
     })
 
-    const panel = document.querySelector('.cu-channel-provider-panel')
+    const panel = screen.getByText(/teams app create/).closest('.cu-channel-provider-panel')
     expect(panel?.textContent ?? '').toMatch(
       /NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL|no public webhook origin/i
     )
@@ -381,10 +420,10 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
 
-    const panel = document.querySelector('.cu-channel-provider-panel')
+    const panel = screen.getByText(/teams app create/).closest('.cu-channel-provider-panel')
     expect(panel?.textContent ?? '').toMatch(/no public webhook origin/i)
 
     const command = screen.getByText(/teams app create/).closest('pre')
@@ -400,7 +439,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), {
       target: { value: 'evenfire-bot' },
     })
@@ -413,7 +452,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
       target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
 
     expect(await screen.findByText('CLIENT_ID must be a valid UUID.')).toBeInTheDocument()
     expect(api.apiSend).not.toHaveBeenCalled()
@@ -427,7 +466,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), { target: { value: 'secret' } })
     fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
       target: { value: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82' },
@@ -435,7 +474,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
       target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
 
     // The name is free-form, but it is not optional: control-api rejects an
     // appName that is present and empty, and the whole setup command is built
@@ -452,7 +491,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'a'.repeat(81) } })
     fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), { target: { value: 'secret' } })
     fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
@@ -461,7 +500,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
       target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
 
     expect(
       await screen.findByText('Teams bot name must be 80 characters or fewer.')
@@ -477,7 +516,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), {
       target: { value: 'Evenfire Bot' },
     })
@@ -490,7 +529,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), {
       target: { value: 'secret' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
 
     await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
     expect(api.apiSend).toHaveBeenCalledWith(
@@ -521,7 +560,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
     fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
       target: { value: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82' },
@@ -530,7 +569,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
       target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
     })
     fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), { target: { value: 'secret' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
 
     await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
     const body = vi.mocked(api.apiSend).mock.calls[0][2] as { spec: Record<string, unknown> }
@@ -596,7 +635,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
       expect(screen.queryByText('Loading agents...')).not.toBeInTheDocument()
     })
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /agent reference/i })).toHaveTextContent('agent-a')
+      expect(screen.getByRole('button', { name: /^agent\b/i })).toHaveTextContent('agent-a')
     })
     expect(screen.getByPlaceholderText(/channel-name/i)).toHaveValue('')
 
@@ -605,11 +644,10 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 
-    const slackOption = await screen.findByRole('radio', { name: 'Slack' })
-    expect(slackOption).toHaveAttribute('aria-checked', 'true')
-    await waitFor(() => {
-      expect(screen.getByRole('tab', { name: 'Members (1)' })).toBeInTheDocument()
+    const providerSelector = await screen.findByRole('button', {
+      name: 'Communication channel provider',
     })
+    expect(providerSelector).toHaveTextContent('Slack')
 
     fireEvent.change(screen.getByPlaceholderText('Your Slack App'), {
       target: { value: 'Evenfire Test App' },
@@ -620,7 +658,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
       target: { value: 'xoxb-token' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
 
     await waitFor(() => {
       expect(api.apiSend).toHaveBeenCalled()
@@ -670,11 +708,11 @@ describe('CreateCommunicationChannelPage — Slack app manifest', () => {
     fireEvent.change(screen.getByPlaceholderText(/channel-name/i), {
       target: { value: rawName },
     })
-    fireEvent.click(screen.getByRole('button', { name: /agent reference/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^agent\b/i }))
     fireEvent.click(screen.getByRole('option', { name: 'agent-a' }))
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    await screen.findByRole('button', { name: 'Create channel' })
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    await screen.findByRole('button', { name: 'Communication channel provider' })
+    selectProvider('Slack')
   }
 
   it('offers a manifest on the create page, before any channel exists', async () => {
@@ -725,7 +763,7 @@ describe('CreateCommunicationChannelPage — Slack app manifest', () => {
     fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
       target: { value: 'xoxb-token' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+    submitFromProviderStep()
     await waitFor(() => {
       expect(api.apiSend).toHaveBeenCalled()
     })
@@ -811,7 +849,7 @@ describe('CreateCommunicationChannelPage — Teams CLI instruction', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
 
     // Absence of old sentence
     expect(screen.queryByText(/project directory that has the Teams CLI project/i)).toBeNull()
@@ -842,7 +880,7 @@ describe('CreateCommunicationChannelPage — Teams prerequisites', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
 
     expect(screen.getByText(/npm install -g @microsoft\/teams\.cli/)).toBeInTheDocument()
     expect(screen.getByText('teams login')).toBeInTheDocument()
@@ -861,7 +899,7 @@ describe('CreateCommunicationChannelPage — Teams prerequisites', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
 
     const link = screen.getByRole('link', { name: /Teams setup guide/i })
     expect(link).toHaveAttribute('href', TEAMS_GUIDE_URL)
@@ -896,7 +934,7 @@ describe('CreateCommunicationChannelPage — Teams install link', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
 
     // A link built from half the values fails as "app cannot be found", which is
@@ -928,7 +966,7 @@ describe('CreateCommunicationChannelPage — Teams install link', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
     const appId = '0cd0e1e6-adf7-40f4-952f-79006d320a05'
     fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), { target: { value: appId } })
@@ -958,7 +996,7 @@ describe('CreateCommunicationChannelPage — Teams install link', () => {
     )
 
     await fillStep1AndContinue()
-    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    selectProvider('Microsoft Teams')
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
     fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
       target: { value: '0cd0e1e6-adf7-40f4-952f-79006d320a05' },
@@ -975,4 +1013,43 @@ describe('CreateCommunicationChannelPage — Teams install link', () => {
     const note = screen.getByText(/not in the Teams catalog yet/)
     expect(note.closest('details')).toBeNull()
   })
+})
+
+it('starts creation with the provider selected from the channel list tab', async () => {
+  mockSearchParams.set('provider', 'slack')
+  render(
+    <ToastProvider>
+      <CreateCommunicationChannelPage />
+    </ToastProvider>
+  )
+  await fillStep1AndContinue()
+  expect(screen.getByRole('button', { name: 'Communication channel provider' })).toHaveTextContent(
+    'Slack'
+  )
+  expect(screen.getByLabelText('Slack Bot User OAuth Token')).toBeInTheDocument()
+  expect(screen.queryByLabelText('Telegram bot token')).not.toBeInTheDocument()
+})
+
+it('keeps access in step three and preserves provider credentials when going back', async () => {
+  render(
+    <ToastProvider>
+      <CreateCommunicationChannelPage />
+    </ToastProvider>
+  )
+  await fillStep1AndContinue()
+  expect(screen.queryByRole('tab', { name: /Members/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Create channel' })).not.toBeInTheDocument()
+  selectTelegramAndToken()
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+  expect(await screen.findByRole('heading', { name: 'Communication access' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Create channel' })).toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: 'Communication channel provider' })
+  ).not.toBeInTheDocument()
+  expect(api.apiSend).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+  expect(screen.getByLabelText('Telegram bot token')).toHaveValue('123456789:ABCDEF')
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+  await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
 })
