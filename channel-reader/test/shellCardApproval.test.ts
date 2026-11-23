@@ -231,10 +231,11 @@ describe('shell card approval handler', () => {
 
   it('rejects an unknown code without sendDenial', async () => {
     const { adapter, sent } = capturingAdapter('slack')
+    const authorizeProviderMessage = vi.fn(async () => ({ authorized: true }))
     const rpc = makeRpcClient({
       sendApproval: vi.fn(async () => ({ success: true })),
       sendDenial: vi.fn(async () => ({ success: true })),
-      authorizeProviderMessage: vi.fn(async () => ({ authorized: true })),
+      authorizeProviderMessage,
     })
     const reader = new ChannelReader({
       rpcClient: rpc,
@@ -247,7 +248,7 @@ describe('shell card approval handler', () => {
     await reader.handleMessages([source])
 
     // Liveness: the message reached the provider gate, upstream of the code parse.
-    expect(rpc.authorizeProviderMessage).toHaveBeenCalledWith(source.providerIdentity)
+    expect(authorizeProviderMessage).toHaveBeenCalledWith(source.providerIdentity)
     expect(sent.map(message => message.content)).toEqual(['That approval choice is not supported.'])
     expect(rpc.sendDenial).not.toHaveBeenCalled()
     expect(rpc.sendApproval).not.toHaveBeenCalled()
