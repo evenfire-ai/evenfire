@@ -28,6 +28,15 @@ function deferred<T>() {
 
 const pendingDeferredCleanups = new Set<() => void>()
 
+async function settlePendingDeferredCleanups(): Promise<void> {
+  await new Promise(resolve => setImmediate(resolve))
+  for (let pass = 0; pendingDeferredCleanups.size > 0; pass += 1) {
+    if (pass >= 10) throw new Error('Timed out settling deferred Quit test operations')
+    pendingDeferredCleanups.forEach(cleanup => cleanup())
+    await new Promise(resolve => setImmediate(resolve))
+  }
+}
+
 const harness = vi.hoisted(() => {
   const state = {
     onHandlers: new Map<string, SyncHandler>(),
@@ -236,10 +245,10 @@ describe('macOS Quit drain', () => {
 
   afterEach(async () => {
     try {
-      pendingDeferredCleanups.forEach(cleanup => cleanup())
       const { openTokenStoreAdmission, waitForTokenStoreOperations } =
         await import('../tokenStore.ts')
       openTokenStoreAdmission()
+      await settlePendingDeferredCleanups()
       await waitForTokenStoreOperations()
       await new Promise(resolve => setImmediate(resolve))
 
