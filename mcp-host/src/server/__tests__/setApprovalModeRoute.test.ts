@@ -147,6 +147,76 @@ describe('handleSetApprovalModeRoute', () => {
     expect(manager.getSessionByKey(rpcKey())?.approval_mode).toBe('manual')
   })
 
+  function okHandler() {
+    return vi.fn<SetApprovalModeHandler>(async () => ({
+      ok: true,
+      approvalMode: 'auto',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'auto',
+    }))
+  }
+
+  it('returns 400 for an unsafe agent segment and does not call the handler', async () => {
+    const handler = okHandler()
+    for (const agent of ['agent:x', '..', 'a/b', 'a\\b', 'a\u0000b', 'a'.repeat(201)]) {
+      const captured = makeRes()
+      await handleSetApprovalModeRoute(
+        makeReq({ caller: RPC_CALLER, agent, body: { mode: 'auto' } }),
+        captured.res,
+        makeHandlers({ setApprovalModeHandler: handler })
+      )
+      expect(captured.statusCode).toBe(400)
+      expect(captured.jsonBody).toEqual({ error: 'Invalid agent or chatId' })
+    }
+    expect(handler).not.toHaveBeenCalled()
+
+    const safe = makeRes()
+    await handleSetApprovalModeRoute(
+      makeReq({ caller: RPC_CALLER, body: { mode: 'auto' } }),
+      safe.res,
+      makeHandlers({ setApprovalModeHandler: handler })
+    )
+    expect(safe.statusCode).toBe(200)
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith(USER, AGENT, CHAT, 'auto')
+  })
+
+  it('returns 400 for an unsafe chatId segment and does not call the handler', async () => {
+    const handler = okHandler()
+    for (const chatId of ['.', '..', 'x/y', 'x\\y', 'x\u001fy', 'x'.repeat(501)]) {
+      const captured = makeRes()
+      await handleSetApprovalModeRoute(
+        makeReq({ caller: RPC_CALLER, chatId, body: { mode: 'auto' } }),
+        captured.res,
+        makeHandlers({ setApprovalModeHandler: handler })
+      )
+      expect(captured.statusCode).toBe(400)
+      expect(captured.jsonBody).toEqual({ error: 'Invalid agent or chatId' })
+    }
+    expect(handler).not.toHaveBeenCalled()
+
+    const safe = makeRes()
+    await handleSetApprovalModeRoute(
+      makeReq({ caller: RPC_CALLER, chatId: 'chat:with:colons', body: { mode: 'auto' } }),
+      safe.res,
+      makeHandlers({ setApprovalModeHandler: handler })
+    )
+    expect(safe.statusCode).toBe(200)
+    expect(handler).toHaveBeenCalledWith(USER, AGENT, 'chat:with:colons', 'auto')
+  })
+
+  it('returns 501 when no set-approval-mode handler is configured', async () => {
+    const captured = makeRes()
+    await handleSetApprovalModeRoute(
+      makeReq({ caller: RPC_CALLER, body: { mode: 'auto' } }),
+      captured.res,
+      makeHandlers()
+    )
+    expect(captured.statusCode).toBe(501)
+    expect(captured.jsonBody).toEqual({ error: 'Set approval mode handler not configured' })
+  })
+
   it('returns 400 for a mode outside the enum and does not create a row', async () => {
     const manager = new ConversationManager(new InMemoryConversationStore())
     const captured = makeRes()
