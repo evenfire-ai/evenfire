@@ -260,9 +260,9 @@ export function checkAlternates(
 /**
  * P4: walks the git dir, the common dir and every object store with `lstat`.
  * Every symlink must resolve inside the root and not into protected state; a
- * link to a directory is walked by its realpath. A file outside the object
- * stores with more than one hard link is refused: its other names are not
- * visible. One seen-set ends cycles; one budget bounds the whole walk.
+ * link to a directory is walked by its realpath. A file outside an object
+ * store (`objects/`) with more than one hard link is refused: its other names
+ * are not visible. One seen-set ends cycles; one budget bounds the whole walk.
  */
 export function walkRepositoryLinks(
   dirs: readonly string[],
@@ -272,7 +272,11 @@ export function walkRepositoryLinks(
 ): void {
   const seen = new Set<string>()
   let entries = 0
-  const inStore = (real: string): boolean => objectStores.some(store => isInside(real, store))
+  // Object files may be hard links (`git clone --local`, submodule clones
+  // under `.git/modules/*/objects`); git reads them only as objects.
+  const inStore = (real: string): boolean =>
+    objectStores.some(store => isInside(real, store)) ||
+    path.relative(realRoot, real).split(path.sep).includes('objects')
   const walk = (dir: string): void => {
     const real = fs.realpathSync(dir)
     if (seen.has(real)) return

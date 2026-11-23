@@ -53,6 +53,11 @@ const IDENTITY = [
 
 /** Fixture-building git: ordinary environment, fixed identity. */
 export function gitw(cwd: string, ...args: string[]): string {
+  return gitwAt('2026-01-01T00:00:00Z', cwd, ...args)
+}
+
+/** As `gitw`, with the author and committer date of any commit it makes. */
+export function gitwAt(date: string, cwd: string, ...args: string[]): string {
   const result = spawnSync(requireGit(), [...IDENTITY, ...args], {
     cwd,
     encoding: 'utf8',
@@ -61,8 +66,8 @@ export function gitw(cwd: string, ...args: string[]): string {
       HOME: cwd,
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z',
-      GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z',
+      GIT_AUTHOR_DATE: date,
+      GIT_COMMITTER_DATE: date,
     },
   })
   if (result.status !== 0) {
