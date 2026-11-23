@@ -615,6 +615,59 @@ describe('git_read protected content (history, refs, stash, index, worktree)', (
       expect((await run({ subcommand: 'show', revisions: ['HEAD'] })).is_error).toBe(false)
     })
 
+    it('notes history stays closed through revision suffixes, short names, blame and a branch at a notes commit', async () => {
+      gitwAt('2026-01-08T00:00:00Z', copy, 'notes', 'add', '-f', '-C', ids.BLOB1, 'HEAD')
+      gitwAt('2026-01-09T00:00:00Z', copy, 'notes', 'append', '-m', 'second', 'HEAD~1')
+      const head = gitwAt('2026-01-09T00:00:00Z', copy, 'rev-parse', 'HEAD').trim()
+      fs.writeFileSync(path.join(copy, head), 'ordinary\n')
+      const leaks = (...argv: string[]) =>
+        needles(controlGit(fx.root, copy, ...argv).out).length > 0
+      const run = async (params: Record<string, unknown>) => {
+        const out = await copyTool.execute({ directory: 'copy', ...params })
+        return { content: out.content, is_error: out.is_error }
+      }
+      const refused = { content: GIT_READ_REFUSALS.notes_history, is_error: true }
+      // The first notes commit added the protected note; later ones may not.
+      const first = gitwAt(
+        '2026-01-09T00:00:00Z',
+        copy,
+        'rev-list',
+        '--reverse',
+        'refs/notes/commits'
+      )
+        .split('\n')[0]
+        .trim()
+      // Controls: git walks a notes commit through each spelling.
+      expect(leaks('log', '-p', ...NT, `${first}^!`), 'sha^!').toBe(true)
+      expect(leaks('log', '-p', ...NT, 'refs/notes/commits^@'), 'ref^@').toBe(true)
+      expect(leaks('log', '-p', ...NT, 'notes/commits'), 'short name').toBe(true)
+      expect(leaks('blame', '--no-textconv', `${first}^!`, '--', head), 'blame').toBe(true)
+      for (const params of [
+        { subcommand: 'log', options: ['patch'], revisions: [`${first}^!`] },
+        { subcommand: 'log', options: ['patch'], revisions: ['refs/notes/commits^@'] },
+        { subcommand: 'log', options: ['patch'], revisions: ['notes/commits'] },
+        { subcommand: 'log', pickaxe: 'NEEDLE', revisions: ['refs/notes/commits^@'] },
+        { subcommand: 'blame', revisions: [`${first}^!`], paths: [head] },
+      ]) {
+        expect(await run(params)).toEqual(refused)
+      }
+      // A branch that points into notes history is walked by --all.
+      gitwAt('2026-01-09T00:00:00Z', copy, 'branch', 'nb', 'refs/notes/commits')
+      try {
+        expect(leaks('log', '-p', '--exclude=refs/notes/*', '--all', '--no-notes', ...NT)).toBe(
+          true
+        )
+        expect(await run({ subcommand: 'log', options: ['patch', 'all'] })).toEqual(refused)
+      } finally {
+        gitwAt('2026-01-09T00:00:00Z', copy, 'branch', '-D', 'nb')
+        fs.rmSync(path.join(copy, head))
+      }
+      // Witness: ordinary history with --all still runs.
+      const all = await run({ subcommand: 'log', options: ['patch', 'all'], max_count: 5 })
+      expect(all.is_error).toBe(false)
+      expect(needles(all.content)).toEqual([])
+    })
+
     it('a replace ref to a protected blob does not print', async () => {
       const aBlob = gitwAt('2026-01-08T00:00:00Z', copy, 'rev-parse', 'HEAD:a.txt').trim()
       gitwAt('2026-01-08T00:00:00Z', copy, 'replace', '-f', aBlob, ids.BLOB1)

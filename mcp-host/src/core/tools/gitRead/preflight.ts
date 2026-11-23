@@ -456,6 +456,102 @@ function protectedOrQuoted(name: string): boolean {
   return name.startsWith('"') || isProtectedWorkspacePath(name)
 }
 
+/** More start commits than this is a repository git_read does not check. */
+const MAX_WALK_STARTS = 50_000
+
+type Runner = (
+  argv: readonly string[],
+  options?: { timeoutMs?: number; maxBuffer?: number }
+) => Promise<GitSpawnResult>
+
+function lines(output: string): string[] {
+  return output.split('\n').filter(line => line.length > 0)
+}
+
+/**
+ * The commits a content call starts walking from: each revision expanded by
+ * git itself (`rev-parse --revs-only` resolves `^!`, `^@`, ranges and reflog
+ * selectors; negative ends are dropped), the left side of `REV:PATH`, every
+ * non-notes ref and HEAD for `all`, and HEAD when there is no revision.
+ */
+async function walkStarts(
+  params: GitReadParams,
+  run: Runner
+): Promise<{ starts: string[] } | PreflightResult> {
+  const starts: string[] = []
+  if (params.revisions.length === 0) starts.push('HEAD')
+  for (const revision of params.revisions) {
+    if (isRevisionPath(revision)) {
+      const left = revision.slice(0, revision.indexOf(':'))
+      if (left !== '') starts.push(left)
+      continue
+    }
+    const expanded = await run(['rev-parse', '--revs-only', '--end-of-options', revision])
+    if (expanded.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
+    if (expanded.outcome !== 'exited') return { kind: 'refused', category: 'preflight_failed' }
+    if (expanded.exitCode !== 0) return { kind: 'git_failed', stderr: expanded.stderr }
+    starts.push(...lines(expanded.stdout).filter(line => !line.startsWith('^')))
+  }
+  if (params.options.has('all')) {
+    const refs = await run(
+      [
+        'for-each-ref',
+        '--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)',
+      ],
+      { maxBuffer: 64 * 1024 * 1024 }
+    )
+    if (refs.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
+    if (refs.outcome === 'overflow') return { kind: 'refused', category: 'repository_too_large' }
+    if (refs.outcome !== 'exited' || refs.exitCode !== 0) {
+      return { kind: 'refused', category: 'preflight_failed' }
+    }
+    starts.push('HEAD')
+    for (const line of lines(refs.stdout)) {
+      const [refname, type, id, peeledType, peeledId] = line.split('\0')
+      if (refname.startsWith('refs/notes/')) continue
+      if (type === 'commit') starts.push(id)
+      else if (peeledType === 'commit') starts.push(peeledId)
+    }
+  }
+  return { starts: [...new Set(starts)] }
+}
+
+/**
+ * Refuses (`notes_history`) a content call whose walk shares a commit with
+ * any notes ref's history. Notes history is normally its own root, so
+ * `merge-base <notes tip> <starts...>` finds nothing; a shared commit means
+ * the walk can reach a notes commit (over-refusing only when negative ends
+ * would have excluded it). Nothing beyond one spawn without notes refs.
+ */
+async function checkNotesHistory(
+  params: GitReadParams,
+  run: Runner
+): Promise<PreflightResult | undefined> {
+  const notes = await run(['for-each-ref', '--format=%(objectname)', 'refs/notes/'])
+  if (notes.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
+  if (notes.outcome !== 'exited' || notes.exitCode !== 0) {
+    return { kind: 'refused', category: 'preflight_failed' }
+  }
+  const tips = lines(notes.stdout)
+  if (tips.length === 0) return undefined
+  const walk = await walkStarts(params, run)
+  if (!('starts' in walk)) return walk
+  if (walk.starts.length === 0) return undefined
+  if (walk.starts.length > MAX_WALK_STARTS) {
+    return { kind: 'refused', category: 'repository_too_large' }
+  }
+  for (const tip of tips) {
+    const shared = await run(['merge-base', tip, ...walk.starts])
+    if (shared.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
+    if (shared.outcome !== 'exited') return { kind: 'refused', category: 'preflight_failed' }
+    if (shared.exitCode === 0) return { kind: 'refused', category: 'notes_history' }
+    // Exit 1: no common ancestor. Anything else (a start that is not a
+    // commit) fails the call, as the command itself would.
+    if (shared.exitCode !== 1) return { kind: 'git_failed', stderr: shared.stderr }
+  }
+  return undefined
+}
+
 /** Runs the preflight; on `ok`, the command may run in `cwd` with `env`. */
 export async function runPreflight(ctx: PreflightContext): Promise<PreflightResult> {
   let realRoot: string
@@ -596,39 +692,11 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
   }
 
   // Notes history is not read: a notes commit's tree holds note blobs under
-  // commit-id paths, which no exclusion matches. A content call refuses any
-  // revision (or the HEAD it defaults to) that a notes ref reaches.
+  // commit-id paths, which no exclusion matches. A content call is refused
+  // when the history it would walk shares any commit with notes history.
   if (isContentCall(params)) {
-    const notes = await run(['for-each-ref', '--format=%(objectname)', 'refs/notes/'])
-    if (notes.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
-    if (notes.outcome !== 'exited' || notes.exitCode !== 0) {
-      return { kind: 'refused', category: 'preflight_failed' }
-    }
-    const tips = notes.stdout.split('\n').filter(line => line.length > 0)
-    const defaultsToHead =
-      params.revisions.length === 0 && (params.subcommand === 'show' || params.subcommand === 'log')
-    const endpoints = defaultsToHead ? ['HEAD'] : params.revisions.flatMap(peelEndpoints)
-    for (const endpoint of tips.length > 0 ? endpoints : []) {
-      const commit = await run([
-        'rev-parse',
-        '--verify',
-        '-q',
-        '--end-of-options',
-        `${endpoint}^{commit}`,
-      ])
-      if (commit.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
-      // Not a commit: the real command fails or the peel step refused it.
-      if (commit.outcome !== 'exited' || commit.exitCode !== 0) continue
-      const sha = commit.stdout.trim()
-      for (const tip of tips) {
-        const ancestor = await run(['merge-base', '--is-ancestor', sha, tip])
-        if (ancestor.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
-        if (ancestor.outcome !== 'exited' || (ancestor.exitCode !== 0 && ancestor.exitCode !== 1)) {
-          return { kind: 'refused', category: 'preflight_failed' }
-        }
-        if (ancestor.exitCode === 0) return { kind: 'refused', category: 'notes_history' }
-      }
-    }
+    const notesCheck = await checkNotesHistory(params, run)
+    if (notesCheck) return notesCheck
   }
 
   if (params.subcommand === 'log' && params.options.has('follow') && isContentCall(params)) {
