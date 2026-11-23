@@ -32,6 +32,7 @@ export type GitReadRefusalCategory =
   | 'protected_history'
   | 'timeout'
   | 'worktree_link'
+  | 'index_path_unsafe'
   | 'notes_history'
 
 export class GitReadRefusal extends Error {
@@ -431,6 +432,30 @@ export function peelEndpoints(revision: string): string[] {
 const WORKTREE_INDEX_MAX_BUFFER = 64 * 1024 * 1024
 
 /**
+ * True when an index entry names a path git's own tools refuse to write
+ * (`verify_path`): absolute, or with an empty, ".", "..", or ".git" segment.
+ * Such a name makes git open a file outside the worktree.
+ */
+export function hasUnsafeIndexName(lsFilesZ: string): boolean {
+  return lsFilesZ
+    .split('\0')
+    .filter(entry => entry.length > 0)
+    .some(
+      entry =>
+        entry.startsWith('/') ||
+        entry
+          .split('/')
+          .some(
+            segment =>
+              segment === '' ||
+              segment === '.' ||
+              segment === '..' ||
+              segment.toLowerCase() === '.git'
+          )
+    )
+}
+
+/**
  * True when a leading directory of any tracked path is a link (or cannot be
  * checked) in the worktree. Each directory is checked once.
  */
@@ -655,11 +680,18 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
   // P7. Per-call content checks.
   const params = ctx.params
 
-  // A worktree grep opens each tracked file through the OS, so a tracked
-  // directory replaced by a link would be searched through it, outside the
-  // workspace or into protected state. Refuse when any leading directory of
-  // a tracked path is a link; a revision searches objects instead.
-  if (params.subcommand === 'grep' && params.revisions.length === 0) {
+  // Calls that open worktree files by index name: status, a grep with no
+  // revision, and a diff that is not --cached with at most one revision.
+  // The index is repository state and can be written by hand, so its names
+  // must be ones git itself would write (no absolute path, no empty, ".",
+  // ".." or ".git" segment). A worktree grep also opens files through a
+  // tracked directory replaced by a link, outside the workspace or into
+  // protected state, so it is refused when any leading directory is a link.
+  const readsWorktree =
+    params.subcommand === 'status' ||
+    (params.subcommand === 'grep' && params.revisions.length === 0) ||
+    (params.subcommand === 'diff' && !params.options.has('cached') && params.revisions.length <= 1)
+  if (readsWorktree) {
     const index = await run(['ls-files', '-z', '--full-name', '--', ':/'], {
       timeoutMs: ctx.timeoutMs,
       maxBuffer: WORKTREE_INDEX_MAX_BUFFER,
@@ -669,7 +701,8 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     if (index.outcome !== 'exited' || index.exitCode !== 0) {
       return { kind: 'refused', category: 'preflight_failed' }
     }
-    if (hasLinkedLeadingDirectory(index.stdout, topLevel)) {
+    if (hasUnsafeIndexName(index.stdout)) return { kind: 'refused', category: 'index_path_unsafe' }
+    if (params.subcommand === 'grep' && hasLinkedLeadingDirectory(index.stdout, topLevel)) {
       return { kind: 'refused', category: 'worktree_link' }
     }
   }

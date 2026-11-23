@@ -377,9 +377,10 @@ describe('git_read corpus on real git', () => {
     }
     // Every process, preflight included, in order, for the four calls.
     expect(spawned).toEqual([
-      // status: discovery, config, the command, the submodule note
+      // status: discovery, config, the index-name check, the command, the submodule note
       'rev-parse',
       'config',
+      'ls-files',
       'status',
       'ls-files',
       // show HEAD:a.txt: discovery, config, peel, notes refs, the command
