@@ -1032,7 +1032,8 @@ describe('AppService approval-mode token refresh', () => {
     const service = refreshService()
     const invokeHostMessage = vi
       .fn()
-      // rpc-proxy's scope refusal (rpc.ts:541) as requestJson raises it.
+      // rpc-proxy's first-message approvalMode scope refusal (routes/rpc.ts)
+      // as requestJson raises it.
       .mockRejectedValueOnce(
         new ApiError(
           '403 Forbidden: Forbidden: missing scope',
