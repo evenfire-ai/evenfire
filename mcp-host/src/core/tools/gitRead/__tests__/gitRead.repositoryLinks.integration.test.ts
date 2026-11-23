@@ -236,6 +236,41 @@ describe('git_read repository links (P2–P4)', () => {
     expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
+  it('a planted submodule dir with a linked objects adds no store', async () => {
+    const repo = freshRepo()
+    fs.linkSync(secretLine, path.join(repo, '.git', 'packed-refs'))
+    const fake = path.join(repo, '.git', 'modules', 'x')
+    fs.mkdirSync(fake, { recursive: true })
+    fs.writeFileSync(path.join(fake, 'HEAD'), 'ref: refs/heads/main\n')
+    // objects -> .git: as a store it would exempt every file under .git.
+    fs.symlinkSync('../..', path.join(fake, 'objects'))
+    expect(controlGit(fx.root, repo, 'for-each-ref').out).toContain('SECRET-LINE')
+    expect(await verdict(repo)).toBe('directory_outside_workspace')
+  })
+
+  it('a linked .git/modules is not scanned; the link walk judges it', async () => {
+    const repo = freshRepo()
+    fs.symlinkSync(fx.outside, path.join(repo, '.git', 'modules'))
+    expect(await verdict(repo)).toBe('directory_outside_workspace')
+  })
+
+  it('a submodule at a path named objects runs', async () => {
+    const child = freshRepo()
+    const parent = freshRepo()
+    gitw(
+      parent,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      '-q',
+      'add',
+      child,
+      'vendor/objects'
+    )
+    gitw(parent, 'commit', '-qm', 'sub')
+    expect(await verdict(parent)).toBe('ok')
+  })
+
   it('a link to a file with a second hard link is refused', async () => {
     const repo = freshRepo()
     const linked = path.join(fx.root, `notes-link${counter}.txt`)

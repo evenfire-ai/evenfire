@@ -345,41 +345,50 @@ export function checkLinkedWorktrees(commonDir: string, realRoot: string): void 
   }
 }
 
+/** Directories the submodule store scan visits at most. */
+const MAX_SUBMODULE_SCAN_DIRS = 10_000
+
 /**
- * The object stores of submodule git dirs under `<common dir>/modules`: a
- * directory holding a `HEAD` file and an `objects` directory, at any depth
- * (nested submodules). Their clones hard-link store files like a local clone.
+ * The object stores of submodule git dirs under `<common dir>/modules`: a real
+ * directory holding a `HEAD` file and a real (not linked) `objects` directory,
+ * at any depth (nested submodules). Their clones hard-link store files like a
+ * local clone. Links are never followed: a linked `modules` or `objects` adds
+ * no store, and the link walk then judges the link itself.
  */
-export function submoduleObjectStores(commonDir: string, realRoot: string): string[] {
+export function submoduleObjectStores(commonDir: string): string[] {
   const stores: string[] = []
+  let visited = 0
+  const lstatOrNull = (file: string): fs.Stats | null => {
+    try {
+      return fs.lstatSync(file)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null
+      throw new GitReadRefusal('preflight_failed')
+    }
+  }
   const visit = (dir: string, depth: number): void => {
+    if (++visited > MAX_SUBMODULE_SCAN_DIRS) throw new GitReadRefusal('repository_too_large')
     let dirents: fs.Dirent[]
     try {
       dirents = fs.readdirSync(dir, { withFileTypes: true })
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code === 'ENOENT' || code === 'ENOTDIR') return
+    } catch {
       throw new GitReadRefusal('preflight_failed')
     }
-    const names = new Set(dirents.map(d => d.name))
-    if (names.has('HEAD') && names.has('objects')) {
-      let store: string
-      try {
-        store = fs.realpathSync(path.join(dir, 'objects'))
-      } catch {
-        throw new GitReadRefusal('repository_link_unresolved')
-      }
-      confine(store, realRoot)
-      stores.push(store)
-    }
+    const gitDir = dirents.some(d => d.name === 'HEAD' && d.isFile())
+    const objects = dirents.find(d => d.name === 'objects')
+    if (gitDir && objects?.isDirectory()) stores.push(path.join(dir, 'objects'))
     if (depth >= 16) return
     for (const dirent of dirents) {
-      if (dirent.isDirectory() && dirent.name !== 'objects') {
-        visit(path.join(dir, dirent.name), depth + 1)
-      }
+      // Inside a git dir, objects is its store; elsewhere it can be a
+      // submodule named objects.
+      if (!dirent.isDirectory() || (gitDir && dirent.name === 'objects')) continue
+      visit(path.join(dir, dirent.name), depth + 1)
     }
   }
-  visit(path.join(commonDir, 'modules'), 0)
+  const modules = path.join(commonDir, 'modules')
+  const stat = lstatOrNull(modules)
+  if (stat?.isDirectory()) visit(modules, 0)
   return stores
 }
 
@@ -626,7 +635,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     const stores = [
       objects,
       ...checkAlternates(objects, realRoot),
-      ...submoduleObjectStores(commonDir, realRoot),
+      ...submoduleObjectStores(commonDir),
     ]
     walkRepositoryLinks([gitDir, commonDir, ...stores], realRoot, stores)
   } catch (error) {
