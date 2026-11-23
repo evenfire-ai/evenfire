@@ -2061,6 +2061,8 @@ describe('App sidebar GFS resource menu', () => {
       coverage.clear()
       const examples = WITH_EXAMPLES ? Object.values(EXAMPLES).map(build => build()) : []
       const exampleRuns = new WeakSet<object>(examples)
+      // Zero runs with the examples off would let fc.assert pass on nothing.
+      expect(RUNS + examples.length, 'oracle runs').toBeGreaterThan(0)
       const generated: Array<World['stats']> = []
       await fc.assert(
         fc.asyncProperty(
