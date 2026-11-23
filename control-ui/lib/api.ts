@@ -1392,6 +1392,8 @@ export type AdminUser = {
   activeTeamCount: number
   teams?: Array<{ id: string; name: string; role: TeamRole }>
   passwordPendingFromAcceptedInvitation?: boolean
+  /** Optional for older payloads; a removed member is 'retired'. */
+  lifecycleState?: 'active' | 'retired'
 }
 // `keys` are the Secret's data-key NAMES only (never values); the detail bundle
 // populates them via listHostSecrets. Optional for compat with older payloads.

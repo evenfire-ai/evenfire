@@ -246,6 +246,10 @@ code {
   margin-top: 0.75rem;
 }
 
+.cu-auth-oidc-form {
+  margin-top: 0.75rem;
+}
+
 .cu-auth-secondary-link {
   display: inline-flex;
   margin-top: 0.65rem;

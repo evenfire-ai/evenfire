@@ -20,6 +20,7 @@ import {
   applyPendingPr1Migrations,
 } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
+import { OIDC_MEMBER_LINK_MIGRATION, applyOidcMemberLinkSchema } from './oidc/memberLinkSchema.js'
 import {
   applyOidcProtocolAttemptBrowserBindingSchema,
   applyOidcProtocolAttemptExpiryIndexMigration,
@@ -6786,6 +6787,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
     legacyVersions: ['0153_governed_trace_retention_hardening'],
     apply: applyGovernedTraceRetentionHardening,
+  },
+  {
+    version: OIDC_MEMBER_LINK_MIGRATION,
+    apply: applyOidcMemberLinkSchema,
+    lockRetries: 2,
   },
 ]
 
