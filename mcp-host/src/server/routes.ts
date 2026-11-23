@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express'
 import {
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
   validateHostActivityLimit,
   validateHostApprovalRequestId,
   validateHostModelSelectionRequest,
@@ -365,6 +366,20 @@ export async function handleMessageRoute(
           )
         if (!caller.actionContextV2 && declaresV2Authority) {
           badRequest(res, 'V2 authority requires authenticated V2 runtime context')
+          return
+        }
+        // A body that carries its own approval mode also needs the approval-mode scope, as
+        // rpc-proxy requires before forwarding it. The check is on the key, not on its value; a
+        // caller context without verified assertion scopes is refused.
+        if (
+          Object.prototype.hasOwnProperty.call(message, 'approvalMode') &&
+          !caller.edgeAssertionScopes?.includes(
+            HOST_EDGE_RPC_PROXY_ROUTE_SCOPES[
+              'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode'
+            ]
+          )
+        ) {
+          json(res, 403, { error: 'Forbidden: missing scope' })
           return
         }
         message.sender = caller.userId

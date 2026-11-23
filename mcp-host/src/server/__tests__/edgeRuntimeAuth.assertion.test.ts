@@ -742,6 +742,62 @@ describe('mounted Host routes behind the edge assertion', () => {
     }
   })
 
+  it('refuses a first-message approvalMode without host:approval:write in the verified assertion', async () => {
+    const APPROVAL_SCOPE =
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode']
+    expect(APPROVAL_SCOPE).toBe('host:approval:write')
+    const messageHandler = vi.fn().mockResolvedValue({ success: true, taskId: 'task-1' })
+    const mounted = await mount(server => server.onMessage(messageHandler))
+    const send = (scopes: readonly string[], approvalMode?: string) =>
+      fetch(`${mounted.baseUrl}/v1/runtime/messages`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...clearHeaders(),
+          [HOST_EDGE_ASSERTION_HEADER]: assertion({ scopes }),
+        },
+        body: JSON.stringify({
+          sender: USER,
+          channelType: 'rpc',
+          channelId: HOST_NAME,
+          threadId: 'chat-1',
+          content: 'hello',
+          timestamp: new Date().toISOString(),
+          messageId: randomUUID(),
+          hostRef: HOST_NAME,
+          ...(approvalMode === undefined ? {} : { approvalMode }),
+        }),
+      })
+    try {
+      const allowAll = await send([MESSAGE_SCOPE], 'allow_all')
+      expect(allowAll.status).toBe(403)
+      expect(await allowAll.json()).toEqual({ error: 'Forbidden: missing scope' })
+      expect(messageHandler).toHaveBeenCalledTimes(0)
+
+      // The scope is checked on the key, before the value.
+      const invalidMode = await send([MESSAGE_SCOPE], 'not-a-mode')
+      expect(invalidMode.status).toBe(403)
+      expect(await invalidMode.json()).toEqual({ error: 'Forbidden: missing scope' })
+      expect(messageHandler).toHaveBeenCalledTimes(0)
+
+      // Witness: the same route, guard and handler reach the message handler without the key.
+      const noMode = await send([MESSAGE_SCOPE])
+      expect(noMode.status).toBe(200)
+      expect(messageHandler).toHaveBeenCalledTimes(1)
+      expect(
+        Object.prototype.hasOwnProperty.call(messageHandler.mock.calls[0][0], 'approvalMode')
+      ).toBe(false)
+
+      // Witness: with the approval-mode scope in the assertion the mode is forwarded.
+      const granted = await send([MESSAGE_SCOPE, APPROVAL_SCOPE], 'allow_all')
+      expect(granted.status).toBe(200)
+      expect(messageHandler).toHaveBeenCalledTimes(2)
+      expect(messageHandler.mock.calls.at(-1)?.[0].approvalMode).toBe('allow_all')
+    } finally {
+      await mounted.stop()
+    }
+  })
+
   it('refuses direct session search without declared V2 authority', async () => {
     const search = vi.fn().mockResolvedValue({ results: [], total: 0 })
     const sessionsList = vi.fn().mockResolvedValue({ sessions: [], nextCursor: null })

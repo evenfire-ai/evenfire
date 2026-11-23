@@ -581,7 +581,11 @@ the caller is `rpc-proxy`. Caller `rpc-proxy` must also send
 `CLERUM_AUTH_JWT_PUBLIC_KEY` and `CLERUM_AUTH_JWT_ISSUER`, and checks that it
 binds the clear edge headers and grants the route's scope
 (`HOST_EDGE_RPC_PROXY_ROUTE_SCOPES` in `@clerum/action-context-contracts`). A
-request carrying an `Authorization` header is rejected with 401 on these routes.
+`POST /v1/runtime/messages` body from caller `rpc-proxy` that carries
+`approvalMode` also needs `host:approval:write` in the assertion, the scope of
+the approval-mode PATCH route; without it the route answers 403
+`Forbidden: missing scope`. A request carrying an `Authorization` header is
+rejected with 401 on these routes.
 In practice you reach mcp-host through rpc-proxy or channel-reader, which set
 those headers; the body below is what they forward.
 

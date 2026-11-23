@@ -277,7 +277,7 @@ type EdgeAssertionRefusalReason =
   | 'claims-rejected'
 
 type EdgeAssertionVerdict =
-  | { accepted: true }
+  | { accepted: true; scopes: readonly string[] }
   | {
       accepted: false
       reason: EdgeAssertionRefusalReason
@@ -342,7 +342,11 @@ function verifyRpcProxyEdgeAssertion(
     requiredScope,
   })
   if (!claims.ok) return { accepted: false, reason: 'claims-rejected', claimError: claims.error }
-  return { accepted: true }
+  // The claims validator has checked that `scopes` is a non-empty array of non-empty strings.
+  return {
+    accepted: true,
+    scopes: Object.freeze([...(decoded.payload as { scopes: string[] }).scopes]),
+  }
 }
 
 /**
@@ -425,6 +429,7 @@ export function runtimeEdgeGuard(
         })
         return
       }
+      context.edgeAssertionScopes = verdict.scopes
     }
     if (
       context.actionContextV2 &&

@@ -49,7 +49,9 @@ const HOST_EDGE_ASSERTION_V2_CLAIM_KEYS = Object.freeze([
   'checkedAt',
 ])
 // Scope a V1 edge assertion must list for each Host route that admits caller rpc-proxy. Each value
-// is the scope rpc-proxy already requires on the routes that forward to that Host route.
+// is the scope rpc-proxy requires on every request it forwards to that Host route. A
+// `POST /v1/runtime/messages` body that carries `approvalMode` also needs the scope of the
+// approval-mode PATCH row, which the Host message handler checks.
 const HOST_EDGE_RPC_PROXY_ROUTE_SCOPES = Object.freeze({
   'GET /v1/runtime/status': 'host:status:read',
   'GET /v1/runtime/activity': 'host:activity:read',
