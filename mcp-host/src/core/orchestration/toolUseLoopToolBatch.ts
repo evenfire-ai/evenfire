@@ -212,7 +212,13 @@ export async function executeToolCalls(
   // batch: the redirect's own batch sets the flag after this check.
   // `conversation` is required by type; partial test configs may omit it.
   if (config.conversation?.git_redirect_pending && calls.length > 0) {
-    gitRedirectCounter.inc({ followed: calls.some(c => c.name === 'git_read') ? 'yes' : 'no' })
+    const callsGitRead = calls.some(
+      c =>
+        c.name === 'git_read' ||
+        (c.name === 'clerum__tool_call' &&
+          (c.arguments as Record<string, unknown> | undefined)?.name === 'git_read')
+    )
+    gitRedirectCounter.inc({ followed: callsGitRead ? 'yes' : 'no' })
     config.conversation.git_redirect_pending = false
   }
 

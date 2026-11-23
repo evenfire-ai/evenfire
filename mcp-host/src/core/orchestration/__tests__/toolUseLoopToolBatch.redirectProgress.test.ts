@@ -123,6 +123,24 @@ describe('typed-git redirect in the tool batch', () => {
     expect(reportToolComplete).not.toHaveBeenCalled()
   })
 
+  it('a git_read call through the discovery bridge counts as followed', async () => {
+    gitRedirectCounter.reset()
+    const { config } = makeConfig()
+    await executeToolCalls([shell('git status', 'c1')], config, 0)
+    await executeToolCalls(
+      [
+        {
+          id: 'b1',
+          name: 'clerum__tool_call',
+          arguments: { name: 'git_read', arguments: { subcommand: 'status' } },
+        },
+      ],
+      config,
+      1
+    )
+    expect(await followed()).toEqual({ yes: 1 })
+  })
+
   it('counts on the next batch whether the model called git_read, once', async () => {
     gitRedirectCounter.reset()
     const { config, conversation } = makeConfig()

@@ -135,7 +135,7 @@ export const gitRedirectCounter: Counter<'followed'> = (() => {
   if (existing) return existing as Counter<'followed'>
   return new Counter<'followed'>({
     name,
-    help: 'Typed read-only git shell commands redirected to git_read, by whether the next turn called git_read',
+    help: 'Model turns that followed a typed-git redirect with tool calls, by whether the turn called git_read (a final text answer is not counted)',
     labelNames: ['followed'],
     registers: [register],
   })
