@@ -11,6 +11,7 @@ import {
   expirePendingRequests,
   getApprovalRecipeBinding,
   getStatus,
+  isRetiredUser,
   parseWorkflowTriggerIntent,
   recordDecision,
   resolveWorkflowTriggerGrant,
@@ -49,6 +50,18 @@ describe('userApprovalRequestService', () => {
     mockedWithTransaction.mockImplementation(async (work: any) =>
       work({ query: mockedQuery } as any)
     )
+  })
+
+  describe('isRetiredUser', () => {
+    it('is true only when a retired users row matches', async () => {
+      mockedQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{}] })
+      await expect(isRetiredUser('user-1')).resolves.toBe(true)
+      const [sql, params] = mockedQuery.mock.calls[0]
+      expect(sql).toContain("lifecycle_state = 'retired'")
+      expect(params).toEqual(['user-1'])
+      mockedQuery.mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      await expect(isRetiredUser('user-2')).resolves.toBe(false)
+    })
   })
 
   describe('allowlistCheck', () => {

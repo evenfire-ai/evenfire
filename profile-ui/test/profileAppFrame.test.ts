@@ -7,7 +7,13 @@ import {
 } from '../lib/profileAppFrame'
 
 test('public profile routes stay outside the authenticated application frame', () => {
-  for (const pathname of ['/desktop-setup', '/forgot-password', '/invitations/token']) {
+  for (const pathname of [
+    '/desktop-setup',
+    '/forgot-password',
+    '/invitations/token',
+    '/oidc/result',
+    '/oidc/signed-in',
+  ]) {
     assert.equal(isPublicProfileUiPath(pathname), true, pathname)
   }
 })

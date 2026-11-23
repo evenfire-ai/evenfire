@@ -43,6 +43,7 @@ describe('directory Google login without team memberships', () => {
         rowCount: 1,
       }) // UPDATE user
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // OIDC link → none, so the heal runs
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // accepted invitation memberships
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // UPDATE accepted invitations
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // findFirstActiveMembership → none
