@@ -413,6 +413,7 @@ describe('macOS Quit drain', () => {
       await first
       initializerRead.resolve('synthetic-initializer-token')
       await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
+      expect(harness.nativeSet).toHaveBeenCalledTimes(1)
       expect(vi.mocked(app.quit)).not.toHaveBeenCalled()
     } finally {
       firstNativeWrite.resolve()
