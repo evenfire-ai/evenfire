@@ -83,8 +83,6 @@ import {
   type TaskModelResolver,
 } from './types'
 
-export { approvalParametersWithinNotificationLimit } from './approvalNotificationLimit'
-
 /**
  * Pending approval info exposed via /status endpoint.
  */
