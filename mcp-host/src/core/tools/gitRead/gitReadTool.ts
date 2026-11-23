@@ -19,6 +19,7 @@ const GIT_MAX_BUFFER = 1024 * 1024
 const SUBMODULE_INDEX_MAX_BUFFER = 8 * 1024 * 1024
 export const GIT_READ_TRUNCATED_LINE = '[output truncated]'
 export const GIT_READ_SUBMODULE_NOTE = 'Submodule changes are not shown by git_read.'
+export const GIT_READ_FAILED_TEXT = 'git_read: git ended abnormally.'
 
 /** Fixed texts for every refusal. None of them carries input or repository bytes. */
 export const GIT_READ_REFUSALS: Readonly<Record<GitReadRefusalCategory, string>> = {
@@ -159,6 +160,8 @@ export class GitReadTool implements Tool {
         return done('git_read was stopped.', true)
       case 'error':
         return done('git_read could not start git.', true)
+      case 'failed':
+        return done(GIT_READ_FAILED_TEXT, true)
       case 'overflow': {
         const out = cut(result.stdout)
         return done(withTruncation(out.text, true), false)
