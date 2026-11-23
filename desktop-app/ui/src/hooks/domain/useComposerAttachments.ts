@@ -10,12 +10,17 @@ import {
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { composerRequestBaseContent } from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import { countGlobalFileReferences, isGlobalFileReferenced } from '@lib/tabReferenceSuggestion'
 import type {
   ComposerFileAttachment,
   ComposerFileRefusal,
+  ComposerGlobalFileReference,
   ComposerImageAttachment,
   ComposerReferenceAttachment,
 } from '../../uiTypes'
+
+/** What accepting a suggested file reference did to the composer. */
+export type SuggestedFileReferenceOutcome = 'added' | 'duplicate' | 'full'
 
 export interface ComposerImageMergeOutcome {
   /** The reconciled composer set (existing + accepted incoming, in order). */
@@ -525,6 +530,33 @@ export function useComposerAttachments({
   )
 
   /**
+   * Adds the file the active tab suggests. Unlike the other add paths it leaves
+   * a visible send error alone: accepting a suggestion is not an answer to it.
+   * Both checks and the add run inside one commit against the live mirror, so
+   * a reference added earlier in the same tick is seen.
+   */
+  const addSuggestedFileReference = useCallback(
+    (candidate: ComposerGlobalFileReference): SuggestedFileReferenceOutcome => {
+      let outcome: SuggestedFileReferenceOutcome = 'added'
+      commitComposerReferences(previous => {
+        if (isGlobalFileReferenced(previous, candidate.gfsUri)) {
+          outcome = 'duplicate'
+          return previous
+        }
+        if (countGlobalFileReferences(previous) >= FILE_REFERENCE_MAX_COUNT) {
+          outcome = 'full'
+          return previous
+        }
+        composerAttachmentOrderRef.current += 1
+        return [...previous, { ...candidate, addedOrder: composerAttachmentOrderRef.current }]
+      })
+      if (outcome === 'added') composerAttachmentRevisionRef.current += 1
+      return outcome
+    },
+    [commitComposerReferences]
+  )
+
+  /**
    * Restore-path reconciliation for references (R1-M5): id-dedupe plus the
    * send-time file cap, applied against the live snapshot, with counts that
    * describe exactly that reconciliation.
@@ -563,6 +595,7 @@ export function useComposerAttachments({
     handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    addSuggestedFileReference,
     restoreComposerImageAttachments,
     restoreComposerReferenceAttachments,
   }

@@ -1,5 +1,7 @@
 import React from 'react'
 import { flushSync } from 'react-dom'
+import { TabReferenceSuggestionContext } from '@contexts/TabReferenceSuggestionContext'
+import type { TabReferenceSuggestionValue } from '@contexts/TabReferenceSuggestionContext.types'
 import {
   AgentActivityProvider,
   AgentChatProviders,
@@ -31,6 +33,7 @@ import type { CompactMenuCloseFocus } from '@components/SidebarNav/types'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
+import { TAB_REFERENCE_FILE_LIMIT_TOAST } from '@constants/tabReferenceSuggestion'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import {
   desktopQueryKeys,
@@ -50,6 +53,7 @@ import {
 } from '@hooks/useChatDrawerResize'
 import { useEmbedOwnership } from '@hooks/useEmbedOwnership'
 import { useSidebarResize } from '@hooks/useSidebarResize'
+import { useTabReferenceSuggestion } from '@hooks/useTabReferenceSuggestion'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import { createChatLinkActivation } from '@lib/chatLinkActivation'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
@@ -104,6 +108,8 @@ import {
   resetPendingSandboxUiDeepLinkFailure,
   shouldPurgeSandboxUiDeepLinks,
 } from '@lib/sandboxUiDeepLinkState'
+import { fileUrisOfWatchEvent, shownTabLocation } from '@lib/tabReferenceSuggestion'
+import type { FilesResolvedLocation } from '@lib/tabReferenceSuggestion.types'
 import {
   activeWorkspaceTab,
   closeWorkspaceTab,
@@ -1577,22 +1583,14 @@ export function App() {
   )
 
   const [sidebarWatchedFolderUris, setSidebarWatchedFolderUris] = React.useState<string[]>([])
+  const [filesResolvedLocation, setFilesResolvedLocation] =
+    React.useState<FilesResolvedLocation>(null)
+  const shownLocation = shownTabLocation(vm.activeWorkspaceTab, vm.navItem, filesResolvedLocation)
   const activeWatchedPreviewUri =
-    vm.navItem === DESKTOP_ROUTES.preview && vm.activeWorkspaceTab?.kind === 'preview'
-      ? (vm.activeWorkspaceTab.preview?.gfsUri ?? null)
-      : null
-  const [filesResolvedLocation, setFilesResolvedLocation] = React.useState<{
-    gfsUri: string
-    kind: 'file' | 'directory'
-  } | null>(null)
+    shownLocation?.kind === 'preview' ? shownLocation.preview.gfsUri : null
   // The Files location is watched under the kind it resolved to: a file
   // subscribed as a folder is refused by the server and wastes a slot.
-  const activeFilesLocation =
-    vm.navItem === DESKTOP_ROUTES.files &&
-    filesResolvedLocation &&
-    filesResolvedLocation.gfsUri === activeFilesTab?.files?.path
-      ? filesResolvedLocation
-      : null
+  const activeFilesLocation = shownLocation?.kind === 'files' ? shownLocation.location : null
   const activeFilesLocationKind = activeFilesLocation?.kind === 'file' ? 'file' : 'dir'
   const activeFilesLocationUri = activeFilesLocation?.gfsUri ?? null
   const gfsWatchKeys = React.useMemo(
@@ -1685,6 +1683,27 @@ export function App() {
     purgeGfsSessionCache(queryClient, livePreviewAuthorityRef.current)
   }, [queryClient, setWorkspaceTabs])
 
+  const tabReferenceSuggestion = useTabReferenceSuggestion({
+    activeTab: vm.activeWorkspaceTab,
+    navItem: vm.navItem,
+    filesResolvedLocation,
+    authorityScope: vm.authorityScope,
+    drawerVisible: chatDrawerVisible,
+  })
+  const invalidateTabReference = tabReferenceSuggestion.invalidate
+  const acceptTabReference = React.useCallback<TabReferenceSuggestionValue['accept']>(
+    candidate => {
+      const outcome = vm.addSuggestedFileReference(candidate)
+      if (outcome === 'full') vm.pushToast(TAB_REFERENCE_FILE_LIMIT_TOAST, 'warn')
+      return outcome
+    },
+    [vm.addSuggestedFileReference, vm.pushToast]
+  )
+  const tabReferenceSuggestionValue = React.useMemo<TabReferenceSuggestionValue>(
+    () => ({ candidate: tabReferenceSuggestion.candidate, accept: acceptTabReference }),
+    [acceptTabReference, tabReferenceSuggestion.candidate]
+  )
+
   useGfsWatchSubscription({
     keys: gfsWatchKeys,
     userId: vm.isAuthenticated ? (vm.me?.id ?? null) : null,
@@ -1693,6 +1712,9 @@ export function App() {
       switch (event.type) {
         case 'changed':
         case 'resync':
+          for (const uri of fileUrisOfWatchEvent(event)) invalidateTabReference(uri)
+          for (const key of event.keys) reactToGfsWatchKey(key)
+          return
         case 'rejected':
           for (const key of event.keys) reactToGfsWatchKey(key)
           return
@@ -4868,7 +4890,11 @@ export function App() {
                                         width={chatDrawerResize.width}
                                         resizing={chatDrawerResize.isResizing}
                                       >
-                                        <ChatPage scrollContainerRef={chatDrawerRef} />
+                                        <TabReferenceSuggestionContext.Provider
+                                          value={tabReferenceSuggestionValue}
+                                        >
+                                          <ChatPage scrollContainerRef={chatDrawerRef} />
+                                        </TabReferenceSuggestionContext.Provider>
                                       </ChatDrawer>
                                     </RightRailShell>
                                   )}
