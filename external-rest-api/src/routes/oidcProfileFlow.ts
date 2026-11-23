@@ -1,4 +1,5 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
+import { ipKeyGenerator } from 'express-rate-limit'
 import { ControlApiError, controlApiRequestWithStatus } from '../controlApiClient.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import { setProfileSessionCookie } from '../sessionCookie.js'
@@ -6,7 +7,6 @@ import { setProfileSessionCookie } from '../sessionCookie.js'
 /** Matches Control API's OIDC operation budget. The fetch waits one extra second so that budget can answer first. */
 const OIDC_OPERATION_DEADLINE_MS = 12_000
 const OIDC_UPSTREAM_WAIT_MS = OIDC_OPERATION_DEADLINE_MS + 1_000
-const CLIENT_KEY_RE = /^[a-f0-9]{64}$/
 
 const BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
@@ -68,16 +68,19 @@ function connectionKey(req: Request): string {
 /**
  * The directly connected peer (the Profile UI pod). Profile UI forwards the browser IP as
  * X-Forwarded-For, so with `trust proxy 1` req.ip is client-influenced; only the socket
- * address is a hard ceiling.
+ * address identifies the peer.
  */
 function socketKey(req: Request): string {
   return req.socket.remoteAddress || 'unknown'
 }
 
+/**
+ * One bucket per browser: the forwarded IP (`req.ip` under `trust proxy 1`), falling back to
+ * the socket address. An IPv6 address shares a bucket with the rest of its /56, so a holder
+ * of a prefix cannot rotate addresses inside it. No request header chooses the key.
+ */
 function clientRateKey(req: Request): string {
-  const key = req.get('x-oidc-client-key')
-  if (key && CLIENT_KEY_RE.test(key)) return `client:${key}`
-  return `ip:${connectionKey(req)}`
+  return `ip:${ipKeyGenerator(connectionKey(req))}`
 }
 
 function upstreamCall(req: Request): { signal: AbortSignal; extraHeaders: Record<string, string> } {
@@ -92,17 +95,30 @@ function upstreamCall(req: Request): { signal: AbortSignal; extraHeaders: Record
   }
 }
 
+/** Requests per minute for one browser (forwarded IP). */
+export const OIDC_PER_CLIENT_LIMIT = 60
+/**
+ * Requests per minute for one directly connected peer (a Profile UI pod). A capacity bound,
+ * not a fairness limit: fairness between browsers is the per-client limit. At about three
+ * requests per sign-in, 6000 is about 2000 sign-ins per minute per pod. A caller that can
+ * choose its own X-Forwarded-For (a deployment with no proxy in front that sets it) can
+ * still reach this ceiling.
+ */
+export const OIDC_PER_SOCKET_LIMIT = 6000
+
 export function createOidcProfileFlowRouter(): Router {
   const router = Router()
+  // The per-client limiter runs first, so a request it refuses never counts against the
+  // shared per-socket ceiling.
   const perClient = createRateLimiter({
     windowMs: 60_000,
-    maxRequests: 60,
+    maxRequests: OIDC_PER_CLIENT_LIMIT,
     keyFn: clientRateKey,
     errorCode: 'oidc_unavailable',
   })
   const perConnection = createRateLimiter({
     windowMs: 60_000,
-    maxRequests: 600,
+    maxRequests: OIDC_PER_SOCKET_LIMIT,
     keyFn: req => `edge:${socketKey(req)}`,
     errorCode: 'oidc_unavailable',
   })

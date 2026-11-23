@@ -82,8 +82,8 @@ export function noStoreText(message: string, status: number, retryAfterSeconds?:
 
 /**
  * Best-effort browser IP: a valid `cf-connecting-ip`, otherwise the left-most `x-forwarded-for`
- * entry. Only a valid IP is returned. External REST's per-socket limit is the hard
- * ceiling; this value only lets it tell browsers apart.
+ * entry. Only a valid IP is returned. It is forwarded as `x-forwarded-for`; External REST
+ * keys its per-browser limit on it. External REST's per-socket limit is the capacity bound.
  */
 export function oidcBrowserClientIp(request: Request): string | undefined {
   const connecting = request.headers.get('cf-connecting-ip')?.trim() ?? ''
@@ -91,11 +91,6 @@ export function oidcBrowserClientIp(request: Request): string | undefined {
   const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? ''
   if (!forwarded || isIP(forwarded) === 0) return undefined
   return forwarded
-}
-
-export function oidcClientKey(request: Request): string | undefined {
-  const ip = oidcBrowserClientIp(request)
-  return ip ? createHash('sha256').update(ip).digest('hex') : undefined
 }
 
 function externalUrl(path: string): string {
@@ -112,7 +107,6 @@ async function requestExternalWithHeaders<T>(
   init?: RequestInit,
   request?: Request
 ): Promise<{ body: T; headers: Headers }> {
-  const clientKey = request ? oidcClientKey(request) : undefined
   const clientIp = request ? oidcBrowserClientIp(request) : undefined
   let response: Response
   try {
@@ -124,7 +118,6 @@ async function requestExternalWithHeaders<T>(
       headers: {
         accept: 'application/json',
         'x-oidc-operation-deadline-ms': String(OIDC_OPERATION_DEADLINE_MS),
-        ...(clientKey ? { 'x-oidc-client-key': clientKey } : {}),
         ...(clientIp ? { 'x-forwarded-for': clientIp } : {}),
         ...(init?.body ? { 'content-type': 'application/json' } : {}),
         ...((init?.headers as Record<string, string> | undefined) ?? {}),

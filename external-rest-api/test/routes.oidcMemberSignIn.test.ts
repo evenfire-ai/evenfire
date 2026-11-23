@@ -4,7 +4,10 @@ import request from 'supertest'
 import { createApp } from '../src/app.js'
 import * as controlApiClient from '../src/controlApiClient.js'
 import { createAuthRouter } from '../src/routes/auth.js'
-import { createOidcProfileFlowRouter } from '../src/routes/oidcProfileFlow.js'
+import {
+  OIDC_PER_SOCKET_LIMIT,
+  createOidcProfileFlowRouter,
+} from '../src/routes/oidcProfileFlow.js'
 
 const authServiceMock = vi.hoisted(() => ({
   loginWithGoogle: vi.fn(),
@@ -222,23 +225,29 @@ describe('External REST OIDC member sign-in', () => {
     expect(malformed.status).toBe(503)
   })
 
-  it('rotating X-Forwarded-For values still hit the per-socket ceiling', async () => {
+  it('rotating X-Forwarded-For values still hit the per-socket ceiling (6000)', async () => {
     controlApi.mockResolvedValue({
       data: { redirectUri: CONFIG_URI, memberAuthenticationActivated: false },
       status: 200,
     } as never)
-    const server = buildApp()
+    const ceiling = OIDC_PER_SOCKET_LIMIT
+    const server = express()
+    server.set('trust proxy', 1)
+    server.use('/api/v1', createOidcProfileFlowRouter())
     const send = (i: number) =>
       request(server)
         .get('/api/v1/oidc/profile-flow/configuration')
-        .set('X-Forwarded-For', `198.51.${Math.floor(i / 250)}.${(i % 250) + 1}`)
-    for (let i = 0; i < 600; i++) {
+        .set(
+          'X-Forwarded-For',
+          `198.${51 + Math.floor(i / 62500)}.${Math.floor(i / 250) % 250}.${(i % 250) + 1}`
+        )
+    for (let i = 0; i < ceiling; i++) {
       const ok = await send(i)
       if (ok.status !== 200) throw new Error(`request ${i} unexpectedly ${ok.status}`)
     }
-    const limited = await send(600)
+    const limited = await send(ceiling)
     expect(limited.status).toBe(429)
-    expect(controlApi).toHaveBeenCalledTimes(600)
+    expect(controlApi).toHaveBeenCalledTimes(ceiling)
   })
 
   it('the control-api call carries the browser IP that Profile UI forwarded', async () => {

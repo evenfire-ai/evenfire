@@ -4,7 +4,6 @@ import {
   type OidcProfileConfiguration,
   browserCookieName,
   oidcBrowserClientIp,
-  oidcClientKey,
 } from '../app/api/oidc/_flow'
 import { GET } from '../app/api/oidc/callback/route'
 import { POST } from '../app/api/oidc/start/route'
@@ -791,6 +790,25 @@ test('the browser IP from cf-connecting-ip is forwarded as x-forwarded-for', asy
   }
 })
 
+test('requests to external-rest-api carry the browser IP and no x-oidc-client-key', async () => {
+  const seen: Array<Record<string, string> | undefined> = []
+  const restore = mockExternalApi((url, init) => {
+    seen.push(init.headers as Record<string, string> | undefined)
+    if (url.pathname.endsWith('/configuration')) return signInConfiguration()
+    return memberSignInResponse({ outcome: 'identity_proof_verified' })
+  })
+  try {
+    await GET(callbackRequest({ 'cf-connecting-ip': '203.0.113.7' }))
+    assert.equal(seen.length, 2)
+    for (const headers of seen) {
+      assert.equal(headers?.['x-forwarded-for'], '203.0.113.7')
+      assert.equal(headers?.['x-oidc-client-key'], undefined)
+    }
+  } finally {
+    restore()
+  }
+})
+
 test('the left-most x-forwarded-for entry is used without cf-connecting-ip', async () => {
   const seen: Array<string | undefined> = []
   const restore = mockExternalApi((url, init) => {
@@ -801,10 +819,6 @@ test('the left-most x-forwarded-for entry is used without cf-connecting-ip', asy
   try {
     await GET(callbackRequest({ 'x-forwarded-for': '198.51.100.9, 10.0.0.1' }))
     assert.deepEqual(seen, ['198.51.100.9', '198.51.100.9'])
-    assert.equal(
-      oidcClientKey(new Request(callbackUri, { headers: { 'cf-connecting-ip': '203.0.113.7' } })),
-      oidcClientKey(new Request(callbackUri, { headers: { 'x-forwarded-for': '203.0.113.7' } }))
-    )
   } finally {
     restore()
   }
