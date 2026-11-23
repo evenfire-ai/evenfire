@@ -326,6 +326,31 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
   not delete them earlier: an HCC rolled back to the previous release with
   `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=dedicated-header-v1` writes
   Host pods that require that Secret.
+- **Key sync after every overlay apply.** From this release every Desktop →
+  Host route depends on `CLERUM_AUTH_JWT_PUBLIC_KEY` in `mcp-host-config`;
+  before it, only `POST /v1/runtime/compact` and session search did. An
+  overlay apply overwrites that ConfigMap with the key literal committed in
+  the overlay, so the production orchestrator (owned by
+  `keyper-labs/evenfire-infra`, see above) runs
+  `scripts/minikube/sync-auth-key.sh` right after it. The script patches the
+  key back from `RPC_PROXY_JWT_PUBLIC_KEY` in Secret `rpc-proxy-secrets`,
+  checks that every Deployment in `mcp-host` that binds the key (HCC-managed
+  Hosts included) runs with it, restarts the ones that drifted, and fails
+  otherwise. The orchestrator's phased apply rolls out and verifies
+  control-api before RPC Proxy and HCC change. A Host started between the
+  apply and the sync answers 401 on every Desktop → Host route until the sync
+  restarts it.
+- **Confirm three keys match before the upgrade:** the public half of
+  control-api's RPC signing key (`CONTROL_API_RPC_JWT_PRIVATE_KEY` in Secret
+  `control-api-secrets`, namespace `control-plane`), `RPC_PROXY_JWT_PUBLIC_KEY`
+  in Secret `rpc-proxy-secrets` (namespace `rpc-proxy`), and
+  `CLERUM_AUTH_JWT_PUBLIC_KEY` in ConfigMap `mcp-host-config` (namespace
+  `mcp-host`). Compare SHA-256 digests of the DER public key, and print only
+  the digests. Secret values are base64 in `.data`; ConfigMap values are not.
+  The key may be stored with real newlines or a literal `\n` (the Host
+  accepts both), so normalize it before hashing. At runtime, a Host refusal
+  log with `verify-failed` and `JsonWebTokenError` is the signal that the
+  keys drifted.
 
 The in-repository executable barrier covers the supported Minikube path. Production
 GCP rollout and rollback orchestration is owned by `keyper-labs/evenfire-infra`;
@@ -381,7 +406,10 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    Know these before you run them:
    - `gen-jwt-keys.sh` generates **new** keys on every run. Running it again
      rotates every key, including the OAuth encryption key. Run it once and
-     keep the output.
+     keep the output. A second run is a full re-bootstrap that cuts service,
+     not a rotation: it restarts only the Deployments in `mcp-host`, so until
+     you restart control-api and RPC Proxy, every Desktop → Host request
+     returns 401.
    - Set `ADMIN_BOOTSTRAP_PASSWORD_HASH` (a bcrypt hash) before you run it.
      Otherwise it writes a placeholder hash.
    - It writes the `control-postgres` Secret with user `postgres` and password
@@ -392,7 +420,9 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
      `CLERUM_AUTH_JWT_PUBLIC_KEY`. `gen-jwt-keys.sh` patches it only if the
      ConfigMap already exists, so after your first overlay apply (and after
      any apply that rewrites it) copy `RPC_PROXY_JWT_PUBLIC_KEY` from Secret
-     `rpc-proxy-secrets` (namespace `rpc-proxy`) into it. Never keep the key
+     `rpc-proxy-secrets` (namespace `rpc-proxy`) into it, then restart every
+     Deployment in `mcp-host`: from this release every Desktop → Host route
+     depends on that key. Never keep the key
      from the minikube copy. `control-api-public-key` and
      `clerum-wrc-public-key` are not in base: `gen-jwt-keys.sh` creates them
      and `kubectl apply -k` leaves them alone.
