@@ -345,6 +345,22 @@ describe('git_read reads follow file_read guardrail rules', () => {
     expect(control.toolMessage).toContain(NESTED_WITNESS)
   })
 
+  it('a backslash pathspec, which git reads as a glob, gets the whole-workspace decision', async () => {
+    const guardrails = {
+      rules: [allowNative, fileReadRule('deny-nested', 'deny', 'under', 'pub/secret')],
+    }
+    const escaped = gitRead({
+      subcommand: 'log',
+      options: ['patch'],
+      paths: ['pub/s\\ecret/b.txt'],
+    })
+    const blocked = await run({ mode: 'auto', call: escaped, guardrails })
+    expect(blocked.toolMessage).toBe('Blocked by guardrail policy (rule:deny-nested).')
+    // Control: git matches the escaped path to the nested file.
+    const control = await run({ mode: 'auto', call: escaped, guardrails: { rules: [allowNative] } })
+    expect(control.toolMessage).toContain(NESTED_WITNESS)
+  })
+
   it('an allowlist Host asks for a read file_read is not allowed', async () => {
     const guardrails = {
       rules: [allowTool('git_read'), fileReadRule('allow-pub', 'allow', 'under', 'pub')],

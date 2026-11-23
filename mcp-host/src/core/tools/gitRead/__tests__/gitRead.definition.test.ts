@@ -219,6 +219,8 @@ describe('gitReadFileReads', () => {
     for (const params of [
       { subcommand: 'grep', pattern: 'x' },
       { subcommand: 'grep', pattern: 'x', paths: ['*.py'] },
+      // git reads `pub/s\\ecret` as a glob that matches `pub/secret`.
+      { subcommand: 'log', options: ['patch'], paths: ['pub/s\\ecret'] },
       { subcommand: 'show' },
       { subcommand: 'show', revisions: ['HEAD:a.txt'] },
       { subcommand: 'cat_file', revisions: ['HEAD'] },

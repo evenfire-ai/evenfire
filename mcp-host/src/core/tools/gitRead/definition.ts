@@ -485,7 +485,8 @@ export function validateGitReadParams(raw: Record<string, unknown>): ValidationR
   return check.ok ? { is_valid: true, errors: [] } : { is_valid: false, errors: [check.text] }
 }
 
-const PATHSPEC_MAGIC = /[*?[]/
+/** Characters that make a git pathspec a glob; a backslash escapes the next one. */
+const PATHSPEC_MAGIC = /[*?[\\]/
 
 /**
  * The workspace files a `git_read` call reads, for the guardrail `file_read`
