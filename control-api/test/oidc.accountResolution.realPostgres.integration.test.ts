@@ -388,10 +388,10 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
 
   it.each([
     ['xms_edov true links', { xms_edov: true }, 'links'],
-    ['no xms_edov', {}, 'email_domain_claim_missing'],
-    ['xms_edov false', { xms_edov: false }, 'email_unverified'],
+    ['no xms_edov refuses provider_configuration', {}, 'email_domain_claim_missing'],
+    ['xms_edov false refuses email_unverified', { xms_edov: false }, 'email_unverified'],
   ] as const)(
-    'an Entra member with no email_verified and %s: %s (R7/PR-1)',
+    'an unlinked Entra member with no email_verified: %s (R7/PR-1)',
     async (_name, extra, outcome) => {
       const fake = entraFake(`fake-entra-edov-link-${outcome.replace(/_/g, '-')}`)
       const subject = uniqueLabel('edov-link-subject')
@@ -423,6 +423,27 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
       expect(await watchedTables()).toEqual(before)
     }
   )
+
+  it('a linked Entra member with neither email_verified nor xms_edov still signs in (R7/PR-1)', async () => {
+    const fake = entraFake('fake-entra-edov-linked')
+    const subject = uniqueLabel('edov-linked-subject')
+    const email = `${uniqueLabel('edov-linked')}@entra.fixture.test`
+    const userId = await seedUser(email)
+    await seedLink(fake.provider, subject, userId)
+    const proof = await fake.signIn({ sub: subject, tid: ENTRA_TENANT_ID, email })
+    expect(proof.verifiedClaims.claims.email_verified).toEqual({ status: 'missing' })
+    expect(proof.verifiedClaims.claims.xms_edov).toEqual({ status: 'missing' })
+    const before = await watchedTables()
+
+    const result = await resolve(fake, proof)
+
+    expect(result).toMatchObject({
+      status: 'resolved',
+      account: { userId, created: { account: false, link: false } },
+    })
+    expect(await watchedTables()).toEqual(before)
+    expect(await linksFor(subject)).toHaveLength(1)
+  })
 
   it('an Entra member with no xms_edov creates no account (R7/PR-1)', async () => {
     const fake = entraFake('fake-entra-edov-create')
