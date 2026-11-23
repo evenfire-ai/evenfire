@@ -9,8 +9,8 @@ export interface LocationReferenceSource {
 }
 
 /**
- * A Global Files folder the turn is about, as the place to create, save, list
- * or search files. It names no version or size: a folder changes whenever
+ * A Global Files folder the turn is about, as the place to create, save or
+ * list files. It names no version or size: a folder changes whenever
  * something is created inside it.
  */
 export interface LocationReferenceV1 {
