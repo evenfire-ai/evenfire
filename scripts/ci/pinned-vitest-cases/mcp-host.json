@@ -2450,5 +2450,837 @@
   {
     "suite": "approvalMode.test.ts",
     "fullName": "approver policy in the channel cap reads the policy from the policy in force and the switch from the Host spec"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission auto runs git_read as A9 and the model sees wrapped output"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission manual cards git_read as M1; an always shell_exec grant runs it without a card"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission a shell Deny leaves git_read at A9 in auto"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission a git_read Deny re-asks git_read only"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission auto with tools {\"git_read\":true} cards git_read: true"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission auto with tools {\"shell_exec\":true} cards git_read: true"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission auto with tools {\"file_read\":true} cards git_read: true"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission auto with tools {\"git_read\":false,\"file_read\":true} cards git_read: true"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission auto with tools {\"git_read\":false} cards git_read: false"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission auto with tools {\"shell_exec\":false} cards git_read: false"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission allow_all runs git_read as X1"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read reads follow file_read guardrail rules a file_read deny blocks whole-workspace and REV:PATH reads; literal paths and names-only calls run"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read reads follow file_read guardrail rules a rule on a path inside a declared directory applies (subtrees)"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read reads follow file_read guardrail rules an allowlist Host asks for a read file_read is not allowed"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read reads follow file_read guardrail rules an ask on file_read cards a content call, not a names-only call"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read reads follow file_read guardrail rules an outside rule blocks a whole-workspace call"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read reads follow file_read guardrail rules in allow-all a derived file_read ask is the X2 card, exact and without Always"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect the first git status is redirected, with no card and no classifier call"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect the same text again takes the normal path; a different git text is redirected"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect a new user message redirects the same text again"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect a denied shell is redirected"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect a non-git command is not redirected"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect in manual"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect in allow_all"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect with a whole-tool shell grant (A1)"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect with an exact command grant (A1)"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect with tools.shell_exec true (A5 admin_forced)"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect with tools.git_read true"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect with tools.file_read true"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect when git_read is not registered"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect when git_read is denied"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect when any guardrail rule is configured"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect when the admission inputs carry no approvalTools"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect liveApprovalTools never holds git_read"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read auto runs git_read as A9"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read auto cards git_read as A5 for every exact cause and admin_forced"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read manual cards git_read as M1 as_produced"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read a task shell_exec grant runs git_read in manual"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read an always shell_exec grant runs git_read in manual"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read a git_read grant does not run shell_exec"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read a shell_exec grant does not cover git_read under guardrail_ask or denied"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read allow_all runs git_read as X1 and cards a guardrail ask as X2"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read a CRD false (cause none) runs git_read as N1 in every mode"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git status"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git -C service log -3"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git --no-pager log -5"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects cd service && git status"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git stash list"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git tag -l 'v1.*'"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git branch --contains abc"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git remote -v"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git remote get-url origin"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git reflog"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git reflog -10"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git reflog show"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git worktree list"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git branch -a -vv"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git branch --show-current"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead redirects git diff HEAD~1 -- a.txt"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git stash"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git branch -d x"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git branch x"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git tag v1"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git remote add o u"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git reflog expire"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git -c x=y log"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git log | head"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect X=1 git status"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git status; rm x"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git log $(cat f)"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git log `cat f`"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git commit -m x"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git status > out.txt"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git status & rm x"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect cd a && cd b && git status"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect cd a && git status && rm x"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git --git-dir=x status"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect gitk status"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git status\nrm x"
+  },
+  {
+    "suite": "mcpApprovalGateController.nativeCause.test.ts",
+    "fullName": "git_read CRD overrides inherits true overrides of shell_exec and file_read, never a false"
+  },
+  {
+    "suite": "manualInvariance.test.ts",
+    "fullName": "manual invariance (P1-T11) the shell description and schema are byte-equal to the tree before PR 1"
+  },
+  {
+    "suite": "manualInvariance.test.ts",
+    "fullName": "manual invariance (P1-T11) every native definition other than json_transform is unchanged, and git_read is absent without a probe"
+  },
+  {
+    "suite": "manualInvariance.test.ts",
+    "fullName": "manual invariance (P1-T11) json_transform is the one definition PR 1 changes"
+  },
+  {
+    "suite": "gitProbe.test.ts",
+    "fullName": "parseGitVersion reads plain, Apple and newer banners and rejects anything else"
+  },
+  {
+    "suite": "gitProbe.test.ts",
+    "fullName": "probeGitReadWith the floor is 2.38.0: 2.37.7 is too old, 2.38.0 and newer are available"
+  },
+  {
+    "suite": "gitProbe.test.ts",
+    "fullName": "probeGitReadWith takes /usr/bin/git first, then /bin/git, and nothing else"
+  },
+  {
+    "suite": "gitProbe.test.ts",
+    "fullName": "probeGitReadWith runs the realpath of the binary and checks that file and its directory"
+  },
+  {
+    "suite": "gitProbe.test.ts",
+    "fullName": "probeGitReadWith a binary or directory not owned by root, or group or other writable, is unsafe"
+  },
+  {
+    "suite": "gitProbe.test.ts",
+    "fullName": "probeGitReadWith a spawn error, a timeout or an unreadable banner is probe_failed"
+  },
+  {
+    "suite": "gitProbe.test.ts",
+    "fullName": "probeGitRead spawns git once for any number of calls"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) no alternates file: the control does not leak and the preflight passes"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) an absolute outside entry is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) an entry relative to the objects dir that leaves the root is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) a comment line followed by an outside entry is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) an outside entry after 2 KB of comments, with a trailing slash or no final newline is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) a C-quoted outside entry is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) a nonexistent entry followed by an outside entry is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) a whitespace-only line, CRLF and a leading space are refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) an alternates file over 64 KiB is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) an alternates file that is a link or a directory is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) a protected store inside the root is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) an inside alternate and a cycle are accepted"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) a nested alternate leaving the root is refused, absolute or relative to the nested store"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) a chain of 6 inside stores is accepted"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) a depth-6 alternates file is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) a chain of 5 whose last file lists an outside store is refused"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) an alternates file that cannot be lstat-ed for another reason is unreadable"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) setup sanity: the fixture repository works under git_read"
+  },
+  {
+    "suite": "gitRead.argv.test.ts",
+    "fullName": "git_read argv templates the exclusion pathspecs are the 13 literal entries"
+  },
+  {
+    "suite": "gitRead.argv.test.ts",
+    "fullName": "git_read argv templates status, with every option"
+  },
+  {
+    "suite": "gitRead.argv.test.ts",
+    "fullName": "git_read argv templates log without content options has no exclusions and a default count of 50"
+  },
+  {
+    "suite": "gitRead.argv.test.ts",
+    "fullName": "git_read argv templates log content calls get the exclusions and --ignore-submodules=all"
+  },
+  {
+    "suite": "gitRead.argv.test.ts",
+    "fullName": "git_read argv templates log --follow takes its one path without exclusions (git allows one pathspec)"
+  },
+  {
+    "suite": "gitRead.argv.test.ts",
+    "fullName": "git_read argv templates show and diff always get the exclusions"
+  },
+  {
+    "suite": "gitRead.argv.test.ts",
+    "fullName": "git_read argv templates blame and grep: no --end-of-options, --no-textconv, grep with exclusions"
+  },
+  {
+    "suite": "gitRead.argv.test.ts",
+    "fullName": "git_read argv templates ref listings put the pattern after --end-of-options"
+  },
+  {
+    "suite": "gitRead.argv.test.ts",
+    "fullName": "git_read argv templates the remaining subcommands"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git every git spawn gets the literal environment and the ceiling"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "git_read definition fits the 2,048-byte native definition budget"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams returns one fixed text and never echoes the input"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams refuses options and fields on subcommands that do not map them"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams an explicit null counts as absent"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams revision words: no leading dash, whitespace, NUL, or more than 8"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams REV:PATH: only show and cat_file, no braces, no :/ or :!, no ./ or ../, unprotected"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams paths and directory: workspace-relative, no .., not protected"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams string fields: at most 256 bytes, no newline; integers in range"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams follow needs exactly one path"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams log and show formats refuse signature placeholders"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "validateGitReadParams for_each_ref formats use only the atom allowlist"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "gitReadFileReads names-only calls declare no reads"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "gitReadFileReads content calls with literal paths declare those paths and their subtrees"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "gitReadFileReads any other content call reads the whole workspace"
+  },
+  {
+    "suite": "gitRead.env.test.ts",
+    "fullName": "gitReadEnv is exactly the literal table, whatever the process environment holds"
+  },
+  {
+    "suite": "gitRead.env.test.ts",
+    "fullName": "gitReadEnv forces the 13 keys in a fixed order"
+  },
+  {
+    "suite": "gitRead.env.test.ts",
+    "fullName": "gitReadEnv passes the ceiling through, empty for the probe"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p01 core.fsmonitor: runs, no fire"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p02 diff.external: refused"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p03 named textconv: refused; without the preflight --no-textconv still stops it"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p04 named diff driver command: refused"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p05 clean filter on a touched same-size file: refused; only the preflight stops it"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p06 post-index-change hook, through core.hooksPath and .git/hooks: no fire"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p07 include.path and includeIf to a workspace file: refused"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p08 a .git file pointing at a generic directory: fsmonitor does not fire, a textconv is refused"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p09 a git dir of plain files, at the directory and in a subdirectory: not a repository"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p10 commondir: outside is refused; inside runs without firing"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p11 worktree config with a program key: refused"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p12a promisor remote with uploadpack: refused"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p12b tolerated promisor keys with an ext:: url: runs, fails, no fire"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p12c a local protocol.ext.allow=always: refused; forcing only protocol.allow would fire"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p13 gpg.program with log.showSignature on a signed commit: refused"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p14 core.pager: refused"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories p15 GIT_CONFIG_PARAMETERS in mcp-host's own environment: no fire"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories submodules s1 submodule core.fsmonitor: no fire"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories submodules s2 submodule textconv: no fire"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories submodules s3 submodule clean filter: no fire with --ignore-submodules=all, fires without it"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories submodules s4 a hook in .git/modules/mod/hooks: no fire"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories N8 blame.ignoreRevsFile naming an outside file: refused"
+  },
+  {
+    "suite": "gitRead.poisoned.integration.test.ts",
+    "fullName": "git_read poisoned repositories N9 a workspace root with no .git inside an outer repository: not a repository"
+  },
+  {
+    "suite": "gitRead.preflightParse.test.ts",
+    "fullName": "git_read config preflight (P6) the inert list is exactly the design list"
+  },
+  {
+    "suite": "gitRead.preflightParse.test.ts",
+    "fullName": "git_read config preflight (P6) real captured -z output parses and passes"
+  },
+  {
+    "suite": "gitRead.preflightParse.test.ts",
+    "fullName": "git_read config preflight (P6) a key off the list runs programs; the tolerated pair does not"
+  },
+  {
+    "suite": "gitRead.preflightParse.test.ts",
+    "fullName": "git_read config preflight (P6) unknown, system and global scopes fail the preflight"
+  },
+  {
+    "suite": "gitRead.preflightParse.test.ts",
+    "fullName": "git_read config preflight (P6) an extra or a missing command key fails the preflight"
+  },
+  {
+    "suite": "gitRead.preflightParse.test.ts",
+    "fullName": "git_read config preflight (P6) a truncated record does not parse"
+  },
+  {
+    "suite": "gitRead.preflightParse.test.ts",
+    "fullName": "git_read config preflight (P6) runPreflight config step passes with the captured output, and fails on rc != 0 or a timeout"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) log -p --all, from the repo and from a subdirectory: no needle, witness present"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) the pickaxe lists no commit for a protected needle"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) show, diff and diff --cached drop protected paths"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) grep finds no needle in the worktree, from a subdirectory or at a commit, and still finds the witness"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) a rename out of protected state shows the new file only"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) log --follow -p of a file renamed from protected state is refused"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) the follow check sees the rename inside a revision window or a since window"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) log --follow -p over the whole tree is refused when its history has a protected name"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) REV:PATH to a protected path is refused in every spelling"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) braces with a path, REV:PATH on grep and pathspec magic are refused"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) blob ids, blob tags and tree ids are not commits"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) positives: commit paths, a tree listing, a commit tag, a commit object, follow and paths"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) names-only listings show protected names but no content"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) a tracked file replaced by a link to an outside file is never followed"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) each exclusion magic word is load-bearing without the /** entries the directory forms leak"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) each exclusion magic word is load-bearing without glob magic root state.db leaks"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) each exclusion magic word is load-bearing without top magic a subdirectory call leaks"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) for_each_ref formats (G-P7) %(raw) and %(*raw) are refused"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) for_each_ref formats (G-P7) a format with only allowlisted atoms runs"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) indirection objects (G-P8) a note made from a protected blob does not print"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) indirection objects (G-P8) a replace ref to a protected blob does not print"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a plain repository passes"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) .git/objects linked outside is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a pack linked outside is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a loose object linked outside is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) packed-refs linked to an outside file is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) HEAD linked outside is not a repository"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a link inside the root is accepted"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a link into protected state is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a dangling link is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) an inside alternate store whose pack links outside is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) an inside alternate store whose loose object links outside is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) objects linked to an inside directory holding an outside pack link is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) objects/pack linked to an inside directory of outside links is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a link cycle under .git is walked once"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a non-object file under .git with a second hard link is refused; a hard-linked loose object is not"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a toplevel outside the root is refused by the toplevel check alone"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a gitfile or commondir pointing outside is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) the link walk stops at its entry budget"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a repository root configured through a symlink works"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a directory that does not exist, a file, or a protected directory is a bad path"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a caller root that no longer verifies is root_unavailable"
   }
 ]
