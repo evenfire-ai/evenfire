@@ -101,6 +101,11 @@ export function decideApproval(input: {
     autoShell: { wholeTool: boolean; commands: ReadonlySet<string> }
   }
   command?: string
+  /**
+   * For git_read: false when the call returns only names and ids. Absent or
+   * true means it can return file content, which cards in auto (A6).
+   */
+  contentRead?: boolean
   classifierAvailable: boolean
   verdict?: ShellVerdict
 }): ModeDecision {
@@ -127,7 +132,14 @@ export function decideApproval(input: {
     return { kind: 'card', cell: 'A5', scope: 'exact_invocation' }
   }
   if (tool === 'http') return { kind: 'run', cell: 'A2' }
-  if (tool === 'git') return { kind: 'run', cell: 'A9' }
+  // git_read runs without a card in auto only when it returns names and ids:
+  // content rules keyed on path names cannot hold against repository state
+  // written without approval, so content reads show their card.
+  if (tool === 'git') {
+    return input.contentRead === false
+      ? { kind: 'run', cell: 'A9' }
+      : { kind: 'card', cell: 'A6', scope: 'exact_invocation' }
+  }
   if (tool === 'other') return { kind: 'card', cell: 'A6', scope: 'exact_invocation' }
 
   const shell = input.grants.autoShell

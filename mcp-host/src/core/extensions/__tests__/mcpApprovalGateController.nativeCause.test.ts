@@ -147,6 +147,7 @@ describe('git_read CRD overrides', () => {
       toolName: 'git_read',
       cause,
       grants: noGrants,
+      contentRead: false,
       classifierAvailable: true,
     }).cell
   }

@@ -2453,7 +2453,7 @@
   },
   {
     "suite": "gitReadAdmission.integration.test.ts",
-    "fullName": "git_read admission auto runs git_read as A9 and the model sees wrapped output"
+    "fullName": "git_read admission auto runs a names-only git_read as A9 and the model sees wrapped output"
   },
   {
     "suite": "gitReadAdmission.integration.test.ts",
@@ -2589,7 +2589,7 @@
   },
   {
     "suite": "decideApproval.test.ts",
-    "fullName": "decideApproval: git_read auto runs git_read as A9"
+    "fullName": "decideApproval: git_read auto runs a names-only git_read as A9"
   },
   {
     "suite": "decideApproval.test.ts",

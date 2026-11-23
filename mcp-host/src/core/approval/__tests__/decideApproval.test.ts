@@ -367,14 +367,32 @@ describe('decideApproval', () => {
 describe('decideApproval: git_read', () => {
   const GIT = 'git_read'
 
-  it('auto runs git_read as A9', () => {
-    expect(decide({ mode: 'auto', toolName: GIT, cause: 'ordinary' })).toEqual({
-      kind: 'run',
-      cell: 'A9',
-    })
+  it('auto runs a names-only git_read as A9', () => {
     expect(
-      decide({ mode: 'auto', toolName: GIT, cause: 'ordinary', classifierAvailable: true })
+      decideApproval({
+        mode: 'auto',
+        toolName: GIT,
+        cause: 'ordinary',
+        grants: grants(),
+        contentRead: false,
+        classifierAvailable: true,
+      })
     ).toEqual({ kind: 'run', cell: 'A9' })
+  })
+
+  it('auto cards a git_read content read, or one not known to be names-only, as A6', () => {
+    for (const contentRead of [true, undefined]) {
+      expect(
+        decideApproval({
+          mode: 'auto',
+          toolName: GIT,
+          cause: 'ordinary',
+          grants: grants({ task: [SHELL, GIT], always: [SHELL, GIT] }),
+          ...(contentRead === undefined ? {} : { contentRead }),
+          classifierAvailable: true,
+        })
+      ).toEqual({ kind: 'card', cell: 'A6', scope: 'exact_invocation' })
+    }
   })
 
   it('auto cards git_read as A5 for every exact cause and admin_forced', () => {

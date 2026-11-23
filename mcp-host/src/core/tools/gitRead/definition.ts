@@ -479,6 +479,16 @@ function hasRefListFields(strings: Partial<Record<StringField, string>>): boolea
   )
 }
 
+/**
+ * True when a call can return file content (or is not valid): such calls
+ * card in auto. Names-only calls (status, log without content options,
+ * listings) return false.
+ */
+export function gitReadReturnsContent(raw: Record<string, unknown>): boolean {
+  const check = checkGitReadParams(raw)
+  return !check.ok || isContentCall(check.params)
+}
+
 /** `Tool.validateParams` for `git_read`. */
 export function validateGitReadParams(raw: Record<string, unknown>): ValidationResult {
   const check = checkGitReadParams(raw)

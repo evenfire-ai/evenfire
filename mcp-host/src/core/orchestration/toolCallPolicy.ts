@@ -21,11 +21,13 @@ import {
   resolveToolIdentityFromRegistry,
 } from '../guardrails'
 import type { RequestImageUsage } from '../interfaces'
+import { gitReadReturnsContent } from '../tools/gitRead/definition'
 import type { PendingApproval, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
 import { executeSingleTool } from './toolUseLoopSingleTool'
 
 const CANCELLED_TEXT = 'Not executed: the task was cancelled.'
+const GIT_READ = 'git_read'
 
 export type ToolCallAdmission =
   /** `report`: emit tool start and complete progress for this result (the git redirect). */
@@ -332,6 +334,7 @@ function readDecision(
       },
     },
     ...(command !== undefined ? { command } : {}),
+    ...(call.name === GIT_READ ? { contentRead: gitReadReturnsContent(call.arguments) } : {}),
     classifierAvailable: inputs.classifierAvailable(call.arguments),
     ...(verdict ? { verdict } : {}),
   })
@@ -417,8 +420,6 @@ async function applyApprovalMode(
   return materialize(decision, call, config, cause, approval, toolIdentity)
 }
 
-const GIT_READ = 'git_read'
-
 /**
  * True when `git_read` would run with no card in auto for any arguments:
  * registered for this task, no tool-lane guardrails (its verdict would depend
@@ -441,6 +442,8 @@ function gitReadCardFree(config: LoopConfig): boolean {
       always: config.conversation.auto_approved_tools ?? new Set<string>(),
       autoShell: { wholeTool: false, commands: new Set<string>() },
     },
+    // The redirect points only names-only commands to git_read.
+    contentRead: false,
     classifierAvailable: false,
   })
   return decision.kind === 'run'

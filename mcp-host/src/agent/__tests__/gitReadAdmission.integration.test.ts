@@ -198,6 +198,7 @@ const gitRead = (args: Record<string, unknown>, id = 'gr-1'): ToolCall => ({
 const shellCall: ToolCall = { id: 'sh-1', name: 'shell_exec', arguments: { command: 'ls' } }
 const STATUS = gitRead({ subcommand: 'status', options: ['short'] })
 const LOG_PUB = gitRead({ subcommand: 'log', options: ['patch'], paths: ['pub'] })
+const LOG_STAT = gitRead({ subcommand: 'log', options: ['stat'], paths: ['pub'] })
 
 const allowNative: GuardrailRule = {
   id: 'allow-native',
@@ -220,11 +221,27 @@ const fileReadRule = (id: string, action: GuardrailRule['action'], op: string, v
   }) satisfies GuardrailRule
 
 describe('git_read admission', () => {
-  it('auto runs git_read as A9 and the model sees wrapped output', async () => {
-    const ran = await run({ mode: 'auto', call: LOG_PUB })
+  it('auto runs a names-only git_read as A9 and the model sees wrapped output', async () => {
+    const ran = await run({ mode: 'auto', call: LOG_STAT })
     expect(ran.approval).toBeUndefined()
     expect(ran.toolMessage).toMatch(/^<tool_output name="git_read"/)
-    expect(ran.toolMessage).toContain(PUB_WITNESS)
+    expect(ran.toolMessage).toContain('pub/a.txt')
+    expect(ran.toolMessage).not.toContain(PUB_WITNESS)
+  })
+
+  it('auto cards a git_read content read as an exact card (A6)', async () => {
+    for (const call of [
+      LOG_PUB,
+      gitRead({ subcommand: 'show' }),
+      gitRead({ subcommand: 'grep', pattern: 'WITNESS' }),
+    ]) {
+      const asked = await run({ mode: 'auto', call })
+      expect(asked.approval).toMatchObject({
+        tool_name: 'git_read',
+        authorization_scope: 'exact_invocation',
+      })
+      expect(asked.toolMessage).toBeUndefined()
+    }
   })
 
   it('manual cards git_read as M1; an always shell_exec grant runs it without a card', async () => {
@@ -247,9 +264,9 @@ describe('git_read admission', () => {
     const denyShell = (conversation: Conversation) => recordDenial(conversation, 'shell_exec', 'u1')
     const shellAsked = await run({ mode: 'auto', call: shellCall, prepare: denyShell })
     expect(shellAsked.approval).toMatchObject({ tool_name: 'shell_exec', reask: 'denied' })
-    const ran = await run({ mode: 'auto', call: LOG_PUB, prepare: denyShell })
+    const ran = await run({ mode: 'auto', call: LOG_STAT, prepare: denyShell })
     expect(ran.approval).toBeUndefined()
-    expect(ran.toolMessage).toContain(PUB_WITNESS)
+    expect(ran.toolMessage).toContain('pub/a.txt')
   })
 
   it('a git_read Deny re-asks git_read only', async () => {
@@ -291,6 +308,8 @@ describe('git_read admission', () => {
 })
 
 describe('git_read reads follow file_read guardrail rules', () => {
+  // Content reads card in auto (A6); allow-all runs them (X1), so these rows
+  // show the guardrail decision alone.
   const denySecrets = {
     rules: [allowNative, fileReadRule('deny-secrets', 'deny', 'under', 'secrets')],
   }
@@ -300,7 +319,7 @@ describe('git_read reads follow file_read guardrail rules', () => {
     expect(
       (
         await run({
-          mode: 'auto',
+          mode: 'allow_all',
           call: gitRead({ subcommand: 'grep', pattern: 'WITNESS' }),
           guardrails: denySecrets,
         })
@@ -309,16 +328,16 @@ describe('git_read reads follow file_read guardrail rules', () => {
     expect(
       (
         await run({
-          mode: 'auto',
+          mode: 'allow_all',
           call: gitRead({ subcommand: 'show', revisions: ['HEAD:secrets/a.txt'] }),
           guardrails: denySecrets,
         })
       ).toolMessage
     ).toBe(BLOCKED)
-    const pub = await run({ mode: 'auto', call: LOG_PUB, guardrails: denySecrets })
+    const pub = await run({ mode: 'allow_all', call: LOG_PUB, guardrails: denySecrets })
     expect(pub.toolMessage).toContain(PUB_WITNESS)
     const status = await run({
-      mode: 'auto',
+      mode: 'allow_all',
       call: gitRead({ subcommand: 'ls_files' }),
       guardrails: denySecrets,
     })
@@ -327,7 +346,7 @@ describe('git_read reads follow file_read guardrail rules', () => {
 
     // Control: without the file_read rule the grep reads the secret file.
     const control = await run({
-      mode: 'auto',
+      mode: 'allow_all',
       call: gitRead({ subcommand: 'grep', pattern: 'WITNESS' }),
       guardrails: { rules: [allowNative] },
     })
@@ -338,10 +357,14 @@ describe('git_read reads follow file_read guardrail rules', () => {
     const guardrails = {
       rules: [allowNative, fileReadRule('deny-nested', 'deny', 'under', 'pub/secret')],
     }
-    const blocked = await run({ mode: 'auto', call: LOG_PUB, guardrails })
+    const blocked = await run({ mode: 'allow_all', call: LOG_PUB, guardrails })
     expect(blocked.toolMessage).toBe('Blocked by guardrail policy (rule:deny-nested).')
     // Control: the same call reads the nested file without the rule.
-    const control = await run({ mode: 'auto', call: LOG_PUB, guardrails: { rules: [allowNative] } })
+    const control = await run({
+      mode: 'allow_all',
+      call: LOG_PUB,
+      guardrails: { rules: [allowNative] },
+    })
     expect(control.toolMessage).toContain(NESTED_WITNESS)
   })
 
@@ -354,10 +377,14 @@ describe('git_read reads follow file_read guardrail rules', () => {
       options: ['patch'],
       paths: ['pub/s\\ecret/b.txt'],
     })
-    const blocked = await run({ mode: 'auto', call: escaped, guardrails })
+    const blocked = await run({ mode: 'allow_all', call: escaped, guardrails })
     expect(blocked.toolMessage).toBe('Blocked by guardrail policy (rule:deny-nested).')
     // Control: git matches the escaped path to the nested file.
-    const control = await run({ mode: 'auto', call: escaped, guardrails: { rules: [allowNative] } })
+    const control = await run({
+      mode: 'allow_all',
+      call: escaped,
+      guardrails: { rules: [allowNative] },
+    })
     expect(control.toolMessage).toContain(NESTED_WITNESS)
   })
 
@@ -366,7 +393,7 @@ describe('git_read reads follow file_read guardrail rules', () => {
       rules: [allowTool('git_read'), fileReadRule('allow-pub', 'allow', 'under', 'pub')],
     }
     const asked = await run({
-      mode: 'auto',
+      mode: 'allow_all',
       call: gitRead({ subcommand: 'log', options: ['patch'], paths: ['secrets'] }),
       guardrails,
     })
@@ -376,7 +403,7 @@ describe('git_read reads follow file_read guardrail rules', () => {
       description: 'Guardrail requires approval (unmatched_ask)',
     })
     const ran = await run({
-      mode: 'auto',
+      mode: 'allow_all',
       call: gitRead({ subcommand: 'log', options: ['patch'], paths: ['pub/a.txt'] }),
       guardrails,
     })
@@ -412,7 +439,7 @@ describe('git_read reads follow file_read guardrail rules', () => {
     expect(
       (
         await run({
-          mode: 'auto',
+          mode: 'allow_all',
           call: gitRead({ subcommand: 'grep', pattern: 'WITNESS' }),
           guardrails,
         })
@@ -421,7 +448,7 @@ describe('git_read reads follow file_read guardrail rules', () => {
     expect(
       (
         await run({
-          mode: 'auto',
+          mode: 'allow_all',
           call: gitRead({ subcommand: 'log', options: ['patch'], paths: ['pub/a.txt'] }),
           guardrails,
         })
