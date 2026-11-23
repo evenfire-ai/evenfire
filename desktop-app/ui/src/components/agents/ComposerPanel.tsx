@@ -4,6 +4,8 @@ import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
+import { useTabReferenceSuggestionContext } from '@contexts/TabReferenceSuggestionContext'
+import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import { Button, IconButton, MenuItem } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
@@ -35,6 +37,7 @@ import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
 import { formatFileSize } from '@lib/composerFileAdmission'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
+import { countGlobalFileReferences, isGlobalFileReferenced } from '@lib/tabReferenceSuggestion'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type {
   ComposerFileAttachment,
@@ -187,6 +190,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     handleDiscardFailedAgentSend: onDiscardFailedSend,
   } = useAgentChatActionsContext()
   const { hostRuntimeStatus } = useMcpRuntimeContext()
+  const { candidate: suggestedReference, accept: acceptSuggestedReference } =
+    useTabReferenceSuggestionContext()
   const {
     selectedAgentMcpServers,
     agentContextByName,
@@ -907,6 +912,48 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const isDegraded = hostRuntimeStatus?.degraded?.reason === 'llm_key_missing'
   const hasComposerAttachments = composerAttachmentItems.length > 0
 
+  // A modal of the composer covers the chip, and a file already attached needs
+  // no suggestion. The chip is not an attachment: it stays out of the count and
+  // of "Clear all".
+  const shownSuggestion =
+    suggestedReference &&
+    selectedAgent &&
+    !globalFilesModalOpen &&
+    !agentFilesModalOpen &&
+    !isGlobalFileReferenced(composerReferenceAttachments, suggestedReference.gfsUri)
+      ? suggestedReference
+      : null
+  const suggestionAtFileLimit =
+    countGlobalFileReferences(composerReferenceAttachments) >= FILE_REFERENCE_MAX_COUNT
+  const suggestionBlockedReason = !shownSuggestion
+    ? null
+    : agentSending
+      ? 'Available once the message is sent'
+      : isDegraded
+        ? 'Unavailable while the agent is degraded'
+        : suggestionAtFileLimit
+          ? `A message can reference at most ${FILE_REFERENCE_MAX_COUNT} files`
+          : null
+  // The cap is the one state the user must act on, so its reason is shown; a
+  // send in progress or a degraded host already explain themselves elsewhere.
+  const suggestionReasonVisible = suggestionBlockedReason !== null && !agentSending && !isDegraded
+  const suggestionReasonId = useId()
+  const shownSuggestionId = shownSuggestion?.id ?? null
+  const shownSuggestionLabel = shownSuggestion?.label ?? null
+  const [suggestionAnnouncement, setSuggestionAnnouncement] = useState<{
+    id: string
+    text: string
+  } | null>(null)
+  // Announced once per file: a revalidation keeps the id, so the same node
+  // stays in the live region and nothing is read again.
+  useEffect(() => {
+    setSuggestionAnnouncement(current => {
+      if (shownSuggestionId === null || shownSuggestionLabel === null) return null
+      if (current?.id === shownSuggestionId) return current
+      return { id: shownSuggestionId, text: `Suggested reference: ${shownSuggestionLabel}` }
+    })
+  }, [shownSuggestionId, shownSuggestionLabel])
+
   return (
     <div className={`composer ${inline ? 'composer-inline' : 'composer-shell-footer'}`}>
       <input
@@ -1240,6 +1287,44 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 </button>
               </span>
             ) : null}
+            {shownSuggestion ? (
+              <span className="composer-suggested-reference">
+                <button
+                  type="button"
+                  className="composer-suggested-reference-chip"
+                  aria-label={`Reference ${shownSuggestion.label} in this message`}
+                  aria-describedby={suggestionBlockedReason ? suggestionReasonId : undefined}
+                  title={suggestionBlockedReason ?? shownSuggestion.label}
+                  disabled={suggestionBlockedReason !== null}
+                  onClick={() => {
+                    // The chip unmounts once the file is attached; focus moves
+                    // first so it does not fall back to the document body.
+                    if (acceptSuggestedReference(shownSuggestion) === 'added') {
+                      composerInputRef.current?.focus()
+                    }
+                  }}
+                >
+                  <span className="composer-suggested-reference-icon" aria-hidden="true">
+                    <IconPlus />
+                  </span>
+                  <span className="composer-suggested-reference-label">
+                    {shownSuggestion.label}
+                  </span>
+                </button>
+                {suggestionBlockedReason ? (
+                  <span
+                    id={suggestionReasonId}
+                    className={
+                      suggestionReasonVisible
+                        ? 'composer-suggested-reference-reason'
+                        : 'visually-hidden'
+                    }
+                  >
+                    {suggestionBlockedReason}
+                  </span>
+                ) : null}
+              </span>
+            ) : null}
           </span>
           <span className="composer-actions-right">
             {selectedAgent && (
@@ -1397,6 +1482,11 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           onClose={() => setAgentFilesModalOpen(false)}
         />
       ) : null}
+      <span className="visually-hidden" aria-live="polite">
+        {suggestionAnnouncement ? (
+          <span key={suggestionAnnouncement.id}>{suggestionAnnouncement.text}</span>
+        ) : null}
+      </span>
       {globalFilesModalOpen ? (
         <ComposerGlobalFilesModal
           attachedIds={composerReferenceAttachments

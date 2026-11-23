@@ -35,6 +35,10 @@ import type {
   ComposerImageAttachment,
   ReadyComposerFileAttachment,
 } from '../../../uiTypes'
+import {
+  fileView,
+  suggestedCandidate,
+} from '../../__tests__/__fixtures__/tabReferenceSuggestionFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -3029,5 +3033,66 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
     expect(request.content).toHaveLength(Math.floor(2.9 * MIB))
+  })
+})
+
+describe('sendAgentMessage — a suggestion accepted while the send is prepared', () => {
+  it('keeps the file suggested during the user-turn write in the composer and out of the request', async () => {
+    const candidate = await suggestedCandidate(await fileView(7, 'report.md'))
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-abc' })
+    clerum.rpc.getTaskResult.mockResolvedValue({ response: 'ok' })
+    // Hold the store write of the outgoing turn (the last await before the
+    // send marks itself as sending), then let it reach the real ChatStore.
+    const userTurnWrite = deferred<void>()
+    const writeToStore = clerum.chat.upsertMessages.getMockImplementation()!
+    clerum.chat.upsertMessages.mockImplementation(
+      async (agentRef: string, chatId: string, messages: Array<{ role?: string }>) => {
+        if (messages[0]?.role === 'user') await userTurnWrite.promise
+        return writeToStore(agentRef, chatId, messages)
+      }
+    )
+    const { result } = renderController()
+    await settleMount()
+
+    const sendPromise = result.current.handleSendAgentMessage('summarize this')
+    await waitFor(() => expect(clerum.chat.upsertMessages).toHaveBeenCalledTimes(1))
+    // The composer is still open to the suggestion chip at this point.
+    expect(result.current.agentSending).toBe(false)
+    let outcome: string | undefined
+    act(() => {
+      outcome = result.current.addSuggestedFileReference(candidate)
+    })
+    expect(outcome).toBe('added')
+
+    await act(async () => {
+      userTurnWrite.resolve()
+    })
+    await waitForProgressHandler('task-abc')
+    await act(async () => {
+      clerum.emitTaskProgress('task-abc', {
+        type: 'terminal',
+        data: { taskId: 'task-abc', status: 'completed' },
+      })
+    })
+    await act(async () => {
+      await sendPromise
+    })
+
+    // What was sent is what the user had when they pressed send.
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      content: string
+      fileReferences?: unknown
+    }
+    expect(request.content).toBe(buildComposerRequestContent('summarize this', []))
+    expect(JSON.stringify(request)).not.toContain(candidate.gfsUri)
+    const chatId = result.current.activeChatId!
+    const [sentTurn] = await clerum.persistedMessages('agent-x', chatId)
+    expect(sentTurn).toMatchObject({ role: 'user', content: 'summarize this' })
+    expect(sentTurn?.attachments).toBeUndefined()
+    // The suggestion accepted mid-send is still in the composer for the next message.
+    expect(result.current.composerReferenceAttachments).toEqual([
+      { ...candidate, addedOrder: expect.any(Number) },
+    ])
   })
 })
