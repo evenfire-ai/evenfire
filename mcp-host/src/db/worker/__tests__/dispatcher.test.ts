@@ -1133,6 +1133,38 @@ describe('dbWorker dispatcher', () => {
     )
     expect(Array.isArray(rows)).toBe(true)
   })
+
+  it('update_session_approval_mode stores the mode and refuses a missing row', async () => {
+    const deps = createDispatcher(db)
+    await dispatch(
+      { kind: 'insert_session', payload: makeSession('s-mode', 'u-mode:rpc:agent:mode') },
+      deps
+    )
+
+    await expect(
+      dispatch(
+        { kind: 'update_session_approval_mode', sessionId: 's-mode', approvalMode: 'auto' },
+        deps
+      )
+    ).resolves.toEqual({ ok: true })
+    const stored = db.prepare('SELECT approval_mode FROM sessions WHERE id = ?').get('s-mode') as {
+      approval_mode: string
+    }
+    expect(stored.approval_mode).toBe('auto')
+
+    let error: (Error & { code?: string }) | undefined
+    try {
+      await dispatch(
+        { kind: 'update_session_approval_mode', sessionId: 's-missing', approvalMode: 'auto' },
+        deps
+      )
+    } catch (err) {
+      error = err as Error & { code?: string }
+    }
+    expect(error?.code).toBe('APPROVAL_MODE_SESSION_NOT_FOUND')
+    expect(error?.message).toContain('s-missing')
+    expect(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 1 })
+  })
 })
 
 function makeSession(id: string, sessionKey: string): SessionRow {

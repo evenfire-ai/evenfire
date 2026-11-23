@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
+import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import { rootLogger } from '../../observability/logger.js'
+import { loadOidcProviderConfiguration } from '../../oidc/configuration.js'
 import {
   type GfsDesktopOperatorLifecycleActor,
   GfsDesktopOperatorLinkError,
@@ -156,6 +159,15 @@ type AdminUserRow = {
   active_team_count: string | number
   teams?: unknown
   password_pending_from_accepted_invitation?: unknown
+  lifecycle_state: string
+}
+
+export type UserLifecycleState = 'active' | 'retired'
+
+/** users.lifecycle_state is NOT NULL and CHECKed to these two values (db.ts). */
+function userLifecycleState(value: string): UserLifecycleState {
+  if (value === 'active' || value === 'retired') return value
+  throw new Error(`unexpected users.lifecycle_state: ${value}`)
 }
 
 function mapAdminUserRow(row: AdminUserRow) {
@@ -177,6 +189,7 @@ function mapAdminUserRow(row: AdminUserRow) {
       }
     }),
     passwordPendingFromAcceptedInvitation: Boolean(row.password_pending_from_accepted_invitation),
+    lifecycleState: userLifecycleState(row.lifecycle_state),
   }
 }
 
@@ -185,6 +198,7 @@ const ADMIN_USER_SELECT = `SELECT u.id,
             u.name,
             u.picture,
             p.display_name,
+            u.lifecycle_state,
             ca.id AS control_admin_id,
             COUNT(DISTINCT CASE WHEN tm.status = 'active' THEN tm.team_id END) AS active_team_count,
             COALESCE(
@@ -202,6 +216,8 @@ const ADMIN_USER_SELECT = `SELECT u.id,
                    OR LOWER(i.email) = LOWER(u.email)
                  )
                  AND u.password_hash IS NULL
+                 -- Password setup resend refuses an OIDC-linked account, so it is never offered.
+                 AND NOT EXISTS (SELECT 1 FROM user_oidc_links l WHERE l.user_id = u.id)
             ) AS password_pending_from_accepted_invitation
        FROM users u
   LEFT JOIN profiles p ON p.user_id = u.id
@@ -209,8 +225,8 @@ const ADMIN_USER_SELECT = `SELECT u.id,
   LEFT JOIN team_members tm ON tm.user_id = u.id
   LEFT JOIN teams t ON t.id = tm.team_id`
 
-const ADMIN_USER_GROUP_ORDER = `GROUP BY u.id, u.email, u.name, u.picture, p.display_name, ca.id
-  ORDER BY u.email ASC`
+const ADMIN_USER_GROUP_ORDER = `GROUP BY u.id, u.email, u.name, u.picture, p.display_name, u.lifecycle_state, ca.id
+  ORDER BY (u.lifecycle_state = 'active') DESC, u.email ASC`
 
 export async function createAdminUser(email: string, name: string) {
   const normalizedEmail = email.trim().toLowerCase()
@@ -241,7 +257,21 @@ export async function createAdminUser(email: string, name: string) {
   })
 }
 
-export async function listUsers(searchQuery = '') {
+/**
+ * The Control UI user list. By default it lists active users only: that is
+ * for the Users page roster (the host detail bundle uses the default too),
+ * because a retired user keeps its team_members rows, so listing it would
+ * show a removed member with their teams. `includeRetired` is for `GET /admin/users`, whose
+ * callers resolve stored user ids to names, and for the invitation guard: a
+ * retired row still holds its address, and an invitation to it could never be
+ * accepted. Each item carries its `lifecycleState`, so the guard can tell a
+ * removed member's address from an active member's. Retired rows sort after
+ * active ones, so the row cap never drops an active user for a retired one.
+ */
+export async function listUsers(
+  searchQuery = '',
+  options: Readonly<{ includeRetired?: boolean }> = {}
+) {
   const query = searchQuery.trim()
   const result = await pool.query(
     `${ADMIN_USER_SELECT}
@@ -252,9 +282,10 @@ export async function listUsers(searchQuery = '') {
         OR COALESCE(p.display_name, '') ILIKE $2
         OR u.id::text = $1
       )
+        AND ($3::boolean OR u.lifecycle_state = 'active')
    ${ADMIN_USER_GROUP_ORDER}
       LIMIT 100`,
-    [query, `%${query}%`]
+    [query, `%${query}%`, options.includeRetired === true]
   )
   return result.rows.map(row => mapAdminUserRow(row as AdminUserRow))
 }
@@ -336,6 +367,42 @@ export async function updateAdminUserContext(
 }
 
 /**
+ * True while OIDC member sign-in is switched on. A member removed then is kept
+ * as a retired row even without link history: OIDC sign-in finds a hard-deleted
+ * member's address unused and, where it creates accounts, would create the
+ * member again. The check reads the configuration at removal time only, so a
+ * member removed while member sign-in was off is still hard-deleted. A
+ * configuration that cannot be read counts as on only while the switch is set.
+ */
+function memberSignInConfigured(): boolean {
+  try {
+    return (
+      loadOidcProviderConfiguration(process.env, config.oauthEncryptionKey)?.memberSignIn != null
+    )
+  } catch (error) {
+    // Only the exact switch value turns member sign-in on, so with the switch
+    // unset (or blank) it is off whatever else failed to load: the member is
+    // hard-deleted, and dropping the error is correct because the OIDC routes
+    // log the settings at fault on their own requests.
+    if (!process.env.CONTROL_API_OIDC_MEMBER_SIGN_IN?.trim()) return false
+    // With the switch set, an unreadable configuration may still have it on,
+    // so the row is kept, which fails safe: a deleted member cannot be
+    // restored, while a retired row only holds its address (nothing in
+    // control-api purges it; reusing the address needs an admin fix). This
+    // logs the class only.
+    rootLogger.warn(
+      {
+        component: 'desktop_user_retirement',
+        event: 'retirement_oidc_configuration_unreadable',
+        errorClass: error instanceof Error ? error.constructor.name : typeof error,
+      },
+      'OIDC configuration is unreadable; the removed member is kept as a retired row'
+    )
+    return true
+  }
+}
+
+/**
  * Approval canApprove reads an enabled medium account and ignores lifecycle
  * state, so both the hard-delete and the tombstone paths have to disable it.
  */
@@ -361,9 +428,10 @@ async function disableWorkflowApprovalMedium(db: DbClient, userId: string): Prom
 /**
  * Retire a Desktop user under one caller-owned transaction.
  *
- * A user with operator-link history is retained as a lifecycle tombstone. The
- * legacy physical delete remains available only when no such history exists,
- * and its durable operation row makes retries safe even after the user row is
+ * A user with operator-link or OIDC-link history is retained as a lifecycle
+ * tombstone, and so is every user removed while OIDC member sign-in is on.
+ * The legacy physical delete remains available only when neither applies, and
+ * its durable operation row makes retries safe even after the user row is
  * gone. Every non-terminal failure throws so the transaction rolls back the
  * pending operation, governed events, link state, and user mutation together.
  */
@@ -502,13 +570,23 @@ export async function retireDesktopUser(
          SELECT 1
            FROM gfs_desktop_operator_links
           WHERE user_id = $1::uuid
-       ) AS has_link_history`,
+       ) AS has_operator_link_history,
+       EXISTS(
+         SELECT 1
+           FROM user_oidc_links
+          WHERE user_id = $1::uuid
+       ) AS has_oidc_link`,
       [targetUserId]
     )
-    const hasLinkHistory =
-      (history.rows[0] as { has_link_history?: unknown } | undefined)?.has_link_history === true
+    const historyRow = history.rows[0] as
+      | { has_operator_link_history?: unknown; has_oidc_link?: unknown }
+      | undefined
+    const hasOperatorLinkHistory = historyRow?.has_operator_link_history === true
+    // An OIDC link is identity history (user_oidc_links.user_id is ON DELETE
+    // RESTRICT): the member is retained as a retired row, never purged.
+    const hasLinkHistory = hasOperatorLinkHistory || historyRow?.has_oidc_link === true
 
-    if (!hasLinkHistory && options.retainWithoutLinkHistory !== true) {
+    if (!hasLinkHistory && options.retainWithoutLinkHistory !== true && !memberSignInConfigured()) {
       await disableWorkflowApprovalMedium(db, targetUserId)
       const deleted = await db.query(
         `DELETE FROM users
@@ -567,7 +645,7 @@ export async function retireDesktopUser(
       }
       throw error
     }
-    if (hasLinkHistory && !revoked) {
+    if (hasOperatorLinkHistory && !revoked) {
       throw new DesktopUserRetirementError(
         'retirement_conflict',
         'operator-link history has no active generation to retire'
@@ -647,9 +725,10 @@ export type RetireDesktopUserInTransactionInput = {
   idempotencyKey: string
   requestId: string | null
   /**
-   * Always leave a `retired` tombstone, even without operator-link history
-   * (where retireDesktopUser hard-deletes). A hand-over needs the tombstone and
-   * must not fail on FKs that a hard delete could hit.
+   * Always leave a `retired` tombstone, even without operator-link or OIDC-link
+   * history while member sign-in is off (where retireDesktopUser hard-deletes).
+   * A hand-over needs the tombstone and must not fail on FKs that a hard delete
+   * could hit.
    */
   retainWithoutLinkHistory?: boolean
 }
@@ -672,7 +751,8 @@ export async function retireDesktopUserInTransaction(
 /**
  * Retire a user account through the existing account-management contract.
  * Teams are retained even when this leaves them with zero active members.
- * Accounts with retained operator-link history are intentionally not purged.
+ * Accounts with retained operator-link or OIDC-link history are intentionally
+ * not purged.
  */
 export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserResult> {
   return withTransaction(async db => {
@@ -695,6 +775,20 @@ export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserRe
     )
     if ((operatorLinkHistory.rowCount ?? 0) > 0) {
       return { error: 'gfs_operator_link_history_retained' }
+    }
+
+    // An OIDC link is identity history: user_oidc_links.user_id is ON DELETE
+    // RESTRICT. Refuse the hard delete; a linked member can only be retired
+    // through retireDesktopUser, which keeps the row.
+    const oidcLink = await db.query(
+      `SELECT 1
+         FROM user_oidc_links
+        WHERE user_id = $1
+        LIMIT 1`,
+      [userId]
+    )
+    if ((oidcLink.rowCount ?? 0) > 0) {
+      return { error: 'linked_identity' }
     }
 
     await db.query(

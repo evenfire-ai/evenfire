@@ -367,6 +367,47 @@ describe('OpenAI token limit parameter compatibility', () => {
   })
 })
 
+describe('OpenAI reasoning effort on Chat Completions', () => {
+  async function sent(model: string, effort?: 'none', profileId: 'openai' | 'azure' = 'openai') {
+    const mockClient = createMockOpenAIClient()
+    mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('OK'))
+    const profile = { ...officialChatProfile(), id: profileId }
+    const provider = new OpenAIProvider(mockClient as any, model, profile)
+    await provider.completeSingleTurn(
+      [{ role: 'user', content: 'Hi' }],
+      effort ? { max_tokens: 16, reasoning_effort: effort } : { max_tokens: 16 }
+    )
+    return mockClient.chat.completions.create.mock.calls[0][0]
+  }
+
+  it('sends reasoning_effort none for a GPT-5 chat model', async () => {
+    const callArgs = await sent('gpt-5.4-mini', 'none')
+    expect(callArgs.reasoning_effort).toBe('none')
+    expect(callArgs.max_completion_tokens).toBe(16)
+  })
+
+  it('does not send reasoning_effort for gpt-4o', async () => {
+    const callArgs = await sent('gpt-4o', 'none')
+    expect(callArgs.model).toBe('gpt-4o')
+    expect(callArgs.max_tokens).toBe(16)
+    expect(callArgs).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('does not send reasoning_effort when the caller does not ask', async () => {
+    const callArgs = await sent('gpt-5.4-mini')
+    expect(callArgs.model).toBe('gpt-5.4-mini')
+    expect(callArgs.max_completion_tokens).toBe(16)
+    expect(callArgs).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('does not send reasoning_effort for a non-OpenAI profile', async () => {
+    const callArgs = await sent('gpt-5.4-mini', 'none', 'azure')
+    expect(callArgs.model).toBe('gpt-5.4-mini')
+    expect(callArgs.max_completion_tokens).toBe(16)
+    expect(callArgs).not.toHaveProperty('reasoning_effort')
+  })
+})
+
 describe('OpenAI token usage mapping', () => {
   it('should map prompt_tokens/completion_tokens to input_tokens/output_tokens', async () => {
     const mockClient = createMockOpenAIClient()

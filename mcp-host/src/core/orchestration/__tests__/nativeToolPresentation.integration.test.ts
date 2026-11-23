@@ -302,6 +302,7 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
     promptCache: scenario.promptCache ? new PromptCache() : undefined,
     modelName: 'gpt-5.6-luna',
     approvalConfig: undefined,
+    approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
     config: {
       maxTaskDuration: 300000,
       maxToolCallsPerTask: 10,

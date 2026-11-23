@@ -1066,6 +1066,94 @@ describe('async progress flow — SSE-driven approval', () => {
     streamCalls[0].fireTerminal({ taskId: 'task-slack-button-1', status: 'cancelled' })
   })
 
+  it('renders a shell card keyboard with once, command, and shell instead of tool:l', async () => {
+    streamCalls.length = 0
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
+    const adapter: ChannelAdapter = {
+      channelType: 'telegram',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async () => 'tg-status-shell-1'),
+      editMessage,
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'pending' as const,
+        taskId: 'task-shell-keyboard-1',
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-shell-keyboard-1',
+          requestId: 'approval-shell-keyboard-1',
+          userId: '516801777',
+          notification:
+            'Tool `shell_exec` requires approval. Parameters: {"command":"ls"}. Reply /approve or /deny to this message.',
+          shellCard: { channelCommandOffered: true, desktopCommandOffered: false },
+        },
+      })),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['telegram', adapter]]),
+      channels: [makeChannel()],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([makeMessage('ls', 'msg-shell-keyboard')])
+    streamCalls[0].fireSuspended({
+      taskId: 'task-shell-keyboard-1',
+      requestId: 'approval-shell-keyboard-1',
+      toolName: 'shell_exec',
+      displayName: 'Shell',
+      reason: 'approval_required',
+      shellCard: { channelCommandOffered: true, desktopCommandOffered: false },
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const approvalEdit = editMessage.mock.calls.find(call => call[2].includes('{"command":"ls"}'))
+    expect(approvalEdit?.[2]).toContain('/approve allows this command once.')
+    expect(approvalEdit?.[3]?.telegramInlineKeyboard).toEqual([
+      [
+        expect.objectContaining({
+          text: 'Allow once',
+          callbackData: expect.stringMatching(/^tool:a:/),
+        }),
+        expect.objectContaining({ text: 'Deny', callbackData: expect.stringMatching(/^tool:d:/) }),
+      ],
+      [
+        expect.objectContaining({
+          text: 'Allow this command',
+          callbackData: expect.stringMatching(/^tool:c:/),
+        }),
+      ],
+      [
+        expect.objectContaining({
+          text: 'Always allow shell',
+          callbackData: expect.stringMatching(/^tool:s:/),
+        }),
+      ],
+    ])
+    const callbacks = (approvalEdit?.[3]?.telegramInlineKeyboard ?? []).flatMap(row =>
+      row.map(button => button.callbackData)
+    )
+    expect(callbacks.some(callback => callback.startsWith('tool:l:'))).toBe(false)
+    for (const callback of callbacks) {
+      expect(Buffer.byteLength(callback, 'utf8')).toBeLessThanOrEqual(64)
+    }
+    streamCalls[0].fireTerminal({ taskId: 'task-shell-keyboard-1', status: 'cancelled' })
+  })
+
   it('routes a Teams tool button through the original runtime conversation', async () => {
     streamCalls.length = 0
     const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
@@ -1146,7 +1234,8 @@ describe('async progress flow — SSE-driven approval', () => {
       'approval-teams-button-1',
       false,
       'teams',
-      '19:channel-1@thread.tacv2;messageid=root-post-1'
+      '19:channel-1@thread.tacv2;messageid=root-post-1',
+      { shellAction: 'once' }
     )
     expect(editMessage).toHaveBeenCalledWith(
       '19:channel-1@thread.tacv2;messageid=root-post-1',
