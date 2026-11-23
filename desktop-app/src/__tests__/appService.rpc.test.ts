@@ -1032,11 +1032,12 @@ describe('AppService approval-mode token refresh', () => {
     const service = refreshService()
     const invokeHostMessage = vi
       .fn()
+      // rpc-proxy's scope refusal (rpc.ts:541) as requestJson raises it.
       .mockRejectedValueOnce(
         new ApiError(
-          '403 Forbidden: Missing scope: host:approval:write',
+          '403 Forbidden: Forbidden: missing scope',
           403,
-          '{"error":"Missing scope: host:approval:write"}'
+          '{"error":"Forbidden: missing scope"}'
         )
       )
       .mockResolvedValueOnce({ success: true, response: 'ok' })
@@ -1067,8 +1068,9 @@ describe('AppService approval-mode token refresh', () => {
     }
     const setApprovalMode = vi
       .fn()
+      // rpc-proxy's 401 (middleware/auth.ts) as rpcProxyClient.setApprovalMode raises it.
       .mockRejectedValueOnce(
-        new ApiError('Set approval mode failed (401): expired', 401, '{"error":"expired"}')
+        new ApiError('Set approval mode failed (401)', 401, '{"error":"Unauthorized"}')
       )
       .mockResolvedValueOnce(saved)
     service.rpcClient = { setApprovalMode }
