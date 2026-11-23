@@ -720,11 +720,11 @@ describe('User Approval Request Routes', () => {
       })
     })
 
-    it('returns 422 approval_target_retired for a removed target before any request is written', async () => {
+    it('returns 422 approval_target_retired for a removed allowlisted target before any request is written', async () => {
       const { accessToken } = issueTestTokens()
       const targetUserId = '00000000-0000-0000-0000-000000000001'
       vi.mocked(userApprovalRequestService.isRetiredUser).mockResolvedValueOnce(true)
-      vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValue(true)
+      vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(true)
 
       const res = await request(app)
         .post('/api/v1/workflow-approvals/request')
@@ -738,12 +738,34 @@ describe('User Approval Request Routes', () => {
         })
       expect(res.status).toBe(422)
       expect(res.body).toEqual({ error: 'approval_target_retired' })
+      expect(userApprovalRequestService.allowlistCheck).toHaveBeenCalledTimes(1)
       expect(userApprovalRequestService.isRetiredUser).toHaveBeenCalledWith(targetUserId)
-      expect(userApprovalRequestService.allowlistCheck).not.toHaveBeenCalled()
       expect(userApprovalRequestService.createApprovalRequest).not.toHaveBeenCalled()
       expect(
         workflowTriggerApprovalService.createWorkflowTriggerApprovalRequest
       ).not.toHaveBeenCalled()
+    })
+
+    it('answers 403 allowlist miss, not 422, for a removed target that is not allowlisted', async () => {
+      const { accessToken } = issueTestTokens()
+      const targetUserId = '00000000-0000-0000-0000-000000000001'
+      vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(false)
+
+      const res = await request(app)
+        .post('/api/v1/workflow-approvals/request')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .set('Idempotency-Key', 'retired-unlisted-key')
+        .send({
+          recipeNamespace: NS,
+          recipeName: RECIPE,
+          target: { userId: targetUserId },
+          payload: { message: 'Please approve this' },
+        })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ error: 'Target not in allowlist for this recipe' })
+      expect(userApprovalRequestService.allowlistCheck).toHaveBeenCalledTimes(1)
+      expect(userApprovalRequestService.isRetiredUser).not.toHaveBeenCalled()
+      expect(userApprovalRequestService.createApprovalRequest).not.toHaveBeenCalled()
     })
 
     it('creates approval on happy path', async () => {
