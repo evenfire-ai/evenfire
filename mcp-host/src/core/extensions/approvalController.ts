@@ -23,6 +23,7 @@
 import { randomUUID } from 'node:crypto'
 import { logger } from '../../logger'
 import type { GateCause } from '../approval/gateCause'
+import { grantNames } from '../approval/nativeApprovalCause'
 import { hasActiveDenials, isDenied } from '../conversation/denialPolicy'
 import { LoopController, ToolRegistry } from '../interfaces'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
@@ -41,6 +42,7 @@ export const SESSION_SCOPED_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
   'shell_exec',
   'http_request',
   'cron_manage',
+  'git_read',
 ])
 
 /**
@@ -186,12 +188,16 @@ export class ApprovalController implements LoopController {
         : decision
     }
 
-    // Exact-name grants: "always" approvals, then this task's plain
-    // session-scoped approvals. A mode-aware admission reads them in the table.
+    // Name grants: "always" approvals, then this task's plain session-scoped
+    // approvals, of the tool or of a tool whose grant covers it
+    // (`grantNames`). A mode-aware admission reads them in the table.
     if (
       !this.modeAware &&
-      (this.conversation.auto_approved_tools.has(toolName) ||
-        this.conversation.task_approved_tools?.has(toolName) === true)
+      grantNames(toolName).some(
+        name =>
+          this.conversation.auto_approved_tools.has(name) ||
+          this.conversation.task_approved_tools?.has(name) === true
+      )
     ) {
       return 'proceed'
     }

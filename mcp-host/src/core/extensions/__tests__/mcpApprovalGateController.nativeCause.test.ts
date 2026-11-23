@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { decideApproval } from '../../approval/decideApproval'
 import { nativeApprovalCause } from '../../approval/nativeApprovalCause'
 import type { NativeToolConfig, Tool, ToolRegistry } from '../../interfaces'
+import { GitReadTool } from '../../tools/gitRead'
 import { NativeToolRegistry } from '../../tools/nativeToolRegistry'
 import type { ApprovalConfig } from '../approvalTypes'
 import { UnifiedApprovalGateController } from '../mcpApprovalGateController'
@@ -122,5 +124,43 @@ describe('nativeApprovalCause', () => {
     expect(gateOutcome(registry, 'reader_tool', {}, { reader_tool: false, file_read: true })).toBe(
       'admin_forced'
     )
+  })
+})
+
+describe('git_read CRD overrides', () => {
+  const tool = new GitReadTool({
+    root: '/tmp',
+    gitPath: '/usr/bin/git',
+    timeoutMs: 1000,
+    verifyCallerRoot: false,
+  })
+  const registry = registryOf({ git_read: tool })
+  const noGrants = {
+    task: new Set<string>(),
+    always: new Set<string>(),
+    autoShell: { wholeTool: false, commands: new Set<string>() },
+  }
+  const autoCell = (tools: Record<string, boolean> | undefined): string => {
+    const cause = gateOutcome(registry, 'git_read', { subcommand: 'status' }, tools)
+    return decideApproval({
+      mode: 'auto',
+      toolName: 'git_read',
+      cause,
+      grants: noGrants,
+      classifierAvailable: true,
+    }).cell
+  }
+
+  it('inherits true overrides of shell_exec and file_read, never a false', () => {
+    expect(tool.approvalAlso()).toEqual(['shell_exec', 'file_read'])
+    expect(autoCell(undefined)).toBe('A9')
+    expect(autoCell({ git_read: true })).toBe('A5')
+    expect(autoCell({ git_read: false })).toBe('N1')
+    expect(autoCell({ shell_exec: true })).toBe('A5')
+    expect(autoCell({ file_read: true })).toBe('A5')
+    expect(autoCell({ git_read: false, file_read: true })).toBe('A5')
+    expect(autoCell({ git_read: false, shell_exec: true })).toBe('A5')
+    expect(autoCell({ shell_exec: false, file_read: false })).toBe('A9')
+    expect(nativeApprovalCause(tool, 'git_read', {}, { shell_exec: true })).toBe('admin_forced')
   })
 })

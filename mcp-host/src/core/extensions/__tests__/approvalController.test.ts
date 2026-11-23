@@ -711,6 +711,7 @@ describe('ApprovalController', () => {
       'shell_exec',
       'http_request',
       'cron_manage',
+      'git_read',
     ])
 
     // Each session-scoped tool proceeds once its own name is approved, either
@@ -720,7 +721,14 @@ describe('ApprovalController', () => {
     expect(controller.beforeTool('shell_exec', {})).toBe('proceed')
     expect(controller.beforeTool('cron_manage', {})).toBe('proceed')
     expect(controller.beforeTool('http_request', {})).toEqual(suspendFor('http_request'))
-    expect(customDelegate.beforeTool).toHaveBeenCalledTimes(4)
+    expect(customDelegate.beforeTool).toHaveBeenCalledTimes(5)
+    // A shell_exec grant covers git_read (grant coverage), never the reverse.
+    expect(controller.beforeTool('git_read', {})).toBe('proceed')
+    conv.auto_approved_tools.delete('shell_exec')
+    conv.task_approved_tools.add('git_read')
+    expect(controller.beforeTool('shell_exec', {})).toEqual(suspendFor('shell_exec'))
+    expect(controller.beforeTool('git_read', {})).toBe('proceed')
+    expect(customDelegate.beforeTool).toHaveBeenCalledTimes(6)
   })
 
   it('should NOT bypass tools when wildcard is absent and individual tool is not approved', () => {
