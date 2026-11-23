@@ -334,11 +334,12 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     const local = uniqueLabel('new.member')
     const claimEmail = `${local.toUpperCase()}@Entra.Fixture.Test`
     const storedEmail = `${local}@entra.fixture.test`
-    // An Entra member without email_verified is accepted (missing_claim).
+    // An Entra member has no email_verified; xms_edov true is the proof (R7/PR-1).
     const proof = await fake.signIn({
       sub: subject,
       tid: ENTRA_TENANT_ID,
       email: claimEmail,
+      xms_edov: true,
       name: 'New Entra Member',
     })
     expect(proof.verifiedClaims.claims.email_verified).toEqual({ status: 'missing' })
@@ -383,6 +384,76 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     )
     expect(connection.rows).toEqual([{ issuer: ENTRA_ISSUER, client_id: fake.provider.clientId }])
     expect((await watchedTables()).invitations).toEqual(invitationsBefore)
+  })
+
+  it.each([
+    ['xms_edov true links', { xms_edov: true }, 'links'],
+    ['no xms_edov', {}, 'email_domain_claim_missing'],
+    ['xms_edov false', { xms_edov: false }, 'email_unverified'],
+  ] as const)(
+    'an Entra member with no email_verified and %s: %s (R7/PR-1)',
+    async (_name, extra, outcome) => {
+      const fake = entraFake(`fake-entra-edov-link-${outcome.replace(/_/g, '-')}`)
+      const subject = uniqueLabel('edov-link-subject')
+      const email = `${uniqueLabel('edov-link')}@entra.fixture.test`
+      const userId = await seedUser(email)
+      const proof = await fake.signIn({ sub: subject, tid: ENTRA_TENANT_ID, email, ...extra })
+      expect(proof.verifiedClaims.claims.email_verified).toEqual({ status: 'missing' })
+      const before = await watchedTables()
+
+      const result = await resolve(fake, proof)
+
+      if (outcome === 'links') {
+        expect(result).toMatchObject({
+          status: 'resolved',
+          account: { userId, created: { account: false, link: true } },
+        })
+        expect(await linksFor(subject)).toHaveLength(1)
+        return
+      }
+      expect(result).toEqual(
+        outcome === 'email_domain_claim_missing'
+          ? { status: 'refused', reason: 'provider_configuration', cause: outcome }
+          : { status: 'refused', reason: outcome }
+      )
+      expect(await linksFor(subject)).toEqual([])
+      expect(await usersWithEmail(email)).toEqual([
+        { id: userId, email, name: 'Seeded Member', lifecycle_state: 'active' },
+      ])
+      expect(await watchedTables()).toEqual(before)
+    }
+  )
+
+  it('an Entra member with no xms_edov creates no account (R7/PR-1)', async () => {
+    const fake = entraFake('fake-entra-edov-create')
+    const email = `${uniqueLabel('edov-create')}@entra.fixture.test`
+    const before = await watchedTables()
+
+    const refused = await resolve(
+      fake,
+      await fake.signIn({ sub: uniqueLabel('edov-create-subject'), tid: ENTRA_TENANT_ID, email })
+    )
+
+    expect(refused).toEqual({
+      status: 'refused',
+      reason: 'provider_configuration',
+      cause: 'email_domain_claim_missing',
+    })
+    expect(await usersWithEmail(email)).toEqual([])
+    expect(await watchedTables()).toEqual(before)
+
+    // Positive control: the same address with xms_edov true is created.
+    const created = await resolve(
+      fake,
+      await fake.signIn({
+        sub: uniqueLabel('edov-create-subject-ok'),
+        tid: ENTRA_TENANT_ID,
+        email,
+        xms_edov: true,
+      })
+    )
+    expect(created.status).toBe('resolved')
+    expect(await usersWithEmail(email)).toHaveLength(1)
   })
 
   it('row 4 creates for an allowed domain and refuses other domains with no_account', async () => {
@@ -613,7 +684,7 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
       reason: 'email_unverified',
     })
 
-    // An Entra guest without email_verified is unverified too (not missing_claim).
+    // An Entra guest without email_verified is unverified too (not domain_claim_missing).
     const guests = entraFake('fake-entra-unverified-guest', {
       CONTROL_API_OIDC_REQUIRED_ROLE: MEMBER_ROLE,
       CONTROL_API_OIDC_ALLOW_GUESTS: 'true',

@@ -5,8 +5,12 @@ export type OidcEligibility =
   | Readonly<{ eligible: true; guest: boolean }>
   | Readonly<{ eligible: false; reason: 'not_eligible' }>
 
-/** `no_email`: the claim is absent, empty or not a plausible address. */
-export type OidcEmailState = 'verified' | 'unverified' | 'missing_claim' | 'no_email'
+/**
+ * `no_email`: the claim is absent, empty or not a plausible address.
+ * `domain_claim_missing`: an Entra member's token has neither `email_verified`
+ * nor `xms_edov`, so the app registration is not configured to send the proof.
+ */
+export type OidcEmailState = 'verified' | 'unverified' | 'domain_claim_missing' | 'no_email'
 
 const NOT_ELIGIBLE: OidcEligibility = Object.freeze({ eligible: false, reason: 'not_eligible' })
 
@@ -41,10 +45,11 @@ export const MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze([
   'idp',
   'roles',
   'acct',
+  'xms_edov',
 ] as const)
 
 /** Claims whose "unsupported" observation means we cannot judge eligibility. */
-const ELIGIBILITY_CLAIMS = ['tid', 'idp', 'roles', 'acct', 'email_verified'] as const
+const ELIGIBILITY_CLAIMS = ['tid', 'idp', 'roles', 'acct', 'email_verified', 'xms_edov'] as const
 
 /**
  * Whether an `idp` claim value names the pinned tenant's own directory.
@@ -106,6 +111,24 @@ export function evaluateOidcEligibility(
   return Object.freeze({ eligible: true, guest })
 }
 
+/**
+ * Whether the claim's email may find or create an account.
+ *
+ * Entra does not send `email_verified` for members, so for an Entra connection
+ * and a non-guest with no `email_verified` the proof is the optional claim
+ * `xms_edov`. Microsoft's optional claims reference documents it as a boolean
+ * saying whether the email's domain owner has been verified: the email belongs
+ * to the tenant where the user account resides and the tenant admin has verified
+ * the domain. It is returned only when the `email` claim is present. It attests
+ * the domain, not the mailbox: a spoof inside the tenant's own verified domain
+ * is not stopped by it.
+ * UNVERIFIED: the claim's shape is not yet confirmed against ID tokens captured
+ * from a real tenant.
+ *
+ * `email_verified`, when present, decides as it always did. A guest with no
+ * `email_verified` is unverified (`xms_edov` does not help a guest), and a
+ * non-Entra connection ignores `xms_edov`.
+ */
 export function oidcEmailState(
   proof: VerifiedOidcIdentityProof,
   policy: OidcMemberSignInPolicy,
@@ -114,6 +137,10 @@ export function oidcEmailState(
   if (!isPlausibleEmail(proof.attributes.email)) return 'no_email'
   const claim = observe(proof, 'email_verified')
   if (claim.status === 'present') return claim.value === true ? 'verified' : 'unverified'
-  if (claim.status === 'missing' && policy.entraTenantId !== null && !guest) return 'missing_claim'
+  if (claim.status === 'missing' && policy.entraTenantId !== null && !guest) {
+    const domain = observe(proof, 'xms_edov')
+    if (domain.status === 'missing') return 'domain_claim_missing'
+    return domain.status === 'present' && domain.value === true ? 'verified' : 'unverified'
+  }
   return 'unverified'
 }

@@ -1086,6 +1086,55 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
     })
   })
 
+  it('an Entra member with no xms_edov applies no invitation and creates no account (R7/PR-1)', async () => {
+    const team = await seedTeam('edov-invited-team')
+    const fake = entraFake('fake-entra-edov-invitation', {
+      CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: team,
+    })
+    const email = `${uniqueLabel('edov-invited')}@entra.fixture.test`
+    const invitation = await seedInvitation({ email, teamId: team, role: 'inviter' })
+    const before = await watchedTables()
+
+    const refused = await signIn(
+      fake,
+      await fake.signIn({
+        sub: uniqueLabel('edov-invited-subject'),
+        tid: ENTRA_TENANT_ID,
+        email,
+      })
+    )
+
+    expect(refused).toEqual({
+      status: 'refused',
+      reason: 'provider_configuration',
+      cause: 'email_domain_claim_missing',
+    })
+    expect(await invitationState(invitation.id)).toEqual({
+      status: 'pending',
+      accepted_user_id: null,
+    })
+    expect(await watchedTables()).toEqual(before)
+
+    // Positive control: with xms_edov true the account is created and the invitation applied.
+    const result = signedIn(
+      await signIn(
+        fake,
+        await fake.signIn({
+          sub: uniqueLabel('edov-invited-subject-ok'),
+          tid: ENTRA_TENANT_ID,
+          email,
+          xms_edov: true,
+        }),
+        { contract: 'v1' }
+      )
+    )
+    expect(result).toMatchObject({ created: { account: true, link: true }, invitationsApplied: 1 })
+    expect(await invitationState(invitation.id)).toEqual({
+      status: 'accepted',
+      accepted_user_id: result.userId,
+    })
+  })
+
   it.each(['row 3', 'row 4'] as const)(
     'concurrent first sign-ins give one account, one link and two sessions: %s',
     async row => {

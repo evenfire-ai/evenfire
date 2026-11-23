@@ -18,6 +18,7 @@ import {
 import { OIDC_OPERATION_DEADLINE_MS } from '../../oidc/protocolTransport.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import { selectExternalSessionRepresentation } from '../../services/auth/externalSessionIssuance.js'
+import type { OidcRefusalCause } from '../../services/auth/oidcAccountResolution.js'
 import {
   type OidcMemberSignInResult,
   signInOidcMember,
@@ -48,6 +49,23 @@ export type ExternalOidcProfileFlowDependencies = Readonly<{
 }>
 
 const logger = rootLogger.child({ component: 'oidc_profile_flow' })
+
+/** What the operator's log says for each configuration refusal cause. */
+const REFUSAL_CAUSE_LOG: Record<OidcRefusalCause, { message: string; action?: string }> = {
+  connection_mismatch: {
+    message:
+      'OIDC member sign-in refused: the registration id is recorded for another issuer or client; use a new registration id',
+    action: 'use a new registration id',
+  },
+  unknown_new_member_team: {
+    message: 'OIDC member sign-in refused: the configured new-member team does not exist',
+  },
+  email_domain_claim_missing: {
+    message:
+      'OIDC member sign-in refused: the ID token has no xms_edov claim; add it as an optional claim in the app registration',
+    action: 'add the xms_edov optional claim to the ID token',
+  },
+}
 
 function defaultProvider(): Provider | undefined {
   return loadOidcProviderConfiguration(process.env, config.oauthEncryptionKey)
@@ -318,19 +336,16 @@ export function createExternalOidcProfileFlowRouter(
       } else {
         // A configuration refusal names its cause for the operator; the cause
         // never goes into the response.
+        const refusal = REFUSAL_CAUSE_LOG[result.cause]
         logger.warn(
           {
             event: 'oidc_member_refused',
             ...audit,
             reason: result.reason,
             cause: result.cause,
-            ...(result.cause === 'connection_mismatch'
-              ? { action: 'use a new registration id' }
-              : {}),
+            ...(refusal.action === undefined ? {} : { action: refusal.action }),
           },
-          result.cause === 'connection_mismatch'
-            ? 'OIDC member sign-in refused: the registration id is recorded for another issuer or client; use a new registration id'
-            : 'OIDC member sign-in refused: the configured new-member team does not exist'
+          refusal.message
         )
       }
       res.status(200).json({

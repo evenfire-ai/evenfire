@@ -386,6 +386,7 @@ describe('Control API OIDC member sign-in completion', () => {
   it.each([
     ['connection_mismatch', { action: 'use a new registration id' }],
     ['unknown_new_member_team', {}],
+    ['email_domain_claim_missing', { action: 'add the xms_edov optional claim to the ID token' }],
   ] as const)(
     'a provider_configuration refusal logs its cause %s and keeps it off the wire',
     async (cause, extra) => {
@@ -415,6 +416,16 @@ describe('Control API OIDC member sign-in completion', () => {
         cause,
         ...extra,
       })
+      expect(flowLog.warn.mock.calls[0]?.[1]).toBe(
+        {
+          connection_mismatch:
+            'OIDC member sign-in refused: the registration id is recorded for another issuer or client; use a new registration id',
+          unknown_new_member_team:
+            'OIDC member sign-in refused: the configured new-member team does not exist',
+          email_domain_claim_missing:
+            'OIDC member sign-in refused: the ID token has no xms_edov claim; add it as an optional claim in the app registration',
+        }[cause]
+      )
       expect(loggedText()).not.toMatch(/opaque-provider-subject|member@example/)
     }
   )
@@ -502,15 +513,15 @@ describe('Control API OIDC member sign-in completion', () => {
     expect(engineConstructions).toEqual([
       {
         generation: 'engine-cache-generation-a',
-        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct'],
+        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
       },
       {
         generation: 'engine-cache-generation-b',
-        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct'],
+        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
       },
       {
         generation: 'engine-cache-generation-a',
-        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct'],
+        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
       },
     ])
   })

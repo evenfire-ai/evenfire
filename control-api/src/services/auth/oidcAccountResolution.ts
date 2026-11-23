@@ -17,7 +17,10 @@ export type OidcRefusalReason =
  * Why a `provider_configuration` refusal happened. It is for the operator's log
  * only and never leaves control-api: the browser sees the reason alone.
  */
-export type OidcRefusalCause = 'connection_mismatch' | 'unknown_new_member_team'
+export type OidcRefusalCause =
+  | 'connection_mismatch'
+  | 'unknown_new_member_team'
+  | 'email_domain_claim_missing'
 
 export type OidcRefusal = Readonly<{
   status: 'refused'
@@ -231,6 +234,10 @@ export async function resolveOidcAccount(
   const emailState = oidcEmailState(proof, policy, guest)
   if (emailState === 'no_email' || claimEmail === undefined) return refused('email_claim_missing')
   if (emailState === 'unverified') return refused('email_unverified')
+  // The app registration does not send xms_edov: a configuration problem.
+  if (emailState === 'domain_claim_missing') {
+    return refused('provider_configuration', 'email_domain_claim_missing')
+  }
 
   // Rows 3, 5 and 6: email finds an existing member the first time only.
   const matches = await db.query(
