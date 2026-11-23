@@ -2625,67 +2625,67 @@
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git status"
+    "fullName": "matchTypedGitRead matches git status"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git -C service log -3"
+    "fullName": "matchTypedGitRead matches git -C service log -3"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git --no-pager log -5"
+    "fullName": "matchTypedGitRead matches git --no-pager log -5"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects cd service && git status"
+    "fullName": "matchTypedGitRead matches cd service && git status"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git stash list"
+    "fullName": "matchTypedGitRead matches git stash list"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git tag -l 'v1.*'"
+    "fullName": "matchTypedGitRead matches git tag -l 'v1.*'"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git branch --contains abc"
+    "fullName": "matchTypedGitRead matches git branch --contains abc"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git remote -v"
+    "fullName": "matchTypedGitRead matches git remote -v"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git remote get-url origin"
+    "fullName": "matchTypedGitRead matches git remote get-url origin"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git reflog"
+    "fullName": "matchTypedGitRead matches git reflog"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git reflog -10"
+    "fullName": "matchTypedGitRead matches git reflog -10"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git reflog show"
+    "fullName": "matchTypedGitRead matches git reflog show"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git worktree list"
+    "fullName": "matchTypedGitRead matches git worktree list"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git branch -a -vv"
+    "fullName": "matchTypedGitRead matches git branch -a -vv"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git branch --show-current"
+    "fullName": "matchTypedGitRead matches git branch --show-current"
   },
   {
     "suite": "gitRedirect.test.ts",
-    "fullName": "matchTypedGitRead redirects git diff HEAD~1 -- a.txt"
+    "fullName": "matchTypedGitRead matches git diff HEAD~1 -- a.txt"
   },
   {
     "suite": "gitRedirect.test.ts",

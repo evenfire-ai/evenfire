@@ -469,7 +469,9 @@ function typedGitRedirect(
     (decision.cell === 'A3' && (decision.kind === 'classify' || decision.kind === 'card')) ||
     (decision.kind === 'card' && decision.cell === 'A5' && cause === 'denied')
   if (!eligible) return undefined
-  if (matchTypedGitRead(command) === null) return undefined
+  // Only names-only commands: git_read cards content reads in auto too.
+  const typed = matchTypedGitRead(command)
+  if (typed === null || typed.content) return undefined
   const conversation = config.conversation
   // Whitespace variants are the same command: re-sending one is the escape.
   const key = command.trim().split(/\s+/).join(' ')

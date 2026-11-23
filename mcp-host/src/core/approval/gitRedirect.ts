@@ -8,7 +8,35 @@ import { Counter, register } from 'prom-client'
 
 /** The fixed result of a redirected call. */
 export const GIT_REDIRECT_TEXT =
-  'Not run. In auto approval mode, read-only git runs without asking through the git_read tool. Call git_read with the equivalent subcommand and options. To run this exact command in the shell instead, send it again; the user may be asked to approve it.'
+  'Not run. In auto approval mode, git_read lists repository state (status, log, branches, tags, refs) without asking. Call git_read with the equivalent subcommand and options. To run this exact command in the shell instead, send it again; the user may be asked to approve it.'
+
+/** Subcommands whose output is file content: git_read cards them in auto. */
+const CONTENT_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'show',
+  'diff',
+  'grep',
+  'blame',
+  'cat-file',
+])
+
+/**
+ * A `git log` argument that adds file content: a patch, a word diff, a
+ * context size, a pickaxe, a line-range log or a combined diff. A short
+ * option bundle counts when it holds one of those letters.
+ */
+function logContentArg(arg: string): boolean {
+  if (
+    /^--(patch|unified|word-diff|color-words|pickaxe|cc$|diff-merges|full-diff|ext-diff|textconv|raw$)/.test(
+      arg
+    )
+  ) {
+    return true
+  }
+  if (arg.startsWith('-') && !arg.startsWith('--')) {
+    return /[puUSGLcm]/.test(arg.slice(1).replace(/^\d+/, ''))
+  }
+  return false
+}
 
 const READ_ONLY_SUBCOMMANDS: ReadonlySet<string> = new Set([
   'status',
@@ -102,7 +130,9 @@ function readOnly(subcommand: string, args: readonly string[]): boolean {
  * subcommand. None of `;`, `|`, `$`, backtick, `<`, `>` or a newline anywhere,
  * and no `&` other than the one after `cd DIR`.
  */
-export function matchTypedGitRead(command: string): { subcommand: string } | null {
+export function matchTypedGitRead(
+  command: string
+): { subcommand: string; content: boolean } | null {
   if (/[;|$`<>\n\r]/.test(command)) return null
   let rest = command.trim()
   const cd = /^cd\s+[^\s&]+\s*&&\s*/.exec(rest)
@@ -122,7 +152,11 @@ export function matchTypedGitRead(command: string): { subcommand: string } | nul
   }
   const subcommand = words[i]
   if (subcommand === undefined || subcommand.startsWith('-')) return null
-  return readOnly(subcommand, words.slice(i + 1)) ? { subcommand } : null
+  const args = words.slice(i + 1)
+  if (!readOnly(subcommand, args)) return null
+  const content =
+    CONTENT_SUBCOMMANDS.has(subcommand) || (subcommand === 'log' && args.some(logContentArg))
+  return { subcommand, content }
 }
 
 /**

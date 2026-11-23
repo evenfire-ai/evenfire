@@ -19,8 +19,32 @@ describe('matchTypedGitRead', () => {
     ['git branch -a -vv', 'branch'],
     ['git branch --show-current', 'branch'],
     ['git diff HEAD~1 -- a.txt', 'diff'],
-  ])('redirects %s', (command, subcommand) => {
-    expect(matchTypedGitRead(command)).toEqual({ subcommand })
+  ])('matches %s', (command, subcommand) => {
+    expect(matchTypedGitRead(command)).toMatchObject({ subcommand })
+  })
+
+  it.each([
+    ['git status', false],
+    ['git log -3', false],
+    ['git log --oneline --stat', false],
+    ['git --no-pager log -5', false],
+    ['git branch -a -vv', false],
+    ['git show', true],
+    ['git diff HEAD~1 -- a.txt', true],
+    ['git grep -n TODO', true],
+    ['git blame a.txt', true],
+    ['git cat-file -p HEAD', true],
+    ['git log -p', true],
+    ['git log -3p', true],
+    ['git log --patch', true],
+    ['git log -U0', true],
+    ['git log -S needle', true],
+    ['git log -Gx', true],
+    ['git log --word-diff', true],
+    ['git log -L 1,2:a.txt', true],
+    ['git log --cc', true],
+  ])('%s returns content: %s', (command, content) => {
+    expect(matchTypedGitRead(command)?.content).toBe(content)
   })
 
   it.each([
