@@ -130,6 +130,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             state: row.state ?? 'idle',
             active_task_id: row.active_task_id ?? null,
             active_trace_context: row.active_trace_context ?? null,
+            approval_mode: row.approval_mode ?? 'manual',
           })
         })
         tx.immediate(op.payload)
@@ -489,6 +490,25 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           return { applied: true, modelSelectionRevision: next, modelSelections }
         })
         return tx.immediate()
+      })
+
+    case 'update_session_approval_mode':
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          const result = s.updateSessionApprovalMode.run({
+            id: op.sessionId,
+            approval_mode: op.approvalMode,
+          })
+          if (result.changes !== 1) {
+            const err: Error & { code?: string } = new Error(
+              `update_session_approval_mode: no session row for id=${op.sessionId}`
+            )
+            err.code = 'APPROVAL_MODE_SESSION_NOT_FOUND'
+            throw err
+          }
+        })
+        tx.immediate()
+        return { ok: true }
       })
 
     case 'update_session_title':

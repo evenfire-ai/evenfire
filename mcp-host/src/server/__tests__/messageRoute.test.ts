@@ -503,6 +503,7 @@ describe('handleMessageRoute — acceptedAttachmentIds through the real admissio
       dispatch,
       fileReferenceGfs: () => ({ status: 'unsupported' }),
       logger: { info: vi.fn(), warn: vi.fn() },
+      approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
     })
     return { dispatch, handlers: makeHandlers({ messageHandler }) }
   }
@@ -612,6 +613,7 @@ describe('handleMessageRoute — structured file references (#666)', () => {
       dispatch,
       fileReferenceGfs: () => ({ status: 'unsupported' }),
       logger: { info: vi.fn(), warn: vi.fn() },
+      approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
     })
     return { dispatch, handlers: makeHandlers({ messageHandler }) }
   }

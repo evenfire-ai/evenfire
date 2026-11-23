@@ -43,6 +43,7 @@ import {
   handleSessionMessagesRoute,
   handleSessionSearchRoute,
   handleSessionsListRoute,
+  handleSetApprovalModeRoute,
   handleSetModelRoute,
   handleSetTitleRoute,
   handleStatusRoute,
@@ -74,6 +75,7 @@ import type {
   SessionMessagesHandler,
   SessionSearchHandler,
   SessionsListHandler,
+  SetApprovalModeHandler,
   SetModelHandler,
   SetTitleHandler,
   StatusHandler,
@@ -374,6 +376,7 @@ export class RPCServer {
   private modelsListHandler: ModelsListHandler | null = null
   private setModelHandler: SetModelHandler | null = null
   private setTitleHandler: SetTitleHandler | null = null
+  private setApprovalModeHandler: SetApprovalModeHandler | null = null
   private workflowRouter: ReturnType<typeof createWorkflowRouter> | null = null
   private artifactSecretEntriesProvider: (() => ArtifactSecretEntry[]) | null = null
   private chatArtifactDirResolver: ((userId: string) => CallerOutputLookup) | null = null
@@ -771,6 +774,13 @@ export class RPCServer {
         await handleSetTitleRoute(req, res, this.routeDeps())
       }
     )
+    this.app.patch(
+      '/v1/runtime/sessions/:agent/:chatId/approval-mode',
+      runtimeEdgeGuard(['rpc-proxy']),
+      async (req, res) => {
+        await handleSetApprovalModeRoute(req, res, this.routeDeps())
+      }
+    )
 
     this.app.get('/v1/runtime/cron/results', runtimeEdgeGuard(['channel-reader']), (req, res) => {
       handleCronResultsRoute(req, res, this.routeDeps())
@@ -1080,6 +1090,10 @@ export class RPCServer {
     this.setTitleHandler = handler
   }
 
+  onSetApprovalMode(handler: SetApprovalModeHandler): void {
+    this.setApprovalModeHandler = handler
+  }
+
   /** Activate workflow mode — mounts /api/v1/workflow/* routes. */
   setWorkflowService(service: WorkflowService): void {
     this.workflowRouter = createWorkflowRouter(service)
@@ -1135,6 +1149,7 @@ export class RPCServer {
       modelsListHandler: this.modelsListHandler,
       setModelHandler: this.setModelHandler,
       setTitleHandler: this.setTitleHandler,
+      setApprovalModeHandler: this.setApprovalModeHandler,
     }
   }
 

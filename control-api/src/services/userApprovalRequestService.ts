@@ -243,6 +243,18 @@ export type ApprovalRequest = {
   correlation: ApprovalCorrelation | null
 }
 
+/**
+ * True when the user exists and has been removed (`lifecycle_state = 'retired'`).
+ * An unknown user id is not retired: the allowlist check already refuses it.
+ */
+export async function isRetiredUser(userId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM users WHERE id = $1 AND lifecycle_state = 'retired'`,
+    [userId]
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
 export async function allowlistCheck(
   recipeNamespace: string,
   recipeName: string,

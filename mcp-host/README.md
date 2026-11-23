@@ -395,12 +395,12 @@ spec:
       telegram: { enabled: true }
     tools:
       http_request: false # skip approval — only safe with a non-empty CLERUM_HTTP_ALLOWLIST
-      shell_exec: true # explicit (matches code default; documents intent)
+      shell_exec: true # explicit: in auto this keeps a card on every shell call. Remove it if auto should judge shell.
 ```
 
 Semantics:
 
-- `true` — force approval (override a tool whose code default is `false`).
+- `true` — require approval, also for a tool whose code default is `false`. In `manual` the tool asks like any tool that requires approval by default. In `auto` it shows a card on every call, with no **Always** option: `shell_exec` is not judged by the classifier and earlier shell-card answers do not cover it, and `http_request` keeps the card that auto would otherwise skip. `allow_all` runs it with no card. A guardrail `ask` rule is the control that still shows a card in allow-all (see [Configure guardrails](../docs/how-to/configure-guardrails.md)). `cron_manage` asks as it would in manual, in every mode.
 - `false` — skip approval (override a tool whose code default is `true`).
 - absent — use the tool's hard-coded `requiresApproval()` default.
 

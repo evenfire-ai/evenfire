@@ -7,8 +7,25 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
+/**
+ * sha256 of dev's team writer: `createTeam` and `createTeamForUser`, the code this
+ * test runs, as one slice of teams.ts. Only that slice is pinned, so other
+ * functions in the file can change without the test running anything but dev's
+ * writer.
+ */
 const PRE_D34_TEAMS_WRITER_SHA256 =
-  '3f73f787acd4b7aac85b9a489c540403518256460d34c5ae2761121b3ff69843'
+  '83aa2e9868be7618a049a5da5ce37d5598ddf0241b1e8364eb97c44a8535ada4'
+
+/** From `export async function createTeam(` to the closing brace of `createTeamForUser`. */
+function teamWriterSource(source: string): string {
+  const start = source.indexOf('export async function createTeam(')
+  const forUser = source.indexOf('export async function createTeamForUser(', start)
+  const end = source.indexOf('\n}\n', forUser)
+  if (start < 0 || forUser < 0 || end < 0) {
+    throw new Error('the team writer was not found in teams.ts')
+  }
+  return source.slice(start, end + 2)
+}
 
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
@@ -75,8 +92,8 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
   })
 
   it("runs dev's team writer against the PR1 schema", async () => {
-    const writerSource = readFileSync(
-      new URL('../src/services/directory/teams.ts', import.meta.url)
+    const writerSource = teamWriterSource(
+      readFileSync(new URL('../src/services/directory/teams.ts', import.meta.url), 'utf8')
     )
     expect(createHash('sha256').update(writerSource).digest('hex')).toBe(
       PRE_D34_TEAMS_WRITER_SHA256

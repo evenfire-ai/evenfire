@@ -119,6 +119,7 @@ function agentPort(primary: SingleTurnProvider, fallback: SingleTurnProvider) {
     mcpManager: null,
     workspaceService: undefined,
     approvalConfig: undefined,
+    approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
     config: {
       maxTaskDuration: 300_000,
       maxToolCallsPerTask: 10,

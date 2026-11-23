@@ -1674,6 +1674,8 @@ All three calls carry the `x-clerum-edge-*` caller headers (`x-clerum-edge-calle
 
 ### Per-tool approval
 
+The approval mode changes which of the cards below appear. `cron_manage` follows the `manual` rules below in every mode. For every other tool, the grant rules (what a plain approval and **Always approve** store, and the `turn_tools` scope of an ordinary card) apply only in `manual`: outside manual, approving a card stores no task or **Always approve** grant. The denial rules (a denied tool asks again, and while a denial is active so do tools that start other tools) apply in `manual` and `auto`. In `auto`, a denial re-ask, a tool an admin forces with `spec.approval.tools.<tool>: true`, and a guardrail `ask` each show a card for that one call. Otherwise the shell classifier judges `shell_exec` and a command it does not approve shows the shell card, `http_request` runs with no card, and every other gated tool shows its card. In `allow_all`, a call the approval gate would hold runs with no approval card, including a tool the user denied and a tool an admin forces; a guardrail `ask` still shows its card. A denial stays recorded and applies again when the mode drops. An OAuth connect card shows in every mode: it comes from the tool's result after the call runs, not from the approval gate. See [Configure approvals](../how-to/configure-approvals.md#approval-modes).
+
 Approving a tool runs that call only. It does not allowlist the rest of the turn or every tool on the same MCP server. A later call, including the same tool with different arguments, asks again.
 
 `/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. It never waives a forced gate: the stateless `cron_manage` create/enable card, a denial re-ask, and an OAuth connect card run the call once and allowlist nothing. Desktop hides the button on those cards. Slack, Telegram, and Teams do the same when the Host sets `alwaysApproveAllowed` to false.
@@ -1697,11 +1699,14 @@ Every pending approval carries a durable `authorization_scope`. An ordinary card
 
 **Channel commands:**
 
-| Command           | Behavior                                                                                                                               |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `/approve`        | Run the approved call only                                                                                                             |
-| `/approve always` | On an ordinary card, run the call and allowlist that exact tool name. On an exact-invocation card, run the call once and store nothing |
-| `/deny`           | Cancel the call, block that tool name until approved, and revoke its Always approve                                                    |
+| Command                | Behavior                                                                                                                               |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/approve`             | Run the approved call only                                                                                                             |
+| `/approve always`      | On an ordinary card, run the call and allowlist that exact tool name. On an exact-invocation card, run the call once and store nothing |
+| `/deny`                | Cancel the call, block that tool name until approved, and revoke its Always approve                                                    |
+| `approval-mode <mode>` | Set this conversation's approval mode to `manual`, `auto` or `allow-all`                                                               |
+
+`approval-mode <mode>` works on Telegram, Slack, Teams and email. The whole message must be the command, in any letter case; for email, the subject and body together. Lowering the mode always works. With the channel's `allowModeChange` off, the command stores `manual`. Under an explicit `defaultPolicy` of `cli_only` or `designated_approvers`, a raise from a sender the policy does not allow leaves the stored mode unchanged, and a session whose owner the policy does not allow runs as `manual` whatever it stored, including after a later change to `defaultPolicy` or `approvers`. The reply gives the stored and the effective mode.
 
 ### Architecture Components
 

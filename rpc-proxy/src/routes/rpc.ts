@@ -8,7 +8,7 @@ import {
   authorizeActionV2,
 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
-import { getHostRpcPreflight } from '../hostRpcPreflight.js'
+import { getHostRpcPreflight, safeAgentSegment, safePathSegment } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
   bindHostRpcScope,
@@ -23,6 +23,7 @@ import {
   runHostRpcPreflightCheckpoint,
 } from '../middleware/auth.js'
 import { chatJsonBody } from '../middleware/chatJsonBody.js'
+import { validateHostRef } from '../middleware/hostRefValidation.js'
 import { jsonBody } from '../middleware/jsonBody.js'
 import { runtimeHostEdgeContext, sendCheckpointError } from '../routeActionBindingV2.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
@@ -68,6 +69,27 @@ import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 import type { ResolvedServerConnection } from '../types.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+
+type ShellAction = 'once' | 'command' | 'shell'
+type ApprovalMode = 'manual' | 'auto' | 'allow_all'
+
+/** Absent is the boolean approve path. Any other value is not a shell answer. */
+function readShellAction(value: unknown): ShellAction | undefined | 'invalid' {
+  if (value === undefined) return undefined
+  if (value === 'once' || value === 'command' || value === 'shell') return value
+  return 'invalid'
+}
+
+/** Stored mode only. The command spelling `allow-all` is not a stored value. */
+function readApprovalMode(value: unknown): ApprovalMode | undefined {
+  if (value === 'manual' || value === 'auto' || value === 'allow_all') return value
+  return undefined
+}
+
+function readApprovalModeBody(body: unknown): ApprovalMode | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+  return readApprovalMode((body as { mode?: unknown }).mode) ?? null
+}
 
 // Keep legacy denial precedence (scope before body parsing), while v2 route
 // binding must see parsed body data before its remote Control API checkpoint.
@@ -553,6 +575,22 @@ export function createRpcRouter(): Router {
           requestId,
           origin: 'direct_chat',
         })
+        // First-message mode. This body is an allowlist: forward approvalMode
+        // only for a stored value when the token also has host:approval:write,
+        // the mode PATCH's scope. Carrying the field without that scope is 403,
+        // checked before the value. With the scope, a value that is not a
+        // stored mode is 400, as on the PATCH. A message without the field
+        // needs only host:message:invoke.
+        const carriesApprovalMode = Object.prototype.hasOwnProperty.call(body, 'approvalMode')
+        if (carriesApprovalMode && !auth.scopes.includes('host:approval:write')) {
+          res.status(403).json({ error: 'Forbidden: missing scope' })
+          return
+        }
+        const approvalMode = carriesApprovalMode ? readApprovalMode(body.approvalMode) : undefined
+        if (carriesApprovalMode && !approvalMode) {
+          res.status(400).json({ error: 'approvalMode must be manual, auto, or allow_all' })
+          return
+        }
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -576,6 +614,7 @@ export function createRpcRouter(): Router {
           ...(typeof body.model === 'string' && body.model.trim()
             ? { model: body.model.trim() }
             : {}),
+          ...(approvalMode ? { approvalMode } : {}),
         }
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
@@ -808,6 +847,13 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'alwaysApprove must be a boolean' })
           return
         }
+        // Optional shell-card answer. Absent stays on the boolean path. Any
+        // other value is 400 so a typo cannot be forwarded as a grant.
+        const shellAction = readShellAction(parsed.shellAction)
+        if (shellAction === 'invalid') {
+          res.status(400).json({ error: 'shellAction must be once, command, or shell' })
+          return
+        }
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -832,6 +878,7 @@ export function createRpcRouter(): Router {
           ...(typeof parsed.taskId === 'string' ? { taskId: parsed.taskId } : {}),
           requestId: approvalRequestId,
           alwaysApprove,
+          ...(shellAction ? { shellAction } : {}),
         }
         // Wake-eligible finite operation (§11.4): the route scope stays
         // host:approval:write; wake capability rides on the token. A suspended
@@ -1371,6 +1418,103 @@ export function createRpcRouter(): Router {
           )
         } catch (error) {
           respondUpstreamUnavailable(res, error)
+        }
+      } catch (error) {
+        guardedNext(res, next, error)
+      }
+    }
+  )
+
+  // Set a session's stored approval mode. A mode answers later cards in
+  // advance, so the scope is approve's (host:approval:write), not rename's.
+  // Host access matches rename. Unlike rename this write is wake-eligible: it
+  // copies the approve route's single retry. There is no idempotency key, so a
+  // hold re-issues the PATCH at most once. The body is only { mode }; mcp-host
+  // clamps the effective mode.
+  router.patch(
+    '/rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode',
+    requireRpcAuth,
+    requireScope('host:approval:write'),
+    jsonBody,
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const hostRef = String(req.params.hostRef || '').trim()
+        const agent = String(req.params.agent || '').trim()
+        const chatId = String(req.params.chatId || '').trim()
+        if (!safePathSegment(hostRef) || !safeAgentSegment(agent) || !safePathSegment(chatId)) {
+          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
+          return
+        }
+        const mode = readApprovalModeBody(req.body)
+        if (!mode) {
+          res.status(400).json({ error: 'mode must be manual, auto, or allow_all' })
+          return
+        }
+        // The Host-ref grammar every sibling Host route applies after its
+        // preflight, before the Host is resolved.
+        if (!validateHostRef(req, res)) return
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
+        const baseUrl = host.url.replace(/\/+$/, '')
+        const logHost = hostRef.replace(/[\r\n]/g, '')
+        const logAgent = agent.replace(/[\r\n]/g, '')
+        const logChatId = chatId.replace(/[\r\n]/g, '')
+        console.info(
+          `[RPC_PROXY] user=${auth.sub} host=${logHost} method=set-approval-mode agent=${logAgent} chatId=${logChatId} mode=${mode}`
+        )
+        const upstreamBody = { mode }
+        // Wake-eligible finite operation: scope stays host:approval:write.
+        // Waking also needs host:wake:write on the token.
+        const attempt = async (timeoutMs?: number) => {
+          const response = await fetch(
+            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/approval-mode`,
+            {
+              method: 'PATCH',
+              headers: { 'content-type': 'application/json', ...host.headers },
+              body: JSON.stringify(upstreamBody),
+              signal: mutatingCallSignal(timeoutMs, res),
+            }
+          )
+          const body = await readMutatingResponseBody(response)
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
+        }
+        try {
+          await attempt()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
+            ...wakeAndHoldV2Options(req, host),
+            attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
         }
       } catch (error) {
         guardedNext(res, next, error)
