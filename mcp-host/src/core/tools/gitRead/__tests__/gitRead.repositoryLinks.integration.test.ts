@@ -294,6 +294,24 @@ describe('git_read repository links (P2–P4)', () => {
     expect(result).toEqual({ kind: 'refused', category: 'bad_path' })
   })
 
+  it('a managed caller root that verifies runs git_read (the GFS Host path)', async () => {
+    const callerRoot = path.join(fx.base, 'host', 'users', 'alice')
+    fs.mkdirSync(callerRoot, { recursive: true })
+    makeRepo(path.join(callerRoot, 'repo'), 'x', 'WITNESS\n')
+    const result = await runPreflight({
+      root: callerRoot,
+      verifyCallerRoot: true,
+      gitPath,
+      params: params({ subcommand: 'status', directory: 'repo' }),
+      timeoutMs: 10_000,
+      spawn: spawnGit,
+    })
+    expect(result).toMatchObject({
+      kind: 'ok',
+      cwd: fs.realpathSync(path.join(callerRoot, 'repo')),
+    })
+  })
+
   it('a caller root that no longer verifies is root_unavailable', async () => {
     const result = await runPreflight({
       root: fx.root,
