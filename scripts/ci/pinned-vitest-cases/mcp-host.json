@@ -3430,5 +3430,165 @@
   {
     "suite": "gitRead.repositoryLinks.integration.test.ts",
     "fullName": "git_read repository links (P2–P4) a submodule at a path named objects runs"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read admission auto cards a git_read content read as an exact card (A6)"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect for a typed command that returns content (git_read would card it)"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read auto cards a git_read content read, or one not known to be names-only, as A6"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git status returns content: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log -3 returns content: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --oneline --stat returns content: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git --no-pager log -5 returns content: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git branch -a -vv returns content: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git show returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git diff HEAD~1 -- a.txt returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git grep -n TODO returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git blame a.txt returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git cat-file -p HEAD returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log -p returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log -3p returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --patch returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log -U0 returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log -S needle returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log -Gx returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --word-diff returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log -L 1,2:a.txt returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --cc returns content: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git branch --sort=refname newb"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git tag --sort=refname t1"
+  },
+  {
+    "suite": "toolUseLoopToolBatch.redirectProgress.test.ts",
+    "fullName": "typed-git redirect in the tool batch a reported result emits one start and one complete with its literal content"
+  },
+  {
+    "suite": "toolUseLoopToolBatch.redirectProgress.test.ts",
+    "fullName": "typed-git redirect in the tool batch the batch usage goes on the first reported result only"
+  },
+  {
+    "suite": "toolUseLoopToolBatch.redirectProgress.test.ts",
+    "fullName": "typed-git redirect in the tool batch a result that is not reported emits nothing"
+  },
+  {
+    "suite": "toolUseLoopToolBatch.redirectProgress.test.ts",
+    "fullName": "typed-git redirect in the tool batch a git_read call through the discovery bridge counts as followed"
+  },
+  {
+    "suite": "toolUseLoopToolBatch.redirectProgress.test.ts",
+    "fullName": "typed-git redirect in the tool batch counts on the next batch whether the model called git_read, once"
+  },
+  {
+    "suite": "gitRead.index.integration.test.ts",
+    "fullName": "git_read refuses an index that names paths outside the worktree a parent-relative name: worktree grep, diff and status are refused"
+  },
+  {
+    "suite": "gitRead.index.integration.test.ts",
+    "fullName": "git_read refuses an index that names paths outside the worktree an absolute name: worktree grep, diff and status are refused"
+  },
+  {
+    "suite": "gitRead.index.integration.test.ts",
+    "fullName": "git_read refuses an index that names paths outside the worktree a name with a .. segment inside the worktree is refused too"
+  },
+  {
+    "suite": "gitRead.index.integration.test.ts",
+    "fullName": "git_read refuses an index that names paths outside the worktree an ordinary repository runs status, diff and grep"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) indirection objects (G-P8) notes history stays closed for diff ranges ending at notes, other worktrees and nested tags"
+  },
+  {
+    "suite": "gitRead.registration.test.ts",
+    "fullName": "git_read registration registers git_read only when the probe found git"
+  },
+  {
+    "suite": "gitRead.registration.test.ts",
+    "fullName": "git_read registration registers the definition as designed"
+  },
+  {
+    "suite": "gitRead.registration.test.ts",
+    "fullName": "git_read registration a GFS caller root binds git_read to the caller root, re-verified on every call"
+  },
+  {
+    "suite": "gitRead.registration.test.ts",
+    "fullName": "git_read registration approval configs may name git_read whether or not this config registers it"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a recursive clone with submodules runs, in the superproject and inside the submodule"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "spawnGit outcomes an argument list the OS refuses (E2BIG) could not start; it never throws"
   }
 ]
