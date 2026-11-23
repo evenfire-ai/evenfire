@@ -359,7 +359,7 @@ describe('macOS Quit drain', () => {
 
   it('cancels Quit before a token-dependent main-window initializer can block', async () => {
     const firstNativeWrite = deferred<void>()
-    const initializerWrite = deferred<void>()
+    const initializerRead = deferred<string | null>()
     harness.initialize.mockRejectedValueOnce(new Error('synthetic first initialization failure'))
     const initializationError = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
@@ -372,9 +372,8 @@ describe('macOS Quit drain', () => {
       initializationError.mockRestore()
     }
     harness.initialize.mockClear()
-    harness.nativeSet
-      .mockImplementationOnce(() => firstNativeWrite.promise)
-      .mockImplementationOnce(() => initializerWrite.promise)
+    harness.nativeSet.mockImplementationOnce(() => firstNativeWrite.promise)
+    harness.nativeGet.mockImplementationOnce(() => initializerRead.promise)
     const { TokenStore } = await import('../tokenStore.ts')
     const { app } = await import('electron')
     const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
@@ -398,24 +397,26 @@ describe('macOS Quit drain', () => {
       expect(vetoed).toBe(true)
 
       harness.initialize.mockImplementation(async () => {
-        await new TokenStore().setSessionToken(
-          'synthetic-initializer-token',
-          'initializer-aaaaaaaaaaaa'
-        )
+        await new TokenStore().getSessionToken('initializer-aaaaaaaaaaaa')
       })
       harness.appListeners.get('activate')?.()
       await vi.waitFor(() => expect(harness.initialize).toHaveBeenCalled())
-      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(2))
+      await vi.waitFor(() =>
+        expect(harness.nativeGet).toHaveBeenCalledWith(
+          'Evenfire',
+          'session-token::initializer-aaaaaaaaaaaa'
+        )
+      )
       expect(harness.windows).toHaveLength(0)
 
       firstNativeWrite.resolve()
       await first
-      initializerWrite.resolve()
+      initializerRead.resolve('synthetic-initializer-token')
       await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
       expect(vi.mocked(app.quit)).not.toHaveBeenCalled()
     } finally {
       firstNativeWrite.resolve()
-      initializerWrite.resolve()
+      initializerRead.resolve('synthetic-initializer-token')
       const { openTokenStoreAdmission } = await import('../tokenStore.ts')
       openTokenStoreAdmission()
       await first
