@@ -3414,5 +3414,21 @@
   {
     "suite": "gitRead.corpus.integration.test.ts",
     "fullName": "git_read corpus on real git a worktree diff or status leaves .git/index unchanged"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) indirection objects (G-P8) notes history stays closed through revision suffixes, short names, blame and a branch at a notes commit"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a planted submodule dir with a linked objects adds no store"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a linked .git/modules is not scanned; the link walk judges it"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a submodule at a path named objects runs"
   }
 ]
