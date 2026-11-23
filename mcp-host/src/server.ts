@@ -776,7 +776,11 @@ export class RPCServer {
     )
     this.app.patch(
       '/v1/runtime/sessions/:agent/:chatId/approval-mode',
-      runtimeEdgeGuard(['rpc-proxy']),
+      runtimeEdgeGuard(
+        ['rpc-proxy'],
+        undefined,
+        HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode']
+      ),
       async (req, res) => {
         await handleSetApprovalModeRoute(req, res, this.routeDeps())
       }

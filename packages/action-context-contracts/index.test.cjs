@@ -73,7 +73,7 @@ test('Host edge assertion constants pin the wire contract and no static edge tok
   assert.equal(contracts.HOST_EDGE_ASSERTION_CLAIM_TYPE, 'host_edge_assertion')
   assert.equal(contracts.HOST_EDGE_ASSERTION_MAX_TTL_SECONDS, 300)
   assert.equal(Object.isFrozen(contracts.HOST_EDGE_RPC_PROXY_ROUTE_SCOPES), true)
-  assert.equal(Object.keys(contracts.HOST_EDGE_RPC_PROXY_ROUTE_SCOPES).length, 18)
+  assert.equal(Object.keys(contracts.HOST_EDGE_RPC_PROXY_ROUTE_SCOPES).length, 19)
   assert.equal('RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER' in contracts, false)
   assert.equal('RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT' in contracts, false)
 })
@@ -95,6 +95,7 @@ test('Host edge route scopes match the scope rpc-proxy requires on each forwardi
     'GET /v1/runtime/models': 'host:session:read',
     'POST /v1/runtime/model': 'host:model:write',
     'PATCH /v1/runtime/sessions/:agent/:chatId/name': 'host:session:write',
+    'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode': 'host:approval:write',
     'GET /v1/runtime/tasks/:taskId/progress/stream': 'host:activity:read',
     'GET /v1/runtime/artifacts': 'host:task:read',
     'GET /v1/runtime/artifacts/:filename/download': 'host:task:read',

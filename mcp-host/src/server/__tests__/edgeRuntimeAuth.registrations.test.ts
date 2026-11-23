@@ -35,7 +35,7 @@ function routeKeysUsing(stack: RouteLayer[], handle: unknown): string[] {
 }
 
 describe('runtime route registrations that admit caller rpc-proxy', () => {
-  it('pass the route scope of the shared table for each of the 18 routes', async () => {
+  it('pass the route scope of the shared table for each of the 19 routes', async () => {
     const { RPCServer } = await import('../../server')
     const { sessionSearchAuthority } = await import('../sessionSearchAuth')
     const server = new RPCServer(0)
@@ -43,7 +43,7 @@ describe('runtime route registrations that admit caller rpc-proxy', () => {
       .stack
 
     const rpcProxyCalls = guardCalls.filter(call => call.callers.includes('rpc-proxy'))
-    expect(rpcProxyCalls).toHaveLength(18)
+    expect(rpcProxyCalls).toHaveLength(19)
 
     const registered = new Map<string, unknown>()
     for (const call of rpcProxyCalls) {
