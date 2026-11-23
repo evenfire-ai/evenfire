@@ -759,8 +759,10 @@ export type RespondWithWakeAndHoldOptions = {
   authorizedActionV2?: AuthorizedActionV2
   reauthorizeV2?: () => Promise<void>
   /**
-   * V1 requests: re-resolves the Host connection before each retry attempt, so
-   * the retry carries a fresh edge assertion. A returned denial ends the retry
+   * V1 requests: runs before each retry attempt and re-resolves the Host
+   * connection when the held edge assertion is near its `exp`, so the retry
+   * carries a fresh edge assertion; otherwise it makes no control-api call and
+   * the retry reuses the held assertion. A returned denial ends the retry
    * through `respondDenied`, the route's answer for a denial at its first
    * resolve. Called where `reauthorizeV2` is called, for requests without
    * `authorizedActionV2`.

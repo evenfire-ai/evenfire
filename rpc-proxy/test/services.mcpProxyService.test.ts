@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync } from 'node:crypto'
 import { config } from '../src/config.js'
 import {
   forwardHostMessageToHost,
   forwardRpcToServer,
+  isHeldEdgeAssertionNearExpiry,
   resolveHostConnectionForUser,
   validateRpcRequest,
 } from '../src/services/mcpProxyService.js'
@@ -284,5 +287,40 @@ describe('services/mcpProxyService', () => {
         { content: 'hello', channelType: 'rpc', sender: 'desktop' }
       )
     ).rejects.toThrow('Upstream host returned 500')
+  })
+})
+
+describe('isHeldEdgeAssertionNearExpiry', () => {
+  const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const EXP_SECONDS = 2_000_000_000
+  // The re-resolve margin: the longest a retry attempt runs, plus 2 s.
+  const MARGIN_MS = config.upstreamTimeoutMs + 2_000
+
+  function sign(payload: Record<string, unknown>): string {
+    return jwt.sign(payload, EDGE_KEYS.privateKey, { algorithm: 'RS256' })
+  }
+
+  const assertion = sign({ sub: 'user-1', iat: EXP_SECONDS - 300, exp: EXP_SECONDS })
+
+  it('is near expiry when exp is exactly the margin away', () => {
+    expect(isHeldEdgeAssertionNearExpiry(assertion, EXP_SECONDS * 1000 - MARGIN_MS)).toBe(true)
+  })
+
+  it('is not near expiry 1 ms outside the margin', () => {
+    expect(isHeldEdgeAssertionNearExpiry(assertion, EXP_SECONDS * 1000 - MARGIN_MS - 1)).toBe(false)
+  })
+
+  it('is near expiry once exp has passed', () => {
+    expect(isHeldEdgeAssertionNearExpiry(assertion, EXP_SECONDS * 1000 + 1)).toBe(true)
+  })
+
+  it.each([
+    { label: 'a value that is not a JWT', value: 'edge-assertion-fixture' },
+    { label: 'a JWT without exp', value: sign({ sub: 'user-1', iat: EXP_SECONDS - 300 }) },
+    { label: 'no assertion', value: undefined },
+  ])('throws for $label', ({ value }) => {
+    expect(() => isHeldEdgeAssertionNearExpiry(value, EXP_SECONDS * 1000)).toThrow(
+      'Held edge assertion has no readable exp'
+    )
   })
 })

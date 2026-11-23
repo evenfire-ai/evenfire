@@ -252,7 +252,7 @@ function mutatingCallSignal(timeoutMs: number | undefined, res: ExpressResponse)
 /**
  * The authority refresh a wake-and-hold retry runs before each attempt: V2
  * re-runs the action checkpoint, V1 re-resolves the Host connection for a fresh
- * edge assertion. `respondDenied` is the route's answer for a denial at its
+ * edge assertion when the held one is near its `exp`. `respondDenied` is the route's answer for a denial at its
  * first resolve, used when the V1 re-resolve is denied.
  */
 function wakeAndHoldAuthorityOptions(
