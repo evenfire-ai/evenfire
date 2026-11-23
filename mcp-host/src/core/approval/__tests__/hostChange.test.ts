@@ -87,7 +87,7 @@ describe('applyHostChange', () => {
     const raced = await race(policy('allow_all', true), policy('allow_all', false))
 
     expect(readModeCeiling(raced.snapshot)).toBe('allow_all')
-    expect(readChannelCap(raced.snapshot, 'slack')).toBe('manual')
+    expect(readChannelCap(raced.snapshot, 'slack', 'user-1')).toBe('manual')
     expect(raced.currentHost).toBe(raced.e2)
     expect(raced.commitHost.mock.calls.map(call => call[0])).toEqual([raced.e2])
     expect(raced.setApprovalConfig.mock.calls.length).toBe(raced.callsAfterE2)

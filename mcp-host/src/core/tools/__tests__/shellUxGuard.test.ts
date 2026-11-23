@@ -73,8 +73,45 @@ const BLOCKED_JOINED_LINES = [
   ['dd device path split mid-token (of=/dev/sda)', 'dd if=/dev/zero of=/dev/s\\\nda'],
   ['redirect device path split mid-token (> /dev/sda)', 'echo x > /dev/s\\\nda'],
   ['fork bomb split mid-token', ':(\\\n){ :|:& };:'],
-  // sh keeps the CR and ends the command here; the guard folds it like LF.
+  // sh keeps the CR and ends the command here. The joined text still matches,
+  // and either match blocks.
   ['rm flags split by backslash-CRLF', 'rm -r\\\r\nf /*'],
+] as const
+
+// sh does not join these lines. A `#` comment ends at the newline even when
+// its last character is a backslash, and `\<CR><LF>` escapes the CR, so the LF
+// still ends the command. Line 2 runs as its own command.
+const BLOCKED_UNJOINED_LINES = [
+  ['rm after a comment ending in a backslash', 'ls # list\\\nrm -rf /'],
+  ['dd after a comment ending in a backslash', 'ls # list\\\ndd if=/dev/zero of=/dev/sda'],
+  ['device redirect after a comment ending in a backslash', 'ls # list\\\necho y > /dev/sda'],
+  ['fork bomb after a comment ending in a backslash', 'ls # list\\\n:(){ :|:& };:'],
+  ['rm after backslash-CRLF', 'echo x\\\r\nrm -rf /'],
+  ['dd after backslash-CRLF', 'echo x\\\r\ndd if=/dev/zero of=/dev/sda'],
+  ['device redirect after backslash-CRLF', 'echo x\\\r\necho y > /dev/sda'],
+  ['fork bomb after backslash-CRLF', 'echo x\\\r\n:(){ :|:& };:'],
+] as const
+
+// sh joins some lines and not others here. Line 1 ends as in
+// BLOCKED_UNJOINED_LINES, then lines 2 and 3 run as one command, so the operand
+// on line 3 belongs to the command on line 2. Line 1's last word touches the
+// backslash, so joining every line glues it to that command word.
+const BLOCKED_MIXED_LINES = [
+  ['rm with its root operand on a continuation after a comment line', 'ls # list\\\nrm -rf \\\n/'],
+  [
+    'dd with its device target on a continuation after a comment line',
+    'ls # list\\\ndd if=/dev/zero \\\nof=/dev/sda',
+  ],
+  ['rm with its root operand on a continuation after backslash-CRLF', 'echo x\\\r\nrm -rf \\\n/'],
+  // A `#` inside a word starts no comment, so sh joins the rm line.
+  [
+    'rm with a # inside an argument and its root operand on a continuation after a comment line',
+    'ls # list\\\nrm -rf tmp#1 \\\n/',
+  ],
+  [
+    'dd with a # inside an argument and its device target on a continuation after backslash-CRLF',
+    'echo x\\\r\ndd if=/dev/zero bs=1#x \\\nof=/dev/sda',
+  ],
 ] as const
 
 const RUNS_JOINED_LINES = [
@@ -82,6 +119,30 @@ const RUNS_JOINED_LINES = [
   ['rm operand split mid-token (rm -rf /tmp/x)', 'rm -rf /\\\ntmp/x'],
   // A bare newline ends the command: sh runs `rm -r`, then `f /*`.
   ['rm flags split by a bare newline', 'rm -r\nf /*'],
+  ['a benign line after a comment ending in a backslash', 'ls # list\\\nls -la'],
+  ['a benign line after backslash-CRLF', 'echo x\\\r\nls -la'],
+] as const
+
+// The benign twins of BLOCKED_MIXED_LINES. sh runs `rm -rf /tmp/x` and
+// `dd if=/dev/sda of=disk.img` on lines 2 and 3.
+const RUNS_MIXED_LINES = [
+  [
+    'rm with a /tmp/x operand split mid-token after a comment line',
+    'ls # list\\\nrm -rf /\\\ntmp/x',
+  ],
+  [
+    'dd reading a disk into an image file after a comment line',
+    'ls # list\\\ndd if=/dev/sda \\\nof=disk.img',
+  ],
+  [
+    'rm with a /tmp/x operand split mid-token after backslash-CRLF',
+    'echo x\\\r\nrm -rf /\\\ntmp/x',
+  ],
+  // The # twin: sh runs `rm -rf tmp#1 /tmp/x`.
+  [
+    'rm with a # inside an argument and a /tmp/x operand split mid-token after a comment line',
+    'ls # list\\\nrm -rf tmp#1 /\\\ntmp/x',
+  ],
 ] as const
 
 function fakeChild(): ChildProcess {
@@ -337,7 +398,31 @@ describe('ShellTool.execute', () => {
     expect(spawnMock).not.toHaveBeenCalled()
   })
 
+  it.each(BLOCKED_UNJOINED_LINES)('blocks %s before spawn', async (_label, command) => {
+    const result = await new ShellTool(workspacePath, 5_000, ['PATH']).execute({ command })
+
+    expect(result.is_error).toBe(true)
+    expect(result.content).toBe(BLOCKED_MESSAGE)
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
   it.each(RUNS_JOINED_LINES)('runs %s', async (_label, command) => {
+    const result = await new ShellTool(workspacePath, 5_000, ['PATH']).execute({ command })
+
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual(['-c', command])
+    expect(result.is_error).toBe(false)
+  })
+
+  it.each(BLOCKED_MIXED_LINES)('blocks %s before spawn', async (_label, command) => {
+    const result = await new ShellTool(workspacePath, 5_000, ['PATH']).execute({ command })
+
+    expect(result.is_error).toBe(true)
+    expect(result.content).toBe(BLOCKED_MESSAGE)
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it.each(RUNS_MIXED_LINES)('runs %s', async (_label, command) => {
     const result = await new ShellTool(workspacePath, 5_000, ['PATH']).execute({ command })
 
     expect(spawnMock).toHaveBeenCalledTimes(1)
@@ -351,6 +436,13 @@ describe('ShellTool.execute', () => {
   it.each([
     ['rm', 'rm '.repeat(50_000)],
     ['dd', 'dd '.repeat(50_000)],
+    // The joined and raw text differ, so all three passes run. The third keeps
+    // every line unjoined.
+    ['rm backslash-CRLF', 'rm \\\r\n'.repeat(25_000)],
+    // All three passes run, and the third joins every line.
+    ['rm backslash-LF', 'rm \\\n'.repeat(30_000)],
+    // All three passes run, and the third joins every other line.
+    ['comment line and rm backslash-LF', '# c\\\nrm \\\n'.repeat(15_000)],
   ])('checks a 150 KB repeated %s command in linear time', async (_word, command) => {
     const started = performance.now()
     const result = await new ShellTool(workspacePath, 5_000, ['PATH']).execute({ command })

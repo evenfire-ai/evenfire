@@ -90,7 +90,12 @@ function shellCommand(marker: string): string {
   return `echo ${marker}; date`
 }
 
-// Same visible path as qa-recorder-image-capabilities.spec.ts: model chip -> menu -> row.
+// Same path as qa-recorder-image-capabilities.spec.ts: model chip -> menu -> row.
+// The row is clicked with a dispatched click event, not a pointer click: in the docked
+// chat panel the upward menu is clipped and has no scroll, so with a long catalog the
+// row sits outside the visible area and cannot receive a pointer click (#1627). The
+// rows below test approval scope, not the model picker; the chip check below still
+// proves the selection reached the composer.
 async function selectChatModel(page: Page, model: string): Promise<void> {
   const chip = page.getByTestId('selected-chat-model')
   await expect(chip).toBeVisible({ timeout: 30_000 })
@@ -98,7 +103,7 @@ async function selectChatModel(page: Page, model: string): Promise<void> {
   await expect(page.getByRole('menu', { name: 'Select model' })).toBeVisible({ timeout: 20_000 })
   const row = page.getByTestId(`model-option-${model}`)
   await expect(row, `${model} must be offered by the chatllm catalog`).toHaveCount(1)
-  await row.click()
+  await row.dispatchEvent('click')
   await expect(chip).toHaveAttribute('data-model-id', model)
 }
 

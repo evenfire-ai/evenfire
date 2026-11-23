@@ -26,6 +26,22 @@ function authorizationUrl(): string {
   return url.href
 }
 
+/**
+ * `next start -p 3001` (the Profile UI image command) builds `request.url` from its
+ * own listener, not from Host or X-Forwarded-Host: `<proto>://localhost:3001`, with
+ * the scheme taken from X-Forwarded-Proto. Behind the proxy the route therefore never
+ * sees the public origin.
+ */
+function internalListenerUrl(protocol: 'http:' | 'https:', pathname: string, search = ''): string {
+  const url = new URL(callbackUri)
+  url.protocol = protocol
+  url.hostname = 'localhost'
+  url.port = '3001'
+  url.pathname = pathname
+  url.search = search
+  return url.href
+}
+
 function mockExternalApi(
   implementation: (url: URL, init: RequestInit) => Response | Promise<Response>
 ): () => void {
@@ -426,6 +442,238 @@ test('duplicate callback issuer parameters are rejected before completion', asyn
     assert.equal(paths.length, 1)
     assert.ok(paths[0]?.endsWith('/configuration'))
     assert.doesNotMatch(await response.text(), /issuer\.example\.test|provider-code/)
+  } finally {
+    restore()
+  }
+})
+
+for (const protocol of ['http:', 'https:'] as const) {
+  test(`Profile OIDC callback completes at the internal ${protocol} listener URL Next reports`, async () => {
+    const calls: Array<{ path: string; body?: unknown }> = []
+    const restore = mockExternalApi((url, init) => {
+      const body = init.body ? JSON.parse(String(init.body)) : undefined
+      calls.push({ path: url.pathname, body })
+      if (url.pathname.endsWith('/configuration')) return configurationResponse()
+      return Response.json({ outcome: 'identity_proof_verified' })
+    })
+    try {
+      const response = await GET(
+        new Request(
+          internalListenerUrl(protocol, '/api/oidc/callback', `?state=${state}&code=provider-code`),
+          { headers: { cookie: `${browserCookieName(state)}=${browserBinding}` } }
+        )
+      )
+      assert.equal(response.status, 200)
+      assert.match(await response.text(), /Identity proof was verified/)
+      assert.deepEqual(
+        calls.map(call => call.path),
+        ['/api/v1/oidc/profile-flow/configuration', '/api/v1/oidc/profile-flow/complete']
+      )
+      assert.deepEqual(calls[1]?.body, { state, code: 'provider-code', browserBinding })
+    } finally {
+      restore()
+    }
+  })
+}
+
+test('Profile OIDC callback at the internal listener URL still requires the host-only binding cookie', async () => {
+  // A browser that reaches the callback on any host other than the configured
+  // redirect origin never carries the __Host- cookie that /start set there.
+  const paths: string[] = []
+  const restore = mockExternalApi(url => {
+    paths.push(url.pathname)
+    return configurationResponse()
+  })
+  try {
+    const response = await GET(
+      new Request(
+        internalListenerUrl('https:', '/api/oidc/callback', `?state=${state}&code=provider-code`)
+      )
+    )
+    assert.equal(response.status, 400)
+    assert.match(await response.text(), /Identity proof could not be verified/)
+    assert.deepEqual(paths, ['/api/v1/oidc/profile-flow/configuration'])
+  } finally {
+    restore()
+  }
+})
+
+test('Profile OIDC callback rejects a request path other than the configured callback path', async () => {
+  const paths: string[] = []
+  const restore = mockExternalApi(url => {
+    paths.push(url.pathname)
+    return configurationResponse()
+  })
+  try {
+    const response = await GET(
+      new Request(
+        internalListenerUrl(
+          'https:',
+          '/api/oidc/not-callback',
+          `?state=${state}&code=provider-code`
+        ),
+        { headers: { cookie: `${browserCookieName(state)}=${browserBinding}` } }
+      )
+    )
+    assert.equal(response.status, 403)
+    assert.deepEqual(paths, ['/api/v1/oidc/profile-flow/configuration'])
+  } finally {
+    restore()
+  }
+})
+
+test('Profile OIDC start sets a binding cookie only for the configured public origin', async () => {
+  // The callback relies on this: only a page on the redirect URI origin can mint
+  // the binding, whatever request.url reports.
+  const paths: string[] = []
+  const restore = mockExternalApi(url => {
+    paths.push(url.pathname)
+    if (url.pathname.endsWith('/configuration')) return configurationResponse()
+    return Response.json({
+      authorizationUrl: authorizationUrl(),
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    })
+  })
+  try {
+    const startUrl = internalListenerUrl('https:', '/api/oidc/start')
+    const accepted = await POST(
+      new Request(startUrl, { method: 'POST', headers: { origin: new URL(callbackUri).origin } })
+    )
+    assert.equal(accepted.status, 303)
+    assert.match(accepted.headers.get('set-cookie') ?? '', /^__Host-ef_oidc_[a-f0-9]{24}=/)
+
+    paths.length = 0
+    const rejected = await POST(
+      new Request(startUrl, { method: 'POST', headers: { origin: new URL(startUrl).origin } })
+    )
+    assert.equal(rejected.status, 403)
+    assert.equal(rejected.headers.get('set-cookie'), null)
+    assert.deepEqual(paths, ['/api/v1/oidc/profile-flow/configuration'])
+  } finally {
+    restore()
+  }
+})
+
+// Dev spike: OIDC member sign-in relays External REST's password-login session cookie.
+// Shape copied from Express `res.cookie` output, including the comma inside Expires.
+const upstreamSessionCookie =
+  'profile_session=session-token-fixture; Max-Age=43200; Path=/; Expires=Sat, 21 Nov 2026 04:48:01 GMT; HttpOnly; Secure; SameSite=Lax'
+
+function memberSignInResponse(body: unknown, cookies: string[] = []): Response {
+  const headers = new Headers({ 'content-type': 'application/json' })
+  for (const cookie of cookies) headers.append('set-cookie', cookie)
+  return new Response(JSON.stringify(body), { status: 200, headers })
+}
+
+function signInConfiguration(): Response {
+  return Response.json({ ...configuration, memberAuthenticationActivated: true })
+}
+
+test('a signed-in member gets the password-login session cookie and lands on Profile UI', async () => {
+  const paths: string[] = []
+  const restore = mockExternalApi(url => {
+    paths.push(url.pathname)
+    if (url.pathname.endsWith('/configuration')) return signInConfiguration()
+    return memberSignInResponse(
+      { outcome: 'member_signed_in', memberAuthenticationActivated: true },
+      [upstreamSessionCookie, 'unrelated=1; Path=/']
+    )
+  })
+  try {
+    const response = await GET(
+      new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+        headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+      })
+    )
+    const cookies = response.headers.getSetCookie()
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.get('location'), '/')
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    assert.deepEqual(cookies, [
+      upstreamSessionCookie,
+      `${browserCookieName(state)}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`,
+    ])
+    assert.equal(await response.text(), '')
+    assert.deepEqual(paths, [
+      '/api/v1/oidc/profile-flow/configuration',
+      '/api/v1/oidc/profile-flow/complete',
+    ])
+  } finally {
+    restore()
+  }
+})
+
+test('a verified identity with no matching member gets no session', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return signInConfiguration()
+    return memberSignInResponse({
+      outcome: 'identity_proof_verified',
+      memberAuthenticationActivated: true,
+      memberSignIn: 'no_matching_member',
+    })
+  })
+  try {
+    const response = await GET(
+      new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+        headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+      })
+    )
+    const cookies = response.headers.getSetCookie()
+    assert.equal(response.status, 403)
+    assert.match(await response.text(), /no Evenfire account matches it/)
+    assert.equal(cookies.length, 1)
+    assert.match(cookies[0] ?? '', /^__Host-ef_oidc_[a-f0-9]{24}=; .*Max-Age=0/)
+  } finally {
+    restore()
+  }
+})
+
+for (const [label, cookies] of [
+  ['no session cookie', []],
+  ['two session cookies', [upstreamSessionCookie, upstreamSessionCookie]],
+] as const) {
+  test(`a signed-in answer with ${label} fails closed and needs a new attempt`, async () => {
+    const restore = mockExternalApi(url => {
+      if (url.pathname.endsWith('/configuration')) return signInConfiguration()
+      return memberSignInResponse(
+        { outcome: 'member_signed_in', memberAuthenticationActivated: true },
+        [...cookies]
+      )
+    })
+    try {
+      const response = await GET(
+        new Request(`${callbackUri}?state=${state}&code=provider-code`, {
+          headers: { cookie: `${browserCookieName(state)}=${browserBinding}` },
+        })
+      )
+      const setCookies = response.headers.getSetCookie()
+      assert.equal(response.status, 503)
+      assert.match(await response.text(), /start a new sign-in attempt/i)
+      assert.equal(setCookies.length, 1)
+      assert.doesNotMatch(setCookies[0] ?? '', /profile_session/)
+    } finally {
+      restore()
+    }
+  })
+}
+
+test('Profile OIDC start still works when member sign-in is on', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return signInConfiguration()
+    return Response.json({
+      authorizationUrl: authorizationUrl(),
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    })
+  })
+  try {
+    const response = await POST(
+      new Request('https://profile.example.test/api/oidc/start', {
+        method: 'POST',
+        headers: { origin: 'https://profile.example.test' },
+      })
+    )
+    assert.equal(response.status, 303)
+    assert.match(response.headers.get('set-cookie') ?? '', /^__Host-ef_oidc_[a-f0-9]{24}=/)
   } finally {
     restore()
   }

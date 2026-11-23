@@ -12,6 +12,7 @@ import fc from 'fast-check'
 import { createRoot } from 'react-dom/client'
 import type { ApprovalModeResult } from '../../../../../src/types'
 import {
+  approvalModeForFirstSend,
   beginApprovalModeFirstSend,
   hostApprovalModeEpoch,
   noteHostApprovalModeFromSession,
@@ -521,6 +522,116 @@ describe('ApprovalModePicker state — focus (F1)', () => {
   })
 })
 
+describe('ApprovalModePicker state — Allow all under a limit that drops (D3)', () => {
+  /** A catalog page whose one session carries the Host's ceiling (SessionsListResult). */
+  function catalogPage(ceiling: ApprovalMode) {
+    return {
+      items: [
+        { agent: 'agent-x', chatId: 'chat-1', turnCount: 1, ...sessionApproval('manual', ceiling) },
+      ],
+    }
+  }
+
+  /**
+   * A blank chat on a Host Desktop has not read yet: the limit is unknown, so
+   * the menu offers Allow all while the opening's refresh is still out.
+   */
+  function openConfirmationWhileTheLimitIsUnknown() {
+    act(() => {
+      resetHostApprovalModeStore()
+    })
+    const catalog = deferred<ReturnType<typeof catalogPage>>()
+    listSessions.mockReturnValueOnce(catalog.promise)
+    const utils = renderPicker('')
+    fireEvent.click(utils.getByTestId('approval-mode-picker'))
+    expect(listSessions).toHaveBeenCalledTimes(1)
+    expect(utils.getByTestId('approval-mode-option-allow-all').getAttribute('aria-disabled')).toBe(
+      null
+    )
+    fireEvent.click(utils.getByTestId('approval-mode-option-allow-all'))
+    expect(utils.queryByTestId('approval-mode-confirm-allow-all')).not.toBeNull()
+    return { utils, catalog }
+  }
+
+  it('returns to the menu when the refresh lowers the limit under an open confirmation, and holds nothing', async () => {
+    const { utils, catalog } = openConfirmationWhileTheLimitIsUnknown()
+
+    catalog.resolve(catalogPage('auto'))
+    await flush()
+
+    expect(utils.queryByTestId('approval-mode-confirm-allow-all')).toBeNull()
+    const allowAll = utils.getByTestId('approval-mode-option-allow-all')
+    expect(allowAll.getAttribute('aria-disabled')).toBe('true')
+    expect(utils.getByTestId('approval-mode-limit-note').textContent).toBe(
+      'This Host limits this chat to Auto-approve.'
+    )
+    // Focus goes back to the row that opened the confirmation; the note describes it.
+    expect(document.activeElement).toBe(allowAll)
+    expect(approvalModeForFirstSend('agent-x', null)).toBeNull()
+    expect(utils.getByTestId('approval-mode-picker').textContent).toBe('Manual')
+  })
+
+  it('still confirms Allow all when the refresh shows the Host allows it', async () => {
+    const { utils, catalog } = openConfirmationWhileTheLimitIsUnknown()
+
+    catalog.resolve(catalogPage('allow_all'))
+    await flush()
+    fireEvent.click(utils.getByTestId('approval-mode-confirm-allow-all'))
+
+    expect(approvalModeForFirstSend('agent-x', null)).toBe('allow_all')
+    expect(utils.getByTestId('approval-mode-picker').textContent).toBe('Allow all')
+  })
+
+  it.each([
+    ['auto', false],
+    ['allow_all', true],
+  ] as const)(
+    'Confirm checks the limit the store holds at the click (a read with ceiling %s lands first)',
+    async (ceiling, stores) => {
+      setApprovalMode.mockResolvedValue(patchSuccess('allow_all'))
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = false
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      const find = (testId: string) =>
+        container.querySelector<HTMLElement>(`[data-testid="${testId}"]`)
+      try {
+        root.render(<ApprovalModePicker agentRef="agent-x" chatId="chat-1" />)
+        await vi.waitFor(() => expect(find('approval-mode-picker')?.textContent).toBe('Manual'))
+        find('approval-mode-picker')!.click()
+        // The opening's own refresh lands before the confirmation opens.
+        await vi.waitFor(() => expect(loadSessionMessages).toHaveBeenCalledTimes(1))
+        await new Promise(resolve => setTimeout(resolve, 0))
+        await vi.waitFor(() => expect(find('approval-mode-option-allow-all')).not.toBeNull())
+        find('approval-mode-option-allow-all')!.click()
+        await vi.waitFor(() => expect(find('approval-mode-confirm-allow-all')).not.toBeNull())
+        const confirm = find('approval-mode-confirm-allow-all')!
+
+        // A read of the chat lands, and the click arrives before React renders it.
+        noteHostApprovalModeFromSession('agent-x', 'chat-1', sessionApproval('manual', ceiling))
+        confirm.click()
+        await new Promise(resolve => setTimeout(resolve, 0))
+
+        if (stores) {
+          expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1', 'allow_all')
+          await vi.waitFor(() =>
+            expect(find('approval-mode-picker')?.textContent).toBe('Allow all')
+          )
+        } else {
+          expect(setApprovalMode).not.toHaveBeenCalled()
+          // The read reached the picker: the confirmation is gone and the row is not offered.
+          await vi.waitFor(() => expect(find('approval-mode-confirm-allow-all')).toBeNull())
+          expect(find('approval-mode-option-allow-all')?.getAttribute('aria-disabled')).toBe('true')
+        }
+      } finally {
+        root.unmount()
+        container.remove()
+        actEnvironment.IS_REACT_ACT_ENVIRONMENT = true
+      }
+    }
+  )
+})
+
 // ---------------------------------------------------------------------------
 // A6 — independent oracle: a trivial reference model of the A4 invariants.
 // ---------------------------------------------------------------------------
@@ -550,6 +661,8 @@ interface ModelWrite {
   mode: ApprovalMode
   outcome: Outcome
   settled: boolean
+  /** `requestSeq` when its PATCH started. */
+  startedAt: number
 }
 interface Model {
   screen: Screen
@@ -566,6 +679,10 @@ interface Model {
   limit: Record<ChatKey, ApprovalMode>
   /** Desktop's Host-wide ceiling (D2), the blank chat's limit. Null: unknown. */
   hostCeiling: ApprovalMode | null
+  /** Bumps as each request that answers with the ceiling starts: a refresh, a PATCH, a re-read. */
+  requestSeq: number
+  /** `requestSeq` of the request whose answer set `hostCeiling`; 0 for the seeds' passive fill. */
+  hostCeilingSeq: number
   /** The blank chat's held pick. */
   held: ApprovalMode
 }
@@ -587,7 +704,15 @@ function closeMenu(model: Model): void {
 }
 
 function startWrite(model: Model, chat: ChatKey, mode: ApprovalMode, outcome: Outcome, real: Real) {
-  model.writes.push({ id: model.writes.length + 1, chat, mode, outcome, settled: false })
+  model.requestSeq += 1
+  model.writes.push({
+    id: model.writes.length + 1,
+    chat,
+    mode,
+    outcome,
+    settled: false,
+    startedAt: model.requestSeq,
+  })
   model.expectedCalls.push(chat)
   real.pendingOutcomes.push(outcome)
 }
@@ -631,10 +756,30 @@ function expectedNote(model: Readonly<Model>): string | null {
   return null
 }
 
-/** Desktop applied a fresh snapshot of `chat` taken now: its limit and the Host ceiling move. */
-function freshSnapshot(model: Model, chat: ChatKey): void {
+/**
+ * D3: once the limit on screen drops below Allow all, an open confirmation
+ * goes back to the menu; nothing above the limit can be confirmed.
+ */
+function dropConfirmationAboveLimit(model: Model): void {
+  if (model.menuOpen && model.confirming && !offered(model, 'allow_all')) {
+    model.confirming = false
+  }
+}
+
+/**
+ * Desktop applied a fresh answer for `chat` taken now, from a request that
+ * started at `requestSeq`. The chat's limit moves. The Host ceiling moves
+ * unless a request that started later already answered (D2).
+ */
+function freshSnapshot(model: Model, chat: ChatKey, requestSeq: number): void {
   model.limit[chat] = model.ceiling
+  freshHostCeiling(model, requestSeq)
+}
+
+function freshHostCeiling(model: Model, requestSeq: number): void {
+  if (model.hostCeilingSeq > requestSeq) return
   model.hostCeiling = model.ceiling
+  model.hostCeilingSeq = requestSeq
 }
 
 function assertInvariants(model: Model, real: Real): void {
@@ -723,11 +868,12 @@ class ToggleMenu implements fc.AsyncCommand<Model, Real> {
       model.menuOpen = true
       // D4: opening re-reads the limit: the chat's own session, or for the
       // blank chat the Host ceiling from the catalog.
+      model.requestSeq += 1
       if (model.screen === 'blank') {
-        model.hostCeiling = model.ceiling
+        freshHostCeiling(model, model.requestSeq)
       } else {
         model.failedRequest[model.screen] = null
-        freshSnapshot(model, model.screen)
+        freshSnapshot(model, model.screen, model.requestSeq)
       }
     }
     // A busy chip ignores the click: the menu stays closed and the error stays.
@@ -784,6 +930,13 @@ class Confirm implements fc.AsyncCommand<Model, Real> {
     return model.menuOpen && model.confirming
   }
   async run(model: Model, real: Real) {
+    // A confirmation open here is always under the limit: PassiveRead and
+    // Settle drop it as they lower the limit (dropConfirmationAboveLimit),
+    // and SetCeiling moves no limit. So the model pins D3's close during
+    // render, but never clicks Confirm above the limit. Confirm's own check
+    // of the store's limit at the click, for a read the picker has not
+    // rendered yet, is pinned by the scenario test "Confirm checks the limit
+    // the store holds at the click".
     closeMenu(model)
     if (model.screen === 'blank') model.held = 'allow_all'
     else startWrite(model, model.screen, 'allow_all', this.outcome, real)
@@ -846,6 +999,7 @@ class PassiveRead implements fc.AsyncCommand<Model, Real> {
   }
   async run(model: Model, real: Real) {
     if (!saveInFlight(model, this.chat)) model.limit[this.chat] = model.ceiling
+    dropConfirmationAboveLimit(model)
     const epoch = hostApprovalModeEpoch()
     act(() => {
       noteHostApprovalModeFromSession(
@@ -877,8 +1031,16 @@ class Settle implements fc.AsyncCommand<Model, Real> {
     write.settled = true
     if (write.outcome === 'ok' || write.outcome === 'dropped') model.stored[write.chat] = write.mode
     // The PATCH answer (ok) or the re-read after a failure carries the Host's
-    // ceiling now. A 404 for a seen chat carries nothing.
-    if (write.outcome !== 'gone') freshSnapshot(model, write.chat)
+    // ceiling now. The answer's request started with the PATCH; the re-read
+    // starts now. A 404 for a seen chat carries nothing.
+    if (write.outcome === 'ok') {
+      freshSnapshot(model, write.chat, write.startedAt)
+    } else if (write.outcome !== 'gone') {
+      model.requestSeq += 1
+      freshSnapshot(model, write.chat, model.requestSeq)
+    }
+    // The Host ceiling is the blank chat's limit, so its confirmation can close here.
+    dropConfirmationAboveLimit(model)
     // S3: only the latest write for its chat decides that chat's error.
     const latest = [...model.writes].reverse().find(entry => entry.chat === write.chat)
     if (latest?.id === write.id) {
@@ -932,6 +1094,14 @@ const commandArbitraries = [
 
 describe('ApprovalModePicker state — A6 command model', () => {
   it('keeps S1–S4, L1, L2, C1 and D1–D4 for any event order and settlement order', async () => {
+    // Run before the random mix, which rarely reaches it: a read lowers the
+    // limit while the Allow-all confirmation is open (D3).
+    const examples: [fc.Scheduler, fc.AsyncCommand<Model, Real>[]][] = [
+      [
+        fc.schedulerFor([]),
+        [new ToggleMenu(), new PickAllowAll(), new SetCeiling('manual'), new PassiveRead('chat-1')],
+      ],
+    ]
     await fc.assert(
       fc.asyncProperty(
         fc.scheduler(),
@@ -972,6 +1142,8 @@ describe('ApprovalModePicker state — A6 command model', () => {
             // The seeds were read under ceiling allow_all; the first filled the Host ceiling.
             limit: { 'chat-1': 'allow_all', 'chat-2': 'allow_all' },
             hostCeiling: 'allow_all',
+            requestSeq: 0,
+            hostCeilingSeq: 0,
             held: 'manual',
           }
           await fc.asyncModelRun(() => ({ model, real }), commands)
@@ -980,7 +1152,7 @@ describe('ApprovalModePicker state — A6 command model', () => {
           assertInvariants(model, real)
         }
       ),
-      { numRuns: Number(process.env.PICKER_MODEL_RUNS ?? 500) }
+      { numRuns: Number(process.env.PICKER_MODEL_RUNS ?? 500), examples }
     )
   })
 })

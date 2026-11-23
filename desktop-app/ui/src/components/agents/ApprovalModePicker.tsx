@@ -29,6 +29,11 @@ function modeName(mode: ApprovalMode): string {
   return MODE_OPTIONS.find(option => option.mode === mode)?.label ?? 'Manual'
 }
 
+/** Allow all is offered while the limit is unknown or allows it. */
+function offersAllowAll(modeLimit: ApprovalMode | null): boolean {
+  return modeLimit === null || modeLimit === 'allow_all'
+}
+
 /**
  * The menu's note on the Host limit: what the chat was set to when the Host
  * runs less, or which modes the Host allows when some rows are not offered.
@@ -56,7 +61,10 @@ function savedAnnouncement(view: HostApprovalModeView): string {
  * controls read as one pair.
  *
  * "Allow all" asks before it writes; the confirmation replaces the menu inside
- * the popover, takes focus, keeps Tab inside, and hands focus back to the chip.
+ * the popover, takes focus, keeps Tab inside, and hands focus back to the chip
+ * when it is confirmed, cancelled or closed with Escape. A click outside
+ * closes it and leaves focus where the user clicked. When a lower limit closes
+ * it instead, focus goes to the Allow-all row (see below).
  *
  * The composer mounts the picker without a key, so a chat switch only changes
  * its props. The menu and the confirmation reset during that render, so nothing
@@ -78,8 +86,12 @@ function savedAnnouncement(view: HostApprovalModeView): string {
  * note that names the limit); when the chat is set above the limit, the note
  * says so. With no answer from the Host yet the limit is unknown and every
  * mode is offered. Opening the menu re-reads the limit, so rows follow an
- * admin's change. A saved pick is announced through a polite status region,
- * with the limit when the Host runs less than the pick.
+ * admin's change. When a read lowers the limit below Allow all while its
+ * confirmation is open, the popover goes back to the menu in that render and
+ * focus returns to the Allow-all row, which the note now describes; Confirm
+ * also checks the store's limit at the click. A saved pick is announced
+ * through a polite status region, with the limit when the Host runs less than
+ * the pick.
  *
  * When the session's model cannot run the shell classifier and the mode is
  * auto, the chip turns warning-toned and says so in its tooltip and to screen
@@ -104,9 +116,11 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [announcement, setAnnouncement] = useState('')
+  const [refocusAllowAll, setRefocusAllowAll] = useState(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const cancelRef = useRef<HTMLButtonElement | null>(null)
   const confirmRef = useRef<HTMLButtonElement | null>(null)
+  const allowAllRowRef = useRef<HTMLButtonElement | null>(null)
   const classifierNoteId = useId()
   const confirmTextId = useId()
   const limitNoteId = useId()
@@ -126,6 +140,13 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
     }
     if (renderedFor.scopeKey !== scopeKey) setAnnouncement('')
     setRenderedFor({ scopeKey, locked })
+  } else if (confirming && !offersAllowAll(modeLimit)) {
+    // A read lowered the limit below Allow all while its confirmation was open
+    // (the menu's own refresh, or any other read of the Host). Back to the
+    // menu in this render, so Allow all above the limit cannot be confirmed;
+    // the row now shows as not offered and the note names the limit.
+    setConfirming(false)
+    setRefocusAllowAll(true)
   }
   // The chat on screen after the last commit, for a save that settles later.
   const shownScopeKey = useRef(scopeKey)
@@ -161,6 +182,14 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [menuOpen, close, focusChip])
+
+  // A confirmation closed by a lower limit took focus with it. Hand it to the
+  // row that opened the confirmation; its description names the limit.
+  useLayoutEffect(() => {
+    if (!refocusAllowAll) return
+    setRefocusAllowAll(false)
+    allowAllRowRef.current?.focus()
+  }, [refocusAllowAll])
 
   const choose = (mode: ApprovalMode) => {
     close()
@@ -308,6 +337,9 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
                 // click of a double-click on that row lands here, so only a
                 // single click or a key press (detail 0) confirms.
                 if (event.detail > 1) return
+                // The store's limit at the click, not the one this render
+                // saw: a read can land between the two.
+                if (!offersAllowAll(readView().modeLimit)) return
                 choose('allow_all')
               }}
             >
@@ -344,6 +376,7 @@ export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps
               return (
                 <li key={option.mode}>
                   <button
+                    ref={option.mode === 'allow_all' ? allowAllRowRef : undefined}
                     type="button"
                     role="menuitemradio"
                     aria-checked={isActive}

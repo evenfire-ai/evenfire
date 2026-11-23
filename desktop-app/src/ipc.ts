@@ -397,7 +397,7 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
     parsed.approvalMode !== 'auto' &&
     parsed.approvalMode !== 'allow_all'
   ) {
-    delete parsed.approvalMode
+    throw new Error('Invalid host message request: approvalMode')
   }
   if (parsed.fileReferences !== undefined) {
     // Checks shape only; mcp-host enforces the count limit and resolves each reference.
@@ -1703,10 +1703,14 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       const targetHostRefs = Array.isArray(hostRefs)
         ? hostRefs.map(v => String(v).trim()).filter(Boolean)
         : undefined
-      const action =
-        shellAction === 'once' || shellAction === 'command' || shellAction === 'shell'
-          ? shellAction
-          : undefined
+      if (
+        shellAction !== undefined &&
+        shellAction !== 'once' &&
+        shellAction !== 'command' &&
+        shellAction !== 'shell'
+      ) {
+        throw new Error('shellAction must be once, command, or shell')
+      }
       return service.approveToolCall(
         targetHostRef,
         targetTaskId,
@@ -1715,7 +1719,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
         {
           teamId: sanitizeString(teamId) || undefined,
           alwaysApprove: alwaysApprove === true,
-          ...(action ? { shellAction: action } : {}),
+          ...(shellAction ? { shellAction } : {}),
         }
       )
     }

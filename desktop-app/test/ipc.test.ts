@@ -471,17 +471,32 @@ describe('ipc host status stream handlers', () => {
     )
   })
 
-  it('drops an invalid shellAction before approveToolCall', async () => {
+  it.each(['nope', null, 1])(
+    'refuses shellAction %s instead of sending a plain approve',
+    async shellAction => {
+      service.approveToolCall.mockResolvedValue({ success: true })
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:approveToolCall')
+      await expect(
+        Promise.resolve(
+          handler?.(event, {
+            hostRef: 'agent-x',
+            taskId: 'task-1',
+            toolCallId: 'req-1',
+            shellAction,
+          })
+        )
+      ).rejects.toThrow('shellAction must be once, command, or shell')
+      expect(service.approveToolCall).not.toHaveBeenCalled()
+    }
+  )
+
+  it('sends a plain approve when no shellAction is given', async () => {
     service.approveToolCall.mockResolvedValue({ success: true })
     const { event } = makeTrustedEvent()
     const handler = testState.handlers.get('rpc:approveToolCall')
     await Promise.resolve(
-      handler?.(event, {
-        hostRef: 'agent-x',
-        taskId: 'task-1',
-        toolCallId: 'req-1',
-        shellAction: 'nope',
-      })
+      handler?.(event, { hostRef: 'agent-x', taskId: 'task-1', toolCallId: 'req-1' })
     )
     expect(service.approveToolCall).toHaveBeenCalledWith('agent-x', 'task-1', 'req-1', undefined, {
       teamId: undefined,
@@ -750,6 +765,38 @@ describe('ipc host status stream handlers', () => {
     )
     expect(result).toEqual({ success: true, response: 'hello' })
   })
+
+  it.each(['manual', 'auto', 'allow_all'])(
+    'forwards approvalMode %s on rpc:invokeHostMessage',
+    async approvalMode => {
+      service.invokeHostMessage.mockResolvedValue({ taskId: 'task-1' })
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:invokeHostMessage')
+      await Promise.resolve(
+        handler?.(event, { hostRef: 'chatllm', payload: { content: 'hello', approvalMode } })
+      )
+      expect(service.invokeHostMessage).toHaveBeenCalledWith(
+        'chatllm',
+        expect.objectContaining({ content: 'hello', approvalMode }),
+        undefined,
+        undefined
+      )
+    }
+  )
+
+  it.each(['yolo', 'allow-all', null, 2])(
+    'refuses approvalMode %s on rpc:invokeHostMessage instead of sending the message without it',
+    async approvalMode => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:invokeHostMessage')
+      await expect(
+        Promise.resolve(
+          handler?.(event, { hostRef: 'chatllm', payload: { content: 'hello', approvalMode } })
+        )
+      ).rejects.toThrow('Invalid host message request: approvalMode')
+      expect(service.invokeHostMessage).not.toHaveBeenCalled()
+    }
+  )
 
   it('routes runtime config save through the auth handler', async () => {
     service.saveRuntimeConfig.mockResolvedValue({

@@ -28,9 +28,10 @@ const STATE_DB_COMMAND_PATTERN = /(^|[^A-Za-z0-9_.-])state\.db|\.clerum-state(\/
 // does not parse the shell. Not a sandbox or a security boundary.
 //
 // It runs on the Host event loop, so every check is linear in the command
-// length: split into segments once, find the first `rm`/`dd` per segment, and
-// test its whitespace-split arguments with plain string checks. A lookahead
-// that rescans to the segment end from every `rm` start is quadratic.
+// length: each pass splits into segments once, finds the first `rm`/`dd` per
+// segment, and tests its whitespace-split arguments with plain string checks.
+// There are at most three passes. A lookahead that rescans to the segment end
+// from every `rm` start is quadratic.
 const SHELL_UX_LINE_CONTINUATION = /\\\r?\n/g
 const SHELL_UX_SEGMENT_SEPARATOR = /[;&|\n]/
 const SHELL_UX_RM = /(?:^|[^A-Za-z0-9_.-])rm(?=\s)/
@@ -62,12 +63,7 @@ function shellUxRecursiveRootDelete(args: string[]): boolean {
   )
 }
 
-function shellUxBlocked(rawCommand: string): boolean {
-  // sh removes a backslash-newline before it splits words, so `-r\<newline>f`
-  // reads as `-rf`. Remove it the same way. A bare newline does end the
-  // command. A backslash before CRLF is removed too, although sh keeps the CR
-  // and ends the command there; that can only add a block.
-  const command = rawCommand.replace(SHELL_UX_LINE_CONTINUATION, '')
+function shellUxMatches(command: string): boolean {
   if (SHELL_UX_FORK_BOMB.test(command) || SHELL_UX_DEVICE_REDIRECT.test(command)) return true
   for (const segment of command.split(SHELL_UX_SEGMENT_SEPARATOR)) {
     const rmArgs = shellUxArguments(segment, SHELL_UX_RM)
@@ -76,6 +72,52 @@ function shellUxBlocked(rawCommand: string): boolean {
     if (ddArgs?.some(arg => SHELL_UX_DD_DEVICE_TARGET.test(arg))) return true
   }
   return false
+}
+
+/**
+ * The command with a backslash-newline removed only where sh removes it,
+ * judged per physical line without parsing quotes or escapes. A line with a
+ * `#` at the start of a word keeps its backslash-newline: sh reads that `#` as
+ * a comment, so the backslash belongs to the comment. A `#` inside a word
+ * (`tmp#1`) starts no comment, so that line is joined. A line ending in
+ * backslash-CR-LF keeps its newline too: the backslash escapes the CR, and the
+ * LF ends the command. Each line is read once, so this stays linear.
+ */
+const SHELL_UX_COMMENT_START = /(?:^|\s)#/
+
+function shellUxShJoined(rawCommand: string): string {
+  const lines = rawCommand.split('\n')
+  const parts: string[] = []
+  for (const [index, line] of lines.entries()) {
+    const isLast = index === lines.length - 1
+    if (!isLast && line.endsWith('\\') && !SHELL_UX_COMMENT_START.test(line)) {
+      parts.push(line.slice(0, -1))
+    } else {
+      parts.push(isLast ? line : `${line}\n`)
+    }
+  }
+  return parts.join('')
+}
+
+function shellUxBlocked(rawCommand: string): boolean {
+  // sh removes a backslash-newline before it splits words, so `-r\<newline>f`
+  // reads as `-rf`. A bare newline ends the command. sh does not remove a
+  // backslash-newline at the end of a `#` comment, and in `\<CR><LF>` the
+  // backslash escapes the CR, so the LF ends the command.
+  // Three texts are checked, and any match blocks:
+  // 1. Every backslash-newline removed: a command whose lines sh joins.
+  // 2. The raw text, split at its own newlines: a line sh does not join, run
+  //    as its own command.
+  // 3. A backslash-newline removed only where sh removes it (shellUxShJoined):
+  //    a command that mixes both, such as a comment line followed by a command
+  //    whose operand is on a continuation line. Only a `#` at the start of a
+  //    word stops the join, as in sh. A ` #` inside quotes also stops it here,
+  //    although sh joins that line; text 1 covers it when sh joins every line.
+  // No pass parses quotes.
+  const joined = rawCommand.replace(SHELL_UX_LINE_CONTINUATION, '')
+  if (shellUxMatches(joined)) return true
+  if (joined === rawCommand) return false
+  return shellUxMatches(rawCommand) || shellUxMatches(shellUxShJoined(rawCommand))
 }
 
 // Node/libuv error codes (E2BIG, ENOMEM, ERR_INVALID_ARG_VALUE) are fixed

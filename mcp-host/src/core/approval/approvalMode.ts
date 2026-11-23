@@ -1,4 +1,5 @@
 import type { ApprovalConfig } from '../extensions/approvalTypes'
+import { approverPolicyRefusal } from './approverPolicy'
 
 /**
  * Stored approval mode. Rank is manual < auto < allow_all.
@@ -11,8 +12,9 @@ export type ApprovalMode = 'manual' | 'auto' | 'allow_all'
  *
  * `effective` is `host.spec.approval || CLERUM_APPROVAL_CONFIG`, as today.
  * `hostSpec` is `host.spec.approval` alone. In dev mode, main passes
- * `config.approvalConfig` as `hostSpec`. Ceiling and channel cap read
- * `hostSpec` only.
+ * `config.approvalConfig` as `hostSpec`. The ceiling and the channel switch
+ * read `hostSpec` only. The approver policy reads `effective`, as approval
+ * notifications do.
  */
 export interface ApprovalConfigSnapshot {
   effective: ApprovalConfig | undefined
@@ -68,15 +70,19 @@ function isMessagingChannelType(value: string | undefined): value is MessagingCh
 }
 
 /**
- * Channel cap from `hostSpec` only.
+ * The channel switch alone, from `hostSpec` only.
  * `rpc` is allow_all. telegram, slack, and teams are allow_all unless
  * `allowModeChange` is `false`; email is allow_all only when it is `true`.
  * An absent `channels`, channel block, or field takes that default. A value
  * that is present but malformed (a non-object `channels` or entry, or a
  * non-boolean field) caps the channel at manual; `approvalModeConfigWarnings`
  * names it. Every other channel type is manual.
+ *
+ * Not an effective-mode input: use `readChannelCap`, which adds the approver
+ * policy. Only the messaging command reads the switch alone, to decide what
+ * it stores and whether its reply names the channel.
  */
-export function readChannelCap(
+export function readChannelSwitch(
   snapshot: ApprovalConfigSnapshot,
   channelType: string | undefined
 ): ApprovalMode {
@@ -97,6 +103,30 @@ export function readChannelCap(
   }
   if (allowModeChange === undefined) allowModeChange = CHANNEL_SWITCH_DEFAULT[channelType]
   return allowModeChange === true ? 'allow_all' : 'manual'
+}
+
+/**
+ * A session's channel cap: the channel switch, then the approver policy.
+ * `owner` is the session's `user_id`, the sender its key is built from.
+ *
+ * Under an explicit `cli_only` or `designated_approvers` (read from
+ * `effective`), a messaging-channel session whose owner the policy does not
+ * allow is capped at manual, whatever it stored and whenever it stored it.
+ * The rule is `approverPolicyRefusal`, the same one the messaging command
+ * applies to a raise. An unset policy and `channel_users` add nothing. `rpc`
+ * is never limited by the policy. An unknown or empty owner is no approver.
+ */
+export function readChannelCap(
+  snapshot: ApprovalConfigSnapshot,
+  channelType: string | undefined,
+  owner: string | undefined
+): ApprovalMode {
+  const channelSwitch = readChannelSwitch(snapshot, channelType)
+  if (channelSwitch === 'manual' || channelType === 'rpc' || channelType === undefined) {
+    return channelSwitch
+  }
+  const refusal = approverPolicyRefusal(snapshot.effective, { userId: owner ?? '', channelType })
+  return refusal ? 'manual' : channelSwitch
 }
 
 /** One malformed approval-mode field. `field` is a path under `spec.approval`. */
@@ -161,7 +191,10 @@ export function raisesApprovalMode(stored: ApprovalMode, requested: ApprovalMode
   return APPROVAL_MODE_RANK[requested] > APPROVAL_MODE_RANK[stored]
 }
 
-/** Effective mode is min(stored, ceiling, channel cap). */
+/**
+ * Effective mode is min(stored, ceiling, channel cap). The cap is
+ * `readChannelCap`, which carries the approver policy.
+ */
 export function effectiveApprovalMode(
   stored: ApprovalMode,
   ceiling: ApprovalMode,

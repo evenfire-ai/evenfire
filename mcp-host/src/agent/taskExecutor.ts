@@ -254,7 +254,8 @@ export interface TaskExecutorDeps {
   approvalConfig: ApprovalConfig | undefined
   /**
    * Live approval snapshot. Interactive tasks read tools, the live set, the
-   * ceiling and the channel cap through this. Absent uses `approvalConfig`.
+   * ceiling and the channel cap (switch and approver policy) through this.
+   * Absent uses `approvalConfig`.
    */
   approvalConfigProvider?: () => ApprovalConfigSnapshot
   guardrailsConfig?: GuardrailsConfig
@@ -2444,7 +2445,11 @@ export class TaskExecutor {
       storedMode: () => normalizeApprovalMode(conversation.approval_mode),
       ceiling: () => readModeCeiling(this.approvalSnapshot()),
       channelCap: () =>
-        readChannelCap(this.approvalSnapshot(), conversation.channel_type ?? undefined),
+        readChannelCap(
+          this.approvalSnapshot(),
+          conversation.channel_type ?? undefined,
+          conversation.user_id
+        ),
       classifierAvailable: args => {
         const caller = this.classifierCaller()
         return isClassifierAvailable(caller.providerType, caller.modelName, args)

@@ -1,6 +1,7 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
 import { ControlApiError, controlApiRequestWithStatus } from '../controlApiClient.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
+import { setProfileSessionCookie } from '../sessionCookie.js'
 
 /** Matches Control API's OIDC operation budget. The fetch waits one extra second so that budget can answer first. */
 const OIDC_OPERATION_DEADLINE_MS = 12_000
@@ -10,6 +11,7 @@ const CLIENT_KEY_RE = /^[a-f0-9]{64}$/
 const BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
 const CODE_RE = /^[\x21-\x7e]{1,4096}$/
+const SESSION_TOKEN_MAX_LENGTH = 4096
 const SAFE_ERRORS = new Set([
   'oidc_not_configured',
   'oidc_attempt_rejected',
@@ -89,15 +91,18 @@ export function createOidcProfileFlowRouter(): Router {
     try {
       const { data } = await controlApiRequestWithStatus<{
         redirectUri: string
-        memberAuthenticationActivated: false
+        memberAuthenticationActivated: boolean
       }>('GET', '/external/oidc/profile-flow/configuration', upstreamCall(req))
-      if (typeof data?.redirectUri !== 'string' || data.memberAuthenticationActivated !== false) {
+      if (
+        typeof data?.redirectUri !== 'string' ||
+        typeof data.memberAuthenticationActivated !== 'boolean'
+      ) {
         res.status(503).json({ error: 'oidc_unavailable' })
         return
       }
       res.status(200).json({
         redirectUri: data.redirectUri,
-        memberAuthenticationActivated: false,
+        memberAuthenticationActivated: data.memberAuthenticationActivated,
       })
     } catch (error) {
       forwardFailure(error, res, next)
@@ -152,24 +157,62 @@ export function createOidcProfileFlowRouter(): Router {
       return
     }
     try {
-      const { data } = await controlApiRequestWithStatus<{
-        outcome: 'identity_proof_verified'
-        memberAuthenticationActivated: false
-      }>('POST', '/external/oidc/profile-flow/complete', {
+      const { data } = await controlApiRequestWithStatus<
+        | { outcome: 'identity_proof_verified'; memberAuthenticationActivated: false }
+        | {
+            outcome: 'identity_proof_verified'
+            memberAuthenticationActivated: true
+            memberSignIn: 'no_matching_member'
+          }
+        | {
+            outcome: 'member_signed_in'
+            memberAuthenticationActivated: true
+            token: string
+            sessionContract: string
+          }
+      >('POST', '/external/oidc/profile-flow/complete', {
         body: { state, code, browserBinding, ...(issuer !== undefined ? { issuer } : {}) },
         ...upstreamCall(req),
       })
       if (
-        data?.outcome !== 'identity_proof_verified' ||
-        data.memberAuthenticationActivated !== false
+        data?.outcome === 'identity_proof_verified' &&
+        data.memberAuthenticationActivated === false
       ) {
-        res.status(503).json({ error: 'oidc_unavailable' })
+        res.status(200).json({
+          outcome: 'identity_proof_verified',
+          memberAuthenticationActivated: false,
+        })
         return
       }
-      res.status(200).json({
-        outcome: 'identity_proof_verified',
-        memberAuthenticationActivated: false,
-      })
+      if (
+        data?.outcome === 'identity_proof_verified' &&
+        data.memberAuthenticationActivated === true &&
+        data.memberSignIn === 'no_matching_member'
+      ) {
+        res.status(200).json({
+          outcome: 'identity_proof_verified',
+          memberAuthenticationActivated: true,
+          memberSignIn: 'no_matching_member',
+        })
+        return
+      }
+      if (
+        data?.outcome === 'member_signed_in' &&
+        data.memberAuthenticationActivated === true &&
+        typeof data.token === 'string' &&
+        data.token.length > 0 &&
+        data.token.length <= SESSION_TOKEN_MAX_LENGTH
+      ) {
+        // The same cookie password login sets. The token stays out of the body; Profile UI
+        // relays this Set-Cookie header to the browser.
+        setProfileSessionCookie(req, res, data.token)
+        res.status(200).json({
+          outcome: 'member_signed_in',
+          memberAuthenticationActivated: true,
+        })
+        return
+      }
+      res.status(503).json({ error: 'oidc_unavailable' })
     } catch (error) {
       forwardFailure(error, res, next)
     }

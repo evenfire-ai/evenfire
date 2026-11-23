@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { openaiApiError } from '../../../llm/__tests__/sdkErrorFixtures'
 import {
   clerumPromptCacheInputTokens,
   clerumPromptCacheReadTokens,
@@ -271,6 +272,111 @@ describe('shell classifier', () => {
     ).toBe('ESCALATE')
     expect(await runTimingOut()).toBe('ESCALATE') // fake timers, 10_000 ms
     expect(await runWithAbortedTaskSignal()).toBe('CANCELLED')
+  })
+
+  it('logs one warn line for a provider error with its class and status, and no content', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    const providerError = openaiApiError(404, {
+      code: 'model_not_found',
+      message: THROWN,
+      type: 'invalid_request_error',
+    })
+    let called = 0
+
+    const verdict = await classifyToolCall(
+      baseInput({
+        description: DESCRIPTION,
+        args: { command: COMMAND, parameters: PARAM },
+        providerType: 'openai',
+        modelName: 'gpt-5.5',
+        provider: {
+          completeSingleTurn: async () => {
+            called += 1
+            throw providerError
+          },
+        },
+      })
+    )
+
+    expect(verdict).toBe('ESCALATE')
+    expect(called).toBe(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [fields, message] = warn.mock.calls[0] as [Record<string, unknown>, string]
+    expect(fields).toEqual({
+      event: 'shell_classifier_failed',
+      session: 'session-log-id',
+      providerType: 'openai',
+      modelName: 'gpt-5.5',
+      errorClass: 'NotFoundError',
+      httpStatus: 404,
+      reason: 'error',
+    })
+    const line = JSON.stringify([fields, message])
+    for (const secret of [COMMAND, PARAM, DESCRIPTION, THROWN, 'model_not_found']) {
+      expect(line).not.toContain(secret)
+    }
+    expect(info).toHaveBeenCalledTimes(1)
+  })
+
+  it('logs a timeout as reason timeout and a task abort not at all', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+
+    expect(await runTimingOut()).toBe('ESCALATE')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]?.[0]).toEqual({
+      event: 'shell_classifier_failed',
+      session: 'session-log-id',
+      providerType: 'claude',
+      modelName: 'claude-sonnet',
+      errorClass: 'DOMException',
+      reason: 'timeout',
+    })
+
+    warn.mockClear()
+    const task = new AbortController()
+    let called = 0
+    const cancelled = await classifyToolCall(
+      baseInput({
+        taskSignal: task.signal,
+        provider: {
+          completeSingleTurn: async () => {
+            called += 1
+            task.abort()
+            throw new DOMException('The operation was aborted', 'AbortError')
+          },
+        },
+      })
+    )
+    expect(cancelled).toBe('CANCELLED')
+    expect(called).toBe(1)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('logs a throw before the provider call once, as an error', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    const completeSingleTurn = vi.fn(async () => modelResponse('APPROVE'))
+    // A signal without addEventListener makes judge throw before its call.
+    const brokenSignal = { aborted: false } as AbortSignal
+
+    const verdict = await classifyToolCall(
+      baseInput({ taskSignal: brokenSignal, provider: { completeSingleTurn } })
+    )
+
+    expect(verdict).toBe('ESCALATE')
+    expect(completeSingleTurn).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]?.[0]).toEqual({
+      event: 'shell_classifier_failed',
+      session: 'session-log-id',
+      providerType: 'claude',
+      modelName: 'claude-sonnet',
+      errorClass: 'TypeError',
+      reason: 'error',
+    })
   })
 
   it('applies the provider table and the 8192 character argument limit', () => {
@@ -647,6 +753,12 @@ describe('shell classifier', () => {
       const thrownLine = JSON.stringify(info.mock.calls[0])
       expect((info.mock.calls[0][0] as { verdict?: string }).verdict).toBe('ESCALATE')
       for (const secret of secrets) expect(thrownLine).not.toContain(secret)
+      // The throw is also logged once at warn, without its message.
+      expect(warn).toHaveBeenCalledTimes(1)
+      const warnLine = JSON.stringify(warn.mock.calls[0])
+      expect((warn.mock.calls[0][0] as { errorClass?: string }).errorClass).toBe('Error')
+      for (const secret of secrets) expect(warnLine).not.toContain(secret)
+      warn.mockClear()
 
       info.mockClear()
       expect(

@@ -444,6 +444,218 @@ describe('approval mode live config', () => {
   })
 })
 
+describe('approver policy on a running channel session', () => {
+  type PolicyChannel = 'telegram' | 'slack' | 'teams' | 'email'
+
+  /** One approver list per messaging channel; every switch is on. */
+  function approverPolicy(
+    defaultPolicy: ApprovalConfig['defaultPolicy'] | undefined,
+    approvers: Partial<Record<PolicyChannel, string[]>> = {}
+  ): ApprovalConfig {
+    const channels = Object.fromEntries(
+      (['telegram', 'slack', 'teams', 'email'] as const).map(channel => [
+        channel,
+        {
+          enabled: true,
+          allowModeChange: true,
+          ...(approvers[channel] ? { approvers: approvers[channel] } : {}),
+        },
+      ])
+    )
+    return {
+      ...(defaultPolicy !== undefined ? { defaultPolicy } : {}),
+      modeCeiling: 'allow_all',
+      channels,
+    } as ApprovalConfig
+  }
+
+  function channelTask(id: string, sender: string, channelType: PolicyChannel | 'rpc'): Task {
+    const base = task(id, sender, 'rpc')
+    return { ...base, sourceMessage: { ...base.sourceMessage!, channelType } }
+  }
+
+  function newRun() {
+    const lifecycle = new TaskLifecycle()
+    const queue = new MessageQueue()
+    queue.setLifecycle(lifecycle)
+    const agent = new AgentStateMachine(queue, lifecycle, {
+      autoStart: false,
+      approvalTimeout: 0,
+      maxTaskDuration: 30_000,
+      maxToolCallsPerTask: 4,
+      taskDelay: 0,
+    })
+    const batches: Array<ToolCall[] | null> = []
+    const provider: SingleTurnProvider = {
+      getProviderType: () => 'claude',
+      classifyError: () => {
+        throw new Error('unused')
+      },
+      completeSingleTurn: vi.fn(async () => ({
+        content: 'APPROVE',
+        usage,
+        finish_reason: FinishReason.Stop,
+      })),
+      completeSingleTurnWithTools: vi.fn(async () => {
+        const calls = batches.shift()
+        if (!calls) {
+          return { content: 'done', tool_calls: null, usage, finish_reason: FinishReason.Stop }
+        }
+        return { content: null, tool_calls: calls, usage, finish_reason: FinishReason.ToolUse }
+      }),
+    }
+    agent.setLLMProvider(provider, 'claude-test')
+    const seed = (t: Task, approvalMode: ApprovalMode) =>
+      agent.getConversationManager().getOrCreate(resolveTaskSessionKey(t), {
+        userId: t.sourceMessage!.sender,
+        channelType: t.sourceMessage!.channelType,
+        approvalMode,
+      })
+    /** One turn that asks for one HTTP call. */
+    const runHttp = async (t: Task, callId: string) => {
+      batches.push([http(callId)], null)
+      queue.enqueue(t)
+      await agent.executeTask(queue.dequeue()!)
+      batches.length = 0
+    }
+    return { agent, seed, runHttp }
+  }
+
+  function l2Events(info: { mock: { calls: unknown[][] } }): Array<Record<string, unknown>> {
+    return info.mock.calls
+      .map(call => call[0] as Record<string, unknown>)
+      .filter(fields => fields?.event === 'L2')
+  }
+
+  it('a mode stored under an unset policy runs manual once designated_approvers leaves its owner out, and the sweep clears its grants', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    try {
+      const { agent, seed, runHttp } = newRun()
+      agent.setApprovalConfig(approverPolicy(undefined), approverPolicy(undefined))
+      const staged = channelTask('staged-1', 'staged-user', 'telegram')
+      const conversation = await seed(staged, 'allow_all')
+
+      // Unset policy: the stored allow_all runs with no card.
+      await runHttp(staged, 'staged-open')
+      expect(vi.mocked(requestPinned)).toHaveBeenCalledTimes(1)
+      expect(conversation.pending_approval).toBeUndefined()
+      expect(conversation.last_effective_approval_mode).toBe('allow_all')
+
+      conversation.auto_shell_grants = { wholeTool: true, commands: new Set(['printf staged']) }
+      conversation.auto_approved_tools.add('shell_exec')
+      conversation.task_approved_tools = new Set(['http_request', 'cron_manage'])
+      info.mockClear()
+
+      const designated = approverPolicy('designated_approvers', { telegram: ['approver-1'] })
+      agent.setApprovalConfig(designated, designated)
+
+      // The sweep lowers it like a ceiling drop: grants cleared, one L2.
+      expect(conversation.last_effective_approval_mode).toBe('manual')
+      expect(conversation.auto_shell_grants).toEqual({ wholeTool: false, commands: new Set() })
+      expect(conversation.auto_approved_tools.has('shell_exec')).toBe(false)
+      expect(conversation.task_approved_tools).toEqual(new Set(['cron_manage']))
+      expect(l2Events(info)).toEqual([
+        expect.objectContaining({
+          storedMode: 'allow_all',
+          previousEffectiveMode: 'allow_all',
+          effectiveApprovalMode: 'manual',
+        }),
+      ])
+
+      // The next tool call shows a manual card. The stored mode is kept.
+      await runHttp(channelTask('staged-2', 'staged-user', 'telegram'), 'staged-closed')
+      expect(vi.mocked(requestPinned)).toHaveBeenCalledTimes(1)
+      expect(conversation.pending_approval).toMatchObject({
+        tool_name: 'http_request',
+        authorization_scope: 'turn_tools',
+      })
+      expect(conversation.approval_mode).toBe('allow_all')
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('a listed approver keeps allow_all until removed from approvers, then runs manual at the next tool call', async () => {
+    const { agent, seed, runHttp } = newRun()
+    const listed = approverPolicy('designated_approvers', { slack: ['U0LISTED'] })
+    agent.setApprovalConfig(listed, listed)
+    const first = channelTask('revoke-1', 'U0LISTED', 'slack')
+    const conversation = await seed(first, 'allow_all')
+
+    await runHttp(first, 'revoke-listed')
+    expect(vi.mocked(requestPinned)).toHaveBeenCalledTimes(1)
+    expect(conversation.pending_approval).toBeUndefined()
+
+    const removed = approverPolicy('designated_approvers', { slack: ['U0SOMEONE'] })
+    agent.setApprovalConfig(removed, removed)
+
+    await runHttp(channelTask('revoke-2', 'U0LISTED', 'slack'), 'revoke-removed')
+    expect(vi.mocked(requestPinned)).toHaveBeenCalledTimes(1)
+    expect(conversation.pending_approval?.tool_name).toBe('http_request')
+    expect(conversation.last_effective_approval_mode).toBe('manual')
+    expect(conversation.approval_mode).toBe('allow_all')
+  })
+
+  it('cli_only lowers every messaging session and leaves an rpc session at its mode', async () => {
+    const { agent, seed, runHttp } = newRun()
+    const open = approverPolicy('channel_users')
+    agent.setApprovalConfig(open, open)
+    const channels = ['telegram', 'slack', 'teams', 'email'] as const
+    const sessions = await Promise.all(
+      channels.map(async channel => {
+        const conversation = await seed(
+          channelTask(`cli-${channel}`, `${channel}-owner`, channel),
+          'allow_all'
+        )
+        conversation.last_effective_approval_mode = 'allow_all'
+        return conversation
+      })
+    )
+    const desktopTask = channelTask('cli-rpc', 'desktop-owner', 'rpc')
+    const desktop = await seed(desktopTask, 'allow_all')
+    desktop.last_effective_approval_mode = 'allow_all'
+
+    const cliOnly = approverPolicy('cli_only', {
+      telegram: ['telegram-owner'],
+      slack: ['slack-owner'],
+      teams: ['teams-owner'],
+      email: ['email-owner'],
+    })
+    agent.setApprovalConfig(cliOnly, cliOnly)
+
+    expect(sessions.map(conversation => conversation.last_effective_approval_mode)).toEqual([
+      'manual',
+      'manual',
+      'manual',
+      'manual',
+    ])
+    expect(desktop.last_effective_approval_mode).toBe('allow_all')
+    await runHttp(desktopTask, 'cli-rpc-http')
+    expect(vi.mocked(requestPinned)).toHaveBeenCalledTimes(1)
+    expect(desktop.pending_approval).toBeUndefined()
+  })
+
+  it('channel_users and an unset policy leave a non-listed channel owner at allow_all', async () => {
+    const { agent, seed, runHttp } = newRun()
+    const designated = approverPolicy('designated_approvers', { telegram: ['someone-else'] })
+    agent.setApprovalConfig(designated, designated)
+    const first = channelTask('open-1', 'open-owner', 'telegram')
+    const conversation = await seed(first, 'allow_all')
+    conversation.last_effective_approval_mode = 'allow_all'
+    agent.setApprovalConfig(designated, designated)
+    expect(conversation.last_effective_approval_mode).toBe('manual')
+
+    for (const [index, policy] of (['channel_users', undefined] as const).entries()) {
+      const config = approverPolicy(policy, { telegram: ['someone-else'] })
+      agent.setApprovalConfig(config, config)
+      expect(conversation.last_effective_approval_mode).toBe('allow_all')
+      await runHttp(channelTask(`open-${index + 2}`, 'open-owner', 'telegram'), `open-${index}`)
+      expect(vi.mocked(requestPinned)).toHaveBeenCalledTimes(index + 1)
+      expect(conversation.pending_approval).toBeUndefined()
+    }
+  })
+})
+
 describe('approval config warnings', () => {
   function newAgent(): AgentStateMachine {
     const lifecycle = new TaskLifecycle()
@@ -480,6 +692,26 @@ describe('approval config warnings', () => {
         'channels.telegram',
         'channels.slack.allowModeChange',
       ])
+
+      warn.mockClear()
+      agent.setApprovalConfig(policy('allow_all'), policy('allow_all'))
+      expect(invalidFields(warn)).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('logs defaultPolicy, never its value, when the policy in force is not a known value', () => {
+    const agent = newAgent()
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    try {
+      const unknown = {
+        ...policy('allow_all'),
+        defaultPolicy: 'admins_only',
+      } as unknown as ApprovalConfig
+      agent.setApprovalConfig(unknown, policy('allow_all'))
+      expect(invalidFields(warn)).toEqual(['defaultPolicy'])
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('admins_only')
 
       warn.mockClear()
       agent.setApprovalConfig(policy('allow_all'), policy('allow_all'))

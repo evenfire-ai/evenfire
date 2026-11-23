@@ -1,6 +1,6 @@
 /**
  * Cause tags, live approval config, and the config-arrival sweep.
- * The admission decision itself stays today's until the decision table lands.
+ * The admission decision itself is covered by the decision-table tests.
  */
 import { describe, expect, it, vi } from 'vitest'
 import { AgentStateMachine } from '../../../agent/stateMachine'
@@ -415,9 +415,9 @@ describe('config-arrival sweep', () => {
     expect(readModeCeiling({ effective: open, hostSpec: policy('allow_all', false) })).toBe(
       'allow_all'
     )
-    expect(readChannelCap({ effective: open, hostSpec: policy('allow_all', false) }, 'slack')).toBe(
-      'manual'
-    )
+    expect(
+      readChannelCap({ effective: open, hostSpec: policy('allow_all', false) }, 'slack', 'user-1')
+    ).toBe('manual')
     expect(changed.auto_shell_grants.wholeTool).toBe(false)
     expect(changed.task_approved_tools).toEqual(new Set(['cron_manage']))
 

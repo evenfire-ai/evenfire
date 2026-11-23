@@ -1410,6 +1410,23 @@ describe('approver policy on a messaging-channel mode raise', () => {
     }
   )
 
+  // Email approver matching is exact, case included, by decision.
+  it('designated_approvers: an email raise from a sender whose case differs from the listed approver is refused', async () => {
+    const run = policyRun(policySnapshot('designated_approvers'))
+    const sender = 'Approver@example.test'
+    expect(sender.toLowerCase()).toBe(APPROVER.email)
+
+    const response = await run.command('email', sender, 'allow-all')
+
+    expect(run.spies.dispatch).not.toHaveBeenCalled()
+    expect(response).toMatchObject({ success: true, response: REFUSAL_REPLY.not_approver })
+    expect(run.stored('email', sender)).toBe('manual')
+    expect(run.refusals()).toEqual([
+      expect.objectContaining({ channel: 'email', requested: 'allow_all', reason: 'not_approver' }),
+    ])
+    expect(run.setApprovalMode).not.toHaveBeenCalled()
+  })
+
   it.each(POLICY_CHANNELS)(
     'cli_only: a %s raise is refused and stores nothing, even from a listed approver',
     async channel => {
@@ -1427,7 +1444,8 @@ describe('approver policy on a messaging-channel mode raise', () => {
     }
   )
 
-  // Controls for raises only: these pass with or without the policy check.
+  // Lowering and keeping always store the requested mode. The policy does not
+  // allow this sender, so it caps the effective mode at manual.
   it.each([
     ['cli_only', 'telegram'],
     ['cli_only', 'teams'],
@@ -1442,12 +1460,12 @@ describe('approver policy on a messaging-channel mode raise', () => {
     const lower = await run.command(channel, sender, 'auto')
     expect(lower).toMatchObject({
       success: true,
-      response: 'Approval mode is auto. Effective mode is auto.',
+      response: 'Approval mode is auto. Effective mode is manual.',
     })
     expect(run.stored(channel, sender)).toBe('auto')
 
     const same = await run.command(channel, sender, 'auto')
-    expect(same).toMatchObject({ response: 'Approval mode is auto. Effective mode is auto.' })
+    expect(same).toMatchObject({ response: 'Approval mode is auto. Effective mode is manual.' })
     expect(run.stored(channel, sender)).toBe('auto')
 
     const manual = await run.command(channel, sender, 'manual')
@@ -1458,6 +1476,38 @@ describe('approver policy on a messaging-channel mode raise', () => {
     expect(run.refusals()).toEqual([])
     expect(run.warn).not.toHaveBeenCalled()
   })
+
+  it.each(POLICY_CHANNELS)(
+    'designated_approvers: a %s non-approver who resends a pre-staged allow-all keeps it stored and runs manual',
+    async channel => {
+      const run = policyRun(policySnapshot('designated_approvers'))
+      const sender = NON_APPROVER[channel]
+      await run.seed(channel, sender, 'allow_all')
+
+      const response = await run.command(channel, sender, 'allow-all')
+
+      expect(response).toEqual({
+        success: true,
+        status: 'completed',
+        response: 'Approval mode is allow_all. Effective mode is manual.',
+      })
+      expect(run.stored(channel, sender)).toBe('allow_all')
+      expect(run.setApprovalMode).toHaveBeenCalledWith(
+        expect.anything(),
+        'allow_all',
+        { ceiling: 'allow_all', cap: 'manual', channelSwitch: 'allow_all' },
+        'command',
+        sender
+      )
+      expect(run.l1()).toEqual([
+        [
+          expect.objectContaining({ channelCap: 'manual', effectiveApprovalMode: 'manual' }),
+          'Stored approval mode',
+        ],
+      ])
+      expect(run.refusals()).toEqual([])
+    }
+  )
 
   it('leaves a stored auto unchanged when a non-approver asks for allow-all', async () => {
     const run = policyRun(policySnapshot('designated_approvers'))
@@ -1470,7 +1520,7 @@ describe('approver policy on a messaging-channel mode raise', () => {
       success: true,
       status: 'completed',
       response:
-        'Approval mode is auto. Effective mode is auto. Only a designated approver can raise the mode.',
+        'Approval mode is auto. Effective mode is manual. Only a designated approver can raise the mode.',
     })
     expect(run.refusals()).toEqual([
       expect.objectContaining({

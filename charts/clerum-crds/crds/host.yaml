@@ -289,9 +289,12 @@ spec:
                         channel_users: Any authorized channel user.
                         designated_approvers: Only users in approvers list.
                         An explicit cli_only or designated_approvers also
-                        governs approval-mode raises from Telegram, email,
-                        Slack and Teams: cli_only refuses them, and
-                        designated_approvers allows only a listed approver.
+                        governs approval modes on Telegram, email, Slack and
+                        Teams: cli_only refuses every raise and runs every
+                        such session as manual, and designated_approvers lets
+                        only a listed approver raise or keep a raised mode.
+                        Every other such session runs as manual. A change
+                        applies at each session's next tool call.
                     modeCeiling:
                       type: string
                       enum:
@@ -311,10 +314,10 @@ spec:
                     shellClassifierModel:
                       type: string
                       description: >-
-                        Model the shell classifier calls when this Host has an
-                        OpenAI credential. Absent means gpt-5.5. A model the
+                        Model the shell classifier calls when this Host's model
+                        provider is OpenAI. Absent means gpt-5.5. A model the
                         classifier does not allow shows the shell card. With
-                        no OpenAI credential, auto keeps judging shell with the
+                        any other provider, auto keeps judging shell with the
                         model serving the turn. An older CRD prunes this field,
                         which is the same as absent.
                     channels:
@@ -329,7 +332,10 @@ spec:
                               description: Whether Telegram users can approve.
                             approvers:
                               type: array
-                              description: List of Telegram user IDs allowed to approve.
+                              description: >-
+                                List of Telegram user IDs allowed to approve. Under
+                                designated_approvers, only these users' Telegram
+                                sessions may raise or keep a mode above manual.
                               items:
                                 type: string
                             allowModeChange:
@@ -347,7 +353,10 @@ spec:
                               description: Whether email users can approve.
                             approvers:
                               type: array
-                              description: List of email addresses allowed to approve.
+                              description: >-
+                                List of email addresses allowed to approve. Under
+                                designated_approvers, only these users' email
+                                sessions may raise or keep a mode above manual.
                               items:
                                 type: string
                             allowModeChange:
@@ -367,7 +376,10 @@ spec:
                               description: Whether Slack users can approve.
                             approvers:
                               type: array
-                              description: List of Slack user IDs allowed to approve.
+                              description: >-
+                                List of Slack user IDs allowed to approve. Under
+                                designated_approvers, only these users' Slack
+                                sessions may raise or keep a mode above manual.
                               items:
                                 type: string
                             allowModeChange:
@@ -385,7 +397,10 @@ spec:
                               description: Whether Microsoft Teams users can approve.
                             approvers:
                               type: array
-                              description: List of Teams user IDs allowed to approve.
+                              description: >-
+                                List of Teams user IDs allowed to approve. Under
+                                designated_approvers, only these users' Teams
+                                sessions may raise or keep a mode above manual.
                               items:
                                 type: string
                             allowModeChange:
