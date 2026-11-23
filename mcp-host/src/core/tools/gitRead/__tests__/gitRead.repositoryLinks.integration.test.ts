@@ -245,6 +245,28 @@ describe('git_read repository links (P2–P4)', () => {
     expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
+  it('a recorded linked worktree outside the root is refused; one inside runs', async () => {
+    const repo = freshRepo()
+    const head = gitw(repo, 'rev-parse', 'HEAD').trim()
+    const plant = (name: string, gitdir: string): void => {
+      const admin = path.join(repo, '.git', 'worktrees', name)
+      fs.mkdirSync(admin, { recursive: true })
+      fs.writeFileSync(path.join(admin, 'HEAD'), `${head}\n`)
+      fs.writeFileSync(path.join(admin, 'commondir'), '../..\n')
+      fs.writeFileSync(path.join(admin, 'gitdir'), `${gitdir}\n`)
+    }
+    plant('probe', path.join(fx.outside, 'probe-target', '.git'))
+    // Control: git lists the outside path, marked prunable when it is missing.
+    expect(controlGit(fx.root, repo, 'worktree', 'list').out).toContain(
+      path.join(fx.outside, 'probe-target')
+    )
+    expect(await verdict(repo)).toBe('directory_outside_workspace')
+
+    const clean = freshRepo()
+    gitw(clean, 'worktree', 'add', '-q', '--detach', path.join(fx.root, `wt${counter}`))
+    expect(await verdict(clean)).toBe('ok')
+  })
+
   it('a toplevel outside the root is refused by the toplevel check alone', async () => {
     const repo = freshRepo()
     const outsideTree = path.join(fx.outside, `tree${counter}`)

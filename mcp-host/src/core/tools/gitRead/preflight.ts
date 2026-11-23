@@ -306,6 +306,43 @@ export function walkRepositoryLinks(
 }
 
 /**
+ * Every linked worktree a repository records (`<common dir>/worktrees/<name>/gitdir`)
+ * must point inside the root: `git worktree list` prints each path and marks
+ * a missing one, which would tell whether an outside path exists.
+ */
+export function checkLinkedWorktrees(commonDir: string, realRoot: string): void {
+  const admin = path.join(commonDir, 'worktrees')
+  let names: string[]
+  try {
+    names = fs.readdirSync(admin)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return
+    throw new GitReadRefusal('preflight_failed')
+  }
+  for (const name of names) {
+    let recorded: string
+    try {
+      recorded = fs.readFileSync(path.join(admin, name, 'gitdir'), 'utf8').trim()
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue
+      throw new GitReadRefusal('preflight_failed')
+    }
+    const lexical = path.resolve(path.join(admin, name), recorded)
+    let real = lexical
+    try {
+      real = fs.realpathSync(lexical)
+    } catch {
+      // A missing worktree is judged by its recorded path.
+    }
+    if (!isInside(lexical, realRoot) || !isInside(real, realRoot)) {
+      throw new GitReadRefusal('directory_outside_workspace')
+    }
+  }
+}
+
+/**
  * The object stores of submodule git dirs under `<common dir>/modules`: a
  * directory holding a `HEAD` file and an `objects` directory, at any depth
  * (nested submodules). Their clones hard-link store files like a local clone.
@@ -485,6 +522,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     confine(objects, realRoot)
 
     // P5, then P4 over every store P5 accepted.
+    checkLinkedWorktrees(commonDir, realRoot)
     const stores = [
       objects,
       ...checkAlternates(objects, realRoot),
