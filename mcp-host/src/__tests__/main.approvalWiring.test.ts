@@ -15,6 +15,7 @@ import { type Conversation, FinishReason } from '../core/types'
 import type { Task } from '../queue'
 import type { RPCServer } from '../server'
 import type { HostCRD } from '../types'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 const HOST = 'host-a'
 const USER = 'user-1'
@@ -112,13 +113,18 @@ async function startServer(loaded: Pick<Harness, 'main' | 'agent'>): Promise<Har
   return current
 }
 
-function edgeHeaders(): Record<string, string> {
-  return {
-    'x-clerum-edge-caller': 'rpc-proxy',
-    'x-clerum-edge-host-ref': HOST,
-    'x-clerum-edge-user-id': USER,
-    'content-type': 'application/json',
-  }
+// What rpc-proxy forwards: the clear edge headers plus the edge assertion
+// control-api signs for them. The Host refuses caller rpc-proxy without it.
+function edgeHeaders(options: { scopes?: readonly string[] } = {}): Record<string, string> {
+  return withRpcProxyEdgeTestAuthentication(
+    {
+      'x-clerum-edge-caller': 'rpc-proxy',
+      'x-clerum-edge-host-ref': HOST,
+      'x-clerum-edge-user-id': USER,
+      'content-type': 'application/json',
+    },
+    options
+  )
 }
 
 async function rpcKey(): Promise<string> {
@@ -455,6 +461,37 @@ describe('main approval-mode writers and approvals over HTTP', () => {
       modeCeiling: 'auto',
       effectiveApprovalMode: 'auto',
     })
+    const stored = loaded.agent.getConversationManager().getSessionByKey(await rpcKey())
+    expect(stored?.approval_mode).toBe('auto')
+  })
+
+  it('PATCH approval-mode refuses an edge assertion without host:approval:write', async () => {
+    fake.primaryKeySlot = 'claude-api-key'
+    const loaded = await loadMain()
+    await loaded.main.onHostChange(host({}))
+    const harness = await startServer(loaded)
+    await seedRpcSession(loaded.agent)
+    const url = `${harness.baseUrl}/v1/runtime/sessions/${HOST}/${CHAT}/approval-mode`
+
+    // The rename scope is not enough: the mode answers later cards in advance.
+    const refused = await fetch(url, {
+      method: 'PATCH',
+      headers: edgeHeaders({ scopes: ['host:session:write'] }),
+      body: JSON.stringify({ mode: 'auto' }),
+    })
+    expect(refused.status).toBe(401)
+    expect(await refused.json()).toEqual({ error: 'Invalid runtime edge assertion' })
+    const afterRefusal = loaded.agent.getConversationManager().getSessionByKey(await rpcKey())
+    expect(afterRefusal).toBeDefined()
+    expect(afterRefusal?.approval_mode).not.toBe('auto')
+
+    // Witness: the same request with the approval scope reaches the writer.
+    const accepted = await fetch(url, {
+      method: 'PATCH',
+      headers: edgeHeaders({ scopes: ['host:approval:write'] }),
+      body: JSON.stringify({ mode: 'auto' }),
+    })
+    expect(accepted.status).toBe(200)
     const stored = loaded.agent.getConversationManager().getSessionByKey(await rpcKey())
     expect(stored?.approval_mode).toBe('auto')
   })
