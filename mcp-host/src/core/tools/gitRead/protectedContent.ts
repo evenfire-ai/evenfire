@@ -177,7 +177,10 @@ export function checkForEachRefFormat(format: string): boolean {
   return true
 }
 
-/** `log` and `show` formats: no signature placeholders (they run gpg). */
+/**
+ * `log` and `show` formats: no signature placeholders (they run gpg), with or
+ * without a `+`, `-` or space modifier (`%+G?`).
+ */
 export function checkLogFormat(format: string): boolean {
-  return !format.includes('%G') && !format.toLowerCase().includes('signature')
+  return !/%[-+ ]?G/.test(format) && !format.toLowerCase().includes('signature')
 }

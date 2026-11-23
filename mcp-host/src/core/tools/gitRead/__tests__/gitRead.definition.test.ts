@@ -149,6 +149,9 @@ describe('validateGitReadParams', () => {
   it('log and show formats refuse signature placeholders', () => {
     expect(category({ subcommand: 'log', format: '%h %G?' })).toBe('bad_format')
     expect(category({ subcommand: 'show', format: '%(signature)' })).toBe('bad_format')
+    for (const format of ['%+G?', '%-G?', '% G?', '%+GS', '%h %-GK']) {
+      expect(category({ subcommand: 'log', format })).toBe('bad_format')
+    }
     expect(category({ subcommand: 'log', format: '%h %N' })).toBeNull()
   })
 
