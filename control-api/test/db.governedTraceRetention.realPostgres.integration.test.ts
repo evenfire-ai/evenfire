@@ -554,8 +554,9 @@ describeRealPostgres('governed trace retention in PostgreSQL', () => {
       url.pathname = `/${fixtureName}`
       const fixture = new Pool({ connectionString: url.toString() })
       try {
-        // Roll back only the last migration. Earlier versions and their concurrent
-        // indexes are the frozen definitions installed by the reviewed 0151.
+        // Roll back only the final retention migration; the migrations after it
+        // never run. Earlier versions and their concurrent indexes are the frozen
+        // definitions installed by the reviewed 0151.
         const beforeCommit = new Error('test stopped before final COMMIT')
         await expect(initDb(interruptFinalCommit(fixture, 'before', beforeCommit))).rejects.toBe(
           beforeCommit
@@ -608,8 +609,10 @@ describeRealPostgres('governed trace retention in PostgreSQL', () => {
         const identity = (rows: typeof final) => rows.map(({ source, settings, ...row }) => row)
         expect(identity(final)).toEqual(identity(original))
         expect(await readRetentionIndexes(fixture)).toEqual(indexes)
-        await expect(assertDbReady(fixture)).resolves.toBeUndefined()
+        // The lost reply stopped initDb before the migrations after the final
+        // retention version, so readiness holds only once the next run applies them.
         await initDb(fixture)
+        await expect(assertDbReady(fixture)).resolves.toBeUndefined()
         expect(await retentionReceipts(fixture)).toEqual(currentReceipts)
         expect(await retentionCatalog(fixture)).toEqual(final)
         expect(await readRetentionIndexes(fixture)).toEqual(indexes)

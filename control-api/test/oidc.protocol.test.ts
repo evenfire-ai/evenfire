@@ -169,8 +169,11 @@ class MemoryAttemptDb {
 }
 
 function providerConfiguration(issuer = GENERIC_ISSUER, clientId = CLIENT_ID) {
+  // An Entra issuer must be pinned to its tenant.
+  const entraTenant = /^https:\/\/login\.microsoftonline\.com\/([^/]+)\/v2\.0$/.exec(issuer)?.[1]
   return loadOidcProviderConfiguration(
     {
+      ...(entraTenant ? { CONTROL_API_OIDC_TENANT_ID: entraTenant } : {}),
       CONTROL_API_OIDC_REGISTRATION_ID: 'company-login',
       CONTROL_API_OIDC_DISPLAY_LABEL: 'Company login',
       CONTROL_API_OIDC_ISSUER: issuer,

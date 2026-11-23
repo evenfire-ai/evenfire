@@ -15,6 +15,7 @@ import { Button, CheckboxField, Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { createMemberFromControlAdmin, getAdminTeams, inviteAdminTeamMember } from '@lib/api'
 import type { TeamRole } from '@lib/api'
+import { describeRetiredMemberInvitationError } from '@lib/invitationError'
 import { permissionsForTeamRole, setDeletePermission, setInvitePermission } from '@lib/teamRoles'
 
 const STEPS = ['Member', 'Team'] as const
@@ -33,6 +34,8 @@ const STEP_DETAILS = [
 ] as const
 
 function formatCreateMemberError(error: unknown): string {
+  const retiredMessage = describeRetiredMemberInvitationError(error)
+  if (retiredMessage) return retiredMessage
   const message = error instanceof Error ? error.message : 'Failed to create member'
   if (message.includes('A member with this email')) {
     return 'A member with this email already exists. Open the existing member and add them to more teams instead.'

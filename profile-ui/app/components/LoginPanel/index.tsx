@@ -8,6 +8,8 @@ import { useAuth } from '@components/AuthContext'
 import { Button } from '@components/Button'
 import { TextInput } from '@components/TextInput'
 import { PROFILE_ROUTES } from '@constants/routes'
+import { getOidcSignInMethod } from '@lib/api'
+import type { OidcSignInMethod } from '@/app/types/api'
 import type { LoginPanelProps } from './types'
 
 export function LoginPanel({
@@ -18,6 +20,7 @@ export function LoginPanel({
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [oidcMethod, setOidcMethod] = useState<OidcSignInMethod | null>(null)
   const forgotPasswordHref = PROFILE_ROUTES.forgotPassword({
     email: email.trim().toLowerCase(),
   })
@@ -25,6 +28,16 @@ export function LoginPanel({
   useEffect(() => {
     const queryEmail = new URLSearchParams(window.location.search).get('email')
     if (queryEmail) setEmail(queryEmail.trim().toLowerCase())
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void getOidcSignInMethod().then(method => {
+      if (!cancelled) setOidcMethod(method)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
@@ -91,6 +104,13 @@ export function LoginPanel({
               {isSubmitting ? 'Signing in...' : 'Sign in'}
             </Button>
           </form>
+          {oidcMethod ? (
+            <form className="cu-auth-oidc-form" method="post" action={PROFILE_ROUTES.oidcStart}>
+              <Button type="submit" variant="secondary" className="cu-btn--block">
+                Continue with {oidcMethod.label}
+              </Button>
+            </form>
+          ) : null}
           <Link className="text-link cu-auth-secondary-link" href={forgotPasswordHref}>
             Forgot password
           </Link>
