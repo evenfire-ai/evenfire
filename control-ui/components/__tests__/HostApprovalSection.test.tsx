@@ -10,7 +10,7 @@ import { useApprovalToolsDraft } from '../HostApprovalSection/hooks'
 const controlUiCss = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
 
 describe('HostApprovalSection — constants', () => {
-  it('contains exactly the 12 always-on native tools verified during the back-end smoke', () => {
+  it('contains exactly the 12 always-on native tools verified during the back-end smoke, plus git_read', () => {
     const expected = [
       'clerum__generate_docx',
       'clerum__generate_markdown',
@@ -20,6 +20,7 @@ describe('HostApprovalSection — constants', () => {
       'clerum__trigger_workflow',
       'file_read',
       'file_write',
+      'git_read',
       'http_request',
       'json_transform',
       'shell_exec',
@@ -43,11 +44,11 @@ describe('HostApprovalSection — constants', () => {
   })
 
   it('attaches a riskHint only to tools whose codeDefault is "required" (loosenable)', () => {
-    // Only http_request and shell_exec actually return true from
+    // Only git_read, http_request and shell_exec return true from
     // requiresApproval() in mcp-host (verified against the live source).
     // Tools whose code default is already 'skip' have no "loosening"
     // direction, so a riskHint on them would be misleading.
-    const expectedRisky = ['http_request', 'shell_exec']
+    const expectedRisky = ['git_read', 'http_request', 'shell_exec']
     for (const name of expectedRisky) {
       const tool = NATIVE_TOOLS.find(t => t.name === name)
       expect(tool, `${name} must be in NATIVE_TOOLS`).toBeDefined()

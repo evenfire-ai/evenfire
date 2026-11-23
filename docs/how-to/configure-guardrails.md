@@ -56,6 +56,25 @@ Hooks are not called for that extra check. A `preToolUse` hook receives the
 real call, named `json_transform`, so a hook that polices file reads must
 handle `json_transform` too.
 
+### `file_read` rules cover `git_read` reads
+
+A `git_read` call that can return file content (`show`, `diff`, `grep`,
+`blame`, `cat_file`, or `log` with a patch, word diff, context size or
+pickaxe) also gets the decision your rules give `file_read` on the paths it
+reads, and the stricter decision applies:
+
+- With literal `paths`, each path is checked as `file_read {path}`, and an
+  `ask` or `deny` rule on a path inside one of them applies too, because git
+  reads the whole directory.
+- Any other content call (no paths, a glob, `COMMIT:path`, or `follow`) reads
+  the whole repository, so it gets every `ask` or `deny` `file_read` rule that
+  names a path.
+- Calls that list only names and ids (`status`, `ls_files`, `log` without
+  content options, `for_each_ref`, …) are not checked against `file_read`
+  rules; `git_read`'s own rules still apply.
+
+As for `json_transform`, hooks receive the real call, named `git_read`.
+
 ### How `ask` interacts with approvals
 
 - In an **interactive** run, a guardrail `ask` creates a pending approval

@@ -5,7 +5,7 @@ export interface NativeToolMeta {
   /**
    * Resolved value of the tool class's hard-coded `requiresApproval()` in
    * mcp-host. Verified against `mcp-host/src/core/tools/*.ts` —
-   *   - `'required'` (true): http_request, shell_exec
+   *   - `'required'` (true): git_read, http_request, shell_exec
    *   - `'skip'` (false): everything else, including all clerum__* output
    *     tools (registered via InternalToolAdapter) and the file/json/system
    *     tools.
@@ -64,6 +64,13 @@ export const NATIVE_TOOLS: NativeToolMeta[] = [
     name: 'file_write',
     codeDefault: 'skip',
     description: 'Write files in the agent workspace.',
+  },
+  {
+    name: 'git_read',
+    codeDefault: 'required',
+    description: 'Read-only git in a workspace repository (no shell).',
+    riskHint:
+      'Skip makes git_read run without a card, unless shell_exec or file_read is set to Required. It cannot run programs and never returns protected content.',
   },
   {
     name: 'http_request',
