@@ -416,6 +416,8 @@ vi.mock('@components/Common', async () => {
   })
   return {
     ...(await import('@components/Common/PermissionStatusIndicator')),
+    // The composer's model and approval-mode chips render the real Pill span.
+    Pill: (await import('@components/Common/Pill')).Pill,
     StatusBanner: (props: { tone: string; text?: string; children?: ReactNode }) => (
       <div role="status" data-tone={props.tone}>
         {props.text ?? props.children}

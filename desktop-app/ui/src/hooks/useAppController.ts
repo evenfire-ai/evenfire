@@ -467,6 +467,7 @@ export function useAppController() {
             window.clerum.rpc.approveToolCall(t.agentRef, t.taskId, t.requestId, [t.agentRef], {
               teamId: t.teamId ?? undefined,
               alwaysApprove: t.alwaysApprove === true,
+              ...(t.shellAction ? { shellAction: t.shellAction } : {}),
             }),
           deny: t =>
             window.clerum.rpc.denyToolCall(

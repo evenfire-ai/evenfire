@@ -45,8 +45,8 @@ app.whenReady().then(async () => {
       <body><div class="app-frame">
         <header class="window-titlebar">
           <div class="window-titlebar__controls"><span>Window controls</span></div>
-          <div class="window-titlebar__leading"></div>
           <div class="window-titlebar__actions"></div>
+          <div class="window-titlebar__leading"></div>
         </header>
         <div class="app-root"><main class="app-shell">
           <aside id="desktop-sidebar-navigation" class="left-nav glass-card">

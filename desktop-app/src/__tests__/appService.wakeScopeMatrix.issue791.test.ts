@@ -236,3 +236,52 @@ describe('issue #791 — streams and observability reads never request host:wake
     service.stopTaskProgressStream('s-progress')
   })
 })
+
+// Approval-mode writes use approve's scope and wake (the route copies approve's
+// wake-and-hold), and the first message carries a non-manual held mode, which
+// needs approval-write on the same token. `manual` stays on the message
+// family's three scopes.
+describe('approval mode token scopes', () => {
+  it('setApprovalMode requests host:approval:write plus host:wake:write', async () => {
+    const { service, issueRpcTokenForHostRefs } = scopeHarness()
+    service.rpcClient.setApprovalMode = vi.fn().mockResolvedValue({
+      approvalMode: 'auto',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'auto',
+    })
+    await service.setApprovalMode('chatllm', 'chatllm', 'chat-1', 'auto')
+    expect(firstScope(issueRpcTokenForHostRefs)).toEqual(['host:approval:write', WAKE])
+  })
+
+  it('a first send with a held auto adds host:approval:write to the message scopes', async () => {
+    const { service, issueRpcTokenForHostRefs } = scopeHarness()
+    service.rpcClient.invokeHostMessage = vi.fn().mockResolvedValue({ success: true })
+    await service.invokeHostMessage('chatllm', { content: 'hi', approvalMode: 'auto' })
+    expect(firstScope(issueRpcTokenForHostRefs)).toEqual([
+      'host:message:invoke',
+      'host:task:read',
+      WAKE,
+      'host:approval:write',
+    ])
+    const forwarded = service.rpcClient.invokeHostMessage.mock.calls[0][2] as {
+      approvalMode?: string
+    }
+    expect(forwarded.approvalMode).toBe('auto')
+  })
+
+  it('a send with manual uses the usual three message scopes', async () => {
+    const { service, issueRpcTokenForHostRefs } = scopeHarness()
+    service.rpcClient.invokeHostMessage = vi.fn().mockResolvedValue({ success: true })
+    await service.invokeHostMessage('chatllm', { content: 'hi', approvalMode: 'manual' })
+    expect(firstScope(issueRpcTokenForHostRefs)).toEqual([
+      'host:message:invoke',
+      'host:task:read',
+      WAKE,
+    ])
+    const forwarded = service.rpcClient.invokeHostMessage.mock.calls[0][2] as {
+      approvalMode?: string
+    }
+    expect(forwarded.approvalMode).toBeUndefined()
+  })
+})

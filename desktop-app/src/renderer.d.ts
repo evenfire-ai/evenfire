@@ -648,7 +648,11 @@ declare global {
           taskId: string,
           toolCallId: string,
           hostRefs?: string[],
-          options?: { teamId?: string | null; alwaysApprove?: boolean }
+          options?: {
+            teamId?: string | null
+            alwaysApprove?: boolean
+            shellAction?: 'once' | 'command' | 'shell'
+          }
         ) => Promise<ApprovalDecisionResult>
         denyToolCall: (
           hostRef: string,
@@ -725,6 +729,21 @@ declare global {
           chatId: string,
           title: string
         ) => Promise<{ title: string }>
+        /**
+         * Stores the session approval mode. A 400, 401 or 404 leaves the mode
+         * unchanged. Any other failure is not proof of what the server stored.
+         */
+        setApprovalMode: (
+          hostRef: string,
+          agent: string,
+          chatId: string,
+          mode: 'manual' | 'auto' | 'allow_all'
+        ) => Promise<{
+          approvalMode: 'manual' | 'auto' | 'allow_all'
+          modeCeiling: 'manual' | 'auto' | 'allow_all'
+          channelCap: 'manual' | 'auto' | 'allow_all'
+          effectiveApprovalMode: 'manual' | 'auto' | 'allow_all'
+        }>
         getTokenMetadata: () => Promise<TokenMetadata>
         // U5 (mcp-oauth reactive consent): "Connect <server>" for a task
         // suspended with `connect_required`. Host-bound to that conversation.

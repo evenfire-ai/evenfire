@@ -19,7 +19,8 @@ import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatSwitcher } from '@components/ChatSwitcher'
 import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
-import { Button, IconButton, StatusBanner, ToastStack } from '@components/Common'
+import { Button, StatusBanner, ToastStack } from '@components/Common'
+import { CompactNavigationToggle } from '@components/CompactNavigationToggle'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
@@ -4600,21 +4601,13 @@ export function App() {
                                     pill and notification bell live in the title bar on
                                     all routes, never floating inline over the panel. */}
                                     <TitlebarActionsPortal container={titlebarLeadingRoot}>
-                                      <IconButton
+                                      <CompactNavigationToggle
                                         ref={compactSidebarTriggerRef}
-                                        className="compact-navigation-toggle"
-                                        data-testid="compact-navigation-toggle"
-                                        label="Open navigation"
-                                        aria-controls="desktop-sidebar-navigation"
-                                        aria-expanded={compactSidebarOpen}
+                                        expanded={compactSidebarOpen}
                                         onClick={() =>
                                           handleCompactSidebarOpenChange(!compactSidebarOpen)
                                         }
-                                      >
-                                        <svg viewBox="0 0 16 16" aria-hidden="true">
-                                          <path d="M2 4h12M2 8h12M2 12h12" />
-                                        </svg>
-                                      </IconButton>
+                                      />
                                     </TitlebarActionsPortal>
                                     <TitlebarActionsPortal container={titlebarActionsRoot}>
                                       <AppHeader

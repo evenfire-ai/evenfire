@@ -22,6 +22,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { logger } from '../../logger'
+import type { GateCause } from '../approval/gateCause'
 import { hasActiveDenials, isDenied } from '../conversation/denialPolicy'
 import { LoopController, ToolRegistry } from '../interfaces'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
@@ -59,9 +60,14 @@ export interface ApprovalControllerOptions {
   honorDenials?: boolean
   toolRegistry?: ToolRegistry
   /** Tools that always consult the delegate for every model-generated call. */
-  liveApprovalTools?: ReadonlySet<string>
+  liveApprovalTools?: ReadonlySet<string> | (() => ReadonlySet<string> | undefined)
   /** Forced approvals ask on every call, before any stored approval. */
   forcedApprovalGate?: ForcedApprovalGate
+  /**
+   * When the approval mode is set, name grants are read by `decideApproval`
+   * instead of this gate. One-shot matches stay here.
+   */
+  modeAware?: boolean
 }
 
 /** cron_manage actions that start or schedule autonomous work. */
@@ -95,8 +101,9 @@ export class ApprovalController implements LoopController {
   private readonly delegate: LoopController
   private readonly honorDenials: boolean
   private readonly toolRegistry?: ToolRegistry
-  private readonly liveApprovalTools: ReadonlySet<string>
+  private readonly readLiveApprovalTools: () => ReadonlySet<string>
   private readonly forcedApprovalGate: ForcedApprovalGate | undefined
+  private readonly modeAware: boolean
 
   constructor(
     conversation: Conversation,
@@ -107,8 +114,13 @@ export class ApprovalController implements LoopController {
     this.delegate = delegate
     this.honorDenials = options?.honorDenials !== false
     this.toolRegistry = options?.toolRegistry
-    this.liveApprovalTools = options?.liveApprovalTools ?? new Set<string>()
+    const live = options?.liveApprovalTools
+    this.readLiveApprovalTools =
+      typeof live === 'function'
+        ? () => live() ?? new Set<string>()
+        : () => live ?? new Set<string>()
     this.forcedApprovalGate = options?.forcedApprovalGate
+    this.modeAware = options?.modeAware === true
   }
 
   shouldAccept(content: string, iteration: number): boolean {
@@ -136,7 +148,7 @@ export class ApprovalController implements LoopController {
     toolName: string,
     params: Record<string, unknown>,
     toolCallId?: string
-  ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
+  ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval; cause?: GateCause } {
     if (this.honorDenials && isDenied(this.conversation, toolName)) {
       logger.info(
         { event: 'approval_reask_required', toolName },
@@ -163,21 +175,23 @@ export class ApprovalController implements LoopController {
     // The approved frozen call executes directly in resumeAfterApproval.
     // Every model-generated live call needs a new delegate decision; retained
     // snapshot data and persistent approvals cannot authorize another invocation.
-    if (this.liveApprovalTools.has(toolName)) {
+    if (this.readLiveApprovalTools().has(toolName)) {
       const decision = this.delegate.beforeTool(toolName, params, toolCallId)
       return typeof decision === 'object'
         ? {
             ...decision,
+            cause: 'live',
             approval: { ...decision.approval, authorization_scope: 'exact_invocation' },
           }
         : decision
     }
 
     // Exact-name grants: "always" approvals, then this task's plain
-    // session-scoped approvals.
+    // session-scoped approvals. A mode-aware admission reads them in the table.
     if (
-      this.conversation.auto_approved_tools.has(toolName) ||
-      this.conversation.task_approved_tools?.has(toolName) === true
+      !this.modeAware &&
+      (this.conversation.auto_approved_tools.has(toolName) ||
+        this.conversation.task_approved_tools?.has(toolName) === true)
     ) {
       return 'proceed'
     }
@@ -202,7 +216,7 @@ export class ApprovalController implements LoopController {
     params: Record<string, unknown>,
     toolCallId: string | undefined,
     reask: 'denied' | 'denials_active'
-  ): 'skip' | { type: 'suspend'; approval: PendingApproval } {
+  ): 'skip' | { type: 'suspend'; approval: PendingApproval; cause: 'denied' | 'denials_active' } {
     const decision = this.delegate.beforeTool(toolName, params, toolCallId)
     if (decision === 'skip') return decision
     const approval =
@@ -211,6 +225,7 @@ export class ApprovalController implements LoopController {
         : decision.approval
     return {
       type: 'suspend',
+      cause: reask,
       approval: {
         ...approval,
         reask,

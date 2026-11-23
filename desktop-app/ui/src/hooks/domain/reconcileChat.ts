@@ -1,4 +1,5 @@
 import { parseTaskKey } from '@contexts/AgentTaskTrackerContext'
+import { hostApprovalModeEpoch } from '@lib/hostApprovalModeStore'
 import type { SessionMessagesQuery, SessionMessagesResult } from '../../../../src/types'
 import type { SessionFsmStore } from './sessionFsm'
 
@@ -56,6 +57,12 @@ export interface ReconcileChatDeps {
     chatKey: string,
     resp: SessionMessagesResult,
     snapshotEpoch: number,
+    /**
+     * The approval-mode store's write sequence taken before the fetch started.
+     * The branch notes the response's approval snapshot with it, so a mode
+     * write that completed while the read was in flight keeps its label.
+     */
+    approvalReadEpoch: number,
     /**
      * The gate's live relevance predicate (generation + per-call `isRelevant`).
      * The branch is async — it yields on the hydration await before re-opening a
@@ -198,6 +205,9 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     // R2 anchor: the epoch at the START of the fetch, so a snapshot that a newer
     // local SEND_STARTED superseded is dropped by the reducer.
     const snapshotEpoch = deps.fsm.getState(chatKey)?.epoch ?? 0
+    // Same anchor for the approval mode: taken before the fetch, not when the
+    // branch runs, so a mode write that completes in between wins (R6-MJ2).
+    const approvalReadEpoch = hostApprovalModeEpoch(agentRef, chatId)
     deps.fsm.dispatch(chatKey, { type: 'RECONCILE_STARTED' })
     let outcome: ReconcileOutcome = 'noop'
     try {
@@ -213,7 +223,7 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
       const serverLive =
         (resp.state === 'processing' || resp.state === 'awaiting_approval') && !!resp.activeTaskId
       outcome = serverLive
-        ? await deps.attachLiveTask(chatKey, resp, snapshotEpoch, stillRelevant)
+        ? await deps.attachLiveTask(chatKey, resp, snapshotEpoch, approvalReadEpoch, stillRelevant)
         : await deps.settleIdle(
             chatKey,
             resp,

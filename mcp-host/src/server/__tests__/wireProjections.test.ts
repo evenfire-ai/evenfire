@@ -138,6 +138,8 @@ function makeConversation(overrides: Partial<Conversation> = {}): Conversation {
     state: ConversationState.Idle,
     turns: [],
     auto_approved_tools: new Set(),
+    approval_mode: 'manual',
+    auto_shell_grants: { wholeTool: false, commands: new Set() },
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,

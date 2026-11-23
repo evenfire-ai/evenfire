@@ -579,6 +579,24 @@ export type RpcTokenResult = {
   expiresInSeconds: number
 }
 
+export type ApprovalMode = 'manual' | 'auto' | 'allow_all'
+
+export type ShellAction = 'once' | 'command' | 'shell'
+
+/** One flag per surface. Desktop may offer "Allow this command" only when its flag is true. */
+export interface ShellCardDescriptor {
+  channelCommandOffered: boolean
+  desktopCommandOffered: boolean
+}
+
+/** PATCH approval-mode response. The ceiling may clamp `effectiveApprovalMode` below the stored choice. */
+export interface ApprovalModeResult {
+  approvalMode: ApprovalMode
+  modeCeiling: ApprovalMode
+  channelCap: ApprovalMode
+  effectiveApprovalMode: ApprovalMode
+}
+
 export type HostMessageRequest = {
   content: string
   channelType?: string
@@ -586,6 +604,11 @@ export type HostMessageRequest = {
   hostRef?: string
   threadId?: string
   attachments?: HostMessageAttachment[]
+  /**
+   * Held approval mode for a chat that has no server session yet. The server
+   * honors it only on that first create. Omitted when the hold is `manual`.
+   */
+  approvalMode?: ApprovalMode
   /**
    * Optional per-session model selection piggybacked onto the send (R2 "Option
    * A"). Present only when the user changed the model while the host was
@@ -984,6 +1007,8 @@ export type TaskProgressStreamEvent =
         // `false` when the host refuses to allowlist this call ("Always approve"
         // is hidden). Absent means allowed.
         alwaysApproveAllowed?: false
+        /** Present only for an auto shell card. Absent means today's buttons. */
+        shellCard?: ShellCardDescriptor
       }
     }
   | { type: 'cancelled'; data: { taskId: string; reason: string } }
@@ -1091,6 +1116,10 @@ export interface PendingApprovalLite {
   // `false` when the host refuses to allowlist this call ("Always approve" is
   // hidden). Absent means allowed.
   alwaysApproveAllowed?: false
+  /** Auto shell card. Absent on a restarted card and on every non-shell card. */
+  shellCard?: ShellCardDescriptor
+  /** Desktop command preview. Absent means the command was not shown. */
+  inputPreview?: { text: string; truncated: boolean }
 }
 
 /**
@@ -1134,6 +1163,11 @@ export interface SessionMessagesResult {
   activeTaskId?: string
   pendingApproval?: PendingApprovalLite
   tokens?: SessionTokensLite
+  approvalMode?: ApprovalMode
+  modeCeiling?: ApprovalMode
+  channelCap?: ApprovalMode
+  effectiveApprovalMode?: ApprovalMode
+  shellClassifierAvailable?: boolean
   turns: Array<{
     number: number
     user_input: string
@@ -1176,6 +1210,11 @@ export interface SessionsListResult {
     activeTaskId?: string
     pendingApproval?: PendingApprovalLite
     tokens?: SessionTokensLite
+    approvalMode?: ApprovalMode
+    modeCeiling?: ApprovalMode
+    channelCap?: ApprovalMode
+    effectiveApprovalMode?: ApprovalMode
+    shellClassifierAvailable?: boolean
   }>
   nextCursor?: string
   /**

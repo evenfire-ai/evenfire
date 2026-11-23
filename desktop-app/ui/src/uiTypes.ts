@@ -4,6 +4,7 @@ import type {
   HostActivityEvent,
   MessageToolStep,
   SessionTokensLite,
+  ShellCardDescriptor,
 } from '../../src/types'
 import type {
   AgentWorkspaceRoute as AgentWorkspaceRouteValue,
@@ -216,6 +217,8 @@ export interface SuspendedInfo {
    *  approve"). Absent means allowed. */
   alwaysApproveAllowed?: false
   inputPreview?: ApprovalInputPreview
+  /** Auto shell card. Absent means today's Approve / Always approve / Deny buttons. */
+  shellCard?: ShellCardDescriptor
 }
 
 export interface TaskProgress {

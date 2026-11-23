@@ -16,7 +16,8 @@ import {
   clerumPromptCacheWriteTokens,
 } from '../../llm/promptCacheMetrics'
 import { logger } from '../../logger'
-import { LlmUsageEvent, UsageReporter, newRequestId } from '../../usage/usageReporter.js'
+import { buildLlmUsageEvent } from '../../usage/buildLlmUsageEvent.js'
+import { UsageReporter, newRequestId } from '../../usage/usageReporter.js'
 import { visualDimensionLimit } from '../../visualInput/deliveryLimits'
 import { gfsImageParts, projectGfsMessages } from '../../visualInput/messageProjection'
 import { type ImageInputCapability, VisualInputError } from '../../visualInput/policy'
@@ -724,30 +725,16 @@ export class LlmPortAdapter implements LlmPort {
       }
     }
     if (!this.usageReporter || !this.staticContext || !usageContext || !usage) return
-    if (this.providerName === 'codex-subscription') return
-    const event: LlmUsageEvent = {
-      request_id: requestId,
-      ts: new Date().toISOString(),
-      run_id: usageContext.traceContext?.runId ?? null,
-      host_ref: this.staticContext.host_ref,
-      context_ref: this.staticContext.context_ref,
-      team_id: usageContext.team_id ?? null,
-      provider: this.providerName,
+    // codex-subscription yields no event. Counters above still run.
+    const event = buildLlmUsageEvent({
+      requestId,
+      staticContext: this.staticContext,
+      providerName: this.providerName,
       model: this.model,
-      llm_secret_name: this.staticContext.llm_secret_name,
-      source_kind: usageContext.source_kind,
-      user_id: usageContext.user_id ?? null,
-      sender: usageContext.sender ?? null,
-      channel_type: usageContext.channel_type ?? null,
-      recipe_name: usageContext.recipe_name ?? null,
-      cron_job_id: usageContext.cron_job_id ?? null,
-      task_id: usageContext.task_id ?? null,
-      iteration: usageContext.iteration ?? null,
-      input_tokens: usage.input_tokens,
-      output_tokens: usage.output_tokens,
-      cache_read_tokens: usage.cache_read_tokens,
-      cache_write_tokens: usage.cache_write_tokens,
-    }
+      usageContext,
+      usage,
+    })
+    if (!event) return
     this.usageReporter.enqueue(event)
   }
 
