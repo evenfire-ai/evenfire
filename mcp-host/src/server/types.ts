@@ -93,6 +93,11 @@ export interface RuntimeCallerContext {
   sender?: string
   /** Present only after strict parsing of rpc-proxy's v2 trusted-edge envelope. */
   actionContextV2?: TrustedEdgeActionContextV2
+  /**
+   * Scopes of the verified V1 edge assertion. Set by the runtime edge guard for caller
+   * rpc-proxy only.
+   */
+  edgeAssertionScopes?: readonly string[]
 }
 
 export interface MessageResponse {
