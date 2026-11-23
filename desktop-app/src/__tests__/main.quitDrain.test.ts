@@ -331,6 +331,32 @@ describe('macOS Quit drain', () => {
     }
   })
 
+  it('reopens admission when a synchronous listener cancels a no-work Quit', async () => {
+    await startMain()
+    const { TokenStore } = await import('../tokenStore.ts')
+    const willQuit = harness.appListeners.get('will-quit')
+    expect(willQuit).toBeTypeOf('function')
+    const event = {
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true
+      },
+    }
+    let write: Promise<void> | undefined
+    try {
+      willQuit?.(event)
+      event.preventDefault()
+      write = new TokenStore().setSessionToken('synthetic-canceled-quit', 'cancel-aaaaaaaaaaaa')
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
+      await write
+      expect(event.defaultPrevented).toBe(true)
+    } finally {
+      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      openTokenStoreAdmission()
+      await write
+    }
+  })
+
   it('cancels Quit before a token-dependent main-window initializer can block', async () => {
     const firstNativeWrite = deferred<void>()
     const initializerWrite = deferred<void>()
