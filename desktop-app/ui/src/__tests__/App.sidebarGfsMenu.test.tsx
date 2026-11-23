@@ -842,7 +842,7 @@ describe('App sidebar GFS resource menu', () => {
     const rename = (menu: HTMLElement) =>
       within(menu).getByRole('menuitem', { name: 'Rename' }) as HTMLButtonElement
 
-    it('S-1 Shift+F10 on a tree row focuses Share, and ArrowDown reaches the next item', async () => {
+    it('Shift+F10 on a tree row focuses Share, and ArrowDown reaches the next item', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
 
@@ -851,7 +851,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(enabledItems(menu)[1])
     })
 
-    it('S-2 a right-click on a tree row focuses Share, and ArrowDown reaches the next item', async () => {
+    it('a right-click on a tree row focuses Share, and ArrowDown reaches the next item', async () => {
       const { notes } = await openDrawerTree()
       createPointerDriver(notes).contextClick()
       const menu = await screen.findByRole('menu', { name: 'Actions for notes.txt' })
@@ -861,7 +861,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(enabledItems(menu)[1])
     })
 
-    it('S-4 bits that settle after the menu opened leave focus on Share', async () => {
+    it('bits that settle after the menu opened leave focus on Share', async () => {
       const { bridge, queryClient } = await openDrawerTree()
       const summary = await expandReports()
       const reads = holdAffordances(bridge, queryClient)
@@ -875,7 +875,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(shareOf(menu))
     })
 
-    it('S-5 bits that settle after ArrowDown leave focus on the item the user reached', async () => {
+    it('bits that settle after ArrowDown leave focus on the item the user reached', async () => {
       const { bridge, queryClient } = await openDrawerTree()
       const summary = await expandReports()
       const reads = holdAffordances(bridge, queryClient)
@@ -891,7 +891,7 @@ describe('App sidebar GFS resource menu', () => {
       expect((reached as HTMLElement).isConnected).toBe(true)
     })
 
-    it('S-6 moving the pointer onto Share with focus on Rename moves focus into the submenu', async () => {
+    it('moving the pointer onto Share with focus on Rename moves focus into the submenu', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -904,7 +904,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(enabledItems(submenu!)[0])
     })
 
-    it('S-8 Escape after the bits failed closes the menu and leaves the drawer open', async () => {
+    it('Escape after the bits failed closes the menu and leaves the drawer open', async () => {
       const { bridge, queryClient } = await openDrawerTree()
       const summary = await expandReports()
       const reads = holdAffordances(bridge, queryClient)
@@ -919,7 +919,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(summary)
     })
 
-    it('S-9 bits that settle after the menu closed move no focus', async () => {
+    it('bits that settle after the menu closed move no focus', async () => {
       const { bridge, queryClient } = await openDrawerTree()
       const summary = await expandReports()
       const reads = holdAffordances(bridge, queryClient)
@@ -939,7 +939,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(summary)
     })
 
-    it('S-10 under StrictMode the menu takes entry focus once, and Escape returns it to the row', async () => {
+    it('under StrictMode the menu takes entry focus once, and Escape returns it to the row', async () => {
       const { notes } = await openDrawerTree({ strict: true })
       shim.reset()
       const menu = await openByKeyboard(notes)
@@ -954,7 +954,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(notes)
     })
 
-    it('S-11 a scroll or resize after ArrowDown leaves focus where the user put it', async () => {
+    it('a scroll or resize after ArrowDown leaves focus where the user put it', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       await press('{ArrowDown}')
@@ -969,7 +969,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(reached)
     })
 
-    it('S-12 Escape closes the menu first and leaves the drawer open; a second Escape closes the drawer', async () => {
+    it('Escape closes the menu first and leaves the drawer open; a second Escape closes the drawer', async () => {
       const { notes } = await openDrawerTree()
       await openByKeyboard(notes)
 
@@ -981,7 +981,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(drawerOpen()).toBe(false)
     })
 
-    it('S-13 ArrowRight on Share focuses the submenu, and ArrowLeft returns to Share', async () => {
+    it('ArrowRight on Share focuses the submenu, and ArrowLeft returns to Share', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
 
@@ -994,7 +994,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(shareOf(menu))
     })
 
-    it('S-14 a contextmenu on the panel or the submenu never reaches the native menu', async () => {
+    it('a contextmenu on the panel or the submenu never reaches the native menu', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
 
@@ -1008,7 +1008,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(onSubmenu.defaultPrevented).toBe(true)
     })
 
-    it('S-17 hover then ArrowRight keeps focus in the submenu; Escape closes only the submenu', async () => {
+    it('hover then ArrowRight keeps focus in the submenu; Escape closes only the submenu', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       createPointerDriver(notes).moveTo(shareOf(menu))
@@ -1023,7 +1023,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(shareOf(menu))
     })
 
-    it('S-18 a click on Share after hover closes the submenu and leaves focus on Share', async () => {
+    it('a click on Share after hover closes the submenu and leaves focus on Share', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -1035,7 +1035,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(shareOf(menu))
     })
 
-    it('S-19a Share arriving under a still pointer does not open the submenu', async () => {
+    it('Share arriving under a still pointer does not open the submenu', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -1052,7 +1052,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(document.activeElement).toBe(shareOf(menu))
     })
 
-    it('S-19b a submenu that covered Share and closes does not reopen under a still pointer', async () => {
+    it('a submenu that covered Share and closes does not reopen under a still pointer', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -1070,7 +1070,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(rowMenu('notes.txt')).toBeNull()
     })
 
-    it('S-20 after Escape closes the hovered submenu, a tremor on Share does not reopen it', async () => {
+    it('after Escape closes the hovered submenu, a tremor on Share does not reopen it', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -1089,7 +1089,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(rowMenu('notes.txt')).toBeNull()
     })
 
-    it('S-20b after ArrowLeft closes the hovered submenu, tremors on Share do not reopen it', async () => {
+    it('after ArrowLeft closes the hovered submenu, tremors on Share do not reopen it', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -1107,7 +1107,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(rowMenu('notes.txt')).toBeNull()
     })
 
-    it('S-21a a click that closes the submenu disarms hover until the pointer leaves Share', async () => {
+    it('a click that closes the submenu disarms hover until the pointer leaves Share', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -1122,7 +1122,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(submenuFor('notes.txt')).toBeTruthy()
     })
 
-    it('S-21b returning from the submenu to Share after Escape reopens it', async () => {
+    it('returning from the submenu to Share after Escape reopens it', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -1137,7 +1137,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(submenuFor('notes.txt')).toBeTruthy()
     })
 
-    it('S-22 Share reached by a still-pointer scroll stays closed after ArrowRight and Escape', async () => {
+    it('Share reached by a still-pointer scroll stays closed after ArrowRight and Escape', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -1159,7 +1159,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(rowMenu('notes.txt')).toBeNull()
     })
 
-    it('S-24 a still-pointer scroll away from Share and back does not re-arm hover', async () => {
+    it('a still-pointer scroll away from Share and back does not re-arm hover', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
@@ -1188,7 +1188,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(rowMenu('notes.txt')).toBeNull()
     })
 
-    it('S-25 a panel opened under the pointer does not open Share as the pointer leaves it', async () => {
+    it('a panel opened under the pointer does not open Share as the pointer leaves it', async () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)

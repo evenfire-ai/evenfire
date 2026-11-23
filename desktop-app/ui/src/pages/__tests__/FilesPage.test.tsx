@@ -8325,7 +8325,7 @@ describe('FilesPage — folder drag-and-drop', () => {
     const share = () => within(menu()!).getByRole('menuitem', { name: 'Share' })
     const submenu = () => screen.queryByRole('menu', { name: 'Share options for notes.txt' })
 
-    it('S-3 a click on the ⋮ trigger focuses the first menu item', async () => {
+    it('a click on the ⋮ trigger focuses the first menu item', async () => {
       const trigger = await renderNotesRow()
       const row = trigger.closest('.da-grid__row')
       expect(row).toBeTruthy()
@@ -8341,7 +8341,7 @@ describe('FilesPage — folder drag-and-drop', () => {
       expect(document.activeElement).toBe(first)
     })
 
-    it('S-23 reopening ⋮ with Enter disarms the hover an earlier opening had armed', async () => {
+    it('reopening ⋮ with Enter disarms the hover an earlier opening had armed', async () => {
       const trigger = await renderNotesRow()
       const row = trigger.closest('.da-grid__row')
       expect(row).toBeTruthy()

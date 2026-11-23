@@ -450,7 +450,7 @@ describe('GfsActionHost — parent-folder confirmation run', () => {
   })
 
   for (const mode of modes) {
-    it(`S-10 sends every ${mode.name} write while the renderer is offline instead of pausing it`, async () => {
+    it(`sends every ${mode.name} write while the renderer is offline instead of pausing it`, async () => {
       const page = await mount()
       await mode.open(page)
       await screen.findByRole('alertdialog')
