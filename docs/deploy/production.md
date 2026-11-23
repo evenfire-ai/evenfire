@@ -233,10 +233,60 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
 (`CLERUM_AUTH_JWT_PUBLIC_KEY`). No extra secret is needed.
 
 - **Upgrade order:** control-api, then RPC Proxy, then HCC and the Hosts. HCC
-  writes no Host Deployment until the whole RPC Proxy pod cohort carries
-  `clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1`.
+  creates no Host Deployment, and moves no Host pod template onto
+  `clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1`, until the whole RPC
+  Proxy pod cohort carries that label. A held Host Deployment that keeps its
+  old pod template (only its replicas change) is updated without that wait.
 - **Rollback order:** HCC and the Hosts first, then RPC Proxy, then control-api.
   RPC Proxy may stop forwarding the assertion only after no Host requires it.
+- **Keep V2 off.** Leave `CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2` unset on
+  control-api for the whole life of this release, including through any RPC
+  Proxy rollback. A Host refuses every request that carries V2 authority, and
+  an RPC Proxy older than this release refuses the V2 checkpoint that
+  control-api now returns with the edge assertion.
+- **Issuer.** control-api signs with `CONTROL_API_RPC_JWT_ISSUER` from
+  ConfigMap `control-api-config` (namespace `control-plane`). Each Host checks
+  `CLERUM_AUTH_JWT_ISSUER` from the ConfigMap HCC injects into Hosts
+  (`CONTEXT_MAPPER_HOST_CONFIGMAP_NAME`, default `mcp-host-config`, namespace
+  `mcp-host`); unset means `control-api`. The two values must match.
+- **Completion gate.** The upgrade is complete when this lists nothing:
+
+  ```bash
+  kubectl --context "$KCTX" -n mcp-host get deployments,pods \
+    -l 'clerum.io/managed-by=host-context-controller,clerum.io/host,clerum.io/rpc-proxy-edge-protocol!=signed-assertion-v1'
+  ```
+
+  and the same command with `clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1`
+  lists every Host. The `clerum.io/host` key leaves out the
+  workspace-files-controller Deployments, which HCC also manages but which
+  carry no protocol label. Hosts held by a blocked suspension, or suspended
+  with a pending resource change, keep the old template until the hold clears
+  or the Host wakes, so the gate can stay non-empty for them.
+
+- **Host refusal log.** A Host logs one warning for each edge assertion it
+  refuses, then answers 401. The fields are `event`
+  (`runtime_edge_assertion_refused`), `reason`, `scope` (the route scope),
+  `errorName` (only with `verify-failed`) and `claimError` (only with
+  `claims-rejected`). No token, header value or key is logged. Example:
+
+  ```text
+  {"event":"runtime_edge_assertion_refused","reason":"verify-failed","scope":"host:approval:write","errorName":"JsonWebTokenError","timestamp":"…","level":"warn","msg":"[Server] Refused rpc-proxy edge assertion"}
+  ```
+
+  `reason` is one of `missing`, `not-a-string`, `v2-refused`,
+  `no-verification-key`, `verify-failed`, `typ-mismatch` and
+  `claims-rejected`. `not-a-string` does not occur over HTTP, because Node
+  joins repeated headers into one string. The others mean:
+
+  | What you see                                              | Meaning                                                                                                                                                                                         |
+  | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `missing`                                                 | An RPC Proxy older than this release, or a V2 request with no assertion.                                                                                                                        |
+  | `v2-refused`                                              | The request carries V2 authority: the V2 policy is on. Turn it off.                                                                                                                             |
+  | `no-verification-key`                                     | `CLERUM_AUTH_JWT_PUBLIC_KEY` is empty and `CLERUM_ENABLE_AUTH=false`. With auth on (the default), a Host with no key does not start.                                                            |
+  | `verify-failed` with `JsonWebTokenError` on every request | The Host's key or issuer differs from control-api's signer.                                                                                                                                     |
+  | `verify-failed` with `TokenExpiredError`                  | Clock skew, or a request at the end of its assertion's life.                                                                                                                                    |
+  | `typ-mismatch`                                            | Signed by the right key for the edge audience, but with another header type: control-api and Host versions differ.                                                                              |
+  | `claims-rejected` with `claimError`                       | The assertion's host, user, team or scope does not match this Host or route; `claimError` names which, for example `host mismatch`, `sub mismatch`, `teamId mismatch` or `route scope missing`. |
 
 The in-repository executable barrier covers the supported Minikube path. Production
 GCP rollout and rollback orchestration is owned by `keyper-labs/evenfire-infra`;

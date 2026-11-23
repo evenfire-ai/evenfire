@@ -470,9 +470,11 @@ Desktop App
 The edge has one protocol, `signed-assertion-v1`. HCC accepts no other value for
 `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL`, and the RPC Proxy Deployment pod
 template carries the non-secret `clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1`
-cohort marker. HCC writes no Host Deployment until every RPC Proxy pod that is not
-`Succeeded` or `Failed` carries the marker and the Proxy Deployment has observed its
-current generation. `make minikube-restart-all` and the pre-gate incremental path
+cohort marker. HCC creates no Host Deployment, and moves no Host pod template onto
+the marker, until every RPC Proxy pod that is not `Succeeded` or `Failed` carries
+the marker and the Proxy Deployment has observed its current generation. A held
+Host Deployment that keeps its old pod template (only its replicas change) is
+updated without that wait. `make minikube-restart-all` and the pre-gate incremental path
 restart in that order: Proxy, cohort proof, HCC, then Hosts. Do not manually roll
 a Proxy back while Hosts still require the assertion. The supported local
 rollback wrapper restores HCC/Hosts first, waits until no Host requires the
