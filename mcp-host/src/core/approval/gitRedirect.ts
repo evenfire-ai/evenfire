@@ -88,7 +88,8 @@ function listsRefsOnly(args: readonly string[], flags: ReadonlySet<string>): boo
       listMode = true
       continue
     }
-    if (/^--(?:contains|merged|no-merged|sort)=/.test(arg)) {
+    if (/^--sort=/.test(arg)) continue
+    if (/^--(?:contains|merged|no-merged)=/.test(arg)) {
       listMode = true
       continue
     }

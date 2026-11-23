@@ -79,6 +79,8 @@ describe('matchTypedGitRead', () => {
     'git branch --set-upstream-to=x',
     'git diff --output=x',
     'git log --output=out.txt -p',
+    'git branch --sort=refname newb',
+    'git tag --sort=refname t1',
   ])('does not redirect %s', command => {
     expect(matchTypedGitRead(command)).toBeNull()
   })
