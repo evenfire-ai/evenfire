@@ -668,6 +668,63 @@ describe('git_read protected content (history, refs, stash, index, worktree)', (
       expect(needles(all.content)).toEqual([])
     })
 
+    it('notes history stays closed for diff ranges ending at notes, other worktrees and nested tags', async () => {
+      gitwAt('2026-01-08T00:00:00Z', copy, 'notes', 'add', '-f', '-C', ids.BLOB1, 'HEAD')
+      const first = gitwAt(
+        '2026-01-10T00:00:00Z',
+        copy,
+        'rev-list',
+        '--reverse',
+        'refs/notes/commits'
+      )
+        .split('\n')[0]
+        .trim()
+      const leaks = (...argv: string[]) =>
+        needles(controlGit(fx.root, copy, ...argv).out).length > 0
+      const run = async (params: Record<string, unknown>) => {
+        const out = await copyTool.execute({ directory: 'copy', ...params })
+        return { content: out.content, is_error: out.is_error }
+      }
+      const refused = { content: GIT_READ_REFUSALS.notes_history, is_error: true }
+      const excl = [...protectedExcludePathspecs()]
+      // diff reads both ends: a notes commit on the negative side leaks too.
+      expect(leaks('diff', ...NT, `${first}..HEAD`, '--', ...excl), 'diff range').toBe(true)
+      for (const revisions of [
+        [`${first}..HEAD`],
+        [`^${first}`, 'HEAD'],
+        ['refs/notes/commits..HEAD'],
+      ]) {
+        expect(await run({ subcommand: 'diff', revisions })).toEqual(refused)
+      }
+      // Another worktree's HEAD at a notes commit is walked by --all.
+      const admin = path.join(copy, '.git', 'worktrees', 'w')
+      fs.mkdirSync(admin, { recursive: true })
+      fs.writeFileSync(path.join(admin, 'HEAD'), `${first}\n`)
+      fs.writeFileSync(path.join(admin, 'commondir'), '../..\n')
+      fs.writeFileSync(path.join(admin, 'gitdir'), `${path.join(fx.root, 'w-gone', '.git')}\n`)
+      try {
+        expect(
+          leaks('log', '-p', '--exclude=refs/notes/*', '--all', '--no-notes', ...NT),
+          'worktree HEAD'
+        ).toBe(true)
+        expect(await run({ subcommand: 'log', options: ['patch', 'all'] })).toEqual(refused)
+      } finally {
+        fs.rmSync(path.join(copy, '.git', 'worktrees'), { recursive: true, force: true })
+      }
+      // A tag of a tag pointing at a notes commit.
+      gitwAt('2026-01-10T00:00:00Z', copy, 'tag', '-a', 'inner', '-m', 'i', first)
+      gitwAt('2026-01-10T00:00:00Z', copy, 'tag', '-a', 'outer', '-m', 'o', 'inner')
+      try {
+        expect(
+          leaks('log', '-p', '--exclude=refs/notes/*', '--all', '--no-notes', ...NT),
+          'nested tag'
+        ).toBe(true)
+        expect(await run({ subcommand: 'log', options: ['patch', 'all'] })).toEqual(refused)
+      } finally {
+        gitwAt('2026-01-10T00:00:00Z', copy, 'tag', '-d', 'outer', 'inner')
+      }
+    })
+
     it('a replace ref to a protected blob does not print', async () => {
       const aBlob = gitwAt('2026-01-08T00:00:00Z', copy, 'rev-parse', 'HEAD:a.txt').trim()
       gitwAt('2026-01-08T00:00:00Z', copy, 'replace', '-f', aBlob, ids.BLOB1)
