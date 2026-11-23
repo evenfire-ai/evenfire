@@ -4462,12 +4462,17 @@ export class AppService {
       // forwards them and mcp-host resolves each one.
       ...(request.fileReferences === undefined ? {} : { fileReferences: request.fileReferences }),
     }
+    // One Idempotency-Key per send, shared by the first POST and the refresh
+    // retry below: rpc-proxy uses it as the Host messageId, so a retry of a
+    // message the Host already admitted replays instead of running the turn
+    // twice.
+    const sendOptions = { ...options, idempotencyKey: randomUUID() }
     try {
       return await this.rpcClient.invokeHostMessage(
         rpc.token,
         targetHostRef,
         contextualRequest,
-        options
+        sendOptions
       )
     } catch (error) {
       const availabilityError = AppService.toHostAvailabilityError(targetHostRef, error)
@@ -4483,7 +4488,7 @@ export class AppService {
             retried.token,
             targetHostRef,
             contextualRequest,
-            options
+            sendOptions
           )
         } catch (retryError) {
           const retryAvailabilityError = AppService.toHostAvailabilityError(
