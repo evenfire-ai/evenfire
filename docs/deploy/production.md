@@ -239,6 +239,26 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
   old pod template (only its replicas change) is updated without that wait.
 - **Rollback order:** HCC and the Hosts first, then RPC Proxy, then control-api.
   RPC Proxy may stop forwarding the assertion only after no Host requires it.
+  - Roll HCC back to its previous Deployment revision, which restores image,
+    env and labels together:
+    `kubectl --context "$KCTX" -n control-plane rollout undo deployment/host-context-controller --to-revision=<n>`.
+    An image-only rollback keeps
+    `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=signed-assertion-v1`, which
+    the older HCC refuses at start; with one replica and the `Recreate`
+    strategy, that leaves no HCC running.
+  - Roll RPC Proxy back only after this lists nothing:
+
+    ```bash
+    kubectl --context "$KCTX" -n mcp-host get deployments,pods \
+      -l 'clerum.io/managed-by=host-context-controller,clerum.io/host,clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1'
+    ```
+
+    This is the label part of the gate the Minikube wrapper enforces
+    (`host_cohort_unsigned` in `scripts/minikube/rpc-proxy-edge-rollout-gate.sh`).
+    Hosts held by a blocked suspension, or suspended with a pending resource
+    change, keep `signed-assertion-v1` until the hold clears or the Host
+    wakes, so the list can stay non-empty for them.
+
 - **Keep V2 off.** Leave `CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2` unset on
   control-api for the whole life of this release, including through any RPC
   Proxy rollback. A Host refuses every request that carries V2 authority, and
