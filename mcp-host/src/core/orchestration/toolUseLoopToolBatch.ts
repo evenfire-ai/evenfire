@@ -1,5 +1,6 @@
 import { BRIDGE_TOOL_NAMES } from '../../capabilities/toolCatalogTools'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
+import { gitRedirectCounter } from '../approval/gitRedirect'
 import {
   buildConnectRequiredApproval,
   extractConnectRequiredMarker,
@@ -207,6 +208,13 @@ export async function executeToolCalls(
   // and skip `continue`s above the emit never reach reportToolComplete).
   let usageEmitted = false
 
+  // Compliance with a typed-git redirect is counted on the next model turn's
+  // batch: the redirect's own batch sets the flag after this check.
+  if (config.conversation.git_redirect_pending && calls.length > 0) {
+    gitRedirectCounter.inc({ followed: calls.some(c => c.name === 'git_read') ? 'yes' : 'no' })
+    config.conversation.git_redirect_pending = false
+  }
+
   for (let i = 0; i < calls.length; i++) {
     let call = calls[i]
 
@@ -247,6 +255,21 @@ export async function executeToolCalls(
       return { toolResults, cancelled: true }
     }
     if (admission.kind === 'result') {
+      // A reported result (the git redirect) shows as a tool step in progress.
+      if (admission.report) {
+        const start = reportToolStart(config, call, iteration, i, calls.length, llmTextContent)
+        reportToolComplete(
+          config,
+          call,
+          admission.toolResult,
+          start,
+          iteration,
+          i,
+          calls.length,
+          usageEmitted ? undefined : usage
+        )
+        usageEmitted = true
+      }
       toolResults.push(admission.toolResult)
       continue
     }

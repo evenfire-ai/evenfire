@@ -316,6 +316,7 @@ export class ConversationManager {
     // the typed-git redirects end here.
     conversation.task_approved_tools?.clear()
     conversation.task_git_redirected?.clear()
+    conversation.git_redirect_pending = false
 
     // Materialize the auto-title (spec 15) in RAM before persisting so the
     // dual-store projection and the durable COALESCE write agree. `??=` keeps

@@ -218,6 +218,8 @@ describe('typed-git redirect', () => {
     expect(result.toolMessages).toHaveLength(1)
     expect(redirected(result.toolMessages[0])).toBe(true)
     expect(result.toolMessages[0]).not.toContain('On branch')
+    // The model answered in text next: the compliance flag is cleared, not counted.
+    expect(result.conversation.git_redirect_pending).toBe(false)
   })
 
   it('the same text again takes the normal path; a different git text is redirected', async () => {
