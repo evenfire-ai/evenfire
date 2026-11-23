@@ -23,4 +23,10 @@ export interface ApprovalModeInputs {
   channelCap(): ApprovalMode
   classifierAvailable(args: Record<string, unknown>): boolean
   classify(call: ToolCall, description: string): Promise<ShellVerdict>
+  /**
+   * The per-tool CRD overrides in force (`spec.approval.tools`), the same
+   * source the native gate reads. Optional: when absent, the typed-git
+   * redirect stays off.
+   */
+  approvalTools?(): Readonly<Record<string, boolean>> | undefined
 }

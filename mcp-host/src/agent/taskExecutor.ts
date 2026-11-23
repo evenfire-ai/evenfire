@@ -2454,6 +2454,7 @@ export class TaskExecutor {
         const caller = this.classifierCaller()
         return isClassifierAvailable(caller.providerType, caller.modelName, args)
       },
+      approvalTools: () => this.approvalSnapshot().effective?.tools,
       classify: (call, description) => {
         const caller = this.classifierCaller()
         return classifyToolCall({

@@ -9,6 +9,7 @@
 import type { ImageInputCapability, VisualInputContext } from '../visualInput/policy'
 import type { GateCause } from './approval/gateCause'
 import type { TokenCounter } from './tokenizer/tokenCounter'
+import type { GitReadAvailability } from './tools/gitRead/probe'
 import {
   AgentEvent,
   ChatMessage,
@@ -333,4 +334,6 @@ export interface NativeToolConfig {
    *  requires it. Pages are shipped inline, so the value is measured against
    *  the context budget, not the spillover threshold. */
   attachmentTextReadMaxBytes?: number
+  /** The process's git probe (`probeGitRead`). Absent or unavailable: no `git_read`. */
+  gitRead?: GitReadAvailability
 }

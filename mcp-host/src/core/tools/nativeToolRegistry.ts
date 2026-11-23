@@ -48,6 +48,7 @@ import { runDocumentJob } from './documentRead/workerRunner'
 import { FileReadTool } from './fileRead'
 import { FileWriteTool } from './fileWrite'
 import { buildGeneratedArtifactAttachment } from './generatedArtifactAttachments'
+import { GIT_READ_TOOL_NAME, GitReadTool } from './gitRead'
 import { HttpRequestTool } from './httpRequest'
 import { JsonTransformTool } from './jsonTransform'
 import {
@@ -322,9 +323,10 @@ export class NativeToolRegistry implements ToolRegistry {
     // A Host-owned GFS store binds the shell to the verified caller root. The
     // shell never calls the store itself (#1019): it only re-verifies that the
     // caller root is still canonical before each command.
+    const shellRoot = gfsDownload ? gfsDownload.callerWorkspacePath : config.workspacePath
     this.register(
       new ShellTool(
-        gfsDownload ? gfsDownload.callerWorkspacePath : config.workspacePath,
+        shellRoot,
         config.shellTimeout,
         config.envAllowlist,
         dynamicEnvProvider,
@@ -335,6 +337,22 @@ export class NativeToolRegistry implements ToolRegistry {
     this.register(new HttpRequestTool(config.httpAllowlist))
     this.register(new SystemInfoTool())
     this.register(new JsonTransformTool(fileToolsRoot))
+    // git_read reads what file_read can read: only when the probe found a safe
+    // git and the shell and file tools share one root.
+    if (
+      config.gitRead?.available === true &&
+      fileToolsRoot !== undefined &&
+      shellRoot === fileToolsRoot
+    ) {
+      this.register(
+        new GitReadTool({
+          root: fileToolsRoot,
+          gitPath: config.gitRead.gitPath,
+          timeoutMs: config.shellTimeout,
+          verifyCallerRoot: gfsDownload !== undefined,
+        })
+      )
+    }
 
     // Memory tools: persistent (filesystem), requires workspace.
     if (workspace) {
@@ -617,4 +635,16 @@ export class NativeToolRegistry implements ToolRegistry {
   register(tool: Tool): void {
     this.tools.set(tool.name(), tool)
   }
+}
+
+/**
+ * Native tool names an approval config may name (`tools.<name>`): the tools a
+ * registry built from `config` alone registers, plus `git_read`, which a task
+ * registers only when the probe passed and its roots are equal.
+ */
+export function knownNativeToolNames(config: NativeToolConfig): Set<string> {
+  return new Set([
+    ...new NativeToolRegistry(config, '').listDefinitions().map(d => d.name),
+    GIT_READ_TOOL_NAME,
+  ])
 }
