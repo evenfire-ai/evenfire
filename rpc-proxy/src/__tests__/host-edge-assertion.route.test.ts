@@ -846,15 +846,10 @@ describe('streams and the assertion expiry', () => {
     return text
   }
 
-  it('status stream: polls succeed until the assertion exp, then the stream ends with auth-expired', async () => {
-    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))
-    const expSeconds = Math.floor(Date.now() / 1000) + 2
-    controlApiBody = {
-      ...OLD_SHAPE_CONNECTION,
-      edgeAssertion: signEdgeAssertion(expSeconds, ['host:status:read']),
-    }
-    const verdicts: HostVerdict[] = []
-    hostAnswer = index => {
+  // The Host answers a status poll as it would at that instant: 401 once the
+  // assertion has expired, a valid status payload before.
+  function statusHostRecordingVerdicts(verdicts: HostVerdict[]) {
+    return (index: number) => {
       const at = Date.now()
       const answer =
         hostChecksAssertion(hostCalls[index]!.headers, at) ??
@@ -862,25 +857,112 @@ describe('streams and the assertion expiry', () => {
       verdicts.push({ at, status: answer.status })
       return answer
     }
+  }
+
+  it('status stream: polls succeed, then it ends with auth-expired before the assertion exp and no poll is refused', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))
+    // Outside the near-expiry window (`upstreamTimeoutMs` plus 2 s) for 2 to 3 s.
+    const expSeconds =
+      Math.floor(Date.now() / 1000) + Math.floor(config.upstreamTimeoutMs / 1000) + 5
+    controlApiBody = {
+      ...OLD_SHAPE_CONNECTION,
+      edgeAssertion: signEdgeAssertion(expSeconds, ['host:status:read']),
+    }
+    const verdicts: HostVerdict[] = []
+    hostAnswer = statusHostRecordingVerdicts(verdicts)
+
+    const text = await readStream('/rpc/hosts/chatllm/status/stream', body =>
+      body.includes('event: closed')
+    )
+    const closedAt = Date.now()
+
+    const accepted = verdicts.filter(verdict => verdict.status === 200)
+    const refused = verdicts.filter(verdict => verdict.status === 401)
+    // Witness: polls reached the Host and succeeded.
+    expect(accepted.length).toBeGreaterThan(0)
+    expect(text).toContain('event: status')
+    // The stream ends before the expiry, so the Host refuses no poll.
+    expect(refused).toHaveLength(0)
+    expect(closedAt).toBeLessThan(expSeconds * 1000)
+    expect(text).toContain('event: auth-expired')
+    expect(text).toContain('"reason":"auth-expired"')
+    expect(text).not.toContain('event: error')
+    // One resolve for the whole stream.
+    expect(hostAccessCalls()).toHaveLength(1)
+  }, 20_000)
+
+  it('status stream: opened inside the expiry margin, it ends with auth-expired before any Host poll', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))
+    const expSeconds = nearExpSeconds()
+    controlApiBody = {
+      ...OLD_SHAPE_CONNECTION,
+      edgeAssertion: signEdgeAssertion(expSeconds, ['host:status:read']),
+    }
+    const verdicts: HostVerdict[] = []
+    hostAnswer = statusHostRecordingVerdicts(verdicts)
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval')
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout')
+
+    // The spies are restored after the assertions: mockRestore also clears the
+    // recorded calls.
+    try {
+      const text = await readStream('/rpc/hosts/chatllm/status/stream', body =>
+        body.includes('event: closed')
+      )
+
+      // Witness: the stream opened and the poll loop ran.
+      expect(text).toContain('event: open')
+      expect(text).toContain('event: auth-expired')
+      expect(text).toContain('"reason":"auth-expired"')
+      expect(hostCalls).toHaveLength(0)
+      expect(hostAccessCalls()).toHaveLength(1)
+      // The stream's poll and keepalive intervals and its lifetime timeout were
+      // created and then cleared when it ended.
+      const handlesCreatedWith = (
+        spy: typeof setIntervalSpy | typeof setTimeoutSpy,
+        delayMs: number
+      ) =>
+        spy.mock.calls.flatMap((call, index) =>
+          call[1] === delayMs ? [spy.mock.results[index]!.value] : []
+        )
+      const pollIntervals = handlesCreatedWith(setIntervalSpy, config.streamIntervalMs)
+      const keepAliveIntervals = handlesCreatedWith(setIntervalSpy, config.streamKeepaliveMs)
+      const lifetimeTimeouts = handlesCreatedWith(setTimeoutSpy, config.streamMaxLifetimeMs)
+      expect(pollIntervals).toHaveLength(1)
+      expect(keepAliveIntervals).toHaveLength(1)
+      expect(lifetimeTimeouts).toHaveLength(1)
+      expect(clearIntervalSpy).toHaveBeenCalledWith(pollIntervals[0])
+      expect(clearIntervalSpy).toHaveBeenCalledWith(keepAliveIntervals[0])
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(lifetimeTimeouts[0])
+    } finally {
+      setIntervalSpy.mockRestore()
+      clearIntervalSpy.mockRestore()
+      setTimeoutSpy.mockRestore()
+      clearTimeoutSpy.mockRestore()
+    }
+  }, 20_000)
+
+  it('status stream: three Host 401 answers far from the assertion exp still end it with auth-expired', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))
+    controlApiBody = {
+      ...OLD_SHAPE_CONNECTION,
+      edgeAssertion: signEdgeAssertion(Math.floor(Date.now() / 1000) + 300, ['host:status:read']),
+    }
+    hostAnswer = HOST_401
 
     const text = await readStream('/rpc/hosts/chatllm/status/stream', body =>
       body.includes('event: closed')
     )
 
-    const accepted = verdicts.filter(verdict => verdict.status === 200)
-    const refused = verdicts.filter(verdict => verdict.status === 401)
-    // Witness: polls reached the Host and succeeded before the expiry.
-    expect(accepted.length).toBeGreaterThan(0)
-    expect(accepted.every(verdict => verdict.at < expSeconds * 1000)).toBe(true)
-    expect(text).toContain('event: status')
-    // After the expiry each poll is refused; the third refusal ends the stream.
-    expect(refused).toHaveLength(3)
-    expect(refused.every(verdict => verdict.at >= expSeconds * 1000)).toBe(true)
-    expect(text).toContain('event: auth-expired')
+    expect(hostCalls).toHaveLength(3)
+    const authExpiredAt = text.indexOf('event: auth-expired')
+    expect(authExpiredAt).toBeGreaterThan(-1)
+    const errorsBefore = text.slice(0, authExpiredAt).split('event: error').length - 1
+    expect(errorsBefore).toBe(2)
     expect(text).toContain('"reason":"auth-expired"')
-    // One resolve for the whole stream.
-    expect(hostAccessCalls()).toHaveLength(1)
-  }, 10_000)
+  }, 20_000)
 
   // Each stream forwards only its own event names.
   const PASSTHROUGH_STREAM_ROWS = [

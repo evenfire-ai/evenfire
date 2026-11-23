@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
@@ -12,6 +13,7 @@ import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAcc
 import {
   UpstreamHostError,
   forwardHostStatus,
+  isHeldEdgeAssertionNearExpiry,
   resolveHostConnectionForUser,
 } from '../services/mcpProxyService.js'
 
@@ -156,6 +158,17 @@ export function createRpcHostStatusStreamRouter(): Router {
           if (closed || pollInFlight) return
           pollInFlight = true
           try {
+            // The stream does not renew the held edge assertion. End the
+            // stream before a poll could reach the Host after `exp`.
+            if (
+              isHeldEdgeAssertionNearExpiry(host.headers[HOST_EDGE_ASSERTION_HEADER], Date.now())
+            ) {
+              writeEvent('auth-expired', {
+                message: 'Host access is about to expire. Reconnect with a fresh token.',
+              })
+              cleanup('auth-expired')
+              return
+            }
             const status = await forwardHostStatus(host)
             if (!status) {
               writeEvent('error', { message: sanitizedStreamErrorMessage() })
@@ -200,7 +213,6 @@ export function createRpcHostStatusStreamRouter(): Router {
         }
 
         writeEvent('open', { hostRef, observedAt: new Date().toISOString() })
-        void pollAndEmit()
         intervalId = setInterval(() => {
           void pollAndEmit()
         }, config.streamIntervalMs)
@@ -211,6 +223,9 @@ export function createRpcHostStatusStreamRouter(): Router {
           writeEvent('error', { message: 'Status stream expired. Reconnect required.' })
           cleanup('max-lifetime')
         }, config.streamMaxLifetimeMs)
+        // After the timers exist: the first poll can end the stream
+        // synchronously (near-expiry check), and cleanup must clear them.
+        void pollAndEmit()
 
         req.on('close', () => {
           cleanup('client-disconnect')
