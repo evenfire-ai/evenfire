@@ -2173,10 +2173,11 @@ export class TaskExecutor {
    * - task.source = 'channel'  → source_kind = 'channel', sender + channel_type from sourceMessage
    * - task.source = 'cron'     → source_kind = 'cron', cron_job_id from task.cronJobId
    * - task.source = 'internal' → source_kind = 'desktop'
+   * - any other source         → source_kind = 'unknown'
    * Workflow-recipe LLM calls go through workflowService and are tagged
    * separately at that call site.
    */
-  private buildDefaultUsageContext(): UsageContext | undefined {
+  private buildDefaultUsageContext(): UsageContext {
     const t = this.task
     if (t.source === 'channel') {
       if (t.sourceMessage?.channelType === 'rpc') {
@@ -2460,11 +2461,7 @@ export class TaskExecutor {
           taskSignal: this.abortController.signal,
           usage: {
             reporter: this.deps.usageReporter,
-            context: this.buildDefaultUsageContext() ?? {
-              source_kind: 'unknown',
-              traceContext: null,
-              task_id: this.taskId,
-            },
+            context: this.buildDefaultUsageContext(),
             staticContext: this.deps.usageStaticContext ?? {
               host_ref: '',
               context_ref: null,
