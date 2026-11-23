@@ -7,7 +7,6 @@ import { ApiError } from '../httpClient.js'
 const {
   mockCancelSandboxUiRefresh,
   mockGetActiveDeploymentProfileUiBaseUrl,
-  mockGetActiveRuntimeConfigOptionId,
   mockGetActiveSandboxUi,
   mockGetActiveSandboxUiLocation,
   mockInstallSandboxUiCookie,
@@ -17,7 +16,6 @@ const {
 } = vi.hoisted(() => ({
   mockCancelSandboxUiRefresh: vi.fn(),
   mockGetActiveDeploymentProfileUiBaseUrl: vi.fn(() => 'https://profile.example.com'),
-  mockGetActiveRuntimeConfigOptionId: vi.fn(() => 'test-profile'),
   mockGetActiveSandboxUi: vi.fn(),
   mockGetActiveSandboxUiLocation: vi.fn(),
   mockInstallSandboxUiCookie: vi.fn(),
@@ -28,7 +26,6 @@ const {
 
 vi.mock('electron', () => ({
   app: {
-    isReady: vi.fn(() => false),
     getPath: vi.fn(() => '/tmp/clerum-desktop-test'),
   },
   safeStorage: {
@@ -55,11 +52,52 @@ vi.mock('../sandboxUiSessionRefresh.js', () => ({
 }))
 
 vi.mock('../config.js', () => ({
+  captureProfileOriginBinding: () => ({
+    profileId: null,
+    filePath: null,
+    restBaseUrl: config.externalRestApiBaseUrl,
+    rpcBaseUrl: config.rpcProxyBaseUrl,
+    witness: null,
+  }),
+  getPairedProfileUiOverride: () => undefined,
   getActiveDeploymentProfileUiBaseUrl: mockGetActiveDeploymentProfileUiBaseUrl,
-  getActiveRuntimeConfigProfileIdentity: () => null,
-  getActiveRuntimeConfigOptionId: mockGetActiveRuntimeConfigOptionId,
+  getActiveRuntimeConfigOptionId: () => null,
   getActiveEnvKey: () => 'test-env',
   getActiveLegacyEnvKeys: () => [],
+  validateProfileUiOrigin: (value: unknown, restBaseUrl: string) => {
+    if (typeof value !== 'string' || !/^https?:\/\/[^/?#\\\s]+\/?$/i.test(value)) {
+      throw new Error('Invalid Profile UI origin')
+    }
+    const origin = new URL(value)
+    const isLoopback = (hostname: string): boolean => {
+      const normalized = hostname
+        .toLowerCase()
+        .replace(/^\[|\]$/g, '')
+        .replace(/\.$/, '')
+      if (normalized === 'localhost' || normalized === '::1') return true
+      const octets = normalized.split('.').map(Number)
+      return (
+        octets.length === 4 &&
+        octets.every(octet => Number.isInteger(octet) && octet >= 0 && octet <= 255) &&
+        octets[0] === 127
+      )
+    }
+    let restIsLoopback = false
+    try {
+      const rest = new URL(restBaseUrl)
+      restIsLoopback = isLoopback(rest.hostname)
+    } catch {
+      throw new Error('Invalid External REST endpoint')
+    }
+    const profileIsLoopback = isLoopback(origin.hostname)
+    if (
+      (profileIsLoopback && !restIsLoopback) ||
+      (origin.protocol !== 'https:' && !profileIsLoopback)
+    ) {
+      throw new Error('Invalid Profile UI origin')
+    }
+    return origin.origin
+  },
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -121,7 +159,6 @@ function makeService(): AppService {
 describe('AppService.listSandboxUiApps', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetActiveRuntimeConfigOptionId.mockReturnValue('test-profile')
     mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
     mockListSandboxUiApps.mockResolvedValue({ apps: [] })
   })
@@ -358,11 +395,7 @@ describe('AppService.openForgotPassword', () => {
   it('opens the Profile UI forgot-password page without requiring an email', async () => {
     const service = new AppService() as unknown as {
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
-      openForgotPassword: (email: string) => Promise<{
-        profileUiUrl: string
-        dispatchAccepted: true
-        correlationId: string
-      }>
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
     }
     const getInvitationProfile = vi.fn()
     service.memberRegistrationServiceClient = { getInvitationProfile } as never
@@ -372,89 +405,13 @@ describe('AppService.openForgotPassword', () => {
 
     expect(getInvitationProfile).not.toHaveBeenCalled()
     expect(shell.openExternal).toHaveBeenCalledWith('https://profile.example.com/forgot-password')
-    expect(result).toMatchObject({
-      profileUiUrl: 'https://profile.example.com/forgot-password',
-      dispatchAccepted: true,
-    })
-    expect(result.correlationId).toMatch(/^[0-9a-f-]{36}$/i)
-  })
-
-  it('routes Forgot Password through the selected environment authority', async () => {
-    config.desktopProfileUiBaseUrl = 'https://stale-build-profile.example.test'
-    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://saved-profile.example.test')
-    const service = new AppService() as unknown as {
-      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
-      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
-    }
-    const getInvitationProfile = vi.fn()
-    service.memberRegistrationServiceClient = { getInvitationProfile } as never
-
-    await expect(service.openForgotPassword('')).resolves.toMatchObject({
-      profileUiUrl: 'https://saved-profile.example.test/forgot-password',
-    })
-    const { shell } = await import('electron')
-    expect(shell.openExternal).toHaveBeenCalledWith(
-      'https://saved-profile.example.test/forgot-password'
-    )
-    expect(getInvitationProfile).not.toHaveBeenCalled()
-  })
-
-  it('does not report a browser dispatch rejection after its original deadline', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(1_000)
-    const { shell } = await import('electron')
-    vi.mocked(shell.openExternal).mockReturnValue(
-      new Promise((_resolve, reject) => {
-        setTimeout(() => reject(new Error('browser dispatch failed')), 10_001)
-      })
-    )
-    const service = new AppService() as unknown as {
-      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
-      openForgotPassword: (
-        email: string,
-        reportLateFailure: (correlationId: string, dispatchDeadline: number) => void
-      ) => Promise<{ dispatchAccepted: true; dispatchDeadline: number; correlationId: string }>
-    }
-    service.memberRegistrationServiceClient = { getInvitationProfile: vi.fn() } as never
-    const reportLateFailure = vi.fn()
-
-    const result = await service.openForgotPassword('', reportLateFailure)
-    expect(result.dispatchDeadline).toBe(11_000)
-    await vi.advanceTimersByTimeAsync(10_001)
-
-    expect(reportLateFailure).not.toHaveBeenCalled()
-    vi.useRealTimers()
-  })
-
-  it('uses the built-in Localhost route without discovery', async () => {
-    mockGetActiveRuntimeConfigOptionId.mockReturnValue('__localhost__')
-    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('http://127.0.0.1:3001')
-    const fetchSpy = vi.spyOn(globalThis, 'fetch')
-    const service = new AppService() as unknown as {
-      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
-      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
-    }
-    service.memberRegistrationServiceClient = { getInvitationProfile: vi.fn() } as never
-
-    await expect(service.openForgotPassword('')).resolves.toMatchObject({
-      profileUiUrl: 'http://127.0.0.1:3001/forgot-password',
-    })
-    const { shell } = await import('electron')
-    expect(shell.openExternal).toHaveBeenCalledWith('http://127.0.0.1:3001/forgot-password')
-    expect(fetchSpy).not.toHaveBeenCalled()
-    fetchSpy.mockRestore()
-    mockGetActiveRuntimeConfigOptionId.mockReturnValue('test-profile')
-    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://profile.example.com')
+    expect(result).toEqual({ profileUiUrl: 'https://profile.example.com/forgot-password' })
   })
 
   it('opens the configured Profile UI forgot-password page with the login email prefilled', async () => {
     const service = new AppService() as unknown as {
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
-      openForgotPassword: (email: string) => Promise<{
-        profileUiUrl: string
-        dispatchAccepted: true
-        correlationId: string
-      }>
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
     }
     const getInvitationProfile = vi.fn()
     service.memberRegistrationServiceClient = { getInvitationProfile } as never
@@ -466,11 +423,9 @@ describe('AppService.openForgotPassword', () => {
     expect(shell.openExternal).toHaveBeenCalledWith(
       'https://profile.example.com/forgot-password?email=user%40example.com'
     )
-    expect(result).toMatchObject({
+    expect(result).toEqual({
       profileUiUrl: 'https://profile.example.com/forgot-password?email=user%40example.com',
-      dispatchAccepted: true,
     })
-    expect(result.correlationId).toMatch(/^[0-9a-f-]{36}$/i)
   })
 })
 
@@ -479,51 +434,36 @@ describe('AppService explicit Profile UI browser actions', () => {
     vi.clearAllMocks()
     config.desktopProfileUiBaseUrl = 'https://profile.example.com'
     config.desktopProfileUiBaseUrlExplicit = false
-    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://profile.example.com')
   })
 
   it('opens forgot-password and profile settings from a valid explicit root origin', async () => {
     config.desktopProfileUiBaseUrl = 'https://profile.self-hosted.example/'
     config.desktopProfileUiBaseUrlExplicit = true
-    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://profile.self-hosted.example')
     const service = new AppService() as unknown as {
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
-      openForgotPassword: (email: string) => Promise<{
-        profileUiUrl: string
-        dispatchAccepted: true
-        correlationId: string
-      }>
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
       openProfileSettings: (
         email: string,
         options?: { section?: 'profile' | 'social'; action?: 'password'; network?: string }
-      ) => Promise<{
-        profileUiUrl: string
-        dispatchAccepted: true
-        correlationId: string
-      }>
+      ) => Promise<{ profileUiUrl: string }>
     }
     const getInvitationProfile = vi.fn()
     service.memberRegistrationServiceClient = { getInvitationProfile } as never
 
-    await expect(service.openForgotPassword(' User@Example.COM ')).resolves.toMatchObject({
+    await expect(service.openForgotPassword(' User@Example.COM ')).resolves.toEqual({
       profileUiUrl: 'https://profile.self-hosted.example/forgot-password?email=user%40example.com',
-      dispatchAccepted: true,
     })
     await expect(
       service.openProfileSettings(' User@Example.COM ', {
         section: 'profile',
         action: 'password',
       })
-    ).resolves.toMatchObject({
+    ).resolves.toEqual({
       profileUiUrl: 'https://profile.self-hosted.example/settings/profile?action=password',
-      dispatchAccepted: true,
     })
     await expect(
       service.openProfileSettings(' User@Example.COM ', { section: 'social', network: 'telegram' })
-    ).resolves.toMatchObject({
-      profileUiUrl: 'https://profile.self-hosted.example/channels/telegram',
-      dispatchAccepted: true,
-    })
+    ).resolves.toEqual({ profileUiUrl: 'https://profile.self-hosted.example/channels/telegram' })
     const { shell } = await import('electron')
     expect(shell.openExternal).toHaveBeenCalledWith(
       'https://profile.self-hosted.example/channels/telegram'
@@ -540,35 +480,46 @@ describe('AppService explicit Profile UI browser actions', () => {
     expect(getInvitationProfile).not.toHaveBeenCalled()
   })
 
-  it('rejects malformed raw operator origin before no-profile Forgot Password dispatch', async () => {
-    const actualConfig = await vi.importActual<typeof import('../config.js')>('../config.js')
-    mockGetActiveRuntimeConfigOptionId.mockReturnValue(null)
+  it('accepts a private HTTPS origin paired with loopback REST for all settings links', async () => {
     config.externalRestApiBaseUrl = 'http://127.0.0.1:8091'
-    config.desktopProfileUiBaseUrl = 'http://localhost.:3001/..'
+    config.desktopProfileUiBaseUrl = 'https://10.20.30.40:9443'
     config.desktopProfileUiBaseUrlExplicit = true
-    mockGetActiveDeploymentProfileUiBaseUrl.mockImplementation(() => {
-      try {
-        return actualConfig.validateProfileUiOrigin(
-          config.desktopProfileUiBaseUrl,
-          config.externalRestApiBaseUrl
-        )
-      } catch {
-        throw new Error('operator_profile_ui_origin_invalid')
-      }
-    })
     const service = new AppService() as unknown as {
-      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
+      openProfileSettings: (
+        email: string,
+        options?: { section?: 'profile' | 'social'; action?: 'password'; network?: string }
+      ) => Promise<{ profileUiUrl: string }>
+    }
+
+    await expect(service.openForgotPassword('user@example.com')).resolves.toMatchObject({
+      profileUiUrl: 'https://10.20.30.40:9443/forgot-password?email=user%40example.com',
+    })
+    await expect(
+      service.openProfileSettings('user@example.com', { section: 'social', network: 'telegram' })
+    ).resolves.toMatchObject({
+      profileUiUrl: 'https://10.20.30.40:9443/channels/telegram',
+    })
+    await expect(
+      service.openProfileSettings('user@example.com', { section: 'profile', action: 'password' })
+    ).resolves.toMatchObject({
+      profileUiUrl: 'https://10.20.30.40:9443/settings/profile?action=password',
+    })
+  })
+
+  it('rejects non-loopback HTTP fallback when the paired REST endpoint is loopback', async () => {
+    config.externalRestApiBaseUrl = 'http://127.0.0.1:8091'
+    config.desktopProfileUiBaseUrl = 'http://profile.customer.example.test'
+    config.desktopProfileUiBaseUrlExplicit = true
+    const service = new AppService() as unknown as {
       openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
     }
-    const getInvitationProfile = vi.fn()
-    service.memberRegistrationServiceClient = { getInvitationProfile } as never
 
     await expect(service.openForgotPassword('user@example.com')).rejects.toThrow(
-      'operator_profile_ui_origin_invalid'
+      'Invalid Profile UI origin'
     )
     const { shell } = await import('electron')
     expect(shell.openExternal).not.toHaveBeenCalled()
-    expect(getInvitationProfile).not.toHaveBeenCalled()
   })
 
   for (const [label, baseUrl] of [
@@ -578,9 +529,6 @@ describe('AppService explicit Profile UI browser actions', () => {
     it(`rejects an explicit Profile UI base URL with ${label}`, async () => {
       config.desktopProfileUiBaseUrl = baseUrl
       config.desktopProfileUiBaseUrlExplicit = true
-      mockGetActiveDeploymentProfileUiBaseUrl.mockImplementation(() => {
-        throw new Error('operator_profile_ui_origin_invalid')
-      })
       const service = new AppService() as unknown as {
         memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
         openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
@@ -590,10 +538,10 @@ describe('AppService explicit Profile UI browser actions', () => {
       service.memberRegistrationServiceClient = { getInvitationProfile } as never
 
       await expect(service.openForgotPassword('user@example.com')).rejects.toThrow(
-        'operator_profile_ui_origin_invalid'
+        'PROFILE_UI_BASE_URL must be an origin URL with a root pathname'
       )
       await expect(service.openProfileSettings('user@example.com')).rejects.toThrow(
-        'operator_profile_ui_origin_invalid'
+        'PROFILE_UI_BASE_URL must be an origin URL with a root pathname'
       )
       const { shell } = await import('electron')
 
@@ -605,7 +553,6 @@ describe('AppService explicit Profile UI browser actions', () => {
 
 describe('AppService profile UI link authority', () => {
   beforeEach(() => {
-    mockGetActiveRuntimeConfigOptionId.mockReturnValue('test-profile')
     config.desktopProfileUiBaseUrl = 'https://profile.example.com'
     config.desktopProfileUiBaseUrlExplicit = false
     mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://profile.example.com')
@@ -680,13 +627,16 @@ describe('AppService profile UI link authority', () => {
       path: '/tasks/42',
     })
 
-    await expect(service.resolveProfileUiBaseUrl()).resolves.toBe('https://profile.example.com')
+    await expect(service.resolveProfileUiBaseUrl()).resolves.toBe('https://profile.tenant.example')
     await expect(service.createSandboxUiDeepLink('team-1')).resolves.toEqual({
       url:
         'https://profile.example.com/open/apps/sandbox-recipes/task-board' +
         '?path=%2Ftasks%2F42&team=team-1',
     })
-    expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledTimes(1)
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledWith(
+      'user@tenant.example'
+    )
   })
 
   it('does not let a build-time Profile origin override the active deployment', async () => {
@@ -760,12 +710,13 @@ describe('AppService profile UI link authority', () => {
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })
 
-  it('fails closed when no selected environment has a verified Profile origin', async () => {
-    mockGetActiveRuntimeConfigOptionId.mockReturnValue(null)
+  it('fails closed when the active deployment has no verified Profile origin', async () => {
     config.desktopProfileUiBaseUrl = 'javascript:alert(1)'
     config.desktopProfileUiBaseUrlExplicit = true
     mockGetActiveDeploymentProfileUiBaseUrl.mockImplementation(() => {
-      throw new Error('profile_ui_origin_missing')
+      throw new Error(
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+      )
     })
     const service = makeService() as unknown as {
       me: { id: string; email: string }
@@ -785,13 +736,12 @@ describe('AppService profile UI link authority', () => {
     })
 
     await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-      'profile_ui_environment_not_selected'
+      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
     )
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })
 
   it('fails visibly instead of copying a fallback for an unknown deployment', async () => {
-    mockGetActiveRuntimeConfigOptionId.mockReturnValue(null)
     const service = makeService() as unknown as {
       me: { id: string; email: string }
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
@@ -802,7 +752,9 @@ describe('AppService profile UI link authority', () => {
       getInvitationProfile: vi.fn().mockRejectedValue(new Error('network unavailable')),
     }
     mockGetActiveDeploymentProfileUiBaseUrl.mockImplementation(() => {
-      throw new Error('profile_ui_origin_missing')
+      throw new Error(
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+      )
     })
     mockGetActiveSandboxUiLocation.mockReturnValue({
       recipeNs: 'sandbox-recipes',
@@ -811,7 +763,7 @@ describe('AppService profile UI link authority', () => {
     })
 
     await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-      'profile_ui_environment_not_selected'
+      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
     )
   })
 

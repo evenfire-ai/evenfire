@@ -51,10 +51,8 @@ export function AuthPage() {
     if (busy || forgotPasswordBusy) return
     setForgotPasswordBusy(true)
     try {
-      const result = await window.clerum.auth.openForgotPassword(email.trim().toLowerCase())
-      setStatus('Password reset opened in your browser.', 'success', undefined, {
-        profileUiCorrelationId: result.correlationId,
-      })
+      await window.clerum.auth.openForgotPassword(email.trim().toLowerCase())
+      setStatus('Password reset opened in your browser.', 'success')
     } catch {
       setStatus('Password reset could not be opened.', 'error')
     } finally {

@@ -30,7 +30,7 @@ const sharedUrl = buildGfsResourceWebLink('https://profile.example', uri)
 const service = {
   createGfsResourceDeepLink: vi.fn(
     async (_uri: string, writeClipboard?: (url: string) => Promise<void>) => {
-      if (writeClipboard) await writeClipboard(sharedUrl)
+      await writeClipboard?.(sharedUrl)
       return { url: sharedUrl }
     }
   ),

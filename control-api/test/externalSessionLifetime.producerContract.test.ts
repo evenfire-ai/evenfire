@@ -9,7 +9,6 @@ import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthT
 
 const COOKIE_TTL_ENV = 'EXTERNAL_REST_API_PROFILE_SESSION_COOKIE_TTL_SECONDS'
 const EXTERNAL_REST_JWT_PUBLIC_KEY_ENV = 'EXTERNAL_REST_API_JWT_PUBLIC_KEY'
-const PROFILE_UI_ORIGIN_ENV = 'CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL'
 const claims = {
   userId: 'session-lifetime-user',
   email: 'session-lifetime@example.invalid',
@@ -27,7 +26,6 @@ async function withExternalCookieProducer(
 ): Promise<void> {
   const previousCookieTtl = process.env[COOKIE_TTL_ENV]
   const previousPublicKey = process.env[EXTERNAL_REST_JWT_PUBLIC_KEY_ENV]
-  const previousProfileUiOrigin = process.env[PROFILE_UI_ORIGIN_ENV]
 
   if (ttlOverride === undefined) {
     delete process.env[COOKIE_TTL_ENV]
@@ -39,7 +37,6 @@ async function withExternalCookieProducer(
   )
     .export({ type: 'spki', format: 'pem' })
     .toString()
-  process.env[PROFILE_UI_ORIGIN_ENV] = 'http://127.0.0.1:3001'
 
   vi.resetModules()
   try {
@@ -58,11 +55,6 @@ async function withExternalCookieProducer(
       delete process.env[EXTERNAL_REST_JWT_PUBLIC_KEY_ENV]
     } else {
       process.env[EXTERNAL_REST_JWT_PUBLIC_KEY_ENV] = previousPublicKey
-    }
-    if (previousProfileUiOrigin === undefined) {
-      delete process.env[PROFILE_UI_ORIGIN_ENV]
-    } else {
-      process.env[PROFILE_UI_ORIGIN_ENV] = previousProfileUiOrigin
     }
     vi.resetModules()
   }

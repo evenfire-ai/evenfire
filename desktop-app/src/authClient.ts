@@ -41,6 +41,7 @@ async function readDesktopEnvironmentResponseText(response: Response): Promise<s
     if (done) break
     totalBytes += value.byteLength
     if (totalBytes > DESKTOP_ENVIRONMENT_RESPONSE_MAX_BYTES) {
+      // Preserve the size-limit error if best-effort transport cancellation also fails.
       await reader.cancel().catch(() => undefined)
       throw new Error('Desktop environment discovery response exceeded the size limit')
     }
@@ -352,21 +353,30 @@ export class AuthClient {
   }
 
   async getDesktopEnvironment(): Promise<DesktopEnvironmentDiscovery> {
-    const endpoint = config.externalRestApiBaseUrl
-    return this.getDesktopEnvironmentForEndpoint(endpoint)
+    return requestJson<DesktopEnvironmentDiscovery>('GET', url('/api/v1/desktop/environment'))
   }
 
   async getDesktopEnvironmentForEndpoint(
     externalRestApiBaseUrl: string,
     signal?: AbortSignal
-  ): Promise<DesktopEnvironmentDiscovery> {
+  ): Promise<DesktopEnvironmentDiscovery & { responseUrl: string }> {
     const target = desktopEnvironmentDiscoveryUrl(externalRestApiBaseUrl)
     const response = await fetch(target, {
       method: 'GET',
-      redirect: 'error',
+      redirect: 'manual',
       signal: signal || AbortSignal.timeout(10_000),
       headers: { accept: 'application/json' },
     })
+    if (
+      response.redirected ||
+      response.type === 'opaqueredirect' ||
+      (response.status >= 300 && response.status < 400)
+    ) {
+      throw new Error('desktop_environment_redirect_rejected')
+    }
+    if (!response.url || response.url !== target) {
+      throw new Error('Desktop environment discovery response URL mismatch')
+    }
     const raw = await readDesktopEnvironmentResponseText(response)
     if (!response.ok) {
       throw new ApiError(
@@ -384,10 +394,7 @@ export class AuthClient {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('Desktop environment discovery returned an invalid response')
     }
-    return {
-      ...(parsed as DesktopEnvironmentDiscovery),
-      responseUrl: response.url,
-    }
+    return { ...(parsed as DesktopEnvironmentDiscovery), responseUrl: response.url }
   }
 
   async getDesktopReleasePolicy(token: string): Promise<DesktopReleasePolicy> {

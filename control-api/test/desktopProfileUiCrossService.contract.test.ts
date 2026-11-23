@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import { type Server as HttpServer, createServer as createHttpServer } from 'node:http'
 import { createServer as createTcpServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
@@ -21,28 +20,13 @@ const originalEnvironment = {
   profileUi: process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL,
   controlRest: process.env.CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL,
   desktopConfig: process.env.CLERUM_DESKTOP_CONFIG_PATH,
+  externalPublic: process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL,
+  desktopRest: process.env.EXTERNAL_REST_API_BASE_URL,
+  desktopRpc: process.env.RPC_PROXY_BASE_URL,
+  desktopProfile: process.env.PROFILE_UI_BASE_URL,
 }
 let externalRestProcess: Awaited<ReturnType<typeof startExternalRestHttpProcess>> | undefined
-let legacyServer: HttpServer | undefined
 let desktopDataDirectory: string | undefined
-
-// Source-pinned fixture for the pre-feature producer at
-// 1b1b1131ef784929f7f5551c509f0aa2f4b19de6:
-// external-rest-api/src/routes/desktop.ts. Keep this three-field response
-// builder independent from the current router so new config validation cannot
-// accidentally manufacture an old-server response.
-const pinnedLegacyDesktopEnvironment = {
-  sourceRevision: '1b1b1131ef784929f7f5551c509f0aa2f4b19de6',
-  createResponse: (legacyConfig: {
-    desktopAppName: string
-    publicBaseUrl: string
-    desktopRpcProxyBaseUrl: string
-  }) => ({
-    appName: legacyConfig.desktopAppName,
-    externalRestApiBaseUrl: legacyConfig.publicBaseUrl,
-    rpcProxyBaseUrl: legacyConfig.desktopRpcProxyBaseUrl,
-  }),
-}
 
 async function reserveLoopbackPort(): Promise<number> {
   const server = createTcpServer()
@@ -62,18 +46,16 @@ async function reserveLoopbackPort(): Promise<number> {
 afterEach(async () => {
   await externalRestProcess?.stop()
   externalRestProcess = undefined
-  if (legacyServer?.listening) {
-    await new Promise<void>((resolve, reject) =>
-      legacyServer!.close(error => (error ? reject(error) : resolve()))
-    )
-  }
-  legacyServer = undefined
   if (desktopDataDirectory) await rm(desktopDataDirectory, { recursive: true, force: true })
   desktopDataDirectory = undefined
   for (const [key, value] of Object.entries({
     CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: originalEnvironment.profileUi,
     CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL: originalEnvironment.controlRest,
     CLERUM_DESKTOP_CONFIG_PATH: originalEnvironment.desktopConfig,
+    EXTERNAL_REST_API_PUBLIC_BASE_URL: originalEnvironment.externalPublic,
+    EXTERNAL_REST_API_BASE_URL: originalEnvironment.desktopRest,
+    RPC_PROXY_BASE_URL: originalEnvironment.desktopRpc,
+    PROFILE_UI_BASE_URL: originalEnvironment.desktopProfile,
   })) {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
@@ -96,6 +78,10 @@ describe('Profile UI origin cross-service compatibility', () => {
       path.join(os.tmpdir(), 'evenfire-profile-origin-contract-')
     )
     desktopElectron.userDataPath = desktopDataDirectory
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(desktopDataDirectory, 'runtime.json')
+    delete process.env.EXTERNAL_REST_API_BASE_URL
+    delete process.env.RPC_PROXY_BASE_URL
+    delete process.env.PROFILE_UI_BASE_URL
 
     externalRestProcess = await startExternalRestHttpProcess({
       controlApiBaseUrl: 'http://127.0.0.1:1',
@@ -111,16 +97,19 @@ describe('Profile UI origin cross-service compatibility', () => {
       rpcProxyBaseUrl: 'http://127.0.0.1:8092',
       appName: 'Compatibility fixture',
     })
-    const identity = desktopConfig.getActiveRuntimeConfigProfileIdentity()
-    if (!identity) throw new Error('Desktop runtime profile identity was not created')
-
     const discovered = await new AuthClient().getDesktopEnvironmentForEndpoint(externalRestBaseUrl)
     expect(discovered.profileUiBaseUrl).toBe(profileUiBaseUrl)
-    const validated = desktopConfig.validateProfileUiOrigin(
-      discovered.profileUiBaseUrl,
-      identity.externalRestApiBaseUrl
-    )
-    await desktopConfig.persistProfileUiOrigin(identity, validated)
+    const { AppService } = await import('../../desktop-app/src/appService.js')
+    const service = new AppService() as AppService & {
+      me: { id: string; email: string }
+      sessionToken: string
+    }
+    service.me = { id: 'contract-user', email: 'member@example.test' }
+    service.sessionToken = 'synthetic-contract-session'
+    const resource = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const result = await service.createGfsResourceDeepLink(resource)
+    expect(result.url).toBe(`${profileUiBaseUrl}/open/files?uri=${encodeURIComponent(resource)}`)
+    const identity = desktopConfig.captureProfileOriginBinding()
     const option = desktopConfig
       .getDesktopRuntimeConfigState()
       .options.find(candidate => candidate.id === identity.profileId)
@@ -155,48 +144,41 @@ describe('Profile UI origin cross-service compatibility', () => {
     )
   })
 
-  it('keeps the pinned pre-feature discovery response compatible with the updated client', async () => {
+  it('keeps the actual producer response compatible when the optional origin is unset', async () => {
     delete process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
-    const legacyConfig = {
-      desktopAppName: 'Example Tenant',
-      publicBaseUrl: '',
-      desktopRpcProxyBaseUrl: 'http://127.0.0.1:8092',
-    }
-    legacyServer = createHttpServer((request, response) => {
-      if (request.url !== '/api/v1/desktop/environment') {
-        response.writeHead(404).end()
-        return
-      }
-      const address = legacyServer?.address()
-      if (!address || typeof address === 'string') {
-        response.writeHead(500).end()
-        return
-      }
-      legacyConfig.publicBaseUrl = `http://127.0.0.1:${address.port}`
-      response.writeHead(200, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify(pinnedLegacyDesktopEnvironment.createResponse(legacyConfig)))
+    const port = await reserveLoopbackPort()
+    const legacyBaseUrl = `http://127.0.0.1:${port}`
+    externalRestProcess = await startExternalRestHttpProcess({
+      controlApiBaseUrl: 'http://127.0.0.1:1',
+      controlApiServiceToken: 'synthetic-legacy-origin-contract-token',
+      publicBaseUrl: legacyBaseUrl,
+      desktopProfileUiBaseUrl: null,
     })
-    await new Promise<void>((resolve, reject) => {
-      legacyServer!.once('error', reject)
-      legacyServer!.listen(0, '127.0.0.1', () => resolve())
-    })
-    const address = legacyServer.address()
-    if (!address || typeof address === 'string')
-      throw new Error('legacy REST listener is unavailable')
-    const legacyBaseUrl = `http://127.0.0.1:${address.port}`
+    const producerResponse = await fetch(`${legacyBaseUrl}/api/v1/desktop/environment`)
+    expect(producerResponse.status).toBe(200)
+    const producerPayload = await producerResponse.json()
+    expect(Object.keys(producerPayload).sort()).toEqual([
+      'appName',
+      'externalRestApiBaseUrl',
+      'rpcProxyBaseUrl',
+    ])
+    const rpcProxyBaseUrl = (producerPayload as { rpcProxyBaseUrl: string }).rpcProxyBaseUrl
     desktopDataDirectory = await mkdtemp(path.join(os.tmpdir(), 'evenfire-legacy-desktop-origin-'))
     desktopElectron.userDataPath = desktopDataDirectory
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(desktopDataDirectory, 'runtime.json')
+    delete process.env.EXTERNAL_REST_API_BASE_URL
+    delete process.env.RPC_PROXY_BASE_URL
+    delete process.env.PROFILE_UI_BASE_URL
     const desktopConfig = await import('../../desktop-app/src/config.js')
     await desktopConfig.saveDesktopRuntimeConfig({
       externalRestApiBaseUrl: legacyBaseUrl,
-      rpcProxyBaseUrl: legacyConfig.desktopRpcProxyBaseUrl,
+      rpcProxyBaseUrl,
       appName: 'Legacy server',
     })
     const { AuthClient } = await import('../../desktop-app/src/authClient.js')
     const received = await new AuthClient().getDesktopEnvironmentForEndpoint(legacyBaseUrl)
     expect(received.externalRestApiBaseUrl).toBe(legacyBaseUrl)
     expect(received.profileUiBaseUrl).toBeUndefined()
-    expect(received.responseUrl).toBe(`${legacyBaseUrl}/api/v1/desktop/environment`)
 
     const { AppService } = await import('../../desktop-app/src/appService.js')
     const driver = await import('../../desktop-app/src/sandboxUiDriver.js')

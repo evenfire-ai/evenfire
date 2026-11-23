@@ -24,7 +24,7 @@ type Config = {
   profileSessionCookieTtlSeconds: number
   publicBaseUrl: string
   desktopRpcProxyBaseUrl: string
-  desktopProfileUiBaseUrl: string
+  desktopProfileUiBaseUrl?: string
   desktopAppName: string
   desktopReleaseBaseUrl: string
   gfsUploadRequestPerMinute: number
@@ -58,26 +58,6 @@ function isLoopbackHostname(hostname: string): boolean {
     normalized === 'localhost' ||
     normalized === '::1' ||
     (isIP(normalized) === 4 && normalized.startsWith('127.'))
-  )
-}
-
-function isPrivateIpv4(hostname: string): boolean {
-  if (isIP(hostname) !== 4) return false
-  const octets = hostname.split('.').map(Number)
-  return (
-    octets[0] === 0 ||
-    octets[0] === 10 ||
-    octets[0] === 127 ||
-    (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
-    (octets[0] === 169 && octets[1] === 254) ||
-    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
-    (octets[0] === 192 && octets[1] === 0 && (octets[2] === 0 || octets[2] === 2)) ||
-    (octets[0] === 192 && octets[1] === 88 && octets[2] === 99) ||
-    (octets[0] === 192 && octets[1] === 168) ||
-    (octets[0] === 198 && (octets[1] === 18 || octets[1] === 19)) ||
-    (octets[0] === 198 && octets[1] === 51 && octets[2] === 100) ||
-    (octets[0] === 203 && octets[1] === 0 && octets[2] === 113) ||
-    octets[0] >= 224
   )
 }
 
@@ -126,22 +106,19 @@ export function validateDesktopProfileUiBaseUrl(raw: string, publicRestBaseUrl: 
   if (!profileLoopback && profileUrl.protocol !== 'https:') {
     throw new Error('Non-loopback Profile UI origins must use HTTPS')
   }
-  const mappedIpv4 = profileHost.match(/^::ffff:(.+)$/i)?.[1]
-  let mappedPrivateIpv4 = false
-  if (mappedIpv4 && isIP(mappedIpv4) === 4) {
-    mappedPrivateIpv4 = isPrivateIpv4(mappedIpv4)
-  } else if (mappedIpv4 && /^[0-9a-f:]+$/i.test(mappedIpv4)) {
-    const groups = mappedIpv4.split(':').filter(Boolean)
-    const low = Number.parseInt(groups.at(-1) || '0', 16)
-    const high = Number.parseInt(groups.at(-2) || '0', 16)
-    mappedPrivateIpv4 = isPrivateIpv4(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`)
-  }
-  const privateIpv6 =
-    isIP(profileHost) === 6 && (profileHost === '::' || /^(fc|fd|fe[89a-fc]|ff)/i.test(profileHost))
-  if (!profileLoopback && (isPrivateIpv4(profileHost) || mappedPrivateIpv4 || privateIpv6)) {
-    throw new Error('Private IP Profile UI origins are not permitted')
-  }
   return profileUrl.origin
+}
+
+function optionalDesktopProfileUiBaseUrl(
+  raw: string | undefined,
+  restBaseUrl: string
+): string | undefined {
+  if (!raw) return undefined
+  try {
+    return validateDesktopProfileUiBaseUrl(raw, restBaseUrl)
+  } catch {
+    return undefined
+  }
 }
 
 function positiveIntegerFromEnv(name: string, defaultValue: number): number {
@@ -298,11 +275,8 @@ export const config: Config = {
     'EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL',
     'http://127.0.0.1:8094'
   ).replace(/\/+$/, ''),
-  desktopProfileUiBaseUrl: validateDesktopProfileUiBaseUrl(
-    requiredOrDevDefault(
-      'CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL',
-      'http://127.0.0.1:3001'
-    ),
+  desktopProfileUiBaseUrl: optionalDesktopProfileUiBaseUrl(
+    process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL,
     requiredOrDevDefault('EXTERNAL_REST_API_PUBLIC_BASE_URL', 'http://127.0.0.1:8091')
   ),
   desktopAppName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME || 'Evenfire',

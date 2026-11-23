@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -18,10 +17,6 @@ function pending<T>() {
 const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
 let directory = ''
 let closeStore: (() => void) | undefined
-
-async function waitPastDiscoveryCooldown(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 1_010))
-}
 
 afterEach(async () => {
   closeStore?.()
@@ -65,14 +60,9 @@ async function fixture() {
   const store = new TokenStore({ isolatedUserDataPath: directory })
   const service = new AppService()
   ;(service as unknown as { tokenStore: InstanceType<typeof TokenStore> }).tokenStore = store
-  const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironmentForEndpoint')
+  const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment')
   discovery.mockRejectedValueOnce(new Error('initial discovery unavailable'))
-  discovery.mockResolvedValue({
-    externalRestApiBaseUrl: rest,
-    rpcProxyBaseUrl: rpc,
-    appName: 'A',
-    responseUrl: `${rest}/api/v1/desktop/environment`,
-  })
+  discovery.mockResolvedValue({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: rpc, appName: 'A' })
   vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue(
     testLoginResult('synthetic-session-a', testSessionMe())
   )
@@ -139,15 +129,10 @@ describe('RPC discovery lifecycle through native producers', () => {
   it('drops discovery for A that settles after native setup has selected B', async () => {
     const { service, config, rest, rpc, discovery } = await fixture()
     await service.googleLogin('synthetic-google-token')
-    await waitPastDiscoveryCooldown()
-    config.config.rpcProxyBaseUrl = ''
-    ;(service as unknown as { effectiveRuntimeRpcEndpoint: unknown }).effectiveRuntimeRpcEndpoint =
-      null
     const response = pending<{
       externalRestApiBaseUrl: string
       rpcProxyBaseUrl: string
       appName: string
-      responseUrl: string
     }>()
     const started = pending<void>()
     discovery.mockImplementationOnce(() => {
@@ -170,12 +155,7 @@ describe('RPC discovery lifecycle through native producers', () => {
     discovery.mockRejectedValue(new Error('B discovery unavailable'))
     await service.completeDesktopSetup('user-a@example.test', 'synthetic-setup-token')
     const bindingB = config.getActiveEnvKey()
-    response.resolve({
-      externalRestApiBaseUrl: rest,
-      rpcProxyBaseUrl: rpc,
-      appName: 'A',
-      responseUrl: `${rest}/api/v1/desktop/environment`,
-    })
+    response.resolve({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: rpc, appName: 'A' })
     await health
     expect(config.config.externalRestApiBaseUrl).toBe(restB)
     expect(config.getActiveEnvKey()).toBe(bindingB)
@@ -196,7 +176,6 @@ describe('RPC discovery lifecycle through native producers', () => {
     })
     const restore = service.getSessionState()
     await started.promise
-    await waitPastDiscoveryCooldown()
     await service.getDependenciesHealth()
     expect(config.config.rpcProxyBaseUrl).toBe('')
     discovery.mockRejectedValue(new Error('subsequent discovery unavailable'))
@@ -211,7 +190,7 @@ describe('RPC discovery lifecycle through native producers', () => {
   })
 
   it.each(['Google', 'password'])(
-    'preserves restore-time discovery when %s login later fails',
+    'persists pending discovery only in failed %s login cleanup',
     async kind => {
       const { service, config, store, discovery, AuthClient, configPath, rpc } = await fixture()
       await store.setSessionToken('synthetic-saved-session', config.getActiveEnvKey())
@@ -223,8 +202,16 @@ describe('RPC discovery lifecycle through native producers', () => {
       })
       const restore = service.getSessionState()
       await started.promise
-      await waitPastDiscoveryCooldown()
       await service.getDependenciesHealth()
+      const write = fs.writeFile.bind(fs)
+      let rejected = false
+      vi.spyOn(fs, 'writeFile').mockImplementation(async (file, ...args) => {
+        if (String(file) === configPath && !rejected) {
+          rejected = true
+          throw new Error('fixture prelogin persistence denied')
+        }
+        return write(file, ...args)
+      })
       discovery.mockRejectedValue(new Error('subsequent discovery unavailable'))
       const loginResponse = pending<ReturnType<typeof testLoginResult>>()
       const loginStarted = pending<void>()
@@ -242,9 +229,10 @@ describe('RPC discovery lifecycle through native producers', () => {
       await loginStarted.promise
       me.resolve(testSessionMe())
       await restore
-      expect(config.config.rpcProxyBaseUrl).toBe(rpc)
+      expect(config.config.rpcProxyBaseUrl).toBe('')
       loginResponse.reject(new Error('fixture login rejected'))
       expect(await result).toMatchObject({ message: 'fixture login rejected' })
+      expect(rejected).toBe(true)
       expect(config.config.rpcProxyBaseUrl).toBe(rpc)
       expect(JSON.parse(await fs.readFile(configPath, 'utf8')).rpcProxyBaseUrl).toBe(rpc)
       expect(service.getCachedUserId()).toBeNull()
@@ -256,20 +244,14 @@ describe('RPC discovery lifecycle through native producers', () => {
     await service.googleLogin('synthetic-google-token')
     await chat.requireChatStore().createChat('agent-a', 'chat-a')
     const oldKey = config.getActiveEnvKey()
-    await waitPastDiscoveryCooldown()
     await service.getDependenciesHealth()
-    const rename = fsSync.renameSync.bind(fsSync)
-    let rejected = false
-    const failure = vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
-      if (String(destination).endsWith('.runtime-config-transaction.json') && !rejected) {
-        rejected = true
-        throw new Error('fixture journal install denied')
-      }
-      return rename(source, destination)
+    const write = fs.writeFile.bind(fs)
+    const failure = vi.spyOn(fs, 'writeFile').mockImplementation(async (file, ...args) => {
+      if (String(file) === configPath) throw new Error('fixture config write denied')
+      return write(file, ...args)
     })
     await service.logout()
     failure.mockRestore()
-    expect(rejected).toBe(true)
     expect(service.getCachedUserId()).toBeNull()
     expect(await store.getSessionToken(oldKey)).toBeNull()
     await service.getDependenciesHealth()
@@ -284,7 +266,6 @@ describe('RPC discovery lifecycle through native producers', () => {
     const { service, config, store, rpc, AuthClient, discovery } = await fixture()
     await service.googleLogin('synthetic-google-token')
     const oldKey = config.getActiveEnvKey()
-    await waitPastDiscoveryCooldown()
     await service.getDependenciesHealth()
     vi.spyOn(AuthClient.prototype, 'switchTeam').mockResolvedValue({
       token: 'synthetic-team-b',
@@ -306,22 +287,15 @@ describe('RPC discovery lifecycle through native producers', () => {
     async invalid => {
       const { service, config, rpc, rest, store, discovery, rpcHealth } = await fixture()
       await service.googleLogin('synthetic-google-token')
-      await waitPastDiscoveryCooldown()
-      config.config.rpcProxyBaseUrl = ''
-      ;(
-        service as unknown as { effectiveRuntimeRpcEndpoint: unknown }
-      ).effectiveRuntimeRpcEndpoint = null
       const key = config.getActiveEnvKey()
       discovery.mockResolvedValueOnce({
         externalRestApiBaseUrl: rest,
         rpcProxyBaseUrl: invalid,
         appName: 'A',
-        responseUrl: `${rest}/api/v1/desktop/environment`,
       } as never)
       const activeGeneration = service.getSessionGeneration()
       await service.getDependenciesHealth()
       expect(config.config.rpcProxyBaseUrl).toBe('')
-      await waitPastDiscoveryCooldown()
       await service.getDependenciesHealth()
       expect(discovery).toHaveBeenCalledTimes(3)
       expect(config.getActiveEnvKey()).toBe(key)

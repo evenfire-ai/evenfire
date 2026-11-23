@@ -102,8 +102,6 @@ export type DesktopEnvironmentDiscovery = {
   externalRestApiBaseUrl: string
   rpcProxyBaseUrl: string
   profileUiBaseUrl?: string
-  /** Actual fetch URL, retained privately for endpoint binding validation. */
-  responseUrl?: string
 }
 
 export type DesktopReleasePolicy = {
@@ -722,14 +720,8 @@ export type DesktopRuntimeConfig = {
   externalRestApiBaseUrl: string
   rpcProxyBaseUrl?: string
   appName?: string
-  /** Main-process-owned, validated public Profile UI origin persisted per profile. */
   profileUiBaseUrl?: string | null
 }
-
-export type DesktopRuntimeConfigStateProjection = Pick<
-  DesktopRuntimeConfig,
-  'externalRestApiBaseUrl' | 'rpcProxyBaseUrl' | 'appName'
->
 
 export type DesktopRuntimeConfigOption = {
   id: string
@@ -739,22 +731,6 @@ export type DesktopRuntimeConfigOption = {
   externalRestApiBaseUrl: string
   rpcProxyBaseUrl: string
   appName: string
-  /** Non-secret profile incarnation used only to scope transient UI reports. */
-  profileIncarnation?: string | null
-}
-
-export type ProfileUiDispatchBinding = {
-  sessionGeneration: number
-  profileId: string | null
-  profileIncarnation: string | null
-  restBaseUrl: string
-}
-
-export type ProfileUiDispatchFailure = {
-  correlationId: string
-  documentLease: string
-  dispatchDeadline: number
-  binding: ProfileUiDispatchBinding
 }
 
 export type DesktopRuntimeConfigState = {
@@ -762,7 +738,7 @@ export type DesktopRuntimeConfigState = {
   isLocalhost: boolean
   selectorVisible: boolean
   activeOptionId: string | null
-  currentConfig?: DesktopRuntimeConfigStateProjection
+  currentConfig?: DesktopRuntimeConfig
   /**
    * Stable, filesystem-safe namespacing key for the ACTIVE environment (spec
    * §5.1). Derived from `new URL(externalRestApiBaseUrl).origin`; every local

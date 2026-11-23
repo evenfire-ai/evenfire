@@ -1484,14 +1484,6 @@ h3 {
   border-color: rgba(var(--danger-rgb), 0.36);
 }
 
-.app-profile-ui-dispatch-error {
-  position: fixed;
-  top: calc(var(--window-titlebar-height) + var(--space-2));
-  right: 16px;
-  z-index: 4000;
-  width: min(320px, calc(100vw - 24px));
-}
-
 .profile-menu-wrapper {
   position: relative;
   z-index: var(--layer-dropdown);

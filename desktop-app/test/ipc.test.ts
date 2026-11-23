@@ -13,7 +13,6 @@ import type { HostStatusStreamEvent } from '../src/types.js'
 
 const testState = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
-  const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const downloadsDir = '/tmp/clerum-test'
   const ipcMainMock = {
     handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
@@ -21,76 +20,34 @@ const testState = vi.hoisted(() => {
     }),
     // The real ipcMain also carries event listeners (gfs:abort); registration
     // must not depend on them being exercised.
-    on: vi.fn((channel: string, listener: (...args: unknown[]) => unknown) => {
-      listeners.set(channel, listener)
-    }),
+    on: vi.fn(),
   }
-  return { handlers, listeners, ipcMainMock, downloadsDir }
+  return { handlers, ipcMainMock, downloadsDir }
 })
 
 vi.mock('electron', () => ({
   ipcMain: testState.ipcMainMock,
-  app: { getPath: () => testState.downloadsDir, isReady: () => true },
+  app: { getPath: () => testState.downloadsDir },
 }))
 
 function makeTrustedEvent(senderId = 77) {
   const destroyedCallbacks: Array<() => void> = []
-  const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
-  const frame = {
-    url: 'file:///index.html',
-    isDestroyed: vi.fn(() => false),
-  }
   const sender = {
     id: senderId,
     isDestroyed: vi.fn(() => false),
-    mainFrame: frame,
     send: vi.fn(),
-    on: vi.fn((eventName: string, callback: (...args: unknown[]) => void) => {
-      const callbacks = listeners.get(eventName) ?? new Set()
-      callbacks.add(callback)
-      listeners.set(eventName, callbacks)
-    }),
     once: vi.fn((eventName: string, callback: () => void) => {
-      if (eventName === 'destroyed') {
-        destroyedCallbacks.push(callback)
-        const callbacks = listeners.get(eventName) ?? new Set()
-        callbacks.add(callback)
-        listeners.set(eventName, callbacks)
-      }
+      if (eventName === 'destroyed') destroyedCallbacks.push(callback)
     }),
-    removeListener: vi.fn((eventName: string, callback: (...args: unknown[]) => void) => {
-      listeners.get(eventName)?.delete(callback)
-    }),
-    emit: (eventName: string, ...args: unknown[]) => {
-      for (const callback of [...(listeners.get(eventName) ?? [])]) callback(...args)
-    },
   }
   return {
     event: {
-      senderFrame: frame,
+      senderFrame: { url: 'file:///index.html' },
       sender,
     },
     sender,
     destroy: () => destroyedCallbacks.forEach(callback => callback()),
-    emit: sender.emit,
   }
-}
-
-function makeSingleReplySyncEvent<T extends object>(event: T): T & { returnValue: unknown } {
-  let replied = false
-  let replyValue: unknown
-  const syncEvent = { ...event }
-  Object.defineProperty(syncEvent, 'returnValue', {
-    configurable: false,
-    enumerable: true,
-    get: () => replyValue,
-    set: (value: unknown) => {
-      if (replied) return
-      replied = true
-      replyValue = value
-    },
-  })
-  return syncEvent as T & { returnValue: unknown }
 }
 
 describe('chat IPC pagination validation', () => {
@@ -146,13 +103,6 @@ describe('ipc host status stream handlers', () => {
     deleteRuntimeConfig: vi.fn(),
     googleLogin: vi.fn(),
     openProfileSettings: vi.fn(),
-    getProfileUiDispatchBinding: vi.fn(() => ({
-      sessionGeneration: 7,
-      profileId: 'profile-a',
-      profileIncarnation: 'incarnation-a',
-      restBaseUrl: 'https://api.example.test',
-    })),
-    isProfileUiDispatchBindingCurrent: vi.fn(() => true),
     logout: vi.fn(),
     listTeams: vi.fn(),
     listTeamMembers: vi.fn(),
@@ -212,7 +162,6 @@ describe('ipc host status stream handlers', () => {
 
   beforeEach(async () => {
     testState.handlers.clear()
-    testState.listeners.clear()
     vi.clearAllMocks()
     await fs.rm(testState.downloadsDir, { recursive: true, force: true })
     await fs.mkdir(testState.downloadsDir, { recursive: true })
@@ -828,194 +777,11 @@ describe('ipc host status stream handlers', () => {
       })
     )
 
-    expect(service.openProfileSettings).toHaveBeenCalledWith(
-      'user@example.com',
-      {
-        section: 'social',
-        network: 'telegram',
-        action: undefined,
-      },
-      expect.any(Function)
-    )
-  })
-
-  it('reports a late Profile dispatch failure only to its originating live document', async () => {
-    let reportLateFailure: ((correlationId: string, deadline: number) => void) | undefined
-    const correlationId = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
-    const dispatchDeadline = Date.now() + 5_000
-    service.openProfileSettings.mockImplementation(async (_email, _options, reportFailure) => {
-      reportLateFailure = reportFailure as (correlationId: string, deadline: number) => void
-      return {
-        profileUiUrl: 'https://profile.example.test/settings/profile',
-        dispatchAccepted: true,
-        correlationId,
-        dispatchDeadline,
-      }
+    expect(service.openProfileSettings).toHaveBeenCalledWith('user@example.com', {
+      section: 'social',
+      network: 'telegram',
+      action: undefined,
     })
-    const { event, sender } = makeTrustedEvent()
-    const documentLease = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    const handler = testState.handlers.get('auth:openProfileSettings')
-
-    await expect(
-      Promise.resolve(handler?.(event, { email: 'user@example.test', documentLease }))
-    ).resolves.toMatchObject({ dispatchAccepted: true, correlationId, dispatchDeadline })
-    expect(reportLateFailure).toBeTypeOf('function')
-
-    reportLateFailure?.(correlationId, dispatchDeadline)
-    expect(sender.send).toHaveBeenCalledOnce()
-    expect(sender.send).toHaveBeenCalledWith('auth:profileUiDispatchFailurePending', {
-      correlationId,
-      documentLease,
-      dispatchDeadline,
-    })
-
-    const authorize = testState.listeners.get('auth:authorizeProfileUiDispatchFailure')
-    const authorizeEvent = makeSingleReplySyncEvent(event)
-    authorize?.(authorizeEvent, { correlationId, documentLease, dispatchDeadline })
-    expect(authorizeEvent.returnValue).toBe(true)
-    expect(sender.send).toHaveBeenLastCalledWith('auth:profileUiDispatchFailed', {
-      correlationId,
-      documentLease,
-      dispatchDeadline,
-      binding: {
-        sessionGeneration: 7,
-        profileId: 'profile-a',
-        profileIncarnation: 'incarnation-a',
-        restBaseUrl: 'https://api.example.test',
-      },
-    })
-
-    sender.mainFrame = { url: 'file:///replacement.html', isDestroyed: () => false }
-    reportLateFailure?.('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', dispatchDeadline)
-    expect(sender.send).toHaveBeenCalledTimes(2)
-  })
-
-  it('suppresses a buffered failure when the main session ends before acceptance authorization', async () => {
-    let reportLateFailure: ((correlationId: string, deadline: number) => void) | undefined
-    const correlationId = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
-    const dispatchDeadline = Date.now() + 5_000
-    service.openProfileSettings.mockImplementation(async (_email, _options, reportFailure) => {
-      reportLateFailure = reportFailure as (correlationId: string, deadline: number) => void
-      return {
-        profileUiUrl: 'https://profile.example.test/settings/profile',
-        dispatchAccepted: true,
-        correlationId,
-        dispatchDeadline,
-      }
-    })
-    const { event, sender } = makeTrustedEvent()
-    const documentLease = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    const handler = testState.handlers.get('auth:openProfileSettings')
-
-    await Promise.resolve(handler?.(event, { email: 'user@example.test', documentLease }))
-    reportLateFailure?.(correlationId, dispatchDeadline)
-    expect(sender.send).toHaveBeenCalledWith('auth:profileUiDispatchFailurePending', {
-      correlationId,
-      documentLease,
-      dispatchDeadline,
-    })
-
-    // Models a main-owned /me rejection committing while preload holds the early failure.
-    service.isProfileUiDispatchBindingCurrent.mockReturnValueOnce(false)
-    const authorize = testState.listeners.get('auth:authorizeProfileUiDispatchFailure')
-    const authorizeEvent = { ...event, returnValue: undefined }
-    authorize?.(authorizeEvent, { correlationId, documentLease, dispatchDeadline })
-
-    expect(authorizeEvent.returnValue).toBe(false)
-    expect(sender.send).toHaveBeenCalledTimes(1)
-    expect(sender.send).not.toHaveBeenCalledWith('auth:profileUiDispatchFailed', expect.anything())
-  })
-
-  it('invalidates a pending report when its document navigates', async () => {
-    let reportLateFailure: ((correlationId: string, deadline: number) => void) | undefined
-    const correlationId = '12121212-1212-1212-1212-121212121212'
-    const dispatchDeadline = Date.now() + 5_000
-    service.openProfileSettings.mockImplementation(async (_email, _options, reportFailure) => {
-      reportLateFailure = reportFailure as (correlationId: string, deadline: number) => void
-      return {
-        profileUiUrl: 'https://profile.example.test',
-        dispatchAccepted: true,
-        dispatchDeadline,
-      }
-    })
-    const { event, sender, emit } = makeTrustedEvent()
-    const documentLease = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    const handler = testState.handlers.get('auth:openProfileSettings')
-    await Promise.resolve(handler?.(event, { email: '', documentLease }))
-    reportLateFailure?.(correlationId, dispatchDeadline)
-    expect(sender.send).toHaveBeenCalledWith('auth:profileUiDispatchFailurePending', {
-      correlationId,
-      documentLease,
-      dispatchDeadline,
-    })
-
-    service.isProfileUiDispatchBindingCurrent.mockClear()
-    emit('did-navigate', {}, 'file:///replacement.html', 200, 'OK')
-    const authorize = testState.listeners.get('auth:authorizeProfileUiDispatchFailure')
-    const authorizeEvent = { ...event, returnValue: undefined }
-    expect(() =>
-      authorize?.(authorizeEvent, { correlationId, documentLease, dispatchDeadline })
-    ).not.toThrow()
-    expect(authorizeEvent.returnValue).toBe(false)
-    expect(sender.send).not.toHaveBeenCalledWith('auth:profileUiDispatchFailed', expect.anything())
-    expect(service.isProfileUiDispatchBindingCurrent).not.toHaveBeenCalled()
-  })
-
-  it('does not enqueue a late failure after navigation before browser rejection', async () => {
-    let reportLateFailure: ((correlationId: string, deadline: number) => void) | undefined
-    const correlationId = '56565656-5656-5656-5656-565656565656'
-    const dispatchDeadline = Date.now() + 5_000
-    service.openProfileSettings.mockImplementation(async (_email, _options, reportFailure) => {
-      reportLateFailure = reportFailure as (correlationId: string, deadline: number) => void
-      return {
-        profileUiUrl: 'https://profile.example.test',
-        dispatchAccepted: true,
-        dispatchDeadline,
-      }
-    })
-    const { event, sender, emit } = makeTrustedEvent()
-    const documentLease = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    const originalFrame = sender.mainFrame
-    const handler = testState.handlers.get('auth:openProfileSettings')
-
-    await Promise.resolve(handler?.(event, { email: '', documentLease }))
-
-    // Electron can retain the same WebFrameMain wrapper after navigation. The
-    // invocation-time listener must fence the later shell rejection anyway.
-    emit('did-navigate', {}, 'file:///replacement.html', 200, 'OK')
-    expect(sender.mainFrame).toBe(originalFrame)
-    reportLateFailure?.(correlationId, dispatchDeadline)
-
-    expect(sender.send).not.toHaveBeenCalledWith(
-      'auth:profileUiDispatchFailurePending',
-      expect.anything()
-    )
-    expect(sender.send).not.toHaveBeenCalledWith('auth:profileUiDispatchFailed', expect.anything())
-  })
-
-  it('suppresses binding-read failures during shutdown without throwing from synchronous IPC', async () => {
-    let reportLateFailure: ((correlationId: string, deadline: number) => void) | undefined
-    const correlationId = '34343434-3434-3434-3434-343434343434'
-    const dispatchDeadline = Date.now() + 5_000
-    service.openProfileSettings.mockImplementation(async (_email, _options, reportFailure) => {
-      reportLateFailure = reportFailure as (correlationId: string, deadline: number) => void
-      return { profileUiUrl: 'https://profile.example.test', dispatchAccepted: true }
-    })
-    const { event, sender } = makeTrustedEvent()
-    const documentLease = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    const handler = testState.handlers.get('auth:openProfileSettings')
-    await Promise.resolve(handler?.(event, { email: '', documentLease }))
-    reportLateFailure?.(correlationId, dispatchDeadline)
-    service.isProfileUiDispatchBindingCurrent.mockImplementationOnce(() => {
-      throw new Error('desktop_shutting_down')
-    })
-    const authorize = testState.listeners.get('auth:authorizeProfileUiDispatchFailure')
-    const authorizeEvent = { ...event, returnValue: undefined }
-    expect(() =>
-      authorize?.(authorizeEvent, { correlationId, documentLease, dispatchDeadline })
-    ).not.toThrow()
-    expect(authorizeEvent.returnValue).toBe(false)
-    expect(sender.send).not.toHaveBeenCalledWith('auth:profileUiDispatchFailed', expect.anything())
   })
 
   it('loads the external channel summary through trusted IPC', async () => {
@@ -1706,99 +1472,5 @@ describe('ipc desktop window handlers', () => {
     const result = await Promise.resolve(handler?.(event, { hostRef: 'chatllm' }))
     expect(desktopService.getDesktopStatus).toHaveBeenCalledWith('chatllm')
     expect(result).toEqual(statusResult)
-  })
-
-  it('contains real AppService binding reads after shutdown in synchronous authorization', async () => {
-    const { AppService } = await import('../src/appService.js')
-    const appService = new AppService()
-    const appServiceBoundary = Object.assign(Object.create(appService), {
-      openProfileSettings: vi.fn(async (_email: string, _options: unknown, report: Function) => {
-        reportLateFailure = report as (correlationId: string, deadline: number) => void
-        return { profileUiUrl: 'https://profile.example.test', dispatchAccepted: true }
-      }),
-    })
-    let reportLateFailure: ((correlationId: string, deadline: number) => void) | undefined
-    registerIpcHandlers(appServiceBoundary, async () => 0)
-    const { event, sender } = makeTrustedEvent()
-    const correlationId = '45454545-4545-4545-4545-454545454545'
-    const documentLease = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    const dispatchDeadline = Date.now() + 5_000
-    const handler = testState.handlers.get('auth:openProfileSettings')
-
-    await Promise.resolve(handler?.(event, { email: '', documentLease }))
-    reportLateFailure?.(correlationId, dispatchDeadline)
-    expect(sender.send).toHaveBeenCalledWith('auth:profileUiDispatchFailurePending', {
-      correlationId,
-      documentLease,
-      dispatchDeadline,
-    })
-    appService.beginShutdown()
-
-    const authorize = testState.listeners.get('auth:authorizeProfileUiDispatchFailure')
-    const authorizeEvent = { ...event, returnValue: undefined }
-    expect(() =>
-      authorize?.(authorizeEvent, { correlationId, documentLease, dispatchDeadline })
-    ).not.toThrow()
-    expect(authorizeEvent.returnValue).toBe(false)
-    expect(sender.send).not.toHaveBeenCalledWith('auth:profileUiDispatchFailed', expect.anything())
-  })
-
-  it('suppresses a buffered dispatch report after real /me rejection ends the session', async () => {
-    // Isolate runtime-config admission from the preceding shutdown-boundary case.
-    vi.resetModules()
-    const [{ AppService }, { ApiError }] = await Promise.all([
-      import('../src/appService.js'),
-      import('../src/httpClient.js'),
-    ])
-    const appService = new AppService()
-    const state = appService as unknown as {
-      sessionToken: string | null
-      me: { id: string; email: string } | null
-      sessionGeneration: number
-      authClient: { getMe: (token: string) => Promise<unknown> }
-      tokenStore: { clearSessionToken: (...args: unknown[]) => Promise<void> }
-      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
-      confirmCommittedSessionWithMe: () => Promise<void>
-    }
-    state.sessionToken = 'committed-session-token'
-    state.me = { id: 'user-id', email: 'user@example.test' }
-    state.sessionGeneration = 7
-    state.tokenStore = { clearSessionToken: vi.fn().mockResolvedValue(undefined) }
-    appService.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
-    vi.spyOn(state.authClient, 'getMe').mockRejectedValue(
-      new ApiError('Unauthorized', 401, '{"error":"Unauthorized"}')
-    )
-
-    let reportLateFailure: ((correlationId: string, deadline: number) => void) | undefined
-    const appServiceBoundary = Object.assign(Object.create(appService), {
-      openProfileSettings: vi.fn(async (_email: string, _options: unknown, report: Function) => {
-        reportLateFailure = report as (correlationId: string, deadline: number) => void
-        return { profileUiUrl: 'https://profile.example.test', dispatchAccepted: true }
-      }),
-    })
-    registerIpcHandlers(appServiceBoundary, async () => 0)
-    const { event, sender } = makeTrustedEvent()
-    const correlationId = '56565656-5656-5656-5656-565656565656'
-    const documentLease = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    const dispatchDeadline = Date.now() + 5_000
-    const handler = testState.handlers.get('auth:openProfileSettings')
-
-    await Promise.resolve(handler?.(event, { email: '', documentLease }))
-    reportLateFailure?.(correlationId, dispatchDeadline)
-    expect(sender.send).toHaveBeenCalledWith('auth:profileUiDispatchFailurePending', {
-      correlationId,
-      documentLease,
-      dispatchDeadline,
-    })
-
-    await state.confirmCommittedSessionWithMe()
-    expect(state.sessionToken).toBeNull()
-    expect(state.sessionGeneration).toBe(8)
-    const authorize = testState.listeners.get('auth:authorizeProfileUiDispatchFailure')
-    const authorizeEvent = { ...event, returnValue: undefined }
-    authorize?.(authorizeEvent, { correlationId, documentLease, dispatchDeadline })
-
-    expect(authorizeEvent.returnValue).toBe(false)
-    expect(sender.send).not.toHaveBeenCalledWith('auth:profileUiDispatchFailed', expect.anything())
   })
 })

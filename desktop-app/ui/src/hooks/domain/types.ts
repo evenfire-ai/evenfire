@@ -4,12 +4,7 @@ export type SetStatusFn = (
   message: string,
   tone?: Tone,
   payload?: unknown,
-  options?: {
-    global?: boolean
-    toast?: boolean
-    toastDurationMs?: number
-    profileUiCorrelationId?: string
-  }
+  options?: { global?: boolean; toast?: boolean; toastDurationMs?: number }
 ) => void
 
 export type PushToastFn = (message: string, tone: Tone, options?: { durationMs?: number }) => void

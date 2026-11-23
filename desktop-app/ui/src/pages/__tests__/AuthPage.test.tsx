@@ -225,25 +225,4 @@ describe('AuthPage', () => {
 
     expect(screen.queryByRole('button', { name: /Switch to .* & retry/ })).toBeNull()
   })
-
-  it('keeps the password-reset success status correlated to its browser dispatch', async () => {
-    const user = userEvent.setup()
-    const setStatus = vi.fn()
-    const openForgotPassword = vi.fn().mockResolvedValue({ correlationId: 'forgot-dispatch-1' })
-    ;(window as unknown as { clerum: { auth: Record<string, unknown> } }).clerum.auth = {
-      probeLocalhostReachable,
-      openForgotPassword,
-    }
-    renderAuthPage({ email: 'User@Example.test', setStatus })
-
-    await user.click(screen.getByRole('button', { name: 'Forgot password' }))
-
-    expect(openForgotPassword).toHaveBeenCalledWith('user@example.test')
-    expect(setStatus).toHaveBeenCalledWith(
-      'Password reset opened in your browser.',
-      'success',
-      undefined,
-      { profileUiCorrelationId: 'forgot-dispatch-1' }
-    )
-  })
 })

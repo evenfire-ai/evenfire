@@ -382,12 +382,10 @@ describe('PR1087 App-root native visibility owners', () => {
           role: 'member',
         },
       }),
-      getDesktopEnvironmentForEndpoint: vi.fn().mockResolvedValue({
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
         appName: 'Environment C',
         externalRestApiBaseUrl: newRest,
         rpcProxyBaseUrl: 'https://rpc-c.example.test',
-        profileUiBaseUrl: 'https://profile-c.example.test',
-        responseUrl: `${newRest}/api/v1/desktop/environment`,
       }),
     }
     producer.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {})

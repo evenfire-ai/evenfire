@@ -3,8 +3,6 @@ import {
   IpcMainEvent,
   IpcMainInvokeEvent,
   Notification,
-  type WebContents,
-  type WebFrameMain,
   app,
   clipboard,
   dialog,
@@ -50,7 +48,6 @@ import {
   HostMessageAttachment,
   HostMessageRequest,
   HostStatusStreamEvent,
-  ProfileUiDispatchBinding,
   TaskProgressStreamEvent,
   WorkflowNotificationStreamEvent,
 } from './types.js'
@@ -80,209 +77,6 @@ function parseDeepLinkAcknowledgmentAuthority(input: unknown): DeepLinkAcknowled
     sessionGeneration: value.sessionGeneration as number,
     userNavigationGeneration: value.userNavigationGeneration as number,
   }
-}
-
-type PendingProfileUiDispatchFailure = {
-  sender: WebContents
-  frame: WebFrameMain
-  documentLease: string
-  binding: ProfileUiDispatchBinding
-  dispatchDeadline: number
-  timer: ReturnType<typeof setTimeout>
-  service: AppService
-  cleanup: () => void
-}
-
-type ProfileUiDispatchFailureReporter = ((
-  correlationId: string,
-  dispatchDeadline: number
-) => void) & {
-  finish: (dispatchDeadline?: number) => void
-}
-
-const pendingProfileUiDispatchFailures = new Map<string, PendingProfileUiDispatchFailure>()
-const PROFILE_UI_DISPATCH_LEASE_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const MAX_PENDING_PROFILE_UI_DISPATCH_FAILURES = 128
-
-function removePendingProfileUiDispatchFailure(correlationId: string): void {
-  const pending = pendingProfileUiDispatchFailures.get(correlationId)
-  if (!pending) return
-  pendingProfileUiDispatchFailures.delete(correlationId)
-  clearTimeout(pending.timer)
-  pending.cleanup()
-}
-
-function profileUiDispatchFailureReporter(
-  event: IpcMainInvokeEvent,
-  service: AppService,
-  rawDocumentLease: unknown
-): ProfileUiDispatchFailureReporter {
-  const sender = event.sender
-  const originatingFrame = event.senderFrame
-  const documentLease =
-    typeof rawDocumentLease === 'string' && PROFILE_UI_DISPATCH_LEASE_PATTERN.test(rawDocumentLease)
-      ? rawDocumentLease
-      : ''
-  const binding = service.getProfileUiDispatchBinding()
-  let invalidated = false
-  let expiryTimer: ReturnType<typeof setTimeout> | undefined
-  let activeCorrelationId: string | undefined
-  const removeDocumentListeners = () => {
-    sender.removeListener('did-navigate', invalidateDocument)
-    sender.removeListener('render-process-gone', invalidateDocument)
-    sender.removeListener('destroyed', invalidateDocument)
-  }
-  const invalidateDocument = () => {
-    invalidated = true
-    if (activeCorrelationId) removePendingProfileUiDispatchFailure(activeCorrelationId)
-    removeDocumentListeners()
-    if (expiryTimer) clearTimeout(expiryTimer)
-  }
-  // Track the invoking document before awaiting discovery or browser dispatch.
-  // Electron may reuse the WebFrameMain object across a document replacement.
-  sender.on('did-navigate', invalidateDocument)
-  sender.on('render-process-gone', invalidateDocument)
-  sender.once('destroyed', invalidateDocument)
-
-  const reporter = ((correlationId, dispatchDeadline) => {
-    if (
-      invalidated ||
-      !documentLease ||
-      !PROFILE_UI_DISPATCH_LEASE_PATTERN.test(correlationId) ||
-      !Number.isSafeInteger(dispatchDeadline) ||
-      Date.now() > dispatchDeadline ||
-      pendingProfileUiDispatchFailures.has(correlationId) ||
-      pendingProfileUiDispatchFailures.size >= MAX_PENDING_PROFILE_UI_DISPATCH_FAILURES ||
-      sender.isDestroyed() ||
-      !originatingFrame ||
-      originatingFrame.isDestroyed() ||
-      sender.mainFrame !== originatingFrame ||
-      !service.isProfileUiDispatchBindingCurrent(binding)
-    ) {
-      return
-    }
-    activeCorrelationId = correlationId
-    const pending: PendingProfileUiDispatchFailure = {
-      sender,
-      frame: originatingFrame,
-      documentLease,
-      binding,
-      dispatchDeadline,
-      timer: setTimeout(
-        () => {
-          removePendingProfileUiDispatchFailure(correlationId)
-          activeCorrelationId = undefined
-        },
-        Math.max(0, dispatchDeadline - Date.now())
-      ),
-      service,
-      cleanup: removeDocumentListeners,
-    }
-    pendingProfileUiDispatchFailures.set(correlationId, pending)
-    sender.send('auth:profileUiDispatchFailurePending', {
-      correlationId,
-      documentLease,
-      dispatchDeadline,
-    })
-  }) as ProfileUiDispatchFailureReporter
-  reporter.finish = dispatchDeadline => {
-    if (
-      !documentLease ||
-      invalidated ||
-      !Number.isSafeInteger(dispatchDeadline) ||
-      (dispatchDeadline as number) <= Date.now()
-    ) {
-      if (activeCorrelationId) removePendingProfileUiDispatchFailure(activeCorrelationId)
-      removeDocumentListeners()
-      return
-    }
-    if (expiryTimer) clearTimeout(expiryTimer)
-    expiryTimer = setTimeout(
-      () => {
-        if (activeCorrelationId) removePendingProfileUiDispatchFailure(activeCorrelationId)
-        removeDocumentListeners()
-      },
-      Math.max(0, (dispatchDeadline as number) - Date.now())
-    )
-  }
-  return reporter
-}
-
-async function runProfileUiDispatchAction<T>(
-  reporter: ProfileUiDispatchFailureReporter,
-  action: (reportLateFailure: ProfileUiDispatchFailureReporter) => Promise<T>
-): Promise<T> {
-  try {
-    const result = await action(reporter)
-    const dispatchDeadline =
-      result && typeof result === 'object'
-        ? (result as { dispatchDeadline?: unknown }).dispatchDeadline
-        : undefined
-    reporter.finish(typeof dispatchDeadline === 'number' ? dispatchDeadline : undefined)
-    return result
-  } catch (error) {
-    reporter.finish()
-    throw error
-  }
-}
-
-function registerProfileUiDispatchFailureAuthorizationHandler(): void {
-  ipcMain.on('auth:authorizeProfileUiDispatchFailure', (event, payload: unknown) => {
-    let authorized = false
-    try {
-      try {
-        assertTrustedSender(event)
-      } catch {
-        return
-      }
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return
-      const value = payload as Record<string, unknown>
-      const correlationId = value.correlationId
-      const documentLease = value.documentLease
-      const dispatchDeadline = value.dispatchDeadline
-      if (
-        typeof correlationId !== 'string' ||
-        typeof documentLease !== 'string' ||
-        !Number.isSafeInteger(dispatchDeadline)
-      ) {
-        return
-      }
-      const pending = pendingProfileUiDispatchFailures.get(correlationId)
-      if (!pending) return
-      removePendingProfileUiDispatchFailure(correlationId)
-      let bindingIsCurrent = false
-      try {
-        bindingIsCurrent = pending.service.isProfileUiDispatchBindingCurrent(pending.binding)
-      } catch {
-        // Shutdown and configuration recovery intentionally fence binding reads.
-        // A late browser failure is advisory, so suppress it when authority is unavailable.
-        return
-      }
-      if (
-        pending.documentLease !== documentLease ||
-        pending.dispatchDeadline !== dispatchDeadline ||
-        Date.now() > pending.dispatchDeadline ||
-        pending.sender !== event.sender ||
-        pending.frame.isDestroyed() ||
-        pending.sender.isDestroyed() ||
-        pending.sender.mainFrame !== pending.frame ||
-        !bindingIsCurrent
-      ) {
-        return
-      }
-      pending.sender.send('auth:profileUiDispatchFailed', {
-        correlationId,
-        documentLease,
-        dispatchDeadline,
-        binding: pending.binding,
-      })
-      authorized = true
-    } finally {
-      // Electron's synchronous IPC reply channel accepts only one assignment.
-      event.returnValue = authorized
-    }
-  })
 }
 
 export function registerDeepLinkAcknowledgmentHandlers(
@@ -756,7 +550,6 @@ function sanitizeDesktopNotificationActions(
 }
 
 export function registerIpcHandlers(service: AppService, logout: () => Promise<number>): void {
-  registerProfileUiDispatchFailureAuthorizationHandler()
   const streamOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
   registerGfsWatchIpcHandlers(service.gfsWatch)
@@ -887,56 +680,28 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.openHostedSignup()
   })
-  ipcMain.handle(
-    'auth:startDesktopSetup',
-    async (event, payload: { email: string; documentLease?: unknown }) => {
-      assertTrustedSender(event)
-      const reporter = profileUiDispatchFailureReporter(event, service, payload?.documentLease)
-      return runProfileUiDispatchAction(reporter, reportLateFailure =>
-        service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase(), reportLateFailure)
-      )
-    }
-  )
-  ipcMain.handle(
-    'auth:openForgotPassword',
-    async (event, payload: { email?: string; documentLease?: unknown }) => {
-      assertTrustedSender(event)
-      const reporter = profileUiDispatchFailureReporter(event, service, payload?.documentLease)
-      return runProfileUiDispatchAction(reporter, reportLateFailure =>
-        service.openForgotPassword(
-          sanitizeString(payload?.email || '').toLowerCase(),
-          reportLateFailure
-        )
-      )
-    }
-  )
+  ipcMain.handle('auth:startDesktopSetup', async (event, payload: { email: string }) => {
+    assertTrustedSender(event)
+    return service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase())
+  })
+  ipcMain.handle('auth:openForgotPassword', async (event, payload: { email?: string }) => {
+    assertTrustedSender(event)
+    return service.openForgotPassword(sanitizeString(payload?.email || '').toLowerCase())
+  })
   ipcMain.handle(
     'auth:openProfileSettings',
     async (
       event,
-      payload: {
-        email?: string
-        section?: string
-        network?: string
-        action?: string
-        documentLease?: unknown
-      }
+      payload: { email?: string; section?: string; network?: string; action?: string }
     ) => {
       assertTrustedSender(event)
       const action = payload?.action === 'password' ? 'password' : undefined
       const section = payload?.section === 'social' ? 'social' : 'profile'
-      const reporter = profileUiDispatchFailureReporter(event, service, payload?.documentLease)
-      return runProfileUiDispatchAction(reporter, reportLateFailure =>
-        service.openProfileSettings(
-          sanitizeString(payload?.email || '').toLowerCase(),
-          {
-            section,
-            network: sanitizeString(payload?.network || '').toLowerCase(),
-            action,
-          },
-          reportLateFailure
-        )
-      )
+      return service.openProfileSettings(sanitizeString(payload?.email || '').toLowerCase(), {
+        section,
+        network: sanitizeString(payload?.network || '').toLowerCase(),
+        action,
+      })
     }
   )
   ipcMain.handle(

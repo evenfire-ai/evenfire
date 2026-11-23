@@ -100,9 +100,6 @@ const appService = new AppService({
     }
   },
 })
-app.on('before-quit', () => {
-  appService.beginShutdown()
-})
 const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
 const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()
 const logoutAndClearGfsResourceDeepLinks = createLogoutWithGfsResourceDeepLinkClear(

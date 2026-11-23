@@ -6,10 +6,7 @@ import {
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
 
-afterEach(async () => {
-  vi.restoreAllMocks()
-  await cleanupNativeCommitTestHarness()
-})
+afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService native auth and environment commit ordering', () => {
   it('persists real version-2 GFS state as suspended_auth on logout', async () => {
@@ -261,25 +258,10 @@ describe('AppService native auth and environment commit ordering', () => {
     })
   })
 
-  it('rejects a staged selection superseded by a login before queue admission', async () => {
+  it('keeps a pending environment selection ahead of a login commit', async () => {
     const { service, runtimeConfig, restA, restB, optionB } = await createNativeCommitTestHarness()
     const loginStarted = deferred<void>()
     const releaseLogin = deferred<void>()
-    const stageStarted = deferred<void>()
-    const releaseStage = deferred<void>()
-    const originalWriteFile = fs.writeFile.bind(fs)
-    const fsPromises = fs as unknown as { writeFile: (...args: any[]) => Promise<void> }
-    let heldStage = false
-    vi.spyOn(fsPromises, 'writeFile').mockImplementation((...args: any[]) => {
-      if (!heldStage && String(args[0]).includes('.runtime-config-stage-')) {
-        heldStage = true
-        stageStarted.resolve()
-        return releaseStage.promise.then(() =>
-          originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
-        )
-      }
-      return originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
-    })
     let handoffRequestRest = ''
     service.authClient = {
       googleLogin: vi.fn(async (token: string) => {
@@ -297,27 +279,35 @@ describe('AppService native auth and environment commit ordering', () => {
     } as never
     await service.googleLogin('initial-login')
 
+    let handoffLogin: Promise<unknown> | null = null
+    const selectReal = runtimeConfig.selectDesktopRuntimeConfigOption.bind(runtimeConfig)
+    vi.spyOn(runtimeConfig, 'selectDesktopRuntimeConfigOption').mockImplementation(async id => {
+      if (id === optionB.id) handoffLogin = service.googleLogin('handoff-login')
+      await selectReal(id)
+    })
+
     const selection = service.selectRuntimeConfig(optionB.id)
-    await stageStarted.promise
-    const handoffLogin = service.googleLogin('handoff-login')
+    const selectionOutcome = await selection.then(
+      value => ({ status: 'fulfilled' as const, value }),
+      reason => ({ status: 'rejected' as const, reason })
+    )
     await loginStarted.promise
-    releaseStage.resolve()
-    await expect(selection).rejects.toThrow('stale_session_generation')
     releaseLogin.resolve()
     const loginOutcome = await handoffLogin
 
-    expect(handoffRequestRest).toBe(restA)
-    expect(loginOutcome).toMatchObject({ authenticated: true, me: { id: 'user-a' } })
-    expect(runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).not.toBe(optionB.id)
+    expect(selectionOutcome.status).toBe('fulfilled')
+    expect(handoffRequestRest).toBe(restB)
+    expect(loginOutcome).toMatchObject({ authenticated: true, me: { id: 'user-b' } })
+    expect(runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(optionB.id)
     await expect(service.getSessionState()).resolves.toMatchObject({
       authenticated: true,
-      me: { id: 'user-a' },
+      me: { id: 'user-b' },
     })
     await expect(service.listGfsUploadSessions()).resolves.toEqual([])
     expect(service.gfsScopeIdentity).toMatchObject({
-      ownerId: 'user-a',
+      ownerId: 'user-b',
       environmentKey: runtimeConfig.getDesktopRuntimeConfigState().envKey,
-      baseUrl: restA,
+      baseUrl: restB,
     })
   })
 })

@@ -37,7 +37,6 @@ realPg('RP-003 complete password admission response metadata', () => {
     url.pathname = `/${database}`
     vi.stubEnv('CONTROL_API_PG_CONNECTION_STRING', url.toString())
     vi.stubEnv('CONTROL_API_INTERNAL_SERVICE_TOKENS', `external-rest-api=${serviceToken}`)
-    vi.stubEnv('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL', 'http://127.0.0.1:3001')
     vi.stubEnv(
       'EXTERNAL_REST_API_JWT_PUBLIC_KEY',
       createPublicKey(process.env.CONTROL_API_SESSION_JWT_PRIVATE_KEY!)
@@ -58,7 +57,6 @@ realPg('RP-003 complete password admission response metadata', () => {
     server = app.listen(0, '127.0.0.1')
     await new Promise<void>(resolve => server.once('listening', resolve))
     externalConfig = (await import('../../external-rest-api/src/config.js')).config
-    expect(externalConfig.desktopProfileUiBaseUrl).toBe('http://127.0.0.1:3001')
     previousUrl = externalConfig.controlApiBaseUrl
     previousToken = externalConfig.controlApiServiceToken
     externalConfig.controlApiBaseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`

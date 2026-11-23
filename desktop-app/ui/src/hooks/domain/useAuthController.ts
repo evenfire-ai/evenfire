@@ -21,7 +21,6 @@ import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
 
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
-  onMainSessionGenerationChanged?: () => Promise<void>
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
   onSessionEnded: () => void
   logoutForEnvironmentMismatch: () => Promise<number | null>
@@ -66,7 +65,6 @@ function getDesktopSetupErrorMessage(error: unknown) {
 
 export function useAuthController({
   setStatus,
-  onMainSessionGenerationChanged,
   onSessionNeedsLoad,
   onSessionEnded,
   logoutForEnvironmentMismatch,
@@ -174,25 +172,21 @@ export function useAuthController({
 
   const completeDesktopSetupWith = useCallback(
     async (nextEmail: string, nextAuthorizationToken: string) => {
-      try {
-        const normalizedEmail = nextEmail.trim().toLowerCase()
-        if (!normalizedEmail || !nextAuthorizationToken.trim()) {
-          throw new Error('email and authorization token are required')
-        }
-        const state = await window.clerum.auth.completeDesktopSetup(
-          normalizedEmail,
-          nextAuthorizationToken.trim()
-        )
-        setRuntimeConfigState(state)
-        setEmail(normalizedEmail)
-        setDesktopSetupAuthorizationToken('')
-        setDesktopSetupStarted(false)
-        setStatus('Desktop setup complete. Sign in with your email and password.', 'success')
-      } finally {
-        await onMainSessionGenerationChanged?.()
+      const normalizedEmail = nextEmail.trim().toLowerCase()
+      if (!normalizedEmail || !nextAuthorizationToken.trim()) {
+        throw new Error('email and authorization token are required')
       }
+      const state = await window.clerum.auth.completeDesktopSetup(
+        normalizedEmail,
+        nextAuthorizationToken.trim()
+      )
+      setRuntimeConfigState(state)
+      setEmail(normalizedEmail)
+      setDesktopSetupAuthorizationToken('')
+      setDesktopSetupStarted(false)
+      setStatus('Desktop setup complete. Sign in with your email and password.', 'success')
     },
-    [onMainSessionGenerationChanged, setStatus]
+    [setStatus]
   )
 
   // Boot effect
@@ -297,7 +291,6 @@ export function useAuthController({
         setBackendSwitchHint(null)
       }
     } finally {
-      await onMainSessionGenerationChanged?.()
       setAuthTransitioning(false)
       setBusy(false)
     }
@@ -318,11 +311,9 @@ export function useAuthController({
       setAuthTransitioning(true)
       const normalizedEmail = email.trim().toLowerCase()
       if (!normalizedEmail) throw new Error('email is required')
-      const result = await window.clerum.auth.startDesktopSetup(normalizedEmail)
+      await window.clerum.auth.startDesktopSetup(normalizedEmail)
       setDesktopSetupStarted(true)
-      setStatus('Check your browser to authorize desktop setup.', 'success', undefined, {
-        profileUiCorrelationId: result.correlationId,
-      })
+      setStatus('Check your browser to authorize desktop setup.', 'success')
     } catch (error) {
       setStatus(
         isMissingInvitationConfigError(error)
@@ -391,7 +382,6 @@ export function useAuthController({
       }
       return state
     } catch (error) {
-      await refreshRuntimeConfigState().catch(() => undefined)
       const message = error instanceof Error ? error.message : String(error)
       if (
         expectedSessionGeneration !== undefined &&
@@ -409,20 +399,11 @@ export function useAuthController({
       ) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus('The desktop session changed while processing this link. Open it again.', 'info')
-      } else if (expectedSessionGeneration !== undefined) {
-        setPendingDesktopEnvironmentSetup(null)
-        setStatus(
-          message.includes('Profile UI resolution is unavailable')
-            ? 'Desktop environment setup could not verify the confirmed REST and RPC endpoints.'
-            : `Environment setup failed: ${message}`,
-          'error'
-        )
       } else {
         setStatus(`Environment setup failed: ${message}`, 'error')
       }
       return null
     } finally {
-      await onMainSessionGenerationChanged?.()
       setBusy(false)
     }
   }
@@ -439,13 +420,11 @@ export function useAuthController({
       setRuntimeConfigState(state)
       setStatus('Environment deleted.', 'success', undefined, { global: false, toast: true })
     } catch (error) {
-      await refreshRuntimeConfigState().catch(() => undefined)
       setStatus(
         `Failed to delete environment: ${error instanceof Error ? error.message : String(error)}`,
         'error'
       )
     } finally {
-      await onMainSessionGenerationChanged?.()
       setBusy(false)
     }
   }
@@ -470,23 +449,16 @@ export function useAuthController({
         reportDesktopEnvironmentSelected(state, setStatus)
         return state
       } catch (error) {
-        await refreshRuntimeConfigState().catch(() => undefined)
         setStatus(
           `Failed to switch environment: ${error instanceof Error ? error.message : String(error)}`,
           'error'
         )
         return null
       } finally {
-        await onMainSessionGenerationChanged?.()
         setBusy(false)
       }
     },
-    [
-      applySelectedRuntimeConfigState,
-      onMainSessionGenerationChanged,
-      refreshRuntimeConfigState,
-      setStatus,
-    ]
+    [applySelectedRuntimeConfigState, setStatus]
   )
 
   const handleSelectRuntimeConfigForHandoff = useCallback(
@@ -509,7 +481,6 @@ export function useAuthController({
         }
         return selection
       } catch (error) {
-        await refreshRuntimeConfigState().catch(() => undefined)
         const message = error instanceof Error ? error.message : String(error)
         if (message.includes('stale_session_generation')) {
           setStatus(
@@ -535,16 +506,10 @@ export function useAuthController({
         setStatus(`Failed to switch environment: ${message}`, 'error')
         return null
       } finally {
-        await onMainSessionGenerationChanged?.()
         setBusy(false)
       }
     },
-    [
-      applySelectedRuntimeConfigState,
-      onMainSessionGenerationChanged,
-      refreshRuntimeConfigState,
-      setStatus,
-    ]
+    [applySelectedRuntimeConfigState, setStatus]
   )
 
   useEffect(() => {
@@ -590,14 +555,12 @@ export function useAuthController({
       })
       return state
     } catch (error) {
-      await refreshRuntimeConfigState().catch(() => undefined)
       setStatus(
         `Failed to unselect environment: ${error instanceof Error ? error.message : String(error)}`,
         'error'
       )
       return null
     } finally {
-      await onMainSessionGenerationChanged?.()
       setBusy(false)
     }
   }

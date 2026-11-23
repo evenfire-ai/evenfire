@@ -32,7 +32,7 @@ vi.mock(
 )
 
 const authMocks = vi.hoisted(() => ({
-  getDesktopEnvironmentForEndpoint: vi.fn(),
+  getDesktopEnvironment: vi.fn(),
   getMe: vi.fn(),
   googleLogin: vi.fn(),
   health: vi.fn(),
@@ -52,17 +52,20 @@ vi.mock('../config.js', async importOriginal => {
   }
   return {
     validateRpcProxyBaseUrl,
+    captureProfileOriginBinding: () => ({
+      profileId: null,
+      filePath: null,
+      restBaseUrl: 'http://rest',
+      rpcBaseUrl: 'https://rpc.example',
+      witness: null,
+    }),
+    getPairedProfileUiOverride: () => 'https://profile.example.com',
     getActiveDeploymentProfileUiBaseUrl: () => 'https://profile.example.com',
-    getActiveRuntimeConfigProfileIdentity: () => null,
-    getActiveRuntimeConfigOptionId: () => 'test-profile',
+    getActiveRuntimeConfigOptionId: () => null,
     getActiveEnvKey: () => 'test-env',
     getActiveLegacyEnvKeys: () => [],
     hydrateDesktopRuntimeConfig: () => undefined,
     isDesktopRuntimeConfigured: () => true,
-    prepareDesktopRuntimeConfigSave: vi.fn(() => ({ id: 'test-runtime-save', created: false })),
-    stagePreparedDesktopRuntimeConfigMutation: vi.fn().mockResolvedValue(undefined),
-    commitPreparedDesktopRuntimeConfigMutation: vi.fn().mockResolvedValue(undefined),
-    cancelPreparedDesktopRuntimeConfigMutation: vi.fn(),
     saveDesktopRuntimeConfig: vi.fn(),
     getDesktopRuntimeConfigState: () => ({
       configured: true,
@@ -110,7 +113,7 @@ vi.mock('../authClient.js', () => ({
     health = authMocks.health
     getMe = authMocks.getMe
     googleLogin = authMocks.googleLogin
-    getDesktopEnvironmentForEndpoint = authMocks.getDesktopEnvironmentForEndpoint
+    getDesktopEnvironment = authMocks.getDesktopEnvironment
   },
 }))
 
@@ -223,7 +226,7 @@ beforeEach(async () => {
   authMocks.health.mockResolvedValue({ status: 'ok' })
   authMocks.getMe.mockResolvedValue(null)
   authMocks.googleLogin.mockReset()
-  authMocks.getDesktopEnvironmentForEndpoint.mockReset()
+  authMocks.getDesktopEnvironment.mockReset()
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   electronMocks.views.length = 0
   electronMocks.sessionObject.cookies.set.mockResolvedValue(undefined)
@@ -263,13 +266,12 @@ describe('AppService sandbox-ui effective RPC endpoint', () => {
     const { config } = await import('../config.js')
     const discoveredRpcUrl = 'https://late-rpc.example.test'
     config.rpcProxyBaseUrl = ''
-    authMocks.getDesktopEnvironmentForEndpoint
+    authMocks.getDesktopEnvironment
       .mockRejectedValueOnce(new Error('initial discovery unavailable'))
       .mockResolvedValueOnce({
         externalRestApiBaseUrl: 'http://rest',
         rpcProxyBaseUrl: discoveredRpcUrl,
         appName: 'Discovered environment',
-        responseUrl: 'http://rest/api/v1/desktop/environment',
       })
     authMocks.googleLogin.mockResolvedValue({
       token: 'fake-session-token',
