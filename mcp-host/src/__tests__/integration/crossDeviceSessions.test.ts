@@ -59,6 +59,9 @@ function makeApp(convManager: ConversationManager) {
     getConversationManager: () => convManager,
     redactToolError: (_toolName, rawError) => rawError,
     redactTitle: rawTitle => rawTitle,
+    // No Host approval config and no Host model, as main.ts reports them.
+    approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
+    sessionModel: () => ({ providerType: 'unknown', modelName: 'unknown' }),
   })
   const handlers = makeHandlers({
     sessionsListHandler: handleSessionsList,

@@ -66,6 +66,7 @@ const HOST_EDGE_RPC_PROXY_ROUTE_SCOPES = Object.freeze({
   'GET /v1/runtime/models': 'host:session:read',
   'POST /v1/runtime/model': 'host:model:write',
   'PATCH /v1/runtime/sessions/:agent/:chatId/name': 'host:session:write',
+  'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode': 'host:approval:write',
   'GET /v1/runtime/tasks/:taskId/progress/stream': 'host:activity:read',
   'GET /v1/runtime/artifacts': 'host:task:read',
   'GET /v1/runtime/artifacts/:filename/download': 'host:task:read',

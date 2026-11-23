@@ -203,6 +203,51 @@ describe('profile-admin agent compatibility access', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
+  it('shows the removed-member invite refusal without its status prefix in the team invite dialog', async () => {
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({ teamId: 'team-1', contextIds: [] })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    // The guard's real 409 body, run through the real formatApiError.
+    const body = JSON.stringify({
+      error: 'member_email_retired',
+      message: "This email belongs to a removed member and can't be invited again.",
+      email: 'removed@example.com',
+    })
+    vi.mocked(api.inviteAdminTeamMember).mockRejectedValueOnce(
+      api.formatApiError(new Response(body, { status: 409, statusText: 'Conflict' }), body)
+    )
+    navigationState.params = { teamId: 'team-1', tab: 'members' }
+    render(<TeamDetailsPage />)
+
+    await screen.findByRole('button', { name: 'Add member' })
+    fireEvent.click(screen.getByRole('button', { name: 'Add member' }))
+    const dialog = screen.getByRole('dialog', { name: 'Add member' })
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Invite by email' }))
+    fireEvent.change(within(dialog).getByLabelText(/Name/), { target: { value: 'Removed Member' } })
+    fireEvent.change(within(dialog).getByLabelText(/Email/), {
+      target: { value: 'removed@example.com' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send invite' }))
+
+    // Positive: the invite submit path ran.
+    await waitFor(() =>
+      expect(api.inviteAdminTeamMember).toHaveBeenCalledWith('team-1', {
+        name: 'Removed Member',
+        email: 'removed@example.com',
+        role: 'member',
+      })
+    )
+    const refusal = "This email belongs to a removed member and can't be invited again."
+    await waitFor(() => expect(within(dialog).getByText(refusal)).toBeInTheDocument())
+    // Dialog error and toast both show the unprefixed text.
+    expect(screen.getAllByText(refusal).length).toBeGreaterThanOrEqual(2)
+    expect(screen.queryByText(/409 Conflict/)).not.toBeInTheDocument()
+  })
+
   it('adds members to teams through the shared searchable chip picker and dialog', async () => {
     vi.mocked(api.getAdminUserContexts).mockResolvedValue({ userId: 'user-1', contextIds: [] })
     vi.mocked(api.getAdminUserAgents).mockResolvedValue({

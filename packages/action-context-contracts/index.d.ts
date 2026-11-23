@@ -60,6 +60,7 @@ export type HostEdgeRpcProxyRoute =
   | 'GET /v1/runtime/models'
   | 'POST /v1/runtime/model'
   | 'PATCH /v1/runtime/sessions/:agent/:chatId/name'
+  | 'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode'
   | 'GET /v1/runtime/tasks/:taskId/progress/stream'
   | 'GET /v1/runtime/artifacts'
   | 'GET /v1/runtime/artifacts/:filename/download'

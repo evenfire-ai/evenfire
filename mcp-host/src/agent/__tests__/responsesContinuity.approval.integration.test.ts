@@ -153,6 +153,7 @@ async function suspended() {
     workspaceService: undefined,
     modelName: RESPONSES_MODEL,
     approvalConfig: APPROVAL,
+    approvalConfigProvider: () => ({ effective: APPROVAL, hostSpec: APPROVAL }),
     config: {
       maxTaskDuration: 30_000,
       maxToolCallsPerTask: 10,

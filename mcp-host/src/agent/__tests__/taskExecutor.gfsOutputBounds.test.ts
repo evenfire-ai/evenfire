@@ -153,6 +153,10 @@ function makeScenario(options: {
       defaultPolicy: 'channel_users',
       channels: {},
     },
+    approvalConfigProvider: () => ({
+      effective: deps.approvalConfig,
+      hostSpec: deps.approvalConfig,
+    }),
     config: {
       maxTaskDuration: 300_000,
       maxToolCallsPerTask: 10,
@@ -387,6 +391,9 @@ it('rehydrates a waiting GFS shell approval into a fresh executor', async () => 
       getConversationManager: () => scenario.conversationManager,
       redactToolError: (_tool, text) => text,
       redactTitle: text => text,
+      // No Host approval config and no Host model, as main.ts reports them.
+      approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
+      sessionModel: () => ({ providerType: 'unknown', modelName: 'unknown' }),
     })
     const snapshot = await handlers.handleSessionMessages(
       'gfs-caller',

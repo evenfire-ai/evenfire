@@ -70,7 +70,7 @@ describe('approval scope across a restart', () => {
   ) {
     const podA = pod()
     const managerA = new ConversationManager(podA.store)
-    const conv = await managerA.getOrCreate(SESSION_KEY)
+    const conv = await managerA.getOrCreate(SESSION_KEY, { channelType: 'rpc' })
     await setup?.(managerA)
     await managerA.startTurn(conv, 'do it', 'task-1')
     const g = gate()

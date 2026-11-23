@@ -115,6 +115,7 @@ describe('clerum__attachment_read persistence boundary (#666)', () => {
         workspaceService: undefined,
         modelName: 'test-model',
         approvalConfig: undefined,
+        approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
         config: {
           maxTaskDuration: 300000,
           maxToolCallsPerTask: 10,
