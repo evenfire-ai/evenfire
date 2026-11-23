@@ -1747,7 +1747,8 @@ dev-mode bypass; without them the guard returns `401`. An `Authorization` header
 routes is also rejected with `401`. Caller `rpc-proxy` also needs an edge assertion that
 only control-api can sign, so a script acts as the Telegram `channel-reader`, the way
 channel-reader itself does: send the message, read the approval's `requestId` from the
-task's progress stream, then approve.
+task's progress stream, then approve. `CLERUM_MCP_HOST_URL` is the Host URL that
+channel-reader uses above.
 
 ```bash
 EDGE=(-H "x-clerum-edge-caller: channel-reader" -H "x-clerum-edge-host-ref: chatllm"
@@ -1755,7 +1756,7 @@ EDGE=(-H "x-clerum-edge-caller: channel-reader" -H "x-clerum-edge-host-ref: chat
       -H "x-clerum-edge-sender: 123")
 
 # Send a message that triggers a tool; the answer carries the taskId
-curl -X POST http://localhost:8080/v1/runtime/messages "${EDGE[@]}" -H "Content-Type: application/json" -d '{
+curl -X POST "$CLERUM_MCP_HOST_URL/v1/runtime/messages" "${EDGE[@]}" -H "Content-Type: application/json" -d '{
   "content": "List files in /tmp",
   "channelType": "telegram",
   "channelId": "test",
@@ -1766,10 +1767,10 @@ curl -X POST http://localhost:8080/v1/runtime/messages "${EDGE[@]}" -H "Content-
 }'
 
 # Read the approval request: each `suspended` event carries data.requestId
-curl -N http://localhost:8080/v1/runtime/tasks/<taskId>/progress/stream "${EDGE[@]}"
+curl -N "$CLERUM_MCP_HOST_URL/v1/runtime/tasks/<taskId>/progress/stream" "${EDGE[@]}"
 
 # Approve
-curl -X POST http://localhost:8080/v1/runtime/approvals/approve "${EDGE[@]}" -H "Content-Type: application/json" -d '{
+curl -X POST "$CLERUM_MCP_HOST_URL/v1/runtime/approvals/approve" "${EDGE[@]}" -H "Content-Type: application/json" -d '{
   "userId": "123",
   "requestId": "<from the suspended event>",
   "alwaysApprove": false,
