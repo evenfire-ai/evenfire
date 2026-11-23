@@ -5,6 +5,7 @@ import {
   GIT_READ_VALIDATION_TEXTS,
   checkGitReadParams,
   gitReadFileReads,
+  gitReadReturnsContent,
   validateGitReadParams,
 } from '../definition'
 import { checkForEachRefFormat, checkRevisionWord } from '../protectedContent'
@@ -187,6 +188,17 @@ describe('validateGitReadParams', () => {
     ]) {
       expect(checkForEachRefFormat(format)).toBe(true)
     }
+  })
+})
+
+describe('gitReadReturnsContent', () => {
+  it('is false only for valid names-only calls; an invalid call counts as content', () => {
+    expect(gitReadReturnsContent({ subcommand: 'status' })).toBe(false)
+    expect(gitReadReturnsContent({ subcommand: 'log', options: ['stat'] })).toBe(false)
+    expect(gitReadReturnsContent({ subcommand: 'show' })).toBe(true)
+    expect(gitReadReturnsContent({ subcommand: 'log', options: ['patch'] })).toBe(true)
+    expect(gitReadReturnsContent({ subcommand: 'status', revisions: ['--output=x'] })).toBe(true)
+    expect(gitReadReturnsContent({ subcommand: 'push' })).toBe(true)
   })
 })
 
