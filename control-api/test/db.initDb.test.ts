@@ -70,11 +70,12 @@ describe('db.initDb', () => {
     // The committed password-admission rollout fence, one dev batch through
     // 0136_llm_catalog_dismissed_backfill (as in dev), then one transaction per
     // PR1 version. PR2 uses 18 transactions for schema changes, constraint
-    // validations, and receipts. The two retention versions use one each.
+    // validations, and receipts. The two retention versions and
+    // 0159_oidc_member_links use one each.
     const { PR1_MIGRATION_VERSIONS } = await import('../src/migrations/migrationRunner.js')
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length + 20)
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length + 21)
     expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(
-      2 + PR1_MIGRATION_VERSIONS.length + 20
+      2 + PR1_MIGRATION_VERSIONS.length + 21
     )
     expect(sqls.filter(sql => /^ALTER TABLE \w+ VALIDATE CONSTRAINT \w+$/.test(sql))).toHaveLength(
       8

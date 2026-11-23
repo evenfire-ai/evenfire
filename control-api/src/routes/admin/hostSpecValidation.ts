@@ -304,10 +304,29 @@ function validateHostArrayCaps(
   return null
 }
 
+// Strict channel objects. Unknown keys on the approval object itself still pass through.
+const HostApprovalChannelSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    approvers: z.array(z.string()).optional(),
+    allowModeChange: z.boolean().optional(),
+  })
+  .strict()
+
 const HostApprovalSchema = z
   .object({
     defaultPolicy: z.string().optional(),
-    channels: z.any().optional(),
+    modeCeiling: z.enum(['manual', 'auto', 'allow_all']).optional(),
+    shellClassifierModel: z.string().optional(),
+    channels: z
+      .object({
+        telegram: HostApprovalChannelSchema.optional(),
+        email: HostApprovalChannelSchema.optional(),
+        slack: HostApprovalChannelSchema.optional(),
+        teams: HostApprovalChannelSchema.optional(),
+      })
+      .strict()
+      .optional(),
     tools: z.record(z.string(), z.boolean()).optional(),
   })
   .passthrough()
@@ -401,7 +420,7 @@ const HostLifecycleSchema = z
 /**
  * Validate a Host spec before it reaches the K8s API.
  *
- * - `spec.approval`: defensive zod shape check (unchanged behavior).
+ * - `spec.approval`: modeCeiling and per-channel allowModeChange, plus the existing policy fields.
  * - `spec.lifecycle` (stateless agents): optional object carrying a boolean
  *   `stateless`; absent means disabled (the admin facade full-replaces the CR,
  *   so Control UI must echo the full spec it read).

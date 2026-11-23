@@ -1,5 +1,6 @@
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import type { FilesResolvedLocation } from '@lib/tabReferenceSuggestion.types'
 import type { Tone } from '@/uiTypes'
 
 export type GfsDriveResource = GfsBrowserChild & {
@@ -50,9 +51,7 @@ export interface FilesPageProps {
    * The resolved current location and whether it is a file or a folder, so the
    * owner watches it under the right kind; `null` at the root or on unmount.
    */
-  onResolvedLocationChange?: (
-    location: { gfsUri: string; kind: 'file' | 'directory' } | null
-  ) => void
+  onResolvedLocationChange?: (location: FilesResolvedLocation) => void
   /**
    * Open (or focus) a preview tab for a previewable file (spec 18 §3.B.4). The
    * files browser no longer renders a preview modal: `openFilePreview` resolves

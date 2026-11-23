@@ -1,0 +1,9 @@
+{
+  "metadata": {
+    "name": "bare",
+    "namespace": "channels"
+  },
+  "spec": {
+    "hostRef": "h1"
+  }
+}

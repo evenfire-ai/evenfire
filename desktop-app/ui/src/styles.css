@@ -419,14 +419,19 @@ h3 {
   align-items: center;
   gap: var(--space-1);
   height: var(--window-titlebar-height);
-  /* Chromium unions all `-webkit-app-region` rects in DOCUMENT ORDER and, where
+  /* Chromium unions all `-webkit-app-region` boxes in DOCUMENT ORDER and, where
      they overlap, the LAST one wins (z-index, position and pointer-events do not
-     enter into it). The only `drag` region is the root `.window-titlebar`; every
-     control that must stay clickable carves itself out as `no-drag`. This slot
-     sits over that root drag band, so it declares `no-drag` to lift the whole
-     leading area (and its descendant buttons) out of it. It must NOT declare
-     `drag` here: a later-in-document `drag` box covering another control would
-     re-union over it and make that control draggable again. */
+     enter into it). The property is inherited, so a descendant of
+     `.window-titlebar` is a `drag` box unless it, or an ancestor between it and
+     `.window-titlebar`, declares `no-drag` — that includes the fixed, almost
+     full-width `.window-titlebar__actions` and its `.top-bar`, which overlap
+     this slot. Every control that must stay clickable
+     therefore declares `no-drag`, and this slot must stay AFTER
+     `.window-titlebar__actions` in the DOM: rendered before it, the actions'
+     inherited drag band would re-cover the leading buttons and the OS would
+     swallow their clicks as window drags. Its descendants inherit `no-drag`.
+     It must NOT declare `drag` here: a later-in-document `drag` box covering
+     another control would re-union over it and make that control draggable. */
   pointer-events: auto;
   -webkit-app-region: no-drag;
 }
@@ -480,8 +485,9 @@ h3 {
   box-shadow: none;
   color: var(--titlebar-control-ink);
   /* Restate no-drag on the clickable button itself. The leading slot is already
-     no-drag and propagates, so this is idempotent — kept for clarity next to the
-     interactive control, and harmless because it never widens a drag region. */
+     no-drag and its descendants inherit it, so this is idempotent — kept for
+     clarity next to the interactive control, and harmless because it never
+     widens a drag region. */
   -webkit-app-region: no-drag;
 }
 
@@ -4340,6 +4346,17 @@ body.sidebar-resizing {
   cursor: default;
 }
 
+/* A row that stays focusable but is not offered (approval modes above the
+ * Host's limit). It keeps its focus-visible background, not a hover one. */
+.model-selector-item[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.model-selector-item[aria-disabled='true']:hover:not(:focus-visible) {
+  background: transparent;
+}
+
 .model-selector-item--active {
   background: rgba(var(--edge-rgb), 0.2);
   font-weight: var(--font-weight-medium);
@@ -4445,9 +4462,47 @@ body.sidebar-resizing {
   color: var(--text-dim);
 }
 
+/* Busy approval-mode chip while its save is in flight: it stays focusable (a
+ * pick hands focus back to it), so it keeps the interactive class and its
+ * focus ring, but hover no longer suggests it opens. */
+.composer-actions-right
+  .model-selector-chip.model-selector-chip--disabled.ui-pill--interactive:hover {
+  background: var(--surface-soft);
+  border-color: rgba(var(--edge-rgb), 0.32);
+  color: var(--text-dim);
+  cursor: default;
+}
+
 /* Caret reads as a control affordance (muted), not a status accent. */
 .composer-actions-right .model-selector-chip-caret {
   opacity: 0.55;
+}
+
+/* Approval-mode picker. It reuses the model selector's chip, upward popover and
+ * rows above so the two composer controls match. Only its own pieces live here:
+ * a save error that floats above the chip like the "applies to your next
+ * message" badge, out of the flex flow so it never shoves the send button, and
+ * the Allow-all confirmation that replaces the menu inside the popover. */
+.approval-mode-picker-error {
+  position: absolute;
+  bottom: calc(100% + var(--space-1));
+  right: 0;
+  font-size: var(--font-size-2xs);
+  color: var(--danger);
+  white-space: nowrap;
+}
+
+.approval-mode-picker-confirm-text {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text);
+  line-height: var(--line-height-normal);
+}
+
+.approval-mode-picker-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
 }
 
 .agent-workspace-agent-breadcrumb-actions {
@@ -8284,6 +8339,73 @@ body.sidebar-resizing {
   font-size: var(--font-size-2xs);
   line-height: 1.2;
   color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-suggested-reference {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.composer-suggested-reference-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 34px;
+  max-width: 260px;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px dashed rgba(var(--edge-rgb), 0.45);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  padding: var(--space-0-5) var(--space-1);
+  cursor: pointer;
+}
+
+.composer-suggested-reference-chip:hover:enabled {
+  background: var(--list-item-hover-bg);
+  border-color: rgba(var(--accent-rgb), 0.34);
+  color: var(--text);
+}
+
+.composer-suggested-reference-chip:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
+.composer-suggested-reference-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.composer-suggested-reference-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.composer-suggested-reference-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-suggested-reference-reason {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--font-size-2xs);
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -13883,9 +14005,10 @@ pre {
   border-color: transparent;
   background: transparent;
   box-shadow: none;
-  /* The root title bar is the only `-webkit-app-region: drag` band; every
-     clickable control carves itself out as `no-drag` (see .window-titlebar__leading)
-     or the OS swallows its clicks for window dragging. */
+  /* `-webkit-app-region` is inherited, so this toggle would otherwise be a
+     `drag` box like the rest of the title bar; every clickable control declares
+     `no-drag` (see .window-titlebar__leading) or the OS swallows its clicks for
+     window dragging. */
   -webkit-app-region: no-drag;
 }
 

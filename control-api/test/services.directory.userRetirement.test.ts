@@ -86,7 +86,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
@@ -150,7 +150,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
@@ -242,12 +242,12 @@ describe('retireDesktopUser', () => {
     expect(mocks.retireParentInTransaction).not.toHaveBeenCalled()
   })
 
-  it('keeps the legacy hard-delete only for users with no operator-link history and persists its replay result', async () => {
+  it('keeps the legacy hard-delete only for users with no operator-link or OIDC-link history while OIDC member sign-in is off, and persists its replay result', async () => {
     const { retireDesktopUser } = await import('../src/services/directory/users.js')
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: false }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: false }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: USER_ID }], rowCount: 1 })
@@ -278,7 +278,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
@@ -323,7 +323,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
     mocks.retireParentInTransaction.mockRejectedValueOnce(new Error('audit unavailable'))
 
     await expect(
@@ -346,7 +346,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser(7))
-      .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 0 })
@@ -386,7 +386,7 @@ describe('retireDesktopUser', () => {
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
-      .mockResolvedValueOnce({ rows: [{ has_link_history: false }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ has_operator_link_history: false }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
