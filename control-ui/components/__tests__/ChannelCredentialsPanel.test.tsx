@@ -42,7 +42,7 @@ function renderPanel(props: Parameters<typeof ChannelCredentialsPanel>[0] = { cc
 describe('ChannelCredentialsPanel — credential field filtering', () => {
   it('shows all provider credential inputs when visibleChannelTypes is undefined', () => {
     renderPanel({ ccName: 'cc-rotate' })
-    expect(screen.getByLabelText('Telegram Bot Token')).toBeInTheDocument()
+    expect(screen.getByLabelText('Telegram bot token')).toBeInTheDocument()
     expect(screen.getByLabelText('Slack Signing Secret')).toBeInTheDocument()
     expect(screen.getByLabelText('Slack Bot User OAuth Token')).toBeInTheDocument()
     expect(screen.getByLabelText('Email Username')).toBeInTheDocument()
@@ -51,7 +51,7 @@ describe('ChannelCredentialsPanel — credential field filtering', () => {
 
   it('renders only the Telegram input when visibleChannelTypes=["telegram"]', () => {
     renderPanel({ ccName: 'cc-tg', visibleChannelTypes: ['telegram'] })
-    expect(screen.getByLabelText('Telegram Bot Token')).toBeInTheDocument()
+    expect(screen.getByLabelText('Telegram bot token')).toBeInTheDocument()
     expect(screen.queryByLabelText('Slack Signing Secret')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Email Username')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Email Password')).not.toBeInTheDocument()
@@ -59,7 +59,7 @@ describe('ChannelCredentialsPanel — credential field filtering', () => {
 
   it('renders email username + password (both) when visibleChannelTypes=["email"]', () => {
     renderPanel({ ccName: 'cc-email', visibleChannelTypes: ['email'] })
-    expect(screen.queryByLabelText('Telegram Bot Token')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Telegram bot token')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Slack Signing Secret')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Email Username')).toBeInTheDocument()
     expect(screen.getByLabelText('Email Password')).toBeInTheDocument()
@@ -70,7 +70,7 @@ describe('ChannelCredentialsPanel — credential field filtering', () => {
     expect(
       screen.getByText(/Select a communication channel provider to configure its credentials/i)
     ).toBeInTheDocument()
-    expect(screen.queryByLabelText('Telegram Bot Token')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Telegram bot token')).not.toBeInTheDocument()
   })
 
   it('prunes pending draft values whose channel type is removed', () => {
@@ -91,7 +91,7 @@ describe('ChannelCredentialsPanel — credential field filtering', () => {
 
     // User types a Telegram token.
     act(() => {
-      fireEvent.change(screen.getByLabelText('Telegram Bot Token'), {
+      fireEvent.change(screen.getByLabelText('Telegram bot token'), {
         target: { value: '123:abc' },
       })
     })
@@ -124,7 +124,7 @@ describe('ChannelCredentialsPanel — per-key stored state', () => {
     // credential at all.
     renderPanel({ ...TELEGRAM_AND_SLACK, storedKeys: ['telegram-bot-token'] })
 
-    expect(credentialInput('Telegram Bot Token').value).toBe(MASKED)
+    expect(credentialInput('Telegram bot token').value).toBe(MASKED)
 
     const signingSecret = credentialInput('Slack Signing Secret')
     expect(signingSecret.value).not.toBe(MASKED)
@@ -141,7 +141,7 @@ describe('ChannelCredentialsPanel — per-key stored state', () => {
     renderPanel({ ...TELEGRAM_AND_SLACK, storedKeys: [] })
 
     for (const [label, placeholder] of [
-      ['Telegram Bot Token', '123456789:ABCDEF…'],
+      ['Telegram bot token', '123456789:ABCDEF…'],
       ['Slack Signing Secret', 'signing secret'],
       ['Slack Bot User OAuth Token', 'xoxb-…'],
     ] as const) {
@@ -159,7 +159,7 @@ describe('ChannelCredentialsPanel — per-key stored state', () => {
     renderPanel({ ...TELEGRAM_AND_SLACK, storedKeys: undefined })
 
     for (const label of [
-      'Telegram Bot Token',
+      'Telegram bot token',
       'Slack Signing Secret',
       'Slack Bot User OAuth Token',
     ]) {
@@ -210,7 +210,7 @@ describe('ChannelCredentialsPanel — per-key stored state', () => {
     )
 
     expect(credentialInput('Slack Bot User OAuth Token').value).toBe(MASKED)
-    expect(credentialInput('Telegram Bot Token').value).toBe(MASKED)
+    expect(credentialInput('Telegram bot token').value).toBe(MASKED)
     expect(credentialInput('Slack Signing Secret').value).toBe('')
   })
 
@@ -279,7 +279,7 @@ describe('ChannelCredentialsPanel — per-key stored state', () => {
 
     expect(credentialInput('Slack Bot User OAuth Token').value).toBe(MASKED)
     expect(credentialInput('Slack Signing Secret').value).toBe('')
-    expect(credentialInput('Telegram Bot Token').value).toBe('')
+    expect(credentialInput('Telegram bot token').value).toBe('')
     expect(screen.queryByLabelText('Edit Slack Bot User OAuth Token')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Delete Slack Bot User OAuth Token')).not.toBeInTheDocument()
   })
@@ -347,7 +347,7 @@ describe('ChannelCredentialsPanel — failed stored-key read', () => {
     expect(screen.getByText('secrets is forbidden')).toBeInTheDocument()
 
     for (const label of [
-      'Telegram Bot Token',
+      'Telegram bot token',
       'Slack Signing Secret',
       'Slack Bot User OAuth Token',
     ]) {
@@ -501,7 +501,7 @@ describe('ChannelCredentialsPanel — parent-owned edit staging', () => {
       editStates: {},
       onEditStateChange: vi.fn(),
     })
-    expect(credentialInput('Telegram Bot Token')).toHaveValue('')
+    expect(credentialInput('Telegram bot token')).toHaveValue('')
     expect(screen.getByText('A value is stored. Leave this field blank to keep it.')).toBeVisible()
   })
 
@@ -514,7 +514,7 @@ describe('ChannelCredentialsPanel — parent-owned edit staging', () => {
       editStates: {},
       onEditStateChange,
     })
-    fireEvent.change(credentialInput('Telegram Bot Token'), { target: { value: 'next-token' } })
+    fireEvent.change(credentialInput('Telegram bot token'), { target: { value: 'next-token' } })
     expect(onEditStateChange).toHaveBeenCalledWith('telegram-bot-token', {
       status: 'replaced',
       value: 'next-token',
@@ -531,7 +531,7 @@ describe('ChannelCredentialsPanel — parent-owned edit staging', () => {
       editStates: {},
       onEditStateChange,
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Telegram Bot Token' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Clear Telegram bot token' }))
     expect(onEditStateChange).toHaveBeenLastCalledWith('telegram-bot-token', {
       status: 'cleared',
     })
@@ -546,7 +546,7 @@ describe('ChannelCredentialsPanel — parent-owned edit staging', () => {
       editStates: { 'telegram-bot-token': { status: 'replaced', value: 'retry-token' } },
       onEditStateChange: vi.fn(),
     })
-    expect(credentialInput('Telegram Bot Token')).toHaveValue('retry-token')
+    expect(credentialInput('Telegram bot token')).toHaveValue('retry-token')
   })
 
   it('disables staged fields while the parent save coordinator runs', () => {
@@ -558,6 +558,6 @@ describe('ChannelCredentialsPanel — parent-owned edit staging', () => {
       onEditStateChange: vi.fn(),
       saving: true,
     })
-    expect(credentialInput('Telegram Bot Token')).toBeDisabled()
+    expect(credentialInput('Telegram bot token')).toBeDisabled()
   })
 })
