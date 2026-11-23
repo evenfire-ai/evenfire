@@ -173,7 +173,7 @@ describe('typed-git redirect in the tool batch', () => {
     expect(await followed()).toEqual({ yes: 1 })
     expect(conversation.git_redirect_pending).toBe(false)
 
-    await executeToolCalls([shell('git diff', 'c3')], config, 2)
+    await executeToolCalls([shell('git branch -a', 'c3')], config, 2)
     await executeToolCalls([shell('ls', 'c4')], config, 3)
     expect(await followed()).toEqual({ yes: 1, no: 1 })
   })
