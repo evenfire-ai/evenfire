@@ -9,7 +9,7 @@ const hostPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platfor
 
 vi.mock('keytar', () => keytar)
 vi.mock('electron', () => ({
-  app: { isReady: () => true, getPath: () => process.env.SPEC125_SCRATCH },
+  app: { isReady: () => true, getPath: () => process.env.TOKEN_STORE_TEST_USER_DATA },
   safeStorage: { isEncryptionAvailable: () => false },
 }))
 

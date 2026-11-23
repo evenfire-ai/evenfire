@@ -12,7 +12,7 @@ const hostPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platfor
 
 vi.mock('keytar', () => keytar)
 vi.mock('electron', () => ({
-  app: { isReady: () => true, getPath: () => process.env.SPEC125_SCRATCH },
+  app: { isReady: () => true, getPath: () => process.env.TOKEN_STORE_TEST_USER_DATA },
   safeStorage: { isEncryptionAvailable: () => false },
 }))
 
@@ -63,9 +63,9 @@ describe('TokenStore macOS Quit admission', () => {
   })
 
   it('does not gate isolated storage during macOS Quit', async () => {
-    const isolatedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'spec125-isolated-'))
-    const previousScratch = process.env.SPEC125_SCRATCH
-    process.env.SPEC125_SCRATCH = isolatedDir
+    const isolatedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'token-store-isolated-'))
+    const previousUserData = process.env.TOKEN_STORE_TEST_USER_DATA
+    process.env.TOKEN_STORE_TEST_USER_DATA = isolatedDir
     try {
       expect(tokenStoreModule.closeTokenStoreAdmission()).toBe(false)
       const store = new tokenStoreModule.TokenStore({ isolatedUserDataPath: isolatedDir })
@@ -76,8 +76,8 @@ describe('TokenStore macOS Quit admission', () => {
       ).resolves.toContain('synthetic-isolated-value')
     } finally {
       tokenStoreModule.openTokenStoreAdmission()
-      if (previousScratch === undefined) delete process.env.SPEC125_SCRATCH
-      else process.env.SPEC125_SCRATCH = previousScratch
+      if (previousUserData === undefined) delete process.env.TOKEN_STORE_TEST_USER_DATA
+      else process.env.TOKEN_STORE_TEST_USER_DATA = previousUserData
       await fs.rm(isolatedDir, { recursive: true, force: true })
     }
   })

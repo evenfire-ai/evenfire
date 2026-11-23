@@ -93,7 +93,7 @@ vi.mock('electron', () => ({
     dock: undefined,
     isPackaged: false,
     isReady: () => true,
-    getPath: () => process.env.SPEC125_SCRATCH,
+    getPath: () => process.env.TOKEN_STORE_TEST_USER_DATA,
     setName: vi.fn(),
     setAppUserModelId: vi.fn(),
     setAsDefaultProtocolClient: vi.fn(),
