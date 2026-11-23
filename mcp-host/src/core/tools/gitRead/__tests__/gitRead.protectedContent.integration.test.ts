@@ -424,6 +424,60 @@ describe('git_read protected content (history, refs, stash, index, worktree)', (
     }
   })
 
+  it('a worktree grep is refused when a tracked directory is a link; a revision grep still runs', async () => {
+    const linked = path.join(fx.root, 'linked')
+    fs.mkdirSync(path.join(linked, 'cfg'), { recursive: true })
+    fs.mkdirSync(path.join(linked, 'st'), { recursive: true })
+    gitwAt('2026-03-01T00:00:00Z', linked, 'init', '-q')
+    fs.writeFileSync(path.join(linked, 'cfg', 'secret.txt'), 'placeholder\n')
+    fs.writeFileSync(path.join(linked, 'st', 'session.json'), 'placeholder\n')
+    fs.writeFileSync(path.join(linked, 'a.txt'), 'WITNESS-L\n')
+    gitwAt('2026-03-01T00:00:00Z', linked, 'add', '-A')
+    gitwAt('2026-03-01T00:00:00Z', linked, 'commit', '-qm', 'l1')
+    const outsideDir = path.join(fx.outside, 'cfg-target')
+    fs.mkdirSync(outsideDir, { recursive: true })
+    fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'OUTSIDE-SECRET line\n')
+    const stateDir = path.join(fx.root, '.clerum-state')
+    fs.mkdirSync(stateDir, { recursive: true })
+    fs.writeFileSync(path.join(stateDir, 'session.json'), 'NEEDLE-STATE token\n')
+    fs.rmSync(path.join(linked, 'cfg'), { recursive: true })
+    fs.symlinkSync(outsideDir, path.join(linked, 'cfg'))
+    fs.rmSync(path.join(linked, 'st'), { recursive: true })
+    fs.symlinkSync(stateDir, path.join(linked, 'st'))
+    // Control: git greps the worktree through both links.
+    const control = controlGit(
+      fx.root,
+      linked,
+      'grep',
+      '--no-textconv',
+      '-n',
+      '-e',
+      'SECRET',
+      '-e',
+      'NEEDLE'
+    ).out
+    expect(control).toContain('OUTSIDE-SECRET')
+    expect(control).toContain('NEEDLE-STATE')
+    const run = async (params: Record<string, unknown>) => {
+      const out = await tool.execute({ directory: 'linked', ...params })
+      return { content: out.content, is_error: out.is_error }
+    }
+    for (const params of [
+      { subcommand: 'grep', pattern: 'SECRET' },
+      { subcommand: 'grep', pattern: 'NEEDLE', paths: ['st'] },
+    ]) {
+      expect(await run(params)).toEqual({
+        content: GIT_READ_REFUSALS.worktree_link,
+        is_error: true,
+      })
+    }
+    const committed = await run({ subcommand: 'grep', pattern: 'placeholder', revisions: ['HEAD'] })
+    expect(committed.is_error).toBe(false)
+    expect(committed.content).toContain('HEAD:cfg/secret.txt')
+    expect(needles(committed.content)).toEqual([])
+    expect(committed.content).not.toContain('OUTSIDE-SECRET')
+  })
+
   describe('each exclusion magic word is load-bearing', () => {
     const excl = (): string[] => [...protectedExcludePathspecs()]
 

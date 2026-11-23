@@ -31,6 +31,7 @@ export type GitReadRefusalCategory =
   | 'not_a_commit'
   | 'protected_history'
   | 'timeout'
+  | 'worktree_link'
 
 export class GitReadRefusal extends Error {
   constructor(readonly category: GitReadRefusalCategory) {
@@ -338,6 +339,33 @@ export function peelEndpoints(revision: string): string[] {
   return parts.map(part => (part.startsWith('^') ? part.slice(1) : part)).filter(Boolean)
 }
 
+/** `ls-files -z` output of a large repository. */
+const WORKTREE_INDEX_MAX_BUFFER = 64 * 1024 * 1024
+
+/**
+ * True when a leading directory of any tracked path is a link (or cannot be
+ * checked) in the worktree. Each directory is checked once.
+ */
+export function hasLinkedLeadingDirectory(lsFilesZ: string, topLevel: string): boolean {
+  const checked = new Set<string>()
+  for (const entry of lsFilesZ.split('\0')) {
+    const segments = entry.split('/')
+    for (let depth = 1; depth < segments.length; depth++) {
+      const dir = segments.slice(0, depth).join('/')
+      if (checked.has(dir)) continue
+      checked.add(dir)
+      try {
+        if (fs.lstatSync(path.join(topLevel, dir)).isSymbolicLink()) return true
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        // A deleted directory is not searched; anything else fails closed.
+        if (code !== 'ENOENT' && code !== 'ENOTDIR') return true
+      }
+    }
+  }
+  return false
+}
+
 /**
  * Every name in `git log --name-status -z` output. With `-z` git prints names
  * raw; without it, a name with non-ASCII bytes, a quote or a backslash is
@@ -389,6 +417,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
       ...(ctx.signal ? { signal: ctx.signal } : {}),
     })
 
+  let topLevel: string
   try {
     // P2. Discovery, under the ceiling.
     const discovery = await run(['rev-parse', '--git-dir', '--git-common-dir', '--show-toplevel'])
@@ -397,14 +426,15 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     }
     const lines = discovery.stdout.split('\n').filter(line => line.length > 0)
     if (lines.length !== 3) return { kind: 'refused', category: 'not_a_repository' }
-    const [gitDir, commonDir, topLevel] = lines.map(line => {
+    const [gitDir, commonDir, top] = lines.map(line => {
       try {
         return fs.realpathSync(path.resolve(cwd, line))
       } catch {
         throw new GitReadRefusal('not_a_repository')
       }
     })
-    for (const real of [gitDir, commonDir, topLevel]) confine(real, realRoot)
+    for (const real of [gitDir, commonDir, top]) confine(real, realRoot)
+    topLevel = top
 
     // P3. The object store.
     let objects: string
@@ -434,6 +464,25 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
 
   // P7. Per-call content checks.
   const params = ctx.params
+
+  // A worktree grep opens each tracked file through the OS, so a tracked
+  // directory replaced by a link would be searched through it, outside the
+  // workspace or into protected state. Refuse when any leading directory of
+  // a tracked path is a link; a revision searches objects instead.
+  if (params.subcommand === 'grep' && params.revisions.length === 0) {
+    const index = await run(['ls-files', '-z', '--full-name', '--', ':/'], {
+      timeoutMs: ctx.timeoutMs,
+      maxBuffer: WORKTREE_INDEX_MAX_BUFFER,
+    })
+    if (index.outcome === 'timeout') return { kind: 'refused', category: 'timeout' }
+    if (index.outcome === 'overflow') return { kind: 'refused', category: 'repository_too_large' }
+    if (index.outcome !== 'exited' || index.exitCode !== 0) {
+      return { kind: 'refused', category: 'preflight_failed' }
+    }
+    if (hasLinkedLeadingDirectory(index.stdout, topLevel)) {
+      return { kind: 'refused', category: 'worktree_link' }
+    }
+  }
   if (params.subcommand === 'blame') {
     const file = validatePath(path.posix.join(params.directory, params.paths[0]), ctx.root)
     if (!file.valid) return { kind: 'refused', category: 'bad_path' }

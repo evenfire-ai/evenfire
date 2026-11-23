@@ -47,6 +47,8 @@ export const GIT_READ_REFUSALS: Readonly<Record<GitReadRefusalCategory, string>>
   protected_history:
     'This file was renamed from platform-managed state; git_read does not follow its history.',
   timeout: 'git_read timed out.',
+  worktree_link:
+    "A directory in this repository's worktree is a link, so git_read does not search the worktree. Name a revision (for example HEAD) to search committed content.",
 }
 
 export interface GitReadToolOptions {
