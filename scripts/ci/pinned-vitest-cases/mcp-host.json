@@ -3265,7 +3265,7 @@
   },
   {
     "suite": "gitRead.repositoryLinks.integration.test.ts",
-    "fullName": "git_read repository links (P2–P4) a gitfile or commondir pointing outside is refused"
+    "fullName": "git_read repository links (P2–P4) a gitfile pointing outside is refused (commondir: p10)"
   },
   {
     "suite": "gitRead.repositoryLinks.integration.test.ts",

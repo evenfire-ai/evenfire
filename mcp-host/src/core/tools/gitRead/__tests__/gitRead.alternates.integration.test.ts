@@ -244,16 +244,26 @@ describe('git_read alternates reader (P5)', () => {
   })
 
   it('an alternates file that cannot be lstat-ed for another reason is unreadable', async () => {
+    // objects/info as a link to itself: lstat of info/alternates fails with
+    // ELOOP for any user, root included.
     const info = path.join(mainObjects, 'info')
-    fs.mkdirSync(info, { recursive: true })
-    fs.chmodSync(info, 0o000)
+    const saved = path.join(mainObjects, 'info.saved')
+    fs.renameSync(info, saved)
+    fs.symlinkSync(info, info)
     try {
-      // Running as root ignores the mode; the row only holds for an ordinary user.
-      if (process.getuid?.() === 0) return
       expect(await verdict()).toBe('alternates_unreadable')
     } finally {
-      fs.chmodSync(info, 0o755)
+      fs.rmSync(info)
+      fs.renameSync(saved, info)
     }
+  })
+
+  it('the alternates cap is exactly 64 KiB', async () => {
+    const entry = `${insideStore}\n`
+    const pad = (size: number): string => `${'#'.repeat(size - entry.length - 1)}\n${entry}`
+    expect(Buffer.byteLength(pad(65_536))).toBe(65_536)
+    expect((await row(pad(65_536))).verdict).toBe('ok')
+    expect((await row(pad(65_537))).verdict).toBe('alternates_unsupported')
   })
 
   it('setup sanity: the fixture repository works under git_read', () => {

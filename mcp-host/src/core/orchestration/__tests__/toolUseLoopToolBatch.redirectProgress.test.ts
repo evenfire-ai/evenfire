@@ -115,6 +115,22 @@ describe('typed-git redirect in the tool batch', () => {
     )
   })
 
+  it('the batch usage goes on the first reported result only', async () => {
+    const { config, reportToolComplete } = makeConfig()
+    const usage = { input_tokens: 5, output_tokens: 7, total_tokens: 12 }
+    await executeToolCalls(
+      [shell('git status', 'c1'), shell('git log', 'c2')],
+      config,
+      0,
+      undefined,
+      undefined,
+      usage
+    )
+    expect(reportToolComplete).toHaveBeenCalledTimes(2)
+    expect(reportToolComplete.mock.calls[0][0].tokens).toEqual({ input: 5, output: 7 })
+    expect(reportToolComplete.mock.calls[1][0].tokens).toBeUndefined()
+  })
+
   it('a result that is not reported emits nothing', async () => {
     const { config, reportToolStart, reportToolComplete } = makeConfig({ validates: false })
     const { toolResults } = await executeToolCalls([shell('git status', 'c1')], config, 0)

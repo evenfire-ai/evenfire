@@ -413,15 +413,23 @@ describe('git_read protected content (history, refs, stash, index, worktree)', (
   })
 
   it('a tracked file replaced by a link to an outside file is never followed', async () => {
+    // Regression rows: git itself never follows a final-component link, so
+    // these have no leaking control; blame is refused by its realpath check.
     expect(fs.readFileSync(path.join(repo, 'wt-link.txt'), 'utf8')).toBe('OUTSIDE-SECRET\n')
-    for (const params of [
-      { subcommand: 'grep', pattern: 'OUTSIDE' },
-      { subcommand: 'diff', paths: ['wt-link.txt'] },
-      { subcommand: 'log', options: ['patch'], paths: ['wt-link.txt'] },
-      { subcommand: 'blame', paths: ['wt-link.txt'] },
-    ]) {
-      expect(needles((await call(params)).content)).toEqual([])
-    }
+    expect(await call({ subcommand: 'grep', pattern: 'OUTSIDE' })).toEqual({
+      content: '',
+      is_error: false,
+    })
+    const diff = await call({ subcommand: 'diff', paths: ['wt-link.txt'] })
+    expect(diff.content).toContain('new file mode 120000')
+    expect(needles(diff.content)).toEqual([])
+    const log = await call({ subcommand: 'log', options: ['patch'], paths: ['wt-link.txt'] })
+    expect(log.content).toContain('+regular')
+    expect(needles(log.content)).toEqual([])
+    expect(await call({ subcommand: 'blame', paths: ['wt-link.txt'] })).toEqual({
+      content: GIT_READ_REFUSALS.bad_path,
+      is_error: true,
+    })
   })
 
   it('a worktree grep is refused when a tracked directory is a link; a revision grep still runs', async () => {

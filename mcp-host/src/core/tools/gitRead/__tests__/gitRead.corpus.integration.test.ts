@@ -68,7 +68,13 @@ const CORPUS: ReadonlyArray<readonly [string, Record<string, unknown>, RegExp]> 
     /^c3$/m,
   ],
   ['git log @{u}..HEAD', { subcommand: 'log', revisions: ['@{u}..HEAD'], format: '%s' }, /^c3$/m],
-  ['git diff', { subcommand: 'diff' }, /^$/m],
+  // Everything is staged, so the worktree diff is exactly empty.
+  ['git diff', { subcommand: 'diff' }, /^$/],
+  [
+    'git diff --cached --stat',
+    { subcommand: 'diff', options: ['cached', 'stat'] },
+    /a\.txt \| 1 \+/,
+  ],
   [
     'git diff --stat',
     { subcommand: 'diff', options: ['stat'], revisions: ['HEAD~1'] },
@@ -79,7 +85,7 @@ const CORPUS: ReadonlyArray<readonly [string, Record<string, unknown>, RegExp]> 
     { subcommand: 'diff', options: ['cached'] },
     /^diff --git a\/a\.txt b\/a\.txt/,
   ],
-  ['git diff main...feature', { subcommand: 'diff', revisions: ['main...feature'] }, /^$/m],
+  ['git diff main...feature', { subcommand: 'diff', revisions: ['main...feature'] }, /^$/],
   ['git diff HEAD~1', { subcommand: 'diff', revisions: ['HEAD~1'] }, /^diff --git/],
   [
     'git diff HEAD^ HEAD -- a.txt',
@@ -341,8 +347,10 @@ describe('git_read corpus on real git', () => {
     const saved = Object.fromEntries(Object.keys(poison).map(key => [key, process.env[key]]))
     Object.assign(process.env, poison)
     const envs: Array<Readonly<Record<string, string>>> = []
+    const spawned: string[] = []
     const spy: GitSpawn = (git, argv, options) => {
       envs.push(options.env)
+      spawned.push(argv[0])
       return spawnGit(git, argv, options)
     }
     try {
@@ -367,8 +375,32 @@ describe('git_read corpus on real git', () => {
         else process.env[key] = value
       }
     }
-    // status: rev-parse, config, status, ls-files; show: +peel; log follow: +check; blame.
-    expect(envs.length).toBeGreaterThanOrEqual(12)
+    // Every process, preflight included, in order, for the four calls.
+    expect(spawned).toEqual([
+      // status: discovery, config, the command, the submodule note
+      'rev-parse',
+      'config',
+      'status',
+      'ls-files',
+      // show HEAD:a.txt: discovery, config, peel, notes refs, the command
+      'rev-parse',
+      'config',
+      'rev-parse',
+      'for-each-ref',
+      'show',
+      // log --follow -p: discovery, config, notes refs, the follow check, the command
+      'rev-parse',
+      'config',
+      'for-each-ref',
+      'log',
+      'log',
+      // blame: discovery, config, notes refs, the command
+      'rev-parse',
+      'config',
+      'for-each-ref',
+      'blame',
+    ])
+    expect(envs).toHaveLength(spawned.length)
     const literal = gitReadEnv(path.dirname(fs.realpathSync(fx.root)))
     for (const env of envs) expect(env).toEqual(literal)
     expect(literal.GIT_CEILING_DIRECTORIES).toBe(fx.base)

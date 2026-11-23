@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
-import { runPreflight, walkRepositoryLinks } from '../preflight'
+import { GIT_READ_LINK_WALK_BUDGET, runPreflight, walkRepositoryLinks } from '../preflight'
 import { spawnGit } from '../runner'
 import {
   type Fixture,
@@ -277,7 +277,7 @@ describe('git_read repository links (P2–P4)', () => {
     expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
-  it('a gitfile or commondir pointing outside is refused', async () => {
+  it('a gitfile pointing outside is refused (commondir: p10)', async () => {
     const outsideRepo = path.join(fx.outside, `gitdir${counter}`)
     makeRepo(outsideRepo, 'x', 'OUT\n')
     const repo = path.join(fx.root, `gitfile${++counter}`)
@@ -293,6 +293,7 @@ describe('git_read repository links (P2–P4)', () => {
       expect.objectContaining({ category: 'repository_too_large' })
     )
     expect(() => walkRepositoryLinks([gitDir], fx.root, [], 200_000)).not.toThrow()
+    expect(GIT_READ_LINK_WALK_BUDGET).toBe(200_000)
   })
 
   it('a repository root configured through a symlink works', async () => {
@@ -355,6 +356,24 @@ describe('git_read repository links (P2–P4)', () => {
       kind: 'ok',
       cwd: fs.realpathSync(path.join(callerRoot, 'repo')),
     })
+  })
+
+  it('blame of a tracked file missing from the worktree is path_missing', async () => {
+    const repo = freshRepo()
+    fs.rmSync(path.join(repo, 'x'))
+    const result = await runPreflight({
+      root: fx.root,
+      verifyCallerRoot: false,
+      gitPath,
+      params: params({
+        subcommand: 'blame',
+        directory: path.relative(fx.root, repo),
+        paths: ['x'],
+      }),
+      timeoutMs: 10_000,
+      spawn: spawnGit,
+    })
+    expect(result).toEqual({ kind: 'refused', category: 'path_missing' })
   })
 
   it('a caller root that no longer verifies is root_unavailable', async () => {

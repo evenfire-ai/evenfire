@@ -5,6 +5,7 @@ import type { PendingApproval } from '../../types'
 import type { ApprovalMode } from '../approvalMode'
 import { type ModeDecision, decideApproval } from '../decideApproval'
 import type { GateCause } from '../gateCause'
+import { GRANT_COVERED_BY } from '../nativeApprovalCause'
 import { shellCardDescriptor } from '../shellCard'
 import type { ShellVerdict } from '../shellClassifier'
 
@@ -408,6 +409,21 @@ describe('decideApproval: git_read', () => {
       kind: 'run',
       cell: 'M1',
     })
+  })
+
+  it('only a shell_exec grant covers git_read: http_request and file_read grants do not', () => {
+    expect(GRANT_COVERED_BY).toEqual({ git_read: ['shell_exec'] })
+    for (const name of [HTTP, 'file_read', 'json_transform']) {
+      expect(
+        decide({
+          mode: 'manual',
+          toolName: 'git_read',
+          cause: 'ordinary',
+          task: [name],
+          always: [name],
+        })
+      ).toEqual({ kind: 'card', cell: 'M1', scope: 'as_produced' })
+    }
   })
 
   it('a git_read grant does not run shell_exec', () => {
