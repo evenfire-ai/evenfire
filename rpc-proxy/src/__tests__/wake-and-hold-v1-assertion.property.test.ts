@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
 import fc from 'fast-check'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { requestHostWakeFromControlApi } from '../services/controlApiRestService.js'
@@ -22,10 +24,29 @@ import type { RpcAccessClaims } from '../types.js'
 // stub, and the scheduler decides the order in which every fetch settles. At
 // rest, each request's last Host call carries the assertion of that request's
 // most recent resolve, never an older one or the other request's.
+//
+// control-api issues signed assertions whose `exp` is within the re-resolve
+// margin (`upstreamTimeoutMs` plus 2 s), so each retry re-resolves; `jti` makes
+// every issued assertion distinct.
 
 const USER_ID = 'user-uuid-123'
 const HOST_URL = 'http://chatllm.mcp-host.svc.cluster.local:8080'
 const REQUESTS = ['req-a', 'req-b'] as const
+const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
+
+function signNearExpAssertion(): string {
+  const iat = Math.floor(Date.now() / 1000)
+  return jwt.sign(
+    {
+      sub: USER_ID,
+      jti: randomUUID(),
+      iat,
+      exp: iat + Math.floor(config.upstreamTimeoutMs / 1000),
+    },
+    EDGE_KEYS.privateKey,
+    { algorithm: 'RS256' }
+  )
+}
 
 const CLAIMS = {
   sub: USER_ID,
@@ -94,7 +115,7 @@ describe('V1 wake-and-hold keeps each request on its own latest assertion', () =
             } else {
               const token = headers.get('x-rpc-access-token')!
               const list = issued.get(token) ?? []
-              const assertion = `${token}-assertion-${list.length}`
+              const assertion = signNearExpAssertion()
               list.push(assertion)
               issued.set(token, list)
               outcome = jsonResponse(200, {

@@ -1,3 +1,4 @@
+import jwt from 'jsonwebtoken'
 import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
 import { ActionAuthorityCheckpointError, type AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
@@ -158,11 +159,42 @@ export async function resolveHostConnectionForUser(
 }
 
 /**
- * Re-resolves a V1 Host connection before a wake-and-hold retry, so the retry
- * carries a fresh edge assertion instead of the first resolve's, which may have
- * expired during the hold. Uses the GET form (no direct-run binding) with the
- * caller's RPC token.
+ * Allowance for the whole-second `exp` and for the Host verifying the assertion
+ * with no clock tolerance. Same value as the hold's RPC token margin
+ * (`TOKEN_EXP_SAFETY_MARGIN_MS` in wakeAndHold.ts, which does not export it).
+ */
+const EDGE_ASSERTION_EXP_SAFETY_MARGIN_MS = 2_000
+
+/**
+ * Whether a held V1 edge assertion is close enough to its `exp` that a retry
+ * must re-resolve it first: `exp` is at most `upstreamTimeoutMs` plus the
+ * safety margin away. A retry attempt never outlives `upstreamTimeoutMs`, so an
+ * assertion outside that window is still valid when the Host checks it.
  *
+ * The assertion is decoded without verification (rpc-proxy does not hold the
+ * Host's key; it only reads `exp`). control-api always issues a JWT with a
+ * numeric `exp`, so an assertion without one is a broken invariant and throws.
+ */
+export function isHeldEdgeAssertionNearExpiry(
+  assertion: string | undefined,
+  nowMs: number
+): boolean {
+  const payload = assertion === undefined ? null : jwt.decode(assertion)
+  const exp = payload !== null && typeof payload === 'object' ? payload.exp : undefined
+  if (typeof exp !== 'number' || !Number.isFinite(exp)) {
+    throw new Error('Held edge assertion has no readable exp')
+  }
+  return exp * 1000 - nowMs <= config.upstreamTimeoutMs + EDGE_ASSERTION_EXP_SAFETY_MARGIN_MS
+}
+
+/**
+ * Re-resolves a V1 Host connection before a wake-and-hold retry when the held
+ * edge assertion is near its `exp` (`isHeldEdgeAssertionNearExpiry`), so the
+ * retry carries a fresh assertion. Far from `exp` it returns null without
+ * calling control-api and the retry reuses the held assertion. Uses the GET
+ * form (no direct-run binding) with the caller's RPC token.
+ *
+ * - A held assertion without a readable `exp` throws.
  * - A denial (control-api 403/404, or a user or Host mismatch) is returned for
  *   the route to answer as it answers a denial at its first resolve.
  * - A control-api 401 (`ControlApiHostAccessRejectedError`) is rethrown as is,
@@ -182,6 +214,9 @@ export async function refreshV1HostConnection(
   hostRef: string,
   rpcAccessToken: string
 ): Promise<HostAccessDenial | null> {
+  if (!isHeldEdgeAssertionNearExpiry(host.headers[HOST_EDGE_ASSERTION_HEADER], Date.now())) {
+    return null
+  }
   let resolved: Awaited<ReturnType<typeof fetchHostConnectionFromControlApi>>
   try {
     resolved = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken)

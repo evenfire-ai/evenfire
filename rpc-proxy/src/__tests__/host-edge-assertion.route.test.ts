@@ -33,7 +33,10 @@ const authTokenMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
 vi.mock('../authToken.js', () => authTokenMock)
 
 const USER_ID = 'user-uuid-123'
-const EDGE_ASSERTION = 'edge-assertion-fixture'
+// The assertion the default control-api answer carries, signed per test with
+// `exp` far from now (see `signEdgeAssertion`), so a wake-and-hold retry reuses
+// it without a re-resolve.
+let edgeAssertion: string
 
 function claimsWithScopes(scopes: string[]) {
   return {
@@ -99,7 +102,8 @@ function jsonResponse(status: number, body: unknown): Response {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion: EDGE_ASSERTION }
+  edgeAssertion = signEdgeAssertion(Math.floor(Date.now() / 1000) + 300, [])
+  controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
   controlApiHostAccessStatus = 200
   controlApiCalls = []
   controlApiHostAccessAnswer = null
@@ -329,7 +333,7 @@ describe('V1 Host requests carry the control-api edge assertion', () => {
     expect(res.status).toBe(500)
 
     // The same request with an assertion in the control-api answer reaches the Host.
-    controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion: EDGE_ASSERTION }
+    controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
     await send(ROUTE_SCOPE_ROWS[0]!)
     expect(controlApiCalls).toHaveLength(2)
     expect(hostCalls).toHaveLength(1)
@@ -342,7 +346,7 @@ describe('V1 Host requests carry the control-api edge assertion', () => {
 
     expect(hostCalls).toHaveLength(1)
     expect(hostCalls[0]!.headers).toMatchObject({
-      [HOST_EDGE_ASSERTION_HEADER]: EDGE_ASSERTION,
+      [HOST_EDGE_ASSERTION_HEADER]: edgeAssertion,
       'x-clerum-edge-caller': 'rpc-proxy',
       'x-clerum-edge-user-id': USER_ID,
       'x-clerum-edge-team-id': 'team-1',
@@ -369,7 +373,7 @@ describe('route scopes: each rpc-proxy route reaches its Host route only with it
     // request records one Host call, on the row's Host route, with the assertion.
     expect(hostCalls).toHaveLength(1)
     expect(hostCalls[0]!.path).toBe(row.hostPath)
-    expect(hostCalls[0]!.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(EDGE_ASSERTION)
+    expect(hostCalls[0]!.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(edgeAssertion)
   })
 
   it('session search is V2 only: a V1 token with host:session:read gets 403 and no Host call', async () => {
@@ -518,12 +522,22 @@ function firstResolveThen(reresolve: (index: number) => Response) {
   return (index: number) => (index === 0 ? jsonResponse(200, controlApiBody) : reresolve(index))
 }
 
-describe('a V1 wake-and-hold retry re-resolves the Host connection', () => {
+// An `exp` inside the re-resolve margin (`upstreamTimeoutMs` plus 2 s), built
+// from the same config the code reads.
+function nearExpSeconds(): number {
+  return Math.floor(Date.now() / 1000) + Math.floor(config.upstreamTimeoutMs / 1000)
+}
+
+describe('a V1 wake-and-hold retry re-resolves the Host connection near the assertion exp', () => {
   const originalWakeMaxHoldMs = config.wakeMaxHoldMs
 
   beforeEach(() => {
     // Bounds a retry-until-deadline route that keeps failing.
     config.wakeMaxHoldMs = 3_000
+    // The first resolve's assertion is within the margin of its exp, so the
+    // retry re-resolves it.
+    edgeAssertion = signEdgeAssertion(nearExpSeconds(), [])
+    controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
   })
 
   afterEach(() => {
@@ -546,18 +560,20 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection', () => {
     expect(hostAccessCalls()).toHaveLength(2)
     expect(hostAccessCalls().every(url => url.includes('/mcp-hosts/chatllm'))).toBe(true)
     expect(hostCalls).toHaveLength(2)
-    expect(hostCalls[0]!.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(EDGE_ASSERTION)
+    expect(hostCalls[0]!.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(edgeAssertion)
     expect(hostCalls[1]!.path).toBe(row.hostPath)
     expect(hostCalls[1]!.headers[HOST_EDGE_ASSERTION_HEADER]).toBe('edge-assertion-refreshed-1')
   })
 
-  it('task result: every retry attempt re-resolves first (one control-api call per attempt)', async () => {
+  it('task result: each retry re-resolves while the held assertion is within the margin of exp', async () => {
     const row = RETRY_UNTIL_DEADLINE_ROW
     authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+    // Re-resolved assertions are near their exp too, so every retry re-resolves.
+    const refreshed = [1, 2].map(() => signEdgeAssertion(nearExpSeconds(), []))
     controlApiHostAccessAnswer = firstResolveThen(index =>
       jsonResponse(200, {
         ...OLD_SHAPE_CONNECTION,
-        edgeAssertion: `edge-assertion-refreshed-${index}`,
+        edgeAssertion: refreshed[index - 1],
       })
     )
     hostAnswer = index => {
@@ -571,10 +587,54 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection', () => {
     // One first resolve plus one re-resolve per retry attempt (two attempts).
     expect(hostAccessCalls()).toHaveLength(3)
     expect(hostCalls.map(call => call.headers[HOST_EDGE_ASSERTION_HEADER])).toEqual([
-      EDGE_ASSERTION,
-      'edge-assertion-refreshed-1',
-      'edge-assertion-refreshed-2',
+      edgeAssertion,
+      refreshed[0],
+      refreshed[1],
     ])
+  })
+
+  it('task result: retries make no control-api call while the held assertion is far from exp', async () => {
+    const row = RETRY_UNTIL_DEADLINE_ROW
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+    edgeAssertion = signEdgeAssertion(Math.floor(Date.now() / 1000) + 300, [])
+    controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
+    hostAnswer = index => {
+      if (index < 2) throw new TypeError('fetch failed')
+      return jsonResponse(200, {})
+    }
+
+    const res = await send(row)
+
+    expect(res.status).toBe(200)
+    // Witness: the wake ran and both retries reached the Host, each with the
+    // held assertion.
+    expect(controlApiCalls.filter(url => url.endsWith('/wake'))).toHaveLength(1)
+    expect(hostCalls.map(call => call.headers[HOST_EDGE_ASSERTION_HEADER])).toEqual([
+      edgeAssertion,
+      edgeAssertion,
+      edgeAssertion,
+    ])
+    expect(hostCalls[2]!.path).toBe(row.hostPath)
+    // Only the route's first resolve called control-api.
+    expect(hostAccessCalls()).toHaveLength(1)
+  })
+
+  it('approve: a held assertion with no readable exp answers 502 and makes no second control-api call', async () => {
+    const row = SINGLE_ATTEMPT_ROW
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+    edgeAssertion = 'edge-assertion-without-exp-fixture'
+    controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
+    hostAnswer = hostDownThen(() => jsonResponse(200, {}))
+
+    const res = await send(row)
+
+    // Witness: the first attempt reached the Host as Host down and the wake ran,
+    // so the retry's refresh read the held assertion.
+    expect(controlApiCalls.filter(url => url.endsWith('/wake'))).toHaveLength(1)
+    expect(hostCalls).toHaveLength(1)
+    expect(hostCalls[0]!.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(edgeAssertion)
+    expect(hostAccessCalls()).toHaveLength(1)
+    expect(res.status).toBe(502)
   })
 
   it.each(REFRESH_ROWS)(
@@ -603,7 +663,7 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection', () => {
         jsonResponse(200, {
           ...OLD_SHAPE_CONNECTION,
           userId: 'another-user',
-          edgeAssertion: EDGE_ASSERTION,
+          edgeAssertion,
         }),
     },
   ]
@@ -641,7 +701,7 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection', () => {
       jsonResponse(200, {
         ...OLD_SHAPE_CONNECTION,
         url: 'http://other.mcp-host.svc.cluster.local:8080',
-        edgeAssertion: EDGE_ASSERTION,
+        edgeAssertion,
       })
     )
     hostAnswer = hostDownThen(() => jsonResponse(200, {}))
