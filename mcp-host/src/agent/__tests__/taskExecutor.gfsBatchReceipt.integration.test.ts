@@ -229,6 +229,10 @@ it('keeps the exact workspace receipt through same-batch image suspension, SQLit
     imageInput: () => ({}),
     modelName: 'fixture-model',
     approvalConfig: { defaultPolicy: 'channel_users', channels: {} },
+    approvalConfigProvider: () => ({
+      effective: deps.approvalConfig,
+      hostSpec: deps.approvalConfig,
+    }),
     config: {
       maxTaskDuration: 30_000,
       maxToolCallsPerTask: 10,

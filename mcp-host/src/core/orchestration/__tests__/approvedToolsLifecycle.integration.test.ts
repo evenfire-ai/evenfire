@@ -682,6 +682,7 @@ describe('approved catalog across presentation and lifecycle', () => {
           workspaceService: undefined,
           modelName: 'gpt-5.6-luna',
           approvalConfig: undefined,
+          approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
           config: {
             maxTaskDuration: 300000,
             maxToolCallsPerTask: 10,

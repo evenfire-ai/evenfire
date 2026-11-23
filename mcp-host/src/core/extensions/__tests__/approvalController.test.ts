@@ -12,6 +12,8 @@ function makeConversation(overrides?: Partial<Conversation>): Conversation {
     state: ConversationState.Processing,
     turns: [],
     auto_approved_tools: new Set<string>(),
+    approval_mode: 'manual',
+    auto_shell_grants: { wholeTool: false, commands: new Set() },
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,
@@ -103,6 +105,7 @@ describe('ApprovalController', () => {
     const result = controller.beforeTool('shell_exec', { command: 'process-file' })
     expect(result).toEqual({
       type: 'suspend',
+      cause: 'live',
       approval: { ...pendingApproval, authorization_scope: 'exact_invocation' },
     })
     expect(customDelegate.beforeTool).toHaveBeenCalledWith(
@@ -147,6 +150,7 @@ describe('ApprovalController', () => {
 
       expect(controller.beforeTool('shell_exec', { command })).toEqual({
         type: 'suspend',
+        cause: 'live',
         approval: { ...nextApproval, authorization_scope: 'exact_invocation' },
       })
       expect(customDelegate.beforeTool).toHaveBeenCalledExactlyOnceWith(

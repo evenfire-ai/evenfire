@@ -131,6 +131,7 @@ describe('image sends and the session model selection', () => {
       dispatch,
       fileReferenceGfs: () => ({ status: 'unsupported' }),
       logger: { info: vi.fn(), warn: vi.fn() },
+      approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
     })
   })
 
