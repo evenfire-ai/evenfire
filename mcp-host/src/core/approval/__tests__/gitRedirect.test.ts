@@ -43,6 +43,15 @@ describe('matchTypedGitRead', () => {
     ['git log --word-diff', true],
     ['git log -L 1,2:a.txt', true],
     ['git log --cc', true],
+    ['git reflog show -p', true],
+    ['git reflog show --patch', true],
+    ['git log --notes', true],
+    ['git log --show-notes', true],
+    ['git log --format=%N', true],
+    ['git for-each-ref --format=%(raw)', true],
+    ['git for-each-ref --format=%(contents)', true],
+    ['git for-each-ref --format=%(refname)', false],
+    ['git reflog', false],
   ])('%s returns content: %s', (command, content) => {
     expect(matchTypedGitRead(command)?.content).toBe(content)
   })

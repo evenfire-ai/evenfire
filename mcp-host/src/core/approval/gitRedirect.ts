@@ -26,12 +26,14 @@ const CONTENT_SUBCOMMANDS: ReadonlySet<string> = new Set([
  */
 function logContentArg(arg: string): boolean {
   if (
-    /^--(patch|unified|word-diff|color-words|pickaxe|cc$|diff-merges|full-diff|ext-diff|textconv|raw$)/.test(
+    /^--(patch|notes|show-notes|unified|word-diff|color-words|pickaxe|cc$|diff-merges|full-diff|ext-diff|textconv|raw$)/.test(
       arg
     )
   ) {
     return true
   }
+  // A format with %N prints notes, which can be made from any blob.
+  if (/^--(format|pretty)=.*%N/.test(arg)) return true
   if (arg.startsWith('-') && !arg.startsWith('--')) {
     return /[puUSGLcm]/.test(arg.slice(1).replace(/^\d+/, ''))
   }
@@ -156,7 +158,10 @@ export function matchTypedGitRead(
   const args = words.slice(i + 1)
   if (!readOnly(subcommand, args)) return null
   const content =
-    CONTENT_SUBCOMMANDS.has(subcommand) || (subcommand === 'log' && args.some(logContentArg))
+    CONTENT_SUBCOMMANDS.has(subcommand) ||
+    ((subcommand === 'log' || subcommand === 'reflog') && args.some(logContentArg)) ||
+    (subcommand === 'for-each-ref' &&
+      args.some(arg => /%\(\*?(raw|contents|body|trailers)/.test(arg)))
   return { subcommand, content }
 }
 
