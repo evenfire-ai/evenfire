@@ -3282,5 +3282,137 @@
   {
     "suite": "gitRead.repositoryLinks.integration.test.ts",
     "fullName": "git_read repository links (P2–P4) a caller root that no longer verifies is root_unavailable"
+  },
+  {
+    "suite": "gitReadAdmission.integration.test.ts",
+    "fullName": "git_read reads follow file_read guardrail rules a backslash pathspec, which git reads as a glob, gets the whole-workspace decision"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect a whitespace variant of a redirected command takes the normal path"
+  },
+  {
+    "suite": "decideApproval.test.ts",
+    "fullName": "decideApproval: git_read only a shell_exec grant covers git_read: http_request and file_read grants do not"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect cd a&&b&&c && git log"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git log < f"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git branch -D x"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git tag -d v1"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git tag -v v1"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git tag -v"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git branch --contains"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git branch --set-upstream-to=x"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git diff --output=x"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead does not redirect git log --output=out.txt -p"
+  },
+  {
+    "suite": "gitRead.alternates.integration.test.ts",
+    "fullName": "git_read alternates reader (P5) the alternates cap is exactly 64 KiB"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) the follow check sees a protected name git would quote (non-ASCII), renamed out or matched by a glob"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) a worktree grep is refused when a tracked directory is a link; a revision grep still runs"
+  },
+  {
+    "suite": "gitRead.protectedContent.integration.test.ts",
+    "fullName": "git_read protected content (history, refs, stash, index, worktree) indirection objects (G-P8) notes history is not read: --all skips notes refs, and a notes ref or commit is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a hard link outside an object store is refused wherever an objects segment appears"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a link to a file with a second hard link is refused"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a recorded linked worktree outside the root is refused; one inside runs"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a managed caller root that verifies runs git_read (the GFS Host path)"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) blame of a tracked file missing from the worktree is path_missing"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "spawnGit outcomes a child killed at the timeout is a timeout"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "spawnGit outcomes a child that dies from a signal it did not get from us has failed, not timed out"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "spawnGit outcomes stdout past the buffer is an overflow; stderr past it has failed"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "spawnGit outcomes an exit code is reported, and a missing binary could not start"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "git_read results for each ending of the main command a timeout returns the fixed refusal text"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "git_read results for each ending of the main command an abnormal end is an error, not a timeout or a result"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "git_read results for each ending of the main command git that could not start is an error"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "git_read results for each ending of the main command a stopped call is an error"
+  },
+  {
+    "suite": "gitRead.runner.test.ts",
+    "fullName": "git_read results for each ending of the main command an overflow keeps what was read and says it was cut"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git a repository with a submodule gets the fixed note on status and diff"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git a worktree diff or status leaves .git/index unchanged"
   }
 ]
