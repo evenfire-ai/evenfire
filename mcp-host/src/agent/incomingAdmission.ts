@@ -150,6 +150,24 @@ function approvalModeReply(
   return refusal ? `${base} ${APPROVAL_MODE_REFUSAL_TEXT[refusal]}` : base
 }
 
+/**
+ * Log fields for a mode write that failed. The error's message can name the
+ * conversation id (the SQLite store's persistApprovalMode does), so only the
+ * error's class, a string code and the hashed session id are logged. The
+ * session id is absent when the failure came before the session was read.
+ */
+function approvalModeStoreFailureFields(
+  err: unknown,
+  sessionLogId: string | undefined
+): Record<string, unknown> {
+  const code = (err as { code?: unknown } | null | undefined)?.code
+  return {
+    errorClass: err instanceof Error ? err.constructor.name : typeof err,
+    ...(typeof code === 'string' ? { code } : {}),
+    ...(sessionLogId !== undefined ? { session: sessionLogId } : {}),
+  }
+}
+
 function approvalModeStoreFailure(provider: string | undefined): MessageResponse {
   return {
     success: false,
@@ -315,6 +333,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       }
       if (!deps.getConversationManager) return approvalModeStoreFailure(deps.hostProvider())
       return (async () => {
+        let sessionLogId: string | undefined
         try {
           const manager = deps.getConversationManager!()
           const key = serializeSessionKey({
@@ -330,6 +349,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             threadId: normalizedMessage.threadId,
             source: normalizedMessage.channelType,
           })
+          sessionLogId = approvalLogId(conversation.id)
           const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
           // The switch decides what the command stores and whether the reply
           // names the channel. The cap, which adds the approver policy for
@@ -403,7 +423,10 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             response: approvalModeReply(stored.approvalMode, stored.effectiveApprovalMode, refusal),
           }
         } catch (err) {
-          logger.warn({ err }, 'Approval mode command could not be stored')
+          logger.warn(
+            approvalModeStoreFailureFields(err, sessionLogId),
+            'Approval mode command could not be stored'
+          )
           return approvalModeStoreFailure(deps.hostProvider())
         }
       })()
@@ -538,6 +561,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       const requested = carriedApprovalMode(normalizedMessage)
       if (!requested) return undefined
       if (!deps.getConversationManager) return approvalModeStoreFailure(deps.hostProvider())
+      let sessionLogId: string | undefined
       try {
         const manager = deps.getConversationManager()
         const key = serializeSessionKey({
@@ -554,6 +578,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           source: 'rpc',
           approvalMode: requested,
         })
+        sessionLogId = approvalLogId(conversation.id)
         if (!created) return undefined
         const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
         const ceiling = readModeCeiling(live)
@@ -575,7 +600,10 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         syncEffectiveMode(conversation, effective)
         return undefined
       } catch (err) {
-        logger.warn({ err }, 'First-message approval mode could not be stored')
+        logger.warn(
+          approvalModeStoreFailureFields(err, sessionLogId),
+          'First-message approval mode could not be stored'
+        )
         return approvalModeStoreFailure(deps.hostProvider())
       }
     }

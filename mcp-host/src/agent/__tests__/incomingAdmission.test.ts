@@ -7,6 +7,7 @@
  * the resolver call, or the structured log line the branch had to emit).
  */
 import { type Mock, afterEach, describe, expect, it, vi } from 'vitest'
+import { SqliteError } from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1112,10 +1113,6 @@ describe('approval mode writers at admission', () => {
           provider: 'zai',
         },
       })
-      expect(warn).toHaveBeenCalledWith(
-        { err: expect.objectContaining({ message: 'fixture approval-mode write failure' }) },
-        'Approval mode command could not be stored'
-      )
       expect(spies.dispatch).not.toHaveBeenCalled()
       const conv = manager.getSessionByKey(
         serializeSessionKey({
@@ -1124,6 +1121,11 @@ describe('approval mode writers at admission', () => {
           channelId: 'C1',
           threadId: 'thread-1',
         })
+      )
+      expect(conv).toBeDefined()
+      expect(warn).toHaveBeenCalledWith(
+        { errorClass: 'Error', session: approvalLogId(conv!.id) },
+        'Approval mode command could not be stored'
       )
       expect(conv?.approval_mode).toBe('manual')
       expect(l1Calls(info as unknown as Mock)).toHaveLength(0)
@@ -1154,7 +1156,7 @@ describe('approval mode writers at admission', () => {
         },
       })
       expect(warn).toHaveBeenCalledWith(
-        { err: expect.objectContaining({ message: 'fixture session read failure' }) },
+        { errorClass: 'Error' },
         'First-message approval mode could not be stored'
       )
       expect(spies.dispatch).not.toHaveBeenCalled()
@@ -1163,6 +1165,63 @@ describe('approval mode writers at admission', () => {
       warn.mockRestore()
     }
   })
+
+  it.each([
+    {
+      // The SQLite store's own refusal names the conversation id.
+      name: 'the SQLite store refusal',
+      error: (id: string) =>
+        new Error(
+          `persistApprovalMode: no sessionKey for conversation ${id}; refusing a write with no durable target`
+        ),
+      fields: { errorClass: 'Error' },
+    },
+    {
+      name: 'a SQLite driver error with a code',
+      error: (id: string) => new SqliteError(`database is locked for ${id}`, 'SQLITE_BUSY'),
+      fields: { errorClass: 'SqliteError', code: 'SQLITE_BUSY' },
+    },
+  ])(
+    'logs $name by its class, any code and the hashed session, never the conversation id',
+    async ({ error, fields }) => {
+      class RefusingModeWrite extends InMemoryConversationStore {
+        override async persistApprovalMode(conv: { id: string }): Promise<void> {
+          throw error(conv.id)
+        }
+      }
+      const manager = new ConversationManager(new RefusingModeWrite())
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+      const { admit } = admitWith(manager, OPEN_CEILING)
+      try {
+        const response = await admit(
+          message({
+            channelType: 'slack',
+            channelId: 'C1',
+            threadId: 'thread-1',
+            sender: 'slack-user',
+            content: 'approval-mode auto',
+          })
+        )
+        expect(response).toMatchObject({ success: false })
+        const conv = manager.getSessionByKey(
+          serializeSessionKey({
+            userId: 'slack-user',
+            channelType: 'slack',
+            channelId: 'C1',
+            threadId: 'thread-1',
+          })
+        )
+        expect(conv).toBeDefined()
+        expect(warn).toHaveBeenCalledWith(
+          { ...fields, session: approvalLogId(conv!.id) },
+          'Approval mode command could not be stored'
+        )
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(conv!.id)
+      } finally {
+        warn.mockRestore()
+      }
+    }
+  )
 
   it('is never recognized on an rpc message', async () => {
     const manager = new ConversationManager()
