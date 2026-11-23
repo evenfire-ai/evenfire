@@ -37,7 +37,8 @@ function isPlausibleEmail(value: unknown): value is string {
 
 /**
  * The claims member eligibility reads (tenant, guest markers, roles) beyond the
- * email claims the protocol engine always keeps. The member sign-in route builds
+ * email claims the protocol engine always keeps, plus `xms_edov`, the Entra
+ * email-domain proof that `oidcEmailState` reads. The member sign-in route builds
  * its engine with exactly these, so each is kept as verified evidence.
  */
 export const MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze([
