@@ -180,9 +180,18 @@ function enqueueUsage(input: ClassifyInput, usage: TokenUsage | undefined): void
     })
     if (!event) return
     input.usage.reporter.enqueue(event)
-  } catch {
-    // A reporter failure must not change the verdict.
+  } catch (error) {
+    // A reporter failure must not change the verdict. Only the error's class
+    // is logged: the event carries ids, and the message may echo them.
+    logger.warn(
+      { event: 'shell_classifier_usage_failed', errorClass: errorClassOf(error) },
+      'Shell classifier usage event was not enqueued'
+    )
   }
+}
+
+function errorClassOf(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : typeof error
 }
 
 /**
@@ -195,7 +204,7 @@ function logClassifierFailure(
   error: unknown,
   timedOut: boolean
 ): void {
-  const errorClass = error instanceof Error ? error.constructor.name : typeof error
+  const errorClass = errorClassOf(error)
   const fields = error as { status?: unknown; httpStatus?: unknown } | null | undefined
   const status = typeof fields?.status === 'number' ? fields.status : fields?.httpStatus
   logger.warn(

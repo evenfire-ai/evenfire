@@ -672,6 +672,46 @@ describe('shell classifier', () => {
     expect(await histogramCounts()).toEqual(before)
   })
 
+  it('keeps the verdict and warns with the error class when the usage reporter throws', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    class ReporterFailure extends Error {}
+    const enqueue = vi.fn(() => {
+      throw new ReporterFailure(THROWN)
+    })
+    const reporter = { enqueue } as unknown as UsageReporter
+
+    const verdict = await classifyToolCall(
+      baseInput({
+        reporter,
+        description: DESCRIPTION,
+        args: { command: COMMAND, parameters: PARAM },
+        provider: { completeSingleTurn: async () => modelResponse('APPROVE') },
+      })
+    )
+
+    expect(verdict).toBe('APPROVE')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [fields, message] = warn.mock.calls[0] as [Record<string, unknown>, string]
+    expect(fields).toEqual({
+      event: 'shell_classifier_usage_failed',
+      errorClass: 'ReporterFailure',
+    })
+    const line = JSON.stringify([fields, message])
+    for (const secret of [
+      COMMAND,
+      PARAM,
+      DESCRIPTION,
+      THROWN,
+      'session-log-id',
+      'user-1',
+      'task-1',
+    ]) {
+      expect(line).not.toContain(secret)
+    }
+  })
+
   it('logs one L3 line with the normalized verdict and no sensitive text', async () => {
     const manager = new ConversationManager()
     const conversation = await manager.getOrCreate(`${SENDER}:email:INBOX:${THREAD}`, {
