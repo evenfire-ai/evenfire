@@ -204,7 +204,8 @@ export class GitReadTool implements Tool {
     run: (argv: readonly string[], maxBuffer: number) => Promise<GitSpawnResult>
   ): Promise<boolean> {
     if (params.subcommand !== 'status' && params.subcommand !== 'diff') return false
-    const index = await run(['ls-files', '--stage'], SUBMODULE_INDEX_MAX_BUFFER)
+    // The whole index (`:/`), as status and diff report from a subdirectory.
+    const index = await run(['ls-files', '--stage', '--', ':/'], SUBMODULE_INDEX_MAX_BUFFER)
     if (index.outcome !== 'exited' || index.exitCode !== 0) {
       // The note is advisory; the call's own result is already complete.
       logger.debug(

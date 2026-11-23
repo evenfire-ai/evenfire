@@ -269,6 +269,9 @@ describe('git_read corpus on real git', () => {
       gitw(dir, 'commit', '-qm', 'c')
     }
     gitw(parent, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'add', child, 'mod')
+    fs.mkdirSync(path.join(parent, 'src'))
+    fs.writeFileSync(path.join(parent, 'src', 's.txt'), 's\n')
+    gitw(parent, 'add', '-A')
     gitw(parent, 'commit', '-qm', 'sub')
     const tool = new GitReadTool({
       root: fx.root,
@@ -276,9 +279,12 @@ describe('git_read corpus on real git', () => {
       timeoutMs: 30_000,
       verifyCallerRoot: false,
     })
-    for (const subcommand of ['status', 'diff']) {
-      const result = await tool.execute({ directory: 'parent', subcommand })
-      expect(result.content).toContain('Submodule changes are not shown by git_read.')
+    // From a subdirectory too: status and diff still cover the whole repository.
+    for (const directory of ['parent', 'parent/src']) {
+      for (const subcommand of ['status', 'diff']) {
+        const result = await tool.execute({ directory, subcommand })
+        expect(result.content).toContain('Submodule changes are not shown by git_read.')
+      }
     }
     expect((await tool.execute({ directory: 'repo', subcommand: 'status' })).content).not.toContain(
       'Submodule changes'
