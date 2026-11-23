@@ -32,8 +32,11 @@ import {
   buildCommunicationChannelSpec,
   communicationChannelInitialTab,
   createCommunicationChannelDraft,
+  hasSlackConfig,
   hasSlackConfigForRequestUrl,
+  hasTeamsConfig,
   hasTeamsConfigForRequestUrl,
+  hasTelegramConfig,
 } from '@lib/communicationChannelEdit'
 import { type CommunicationChannelProvider } from '@lib/communicationChannelProviders'
 import {
@@ -268,24 +271,36 @@ export default function EditCommunicationChannelPage() {
         )
       : null
 
+  /** Both Save and conversation deletion validate before writing a full spec. */
+  function draftValidationError(nextDraft: DraftState): string | null {
+    const spec = buildCommunicationChannelSpec(nextDraft)
+    const teamsAppName = spec.teamsSettings?.appName
+    const nameError = teamsAppName === undefined ? null : teamsAppNameError(teamsAppName)
+    if (nameError) return nameError
+
+    // Legacy email-only/providerless records remain editable through their URL.
+    // Once a record has a supported provider, an edit must not remove its last
+    // one: that would make it unreachable through all three provider tabs.
+    const hasProvider = (value: DraftState) =>
+      hasTelegramConfig(value) || hasSlackConfig(value) || hasTeamsConfig(value)
+    return savedDraft && hasProvider(savedDraft) && !hasProvider(nextDraft)
+      ? 'Keep at least one channel provider configured before saving.'
+      : null
+  }
+
   /**
-   * The single validation boundary for this page: every path that persists a
-   * full spec goes through here, Save and deleteConversation alike. Validating
-   * in handleSave instead let deleteConversation persist a value Save refuses.
-   *
-   * It validates the SPEC, not the draft, because the spec is what is sent: an
-   * empty name is omitted by buildCommunicationChannelSpec rather than written
-   * as an empty string, which is exactly what the server accepts.
+   * Conversation deletion persists a full spec independently of handleSave.
+   * Keep its validation aligned with Save through draftValidationError, so a
+   * conversation action cannot persist a value Save would refuse.
    *
    * Returns false when nothing was persisted, so callers do not navigate away
    * from an unsaved page -- neither on a rejected value nor on a failed PUT.
    */
   async function persistDraft(nextDraft: DraftState, successMessage: string): Promise<boolean> {
     const spec = buildCommunicationChannelSpec(nextDraft)
-    const teamsAppName = spec.teamsSettings?.appName
-    const nameError = teamsAppName === undefined ? null : teamsAppNameError(teamsAppName)
-    if (nameError) {
-      setSaveError(nameError)
+    const validationError = draftValidationError(nextDraft)
+    if (validationError) {
+      setSaveError(validationError)
       return false
     }
     setSaving(true)
@@ -310,12 +325,12 @@ export default function EditCommunicationChannelPage() {
     event.preventDefault()
     if (!draft || saving) return
     const spec = buildCommunicationChannelSpec(draft)
-    const teamsName = spec.teamsSettings?.appName
-    const nameError = teamsName === undefined ? null : teamsAppNameError(teamsName)
     const plan = buildCredentialOperationPlan(credentialEditStates, validCredentialChannelTypes)
-    if (nameError || plan.invalidLabels.length) {
+    const validationError = draftValidationError(draft)
+    if (validationError || plan.invalidLabels.length) {
       setSaveError(
-        nameError || `Credential changes are no longer valid for: ${plan.invalidLabels.join(', ')}.`
+        validationError ||
+          `Credential changes are no longer valid for: ${plan.invalidLabels.join(', ')}.`
       )
       return
     }

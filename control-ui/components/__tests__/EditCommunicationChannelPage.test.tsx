@@ -2,6 +2,9 @@ import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { parse } from 'yaml'
 import { ToastProvider } from '@components/Toast'
 import EditCommunicationChannelPage from '../../app/communication-channels/[name]/edit/page'
 import * as api from '../../lib/api'
@@ -43,6 +46,13 @@ afterEach(() => {
 })
 
 type ChannelSpec = Record<string, unknown>
+
+const MINIKUBE_CHANNEL = parse(
+  readFileSync(
+    resolve(__dirname, '../../../deploy/overlays/minikube/instances/communicationchannel.yaml'),
+    'utf8'
+  )
+) as { spec: ChannelSpec }
 
 function mockChannel(name: string, spec: ChannelSpec, annotations?: Record<string, string>) {
   navigation.params = { name }
@@ -1042,8 +1052,8 @@ describe('EditCommunicationChannelPage Teams name validation', () => {
 /**
  * deleteConversation persists a full spec through persistDraft without going
  * anywhere near handleSave, so a check that lived only in handleSave let it
- * write a value Save would refuse. Validation lives on persistDraft, the one
- * boundary both paths cross.
+ * write a value Save would refuse. Both write paths use the shared draft
+ * validation before sending their full-spec PUT.
  */
 describe('EditCommunicationChannelPage conversation delete validation', () => {
   const TEAMS_CONVERSATION = {
@@ -1174,4 +1184,109 @@ describe('shared channel details layout', () => {
       expect(api.apiSend).not.toHaveBeenCalled()
     }
   )
+})
+
+describe('prevent removing the last supported channel provider', () => {
+  it.each([
+    {
+      provider: 'Telegram',
+      spec: { telegramSettings: { botHandle: '@fixture_bot' } },
+      fields: [/Telegram bot handle/],
+    },
+    {
+      provider: 'Slack',
+      spec: { slackSettings: { botHandle: 'Fixture app' } },
+      fields: [/Slack App Name/],
+    },
+    {
+      provider: 'Microsoft Teams',
+      spec: { teamsSettings: { appName: 'Fixture bot' } },
+      fields: [/^Name/],
+    },
+  ])(
+    'blocks Save after clearing the last $provider configuration and allows repair',
+    async ({ spec, fields }) => {
+      mockChannel('fixture-provider-removal', spec)
+      await renderLoadedPage()
+      for (const field of fields)
+        fireEvent.change(screen.getByLabelText(field), { target: { value: '' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+      expect(
+        await screen.findByText('Keep at least one channel provider configured before saving.')
+      ).toBeVisible()
+      expect(api.apiSend).not.toHaveBeenCalled()
+
+      fireEvent.change(screen.getByLabelText(fields[0]), { target: { value: 'fixture_bot' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+      await waitFor(() =>
+        expect(api.apiSend).toHaveBeenCalledWith(
+          'PUT',
+          '/api/v1/admin/communication-channels/fixture-provider-removal',
+          expect.objectContaining({ spec: expect.any(Object) })
+        )
+      )
+    }
+  )
+
+  it('blocks deleting the last conversation after clearing its provider identity', async () => {
+    mockChannel('fixture-provider-removal', {
+      telegramSettings: { botHandle: '@fixture_bot' },
+      telegram: [{ channelId: 'fixture-chat', title: 'Fixture chat', chatType: 'private' }],
+    })
+    await renderLoadedPage()
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), { target: { value: '' } })
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Actions for Fixture chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+    expect(
+      await screen.findByText('Keep at least one channel provider configured before saving.')
+    ).toBeVisible()
+    expect(api.apiSend).not.toHaveBeenCalled()
+  })
+
+  it('allows removing one provider when another supported provider remains', async () => {
+    mockChannel('fixture-multi-provider', {
+      telegramSettings: { botHandle: '@fixture_bot' },
+      slackSettings: { botHandle: 'Fixture app' },
+    })
+    await renderLoadedPage()
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [method, path, body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      { spec: ChannelSpec },
+    ]
+    expect(method).toBe('PUT')
+    expect(path).toBe('/api/v1/admin/communication-channels/fixture-multi-provider')
+    expect(body.spec).not.toHaveProperty('telegramSettings')
+    expect(body.spec).toHaveProperty('slackSettings.botHandle', 'Fixture app')
+  })
+
+  it.each([
+    { record: 'email-only', spec: MINIKUBE_CHANNEL.spec },
+    { record: 'providerless', spec: { hostRef: 'fixture-old-agent' } },
+  ])('keeps a legacy $record record editable through its direct URL', async ({ spec }) => {
+    mockChannel('fixture-legacy-channel', spec)
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('button', { name: /Channel.*Name and assign/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Agent\b/i }))
+    fireEvent.click(screen.getByRole('option', { name: 'agent-a' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [method, path, body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      { spec: ChannelSpec },
+    ]
+    expect(method).toBe('PUT')
+    expect(path).toBe('/api/v1/admin/communication-channels/fixture-legacy-channel')
+    expect(body.spec.hostRef).toBe('agent-a')
+    expect(body.spec).not.toHaveProperty('telegramSettings')
+    expect(body.spec).toEqual(expect.objectContaining({ ...spec, hostRef: 'agent-a' }))
+  })
 })
