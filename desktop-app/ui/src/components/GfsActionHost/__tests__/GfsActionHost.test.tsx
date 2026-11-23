@@ -667,6 +667,8 @@ describe('GfsActionHost — upload', () => {
     const click = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
 
     h.open(folder, 'upload-file')
+    expect(click).toHaveBeenCalledTimes(1)
+    expect(overlayOpen(h)).toBe(true)
     act(() => revoke(h))
     await waitFor(() => expect(overlayOpen(h)).toBe(false))
     await act(async () => pick(file()))
@@ -710,6 +712,8 @@ describe('GfsActionHost — upload', () => {
     const click = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
 
     h.open(folder, 'upload-file')
+    expect(click).toHaveBeenCalledTimes(1)
+    expect(overlayOpen(h)).toBe(true)
     act(() => {
       screen.getByTestId('gfs-action-host-upload-input').dispatchEvent(new Event('cancel'))
     })
