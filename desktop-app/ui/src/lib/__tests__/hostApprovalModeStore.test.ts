@@ -53,9 +53,15 @@ afterEach(() => {
 describe('hostApprovalModeStore', () => {
   it('does not PATCH while chatId is null', async () => {
     const { client, setApprovalMode, readSessionApproval } = transport()
-    await selectHostApprovalMode(client, AGENT, null, 'auto')
+    await expect(selectHostApprovalMode(client, AGENT, null, 'auto')).resolves.toBe(true)
     expect(setApprovalMode).not.toHaveBeenCalled()
     expect(readSessionApproval).not.toHaveBeenCalled()
+    // The pick ran: the blank chat holds it locally for the first send.
+    const view = readHostApprovalMode(AGENT, null)
+    expect(view.storedMode).toBe('auto')
+    expect(view.label).toBe('Auto-approve')
+    expect(view.firstSendMode).toBe('auto')
+    expect(approvalModeForFirstSend(AGENT, null)).toBe('auto')
   })
 
   it('the first send carries the held mode', async () => {
