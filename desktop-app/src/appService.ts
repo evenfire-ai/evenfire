@@ -4462,12 +4462,17 @@ export class AppService {
       // forwards them and mcp-host resolves each one.
       ...(request.fileReferences === undefined ? {} : { fileReferences: request.fileReferences }),
     }
+    // One Idempotency-Key per send, shared by the first POST and the refresh
+    // retry below: rpc-proxy uses it as the Host messageId, so a retry of a
+    // message the Host already admitted replays instead of running the turn
+    // twice.
+    const sendOptions = { ...options, idempotencyKey: randomUUID() }
     try {
       return await this.rpcClient.invokeHostMessage(
         rpc.token,
         targetHostRef,
         contextualRequest,
-        options
+        sendOptions
       )
     } catch (error) {
       const availabilityError = AppService.toHostAvailabilityError(targetHostRef, error)
@@ -4483,7 +4488,7 @@ export class AppService {
             retried.token,
             targetHostRef,
             contextualRequest,
-            options
+            sendOptions
           )
         } catch (retryError) {
           const retryAvailabilityError = AppService.toHostAvailabilityError(
@@ -4769,7 +4774,9 @@ export class AppService {
           ({ event, data }) => {
             if (closed) return
             if (event === 'open') {
-              backoffMs = 1000
+              // No backoff reset here: rpc-proxy writes `open` before its first
+              // Host poll, so `open` proves only that the stream was accepted.
+              // The reset waits for a `status` event, the proof the Host answers.
               const payload = data as { hostRef?: string; observedAt?: string }
               onEvent({
                 type: 'open',
