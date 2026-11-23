@@ -1511,7 +1511,9 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
-            ...wakeAndHoldV2Options(req, host),
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
