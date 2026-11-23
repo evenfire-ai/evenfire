@@ -750,6 +750,24 @@ describe('GfsActionHost — upload', () => {
 })
 
 describe('GfsActionHost — move', () => {
+  it('an Escape pressed from the page closes an idle Move and moves nothing', async () => {
+    const h = await harness()
+    const target = await listedRow('file-t', 'notes.txt', 'file', 'folder-p')
+    h.bridge.resolve.mockImplementation(async () =>
+      resolveResource(
+        resolvedFile('file-t', 'notes.txt', { parentResourceId: 'folder-p', version: 3 })
+      )
+    )
+
+    h.open(target, 'move')
+    await screen.findByRole('dialog', { name: /move/i })
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+
+    await waitFor(() => expect(dialog()).toBeNull())
+    expect(h.bridge.moveResource).not.toHaveBeenCalled()
+    expect(overlayOpen(h)).toBe(false)
+  })
+
   it('with the move running, Escape, the backdrop and Cancel are ignored and the moving id stays until it settles', async () => {
     const h = await harness()
     const target: GfsHostActionTarget = {
