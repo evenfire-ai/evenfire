@@ -254,6 +254,28 @@ describe('git_read repository links (P2–P4)', () => {
     expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
+  it('a recursive clone with submodules runs, in the superproject and inside the submodule', async () => {
+    const child = freshRepo()
+    const source = freshRepo()
+    gitw(source, '-c', 'protocol.file.allow=always', 'submodule', '-q', 'add', child, 'vendor/sub')
+    gitw(source, 'commit', '-qm', 'sub')
+    const clone = path.join(fx.root, `clone-rec${++counter}`)
+    gitw(
+      fx.root,
+      '-c',
+      'protocol.file.allow=always',
+      'clone',
+      '-q',
+      '--recurse-submodules',
+      source,
+      clone
+    )
+    // The clone writes submodule.active, and the submodule's config core.worktree.
+    expect(gitw(clone, 'config', '--local', '--get', 'submodule.active').trim()).toBe('.')
+    expect(await verdict(clone)).toBe('ok')
+    expect(await verdict(path.join(clone, 'vendor', 'sub'))).toBe('ok')
+  })
+
   it('a submodule at a path named objects runs', async () => {
     const child = freshRepo()
     const parent = freshRepo()

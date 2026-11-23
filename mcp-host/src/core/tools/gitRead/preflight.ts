@@ -116,6 +116,10 @@ export const INERT_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'extensions.partialclone',
   'submodule.<n>.url',
   'submodule.<n>.active',
+  // `clone --recurse-submodules` writes it.
+  'submodule.active',
+  // A submodule's own config; the toplevel it gives is confined by P2.
+  'core.worktree',
   'lfs.repositoryformatversion',
   'status.showuntrackedfiles',
   'diff.algorithm',
@@ -132,7 +136,12 @@ export const INERT_CONFIG_KEYS: ReadonlySet<string> = new Set([
 ])
 
 /** Local keys git_read tolerates because the forced keys override them. */
-const TOLERATED_LOCAL_KEYS: ReadonlySet<string> = new Set(['core.hookspath', 'core.fsmonitor'])
+const TOLERATED_LOCAL_KEYS: ReadonlySet<string> = new Set([
+  'core.hookspath',
+  'core.fsmonitor',
+  'submodule.recurse',
+  'status.submodulesummary',
+])
 
 export interface ConfigEntry {
   scope: string

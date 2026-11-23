@@ -3097,7 +3097,7 @@
   },
   {
     "suite": "gitRead.preflightParse.test.ts",
-    "fullName": "git_read config preflight (P6) a key off the list runs programs; the tolerated pair does not"
+    "fullName": "git_read config preflight (P6) a key off the list is refused; the tolerated keys and submodule keys are not"
   },
   {
     "suite": "gitRead.preflightParse.test.ts",

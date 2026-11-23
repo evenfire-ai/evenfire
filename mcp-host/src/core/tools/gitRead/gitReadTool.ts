@@ -24,7 +24,7 @@ export const GIT_READ_FAILED_TEXT = 'git_read: git ended abnormally.'
 /** Fixed texts for every refusal. None of them carries input or repository bytes. */
 export const GIT_READ_REFUSALS: Readonly<Record<GitReadRefusalCategory, string>> = {
   config_runs_programs:
-    "git_read did not run: this repository's git configuration can run programs (drivers, filters, includes, aliases or signing tools). Run git with shell_exec instead; the user may be asked to approve it.",
+    "git_read did not run: this repository's git configuration has settings git_read does not accept (such as drivers, filters, includes, aliases or signing tools). Run git with shell_exec instead; the user may be asked to approve it.",
   preflight_failed: "git_read could not read this repository's configuration.",
   not_a_repository:
     'No git repository at this directory (git_read does not use bare or plain-file git directories).',

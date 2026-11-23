@@ -72,6 +72,8 @@ describe('git_read config preflight (P6)', () => {
         'extensions.partialclone',
         'submodule.<n>.url',
         'submodule.<n>.active',
+        'submodule.active',
+        'core.worktree',
         'lfs.repositoryformatversion',
         'status.showuntrackedfiles',
         'diff.algorithm',
@@ -98,7 +100,7 @@ describe('git_read config preflight (P6)', () => {
     expect(checkConfigEntries(entries!)).toBeNull()
   })
 
-  it('a key off the list runs programs; the tolerated pair does not', () => {
+  it('a key off the list is refused; the tolerated keys and submodule keys are not', () => {
     for (const name of [
       'diff.external',
       'diff.x.textconv',
@@ -106,7 +108,6 @@ describe('git_read config preflight (P6)', () => {
       'include.path',
       'includeif.gitdir:/x.path',
       'core.pager',
-      'core.worktree',
       'blame.ignorerevsfile',
       'remote.o.uploadpack',
     ]) {
@@ -117,7 +118,7 @@ describe('git_read config preflight (P6)', () => {
     expect(
       checkConfigEntries(
         parseConfigListZ(
-          `local\u0000core.hookspath\u0000worktree\u0000core.fsmonitor\u0000${COMMAND}`
+          `local\u0000core.hookspath\u0000worktree\u0000core.fsmonitor\u0000local\u0000submodule.recurse\u0000local\u0000status.submodulesummary\u0000local\u0000submodule.active\u0000local\u0000core.worktree\u0000${COMMAND}`
         )!
       )
     ).toBeNull()
