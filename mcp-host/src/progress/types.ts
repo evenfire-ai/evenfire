@@ -1,4 +1,5 @@
 // mcp-host/src/progress/types.ts
+import type { ShellCardDescriptor } from '../core/approval/shellCard'
 import type { CanonicalReason } from '../lifecycle/types.js'
 import type { TaskError } from '../queue/types.js'
 
@@ -115,6 +116,8 @@ export interface SuspendedEvent {
   /** false when the card must not offer "Always approve" (forced gate or
    *  denial re-ask). Omitted when allowed. */
   alwaysApproveAllowed?: false
+  /** Shell card buttons. Omitted when this suspension is not a shell card. */
+  shellCard?: ShellCardDescriptor
   /** Sanitized, bounded input for human review; never used to resume execution. */
   inputPreview?: ApprovalInputPreview
 }

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import CreateMemberPage from '../../app/profile-admin/users/new/page'
-import { getAdminTeams, inviteAdminTeamMember } from '../../lib/api'
+import { formatApiError, getAdminTeams, inviteAdminTeamMember } from '../../lib/api'
 import { ToastProvider } from '../Toast'
 
 const mockPush = vi.fn()
@@ -143,6 +143,35 @@ describe('CreateMemberPage', () => {
         )
       ).toBeInTheDocument()
     })
+    expect(mockPush).not.toHaveBeenCalled()
+  })
+
+  it('shows the removed-member refusal without the status prefix', async () => {
+    vi.mocked(getAdminTeams).mockResolvedValueOnce({ items: [] })
+    const body = JSON.stringify({
+      error: 'member_email_retired',
+      message: "This email belongs to a removed member and can't be invited again.",
+      email: 'jane@example.com',
+    })
+    vi.mocked(inviteAdminTeamMember).mockRejectedValueOnce(
+      formatApiError(new Response(body, { status: 409, statusText: 'Conflict' }), body)
+    )
+
+    render(<CreateMemberPage />)
+
+    fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'Jane Doe' } })
+    fireEvent.change(screen.getByLabelText(/Email/), { target: { value: 'Jane@Example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    await waitFor(() => expect(screen.queryByText(/Loading teams/)).not.toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Send invite' }))
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("This email belongs to a removed member and can't be invited again.")
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/409 Conflict/)).not.toBeInTheDocument()
     expect(mockPush).not.toHaveBeenCalled()
   })
 

@@ -143,6 +143,7 @@ it.each([true, false])(
       mcpManager: new McpManager(),
       workspaceService: undefined,
       approvalConfig: undefined,
+      approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
       config: {
         maxTaskDuration: 300_000,
         maxToolCallsPerTask: 10,

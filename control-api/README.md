@@ -87,14 +87,14 @@ If you need fewer variables operationally, you can reuse a single keypair across
 
 Host runtime scope intent for `rpc-proxy` callers:
 
-| Scope                 | Purpose                                                                  |
-| --------------------- | ------------------------------------------------------------------------ |
-| `host:message:invoke` | authorizes host message/task submission route                            |
-| `host:status:read`    | authorizes host status snapshot and status stream routes                 |
-| `host:activity:read`  | authorizes host activity snapshot and activity stream routes (read-only) |
-| `host:health:read`    | authorizes host health/liveness route                                    |
-| `host:task:read`      | authorizes host task status and result routes (read-only)                |
-| `host:approval:write` | authorizes host approval submission                                      |
+| Scope                 | Purpose                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `host:message:invoke` | authorizes host message/task submission route                                                                            |
+| `host:status:read`    | authorizes host status snapshot and status stream routes                                                                 |
+| `host:activity:read`  | authorizes host activity snapshot and activity stream routes (read-only)                                                 |
+| `host:health:read`    | authorizes host health/liveness route                                                                                    |
+| `host:task:read`      | authorizes host task status and result routes (read-only)                                                                |
+| `host:approval:write` | authorizes host approval submission, the session approval-mode change, and a first message that carries an approval mode |
 
 ### 5) Control UI admin auth
 

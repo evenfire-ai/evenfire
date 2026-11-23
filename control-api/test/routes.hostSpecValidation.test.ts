@@ -858,4 +858,114 @@ describe('validateHostSpec', () => {
       expect(getModelAllowlistState).not.toHaveBeenCalled()
     })
   })
+
+  // Approval modes. modeCeiling is the Host ceiling. telegram, email, slack
+  // and teams may each set allowModeChange.
+  describe('spec.approval mode ceiling and channel switch', () => {
+    const deps = () => ({ isModelAllowed: vi.fn() })
+
+    it.each(['manual', 'auto', 'allow_all'] as const)(
+      'round-trips modeCeiling %s',
+      async modeCeiling => {
+        const spec = { approval: { modeCeiling } }
+        expect(await validateHostSpec(spec, deps())).toBeNull()
+        expect(spec.approval.modeCeiling).toBe(modeCeiling)
+      }
+    )
+
+    it('round-trips shellClassifierModel and rejects a non-string', async () => {
+      const spec = { approval: { shellClassifierModel: 'gpt-5.5' } }
+      expect(await validateHostSpec(spec, deps())).toBeNull()
+      expect(spec.approval.shellClassifierModel).toBe('gpt-5.5')
+
+      const rejected = await validateHostSpec({ approval: { shellClassifierModel: 12 } }, deps())
+      expect(rejected).not.toBeNull()
+      expect(
+        rejected!.errors.some(error => error.field === 'spec.approval.shellClassifierModel')
+      ).toBe(true)
+    })
+
+    it('rejects modeCeiling yolo', async () => {
+      const res = await validateHostSpec({ approval: { modeCeiling: 'yolo' } }, deps())
+      expect(res).not.toBeNull()
+      expect(res!.errors.some(error => error.field === 'spec.approval.modeCeiling')).toBe(true)
+    })
+
+    it.each(['telegram', 'email', 'slack', 'teams'] as const)(
+      'accepts %s.allowModeChange true',
+      async channel => {
+        const spec = {
+          approval: { channels: { [channel]: { enabled: true, allowModeChange: true } } },
+        }
+        expect(await validateHostSpec(spec, deps())).toBeNull()
+        expect(spec.approval.channels[channel].allowModeChange).toBe(true)
+      }
+    )
+
+    it('still accepts the existing telegram channel fixture', async () => {
+      expect(
+        await validateHostSpec({ approval: { channels: { telegram: { enabled: true } } } }, deps())
+      ).toBeNull()
+    })
+
+    it('still accepts an empty channels object', async () => {
+      expect(await validateHostSpec({ approval: { channels: {} } }, deps())).toBeNull()
+    })
+
+    // The channel schema is strict: a misspelled key is refused, not dropped.
+    it('rejects an unknown channel key under channels', async () => {
+      const res = await validateHostSpec(
+        { approval: { channels: { discord: { enabled: true } } } },
+        deps()
+      )
+      expect(res).toEqual({
+        errors: [{ field: 'spec.approval.channels', message: expect.stringContaining('discord') }],
+      })
+    })
+
+    it('rejects an unknown key inside one channel', async () => {
+      const res = await validateHostSpec(
+        { approval: { channels: { slack: { enabled: true, allowModeChnage: false } } } },
+        deps()
+      )
+      expect(res).toEqual({
+        errors: [
+          {
+            field: 'spec.approval.channels.slack',
+            message: expect.stringContaining('allowModeChnage'),
+          },
+        ],
+      })
+    })
+
+    it('rejects a non-boolean allowModeChange', async () => {
+      const res = await validateHostSpec(
+        { approval: { channels: { teams: { allowModeChange: 'false' } } } },
+        deps()
+      )
+      expect(res).toEqual({
+        errors: [
+          {
+            field: 'spec.approval.channels.teams.allowModeChange',
+            message: expect.stringContaining('boolean'),
+          },
+        ],
+      })
+    })
+
+    it('rejects a non-array approvers', async () => {
+      const res = await validateHostSpec(
+        { approval: { channels: { telegram: { approvers: '123456' } } } },
+        deps()
+      )
+      expect(res).toEqual({
+        errors: [
+          {
+            field: 'spec.approval.channels.telegram.approvers',
+            message: expect.stringContaining('array'),
+          },
+        ],
+      })
+    })
+  })
 })

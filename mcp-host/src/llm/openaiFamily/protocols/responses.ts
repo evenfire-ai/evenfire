@@ -16,6 +16,7 @@ import {
   type ToolCompletionResponse,
 } from '../../../core/types'
 import { logger } from '../../../logger'
+import type { ReasoningEffortOption } from '../../types'
 import type { ResolvedModelParams } from '../modelParamPolicy'
 import { isUsageReported, parseArguments } from '../shared'
 import type { DecodeContext, DriverIdentity, EncodeContext, WireProtocol } from './types'
@@ -169,6 +170,17 @@ function temperatureField(
  */
 function stateless(): { store: false; include: OpenAI.Responses.ResponseIncludable[] } {
   return { store: false, include: ['reasoning.encrypted_content'] }
+}
+
+/**
+ * The API accepts `none` and `xhigh`. The SDK union is only
+ * `low` | `medium` | `high` | null, so the value is cast here.
+ */
+function reasoningField(effort: ReasoningEffortOption | undefined): {
+  reasoning?: OpenAI.Responses.ResponseCreateParamsNonStreaming['reasoning']
+} {
+  if (!effort) return {}
+  return { reasoning: { effort: effort as 'low' | 'medium' | 'high' } }
 }
 
 // ─── Encode ─────────────────────────────────────────────────
@@ -502,6 +514,7 @@ export const responsesProtocol: WireProtocol<ResponsesPayload, ResponsesResult> 
       input: items,
       ...tokenLimit(input.max_tokens),
       ...temperatureField(input.temperature, ctx.params),
+      ...reasoningField(input.reasoning_effort),
       ...stateless(),
     }
   },

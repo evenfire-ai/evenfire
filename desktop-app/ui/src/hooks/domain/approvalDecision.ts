@@ -64,6 +64,8 @@ export interface ApprovalDecisionTarget {
   decision: 'approve' | 'deny'
   /** When true, the host allowlists this exact tool name for later calls. */
   alwaysApprove?: boolean
+  /** Auto shell card. Deny stays on the deny route and does not set this. */
+  shellAction?: 'once' | 'command' | 'shell'
   // `connect_completed` (U5): the OAuth deep-link returned for an mcp-server;
   // the suspended task is resumed through the SAME approval RPC (mcp-host
   // re-executes the tool with the freshly-minted grant). Always an approve.

@@ -98,7 +98,7 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     expect(queue.admit(task)).toEqual({ admitted: true })
     expect(lifecycle.get(task.id)?.traceContext).toEqual(traceContext)
 
-    const convA = await managerA.getOrCreate(sessionKey)
+    const convA = await managerA.getOrCreate(sessionKey, { channelType: 'rpc' })
     await managerA.startTurn(convA, message.content, task.id, task.traceContext ?? null)
     expect(convA.traceContext).toEqual(traceContext)
     await managerA.suspendForApproval(convA, {

@@ -465,6 +465,17 @@ describe('RPCClient - sendApproval()', () => {
     expect(result.success).toBe(false)
     expect(result.error).toContain('Network down')
   })
+
+  it('posts shellAction with alwaysApprove when a shell choice is sent', async () => {
+    mockFetch.mockReturnValueOnce(mockOkResponse({ success: true }))
+
+    const client = new RPCClient('http://mcp-host:8080')
+    await client.sendApproval('user-1', 'req-1', false, 'slack', 'C123', { shellAction: 'command' })
+
+    const body = JSON.parse(String((mockFetch.mock.calls[0] as [string, RequestInit])[1].body))
+    expect(body.alwaysApprove).toBe(false)
+    expect(body.shellAction).toBe('command')
+  })
 })
 
 describe('RPCClient - read-side direct mcp-host calls', () => {
