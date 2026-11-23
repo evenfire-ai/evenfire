@@ -519,15 +519,20 @@ export function createRpcRouter(): Router {
         })
         // First-message mode. This body is an allowlist: forward approvalMode
         // only for a stored value when the token also has host:approval:write,
-        // the mode PATCH's scope. Carrying the field without that scope is 403.
-        // A message without the field needs only host:message:invoke. An
-        // invalid value is dropped.
+        // the mode PATCH's scope. Carrying the field without that scope is 403,
+        // checked before the value. With the scope, a value that is not a
+        // stored mode is 400, as on the PATCH. A message without the field
+        // needs only host:message:invoke.
         const carriesApprovalMode = Object.prototype.hasOwnProperty.call(body, 'approvalMode')
         if (carriesApprovalMode && !auth.scopes.includes('host:approval:write')) {
           res.status(403).json({ error: 'Forbidden: missing scope' })
           return
         }
         const approvalMode = carriesApprovalMode ? readApprovalMode(body.approvalMode) : undefined
+        if (carriesApprovalMode && !approvalMode) {
+          res.status(400).json({ error: 'approvalMode must be manual, auto, or allow_all' })
+          return
+        }
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
