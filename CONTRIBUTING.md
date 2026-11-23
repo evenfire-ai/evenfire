@@ -1,7 +1,8 @@
 # Contributing to evenfire
 
 Thanks for your interest! evenfire is **open source** under the
-[Mozilla Public License 2.0](LICENSE) (MPL-2.0) and requires a signed CLA.
+[Mozilla Public License 2.0](LICENSE) (MPL-2.0). Contributions are accepted
+under the same license; see [License of contributions](#license-of-contributions).
 
 ## Set up
 
@@ -165,12 +166,7 @@ use the local Minikube lanes:
 Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md)
 for private reporting.
 
-## CLA
+## License of contributions
 
-The project plans to require a signed Contributor License Agreement, and
-contributions may be used in the project's commercial / managed editions.
-
-The agreement in [CLA.md](CLA.md) is a draft pending legal review and is not
-open for signing yet: no CLA bot runs on pull requests and there is no
-signature record. You cannot sign it today. Once it is final, CLA.md will say
-how to accept it.
+Contributions are accepted under MPL-2.0, the license of the project. There is
+no contributor license agreement to sign.
