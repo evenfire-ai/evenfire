@@ -313,6 +313,19 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
   lets a Host pod with the old label start on the new image (wake from zero,
   eviction, node drain) while RPC Proxy is still old, and that Host answers
   401.
+- **Host restarts.** The upgrade replaces every Host Deployment. Host
+  Deployments use the `Recreate` strategy, HCC does not wait for one Host to
+  come back before it replaces the next (`HCC_HOST_FULL_RECONCILE_CONCURRENCY`,
+  default 2, limits concurrent reconciles, not downtime), and the Host pod
+  sets no `terminationGracePeriodSeconds`, so in-flight tasks are cut after
+  the Kubernetes default of 30 seconds. Plan a maintenance window.
+- **Retired edge credentials.** After the rollback window closes, delete
+  Secret `rpc-proxy-edge-credentials` in `mcp-host` and the key
+  `RPC_PROXY_MCP_HOST_EDGE_TOKEN` in Secret `rpc-proxy-secrets` (namespace
+  `rpc-proxy`), if your install created them. This release reads neither. Do
+  not delete them earlier: an HCC rolled back to the previous release with
+  `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=dedicated-header-v1` writes
+  Host pods that require that Secret.
 
 The in-repository executable barrier covers the supported Minikube path. Production
 GCP rollout and rollback orchestration is owned by `keyper-labs/evenfire-infra`;
