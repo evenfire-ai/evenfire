@@ -168,10 +168,11 @@ session's owner.
 | Email | `allow_all` only when `approval.channels.email.allowModeChange` is `true`. The switch defaults to off, because the From address can be forged. `manual` for an owner the approver policy does not allow |
 | Any other channel | `manual` |
 
-A malformed value caps that channel at `manual`: a `channels` value or channel
-block that is not an object, or an `allowModeChange` that is not a boolean.
-mcp-host logs `approval_config_invalid` with the field name when the config
-arrives.
+A malformed value caps sessions at `manual`. A `channels` value that is not an object
+caps every messaging channel: Telegram, email, Slack and Microsoft Teams. A
+channel block that is not an object, or an `allowModeChange` that is not a
+boolean, caps that channel only. Desktop is not affected. mcp-host logs
+`approval_config_invalid` with the field name when the config arrives.
 
 The table assumes the approver policy allows the channel session's owner. For
 an owner it does not allow, the column is the same as a switch that is off.
