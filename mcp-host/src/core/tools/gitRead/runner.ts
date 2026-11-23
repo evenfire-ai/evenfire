@@ -37,29 +37,36 @@ export type GitSpawn = (
  */
 export const spawnGit: GitSpawn = (gitPath, argv, options) =>
   new Promise(resolve => {
-    const child = execFile(
-      gitPath,
-      [...argv],
-      {
-        cwd: options.cwd,
-        env: { ...options.env },
-        maxBuffer: options.maxBuffer,
-        timeout: options.timeoutMs,
-        killSignal: 'SIGKILL',
-        encoding: 'utf8',
-        windowsHide: true,
-        ...(options.signal ? { signal: options.signal } : {}),
-      },
-      (error, stdout, stderr) => {
-        resolve(
-          classifyExecFileResult(
-            error,
-            typeof stdout === 'string' ? stdout : '',
-            typeof stderr === 'string' ? stderr : ''
+    let child: ReturnType<typeof execFile>
+    try {
+      child = execFile(
+        gitPath,
+        [...argv],
+        {
+          cwd: options.cwd,
+          env: { ...options.env },
+          maxBuffer: options.maxBuffer,
+          timeout: options.timeoutMs,
+          killSignal: 'SIGKILL',
+          encoding: 'utf8',
+          windowsHide: true,
+          ...(options.signal ? { signal: options.signal } : {}),
+        },
+        (error, stdout, stderr) => {
+          resolve(
+            classifyExecFileResult(
+              error,
+              typeof stdout === 'string' ? stdout : '',
+              typeof stderr === 'string' ? stderr : ''
+            )
           )
-        )
-      }
-    )
+        }
+      )
+    } catch (error) {
+      // execFile throws synchronously for some spawn errors (E2BIG).
+      resolve(classifyExecFileResult(error as Error, '', ''))
+      return
+    }
     child.stdin?.end()
   })
 

@@ -54,6 +54,16 @@ describe('spawnGit outcomes', () => {
     expect(err.outcome).toBe('failed')
   })
 
+  it('an argument list the OS refuses (E2BIG) could not start; it never throws', async () => {
+    const result = await spawnGit('/bin/echo', ['x'.repeat(4 * 1024 * 1024)], {
+      cwd: '/',
+      env,
+      timeoutMs: 10_000,
+      maxBuffer: 1024,
+    })
+    expect(result.outcome).toBe('error')
+  })
+
   it('an exit code is reported, and a missing binary could not start', async () => {
     expect(
       await spawnGit('/bin/sh', ['-c', 'exit 3'], {
