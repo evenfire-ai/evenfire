@@ -254,7 +254,13 @@ async function judge(input: ClassifyInput): Promise<ShellVerdict> {
     )
     enqueueUsage(input, response.usage)
     if (input.taskSignal.aborted) return 'CANCELLED'
-    if (timeout.signal.aborted) return 'ESCALATE'
+    if (timeout.signal.aborted) {
+      // The reply came after the 10s timeout fired. Nothing was thrown, so
+      // the abort reason (an AbortError DOMException) is the logged class,
+      // as for a provider that rejects on the abort.
+      logClassifierFailure(input, timeout.signal.reason, true)
+      return 'ESCALATE'
+    }
     return verdictFromContent(response.content)
   } catch (error) {
     // A task abort ends the task; it is not a classifier failure, so it is

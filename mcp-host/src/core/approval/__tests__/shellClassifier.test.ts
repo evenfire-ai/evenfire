@@ -354,6 +354,53 @@ describe('shell classifier', () => {
     expect(warn).not.toHaveBeenCalled()
   })
 
+  it('escalates and warns as a timeout when the reply arrives after the 10s timeout', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    let resolvedAfterAbort = false
+
+    const pending = classifyToolCall(
+      baseInput({
+        description: DESCRIPTION,
+        args: { command: COMMAND, parameters: PARAM },
+        provider: {
+          // Resolves, does not reject, once the timeout aborts its signal.
+          completeSingleTurn: (_messages, options) =>
+            new Promise(resolve => {
+              options?.signal?.addEventListener(
+                'abort',
+                () => {
+                  resolvedAfterAbort = true
+                  resolve(modelResponse('APPROVE'))
+                },
+                { once: true }
+              )
+            }),
+        },
+      })
+    )
+    await vi.advanceTimersByTimeAsync(10_000)
+    const verdict = await pending
+
+    expect(resolvedAfterAbort).toBe(true)
+    expect(verdict).toBe('ESCALATE')
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [fields, message] = warn.mock.calls[0] as [Record<string, unknown>, string]
+    expect(fields).toEqual({
+      event: 'shell_classifier_failed',
+      session: 'session-log-id',
+      providerType: 'claude',
+      modelName: 'claude-sonnet',
+      errorClass: 'DOMException',
+      reason: 'timeout',
+    })
+    const line = JSON.stringify([fields, message])
+    for (const secret of [COMMAND, PARAM, DESCRIPTION, 'APPROVE', 'You review one shell command']) {
+      expect(line).not.toContain(secret)
+    }
+  })
+
   it('logs a throw before the provider call once, as an error', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
