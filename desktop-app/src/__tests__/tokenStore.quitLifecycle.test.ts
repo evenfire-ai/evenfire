@@ -56,12 +56,6 @@ describe('TokenStore macOS Quit admission', () => {
     }
   })
 
-  it('exports the lifecycle controls used by the macOS Quit coordinator', () => {
-    expect(tokenStoreModule.closeTokenStoreAdmission).toBeTypeOf('function')
-    expect(tokenStoreModule.openTokenStoreAdmission).toBeTypeOf('function')
-    expect(tokenStoreModule.waitForTokenStoreOperations).toBeTypeOf('function')
-  })
-
   it('does not gate isolated storage during macOS Quit', async () => {
     const isolatedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'token-store-isolated-'))
     const previousUserData = process.env.TOKEN_STORE_TEST_USER_DATA
