@@ -419,14 +419,19 @@ h3 {
   align-items: center;
   gap: var(--space-1);
   height: var(--window-titlebar-height);
-  /* Chromium unions all `-webkit-app-region` rects in DOCUMENT ORDER and, where
+  /* Chromium unions all `-webkit-app-region` boxes in DOCUMENT ORDER and, where
      they overlap, the LAST one wins (z-index, position and pointer-events do not
-     enter into it). The only `drag` region is the root `.window-titlebar`; every
-     control that must stay clickable carves itself out as `no-drag`. This slot
-     sits over that root drag band, so it declares `no-drag` to lift the whole
-     leading area (and its descendant buttons) out of it. It must NOT declare
-     `drag` here: a later-in-document `drag` box covering another control would
-     re-union over it and make that control draggable again. */
+     enter into it). The property is inherited, so a descendant of
+     `.window-titlebar` is a `drag` box unless it, or an ancestor between it and
+     `.window-titlebar`, declares `no-drag` — that includes the fixed, almost
+     full-width `.window-titlebar__actions` and its `.top-bar`, which overlap
+     this slot. Every control that must stay clickable
+     therefore declares `no-drag`, and this slot must stay AFTER
+     `.window-titlebar__actions` in the DOM: rendered before it, the actions'
+     inherited drag band would re-cover the leading buttons and the OS would
+     swallow their clicks as window drags. Its descendants inherit `no-drag`.
+     It must NOT declare `drag` here: a later-in-document `drag` box covering
+     another control would re-union over it and make that control draggable. */
   pointer-events: auto;
   -webkit-app-region: no-drag;
 }
@@ -480,8 +485,9 @@ h3 {
   box-shadow: none;
   color: var(--titlebar-control-ink);
   /* Restate no-drag on the clickable button itself. The leading slot is already
-     no-drag and propagates, so this is idempotent — kept for clarity next to the
-     interactive control, and harmless because it never widens a drag region. */
+     no-drag and its descendants inherit it, so this is idempotent — kept for
+     clarity next to the interactive control, and harmless because it never
+     widens a drag region. */
   -webkit-app-region: no-drag;
 }
 
@@ -13999,9 +14005,10 @@ pre {
   border-color: transparent;
   background: transparent;
   box-shadow: none;
-  /* The root title bar is the only `-webkit-app-region: drag` band; every
-     clickable control carves itself out as `no-drag` (see .window-titlebar__leading)
-     or the OS swallows its clicks for window dragging. */
+  /* `-webkit-app-region` is inherited, so this toggle would otherwise be a
+     `drag` box like the rest of the title bar; every clickable control declares
+     `no-drag` (see .window-titlebar__leading) or the OS swallows its clicks for
+     window dragging. */
   -webkit-app-region: no-drag;
 }
 
