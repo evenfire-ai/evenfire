@@ -308,6 +308,12 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
   | `typ-mismatch`                                            | Signed by the right key for the edge audience, but with another header type: control-api and Host versions differ.                                                                              |
   | `claims-rejected` with `claimError`                       | The assertion's host, user, team or scope does not match this Host or route; `claimError` names which, for example `host mismatch`, `sub mismatch`, `teamId mismatch` or `route scope missing`. |
 
+- **Image tags.** Never republish a Host or RPC Proxy image tag. The HCC
+  barrier checks the pod template label, not the image. A republished tag
+  lets a Host pod with the old label start on the new image (wake from zero,
+  eviction, node drain) while RPC Proxy is still old, and that Host answers
+  401.
+
 The in-repository executable barrier covers the supported Minikube path. Production
 GCP rollout and rollback orchestration is owned by `keyper-labs/evenfire-infra`;
 this OSS repository does not publish its exact workflow path. That orchestrator
