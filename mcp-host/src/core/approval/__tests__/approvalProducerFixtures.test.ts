@@ -112,12 +112,19 @@ describe('approval producer fixtures for Control UI', () => {
     fixtures = await buildApprovalProducerFixtures()
   }, 120_000)
 
+  /** The one asks entry that covers a full context. */
+  function entryAt(tool: string, context: AsksContext): boolean {
+    const entries = matchingEntries(fixtures, tool, context)
+    expect(entries, `${tool} entries for ${JSON.stringify(context)}`).toHaveLength(1)
+    return entries[0][1]
+  }
+
   /**
-   * The one asks entry that covers this context. Unless overridden: Manual, no
-   * override, an interactive rpc task, a Host that is not stateless, a judge.
+   * The entry for a context that, unless overridden, is Manual, with no override,
+   * an interactive rpc task, a Host that is not stateless, and a judge.
    */
   function asksAt(tool: string, overrides: AsksContext = {}): boolean {
-    const context: AsksContext = {
+    return entryAt(tool, {
       effectiveMode: 'manual',
       override: 'absent',
       channelType: 'rpc',
@@ -126,10 +133,7 @@ describe('approval producer fixtures for Control UI', () => {
       allowStatelessCron: 'false',
       judge: 'true',
       ...overrides,
-    }
-    const entries = matchingEntries(fixtures, tool, context)
-    expect(entries, `${tool} entries for ${JSON.stringify(context)}`).toHaveLength(1)
-    return entries[0][1]
+    })
   }
 
   it('pins the tools chat registers and their requiresApproval()', () => {
@@ -302,6 +306,42 @@ describe('approval producer fixtures for Control UI', () => {
     expect(asksAt(MCP_TOOL_PROBE, { effectiveMode: 'allow_all' })).toBe(false)
     expect(asksAt(CUSTOM_TOOL_PROBE)).toBe(false)
     expect(asksAt(CUSTOM_TOOL_PROBE, { override: 'true' })).toBe(true)
+  })
+
+  it('drops the cron_manage row whenever an override change lets one of its actions run', () => {
+    const actions = fixtures.cronManageActions
+    expect(Object.keys(actions).sort()).toEqual([
+      'create',
+      'delete',
+      'disable',
+      'enable',
+      'get',
+      'list',
+      'trigger',
+    ])
+    for (const [action, byKey] of Object.entries(actions)) {
+      expect(Object.keys(byKey), action).toHaveLength(720)
+    }
+    const keyOf = (context: AsksContext) => KEY_VALUES.map(([field]) => context[field]).join('|')
+    const overrides = KEY_VALUES[1][1]
+    let freed = 0
+    for (const context of everyAsksContext().filter(each => each.override === 'absent')) {
+      for (const from of overrides) {
+        for (const to of overrides) {
+          const before = { ...context, override: from }
+          const after = { ...context, override: to }
+          const letsOneRun = Object.values(actions).some(
+            byKey => byKey[keyOf(before)] && !byKey[keyOf(after)]
+          )
+          if (from === to || !letsOneRun) continue
+          freed += 1
+          expect(entryAt('cron_manage', before), keyOf(before)).toBe(true)
+          expect(entryAt('cron_manage', after), keyOf(after)).toBe(false)
+        }
+      }
+    }
+    // Some override changes do let an action run, so the check above is not empty.
+    expect(freed).toBeGreaterThan(0)
   })
 
   it('finds exactly one asks entry for every tool in every context', () => {

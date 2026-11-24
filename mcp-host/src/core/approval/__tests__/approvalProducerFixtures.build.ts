@@ -142,6 +142,8 @@ export interface ApprovalProducerFixtures {
   asksVariants: AsksVariantCheck[]
   /** readChannelCap on telegram, under the designated-approvers policy the variants use. */
   senderCaps: { listed: ApprovalMode; unlisted: ApprovalMode }
+  /** cron_manage's answer per action and full key, from the recorded registry; not pinned. */
+  cronManageActions: Record<string, Record<string, boolean>>
 }
 
 /** Names no tool registers: one custom row and one MCP tool. */
@@ -768,14 +770,33 @@ function collapse(tool: string, full: Map<string, boolean>): Record<string, bool
   )
 }
 
-/** Every answer of one registry: tool name to full key to whether the call asks. */
+/** Sets one answer, and throws if this key already has another. */
+function setAnswer(byKey: Map<string, boolean>, key: string, asks: boolean, what: string): void {
+  const earlier = byKey.get(key)
+  if (earlier !== undefined && earlier !== asks) {
+    throw new Error(
+      `${what} at ${key}: two (stored, ceiling, cap) combinations with this effective mode disagree`
+    )
+  }
+  byKey.set(key, asks)
+}
+
+interface RegistryAnswers {
+  /** Name to full key to whether every call asks. */
+  answers: Map<string, Map<string, boolean>>
+  /** cron_manage's action to full key to whether that call asks. */
+  cronManageActions: Map<string, Map<string, boolean>>
+}
+
+/** Every answer of one registry. */
 function registryAnswers(
   built: BuiltRegistry,
   names: readonly string[],
   policy: ApprovalPolicy,
   inputs: RegistryInputs
-): Map<string, Map<string, boolean>> {
+): RegistryAnswers {
   const answers = new Map(names.map(name => [name, new Map<string, boolean>()]))
+  const cronManageActions = new Map<string, Map<string, boolean>>()
   // Set for each tool and override before the controller is asked.
   let approvalConfig: ApprovalConfig | undefined
   for (const cronFired of BOOLEANS) {
@@ -797,7 +818,7 @@ function registryAnswers(
             for (const cap of MODES) {
               const mode = effectiveApprovalMode(stored, ceiling, cap)
               for (const judge of BOOLEANS) {
-                const asks = results.every(({ args, answer }) =>
+                const perCall = results.map(({ args, answer }) =>
                   answerAsks(answer, { toolName, args }, { cronFired, mode, judge })
                 )
                 const key = [
@@ -809,13 +830,14 @@ function registryAnswers(
                   inputs.allowStatelessCronManage,
                   judge,
                 ].join('|')
-                const earlier = asksByKey.get(key)
-                if (earlier !== undefined && earlier !== asks) {
-                  throw new Error(
-                    `${toolName} at ${key}: two (stored, ceiling, cap) combinations with this effective mode disagree`
-                  )
-                }
-                asksByKey.set(key, asks)
+                setAnswer(asksByKey, key, perCall.every(Boolean), toolName)
+                if (toolName !== 'cron_manage') continue
+                results.forEach(({ args }, index) => {
+                  const action = String(args.action)
+                  const byKey = cronManageActions.get(action) ?? new Map<string, boolean>()
+                  cronManageActions.set(action, byKey)
+                  setAnswer(byKey, key, perCall[index], `cron_manage ${action}`)
+                })
               }
             }
           }
@@ -823,7 +845,7 @@ function registryAnswers(
       }
     }
   }
-  return answers
+  return { answers, cronManageActions }
 }
 
 interface AsksVariant {
@@ -884,9 +906,14 @@ async function buildApprovalAsks(
   attachment: Attachment,
   toolNames: readonly string[],
   runtime: GfsRuntimeFixture
-): Promise<{ file: ApprovalAsksFile; checks: AsksVariantCheck[] }> {
+): Promise<{
+  file: ApprovalAsksFile
+  checks: AsksVariantCheck[]
+  cronManageActions: ApprovalProducerFixtures['cronManageActions']
+}> {
   const names = [...toolNames, CUSTOM_TOOL_PROBE, MCP_TOOL_PROBE]
   const full = new Map(names.map(name => [name, new Map<string, boolean>()]))
+  const actionsFull = new Map<string, Map<string, boolean>>()
   const checks: AsksVariantCheck[] = ASKS_VARIANTS.map(({ variant }) => ({
     variant,
     compared: 0,
@@ -919,11 +946,16 @@ async function buildApprovalAsks(
             for (const probe of [CUSTOM_TOOL_PROBE, MCP_TOOL_PROBE]) {
               if (built.registry.get(probe)) throw new Error(`${probe} is a registered tool`)
             }
-            return { built, answers: registryAnswers(built, names, policy, inputs) }
+            return { built, ...registryAnswers(built, names, policy, inputs) }
           }
           const recorded = await answersOf(RECORDED_ASKS)
           for (const [name, byKey] of recorded.answers) {
             for (const [key, asks] of byKey) full.get(name)!.set(key, asks)
+          }
+          for (const [action, byKey] of recorded.cronManageActions) {
+            const all = actionsFull.get(action) ?? new Map<string, boolean>()
+            actionsFull.set(action, all)
+            for (const [key, asks] of byKey) all.set(key, asks)
           }
           for (const [index, variant] of ASKS_VARIANTS.entries()) {
             compareAnswers(recorded, await answersOf(variant), checks[index])
@@ -939,6 +971,9 @@ async function buildApprovalAsks(
       asks: Object.fromEntries(names.map(name => [name, collapse(name, full.get(name)!)])),
     },
     checks,
+    cronManageActions: Object.fromEntries(
+      [...actionsFull].map(([action, byKey]) => [action, Object.fromEntries(byKey)])
+    ),
   }
 }
 
@@ -964,6 +999,7 @@ export async function buildApprovalProducerFixtures(): Promise<ApprovalProducerF
       storeEffect: tools.storeEffect,
       asksVariants: asks.checks,
       senderCaps: senderCaps(),
+      cronManageActions: asks.cronManageActions,
     }
   } finally {
     await closeGfsRuntime(runtime)
