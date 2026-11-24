@@ -174,7 +174,11 @@ it('finishes an admitted P file write before a later Q selection', async () => {
   const writeFile = fs.writeFile.bind(fs)
   let held = false
   vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
-    if (args[0] === h.optionA.configPath && String(args[1]).includes(origin) && !held) {
+    if (
+      args[0] === h.optionA.configPath &&
+      JSON.parse(String(args[1])).profileUiBaseUrl === origin &&
+      !held
+    ) {
       held = true
       enteredWrite.resolve()
       await releaseWrite.promise

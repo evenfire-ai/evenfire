@@ -213,7 +213,11 @@ it.each(['app', 'gfs'] as const)(
         releaseWrite = resolve
       })
       vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
-        if (!sawWrite && args[0] === file && String(args[1]).includes(origin)) {
+        if (
+          !sawWrite &&
+          args[0] === file &&
+          JSON.parse(String(args[1])).profileUiBaseUrl === origin
+        ) {
           sawWrite = true
           await writeGate
         }
