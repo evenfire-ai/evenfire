@@ -1,0 +1,44 @@
+{
+  "status": 200,
+  "body": {
+    "host": {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "Host",
+      "metadata": {
+        "name": "foo",
+        "namespace": "mcp-host",
+        "uid": "00000000-0000-4000-a000-000000000001",
+        "creationTimestamp": "2026-11-01T00:00:00Z",
+        "generation": 1,
+        "resourceVersion": "1"
+      },
+      "spec": {
+        "host": "foo",
+        "contextRef": "ctx-a",
+        "secretRef": "foo-llm",
+        "channels": [],
+        "model": {
+          "provider": "claude",
+          "name": "claude-sonnet-4-6"
+        },
+        "approval": {
+          "defaultPolicy": "cli_only",
+          "channels": {}
+        }
+      },
+      "status": {
+        "lifecycle": {
+          "state": "active",
+          "effectiveMode": "stateful",
+          "observedGeneration": 1
+        }
+      }
+    },
+    "contexts": [],
+    "secrets": [],
+    "users": [],
+    "teams": [],
+    "agentUsers": [],
+    "agentTeams": []
+  }
+}

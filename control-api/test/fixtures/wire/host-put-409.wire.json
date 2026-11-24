@@ -1,0 +1,7 @@
+{
+  "status": 409,
+  "body": {
+    "error": "conflict",
+    "reason": "resource_changed"
+  }
+}

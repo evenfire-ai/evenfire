@@ -1,0 +1,11 @@
+{
+  "status": 422,
+  "body": {
+    "errors": [
+      {
+        "field": "spec.model.provider",
+        "message": "spec.model.provider is required when spec.model.name is set"
+      }
+    ]
+  }
+}

@@ -22,15 +22,25 @@
  *     `409 { error: 'conflict', reason: 'approval_requires_version' }`;
  *   - every accepted write moves the version, even with an unchanged spec,
  *     because control-api writes a fresh administrative-intent annotation;
+ *   - an accepted write whose stored spec is unchanged moves the version a
+ *     second time, after the answer is taken: the answer carries a version the
+ *     store has already left (control-api's post-write generation patch, below);
  *   - `spec.approval` is pruned and defaulted by the chosen Host CRD, as the
- *     apiserver does (./hostCrdApproval).
+ *     apiserver does (./hostCrdApproval);
+ *   - the 200 body gains `warnings` when `spec.model` newly assigns a model
+ *     listed in `staleModels`: one the stored spec does not reference in
+ *     `spec.model`, `spec.allowedModels` or `spec.llmPolicy.fallbacks`
+ *     (hostSpecValidation.ts `maybeWarnStale`; resources.ts answers
+ *     `{ ...host, warnings }`).
  *
  * Any other request answers its `defaults` entry, or control-api's unknown-route
  * `404 { error: 'Not Found' }` (control-api/src/app.ts).
  *
- * Not modelled: the 200 body's `warnings` (stale-model data), other Host
- * validation, and the post-write generation patch that follows a replace whose
- * spec is unchanged (`bumpVersion(name, 'post-write')` stands for it).
+ * Not modelled: the model allowlist (every model is accepted), warnings for
+ * fallbacks and `allowedModels` entries, and other Host validation.
+ *
+ * control-api/test/routes.hostPut.fakeContract.test.ts pins this model to the
+ * real routes.
  *
  * Each request passes three points, each awaited through `schedule`:
  * arrival (a read takes its answer from the store), apply (a write is applied),
@@ -113,12 +123,15 @@ export interface FakeControlApi {
    * Moves the version without changing the spec: an HCC status write, a wake
    * annotation patch, or control-api's post-write generation patch (spec E6).
    * Control UI sees the same of each; `kind` names the one a test models.
-   * Not a request, so not in `log`.
+   * Not a request, so not in `log`. A PUT with an unchanged spec already
+   * applies its own post-write patch, so `'post-write'` stands for another
+   * writer's; after such a PUT it would move the version once more.
    */
   bumpVersion(name: string, kind: 'status' | 'annotation' | 'post-write'): void
   /**
    * Another writer (an admin, kubectl, a manifest apply), stored like an accepted
-   * PUT. Not a request, so not in `log`.
+   * PUT: pruned, defaulted and one new version, with no post-write patch even when
+   * the spec is unchanged. Not a request, so not in `log`.
    */
   writeExternal(name: string, mutate: (spec: Record<string, unknown>) => void): void
   /**
@@ -136,6 +149,16 @@ export type FakeControlApiOptions = {
   /** Recorded answers keyed by control-api path, as in `FakeLogEntry.path`. */
   defaults?: Record<string, { status: number; body: unknown }>
   schedule?: (point: FakePoint, entry: FakeLogEntry) => Promise<void>
+  /** Enabled models the allowlist marks stale; assigning one newly warns. */
+  staleModels?: Array<{ provider: string; model: string }>
+}
+
+/** control-api's warning for a newly assigned stale model (staleModelWarning.ts). */
+export type StaleModelWarning = {
+  code: 'stale_model_assigned'
+  provider: string
+  model: string
+  field: string
 }
 
 type Answer = { status: number; body: unknown }
@@ -314,6 +337,42 @@ function hostSpecIssue(spec: Record<string, unknown>): Answer | null {
   return null
 }
 
+/** The `(provider, model)` pairs a Host spec references (control-api hostModelReferences.ts). */
+function modelReferences(spec: Record<string, unknown>): Set<string> {
+  const pairs = new Set<string>()
+  const add = (provider: unknown, model: unknown) => {
+    const p = typeof provider === 'string' ? provider.trim() : ''
+    const m = typeof model === 'string' ? model.trim() : ''
+    if (p && m) pairs.add(JSON.stringify([p, m]))
+  }
+  if (isRecord(spec.model)) add(spec.model.provider, spec.model.name)
+  for (const entry of Array.isArray(spec.allowedModels) ? spec.allowedModels : []) {
+    if (isRecord(entry)) add(entry.provider, entry.model)
+  }
+  const policy = isRecord(spec.llmPolicy) ? spec.llmPolicy : {}
+  for (const entry of Array.isArray(policy.fallbacks) ? policy.fallbacks : []) {
+    if (isRecord(entry)) add(entry.provider, entry.model)
+  }
+  return pairs
+}
+
+/**
+ * hostSpecValidation.ts `maybeWarnStale` for `spec.model`: a warning when it
+ * names a stale model the stored spec does not reference yet.
+ */
+function staleModelWarnings(
+  spec: Record<string, unknown>,
+  stored: Record<string, unknown>,
+  staleModels: ReadonlyArray<{ provider: string; model: string }>
+): StaleModelWarning[] {
+  if (!isRecord(spec.model)) return []
+  const provider = typeof spec.model.provider === 'string' ? spec.model.provider.trim() : ''
+  const model = typeof spec.model.name === 'string' ? spec.model.name.trim() : ''
+  const stale = staleModels.some(entry => entry.provider === provider && entry.model === model)
+  if (!stale || modelReferences(stored).has(JSON.stringify([provider, model]))) return []
+  return [{ code: 'stale_model_assigned', provider, model, field: 'spec.model.name' }]
+}
+
 function toResponse(answer: Answer): Response {
   return new Response(answer.body === undefined ? null : JSON.stringify(answer.body), {
     status: answer.status,
@@ -348,6 +407,13 @@ export function createFakeControlApi(options: FakeControlApiOptions): FakeContro
     return host
   }
 
+  /** A new version for the stored Host; nothing else changes. */
+  function moveVersion(name: string): void {
+    const next = wireCopy(requireHost(name))
+    next.metadata.resourceVersion = nextVersion()
+    hosts.set(name, next)
+  }
+
   /** An accepted write as the apiserver stores it: approval pruned and defaulted, a new version. */
   function storeSpec(name: string, current: HostObject, spec: Record<string, unknown>): HostObject {
     const next = wireCopy(current)
@@ -375,7 +441,16 @@ export function createFakeControlApi(options: FakeControlApiOptions): FakeContro
     } else if (options.versionRule && !sameJson(body.spec.approval, current.spec.approval)) {
       return conflict('approval_requires_version')
     }
-    return { status: 200, body: wireCopy(storeSpec(name, current, body.spec)) }
+    const warnings = staleModelWarnings(body.spec, current.spec, options.staleModels ?? [])
+    const stored = wireCopy(storeSpec(name, current, body.spec))
+    // control-api answers with the replace's own response. A replace that left
+    // the stored spec as it was kept `metadata.generation`, so before answering,
+    // reconcileAdministrativeIntentGeneration (resourceService.ts) patches the
+    // intent annotation down to that generation, which moves the version again:
+    // the answer carries a version the store has already left. Pinned by
+    // control-api/test/routes.hostPut.fakeContract.test.ts.
+    if (sameJson(stored.spec, current.spec)) moveVersion(name)
+    return { status: 200, body: warnings.length > 0 ? { ...stored, warnings } : stored }
   }
 
   function unmodelled(path: string): Answer {
@@ -513,9 +588,7 @@ export function createFakeControlApi(options: FakeControlApiOptions): FakeContro
       return respond(entry, request, hold)
     },
     bumpVersion(name) {
-      const next = wireCopy(requireHost(name))
-      next.metadata.resourceVersion = nextVersion()
-      hosts.set(name, next)
+      moveVersion(name)
     },
     writeExternal(name, mutate) {
       const current = requireHost(name)

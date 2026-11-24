@@ -12,13 +12,20 @@ import {
 const HOST_URL = '/control-api/api/v1/admin/hosts/foo'
 const HOST_PATH = '/api/v1/admin/hosts/foo'
 
-// control-api's recorded GET /admin/llm-models answer (producer wire file).
-const LLM_MODELS_WIRE = JSON.parse(
-  readFileSync(
-    resolve(__dirname, '../../../../control-api/test/fixtures/wire/llmModelsSetupEnsure.wire.json'),
-    'utf8'
-  )
-) as { list: { status: number; body: unknown } }
+type WireAnswer = { status: number; body: unknown }
+
+/** A control-api producer wire file (control-api/test/fixtures/wire). */
+function readControlApiWire<T>(file: string): T {
+  return JSON.parse(
+    readFileSync(resolve(__dirname, '../../../../control-api/test/fixtures/wire', file), 'utf8')
+  ) as T
+}
+
+// control-api's recorded GET /admin/llm-models answer.
+const LLM_MODELS_WIRE = readControlApiWire<{ list: WireAnswer }>('llmModelsSetupEnsure.wire.json')
+// control-api's recorded Host PUT answers (control-api/test/routes.hostPut.fakeContract.test.ts).
+const HOST_PUT_409 = readControlApiWire<WireAnswer>('host-put-409.wire.json')
+const HOST_PUT_WARNINGS = readControlApiWire<WireAnswer>('host-put-warnings.wire.json')
 
 type FakeOptions = Parameters<typeof createFakeControlApi>[0]
 
@@ -79,9 +86,9 @@ describe('fake control-api: Host PUT', () => {
       metadata: { resourceVersion: version },
       spec: { ...read.spec, contextRef: 'ctx-c' },
     })
-    expect(stale.status).toBe(409)
+    expect(stale.status).toBe(HOST_PUT_409.status)
     expect(stale.statusText).toBe('Conflict')
-    expect(await stale.json()).toEqual({ error: 'conflict', reason: 'resource_changed' })
+    expect(await stale.json()).toEqual(HOST_PUT_409.body)
     expect(fake.stored('foo').spec.contextRef).toBe('ctx-b')
     expect(
       fake.log.map(entry => [entry.versionSent, entry.applied, entry.response?.status])
@@ -110,8 +117,58 @@ describe('fake control-api: Host PUT', () => {
       afterVersionless.metadata.resourceVersion,
     ]
     expect(new Set(versions).size).toBe(3)
-    expect(fake.stored('foo').metadata.resourceVersion).toBe(versions[2])
     expect(fake.stored('foo').spec).toEqual(read.spec)
+  })
+
+  it('a PUT with an unchanged spec answers a version its post-write patch has already moved past', async () => {
+    const fake = createFake()
+    const read = fake.stored('foo')
+
+    const changed = await putHost(fake, { spec: { ...read.spec, contextRef: 'ctx-b' } })
+    const changedAnswer = (await changed.json()) as HostObject
+    expect(changed.status).toBe(200)
+    expect(fake.stored('foo').metadata.resourceVersion).toBe(changedAnswer.metadata.resourceVersion)
+
+    const unchanged = await putHost(fake, { spec: changedAnswer.spec })
+    const unchangedAnswer = (await unchanged.json()) as HostObject
+    expect(unchanged.status).toBe(200)
+    expect(unchangedAnswer.metadata.resourceVersion).not.toBe(
+      changedAnswer.metadata.resourceVersion
+    )
+    expect(fake.stored('foo').metadata.resourceVersion).not.toBe(
+      unchangedAnswer.metadata.resourceVersion
+    )
+
+    const fromAnswer = await putHost(fake, {
+      metadata: { resourceVersion: unchangedAnswer.metadata.resourceVersion },
+      spec: changedAnswer.spec,
+    })
+    expect(fromAnswer.status).toBe(HOST_PUT_409.status)
+    expect(await fromAnswer.json()).toEqual(HOST_PUT_409.body)
+  })
+
+  it('a PUT that newly assigns a stale model answers the warnings control-api records', async () => {
+    const recorded = HOST_PUT_WARNINGS.body as HostObject & { warnings: unknown[] }
+    const staleModel = recorded.spec.model as { provider: string; name: string }
+    const fake = createFake({
+      staleModels: [{ provider: staleModel.provider, model: staleModel.name }],
+    })
+    const read = fake.stored('foo')
+    expect(read.spec.model).not.toEqual(staleModel)
+
+    const assigned = await putHost(fake, { spec: { ...read.spec, model: staleModel } })
+    expect(assigned.status).toBe(HOST_PUT_WARNINGS.status)
+    expect(((await assigned.json()) as { warnings?: unknown }).warnings).toEqual(recorded.warnings)
+    expect(fake.stored('foo').spec.model).toEqual(staleModel)
+
+    // The stored spec now references it: a live reference is not revalidated.
+    const kept = await putHost(fake, {
+      spec: { ...read.spec, model: staleModel, contextRef: 'ctx-b' },
+    })
+    expect(kept.status).toBe(200)
+    const keptBody = (await kept.json()) as HostObject
+    expect(keptBody.spec.contextRef).toBe('ctx-b')
+    expect(keptBody).not.toHaveProperty('warnings')
   })
 
   it('version-less PUT is last-write-wins', async () => {
@@ -338,8 +395,8 @@ describe('fake control-api: arrival, apply and delivery', () => {
     hold.deliverNow()
 
     const response = await first
-    expect(response.status).toBe(409)
-    expect(await response.json()).toEqual({ error: 'conflict', reason: 'resource_changed' })
+    expect(response.status).toBe(HOST_PUT_409.status)
+    expect(await response.json()).toEqual(HOST_PUT_409.body)
     expect(fake.stored('foo').spec.contextRef).toBe('ctx-later')
     expect(fake.log.map(entry => [entry.seq, entry.applied, entry.response?.status])).toEqual([
       [1, false, 409],
