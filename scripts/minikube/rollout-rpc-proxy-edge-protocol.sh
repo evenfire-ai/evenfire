@@ -164,7 +164,10 @@ fi
 
 # Hosts are only advanced after the complete RPC Proxy cohort that forwards the
 # edge assertion is observed.
-# HCC also checks this condition at each Host Deployment write.
+# HCC runs a weaker barrier of its own, on labels only (observed generation,
+# template label, label of every non-terminal pod; no replica or readiness
+# count), and only when it creates a Host Deployment or moves a pod template
+# onto the protocol label. It does not replace this gate.
 if [[ "$RESTART_PROXY" == true ]]; then
   restart_and_wait "$PROXY_NAMESPACE" rpc-proxy
 fi
