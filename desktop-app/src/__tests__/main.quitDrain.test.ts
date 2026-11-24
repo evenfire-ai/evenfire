@@ -642,7 +642,6 @@ describe('macOS Quit drain', () => {
     harness.nativeSet.mockImplementationOnce(() => firstNativeWrite.promise)
     const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
     let second: Promise<void> | undefined
-    const scheduler = fc.scheduler()
     const generatedCommands = fc
       .sample(
         fc.commands([fc.constant(new CanceledQuitSequenceCommand())], {
