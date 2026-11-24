@@ -206,7 +206,10 @@ describe('ApprovalModePicker — model selector look', () => {
     expect(error.classList.contains('approval-mode-picker-error')).toBe(true)
     expect(setApprovalMode).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1', 'auto')
 
+    // The open menu hides the error by itself, so close it again before looking.
     fireEvent.click(getByTestId('approval-mode-picker'))
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(queryByTestId('approval-mode-option-auto')).toBeNull()
     expect(queryByTestId('approval-mode-write-error')).toBeNull()
   })
 })

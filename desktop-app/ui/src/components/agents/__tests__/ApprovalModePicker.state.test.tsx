@@ -344,6 +344,7 @@ describe('ApprovalModePicker state — chat switch (C1)', () => {
 
     rerender(<Harness chatId="chat-2" />)
 
+    expect(committed.some(entry => entry.chatId === 'chat-2')).toBe(true)
     expect(committed.filter(entry => entry.chatId === 'chat-2' && entry.confirmInDom)).toEqual([])
     expect(setApprovalMode).not.toHaveBeenCalled()
   })
