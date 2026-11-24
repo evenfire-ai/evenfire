@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
+import {
+  FILE_REFERENCE_MAX_COUNT,
+  LOCATION_REFERENCE_MAX_COUNT,
+} from '@clerum/gfs-interaction-policy'
 import { COMPOSER_MAX_ATTACHMENTS } from '@constants/attachments'
 import { clearComposerDraft } from '@lib/composerDraftStore'
 import {
@@ -9,18 +12,28 @@ import {
 } from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { composerRequestBaseContent } from '@lib/composerHostRequest'
+import { buildComposerLocationReferences } from '@lib/composerLocationReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
-import { countGlobalFileReferences, isGlobalFileReferenced } from '@lib/tabReferenceSuggestion'
+import {
+  countGlobalFileReferences,
+  countGlobalFolderReferences,
+  isGlobalFileReferenced,
+  isGlobalFolderReferenced,
+} from '@lib/tabReferenceSuggestion'
 import type {
   ComposerFileAttachment,
   ComposerFileRefusal,
   ComposerGlobalFileReference,
+  ComposerGlobalFolderReference,
   ComposerImageAttachment,
   ComposerReferenceAttachment,
 } from '../../uiTypes'
 
+/** What accepting a suggested reference did to the composer. */
+export type SuggestedReferenceOutcome = 'added' | 'duplicate' | 'full'
+
 /** What accepting a suggested file reference did to the composer. */
-export type SuggestedFileReferenceOutcome = 'added' | 'duplicate' | 'full'
+export type SuggestedFileReferenceOutcome = SuggestedReferenceOutcome
 
 export interface ComposerImageMergeOutcome {
   /** The reconciled composer set (existing + accepted incoming, in order). */
@@ -94,15 +107,18 @@ export interface ComposerReferenceMergeOutcome {
   kept: number
   /** Incoming references already held by id (not added). */
   duplicates: number
-  /** Incoming references the send-time file limit leaves no room for (lost). */
+  /** Incoming references a send-time limit leaves no room for (lost), folders included. */
   dropped: number
+  /** Of `dropped`, the folders the one-folder limit left no room for. */
+  droppedFolders: number
 }
 
 /**
  * Reconciles incoming references into the composer's reference set with the
- * add handler's id-dedupe PLUS the send-time `FILE_REFERENCE_MAX_COUNT` cap: a
- * restore that produces an unsendable composer is not a restore (spec: restore
- * semantics), so the cap is enforced while restoring, not first at send.
+ * add handler's id-dedupe PLUS the send-time caps: a restore that produces an
+ * unsendable composer is not a restore (spec: restore semantics), so the caps
+ * are enforced while restoring, not first at send. Folders have their own cap,
+ * `LOCATION_REFERENCE_MAX_COUNT`, and take no slot of `FILE_REFERENCE_MAX_COUNT`.
  */
 export function mergeComposerReferenceAttachments(
   existing: ComposerReferenceAttachment[],
@@ -113,16 +129,27 @@ export function mergeComposerReferenceAttachments(
   let kept = 0
   let duplicates = 0
   let dropped = 0
+  let droppedFolders = 0
   for (const attachment of incoming) {
-    if (accepted.some(candidate => candidate.id === attachment.id)) {
+    const isFolder = attachment.type === 'global_folder'
+    // A folder comes back under another id after a resend; the same URI is the
+    // same folder, so it is already there rather than lost at the cap.
+    if (
+      accepted.some(candidate => candidate.id === attachment.id) ||
+      (attachment.type === 'global_folder' && isGlobalFolderReferenced(accepted, attachment.gfsUri))
+    ) {
       duplicates += 1
       continue
     }
-    if (accepted.length >= FILE_REFERENCE_MAX_COUNT) {
+    const full = isFolder
+      ? countGlobalFolderReferences(accepted) >= LOCATION_REFERENCE_MAX_COUNT
+      : accepted.length - countGlobalFolderReferences(accepted) >= FILE_REFERENCE_MAX_COUNT
+    if (full) {
       // The cap leaves no room: dropped, but the loop CONTINUES (R4-L1), so a
       // duplicate arriving after the cap was reached is still classified as a
       // duplicate rather than as a lost attachment.
       dropped += 1
+      if (isFolder) droppedFolders += 1
       continue
     }
     accepted.push(
@@ -130,7 +157,7 @@ export function mergeComposerReferenceAttachments(
     )
     kept += 1
   }
-  return { next: accepted, kept, duplicates, dropped }
+  return { next: accepted, kept, duplicates, dropped, droppedFolders }
 }
 
 interface UseComposerAttachmentsParams {
@@ -368,8 +395,10 @@ export function useComposerAttachments({
       const references = composerReferencesRef.current
       let referencesProblem: string | null = null
       let fileReferences: ReturnType<typeof buildComposerFileReferences> = []
+      let locationReferences: ReturnType<typeof buildComposerLocationReferences> = []
       try {
         fileReferences = buildComposerFileReferences(references)
+        locationReferences = buildComposerLocationReferences(references)
       } catch (error) {
         referencesProblem = error instanceof Error ? error.message : String(error)
       }
@@ -389,6 +418,7 @@ export function useComposerAttachments({
                     references
                   ),
                   fileReferences,
+                  locationReferences,
                   hostRef: selectedAgent,
                   images,
                 },
@@ -557,8 +587,33 @@ export function useComposerAttachments({
   )
 
   /**
+   * Adds the folder the active tab suggests, under the same rules as
+   * `addSuggestedFileReference`. Only folders count against the folder cap.
+   */
+  const addSuggestedLocationReference = useCallback(
+    (candidate: ComposerGlobalFolderReference): SuggestedReferenceOutcome => {
+      let outcome: SuggestedReferenceOutcome = 'added'
+      commitComposerReferences(previous => {
+        if (isGlobalFolderReferenced(previous, candidate.gfsUri)) {
+          outcome = 'duplicate'
+          return previous
+        }
+        if (countGlobalFolderReferences(previous) >= LOCATION_REFERENCE_MAX_COUNT) {
+          outcome = 'full'
+          return previous
+        }
+        composerAttachmentOrderRef.current += 1
+        return [...previous, { ...candidate, addedOrder: composerAttachmentOrderRef.current }]
+      })
+      if (outcome === 'added') composerAttachmentRevisionRef.current += 1
+      return outcome
+    },
+    [commitComposerReferences]
+  )
+
+  /**
    * Restore-path reconciliation for references (R1-M5): id-dedupe plus the
-   * send-time file cap, applied against the live snapshot, with counts that
+   * send-time caps, applied against the live snapshot, with counts that
    * describe exactly that reconciliation.
    */
   const restoreComposerReferenceAttachments = useCallback(
@@ -596,6 +651,7 @@ export function useComposerAttachments({
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
     addSuggestedFileReference,
+    addSuggestedLocationReference,
     restoreComposerImageAttachments,
     restoreComposerReferenceAttachments,
   }

@@ -2995,6 +2995,7 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
       composerNonImageShareBytes({
         content: request.content,
         fileReferences: request.fileReferences,
+        locationReferences: [],
         hostRef: 'agent-x',
         files: [{ filename: 'doc.txt' }],
         images: [],

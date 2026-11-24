@@ -1808,6 +1808,7 @@ export function useAppController() {
     handleRemoveComposerReferenceAttachment: chat.handleRemoveComposerReferenceAttachment,
     handleClearComposerAttachments: chat.handleClearComposerAttachments,
     addSuggestedFileReference: chat.addSuggestedFileReference,
+    addSuggestedLocationReference: chat.addSuggestedLocationReference,
     cancelTask: chat.cancelTask,
 
     // MCP Server

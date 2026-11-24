@@ -6,6 +6,8 @@ import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { TAB_REFERENCE_RETRY_DELAYS_MS } from '@constants/tabReferenceSuggestion'
 import type { ResolvedGfsResource } from '../../../../src/gfs/uriHandler'
+import type { GfsWatchEvent } from '../../../../src/types'
+import { GfsWatchEventSource } from '../../gfs/__fixtures__/gfsWatchEvents'
 import {
   type NavigationResolution,
   gfscResourceView,
@@ -14,6 +16,7 @@ import {
   unavailableNavigation,
 } from '../../gfs/__fixtures__/navigationResolutionFixtures'
 import { gfsWatchKey, parseGfsWatchKey } from '../../lib/gfsWatchKeys'
+import { fileUrisOfWatchEvent } from '../../lib/tabReferenceSuggestion'
 import {
   activeWorkspaceTab,
   createEmptyWorkspaceTabsState,
@@ -32,9 +35,10 @@ import type { TabReferenceSuggestionInput } from '../useTabReferenceSuggestion.t
  * Model-based oracle for the tab reference prefetch.
  *
  * Generated sequences run against the real hook, rendered in StrictMode:
- * tab switches (including back to a cached file), drawer toggles, session
- * changes, a preview going unavailable and back, watched and unwatched file
- * changes, server outcomes and timer advances. Only `resolveForNavigation` is
+ * tab switches (including back to a cached file, and Files open on one of two
+ * folders), drawer toggles, session changes, a preview going unavailable and
+ * back, watched and unwatched file changes, changes inside a folder reported
+ * on its `dir:` watch key, server outcomes and timer advances. Only `resolveForNavigation` is
  * mocked. Its answers come from gfs-controller's `toView` through `AppService`,
  * and `fc.scheduler()` decides when each one lands, so answers cross tab
  * switches, drawer toggles, session changes and each other.
@@ -60,13 +64,15 @@ import type { TabReferenceSuggestionInput } from '../useTabReferenceSuggestion.t
  *   for a preview, not older than the version on screen; that covers the
  *   stale-while-revalidate answer shown while a revalidation retries, and its
  *   loss once the revalidation gives up;
- * - independently of the model, whatever is shown is the current file, resolved
- *   under the current scope and not older than the preview (S4), and nothing is
- *   shown without a visible target (L3);
+ * - independently of the model, whatever is shown is the current file or
+ *   folder, resolved under the current scope and not older than the preview
+ *   (S4), a folder reference exactly when the target is a folder (S1′), and
+ *   nothing is shown without a visible target (L3);
  * - from the call log: every request of a visit but the first follows an
  *   applied transient answer for the same key that was not yet the third in a
  *   row, and no visit makes more than three requests (K1). A request without a
- *   visible target is never predicted, so it fails as unpredicted;
+ *   visible target is never predicted, so it fails as unpredicted; neither is
+ *   one after a change inside a folder, which a folder has no key for (K1′);
  * - if the last applied answer for the current key was transient, it was the
  *   third in a row and there is no chip; if it was usable, the chip is exactly
  *   that answer (L1, S6);
@@ -89,9 +95,15 @@ import type { TabReferenceSuggestionInput } from '../useTabReferenceSuggestion.t
 const IDS = {
   a: '0b9f3c1e-7a42-4d4e-9c1a-5f6e7d8c9b0a',
   b: '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f',
+  c: '7d1e2f3a-4b5c-4d6e-8f7a-0000000000c3',
+  d: '7d1e2f3a-4b5c-4d6e-8f7a-0000000000d4',
 } as const
-type FileName = keyof typeof IDS
+type Name = keyof typeof IDS
+type FileName = 'a' | 'b'
+type FolderName = 'c' | 'd'
 const FILES: FileName[] = ['a', 'b']
+const FOLDERS: FolderName[] = ['c', 'd']
+const isFolder = (name: Name): name is FolderName => name === 'c' || name === 'd'
 const SCOPES = ['dev:true:user-1:', 'dev:true:user-1:team-2'] as const
 const MAX_VERSION = 6
 type Mode = 'usable' | 'stale' | 'directory' | 'otherFile' | 'superseded' | 'unavailable' | 'reject'
@@ -104,18 +116,22 @@ const MODES: Mode[] = [
   'unavailable',
   'reject',
 ]
-type Tab = 'previewA' | 'filesA' | 'filesB' | 'settings'
+type Tab = 'previewA' | 'filesA' | 'filesB' | 'folderC' | 'folderD' | 'settings'
 
 /** Every answer the server can give, produced once by the real producers. */
 type Answers = {
   resolved: Record<FileName, Record<string, ResolvedGfsResource[]>>
   envelopes: Map<ResolvedGfsResource, NavigationResolution>
   directory: Record<FileName, NavigationResolution>
+  /** A folder as gfsc projects it, per scope; and the same rid answered as a file. */
+  folder: Record<FolderName, Record<string, ResolvedGfsResource>>
+  folderAsFile: Record<FolderName, NavigationResolution>
   unavailable: NavigationResolution
   superseded: NavigationResolution
 }
 let answers: Answers
-let URI: Record<FileName, string>
+let URI: Record<Name, string>
+let dirChanged: Record<FolderName, GfsWatchEvent>
 
 beforeAll(async () => {
   const resolved = { a: {}, b: {} } as Answers['resolved']
@@ -138,7 +154,42 @@ beforeAll(async () => {
       resolved[file][scope] = views
     }
   }
-  URI = { a: resolved.a[SCOPES[0]]![1]!.gfsUri, b: resolved.b[SCOPES[0]]![1]!.gfsUri }
+  const folder = { c: {}, d: {} } as Answers['folder']
+  const folderAsFile = {} as Answers['folderAsFile']
+  for (const name of FOLDERS) {
+    for (const scope of SCOPES) {
+      const view = await gfscResourceView({
+        resourceId: IDS[name],
+        name: `${name}@${scope}.md`,
+        version: 1,
+        bytes: 0,
+        kind: 'directory',
+      })
+      folder[name][scope] = view
+      envelopes.set(view, await resolvedNavigation(view))
+    }
+    folderAsFile[name] = await resolvedNavigation(
+      await gfscResourceView({ resourceId: IDS[name], name, version: 1, bytes: 3 })
+    )
+  }
+  URI = {
+    a: resolved.a[SCOPES[0]]![1]!.gfsUri,
+    b: resolved.b[SCOPES[0]]![1]!.gfsUri,
+    c: folder.c[SCOPES[0]]!.gfsUri,
+    d: folder.d[SCOPES[0]]!.gfsUri,
+  }
+  const dirKeys = FOLDERS.map(name => gfsWatchKey('dir', URI[name])!)
+  const source = await new GfsWatchEventSource().start(dirKeys)
+  try {
+    dirChanged = {} as Record<FolderName, GfsWatchEvent>
+    for (const [index, name] of FOLDERS.entries()) {
+      dirChanged[name] = (await source.changed([dirKeys[index]!])).find(
+        event => event.type === 'changed'
+      )!
+    }
+  } finally {
+    await source.stop()
+  }
   const directory = {} as Answers['directory']
   for (const file of FILES) {
     directory[file] = await resolvedNavigation(
@@ -155,6 +206,8 @@ beforeAll(async () => {
     resolved,
     envelopes,
     directory,
+    folder,
+    folderAsFile,
     unavailable: await unavailableNavigation(URI.a),
     superseded: await supersededNavigation(URI.a),
   }
@@ -170,7 +223,7 @@ interface Model {
   /** Mirrors the hook's observed-change counter of the current target. */
   revision: number
   serverVersion: Record<FileName, number>
-  mode: Record<FileName, Mode>
+  mode: Record<Name, Mode>
   preview: WorkspaceTabsState
 }
 
@@ -182,6 +235,7 @@ type Call = {
   uri: string
   scope: string
   floor: number | undefined
+  folder: boolean
   visit: number
   answer: NavigationResolution | 'reject'
   /** Whether the answer reached the cache, or was dropped as stale. */
@@ -233,8 +287,15 @@ function previewTab(model: Model) {
   return activeWorkspaceTab(model.preview)!
 }
 
-function targetOf(model: Model): { file: FileName; key: string; floor: number | undefined } | null {
+type Target = { file: Name; key: string; floor: number | undefined; folder: boolean }
+
+function targetOf(model: Model): Target | null {
   if (model.tab === 'settings') return null
+  if (model.tab === 'folderC' || model.tab === 'folderD') {
+    // A folder has no version: one key per folder, whatever else happens.
+    const name: FolderName = model.tab === 'folderC' ? 'c' : 'd'
+    return { file: name, key: `${URI[name]} folder`, floor: undefined, folder: true }
+  }
   if (model.tab === 'previewA') {
     const preview = previewTab(model).preview!
     if (preview.unavailable) return null
@@ -242,10 +303,11 @@ function targetOf(model: Model): { file: FileName; key: string; floor: number | 
       file: 'a',
       key: `${URI.a}#${preview.reloadVersion ?? 0}#${preview.resourceVersion ?? ''}`,
       floor: preview.resourceVersion,
+      folder: false,
     }
   }
   const file: FileName = model.tab === 'filesA' ? 'a' : 'b'
-  return { file, key: `${URI[file]}#r${model.revision}`, floor: undefined }
+  return { file, key: `${URI[file]}#r${model.revision}`, floor: undefined, folder: false }
 }
 
 function requestKeyOf(model: Model): string | null {
@@ -275,6 +337,18 @@ function inputOf(model: Model): TabReferenceSuggestionInput {
         filesResolvedLocation: { gfsUri: uri, kind: 'file' },
       }
     }
+    case 'folderC':
+    case 'folderD': {
+      const uri = URI[model.tab === 'folderC' ? 'c' : 'd']
+      return {
+        ...base,
+        activeTab: activeWorkspaceTab(
+          openFilesTab(createEmptyWorkspaceTabsState(), { id: 'files-1', path: uri })
+        ),
+        navItem: DESKTOP_ROUTES.files,
+        filesResolvedLocation: { gfsUri: uri, kind: 'directory' },
+      }
+    }
     case 'settings':
       return {
         ...base,
@@ -290,7 +364,28 @@ function inputOf(model: Model): TabReferenceSuggestionInput {
   }
 }
 
-function answerFor(model: Model, file: FileName): NavigationResolution | 'reject' {
+function folderAnswerFor(model: Model, name: FolderName): NavigationResolution | 'reject' {
+  switch (model.mode[name]) {
+    case 'usable':
+    case 'stale':
+      return answers.envelopes.get(answers.folder[name][model.scope]!)!
+    // The rid answers as a file: a folder target cannot use it.
+    case 'directory':
+      return answers.folderAsFile[name]
+    // Hardening, as for files: an answer for another folder stands for a server bug.
+    case 'otherFile':
+      return answers.envelopes.get(answers.folder[name === 'c' ? 'd' : 'c'][model.scope]!)!
+    case 'superseded':
+      return answers.superseded
+    case 'unavailable':
+      return answers.unavailable
+    case 'reject':
+      return 'reject'
+  }
+}
+
+function answerFor(model: Model, file: Name): NavigationResolution | 'reject' {
+  if (isFolder(file)) return folderAnswerFor(model, file)
   const version = model.serverVersion[file]
   switch (model.mode[file]) {
     case 'usable':
@@ -316,11 +411,14 @@ function answerFor(model: Model, file: FileName): NavigationResolution | 'reject
 function verdict(
   answer: NavigationResolution | 'reject',
   uri: string,
-  floor: number | undefined
+  floor: number | undefined,
+  folder: boolean
 ): Verdict {
   if (answer === 'reject' || answer.status !== 'resolved') return 'transient'
   const resource = answer.resource
-  if (resource.kind !== 'file' || resource.gfsUri !== uri) return 'unusable'
+  if (resource.kind !== (folder ? 'directory' : 'file') || resource.gfsUri !== uri) {
+    return 'unusable'
+  }
   if (floor !== undefined && resource.version < floor) return 'transient'
   return { usable: resource }
 }
@@ -329,10 +427,12 @@ function shownFrom(
   cache: Reference['cache'],
   uri: string,
   scope: string,
-  floor: number | undefined
+  floor: number | undefined,
+  folder: boolean
 ): ResolvedGfsResource | null {
   if (!cache || cache.result.status !== 'ready') return null
   if (cache.uri !== uri || cache.scope !== scope) return null
+  if ((cache.result.view.kind === 'directory') !== folder) return null
   if (floor !== undefined && cache.result.view.version < floor) return null
   return cache.result.view
 }
@@ -355,6 +455,7 @@ function predictRequest(real: Real, requestKey: string) {
     uri: URI[target.file],
     scope: real.model.scope,
     floor: target.floor,
+    folder: target.folder,
     visit: currentVisit(real),
     answer: answerFor(real.model, target.file),
   }
@@ -389,7 +490,7 @@ function referenceSettled(real: Real, id: number) {
   call.applied = ref.live === id
   if (!call.applied) return
   ref.live = null
-  const outcome = verdict(call.answer, call.uri, call.floor)
+  const outcome = verdict(call.answer, call.uri, call.floor, call.folder)
   call.verdict = outcome
   const entry = { requestKey: call.requestKey, uri: call.uri, scope: call.scope }
   if (outcome !== 'transient') {
@@ -464,6 +565,16 @@ async function drain(real: Real) {
 }
 
 function referenceOf(view: ResolvedGfsResource) {
+  if (view.kind === 'directory') {
+    return {
+      id: `global-folder:${view.drive}:${view.resourceId}`,
+      type: 'global_folder',
+      resourceId: view.resourceId,
+      drive: view.drive,
+      gfsUri: view.gfsUri,
+      label: view.name,
+    }
+  }
   return {
     id: `global-file:${view.drive}:${view.resourceId}`,
     type: 'global_file',
@@ -479,9 +590,9 @@ function referenceOf(view: ResolvedGfsResource) {
 type Chip = ReturnType<typeof useTabReferenceSuggestion>['candidate']
 
 /** S7, from the server timeline and the delivery log only. */
-function expectFresh(real: Real, file: FileName | undefined, candidate: Chip) {
-  const change = file ? real.observed[file] : undefined
-  if (!candidate || !change) return
+function expectFresh(real: Real, file: Name | undefined, candidate: Chip) {
+  const change = file && !isFolder(file) ? real.observed[file] : undefined
+  if (candidate?.type !== 'global_file' || !change) return
   // Deliveries of an equal view are indistinguishable, so the latest one is
   // taken: S7 can miss a stale chip this way, never report a fresh one.
   let deliveredAt = -1
@@ -511,7 +622,9 @@ async function assertAtRest(real: Real) {
 
   // The chip the reference predicts.
   const predicted =
-    target && model.drawer ? shownFrom(real.ref.cache, uri!, model.scope, target.floor) : null
+    target && model.drawer
+      ? shownFrom(real.ref.cache, uri!, model.scope, target.floor, target.folder)
+      : null
   expect(candidate, 'the chip the reference predicts').toEqual(
     predicted ? referenceOf(predicted) : null
   )
@@ -541,7 +654,10 @@ async function assertAtRest(real: Real) {
   if (candidate) {
     expect(normalizeGfsResourceUri(candidate.gfsUri), 'S4: another file').toBe(uri)
     expect(candidate.label, 'S4: another scope').toBe(`${target.file}@${model.scope}.md`)
-    if (target.floor !== undefined) {
+    expect(candidate.type, 'S1′: the kind of the target').toBe(
+      target.folder ? 'global_folder' : 'global_file'
+    )
+    if (target.floor !== undefined && candidate.type === 'global_file') {
       expect(candidate.version, 'S4: older than the preview').toBeGreaterThanOrEqual(target.floor)
     }
   }
@@ -606,9 +722,37 @@ function observeChange(file: FileName): Cmd {
   }
 }
 
+/**
+ * A child created or changed inside `folder`, as the watch reports it on the
+ * folder's `dir:` key and as App hands it to `invalidate`, followed by a change
+ * reported for the folder itself. The reference expects no request: a folder's
+ * key has no revision in it. The shared counter still moves when the folder is
+ * on screen, as it does for any target, so later file keys follow it.
+ */
+function changeInside(folder: FolderName): Cmd {
+  const label = `change inside ${folder}`
+  return {
+    check: () => true,
+    async run(_model, real) {
+      if (targetOf(real.model)?.file === folder) real.model.revision += 1
+      referenceKeyChanged(real)
+      act(() => {
+        for (const uri of fileUrisOfWatchEvent(dirChanged[folder])) {
+          real.hook.result.current.invalidate(uri)
+        }
+        real.hook.result.current.invalidate(URI[folder])
+      })
+      expectInStep(real, label)
+      expectTimersAgree(real, label)
+      sync(real, label)
+    },
+    toString: () => label,
+  }
+}
+
 const commandArbs: fc.Arbitrary<Cmd>[] = [
   fc
-    .constantFrom<Tab>('previewA', 'filesA', 'filesB', 'settings')
+    .constantFrom<Tab>('previewA', 'filesA', 'filesB', 'folderC', 'folderD', 'settings')
     .map(tab => command(`tab ${tab}`, model => void (model.tab = tab))),
   fc.constant(command('toggle drawer', model => void (model.drawer = !model.drawer))),
   fc.constant(
@@ -636,13 +780,14 @@ const commandArbs: fc.Arbitrary<Cmd>[] = [
     })
   ),
   fc.constantFrom<FileName>('a', 'b').map(observeChange),
+  fc.constantFrom<FolderName>('c', 'd').map(changeInside),
   fc.constantFrom<FileName>('a', 'b').map(file =>
     command(`unwatched change of ${file}`, model => {
       if (model.serverVersion[file] < MAX_VERSION) model.serverVersion[file] += 1
     })
   ),
   fc
-    .tuple(fc.constantFrom<FileName>('a', 'b'), fc.constantFrom(...MODES))
+    .tuple(fc.constantFrom<Name>('a', 'b', 'c', 'd'), fc.constantFrom(...MODES))
     .map(([file, mode]) =>
       command(`server ${file} ${mode}`, model => void (model.mode[file] = mode))
     ),
@@ -690,7 +835,7 @@ function setup(scheduler: Scheduler): Real {
     scope: SCOPES[0],
     revision: 0,
     serverVersion: { a: 1, b: 1 },
-    mode: { a: 'usable', b: 'usable' },
+    mode: { a: 'usable', b: 'usable', c: 'usable', d: 'usable' },
     preview: openPreviewTab(createEmptyWorkspaceTabsState(), {
       id: 'preview-1',
       title: 'a.md',

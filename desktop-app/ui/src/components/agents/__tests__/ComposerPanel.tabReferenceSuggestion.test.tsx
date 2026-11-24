@@ -155,9 +155,17 @@ function Harness({
     handleSelectChatAgent: noop,
     handleBackToAgents: noop,
   } as unknown as NavigationContextValue
+  const { addSuggestedFileReference, addSuggestedLocationReference } = composer
+  // Routes by kind, as App does for the drawer.
   const suggestion = useMemo<TabReferenceSuggestionValue>(
-    () => ({ candidate, accept: composer.addSuggestedFileReference }),
-    [candidate, composer.addSuggestedFileReference]
+    () => ({
+      candidate,
+      accept: reference =>
+        reference.type === 'global_folder'
+          ? addSuggestedLocationReference(reference)
+          : addSuggestedFileReference(reference),
+    }),
+    [candidate, addSuggestedFileReference, addSuggestedLocationReference]
   )
   const panel = <ComposerPanel />
   return (

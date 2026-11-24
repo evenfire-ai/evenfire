@@ -1,6 +1,6 @@
-import type { FilesResolvedLocation } from '@lib/tabReferenceSuggestion.types'
+import type { FilesResolvedLocation, SuggestedReference } from '@lib/tabReferenceSuggestion.types'
 import type { WorkspaceTab } from '@lib/workspaceTabs.types'
-import type { ComposerGlobalFileReference, NavItem } from '@/uiTypes'
+import type { NavItem } from '@/uiTypes'
 
 export type TabReferenceSuggestionInput = {
   activeTab: WorkspaceTab | null | undefined
@@ -12,8 +12,11 @@ export type TabReferenceSuggestionInput = {
 }
 
 export type TabReferenceSuggestion = {
-  /** The active tab's file, resolved and validated, or `null` when none is offered. */
-  candidate: ComposerGlobalFileReference | null
-  /** Report an observed change of `uri`. Stable; only the current target re-keys. */
+  /**
+   * The active tab's file, or the folder Files is open on, resolved and
+   * validated; `null` when none is offered.
+   */
+  candidate: SuggestedReference | null
+  /** Report an observed change of `uri`. Stable; only the current target re-keys, and a folder's key never moves. */
   invalidate: (uri: string) => void
 }

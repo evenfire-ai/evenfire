@@ -1,9 +1,9 @@
-import type { SuggestedFileReferenceOutcome } from '@hooks/domain/useComposerAttachments'
-import type { ComposerGlobalFileReference } from '../uiTypes'
+import type { SuggestedReferenceOutcome } from '@hooks/domain/useComposerAttachments'
+import type { SuggestedReference } from '@lib/tabReferenceSuggestion.types'
 
 export type TabReferenceSuggestionValue = {
-  /** The active tab's file, ready to attach, or `null` when none is offered. */
-  candidate: ComposerGlobalFileReference | null
+  /** The active tab's file or folder, ready to attach, or `null` when none is offered. */
+  candidate: SuggestedReference | null
   /** Attach `candidate` to the composer. Synchronous: it was resolved beforehand. */
-  accept: (candidate: ComposerGlobalFileReference) => SuggestedFileReferenceOutcome
+  accept: (candidate: SuggestedReference) => SuggestedReferenceOutcome
 }

@@ -13,6 +13,7 @@ import {
   COMPOSER_MAX_REQUEST_BODY_BYTES,
   COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES,
 } from '@constants/attachments'
+import { LOCATION_REFERENCE_LIMIT_REASON } from '@constants/tabReferenceSuggestion'
 import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
@@ -38,6 +39,7 @@ import {
   composerRequestBaseContent,
   mapComposerAttachmentsToHostRequest,
 } from '@lib/composerHostRequest'
+import { buildComposerLocationReferences } from '@lib/composerLocationReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   beginApprovalModeFirstSend,
@@ -55,6 +57,7 @@ import {
   readHostModelSelection,
 } from '@lib/hostModelSelectionStore'
 import { createRetainedSendStore } from '@lib/retainedSendStore'
+import { countGlobalFolderReferences } from '@lib/tabReferenceSuggestion'
 import {
   mergeAuthoritativeServerMessages,
   messageServerTurnNumber,
@@ -168,6 +171,8 @@ const TRANSCRIPT_MEMO_LIMITS = {
 const MAX_RECONCILE_DELTA_PAGES = 5
 const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
   'The Host did not receive the selected Global Files; the message was sent without them.'
+const LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE =
+  "This agent can't use folder references yet; the message was sent without it."
 // #678 D13 — a Host that predates `kind:'file'` either rejects the attachment
 // with LLM_INVALID_ATTACHMENT or drops it and still accepts the message.
 const HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE =
@@ -934,6 +939,7 @@ export function useAgentChatController({
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
     addSuggestedFileReference,
+    addSuggestedLocationReference,
     restoreComposerImageAttachments,
     restoreComposerReferenceAttachments,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
@@ -990,15 +996,24 @@ export function useAgentChatController({
           `${imageOutcome.dropped} of ${images.length} ${imageOutcome.dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_ATTACHMENTS}-attachment limit`
         )
       }
-      if (referenceOutcome.dropped > 0) {
+      // Folders have a cap of their own, so they are reported apart from the
+      // file limit and left out of its counts.
+      const droppedFolders = referenceOutcome.droppedFolders
+      const droppedFileReferences = referenceOutcome.dropped - droppedFolders
+      if (droppedFileReferences > 0) {
+        const fileReferenceCount = references.length - countGlobalFolderReferences(references)
         droppedParts.push(
-          `${referenceOutcome.dropped} of ${references.length} ${referenceOutcome.dropped === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
+          `${droppedFileReferences} of ${fileReferenceCount} ${droppedFileReferences === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
         )
       }
-      const totalDropped = imageOutcome.dropped + referenceOutcome.dropped
-      const message = droppedParts.length
+      const totalDropped = imageOutcome.dropped + droppedFileReferences
+      const keptMessage = droppedParts.length
         ? `Attachments kept — ${droppedParts.join('; ')} and ${totalDropped === 1 ? 'was' : 'were'} dropped.`
         : 'Attachments kept'
+      const message =
+        droppedFolders > 0
+          ? `${droppedParts.length ? keptMessage : 'Attachments kept.'} ${LOCATION_REFERENCE_LIMIT_REASON}: ${droppedFolders === 1 ? 'a folder was' : `${droppedFolders} folders were`} dropped.`
+          : keptMessage
       pushToast(message, 'info', {
         action: {
           label: 'Discard all',
@@ -3515,8 +3530,10 @@ export function useAgentChatController({
       // must leave the composer and its draft as the user typed them, with the
       // reason on screen, instead of failing after the send cleared the composer.
       let fileReferencesForSend: ReturnType<typeof buildComposerFileReferences>
+      let locationReferencesForSend: ReturnType<typeof buildComposerLocationReferences>
       try {
         fileReferencesForSend = buildComposerFileReferences(effectiveReferences)
+        locationReferencesForSend = buildComposerLocationReferences(effectiveReferences)
       } catch (error) {
         const blocker = error instanceof Error ? error.message : String(error)
         setAgentError(blocker)
@@ -3545,6 +3562,7 @@ export function useAgentChatController({
       const requestForBudget = {
         content: effectiveContentForRequest,
         fileReferences: fileReferencesForSend,
+        locationReferences: locationReferencesForSend,
         hostRef: sendAgent,
         files: effectiveFiles,
         images: effectiveAttachments,
@@ -3947,6 +3965,7 @@ export function useAgentChatController({
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
         const fileReferences = fileReferencesForSend
+        const locationReferences = locationReferencesForSend
         // Reads the held mode and locks the picker in one step: a pick after
         // this point would PATCH before the POST creates the session row, get
         // a 404 and paint a mode the session never stores (R6-MJ1).
@@ -3969,6 +3988,7 @@ export function useAgentChatController({
             ? {}
             : { modelSelectionRevision: visualModelRevisionForSend }),
           ...(fileReferences.length > 0 ? { fileReferences } : {}),
+          ...(locationReferences.length > 0 ? { locationReferences } : {}),
           ...(heldApprovalMode ? { approvalMode: heldApprovalMode } : {}),
         }
 
@@ -4074,6 +4094,23 @@ export function useAgentChatController({
                 : `The Host did not receive ${droppedFiles.length} of the selected Global Files; the message was sent without them.`
             setAgentError(droppedMessage)
             pushToast(droppedMessage, 'error')
+          }
+        }
+        // The same rule for the folder: a Host or rpc-proxy that predates
+        // locationReferences runs the turn without it. The send stands.
+        let locationReferencesDropped = false
+        if (ackOk && !ackIsEmpty && locationReferences.length > 0) {
+          const acceptedLocationReferenceIds = new Set<string>(
+            Array.isArray(response.acceptedLocationReferenceIds)
+              ? response.acceptedLocationReferenceIds
+              : []
+          )
+          if (
+            locationReferences.some(reference => !acceptedLocationReferenceIds.has(reference.id))
+          ) {
+            locationReferencesDropped = true
+            setAgentError(LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE)
+            pushToast(LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE, 'error')
           }
         }
         // #678 D13 — the same rule for documents. An ack that lists which
@@ -4201,7 +4238,9 @@ export function useAgentChatController({
             }))
             // The dropped-files error above already told the user what happened;
             // a success toast right after it would contradict it.
-            if (!fileReferencesDropped) pushToast(`Message sent to ${sendAgent}.`, 'success')
+            if (!fileReferencesDropped && !locationReferencesDropped) {
+              pushToast(`Message sent to ${sendAgent}.`, 'success')
+            }
           }
           return
         }
@@ -4886,6 +4925,7 @@ export function useAgentChatController({
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
     addSuggestedFileReference,
+    addSuggestedLocationReference,
     handleClearComposerAttachments: resetComposerAttachments,
     cancelTask,
   }
