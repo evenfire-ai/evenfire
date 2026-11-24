@@ -164,16 +164,18 @@ export function errorSummary(error: unknown): { errorClass: string; code?: strin
 }
 
 /**
- * A provider configuration error answers 503 on every OIDC route. Its log names
- * the settings at fault (the member sign-in switch set without its release
- * guard names CONTROL_API_OIDC_UNRELEASED), never their values.
+ * A provider configuration error fails every OIDC route until it is fixed: the
+ * profile-flow routes answer 503, and Desktop sign-in redeem answers 409
+ * without spending the code. Its log names the settings at fault (the member
+ * sign-in switch set without its release guard names
+ * CONTROL_API_OIDC_UNRELEASED), never their values.
  */
 export function logConfigurationFailure(error: unknown): void {
   const fields =
     error instanceof Error ? [...new Set(error.message.match(OIDC_SETTING_NAME_RE) ?? [])] : []
   logger.error(
     { event: 'oidc_configuration_unavailable', ...errorSummary(error), fields },
-    'OIDC provider configuration is unusable; OIDC routes answer 503 until it is fixed'
+    'OIDC provider configuration is unusable; OIDC routes fail until it is fixed'
   )
 }
 
