@@ -270,10 +270,13 @@ function parseMemberEligibility(
   }
 
   // A name alone would load and be silently ignored, so it needs a value.
+  // Surrounding whitespace would name a claim no token carries and refuse
+  // everyone, so it is refused here, as for the value.
   const claimName = claimNameRaw ?? DEFAULT_REQUIRED_CLAIM_NAME
   if (
     claimNameRaw !== undefined &&
     (claimValueRaw === undefined ||
+      claimNameRaw !== claimNameRaw.trim() ||
       !isAcceptableEvidenceClaimName(claimNameRaw) ||
       OIDC_ELIGIBILITY_RESERVED_CLAIMS.has(claimNameRaw))
   ) {

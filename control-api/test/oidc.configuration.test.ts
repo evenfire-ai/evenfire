@@ -505,6 +505,23 @@ describe('OIDC member sign-in configuration', () => {
     }
   })
 
+  it('refuses a claim name with leading or trailing whitespace', () => {
+    for (const name of [' roles', 'roles ', ' groups', 'groups ']) {
+      const message = refusal({ ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, name) })
+      expect(message).toBe(CLAIM_NAME_REFUSED)
+      expect(message).not.toContain(CLAIM_VALUE)
+    }
+    // Positive control: the same names without the whitespace load.
+    for (const name of ['roles', 'groups']) {
+      expect(
+        loadOidcProviderConfiguration(
+          { ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, name) },
+          GENERATION_KEY
+        )!.memberEligibility.requiredClaim
+      ).toEqual({ name, value: CLAIM_VALUE })
+    }
+  })
+
   it('accepts a value with inner spaces and refuses leading or trailing whitespace', () => {
     expect(
       loadOidcProviderConfiguration({ ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE) }, GENERATION_KEY)!
