@@ -4,14 +4,17 @@ import { createExternalClientRateLimiters } from '../../middleware/externalClien
 import { rootLogger } from '../../observability/logger.js'
 import type { OidcProviderConfiguration } from '../../oidc/configuration.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
-import { selectExternalSessionRepresentation } from '../../services/auth/externalSessionIssuance.js'
+import {
+  ExternalSessionIssuanceUnavailableError,
+  selectExternalSessionRepresentation,
+} from '../../services/auth/externalSessionIssuance.js'
 import { DESKTOP_SIGN_IN_CODE_RE } from '../../services/auth/oidcDesktopSignInCode.js'
 import {
   type DesktopSignInRedeemResult,
   redeemDesktopSignInCode,
 } from '../../services/auth/oidcDesktopSignInRedeem.js'
 import { externalSessionClient } from './auth.js'
-import { defaultProvider, logConfigurationFailure } from './oidcProfileFlow.js'
+import { defaultProvider, errorSummary, logConfigurationFailure } from './oidcProfileFlow.js'
 
 /** An RFC 7636 code verifier: 43 to 128 unreserved characters. */
 const CODE_VERIFIER_RE = /^[A-Za-z0-9._~-]{43,128}$/
@@ -85,8 +88,10 @@ function answerRedeem(
  * answers 400; a provider configuration that fails to load, or none, answers
  * 409; no selectable session format answers 426, as password login does. A
  * switch-off or connection change since mint is decided inside the redeem
- * transaction, which spends the code. A session issuance error reaches the
- * error handler (503 session_issuance_temporarily_unavailable).
+ * transaction, which spends the code. A session issuance error deferred by the
+ * security cutoff reaches the error handler (503
+ * session_issuance_temporarily_unavailable); any other failure answers 503
+ * oidc_storage_unavailable and logs its class and code only.
  */
 export function createExternalOidcDesktopSignInRouter(
   dependencies: ExternalOidcDesktopSignInDependencies = {}
@@ -102,6 +107,7 @@ export function createExternalOidcDesktopSignInRouter(
   router.use('/external/oidc/desktop-sign-in', ...edgeRateLimits)
 
   router.post('/external/oidc/desktop-sign-in/redeem', async (req, res, next) => {
+    let provider: OidcProviderConfiguration | undefined
     try {
       const { code, codeVerifier } = (req.body ?? {}) as { code?: unknown; codeVerifier?: unknown }
       if (
@@ -114,7 +120,6 @@ export function createExternalOidcDesktopSignInRouter(
         return
       }
 
-      let provider: OidcProviderConfiguration | undefined
       try {
         provider = getProvider()
       } catch (error) {
@@ -146,7 +151,26 @@ export function createExternalOidcDesktopSignInRouter(
       })
       answerRedeem(result, provider, req, res)
     } catch (error) {
-      next(error)
+      // Session issuance deferred by the security cutoff keeps its shared
+      // answer (503 session_issuance_temporarily_unavailable).
+      if (error instanceof ExternalSessionIssuanceUnavailableError) {
+        next(error)
+        return
+      }
+      // Any other failure is answered here: the shared error handler would log
+      // the error's message and stack, and a database error's message can hold
+      // a row value. Class and code only. A failed transaction rolled back, so
+      // the code is not spent.
+      logger.error(
+        {
+          event: 'oidc_desktop_code_redeem_failed',
+          ...(provider ? { registrationId: provider.registrationId, issuer: provider.issuer } : {}),
+          requestId: req.get('x-request-id'),
+          ...errorSummary(error),
+        },
+        'OIDC Desktop sign-in redeem failed'
+      )
+      res.status(503).json({ error: 'oidc_storage_unavailable' })
     }
   })
 

@@ -25,12 +25,22 @@ const flowLog = vi.hoisted(() => ({
   warn: vi.fn(),
   error: vi.fn(),
 }))
+/** What the root logger itself is asked to write; the shared error handler logs here. */
+const rootLog = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}))
 const resolveEffectiveUserAccessPolicy = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/observability/logger.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/observability/logger.js')>()
   const rootLogger = new Proxy(actual.rootLogger, {
     get(target, prop, receiver) {
+      if (typeof prop === 'string' && Object.hasOwn(rootLog, prop)) {
+        return rootLog[prop as keyof typeof rootLog]
+      }
       if (prop !== 'child') return Reflect.get(target, prop, receiver)
       return (bindings: Record<string, unknown>, options?: object) => {
         if (bindings?.component === 'oidc_desktop_sign_in') return desktopLog
@@ -104,10 +114,18 @@ function appFor(dependencies: RouterDependencies) {
   return app
 }
 
-/** Every call the route made to its loggers. */
+const allLogMethods = () => [
+  ...Object.values(desktopLog),
+  ...Object.values(flowLog),
+  ...Object.values(rootLog),
+]
+
+/** Every call made to the route's loggers and to the root logger, Error objects expanded. */
 function loggedText(): string {
   return JSON.stringify(
-    [...Object.values(desktopLog), ...Object.values(flowLog)].map(method => method.mock.calls)
+    allLogMethods().map(method => method.mock.calls),
+    (_key, value) =>
+      value instanceof Error ? { message: value.message, stack: value.stack, ...value } : value
   )
 }
 
@@ -125,9 +143,7 @@ const member = {
 }
 
 beforeEach(() => {
-  for (const method of [...Object.values(desktopLog), ...Object.values(flowLog)]) {
-    method.mockReset()
-  }
+  for (const method of allLogMethods()) method.mockReset()
   resolveEffectiveUserAccessPolicy.mockReset().mockResolvedValue(sessionPolicy)
 })
 
@@ -349,4 +365,43 @@ describe('POST /external/oidc/desktop-sign-in/redeem', () => {
     })
     expect(desktopEvents()).toEqual([])
   })
+
+  const failures = [
+    ['redeem', 'redeem'],
+    ['the access policy', 'policy'],
+  ] as const
+
+  it.each(failures)(
+    'answers 503 oidc_storage_unavailable and logs only the class and code when %s fails',
+    async (_name, failing) => {
+      const sentinel = 'sentinel-fixture-row-value'
+      const failure = Object.assign(new Error(`database detail ${sentinel}`), { code: 'XX000' })
+      const redeem = vi.fn().mockResolvedValue({ status: 'signed_in', body: signedInBody })
+      if (failing === 'redeem') redeem.mockRejectedValue(failure)
+      else resolveEffectiveUserAccessPolicy.mockRejectedValue(failure)
+
+      const response = await request(appFor({ getProvider: () => provider, redeem }))
+        .post(REDEEM_PATH)
+        .set('x-request-id', 'request-fixture-redeem')
+        .send(redeemBody)
+
+      expect(response.status).toBe(503)
+      expect(response.body).toEqual({ error: 'oidc_storage_unavailable' })
+      expect(redeem).toHaveBeenCalledTimes(failing === 'redeem' ? 1 : 0)
+      expect(desktopEvents()).toEqual([
+        {
+          event: 'oidc_desktop_code_redeem_failed',
+          registrationId: provider.registrationId,
+          issuer: provider.issuer,
+          requestId: 'request-fixture-redeem',
+          errorClass: 'Error',
+          code: 'XX000',
+        },
+      ])
+      // Neither the message nor a stack is logged anywhere, the root logger included.
+      expect(loggedText()).not.toContain(sentinel)
+      expect(loggedText()).not.toContain('routes.externalOidcDesktopSignIn.test')
+      expect(JSON.stringify(response.body)).not.toContain(sentinel)
+    }
+  )
 })
