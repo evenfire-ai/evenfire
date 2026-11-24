@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { DatabaseError } from 'pg'
 import request from 'supertest'
+import { pool } from '../src/db.js'
 import { OidcPersistenceFailure, OidcProviderUnavailableError } from '../src/oidc/protocolResult.js'
 import { createExternalOidcProfileFlowRouter } from '../src/routes/external/oidcProfileFlow.js'
 import { createOidcR5ProtocolFixture } from './helpers/oidcR5ProtocolFixture.js'
@@ -28,6 +30,17 @@ vi.mock('../src/observability/logger.js', async importOriginal => {
     },
   })
   return { ...actual, rootLogger }
+})
+
+/**
+ * The store's context insert, seen by the route's default writer. The Desktop
+ * tests inject their own writer; one test leaves the default in place.
+ */
+const storeInsertDesktopSignInContext = vi.hoisted(() => vi.fn())
+
+vi.mock('../src/oidc/attemptSignInContextStore.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/oidc/attemptSignInContextStore.js')>()
+  return { ...actual, insertDesktopSignInContext: storeInsertDesktopSignInContext }
 })
 
 // The route's default engine is the real class, recorded on construction. Its
@@ -79,7 +92,22 @@ function appFor(
 
 beforeEach(() => {
   for (const method of Object.values(flowLog)) method.mockReset()
+  storeInsertDesktopSignInContext.mockReset()
 })
+
+/** Every call the route made to its logger, Error objects expanded to their own properties. */
+function loggedText(): string {
+  const calls = Object.entries(flowLog).map(([level, method]) => [level, method.mock.calls])
+  return JSON.stringify(calls, (_key, value) =>
+    value instanceof Error ? { message: value.message, stack: value.stack, ...value } : value
+  )
+}
+
+function loggedEvents(): Array<Record<string, unknown>> {
+  return Object.values(flowLog).flatMap(method =>
+    method.mock.calls.map(call => call[0] as Record<string, unknown>)
+  )
+}
 
 describe('Control API OIDC Profile UI foundation boundary', () => {
   it('returns only the safe callback configuration and inactive-mode marker', async () => {
@@ -231,20 +259,6 @@ describe('Control API OIDC member sign-in completion', () => {
     'no_account',
     'provider_configuration',
   ] as const
-
-  /** Every call the route made to its logger, Error objects expanded to their own properties. */
-  function loggedText(): string {
-    const calls = Object.entries(flowLog).map(([level, method]) => [level, method.mock.calls])
-    return JSON.stringify(calls, (_key, value) =>
-      value instanceof Error ? { message: value.message, stack: value.stack, ...value } : value
-    )
-  }
-
-  function loggedEvents(): Array<Record<string, unknown>> {
-    return Object.values(flowLog).flatMap(method =>
-      method.mock.calls.map(call => call[0] as Record<string, unknown>)
-    )
-  }
 
   function appWithMemberSignIn(signInMember: (...args: never[]) => unknown, memberSignIn = true) {
     return appFor(
@@ -711,5 +725,210 @@ describe('Control API OIDC member sign-in completion', () => {
         expect(flowLog.error).not.toHaveBeenCalled()
       }
     )
+  })
+})
+
+describe('Desktop sign-in at /attempts', () => {
+  const ATTEMPTS_PATH = '/external/oidc/profile-flow/attempts'
+  const ATTEMPT_ID = '3b9c2e71-5d4a-4f08-9e6b-1a7c8d2f0e45'
+  /** The S256 challenge of RFC 7636 Appendix B. */
+  const CODE_CHALLENGE = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
+  const browserBinding = 'B'.repeat(43)
+  const begun = {
+    authorizationUrl: 'https://issuer.example.test/authorize?state=opaque-state',
+    expiresAt: new Date('2026-10-30T18:00:00.000Z'),
+    attemptId: ATTEMPT_ID,
+  }
+  const desktopBody = { browserBinding, desktopSignIn: { codeChallenge: CODE_CHALLENGE } }
+
+  /**
+   * The route with member sign-in on (unless switched off), the given engine
+   * and context writer (`null` keeps the route's default), and, when `events`
+   * is passed, a record of the moment the route answers.
+   */
+  function desktopApp(
+    engine: object,
+    writeDesktopSignInContext: ((attemptId: string, codeChallenge: string) => Promise<void>) | null,
+    options: { memberSignIn?: boolean; events?: string[] } = {}
+  ) {
+    const router = createExternalOidcProfileFlowRouter({
+      getProvider: () => ({
+        ...provider,
+        memberAuthenticationActivated: options.memberSignIn ?? true,
+      }),
+      createEngine: () => engine as never,
+      ...(writeDesktopSignInContext ? { writeDesktopSignInContext } : {}),
+    })
+    const app = express()
+    app.use(express.json())
+    const events = options.events
+    if (events) {
+      app.use((_req, res, next) => {
+        const json = res.json.bind(res)
+        res.json = body => {
+          events.push('response')
+          return json(body)
+        }
+        next()
+      })
+    }
+    app.use(router)
+    return app
+  }
+
+  it('writes no context and sends no echo without desktopSignIn', async () => {
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const writeDesktopSignInContext = vi.fn().mockResolvedValue(undefined)
+    const app = desktopApp({ beginIdentityProofAttempt }, writeDesktopSignInContext)
+
+    const response = await request(app).post(ATTEMPTS_PATH).send({ browserBinding })
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      authorizationUrl: begun.authorizationUrl,
+      expiresAt: '2026-10-30T18:00:00.000Z',
+    })
+    // Positive control: the attempt was begun, with member sign-in on, and no
+    // context went with it.
+    expect(beginIdentityProofAttempt).toHaveBeenCalledTimes(1)
+    expect(writeDesktopSignInContext).not.toHaveBeenCalled()
+  })
+
+  it('answers 409 desktop_sign_in_unavailable and begins nothing when member sign-in is off', async () => {
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const writeDesktopSignInContext = vi.fn().mockResolvedValue(undefined)
+    const app = desktopApp({ beginIdentityProofAttempt }, writeDesktopSignInContext, {
+      memberSignIn: false,
+    })
+
+    const response = await request(app).post(ATTEMPTS_PATH).send(desktopBody)
+
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({ error: 'desktop_sign_in_unavailable' })
+    expect(beginIdentityProofAttempt).not.toHaveBeenCalled()
+    expect(writeDesktopSignInContext).not.toHaveBeenCalled()
+  })
+
+  it('begins the attempt when member sign-in is on', async () => {
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const writeDesktopSignInContext = vi.fn().mockResolvedValue(undefined)
+    const app = desktopApp({ beginIdentityProofAttempt }, writeDesktopSignInContext)
+
+    const response = await request(app).post(ATTEMPTS_PATH).send(desktopBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({ signInContext: 'desktop_sign_in' })
+    expect(beginIdentityProofAttempt).toHaveBeenCalledTimes(1)
+    expect(beginIdentityProofAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({ browserBinding, signal: expect.any(AbortSignal) })
+    )
+    expect(writeDesktopSignInContext).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['a 42-character challenge', { codeChallenge: 'C'.repeat(42) }],
+    ['a 44-character challenge', { codeChallenge: 'C'.repeat(44) }],
+    ['a challenge outside base64url', { codeChallenge: `${'C'.repeat(42)}+` }],
+    ['a challenge that is not a string', { codeChallenge: 43 }],
+    ['no challenge', {}],
+    ['an extra key', { codeChallenge: CODE_CHALLENGE, codeChallengeMethod: 'S256' }],
+    ['null', null],
+    ['false', false],
+    ['a string', CODE_CHALLENGE],
+    ['an array', [CODE_CHALLENGE]],
+  ])('refuses a malformed desktopSignIn with 400: %s', async (_label, desktopSignIn) => {
+    // Member sign-in is on and begin would succeed: only the shape refuses.
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const writeDesktopSignInContext = vi.fn().mockResolvedValue(undefined)
+    const app = desktopApp({ beginIdentityProofAttempt }, writeDesktopSignInContext)
+
+    const response = await request(app).post(ATTEMPTS_PATH).send({ browserBinding, desktopSignIn })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid_oidc_attempt' })
+    expect(beginIdentityProofAttempt).not.toHaveBeenCalled()
+    expect(writeDesktopSignInContext).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 with no authorizationUrl when the context write fails, and logs no challenge', async () => {
+    // Postgres 16's answer to a refused context insert: the class, message,
+    // length, code, table, constraint and detail layout are copied from a live
+    // run; the detail's row carries this test's attempt id and challenge.
+    const failure = Object.assign(
+      new DatabaseError(
+        'new row for relation "oidc_attempt_sign_in_contexts" violates check constraint "oidc_attempt_sign_in_contexts_desktop_code_challenge_check"',
+        471,
+        'error'
+      ),
+      {
+        severity: 'ERROR',
+        code: '23514',
+        detail: `Failing row contains (${ATTEMPT_ID}, desktop_sign_in, ${CODE_CHALLENGE}, null, null, 2026-11-24 18:06:06.001167+00).`,
+        table: 'oidc_attempt_sign_in_contexts',
+        constraint: 'oidc_attempt_sign_in_contexts_desktop_code_challenge_check',
+      }
+    )
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const writeDesktopSignInContext = vi.fn().mockRejectedValue(failure)
+    const app = desktopApp({ beginIdentityProofAttempt }, writeDesktopSignInContext)
+
+    const response = await request(app).post(ATTEMPTS_PATH).send(desktopBody)
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'oidc_storage_unavailable' })
+    expect(JSON.stringify(response.body)).not.toContain('issuer.example.test')
+    expect(beginIdentityProofAttempt).toHaveBeenCalledTimes(1)
+    expect(writeDesktopSignInContext).toHaveBeenCalledWith(ATTEMPT_ID, CODE_CHALLENGE)
+    // The failure is logged, reduced to its class and code.
+    expect(flowLog.error).toHaveBeenCalledTimes(1)
+    expect(loggedEvents()).toEqual([
+      { event: 'oidc_desktop_context_write_failed', errorClass: 'DatabaseError', code: '23514' },
+    ])
+    const logged = loggedText()
+    expect(logged).not.toContain(CODE_CHALLENGE)
+    expect(logged).not.toContain('Failing row')
+    expect(logged).not.toContain('violates check constraint')
+  })
+
+  it('echoes signInContext after the context is written', async () => {
+    const events: string[] = []
+    const beginIdentityProofAttempt = vi.fn(async () => {
+      events.push('begin')
+      return begun
+    })
+    const writeDesktopSignInContext = vi.fn(async (_attemptId: string, _challenge: string) => {
+      events.push('write started')
+      // Yield to the event loop: an answer sent without awaiting the write
+      // lands before the write finishes.
+      await new Promise(resolve => setImmediate(resolve))
+      events.push('write finished')
+    })
+    const app = desktopApp({ beginIdentityProofAttempt }, writeDesktopSignInContext, { events })
+
+    const response = await request(app).post(ATTEMPTS_PATH).send(desktopBody)
+
+    expect(response.status).toBe(200)
+    // Exact: the attempt id stays on the server.
+    expect(response.body).toEqual({
+      authorizationUrl: begun.authorizationUrl,
+      expiresAt: '2026-10-30T18:00:00.000Z',
+      signInContext: 'desktop_sign_in',
+    })
+    expect(writeDesktopSignInContext).toHaveBeenCalledTimes(1)
+    expect(writeDesktopSignInContext).toHaveBeenCalledWith(ATTEMPT_ID, CODE_CHALLENGE)
+    expect(events).toEqual(['begin', 'write started', 'write finished', 'response'])
+  })
+
+  it('writes the context through the store on the service pool by default', async () => {
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    storeInsertDesktopSignInContext.mockResolvedValue(undefined)
+    const app = desktopApp({ beginIdentityProofAttempt }, null)
+
+    const response = await request(app).post(ATTEMPTS_PATH).send(desktopBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({ signInContext: 'desktop_sign_in' })
+    expect(storeInsertDesktopSignInContext).toHaveBeenCalledTimes(1)
+    expect(storeInsertDesktopSignInContext).toHaveBeenCalledWith(pool, ATTEMPT_ID, CODE_CHALLENGE)
   })
 })
