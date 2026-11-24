@@ -32,21 +32,6 @@ describe('AppService runtime config discovery ownership', () => {
   // Profile-origin save, model, and native-owner tests; removed stage/journal
   // transactions are intentionally absent from this runtime contract.
 
-  it('rejects a runtime config save after shutdown closes admission', async () => {
-    const { service, runtimeConfig } = await createNativeCommitTestHarness()
-    const before = runtimeConfig.getDesktopRuntimeConfigState()
-    service.beginShutdown()
-
-    await expect(
-      service.saveRuntimeConfig({
-        externalRestApiBaseUrl: 'https://api-after-shutdown.example.test',
-        rpcProxyBaseUrl: 'https://rpc-after-shutdown.example.test',
-        appName: 'After shutdown',
-      })
-    ).rejects.toThrow('desktop_shutting_down')
-    expect(runtimeConfig.getDesktopRuntimeConfigState()).toEqual(before)
-  })
-
   it('uses RPC discovery completed before the signed-out login result is installed', async () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     await runtimeConfig.saveDesktopRuntimeConfig({

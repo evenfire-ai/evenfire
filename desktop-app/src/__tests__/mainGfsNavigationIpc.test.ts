@@ -17,7 +17,6 @@ const harness = vi.hoisted(() => {
     windows: [] as Array<Record<string, any>>,
     readyResolver: null as null | (() => void),
     initialize: vi.fn().mockResolvedValue(undefined),
-    beginShutdown: vi.fn(),
     logout: vi.fn(async () => 7),
     sessionGeneration: 0,
     invalidateSandboxUiSession: null as null | (() => void),
@@ -118,7 +117,6 @@ vi.mock('../appService.js', () => ({
       harness.sessionCleared = options?.onSessionCleared ?? null
     }
     initialize = harness.initialize
-    beginShutdown = harness.beginShutdown
     logout = harness.logout
     getSessionGeneration = () => harness.sessionGeneration
   },
@@ -202,7 +200,6 @@ async function importMainWithFreshHarness(): Promise<void> {
   harness.onHandlers.clear()
   harness.handleHandlers.clear()
   harness.readyResolver = null
-  harness.beginShutdown.mockClear()
   harness.registeredLogout = null
   harness.sessionGeneration = 0
   await import('../main.js')
@@ -238,46 +235,6 @@ describe('main.ts GFS navigation-generation composition', () => {
       expect(harness.registeredLogout).toBeTypeOf('function')
       expect(harness.windows).toHaveLength(1)
     })
-  })
-
-  it('rejects queued and new native operations when Electron before-quit fires', async () => {
-    await importMainWithFreshHarness()
-    const { AppService } =
-      await vi.importActual<typeof import('../appService.js')>('../appService.js')
-    const realService = new AppService() as unknown as {
-      beginShutdown(): void
-      withNativeAuthEnvironmentCommit<T>(operation: () => Promise<T>): Promise<T>
-    }
-    harness.beginShutdown.mockImplementation(() => realService.beginShutdown())
-
-    let activeStarted!: () => void
-    let releaseActive!: () => void
-    const started = new Promise<void>(resolve => {
-      activeStarted = resolve
-    })
-    const released = new Promise<void>(resolve => {
-      releaseActive = resolve
-    })
-    const queuedOperation = vi.fn(async () => 'queued')
-    const active = realService.withNativeAuthEnvironmentCommit(async () => {
-      activeStarted()
-      await released
-      return 'active'
-    })
-    await started
-    const queued = realService.withNativeAuthEnvironmentCommit(queuedOperation)
-    const beforeQuit = harness.appListeners.get('before-quit')
-    expect(beforeQuit).toBeTypeOf('function')
-    beforeQuit?.()
-    expect(harness.beginShutdown).toHaveBeenCalledOnce()
-    releaseActive()
-
-    await expect(active).resolves.toBe('active')
-    await expect(queued).rejects.toThrow('desktop_shutting_down')
-    await expect(realService.withNativeAuthEnvironmentCommit(queuedOperation)).rejects.toThrow(
-      'desktop_shutting_down'
-    )
-    expect(queuedOperation).not.toHaveBeenCalled()
   })
 
   it('keeps the frameless custom chrome square on Linux only', () => {

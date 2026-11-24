@@ -963,7 +963,6 @@ export class AppService {
   // when the last login settles, unless that login replaced it.
   private sessionRejectedDuringLogin: string | null = null
   private nativeAuthEnvironmentCommitQueue: Promise<void> = Promise.resolve()
-  private shuttingDown = false
   private gfsAuthEpoch = 0
   private gfsDispatchBlocked = true
   // A transient runWithTeamContext hop temporarily installs another team's
@@ -1165,24 +1164,12 @@ export class AppService {
    * success or failure so one rejected transition cannot strand later work.
    */
   private withNativeAuthEnvironmentCommit<T>(operation: () => Promise<T>): Promise<T> {
-    const guardedOperation = async (): Promise<T> => {
-      if (this.shuttingDown) throw new Error('desktop_shutting_down')
-      return operation()
-    }
-    if (this.shuttingDown) return Promise.reject(new Error('desktop_shutting_down'))
-    const result = this.nativeAuthEnvironmentCommitQueue.then(guardedOperation, guardedOperation)
+    const result = this.nativeAuthEnvironmentCommitQueue.then(operation, operation)
     this.nativeAuthEnvironmentCommitQueue = result.then(
       () => undefined,
       () => undefined
     )
     return result
-  }
-
-  beginShutdown(): void {
-    if (this.shuttingDown) return
-    this.shuttingDown = true
-    this.pendingRuntimeConfigDiscovery = null
-    this.runtimeConfigResolutionInFlight.clear()
   }
 
   private captureAuthEnvironmentBinding(): {

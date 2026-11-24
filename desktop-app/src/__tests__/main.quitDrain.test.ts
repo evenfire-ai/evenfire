@@ -1,4 +1,8 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fc from 'fast-check'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 type MainEvent = {
   senderFrame: { url: string }
@@ -26,6 +30,93 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+type CanceledQuitModel = {
+  quitStarted: boolean
+  queuedTokenWrite: boolean
+  windowAndAdmissionReopened: boolean
+  nativeOperationCompleted: boolean
+}
+type CanceledQuitReal = {
+  scheduler: fc.Scheduler
+  beginQuit: () => void
+  queueTokenWrite: () => void
+  reopenWindow: () => Promise<void>
+  nativeOperation: () => Promise<string>
+}
+
+class CanceledQuitSequenceCommand implements fc.AsyncCommand<CanceledQuitModel, CanceledQuitReal> {
+  check(model: Readonly<CanceledQuitModel>): boolean {
+    return !model.quitStarted
+  }
+  async run(model: CanceledQuitModel, real: CanceledQuitReal): Promise<void> {
+    real.beginQuit()
+    model.quitStarted = true
+    real.queueTokenWrite()
+    await new Promise(resolve => setImmediate(resolve))
+    model.queuedTokenWrite = true
+    await real.reopenWindow()
+    model.windowAndAdmissionReopened = true
+    const scheduled = real.scheduler.schedule(
+      Promise.resolve().then(() => real.nativeOperation()),
+      'native-operation-after-cancel'
+    )
+    const result = await real.scheduler.waitFor(scheduled)
+    expect(result).toBe('reopened-operation-completed')
+    model.nativeOperationCompleted = true
+  }
+  toString(): string {
+    return 'cancel-deferred-quit-and-complete-native-operation'
+  }
+}
+
+type TerminalQuitModel = {
+  terminalQuitReached: boolean
+  ownerQueueReleased: boolean
+  postCloseTokenWritePending: boolean
+}
+type TerminalQuitReal = {
+  scheduler: fc.Scheduler
+  terminalQuit: () => boolean
+  releaseOwner: () => void
+  ownerOperation: Promise<string>
+  queuedTokenOperation: Promise<void>
+  tokenWriteStarted: () => boolean
+}
+class TerminalQuitSequenceCommand implements fc.AsyncCommand<TerminalQuitModel, TerminalQuitReal> {
+  check(model: Readonly<TerminalQuitModel>): boolean {
+    return !model.terminalQuitReached
+  }
+  async run(model: TerminalQuitModel, real: TerminalQuitReal): Promise<void> {
+    const prevented = real.terminalQuit()
+    expect(prevented).toBe(false)
+    model.terminalQuitReached = true
+    const release = real.scheduler.schedule(
+      Promise.resolve().then(() => real.releaseOwner()),
+      'release-owner-after-token-admission-closes'
+    )
+    await real.scheduler.waitFor(release)
+    await expect(real.ownerOperation).resolves.toBe('active-owner-finished')
+    model.ownerQueueReleased = true
+    await new Promise(resolve => setImmediate(resolve))
+    let queuedSettled = false
+    void real.queuedTokenOperation.then(
+      () => {
+        queuedSettled = true
+      },
+      () => {
+        queuedSettled = true
+      }
+    )
+    await new Promise(resolve => setImmediate(resolve))
+    expect(real.tokenWriteStarted()).toBe(false)
+    expect(queuedSettled).toBe(false)
+    model.postCloseTokenWritePending = !queuedSettled
+  }
+  toString(): string {
+    return 'terminal-quit-closes-token-admission-before-queued-owner-work'
+  }
+}
+
 const pendingDeferredCleanups = new Set<() => void>()
 
 async function settlePendingDeferredCleanups(): Promise<void> {
@@ -45,6 +136,7 @@ const harness = vi.hoisted(() => {
     windows: [] as Array<Record<string, any>>,
     readyResolver: null as null | (() => void),
     initialize: vi.fn().mockResolvedValue(undefined),
+    beginShutdown: vi.fn(),
     logout: vi.fn(async () => 7),
     nativeSet: vi.fn(),
     nativeGet: vi.fn(),
@@ -157,6 +249,7 @@ vi.mock('../appService.js', () => ({
       harness.sessionCleared = options?.onSessionCleared ?? null
     }
     initialize = harness.initialize
+    beginShutdown = harness.beginShutdown
     logout = harness.logout
     getSessionGeneration = () => harness.sessionGeneration
   },
@@ -227,6 +320,7 @@ describe('macOS Quit drain', () => {
     harness.windows.length = 0
     harness.readyResolver = null
     harness.initialize.mockReset().mockResolvedValue(undefined)
+    harness.beginShutdown.mockReset()
     harness.nativeSet.mockReset().mockResolvedValue(undefined)
     harness.nativeGet.mockReset().mockResolvedValue(null)
     harness.nativeDelete.mockReset().mockResolvedValue(true)
@@ -262,6 +356,7 @@ describe('macOS Quit drain', () => {
       harness.windows.length = 0
       harness.readyResolver = null
       harness.initialize.mockReset().mockResolvedValue(undefined)
+      harness.beginShutdown.mockReset()
       harness.logout.mockReset().mockResolvedValue(7)
       harness.nativeSet.mockReset().mockResolvedValue(undefined)
       harness.nativeGet.mockReset().mockResolvedValue(null)
@@ -529,6 +624,216 @@ describe('macOS Quit drain', () => {
     } finally {
       nativeWrite.resolve()
       await write
+    }
+  })
+
+  it('keeps native auth/environment admission after a canceled macOS Quit', async () => {
+    await startMain()
+    const { AppService } =
+      await vi.importActual<typeof import('../appService.js')>('../appService.js')
+    const service = new AppService() as unknown as {
+      beginShutdown(): void
+      withNativeAuthEnvironmentCommit<T>(operation: () => Promise<T>): Promise<T>
+    }
+    harness.beginShutdown.mockImplementation(() => service.beginShutdown())
+
+    const { TokenStore } = await import('../tokenStore.ts')
+    const firstNativeWrite = deferred<void>()
+    harness.nativeSet.mockImplementationOnce(() => firstNativeWrite.promise)
+    const first = new TokenStore().setSessionToken('synthetic-first', 'first-aaaaaaaaaaaa')
+    let second: Promise<void> | undefined
+    const scheduler = fc.scheduler()
+    const generatedCommands = fc
+      .sample(
+        fc.commands([fc.constant(new CanceledQuitSequenceCommand())], {
+          maxCommands: 1,
+          size: '+1',
+        }),
+        { numRuns: 100, seed: 146360, size: '+1' }
+      )
+      .find(commands => commands.commands.length === 1)
+    if (!generatedCommands) throw new Error('fast-check generated no lifecycle command run')
+    const model: CanceledQuitModel = {
+      quitStarted: false,
+      queuedTokenWrite: false,
+      windowAndAdmissionReopened: false,
+      nativeOperationCompleted: false,
+    }
+    const real: CanceledQuitReal = {
+      scheduler: fc.sample(fc.scheduler(), 1)[0]!,
+      beginQuit: () => {
+        const beforeQuit = harness.appListeners.get('before-quit')
+        beforeQuit?.()
+        let vetoed = false
+        harness.appListeners.get('will-quit')?.({
+          defaultPrevented: false,
+          preventDefault() {
+            this.defaultPrevented = true
+            vetoed = true
+          },
+        })
+        expect(vetoed).toBe(true)
+      },
+      queueTokenWrite: () => {
+        second = new TokenStore().setSessionToken('synthetic-second', 'second-aaaaaaaaaaaa')
+      },
+      reopenWindow: async () => {
+        harness.appListeners.get('activate')?.()
+        await vi.waitFor(() => expect(harness.windows).toHaveLength(1))
+        await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(2))
+      },
+      nativeOperation: () =>
+        service.withNativeAuthEnvironmentCommit(async () => 'reopened-operation-completed'),
+    }
+
+    try {
+      await vi.waitFor(() => expect(harness.nativeSet).toHaveBeenCalledTimes(1))
+      const closed = harness.windows[0].on.mock.calls.find(
+        (call: unknown[]) => call[0] === 'closed'
+      )?.[1]
+      expect(closed).toBeTypeOf('function')
+      closed()
+      harness.windows.splice(0)
+      await fc.asyncModelRun(() => ({ model, real }), generatedCommands)
+      expect(model).toEqual({
+        quitStarted: true,
+        queuedTokenWrite: true,
+        windowAndAdmissionReopened: true,
+        nativeOperationCompleted: true,
+      })
+    } finally {
+      firstNativeWrite.resolve()
+      await first
+      if (second) await second
+      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      openTokenStoreAdmission()
+    }
+  })
+
+  it('keeps dev terminal Quit behavior for work queued behind the native owner', async () => {
+    await startMain()
+    const { AppService } =
+      await vi.importActual<typeof import('../appService.js')>('../appService.js')
+    const service = new AppService() as unknown as {
+      beginShutdown(): void
+      withNativeAuthEnvironmentCommit<T>(operation: () => Promise<T>): Promise<T>
+    }
+    harness.beginShutdown.mockImplementation(() => service.beginShutdown())
+    const { TokenStore } = await import('../tokenStore.ts')
+    const activeStarted = deferred<void>()
+    const releaseActive = deferred<void>()
+    const active = service.withNativeAuthEnvironmentCommit(async () => {
+      activeStarted.resolve()
+      await releaseActive.promise
+      return 'active-owner-finished'
+    })
+    await activeStarted.promise
+    const queued = service.withNativeAuthEnvironmentCommit(async () => {
+      await new TokenStore().setSessionToken('synthetic-terminal-quit', 'terminal-aaaaaaaaaaaa')
+    })
+    let queuedSettled = false
+    void queued.then(
+      () => {
+        queuedSettled = true
+      },
+      () => {
+        queuedSettled = true
+      }
+    )
+    const scheduler = fc.sample(fc.scheduler(), 1)[0]!
+    const generatedCommands = fc
+      .sample(
+        fc.commands([fc.constant(new TerminalQuitSequenceCommand())], {
+          maxCommands: 1,
+          size: '+1',
+        }),
+        { numRuns: 100, seed: 146361, size: '+1' }
+      )
+      .find(commands => commands.commands.length === 1)
+    if (!generatedCommands) throw new Error('fast-check generated no terminal lifecycle command')
+    const model: TerminalQuitModel = {
+      terminalQuitReached: false,
+      ownerQueueReleased: false,
+      postCloseTokenWritePending: false,
+    }
+    const real: TerminalQuitReal = {
+      scheduler,
+      terminalQuit: () => {
+        const beforeQuit = harness.appListeners.get('before-quit')
+        beforeQuit?.()
+        const event = {
+          defaultPrevented: false,
+          preventDefault() {
+            this.defaultPrevented = true
+          },
+        }
+        harness.appListeners.get('will-quit')?.(event)
+        return event.defaultPrevented
+      },
+      releaseOwner: () => releaseActive.resolve(),
+      ownerOperation: active,
+      queuedTokenOperation: queued,
+      tokenWriteStarted: () => harness.nativeSet.mock.calls.length > 0,
+    }
+    try {
+      await fc.asyncModelRun(() => ({ model, real }), generatedCommands)
+      expect(model).toEqual({
+        terminalQuitReached: true,
+        ownerQueueReleased: true,
+        postCloseTokenWritePending: true,
+      })
+      expect(queuedSettled).toBe(false)
+    } finally {
+      releaseActive.resolve()
+      const { openTokenStoreAdmission } = await import('../tokenStore.ts')
+      openTokenStoreAdmission()
+      await Promise.allSettled([active, queued])
+    }
+  })
+
+  it('preserves dev-isolated TokenStore operations after shared admission closes', async () => {
+    await startMain()
+    const isolatedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-profile-origin-isolated-'))
+    const previousUserData = process.env.TOKEN_STORE_TEST_USER_DATA
+    process.env.TOKEN_STORE_TEST_USER_DATA = isolatedDir
+    const { TokenStore, closeTokenStoreAdmission, openTokenStoreAdmission } =
+      await import('../tokenStore.ts')
+    const isolatedStore = new TokenStore({ isolatedUserDataPath: isolatedDir })
+    const { AppService } =
+      await vi.importActual<typeof import('../appService.js')>('../appService.js')
+    const service = new AppService({ tokenStore: isolatedStore }) as unknown as {
+      beginShutdown(): void
+      withNativeAuthEnvironmentCommit<T>(operation: () => Promise<T>): Promise<T>
+    }
+    harness.beginShutdown.mockImplementation(() => service.beginShutdown())
+    const recordKey = 'isolated-aaaaaaaaaaaa'
+    try {
+      const beforeQuit = harness.appListeners.get('before-quit')
+      beforeQuit?.()
+      let prevented = false
+      harness.appListeners.get('will-quit')?.({
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true
+          prevented = true
+        },
+      })
+      expect(prevented).toBe(false)
+      expect(closeTokenStoreAdmission()).toBe(false)
+
+      const result = await service.withNativeAuthEnvironmentCommit(async () => {
+        await isolatedStore.setSessionToken('synthetic-isolated-session', recordKey)
+        return 'isolated-write-completed'
+      })
+      expect(result).toBe('isolated-write-completed')
+      await expect(isolatedStore.getSessionToken(recordKey)).resolves.toBe(
+        'synthetic-isolated-session'
+      )
+    } finally {
+      openTokenStoreAdmission()
+      if (previousUserData === undefined) delete process.env.TOKEN_STORE_TEST_USER_DATA
+      else process.env.TOKEN_STORE_TEST_USER_DATA = previousUserData
+      await fs.rm(isolatedDir, { recursive: true, force: true })
     }
   })
 })

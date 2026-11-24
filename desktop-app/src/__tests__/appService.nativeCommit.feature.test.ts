@@ -9,33 +9,6 @@ import {
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService native auth and environment commit ordering', () => {
-  it('rejects queued native auth/environment commits once shutdown begins', async () => {
-    const { service } = await createNativeCommitTestHarness()
-    const app = service as unknown as {
-      beginShutdown(): void
-      withNativeAuthEnvironmentCommit<T>(operation: () => Promise<T>): Promise<T>
-    }
-    const activeStarted = deferred<void>()
-    const releaseActive = deferred<void>()
-    const queuedOperation = vi.fn(async () => 'queued')
-    const active = app.withNativeAuthEnvironmentCommit(async () => {
-      activeStarted.resolve()
-      await releaseActive.promise
-      return 'active'
-    })
-    await activeStarted.promise
-    const queued = app.withNativeAuthEnvironmentCommit(queuedOperation)
-    app.beginShutdown()
-    releaseActive.resolve()
-
-    await expect(active).resolves.toBe('active')
-    await expect(queued).rejects.toThrow('desktop_shutting_down')
-    await expect(app.withNativeAuthEnvironmentCommit(queuedOperation)).rejects.toThrow(
-      'desktop_shutting_down'
-    )
-    expect(queuedOperation).not.toHaveBeenCalled()
-  })
-
   it('persists real version-2 GFS state as suspended_auth on logout', async () => {
     const { service } = await createNativeCommitTestHarness()
     const me = {
