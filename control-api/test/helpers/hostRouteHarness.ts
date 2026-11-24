@@ -44,7 +44,9 @@
  *   defaulted with the Host CRD fixture (control-ui/test/fixtures/hostCrdApproval.ts),
  *   the same model the fake control-api uses. Seeds are stored as given;
  * - errors are `@kubernetes/client-node` `ApiException`s carrying a metav1
- *   Status body, as the real client throws them.
+ *   Status body, as the real client throws them. `failNextRead` makes the next
+ *   object read throw a given error instead, for a failure the routes do not
+ *   expect.
  * There is no delete.
  */
 import { type MockInstance, vi } from 'vitest'
@@ -159,6 +161,8 @@ export interface HostRouteHarness {
   /** Every merge-patch body, in order, including refused ones. */
   patchBodies: HarnessWrite[]
   adminOperations: AdministrativeOperationCall[]
+  /** Makes the apiserver's next object read (`getNamespacedCustomObject`) throw `error`. */
+  failNextRead(error: Error): void
   /** Restores the Postgres spies and clears the administrative-operation service. */
   dispose(): void
 }
@@ -250,6 +254,7 @@ function createApiserver(crd: HostCrdApprovalVersion) {
   const patchBodies: HarnessWrite[] = []
   let revision = 0
   let uids = 0
+  let readFailure: Error | undefined
   const nextVersion = () => String((revision += 1))
   const keyOf = (namespace: string, plural: string, name: string) =>
     `${namespace}/${plural}/${name}`
@@ -308,6 +313,11 @@ function createApiserver(crd: HostCrdApprovalVersion) {
 
   const customApi = {
     async getNamespacedCustomObject({ namespace, plural, name }: Target) {
+      if (readFailure) {
+        const failure = readFailure
+        readFailure = undefined
+        throw failure
+      }
       return copy(requireCurrent(namespace, plural, name))
     },
     async listNamespacedCustomObject({ namespace, plural }: Omit<Target, 'name'>) {
@@ -422,7 +432,11 @@ function createApiserver(crd: HostCrdApprovalVersion) {
     },
   }
 
-  return { customApi, store, replaceBodies, patchBodies }
+  const failNextRead = (error: Error) => {
+    readFailure = error
+  }
+
+  return { customApi, store, replaceBodies, patchBodies, failNextRead }
 }
 
 function createAdministrativeOperations(calls: AdministrativeOperationCall[]) {
@@ -532,6 +546,7 @@ export function buildHostRouteHarness(options: HostRouteHarnessOptions = {}): Ho
     replaceBodies: apiserver.replaceBodies,
     patchBodies: apiserver.patchBodies,
     adminOperations,
+    failNextRead: apiserver.failNextRead,
     dispose() {
       for (const spy of spies) spy.mockRestore()
       setAdministrativeOperationService(null)

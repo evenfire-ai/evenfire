@@ -13,7 +13,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
-import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { getHost, getHostDetailBundle } from '../../lib/api'
@@ -54,14 +53,14 @@ const PROXY_504 = JSON.parse(
   readFileSync(resolve(__dirname, '../../test/fixtures/wire/proxy-504.wire.json'), 'utf8')
 ) as WireAnswer
 
-/**
- * control-api's production 500 body (clerumErrorHandler,
- * control-api/src/http/errorHandler.ts). No recorded wire file holds a 500, so
- * this envelope is built by hand; the page uses only the status.
- */
-function internalServerError(): { error: string; correlationId: string } {
-  return { error: 'Internal Server Error', correlationId: randomUUID() }
-}
+// control-api's production 500 for a /detail read that fails unexpectedly,
+// recorded by control-api/test/routes.hostPut.fakeContract.test.ts.
+const DETAIL_500 = JSON.parse(
+  readFileSync(
+    resolve(__dirname, '../../../control-api/test/fixtures/wire/host-detail-500.wire.json'),
+    'utf8'
+  )
+) as WireAnswer
 
 function seedHost(name: string, spec: Record<string, unknown> = {}): HostObject {
   return materializeHostResource(
@@ -113,14 +112,15 @@ async function settle(): Promise<void> {
 }
 
 /**
- * Answers the first `count` GETs of `path` from now with control-api's 500,
- * each as it arrives. A navigation remounts the page, and the target tab reads
- * the Host on its own beside the page, so a first load is more than one read.
+ * Answers the first `count` GETs of `path` from now with control-api's recorded
+ * 500, each as it arrives. A navigation remounts the page, and the target tab
+ * reads the Host on its own beside the page, so a first load is more than one
+ * read.
  */
 function failReads(fake: FakeControlApi, path: string, count: number): void {
   for (let nth = 1; nth <= count; nth += 1) {
     const hold = fake.hold({ method: 'GET', path, nth })
-    void hold.arrived.then(() => hold.respondWith(500, internalServerError()))
+    void hold.arrived.then(() => hold.respondWith(DETAIL_500.status, DETAIL_500.body))
   }
 }
 
@@ -432,7 +432,7 @@ describe('approval settings readiness (spec §7 A3)', () => {
     // then the refresh fails.
     await settle()
     await act(async () => {
-      refresh.respondWith(500, internalServerError())
+      refresh.respondWith(DETAIL_500.status, DETAIL_500.body)
     })
     await settle()
 

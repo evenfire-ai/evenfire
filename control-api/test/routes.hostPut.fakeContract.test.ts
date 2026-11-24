@@ -19,8 +19,10 @@
  * The script runs once per Host CRD version. On the current CRD it also records
  * the bodies Control UI tests consume, in test/fixtures/wire/: with
  * UPDATE_WIRE_GOLDENS=1 it writes them; otherwise it asserts they are unchanged.
+ * One of them is not a script step: the 500 a `/detail` read answers when the
+ * Host read fails unexpectedly, recorded with NODE_ENV=production.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { readFileSync, writeFileSync } from 'node:fs'
 import request from 'supertest'
 import {
@@ -359,12 +361,28 @@ function comparable(observation: Observation) {
   }
 }
 
-function pinWire(file: string, value: unknown): void {
+/** Writes or checks a wire file; `mask` is applied to both sides before they are compared. */
+function pinWire(
+  file: string,
+  value: unknown,
+  mask: (wire: unknown) => unknown = wire => wire
+): void {
   const url = new URL(file, WIRE_DIR)
   const actual = JSON.parse(JSON.stringify(value)) as unknown
   if (UPDATE) writeFileSync(url, `${JSON.stringify(actual, null, 2)}\n`)
-  expect(actual, file).toEqual(JSON.parse(readFileSync(url, 'utf8')))
+  expect(mask(actual), file).toEqual(mask(JSON.parse(readFileSync(url, 'utf8'))))
 }
+
+/** A wire answer with the value of its body's `correlationId` masked: it changes per request. */
+function maskCorrelationId(wire: unknown): unknown {
+  if (!isRecord(wire) || !isRecord(wire.body) || typeof wire.body.correlationId !== 'string') {
+    return wire
+  }
+  return { ...wire, body: { ...wire.body, correlationId: '<per request>' } }
+}
+
+const DETAIL_500_SOURCE =
+  "control-api/test/routes.hostPut.fakeContract.test.ts: GET /api/v1/admin/hosts/foo/detail whose Host read throws a plain Error, answered by clerumErrorHandler's production branch (NODE_ENV=production), as deployed control-api answers"
 
 // Accepted PUTs whose stored spec changes (a new generation) or stays the same,
 // per Host CRD: v0.12.1 prunes the only change CURRENT_CRD_ONLY_CHANGE makes.
@@ -517,6 +535,29 @@ describe.each(['current', 'v0.12.1'] as const)(
           }
         }),
       })
+    })
+
+    it("records control-api's production 500 for a /detail read that fails unexpectedly", async () => {
+      // clerumErrorHandler reads NODE_ENV per request: production omits `message`.
+      vi.stubEnv('NODE_ENV', 'production')
+      try {
+        harness.failNextRead(new Error('Host read failed unexpectedly'))
+        const res = await request(harness.app)
+          .get(`${HOST_PATH}/detail`)
+          .set('x-correlation-id', CORRELATION_ID)
+        expect(res.status).toBe(500)
+        expect(Object.keys(res.body as object).sort(), 'the production body').toEqual([
+          'correlationId',
+          'error',
+        ])
+        pinWire(
+          'host-detail-500.wire.json',
+          { _source: DETAIL_500_SOURCE, status: res.status, body: res.body as unknown },
+          maskCorrelationId
+        )
+      } finally {
+        vi.unstubAllEnvs()
+      }
     })
   }
 )
