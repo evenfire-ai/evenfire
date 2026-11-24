@@ -197,12 +197,12 @@ async function applyPendingInvitations(
   return membershipWrite === 'insert_only' ? applied.reverse() : applied
 }
 
-/** The member's current, active membership in one team. */
+/** The member's current, active membership in one team, with the team's name. */
 export async function currentMembershipIn(
   db: DbTransactionClient,
   userId: string,
   teamId: string
-): Promise<SessionTeam | undefined> {
+): Promise<(SessionTeam & { team_name: string }) | undefined> {
   const result = await db.query(
     `SELECT tm.team_id, tm.role, t.name AS team_name
        FROM team_members tm
@@ -212,7 +212,7 @@ export async function currentMembershipIn(
         AND tm.status = 'active'`,
     [userId, teamId]
   )
-  return result.rows[0] as SessionTeam | undefined
+  return result.rows[0] as (SessionTeam & { team_name: string }) | undefined
 }
 
 /**

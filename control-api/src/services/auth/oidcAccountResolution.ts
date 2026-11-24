@@ -44,9 +44,15 @@ export type OidcResolution =
 
 type Query = Pick<DbClient, 'query'>
 
-type LockedUser = {
+/**
+ * A user row read under its lock (`FOR NO KEY UPDATE`). `name` and `picture`
+ * are the profile fields a sign-in answer shows, as password login reads them.
+ */
+export type LockedUser = {
   id: string
   email: string
+  name: string | null
+  picture: string | null
   lifecycle_state: unknown
   lifecycle_version: unknown
 }
@@ -101,9 +107,10 @@ export async function ensureOidcConnection(
   return row.issuer === provider.issuer && row.client_id === provider.clientId ? 'ok' : 'mismatch'
 }
 
-async function lockUserById(db: Query, userId: string): Promise<LockedUser | undefined> {
+/** Locks one user row by id and reads it; undefined when no such user exists. */
+export async function lockUserById(db: Query, userId: string): Promise<LockedUser | undefined> {
   const result = await db.query(
-    `SELECT id, email, lifecycle_state, lifecycle_version
+    `SELECT id, email, name, picture, lifecycle_state, lifecycle_version
        FROM users
       WHERE id = $1
       FOR NO KEY UPDATE`,
@@ -229,7 +236,7 @@ export async function resolveOidcAccount(
 
   // Rows 3, 5 and 6: email finds an existing member the first time only.
   const matches = await db.query(
-    `SELECT id, email, lifecycle_state, lifecycle_version
+    `SELECT id, email, name, picture, lifecycle_state, lifecycle_version
        FROM users
       WHERE lower(email) = lower($1)
       ORDER BY id
@@ -256,7 +263,7 @@ export async function resolveOidcAccount(
     [claimEmail, name]
   )
   const reselected = await db.query(
-    `SELECT id, email, lifecycle_state, lifecycle_version
+    `SELECT id, email, name, picture, lifecycle_state, lifecycle_version
        FROM users
       WHERE email = lower($1)
       FOR NO KEY UPDATE`,

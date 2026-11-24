@@ -5,6 +5,7 @@ import { MockGateway } from './mockGateway.js'
 
 const EXTERNAL_REST_TOKEN = 'dev-external-rest-api-token'
 const CONFIGURATION_PATH = '/api/v1/external/oidc/profile-flow/configuration'
+const REDEEM_PATH = '/api/v1/external/oidc/desktop-sign-in/redeem'
 const OIDC_ENV = {
   CONTROL_API_OIDC_REGISTRATION_ID: 'company-login',
   CONTROL_API_OIDC_DISPLAY_LABEL: 'Company login',
@@ -88,5 +89,25 @@ describe('OIDC Profile UI foundation service boundary', () => {
 
     expect(response.status).toBe(404)
     expect(response.body).toEqual({ error: 'Not Found' })
+  })
+
+  it('serves Desktop sign-in redeem to external-rest-api only', async () => {
+    const app = createApp(new MockGateway('mcp-server') as never)
+    const malformed = { code: 'not-a-desktop-sign-in-code-fixture' }
+
+    const anonymous = await request(app).post(REDEEM_PATH).send(malformed)
+
+    expect(anonymous.status).toBe(401)
+    expect(anonymous.body).toEqual({ error: 'Unauthorized' })
+
+    // The route's own shape check answers, so the router is mounted.
+    const edge = await request(app)
+      .post(REDEEM_PATH)
+      .set('Authorization', `Bearer ${EXTERNAL_REST_TOKEN}`)
+      .set('x-service-token', 'external-rest-api')
+      .send(malformed)
+
+    expect(edge.status).toBe(400)
+    expect(edge.body).toEqual({ error: 'invalid_desktop_sign_in_code' })
   })
 })
