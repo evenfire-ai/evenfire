@@ -46,6 +46,7 @@ const PROMPT_LISTS: { prefix: string; type: ChatMessageAttachment['type'] }[] = 
   { prefix: 'Connectors:', type: 'connector' },
   { prefix: 'Agent Files:', type: 'agent_file' },
   { prefix: 'Global Files:', type: 'global_file' },
+  { prefix: 'Folders:', type: 'global_folder' },
 ]
 
 function createParsedAttachment(
@@ -172,10 +173,15 @@ export function buildChatMessageAttachments(
             ? 'Connector'
             : attachment.type === 'global_file'
               ? 'Global File'
-              : 'Agent File',
+              : attachment.type === 'global_folder'
+                ? 'Global Folder'
+                : 'Agent File',
       addedOrder: attachmentOrder(attachment, index),
       ...(attachment.type === 'agent_file'
         ? { filesystemName: attachment.filesystemName, path: attachment.path }
+        : {}),
+      ...(attachment.type === 'global_folder'
+        ? { gfsUri: attachment.gfsUri, drive: attachment.drive, resourceId: attachment.resourceId }
         : {}),
       ...(attachment.type === 'global_file'
         ? {
@@ -226,6 +232,7 @@ export function getChatMessageAttachmentTypeLabel(type: ChatMessageAttachment['t
   if (type === 'connector') return 'Connector'
   if (type === 'agent_file') return 'Agent File'
   if (type === 'global_file') return 'Global File'
+  if (type === 'global_folder') return 'Global Folder'
   if (type === 'response_file') return 'Generated File'
   return 'Uploaded File'
 }

@@ -5,7 +5,11 @@ import {
   validateHostApprovalRequestId,
   validateHostModelSelectionRequest,
 } from '@clerum/action-context-contracts'
-import { parseIncomingFileReferences } from '../agent/fileReferenceResolver'
+import { LOCATION_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
+import {
+  parseIncomingFileReferences,
+  parseIncomingLocationReferences,
+} from '../agent/fileReferenceResolver'
 import { config } from '../config'
 import { approvalLogId } from '../core/approval/grantMemory'
 import type { ShellAction } from '../core/approval/shellCard'
@@ -473,6 +477,28 @@ export async function handleMessageRoute(
     }
     message.fileReferences = fileReferences.references.length
       ? fileReferences.references
+      : undefined
+
+    // A folder reference is refused the same way: a request to create or save
+    // in that folder must not run without it.
+    const locationReferences = parseIncomingLocationReferences(
+      message.locationReferences,
+      LOCATION_REFERENCE_MAX_COUNT
+    )
+    if (!locationReferences.ok) {
+      json(res, 200, {
+        success: false,
+        error: {
+          code: locationReferences.code,
+          message: locationReferences.message,
+          retryable: false,
+          provider: 'unknown',
+        },
+      })
+      return
+    }
+    message.locationReferences = locationReferences.references.length
+      ? locationReferences.references
       : undefined
 
     logger.info(

@@ -2,6 +2,7 @@
  * TaskLifecycle — single-writer service for task state transitions.
  */
 import { EventEmitter } from 'events'
+import { logger } from '../logger'
 import type { Task } from '../queue/types'
 import {
   CanonicalReason,
@@ -55,8 +56,9 @@ export class TaskLifecycle extends EventEmitter {
   register(task: Task): void {
     const existing = this.records.get(task.id)
     if (existing) {
-      console.warn(
-        `[TaskLifecycle] duplicate registration suppressed — id already registered: ${task.id} (status=${existing.status})`
+      logger.warn(
+        { component: 'TaskLifecycle', taskId: task.id, status: existing.status },
+        'duplicate registration suppressed'
       )
       return
     }
@@ -75,6 +77,8 @@ export class TaskLifecycle extends EventEmitter {
       // Admission set the resolutions; a caller-supplied value never reaches here.
       acceptedFileReferenceIds:
         task.sourceMessage?.fileReferenceResolutions?.map(r => r.reference.id) ?? [],
+      acceptedLocationReferenceIds:
+        task.sourceMessage?.locationReferenceResolutions?.map(r => r.reference.id) ?? [],
       traceContext: task.traceContext ?? null,
       createdAt: now,
     }
@@ -232,15 +236,17 @@ export class TaskLifecycle extends EventEmitter {
   }
 
   private emitTransition(event: TransitionEvent): void {
-    console.log(
-      JSON.stringify({
+    logger.info(
+      {
+        component: 'TaskLifecycle',
         event: 'transition_emitted',
         taskId: event.taskId,
         from: event.from,
         to: event.to,
         reason: event.reason,
         at: event.at.toISOString(),
-      })
+      },
+      'task transition'
     )
     this.emit('transition', event)
   }

@@ -42,7 +42,7 @@ it('preserves a successful same-intent switch while a duplicate effect waits for
   const catalog = deferred<Awaited<ReturnType<typeof clerum.readIndex>>>()
   clerum.chat.getIndex.mockReturnValueOnce(catalog.promise)
   const catalogCalls = clerum.chat.getIndex.mock.calls.length
-  act(() => controller.rerender({ navItem: DESKTOP_ROUTES.apps }))
+  act(() => controller.rerender({ navItem: DESKTOP_ROUTES.chat }))
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledTimes(catalogCalls + 1))
   expect(controller.result.current.activeChatId).toBe('chat-2')
   expect(controller.result.current.chatMessages).toEqual(expectedHistory)
@@ -172,7 +172,12 @@ it('settles a superseded rejection without settling or duplicating its in-flight
   expect(controller.result.current.chatMessagesLoading).toBe(true)
   const catalog = deferred<Awaited<ReturnType<typeof clerum.readIndex>>>()
   clerum.chat.getIndex.mockReturnValueOnce(catalog.promise)
-  act(() => controller.rerender({ navItem: DESKTOP_ROUTES.apps }))
+  const catalogCalls = clerum.chat.getIndex.mock.calls.length
+  act(() => controller.rerender({ navItem: DESKTOP_ROUTES.chat }))
+  // The route change must re-run the selection effect with the live pending
+  // intent; otherwise the deferred catalog below is never consumed and the
+  // assertions after it hold vacuously.
+  await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledTimes(catalogCalls + 1))
   await act(async () => catalog.resolve(await clerum.readIndex('agent-x')))
   await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
   expect(clerum.chat.setLastActive.mock.calls.map(([, id]) => id)).toEqual(['chat-1', 'chat-2'])

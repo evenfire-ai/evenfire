@@ -79,6 +79,8 @@ export interface TaskRecord {
   acceptedAttachmentIds: readonly string[]
   /** Ids of the structured file references resolved for this task (#666). */
   acceptedFileReferenceIds: readonly string[]
+  /** Ids of the location (folder) references resolved for this task. */
+  acceptedLocationReferenceIds: readonly string[]
   traceContext: TraceContextV1 | null
   createdAt: Date
   dispatchedAt?: Date

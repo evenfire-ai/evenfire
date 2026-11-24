@@ -25,6 +25,7 @@ import type {
 } from '../uiTypes'
 import { estimateBase64DecodedLength } from './base64Size'
 import { parseChatMessageDisplay } from './chatMessageAttachments'
+import { buildComposerLocationReferences } from './composerLocationReferences'
 
 export type ComposerResendDraft = {
   /** Visible text for the composer draft (context block stripped). */
@@ -257,6 +258,33 @@ function buildGlobalFileReference(
 }
 
 /**
+ * The folder of a sent message, rebuilt from its persisted chip alone. The URI,
+ * drive and resource must come from that one chip and describe the same folder:
+ * the content never names a folder's URI, so there is nothing else to take it
+ * from.
+ */
+function buildGlobalFolderReference(
+  chip: ChatMessageAttachment
+): Extract<ComposerReferenceAttachment, { type: 'global_folder' }> | null {
+  if (!chip.gfsUri || !chip.drive || !chip.resourceId) return null
+  const reference: Extract<ComposerReferenceAttachment, { type: 'global_folder' }> = {
+    id: `global-folder:resend:${chip.gfsUri}`,
+    type: 'global_folder',
+    resourceId: chip.resourceId,
+    drive: chip.drive,
+    gfsUri: chip.gfsUri,
+    label: chip.label,
+  }
+  try {
+    buildComposerLocationReferences([reference])
+  } catch {
+    // Not a folder this message can name: reported as unrestorable instead.
+    return null
+  }
+  return reference
+}
+
+/**
  * Builds the composer repopulation payload for a sent user message. Chip
  * resolution mirrors the thread's display precedence: the persisted
  * `attachments` array wins when present, otherwise the chips parsed from the
@@ -301,6 +329,12 @@ export function buildComposerResendDraft(
     }
     if (chip.type === 'global_file') {
       const reference = buildGlobalFileReference(chip)
+      if (reference) referenceAttachments.push(reference)
+      else unrestorable.push({ type: chip.type, label: chip.label })
+      continue
+    }
+    if (chip.type === 'global_folder') {
+      const reference = buildGlobalFolderReference(chip)
       if (reference) referenceAttachments.push(reference)
       else unrestorable.push({ type: chip.type, label: chip.label })
     }

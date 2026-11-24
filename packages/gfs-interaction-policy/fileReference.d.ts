@@ -67,6 +67,9 @@ export declare function quotePromptValue(value: string): string
  */
 export declare function resourceNameProblem(name: string): string | null
 
+/** A resource id as gfsc names it (32 lowercase hex digits, no dashes), or `null`. */
+export declare function normalizeGfsRid(value: string): string | null
+
 export declare function deriveFileReferenceId(
   source: FileReferenceSource,
   digest?: FileReferenceDigest
