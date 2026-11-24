@@ -672,7 +672,7 @@ class FailIndexedRpcSave implements fc.AsyncCommand<Model, Real> {
       if (
         !failed &&
         args[0] === r.pFile &&
-        String(args[1]).includes('https://rpc-r2.example.test')
+        JSON.parse(String(args[1])).rpcProxyBaseUrl === 'https://rpc-r2.example.test'
       ) {
         failed = true
         throw Object.assign(new Error('injected profile write failure'), { code: 'EACCES' })
