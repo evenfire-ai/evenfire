@@ -695,4 +695,61 @@ describe('AppService host status stream — ANTI-FLAP invariant', () => {
 
     svc.stopHostStatusStream('stream-1')
   })
+
+  it('auth-expired drops the cached RPC token before the reconnect asks for one; a plain disconnect keeps it', async () => {
+    vi.useFakeTimers()
+    // Later connects deliver a status and then end without auth-expired: a
+    // plain disconnect.
+    mockOpenHostStatusStream.mockImplementation(
+      async (
+        _token: string,
+        _hostRef: string,
+        onSse: (frame: { event: string; data: unknown }) => void
+      ) => {
+        onSse({ event: 'open', data: { hostRef: 'chatllm' } })
+        onSse({ event: 'status', data: { hostRef: 'chatllm', state: 'active' } })
+      }
+    )
+    // The first connect ends in auth-expired.
+    mockOpenHostStatusStream.mockImplementationOnce(
+      async (
+        _token: string,
+        _hostRef: string,
+        onSse: (frame: { event: string; data: unknown }) => void
+      ) => {
+        onSse({ event: 'open', data: { hostRef: 'chatllm' } })
+        onSse({ event: 'status', data: { hostRef: 'chatllm', state: 'active' } })
+        onSse({ event: 'auth-expired', data: { message: 'RPC token expired' } })
+      }
+    )
+    const svc = makeService()
+    const events: Array<{ type: string; message?: string }> = []
+
+    svc.startHostStatusStream('stream-1', 7, 'chatllm', ['chatllm'], event => {
+      events.push(event)
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(1)
+    expect(mockRpcTokenManagerClear).toHaveBeenCalledTimes(1)
+    expect(events).toContainEqual({ type: 'error', message: 'RPC token expired' })
+
+    // The reconnect requests its token after the clear, so it cannot reuse
+    // the token rpc-proxy refused.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(2)
+    expect(mockGetOrIssue).toHaveBeenCalledTimes(2)
+    expect(mockRpcTokenManagerClear.mock.invocationCallOrder[0]).toBeLessThan(
+      mockGetOrIssue.mock.invocationCallOrder[1]
+    )
+
+    // Witness: the second cycle ended and a third connect ran, yet the plain
+    // disconnect left the cached token alone.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(3)
+    expect(events).toContainEqual({ type: 'error', message: 'Status stream disconnected' })
+    expect(mockRpcTokenManagerClear).toHaveBeenCalledTimes(1)
+
+    svc.stopHostStatusStream('stream-1')
+  })
 })
