@@ -38,8 +38,7 @@ it.each(['forgot', 'password', 'social', 'app', 'gfs'] as const)(
     const file = path.join(dir, 'runtime.json'),
       rest = 'https://api.a.example.test',
       rpc = 'https://rpc.a.example.test',
-      explicit = 'https://override.example.test',
-      derived = 'https://override.example.test'
+      explicit = 'https://override.example.test'
     await fs.writeFile(
       file,
       JSON.stringify({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: rpc, appName: 'A' })
