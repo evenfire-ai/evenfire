@@ -1,7 +1,10 @@
 import { Router } from 'express'
 import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
-import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
+import {
+  HOST_EDGE_ASSERTION_HEADER,
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
+} from '@clerum/action-context-contracts'
 import {
   ActionAuthorityCheckpointError,
   actionAuthorityCacheKey,
@@ -520,7 +523,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/messages',
     requireRpcAuth,
     chatJsonBody,
-    bindHostRpcScope('host:message:invoke'),
+    bindHostRpcScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/messages']),
     runHostRpcPreflightCheckpoint,
     async (req: AuthedRequest, res) => {
       // Host runtime write path (REST-oriented):
@@ -582,7 +585,14 @@ export function createRpcRouter(): Router {
         // stored mode is 400, as on the PATCH. A message without the field
         // needs only host:message:invoke.
         const carriesApprovalMode = Object.prototype.hasOwnProperty.call(body, 'approvalMode')
-        if (carriesApprovalMode && !auth.scopes.includes('host:approval:write')) {
+        if (
+          carriesApprovalMode &&
+          !auth.scopes.includes(
+            HOST_EDGE_RPC_PROXY_ROUTE_SCOPES[
+              'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode'
+            ]
+          )
+        ) {
           res.status(403).json({ error: 'Forbidden: missing scope' })
           return
         }
@@ -836,7 +846,9 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/approve',
     requireRpcAuth,
     jsonBody,
-    requireHostRpcPreflightScope('host:approval:write'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/approvals/approve']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -928,7 +940,9 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/deny',
     requireRpcAuth,
     jsonBody,
-    requireHostRpcPreflightScope('host:approval:write'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/approvals/deny']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1002,7 +1016,7 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions/search',
     requireRpcAuth,
-    bindHostRpcScope('host:session:read'),
+    bindHostRpcScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions/search']),
     requireV2SessionSearch,
     runHostRpcPreflightCheckpoint,
     async (req: AuthedRequest, res, next) => {
@@ -1091,7 +1105,7 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:session:read'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions']),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1181,7 +1195,9 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/messages',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:session:read'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions/:agent/:chatId/messages']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1277,7 +1293,9 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/context-breakdown',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:session:read'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions/:agent/:chatId/context-breakdown']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1362,7 +1380,9 @@ export function createRpcRouter(): Router {
   router.patch(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/name',
     requireRpcAuth,
-    requireHostRpcJsonBodyPreflightScope('host:session:write'),
+    requireHostRpcJsonBodyPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['PATCH /v1/runtime/sessions/:agent/:chatId/name']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1437,7 +1457,9 @@ export function createRpcRouter(): Router {
   router.patch(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode',
     requireRpcAuth,
-    requireScope('host:approval:write'),
+    requireScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode']
+    ),
     jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
@@ -1534,7 +1556,7 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/models',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:session:read'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/models']),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1610,7 +1632,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/model',
     requireRpcAuth,
     jsonBody,
-    requireHostRpcPreflightScope('host:model:write'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/model']),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1678,7 +1700,9 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/tasks/:taskId/result',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:message:invoke'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/tasks/:taskId/result']
+    ),
     async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
@@ -1742,7 +1766,9 @@ export function createRpcRouter(): Router {
   router.post(
     '/rpc/hosts/:hostRef/tasks/:taskId/cancel',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:message:invoke'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/tasks/:taskId/cancel']
+    ),
     async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
@@ -1816,7 +1842,7 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/artifacts',
     requireRpcAuth,
-    requireHostRefCheckpointScope('host:task:read'),
+    requireHostRefCheckpointScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/artifacts']),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1891,7 +1917,9 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/artifacts/:filename/download',
     requireRpcAuth,
-    bindHostRpcScope('host:task:read'),
+    bindHostRpcScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/artifacts/:filename/download']
+    ),
     (req: AuthedRequest, res, next) => {
       const filename = String(req.params.filename || '').trim()
       if (
@@ -2037,7 +2065,7 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/activity',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:activity:read'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/activity']),
     async (req: AuthedRequest, res, next) => {
       // Host runtime read-only activity timeline snapshot.
       try {
@@ -2076,7 +2104,7 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/status',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:status:read'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/status']),
     async (req: AuthedRequest, res, next) => {
       // Host runtime read snapshot (REST-oriented) scoped to host:status:read.
       try {

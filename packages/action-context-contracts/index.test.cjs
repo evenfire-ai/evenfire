@@ -78,7 +78,7 @@ test('Host edge assertion constants pin the wire contract and no static edge tok
   assert.equal('RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT' in contracts, false)
 })
 
-test('Host edge route scopes match the scope rpc-proxy requires on each forwarding route', () => {
+test('Host edge route scope map pins the scope of each of the 19 Host routes', () => {
   assert.deepEqual(contracts.HOST_EDGE_RPC_PROXY_ROUTE_SCOPES, {
     'GET /v1/runtime/status': 'host:status:read',
     'GET /v1/runtime/activity': 'host:activity:read',

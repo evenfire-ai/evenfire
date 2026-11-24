@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { HOST_EDGE_RPC_PROXY_ROUTE_SCOPES } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
@@ -42,7 +43,9 @@ export function createRpcHostProgressStreamRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/tasks/:taskId/progress/stream',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:activity:read'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/tasks/:taskId/progress/stream']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!

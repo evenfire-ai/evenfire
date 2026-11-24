@@ -11,6 +11,8 @@ import {
   HOST_EDGE_ASSERTION_CLAIM_TYPE,
   HOST_EDGE_ASSERTION_HEADER,
   HOST_EDGE_ASSERTION_JWT_TYPE,
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
+  type HostEdgeRpcProxyRoute,
 } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
@@ -73,7 +75,7 @@ const OLD_SHAPE_CONNECTION = {
   url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
 }
 
-type HostCall = { path: string; headers: Record<string, string> }
+type HostCall = { method: string; path: string; headers: Record<string, string> }
 const originalFetch = globalThis.fetch
 let controlApiBody: Record<string, unknown>
 let controlApiHostAccessStatus: number
@@ -131,7 +133,7 @@ beforeEach(() => {
     if (path === '/v1/runtime/health' && hostCalls.length > 0) {
       return jsonResponse(200, { ok: true })
     }
-    hostCalls.push({ path, headers: headersOf(init) })
+    hostCalls.push({ method: init?.method ?? 'GET', path, headers: headersOf(init) })
     return hostAnswer(hostCalls.length - 1, path)
   }) as unknown as typeof fetch
 })
@@ -140,7 +142,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
-type RouteRow = {
+type RequestRow = {
   label: string
   method: 'get' | 'post' | 'patch'
   path: string
@@ -149,35 +151,38 @@ type RouteRow = {
   hostPath: string
 }
 
+type RouteRow = RequestRow & { hostRoute: HostEdgeRpcProxyRoute }
+
 // One row per rpc-proxy route that forwards to a guarded Host route, with the
-// scope rpc-proxy requires for it and the Host route it reaches.
-const ROUTE_SCOPE_ROWS: RouteRow[] = [
+// Host route it reaches. Its scope is that Host route's row of the edge scope
+// map, the scope rpc-proxy requires for it.
+const HOST_ROUTE_ROWS: Array<Omit<RouteRow, 'scope'>> = [
   {
     label: 'status',
     method: 'get',
     path: '/rpc/hosts/chatllm/status',
-    scope: 'host:status:read',
+    hostRoute: 'GET /v1/runtime/status',
     hostPath: '/v1/runtime/status',
   },
   {
     label: 'status stream',
     method: 'get',
     path: '/rpc/hosts/chatllm/status/stream',
-    scope: 'host:status:read',
+    hostRoute: 'GET /v1/runtime/status',
     hostPath: '/v1/runtime/status',
   },
   {
     label: 'activity',
     method: 'get',
     path: '/rpc/hosts/chatllm/activity',
-    scope: 'host:activity:read',
+    hostRoute: 'GET /v1/runtime/activity',
     hostPath: '/v1/runtime/activity',
   },
   {
     label: 'activity stream',
     method: 'get',
     path: '/rpc/hosts/chatllm/activity/stream',
-    scope: 'host:activity:read',
+    hostRoute: 'GET /v1/runtime/activity/stream',
     hostPath: '/v1/runtime/activity/stream',
   },
   {
@@ -185,7 +190,7 @@ const ROUTE_SCOPE_ROWS: RouteRow[] = [
     method: 'post',
     path: '/rpc/hosts/chatllm/messages',
     body: { content: 'hi' },
-    scope: 'host:message:invoke',
+    hostRoute: 'POST /v1/runtime/messages',
     hostPath: '/v1/runtime/messages',
   },
   {
@@ -193,7 +198,7 @@ const ROUTE_SCOPE_ROWS: RouteRow[] = [
     method: 'post',
     path: '/rpc/hosts/chatllm/approvals/approve',
     body: { toolCallId: 'tc-1' },
-    scope: 'host:approval:write',
+    hostRoute: 'POST /v1/runtime/approvals/approve',
     hostPath: '/v1/runtime/approvals/approve',
   },
   {
@@ -201,49 +206,49 @@ const ROUTE_SCOPE_ROWS: RouteRow[] = [
     method: 'post',
     path: '/rpc/hosts/chatllm/approvals/deny',
     body: { toolCallId: 'tc-1' },
-    scope: 'host:approval:write',
+    hostRoute: 'POST /v1/runtime/approvals/deny',
     hostPath: '/v1/runtime/approvals/deny',
   },
   {
     label: 'sessions',
     method: 'get',
     path: '/rpc/hosts/chatllm/sessions',
-    scope: 'host:session:read',
+    hostRoute: 'GET /v1/runtime/sessions',
     hostPath: '/v1/runtime/sessions',
   },
   {
     label: 'session messages',
     method: 'get',
     path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/messages',
-    scope: 'host:session:read',
+    hostRoute: 'GET /v1/runtime/sessions/:agent/:chatId/messages',
     hostPath: '/v1/runtime/sessions/agent-a/chat-1/messages',
   },
   {
     label: 'context breakdown',
     method: 'get',
     path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/context-breakdown',
-    scope: 'host:session:read',
+    hostRoute: 'GET /v1/runtime/sessions/:agent/:chatId/context-breakdown',
     hostPath: '/v1/runtime/sessions/agent-a/chat-1/context-breakdown',
   },
   {
     label: 'task result',
     method: 'get',
     path: '/rpc/hosts/chatllm/tasks/task-1/result',
-    scope: 'host:message:invoke',
+    hostRoute: 'GET /v1/runtime/tasks/:taskId/result',
     hostPath: '/v1/runtime/tasks/task-1/result',
   },
   {
     label: 'task cancel',
     method: 'post',
     path: '/rpc/hosts/chatllm/tasks/task-1/cancel',
-    scope: 'host:message:invoke',
+    hostRoute: 'POST /v1/runtime/tasks/:taskId/cancel',
     hostPath: '/v1/runtime/tasks/task-1/cancel',
   },
   {
     label: 'models',
     method: 'get',
     path: '/rpc/hosts/chatllm/models',
-    scope: 'host:session:read',
+    hostRoute: 'GET /v1/runtime/models',
     hostPath: '/v1/runtime/models',
   },
   {
@@ -251,7 +256,7 @@ const ROUTE_SCOPE_ROWS: RouteRow[] = [
     method: 'post',
     path: '/rpc/hosts/chatllm/model',
     body: { chatId: 'c1', model: 'model-fixture' },
-    scope: 'host:model:write',
+    hostRoute: 'POST /v1/runtime/model',
     hostPath: '/v1/runtime/model',
   },
   {
@@ -259,33 +264,49 @@ const ROUTE_SCOPE_ROWS: RouteRow[] = [
     method: 'patch',
     path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/name',
     body: { title: 'renamed' },
-    scope: 'host:session:write',
+    hostRoute: 'PATCH /v1/runtime/sessions/:agent/:chatId/name',
     hostPath: '/v1/runtime/sessions/agent-a/chat-1/name',
   },
   {
     label: 'progress stream',
     method: 'get',
     path: '/rpc/hosts/chatllm/tasks/task-1/progress/stream',
-    scope: 'host:activity:read',
+    hostRoute: 'GET /v1/runtime/tasks/:taskId/progress/stream',
     hostPath: '/v1/runtime/tasks/task-1/progress/stream',
   },
   {
     label: 'artifacts list',
     method: 'get',
     path: '/rpc/hosts/chatllm/artifacts',
-    scope: 'host:task:read',
+    hostRoute: 'GET /v1/runtime/artifacts',
     hostPath: '/v1/runtime/artifacts',
   },
   {
     label: 'artifact download',
     method: 'get',
     path: '/rpc/hosts/chatllm/artifacts/report.pdf/download',
-    scope: 'host:task:read',
+    hostRoute: 'GET /v1/runtime/artifacts/:filename/download',
     hostPath: '/v1/runtime/artifacts/report.pdf/download',
   },
 ]
 
+const ROUTE_SCOPE_ROWS: RouteRow[] = HOST_ROUTE_ROWS.map(row => ({
+  ...row,
+  scope: HOST_EDGE_RPC_PROXY_ROUTE_SCOPES[row.hostRoute],
+}))
+
 const ALL_ROUTE_SCOPES = [...new Set(ROUTE_SCOPE_ROWS.map(row => row.scope))]
+
+// The path of a map key (for example `/v1/runtime/sessions/:agent/:chatId/name`)
+// as a regular expression in which each `:param` matches one path segment.
+function hostRoutePathPattern(routePath: string): RegExp {
+  const segments = routePath
+    .split('/')
+    .map(segment =>
+      segment.startsWith(':') ? '[^/]+' : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    )
+  return new RegExp(`^${segments.join('/')}$`)
+}
 
 function send(row: Pick<RouteRow, 'method' | 'path' | 'body'>) {
   const pending = request(makeApp())[row.method](row.path).set('authorization', 'Bearer tok')
@@ -374,6 +395,24 @@ describe('route scopes: each rpc-proxy route reaches its Host route only with it
     expect(hostCalls).toHaveLength(1)
     expect(hostCalls[0]!.path).toBe(row.hostPath)
     expect(hostCalls[0]!.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(edgeAssertion)
+    // The call is the map row's Host route: same method, and a path that
+    // matches the route with one segment per `:param`.
+    const [hostMethod, hostRoutePath] = row.hostRoute.split(' ')
+    expect(hostCalls[0]!.method).toBe(hostMethod)
+    expect(hostCalls[0]!.path).toMatch(hostRoutePathPattern(hostRoutePath!))
+  })
+
+  it('every map row has a route test', () => {
+    const covered = new Set<string>([
+      ...ROUTE_SCOPE_ROWS.map(row => row.hostRoute),
+      // Covered in host-edge-route-scope-map.test.ts and
+      // session-approval-mode-passthrough.test.ts.
+      'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode',
+      // V2 only: the session search test below.
+      'GET /v1/runtime/sessions/search',
+    ])
+
+    expect([...covered].sort()).toEqual(Object.keys(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES).sort())
   })
 
   it('session search is V2 only: a V1 token with host:session:read gets 403 and no Host call', async () => {
@@ -410,7 +449,7 @@ const THROWING_FORWARDER_ROWS = ROUTE_SCOPE_ROWS.filter(row =>
 )
 
 // Routes that hand a failure to the app error handler with next(error).
-const NEXT_ERROR_ROWS: RouteRow[] = [
+const NEXT_ERROR_ROWS: RequestRow[] = [
   ROUTE_SCOPE_ROWS.find(row => row.label === 'status')!,
   ROUTE_SCOPE_ROWS.find(row => row.label === 'activity')!,
   {

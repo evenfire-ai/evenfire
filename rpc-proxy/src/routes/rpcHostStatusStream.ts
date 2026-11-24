@@ -1,5 +1,8 @@
 import { Router } from 'express'
-import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
+import {
+  HOST_EDGE_ASSERTION_HEADER,
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
+} from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
@@ -77,7 +80,7 @@ export function createRpcHostStatusStreamRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/status/stream',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:status:read'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/status']),
     async (req: AuthedRequest, res, next) => {
       // Read-only telemetry channel:
       // - server-sent status updates from mcp-host to desktop clients
