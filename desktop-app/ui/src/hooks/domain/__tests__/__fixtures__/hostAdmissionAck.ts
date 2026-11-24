@@ -51,6 +51,12 @@ export async function hostAdmissionAck(
   dispatch: HostDispatch,
   options: { async?: boolean; gfscTimesOut?: boolean } = {}
 ): Promise<HostAck> {
+  // The admission stores a carried approval mode in its conversation store,
+  // which this double does not model: without one the Host refuses the send,
+  // so such an ack would be a refusal no real Host gives.
+  if (request.approvalMode !== undefined) {
+    throw new Error('hostAdmissionAck: a request carrying approvalMode is not modelled')
+  }
   const [{ createIncomingAdmission }, { ok }] = await loadProducers()
   const byUri = new Map(resources.map(resource => [resource.gfsUri, resource]))
   const admit = createIncomingAdmission({
@@ -79,6 +85,7 @@ export async function hostAdmissionAck(
       },
     }),
     logger: { info: () => undefined, warn: () => undefined },
+    approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
   })
   return admit(
     {
