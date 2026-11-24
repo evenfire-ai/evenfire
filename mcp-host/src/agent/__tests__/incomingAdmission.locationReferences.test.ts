@@ -111,6 +111,7 @@ function makeAdmission(
     dispatch,
     fileReferenceGfs,
     logger: { info, warn },
+    approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
     ...overrides,
   }
   return {
