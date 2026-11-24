@@ -235,6 +235,7 @@ export function GfsMoveDialog({
   onRetryPermissionCheck,
   onClose,
   busy = false,
+  closeLocked = false,
   permissionStatus = null,
   onAuthorityFailure,
 }: GfsMoveDialogProps) {
@@ -311,9 +312,21 @@ export function GfsMoveDialog({
     resolve?.(accepted)
   }, [])
   const closeDialog = () => {
+    if (closeLocked) return
     settleNumberedNameConsent(false)
     onClose()
   }
+  // On window, like the other GFS dialogs: the dialog takes no initial focus,
+  // so a listener on its panel would miss an Escape pressed from the page.
+  const closeDialogRef = useRef(closeDialog)
+  closeDialogRef.current = closeDialog
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeDialogRef.current()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
   useEffect(() => {
     const previousIdentity = previousDialogIdentityRef.current
     const currentIdentity = dialogIdentityRef.current
@@ -514,7 +527,13 @@ export function GfsMoveDialog({
             <h3>Move “{target.name}”</h3>
           </span>
           <span className="da-gfs-manage-dialog__top-actions">
-            <IconButton label="Close move dialog" onClick={closeDialog} size="sm" variant="ghost">
+            <IconButton
+              disabled={closeLocked}
+              label="Close move dialog"
+              onClick={closeDialog}
+              size="sm"
+              variant="ghost"
+            >
               <IconClose />
             </IconButton>
           </span>
@@ -643,7 +662,7 @@ export function GfsMoveDialog({
               )}
             </span>
             <span className="da-gfs-move-dialog__action-buttons">
-              <Button onClick={closeDialog} type="button" variant="ghost">
+              <Button disabled={closeLocked} onClick={closeDialog} type="button" variant="ghost">
                 Cancel
               </Button>
               <Button

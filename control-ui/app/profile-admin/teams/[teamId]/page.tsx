@@ -22,6 +22,7 @@ import {
   effectiveAgentNamesForAccess,
 } from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
+import { describeRetiredMemberInvitationError } from '@lib/invitationError'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
 import { IconUsers } from '../../../../components/Sidebar/icons'
 import { IconMoreHorizontal, IconX } from '../../../../components/icons'
@@ -401,7 +402,9 @@ export default function TeamDetailsPage() {
         tone: 'success',
       })
     } catch (e) {
-      const message = e instanceof Error ? e.message : 'Failed to create invitation'
+      const message =
+        describeRetiredMemberInvitationError(e) ??
+        (e instanceof Error ? e.message : 'Failed to create invitation')
       setAddMemberError(message)
       showToast(message, { tone: 'error' })
     } finally {

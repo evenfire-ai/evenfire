@@ -15,6 +15,7 @@
  * inside toolUseLoop) has been removed.
  */
 import { randomUUID } from 'node:crypto'
+import type { GateCause } from '../approval/gateCause'
 import { LoopController, Tool, ToolRegistry } from '../interfaces'
 import { DefaultLoopController } from '../orchestration/loopConfig'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
@@ -108,6 +109,7 @@ const STATELESS_CRON_GATED_ACTIONS: ReadonlySet<string> = new Set(['create', 'en
 
 export class UnifiedApprovalGateController implements LoopController {
   private readonly delegate = new DefaultLoopController()
+  private readonly readApprovalConfig: () => ApprovalConfig | undefined
 
   /**
    * ToolRegistry is REQUIRED (F2: Invariant 9) — ensures native tools with
@@ -115,10 +117,11 @@ export class UnifiedApprovalGateController implements LoopController {
    *
    * approvalConfig is OPTIONAL — when provided, tools[name] overrides the
    * tool's code default. Absent → fall through to tool.requiresApproval().
+   * A function is read on every decision so a later config replaces tools.
    */
   constructor(
     private readonly toolRegistry: ToolRegistry,
-    private readonly approvalConfig?: ApprovalConfig,
+    approvalConfig?: ApprovalConfig | (() => ApprovalConfig | undefined),
     private readonly nativeToolRegistry?: ToolRegistry,
     /**
      * Cron×stateless options.
@@ -131,7 +134,10 @@ export class UnifiedApprovalGateController implements LoopController {
      *   answer it.
      */
     private readonly options?: { statelessLifecycle?: boolean; cronManageGateOnly?: boolean }
-  ) {}
+  ) {
+    this.readApprovalConfig =
+      typeof approvalConfig === 'function' ? approvalConfig : () => approvalConfig
+  }
 
   shouldAccept(content: string, iteration: number): boolean {
     return this.delegate.shouldAccept(content, iteration)
@@ -186,7 +192,7 @@ export class UnifiedApprovalGateController implements LoopController {
     // Use Object.hasOwn to avoid resolving prototype methods (e.g. tool name
     // "toString" would otherwise hit Object.prototype.toString and produce a
     // truthy "override").
-    const tools = this.approvalConfig?.tools
+    const tools = this.readApprovalConfig()?.tools
     const override = tools && Object.hasOwn(tools, toolName) ? tools[toolName] : undefined
     const needsApproval = override ?? tool?.requiresApproval() ?? false
 
@@ -195,7 +201,8 @@ export class UnifiedApprovalGateController implements LoopController {
         toolName,
         params,
         `Tool "${toolName}" requires approval before execution`,
-        tool
+        tool,
+        override === true ? 'admin_forced' : 'ordinary'
       )
     }
 
@@ -227,7 +234,7 @@ export class UnifiedApprovalGateController implements LoopController {
   forcedApproval(
     toolName: string,
     params: Record<string, unknown>
-  ): { type: 'suspend'; approval: PendingApproval } | null {
+  ): { type: 'suspend'; approval: PendingApproval; cause: 'cron_forced' } | null {
     if (this.options?.statelessLifecycle === true && toolName === 'cron_manage') {
       const registryWithNative = this.toolRegistry as NativeAwareRegistry
       const tool =
@@ -242,10 +249,12 @@ export class UnifiedApprovalGateController implements LoopController {
           toolName,
           params,
           STATELESS_CRON_APPROVAL_PROMPT,
-          tool
+          tool,
+          'cron_forced'
         )
         return {
           ...suspension,
+          cause: 'cron_forced',
           // Approving this card runs the call once; it never allowlists cron_manage.
           approval: {
             ...suspension.approval,
@@ -261,8 +270,9 @@ export class UnifiedApprovalGateController implements LoopController {
     toolName: string,
     params: Record<string, unknown>,
     description: string,
-    tool: Tool | null
-  ): { type: 'suspend'; approval: PendingApproval } {
+    tool: Tool | null,
+    cause: GateCause = 'ordinary'
+  ): { type: 'suspend'; approval: PendingApproval; cause: GateCause } {
     const traceDescriptor = tool?.traceDescriptor?.(params) ?? {
       kind: 'internal_tool' as const,
       sourceRef: 'mcp-host',
@@ -278,7 +288,7 @@ export class UnifiedApprovalGateController implements LoopController {
       tool_call_id: '', // Filled by toolUseLoop from call.id
       context_snapshot: [],
     }
-    return { type: 'suspend', approval }
+    return { type: 'suspend', approval, cause }
   }
 }
 

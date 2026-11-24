@@ -27,6 +27,7 @@ import type {
 import { logger } from '../../../logger'
 import { parseSessionKey } from '../../../session/types'
 import { projectGfsApproval } from '../../../visualInput/suspension'
+import { type ApprovalMode, normalizeApprovalMode } from '../../approval/approvalMode'
 import { ConversationError, ConversationErrorCode } from '../../errors'
 import {
   type ChatMessage,
@@ -58,6 +59,7 @@ import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
   groupMessagesIntoTurns,
+  parseModelSelections,
   reconstructConversation,
   reconstructPendingApproval,
 } from './reconstruct'
@@ -191,6 +193,20 @@ function conversationStateFromRow(state: string): ConversationState {
       : ConversationState.Idle
 }
 
+function storedChannelAndModel(
+  cached: Conversation | undefined,
+  session: SessionRow
+): { channelType?: string; modelSelections?: Record<string, string> } {
+  const channelType = cached ? cached.channel_type : (session.channel_type ?? undefined)
+  const modelSelections = cached
+    ? cached.modelSelections
+    : parseModelSelections(session.model_selections ?? null)
+  return {
+    ...(channelType !== undefined ? { channelType } : {}),
+    ...(modelSelections !== undefined ? { modelSelections } : {}),
+  }
+}
+
 export class SqliteConversationStore implements ConversationStore {
   private readonly cache: PinnedLRUMap<string, Conversation>
   private readonly prefetchedPrefixes = new Set<string>()
@@ -299,6 +315,18 @@ export class SqliteConversationStore implements ConversationStore {
       const seconds = Number(process.hrtime.bigint() - start) / 1e9
       rehydrationDurationHistogram?.labels('miss').observe(seconds)
       return undefined
+    }
+    // Another caller can miss the cache for this key while this load is
+    // queued, for example a turn start and an approval-mode PATCH after a
+    // restart. Its load can cache an object first. Return that object: a
+    // second copy would replace it, and a later write through one copy would
+    // not reach the other. Returning before the counters are set keeps the
+    // cached object's ordinals.
+    const raced = this.cache.get(sessionKey)
+    if (raced) {
+      const seconds = Number(process.hrtime.bigint() - start) / 1e9
+      rehydrationDurationHistogram?.labels('hit').observe(seconds)
+      return raced
     }
     const { conversation, highestOrdinal, highestTurnNumber } = reconstructConversation(persisted)
     const pinned = conversation.state !== 'idle' || conversation.pending_approval !== undefined
@@ -411,6 +439,10 @@ export class SqliteConversationStore implements ConversationStore {
         // `normalizeParityValue` treats a missing title identically to the memory
         // store (which yields undefined); a null would survive and break parity.
         title: cached ? cached.title : (row.session.title ?? undefined),
+        approvalMode: normalizeApprovalMode(
+          cached ? cached.approval_mode : row.session.approval_mode
+        ),
+        ...storedChannelAndModel(cached, row.session),
       })
     }
     return out
@@ -447,6 +479,11 @@ export class SqliteConversationStore implements ConversationStore {
         cache_read_tokens: cached.cache_read_tokens,
         cache_write_tokens: cached.cache_write_tokens,
         cacheTokensReported: cached.cacheTokensReported,
+        approvalMode: cached.approval_mode,
+        ...(cached.channel_type !== undefined ? { channelType: cached.channel_type } : {}),
+        ...(cached.modelSelections !== undefined
+          ? { modelSelections: cached.modelSelections }
+          : {}),
       }
     }
 
@@ -462,6 +499,7 @@ export class SqliteConversationStore implements ConversationStore {
     )
     if (!page || page.session.user_id !== userId) return undefined
 
+    const modelSelections = parseModelSelections(page.session.model_selections ?? null)
     return {
       key: sessionKey,
       agent: parts.agent,
@@ -480,6 +518,9 @@ export class SqliteConversationStore implements ConversationStore {
       cache_read_tokens: page.session.cache_read_tokens,
       cache_write_tokens: page.session.cache_write_tokens,
       cacheTokensReported: page.session.cache_tokens_reported === 1,
+      approvalMode: normalizeApprovalMode(page.session.approval_mode),
+      ...(page.session.channel_type != null ? { channelType: page.session.channel_type } : {}),
+      ...(modelSelections !== undefined ? { modelSelections } : {}),
     }
   }
 
@@ -647,7 +688,9 @@ export class SqliteConversationStore implements ConversationStore {
       source: opts.source ?? parsed?.channelType ?? 'internal',
       user_id: opts.userId ?? parsed?.userId ?? conv.user_id ?? null,
       team_id: opts.teamId ?? null,
-      channel_type: opts.channelType ?? parsed?.channelType ?? null,
+      // Channel type comes only from the caller. A missing value stays null
+      // instead of being parsed out of the session key.
+      channel_type: opts.channelType ?? null,
       channel_id: opts.channelId ?? parsed?.channelId ?? null,
       thread_id: opts.threadId ?? parsed?.threadId ?? null,
       // R2 — `model` now records the effective model served (opts.model); the
@@ -671,6 +714,7 @@ export class SqliteConversationStore implements ConversationStore {
       state: conv.state,
       active_task_id: conv.activeTaskId ?? null,
       active_trace_context: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
+      approval_mode: opts.approvalMode ?? 'manual',
     }
     this.persistQueue.enqueueAsync(sessionKey, {
       kind: 'insert_session',
@@ -998,6 +1042,29 @@ export class SqliteConversationStore implements ConversationStore {
       },
       sessionKey
     )
+  }
+
+  /**
+   * Awaited durability barrier for `sessions.approval_mode`. The mirror moves
+   * only after the worker acknowledges the write, and it chains after this
+   * session's `insert_session` on the same FIFO.
+   */
+  async persistApprovalMode(conv: Conversation, mode: ApprovalMode): Promise<void> {
+    const sessionKey = this.sessionKeyById.get(conv.id)
+    if (!sessionKey) {
+      throw new Error(
+        `persistApprovalMode: no sessionKey for conversation ${conv.id}; refusing a write with no durable target`
+      )
+    }
+    await this.persistQueue.enqueueSync(
+      {
+        kind: 'update_session_approval_mode',
+        sessionId: conv.id,
+        approvalMode: mode,
+      },
+      sessionKey
+    )
+    conv.approval_mode = mode
   }
 
   /**

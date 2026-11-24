@@ -8,6 +8,7 @@ import type {
   SessionsListQuery,
   SessionsListResult,
 } from '../../../src/types'
+import { hostApprovalModeEpoch, resetHostApprovalModeStore } from '../lib/hostApprovalModeStore'
 import {
   clearPendingModelIntent,
   clearPreChatModelIntent,
@@ -46,10 +47,15 @@ type CachedRequest<T> = {
 }
 
 /**
- * A catalog page with the sequence number taken when its request was sent. A
- * cached page keeps the number of the request that produced it.
+ * A catalog page with the sequence number and the approval-mode write epoch
+ * taken when its request was sent. A cached page keeps the values of the
+ * request that produced it, so a page requested before a mode write cannot
+ * paint the pre-write mode when a later caller is served it from the cache.
  */
-type IssuedSessionsListResult = SessionsListResult & { issueSeq: number }
+type IssuedSessionsListResult = SessionsListResult & {
+  issueSeq: number
+  approvalReadEpoch: number
+}
 
 const sessionCatalogRequests = new Map<string, CachedRequest<IssuedSessionsListResult>>()
 let sessionCatalogSource: typeof window.clerum.rpc.listSessions | null = null
@@ -189,11 +195,12 @@ export function useChatStore() {
       if (!options.force && cached && cached.expiresAt > Date.now()) return cached.promise
 
       const issueSeq = nextCatalogSequence()
+      const approvalReadEpoch = hostApprovalModeEpoch()
       const entry: CachedRequest<IssuedSessionsListResult> = {
         expiresAt: Date.now() + SESSION_CATALOG_TTL_MS,
         hostRef,
         promise: source(hostRef, undefined, query).then(
-          result => ({ ...result, issueSeq }),
+          result => ({ ...result, issueSeq, approvalReadEpoch }),
           error => {
             // An invalidation may have replaced this entry with a newer request
             // under the same key; only this request's own entry is evicted.
@@ -259,6 +266,7 @@ export function useChatStore() {
     // responses. Never carry an unpersisted model choice across logout, user,
     // or team boundaries where the same agent/chat identifiers may reappear.
     resetHostModelSelectionStore()
+    resetHostApprovalModeStore()
   }, [])
 
   // --- Pending (unpersisted) model selections — R2 "Option A" (see the

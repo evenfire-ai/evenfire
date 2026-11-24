@@ -103,7 +103,8 @@ export async function renameTeam(teamId: string, name: string) {
 
 /**
  * Hard-delete an empty team and all dependent rows (CASCADE from schema: invitations,
- * team_contexts, team_agents). Active memberships block deletion.
+ * team_contexts, team_agents, team_members). Active memberships of active users block
+ * deletion; a retired user's retained membership row does not.
  */
 export async function adminDeleteTeam(teamId: string): Promise<AdminDeleteTeamResult> {
   return withTransaction(async db => {
@@ -113,9 +114,11 @@ export async function adminDeleteTeam(teamId: string): Promise<AdminDeleteTeamRe
 
     const members = await db.query(
       `SELECT 1
-         FROM team_members
-        WHERE team_id = $1
-          AND status = 'active'
+         FROM team_members tm
+         JOIN users u ON u.id = tm.user_id
+        WHERE tm.team_id = $1
+          AND tm.status = 'active'
+          AND u.lifecycle_state = 'active'
         LIMIT 1`,
       [teamId]
     )

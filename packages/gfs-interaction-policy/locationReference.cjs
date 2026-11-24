@@ -2,7 +2,7 @@
 
 /**
  * LocationReferenceV1: the versioned description of a Global Files folder a
- * turn is about, as the place to create, save, list or search files. Unlike a
+ * turn is about, as the place to create, save or list files. Unlike a
  * FileReferenceV1 it names no version or size: a folder changes every time
  * something is created inside it, often by the agent itself. A reference
  * describes a folder; it never grants access to it. Consumers re-authorize it

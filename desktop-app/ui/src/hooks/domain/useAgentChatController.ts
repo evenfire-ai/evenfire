@@ -42,6 +42,14 @@ import {
 import { buildComposerLocationReferences } from '@lib/composerLocationReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
+  beginApprovalModeFirstSend,
+  confirmHeldApprovalModeFromSend,
+  hostApprovalModeEpoch,
+  migrateHeldApprovalMode,
+  noteHostApprovalModeFromSession,
+  snapshotFromSessionRead,
+} from '@lib/hostApprovalModeStore'
+import {
   confirmHostModelSelectionFromSend,
   dropIgnoredHostModelIntent,
   loadHostModels,
@@ -105,7 +113,11 @@ import {
   createSessionFsmStore,
   projectSessionState,
 } from './sessionFsm'
-import { mapTrackerStatusToProgress, readApprovalInputPreview } from './trackerToProgress'
+import {
+  mapTrackerStatusToProgress,
+  readApprovalInputPreview,
+  readShellCard,
+} from './trackerToProgress'
 import { type TranscriptMemoEntry, createTranscriptMemo, transcriptMemoKey } from './transcriptMemo'
 import type { PushNotificationInput } from './types'
 import {
@@ -838,8 +850,14 @@ export function useAgentChatController({
       fsm,
       loadSessionMessages: (agentRef, chatId, query, stillRelevant) =>
         reconcileBranchesRef.current!.loadSessionMessages(agentRef, chatId, query, stillRelevant),
-      attachLiveTask: (chatKey, resp, epoch, stillRelevant) =>
-        reconcileBranchesRef.current!.attachLiveTask(chatKey, resp, epoch, stillRelevant),
+      attachLiveTask: (chatKey, resp, epoch, approvalReadEpoch, stillRelevant) =>
+        reconcileBranchesRef.current!.attachLiveTask(
+          chatKey,
+          resp,
+          epoch,
+          approvalReadEpoch,
+          stillRelevant
+        ),
       settleIdle: (chatKey, resp, epoch, hint, stillRelevant) =>
         reconcileBranchesRef.current!.settleIdle(chatKey, resp, epoch, hint, stillRelevant),
       revokeAccess: chatKey => reconcileBranchesRef.current!.revokeAccess(chatKey),
@@ -2381,7 +2399,7 @@ export function useAgentChatController({
   )
 
   const reconcileAttachLiveTask = useCallback<ReconcileChatDeps['attachLiveTask']>(
-    async (chatKey, resp, snapshotEpoch, stillRelevant) => {
+    async (chatKey, resp, snapshotEpoch, approvalReadEpoch, stillRelevant) => {
       // Staleness guard for the TRACKER (the FSM has R2, the coordinator does not):
       // if a newer local `SEND_STARTED` bumped the epoch since this reconcile's
       // fetch began, the server's `activeTaskId` is stale — calling `attach` would
@@ -2420,6 +2438,16 @@ export function useAgentChatController({
         tokens: resp.tokens,
         snapshotEpoch,
       })
+      const approvalSnapshot = snapshotFromSessionRead(resp)
+      if (approvalSnapshot) {
+        const { agentRef: approvalAgent, chatId: approvalChatId } = parseTaskKey(chatKey)
+        noteHostApprovalModeFromSession(
+          approvalAgent,
+          approvalChatId,
+          approvalSnapshot,
+          approvalReadEpoch
+        )
+      }
       // reason:'rejoin' → the coordinator consumes the bounded re-rejoin budget
       // (P1-stall guard). Idempotent when the same task is already attached.
       const attached = tracker.attach(
@@ -2654,6 +2682,13 @@ export function useAgentChatController({
             ...(reconcileFromTurn !== undefined ? { afterTurn: reconcileFromTurn } : {}),
           }
         }
+        const approvalReadSeq = hostApprovalModeEpoch(agentRef, chatId)
+        const noteOpenedChat = (opened: Parameters<typeof snapshotFromSessionRead>[0]) => {
+          const approval = snapshotFromSessionRead(opened)
+          if (approval) {
+            noteHostApprovalModeFromSession(agentRef, chatId, approval, approvalReadSeq)
+          }
+        }
         let response = await chatStore.loadSessionMessages(
           agentRef,
           agentRef,
@@ -2661,6 +2696,7 @@ export function useAgentChatController({
           requestedQuery
         )
         if (!stillRelevant()) return undefined
+        noteOpenedChat(response)
         if (requestedQuery.afterTurn === undefined || !response.hasMoreAfter) {
           if (requestedQuery.afterTurn !== undefined) {
             return {
@@ -2721,6 +2757,7 @@ export function useAgentChatController({
           })
           if (!stillRelevant()) return undefined
           const combinedTurns = mergeUniqueSessionTurns(turns, latest.turns)
+          noteOpenedChat(latest)
           return {
             ...latest,
             turns: combinedTurns,
@@ -3317,6 +3354,10 @@ export function useAgentChatController({
             mcpServerName: state.pendingApproval.mcpServerName,
             alwaysApproveAllowed: state.pendingApproval.alwaysApproveAllowed,
             inputPreview: readApprovalInputPreview(state.pendingApproval.inputPreview),
+            ...(() => {
+              const shellCard = readShellCard(state.pendingApproval.shellCard)
+              return shellCard ? { shellCard } : {}
+            })(),
           }
         : activeFsmApproval
           ? {
@@ -3331,6 +3372,10 @@ export function useAgentChatController({
               mcpServerName: activeFsmApproval.mcpServerName,
               alwaysApproveAllowed: activeFsmApproval.alwaysApproveAllowed,
               inputPreview: readApprovalInputPreview(activeFsmApproval.inputPreview),
+              ...(() => {
+                const shellCard = readShellCard(activeFsmApproval.shellCard)
+                return shellCard ? { shellCard } : {}
+              })(),
             }
           : undefined
       updateMessageProgress(selectedAgent, state.userMessageId, () => ({
@@ -3598,6 +3643,7 @@ export function useAgentChatController({
             chatStore.setPendingModel(sendAgent, chatId, preChatModel)
             chatStore.clearPreChatModel(sendAgent)
           }
+          migrateHeldApprovalMode(sendAgent, chatId)
           if (
             wasSendChatVisible &&
             sendSelectionIntentRevision !== null &&
@@ -3892,6 +3938,9 @@ export function useAgentChatController({
       // send that was handed to main and failed in another way keeps its turn,
       // and its input is retained with the failure.
       let postIssued = false
+      // Unlocks the approval-mode picker that this send locked for a chat whose
+      // session row the store has not seen. Idempotent; every exit calls it.
+      let releaseApprovalModeFirstSend: () => void = () => undefined
       const sendHeldByAnotherPath = () =>
         sendAuthScopeIsCurrent() && !sendChatWasDeleted() && isHostAccessBlocked(sendAgent)
       const endSendHeldByAnotherPath = async (detail: string, kind: FailedAgentSend['kind']) => {
@@ -3917,6 +3966,14 @@ export function useAgentChatController({
         const requestModel = requestModelForRetention
         const fileReferences = fileReferencesForSend
         const locationReferences = locationReferencesForSend
+        // Reads the held mode and locks the picker in one step: a pick after
+        // this point would PATCH before the POST creates the session row, get
+        // a 404 and paint a mode the session never stores (R6-MJ1).
+        const firstSendApproval = sendChatId
+          ? beginApprovalModeFirstSend(sendAgent, sendChatId)
+          : null
+        if (firstSendApproval) releaseApprovalModeFirstSend = firstSendApproval.release
+        const heldApprovalMode = firstSendApproval?.mode ?? null
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -3932,6 +3989,7 @@ export function useAgentChatController({
             : { modelSelectionRevision: visualModelRevisionForSend }),
           ...(fileReferences.length > 0 ? { fileReferences } : {}),
           ...(locationReferences.length > 0 ? { locationReferences } : {}),
+          ...(heldApprovalMode ? { approvalMode: heldApprovalMode } : {}),
         }
 
         // Handed to main from here, even if main refuses it before the POST.
@@ -3950,6 +4008,28 @@ export function useAgentChatController({
         if (!sendStillAuthorized()) return
         const responseRecord = response as Record<string, unknown>
         const ackOk = !responseRecord.error && responseRecord.success !== false
+        if (ackOk && sendChatId) confirmHeldApprovalModeFromSend(sendAgent, sendChatId)
+        releaseApprovalModeFirstSend()
+        // The label shows the held pick, which the Host stores but caps by its
+        // ceiling. The ack carries no mode, so one read of the new session
+        // shows the mode the Host runs. The epoch drops it if a pick lands
+        // first, and a scope change drops it on arrival.
+        if (ackOk && sendChatId && heldApprovalMode) {
+          const approvalReadEpoch = hostApprovalModeEpoch(sendAgent, sendChatId)
+          void chatStore
+            .loadSessionMessages(sendAgent, sendAgent, sendChatId, { limit: 1 })
+            .then(session => {
+              if (!sendAuthScopeIsCurrent()) return
+              const approval = snapshotFromSessionRead(session)
+              if (approval) {
+                noteHostApprovalModeFromSession(sendAgent, sendChatId, approval, approvalReadEpoch)
+              }
+            })
+            .catch(error => {
+              // The label keeps the pick until the next read of the chat.
+              console.warn('[approval-mode] read after the first send failed', error)
+            })
+        }
         // #654 H1 — the send IS the write. Its ack carries the revision that
         // write produced, and adopting it is what arms the NEXT conditional
         // write correctly; without it the client keeps the revision it read
@@ -4226,6 +4306,7 @@ export function useAgentChatController({
         // The task owns the activity entry from here.
         activityHandedToTask = true
       } catch (error) {
+        releaseApprovalModeFirstSend()
         const message = error instanceof Error ? error.message : String(error)
         if (
           isAuthorizationError(error) &&
@@ -4303,6 +4384,7 @@ export function useAgentChatController({
         )
         await keepUndeliveredTurn()
       } finally {
+        releaseApprovalModeFirstSend()
         // A send that handed its activity entry to no task releases it here,
         // whichever exit it took.
         if (!activityHandedToTask) releaseSendActivity()

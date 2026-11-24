@@ -638,7 +638,13 @@ export function ChatThread({
           }
           onAlwaysApprove={
             // The host may refuse to allowlist this call (`alwaysApproveAllowed: false`).
-            canAct && si && si.alwaysApproveAllowed !== false && selectedAgent && activeChatId
+            // A shell card replaces Always with the shell actions below.
+            canAct &&
+            si &&
+            !si.shellCard &&
+            si.alwaysApproveAllowed !== false &&
+            selectedAgent &&
+            activeChatId
               ? () => {
                   return decideApproval({
                     agentRef: selectedAgent,
@@ -647,6 +653,21 @@ export function ChatThread({
                     requestId: si.requestId,
                     decision: 'approve',
                     alwaysApprove: true,
+                    source: 'in_chat',
+                  })
+                }
+              : undefined
+          }
+          onShellAction={
+            canAct && si?.shellCard && selectedAgent && activeChatId
+              ? action => {
+                  return decideApproval({
+                    agentRef: selectedAgent,
+                    chatId: activeChatId,
+                    taskId: taskId!,
+                    requestId: si.requestId,
+                    decision: 'approve',
+                    shellAction: action,
                     source: 'in_chat',
                   })
                 }

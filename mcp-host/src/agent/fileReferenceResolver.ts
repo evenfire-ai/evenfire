@@ -1,16 +1,15 @@
 /**
- * Issue #666 — structured file references on an incoming message.
+ * Issue #666 — structured references on an incoming message.
  *
- * `parseIncomingFileReferences` is the route-level contract check: shape,
- * count, uniqueness and GFS identity, with no I/O. `resolveFileReferences`
- * re-authorizes every GFS reference under the Host principal with gfsc
- * `resolve` (JSON metadata only, never bytes) and reports one availability per
- * reference. The model reads an available file later with `clerum__gfs_read`,
- * which the Host pins to the reference's version.
- *
- * Location references (a folder the turn is about) follow the same two steps:
- * `parseIncomingLocationReferences` at the route, and `resolveMessageReferences`
- * resolves them together with the file references under the same deadline.
+ * `parseIncomingFileReferences` and `parseIncomingLocationReferences` are the
+ * route-level contract checks: shape, count, uniqueness and GFS identity, with
+ * no I/O. `resolveMessageReferences` is the single entry that re-authorizes
+ * both kinds under the Host principal with gfsc `resolve` (JSON metadata only,
+ * never bytes), one call per reference in parallel under one shared deadline,
+ * so admission waits on gfsc for at most one timeout however many files and
+ * folders the message names.
+ * The model reads an available file later with `clerum__gfs_read`, which the
+ * Host pins to the reference's version.
  */
 import {
   type FileReferenceV1,
@@ -272,10 +271,6 @@ export interface FileReferenceCheckFailureResult {
   status?: number
 }
 
-export type FileReferenceResolutionResult =
-  | { ok: true; resolutions: FileReferenceResolution[] }
-  | FileReferenceCheckFailureResult
-
 export type MessageReferenceResolutionResult =
   | {
       ok: true
@@ -511,15 +506,4 @@ export async function resolveMessageReferences(
     clearTimeout(timer)
     controller.abort()
   }
-}
-
-/** {@link resolveMessageReferences} for a message that carries no locations. */
-export async function resolveFileReferences(
-  references: readonly FileReferenceV1[],
-  client: FileReferenceGfscClient | null,
-  timeoutMs?: number,
-  runtimeSurfaces?: GfsSurfaceRuntimeCapability
-): Promise<FileReferenceResolutionResult> {
-  const result = await resolveMessageReferences(references, [], client, timeoutMs, runtimeSurfaces)
-  return result.ok ? { ok: true, resolutions: result.resolutions } : result
 }

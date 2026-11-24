@@ -139,10 +139,17 @@ export function WindowTitleBar({ actions, actionsRef, leadingRef }: WindowTitleB
           </button>
         ))}
       </div>
-      <div className="window-titlebar__leading" ref={leadingRef} />
       <div className="window-titlebar__actions" ref={actionsRef}>
         {actions}
       </div>
+      {/* Keep the leading slot after the actions. Chromium resolves overlapping
+          app-region boxes in document order (last wins), and the actions box
+          inherits `drag` from the title bar while spanning almost the full
+          width. Rendered earlier, its drag band would re-cover the leading
+          buttons and the OS would treat their clicks as window drags. The cost
+          is DOM order: Tab and screen readers reach these buttons after the
+          search, drawer toggle and bell, even though they sit further left. */}
+      <div className="window-titlebar__leading" ref={leadingRef} />
     </header>
   )
 }

@@ -81,6 +81,7 @@ function route() {
     dispatch,
     fileReferenceGfs: () => ({ status: 'unsupported' }),
     logger: { info: vi.fn(), warn: vi.fn() },
+    approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
   })
   return { dispatch, handlers: makeHandlers({ messageHandler }) }
 }

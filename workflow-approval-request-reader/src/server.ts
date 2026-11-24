@@ -35,6 +35,7 @@ import {
   submitMcpHostEnrollment,
 } from './mcpHostClient.js'
 import { verifyTeamsAuthorization } from './teamsAuth.js'
+import { isToolApprovalActionValue } from './toolApprovalAction.js'
 
 const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
 const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000
@@ -250,8 +251,8 @@ function teamsIsWorkflowResultAction(payload: unknown): boolean {
   )
 }
 
-function teamsIsToolApprovalAction(payload: unknown): boolean {
-  return /^tool:[ald]:[A-Za-z0-9_-]{16}$/.test(teamsActionValue(payload))
+export function teamsIsToolApprovalAction(payload: unknown): boolean {
+  return isToolApprovalActionValue(teamsActionValue(payload))
 }
 
 function teamsIsWorkflowApprovalAction(payload: unknown): boolean {

@@ -54,6 +54,7 @@ export const CONTROL_ROUTES = {
   },
   externalChannels: {
     root: '/external-channels',
+    provider: (provider: string) => `/external-channels/providers/${segment(provider)}`,
     new: (query?: ControlRouteQuery) => withQuery('/external-channels/new', query),
     edit: (name: string) => `/external-channels/${segment(name)}/edit`,
   },

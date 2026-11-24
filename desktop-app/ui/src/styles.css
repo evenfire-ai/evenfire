@@ -419,14 +419,19 @@ h3 {
   align-items: center;
   gap: var(--space-1);
   height: var(--window-titlebar-height);
-  /* Chromium unions all `-webkit-app-region` rects in DOCUMENT ORDER and, where
+  /* Chromium unions all `-webkit-app-region` boxes in DOCUMENT ORDER and, where
      they overlap, the LAST one wins (z-index, position and pointer-events do not
-     enter into it). The only `drag` region is the root `.window-titlebar`; every
-     control that must stay clickable carves itself out as `no-drag`. This slot
-     sits over that root drag band, so it declares `no-drag` to lift the whole
-     leading area (and its descendant buttons) out of it. It must NOT declare
-     `drag` here: a later-in-document `drag` box covering another control would
-     re-union over it and make that control draggable again. */
+     enter into it). The property is inherited, so a descendant of
+     `.window-titlebar` is a `drag` box unless it, or an ancestor between it and
+     `.window-titlebar`, declares `no-drag` — that includes the fixed, almost
+     full-width `.window-titlebar__actions` and its `.top-bar`, which overlap
+     this slot. Every control that must stay clickable
+     therefore declares `no-drag`, and this slot must stay AFTER
+     `.window-titlebar__actions` in the DOM: rendered before it, the actions'
+     inherited drag band would re-cover the leading buttons and the OS would
+     swallow their clicks as window drags. Its descendants inherit `no-drag`.
+     It must NOT declare `drag` here: a later-in-document `drag` box covering
+     another control would re-union over it and make that control draggable. */
   pointer-events: auto;
   -webkit-app-region: no-drag;
 }
@@ -480,8 +485,9 @@ h3 {
   box-shadow: none;
   color: var(--titlebar-control-ink);
   /* Restate no-drag on the clickable button itself. The leading slot is already
-     no-drag and propagates, so this is idempotent — kept for clarity next to the
-     interactive control, and harmless because it never widens a drag region. */
+     no-drag and its descendants inherit it, so this is idempotent — kept for
+     clarity next to the interactive control, and harmless because it never
+     widens a drag region. */
   -webkit-app-region: no-drag;
 }
 
@@ -4340,6 +4346,17 @@ body.sidebar-resizing {
   cursor: default;
 }
 
+/* A row that stays focusable but is not offered (approval modes above the
+ * Host's limit). It keeps its focus-visible background, not a hover one. */
+.model-selector-item[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.model-selector-item[aria-disabled='true']:hover:not(:focus-visible) {
+  background: transparent;
+}
+
 .model-selector-item--active {
   background: rgba(var(--edge-rgb), 0.2);
   font-weight: var(--font-weight-medium);
@@ -4445,9 +4462,47 @@ body.sidebar-resizing {
   color: var(--text-dim);
 }
 
+/* Busy approval-mode chip while its save is in flight: it stays focusable (a
+ * pick hands focus back to it), so it keeps the interactive class and its
+ * focus ring, but hover no longer suggests it opens. */
+.composer-actions-right
+  .model-selector-chip.model-selector-chip--disabled.ui-pill--interactive:hover {
+  background: var(--surface-soft);
+  border-color: rgba(var(--edge-rgb), 0.32);
+  color: var(--text-dim);
+  cursor: default;
+}
+
 /* Caret reads as a control affordance (muted), not a status accent. */
 .composer-actions-right .model-selector-chip-caret {
   opacity: 0.55;
+}
+
+/* Approval-mode picker. It reuses the model selector's chip, upward popover and
+ * rows above so the two composer controls match. Only its own pieces live here:
+ * a save error that floats above the chip like the "applies to your next
+ * message" badge, out of the flex flow so it never shoves the send button, and
+ * the Allow-all confirmation that replaces the menu inside the popover. */
+.approval-mode-picker-error {
+  position: absolute;
+  bottom: calc(100% + var(--space-1));
+  right: 0;
+  font-size: var(--font-size-2xs);
+  color: var(--danger);
+  white-space: nowrap;
+}
+
+.approval-mode-picker-confirm-text {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text);
+  line-height: var(--line-height-normal);
+}
+
+.approval-mode-picker-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
 }
 
 .agent-workspace-agent-breadcrumb-actions {
@@ -13950,9 +14005,10 @@ pre {
   border-color: transparent;
   background: transparent;
   box-shadow: none;
-  /* The root title bar is the only `-webkit-app-region: drag` band; every
-     clickable control carves itself out as `no-drag` (see .window-titlebar__leading)
-     or the OS swallows its clicks for window dragging. */
+  /* `-webkit-app-region` is inherited, so this toggle would otherwise be a
+     `drag` box like the rest of the title bar; every clickable control declares
+     `no-drag` (see .window-titlebar__leading) or the OS swallows its clicks for
+     window dragging. */
   -webkit-app-region: no-drag;
 }
 
@@ -14967,46 +15023,6 @@ pre {
   cursor: pointer;
 }
 
-.da-gfs-inline-form {
-  display: flex;
-  align-items: end;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  margin: var(--space-3) 0;
-  padding: var(--space-3);
-  background: var(--surface-soft);
-}
-
-.da-gfs-inline-form__field {
-  display: grid;
-  min-width: min(22rem, 100%);
-  gap: var(--space-1);
-}
-
-.da-gfs-inline-form__field span,
-.da-gfs-inline-form__copy {
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-}
-
-.da-gfs-inline-form__field input {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-}
-
-.da-gfs-inline-form__field input:focus-visible {
-  border-color: var(--focus-ring);
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
-
 .da-gfs-breadcrumb {
   display: flex;
   flex-wrap: wrap;
@@ -15878,7 +15894,9 @@ pre {
 .da-gfs-resource-menu__panel {
   position: fixed;
   /* The persistent sidebar owns dropdown + 1000. Resource menus are portaled
-     to body and must remain above it while the navigation expands/collapses. */
+     to body and must remain above it while the navigation expands/collapses.
+     Access-row menus inside a Share dialog mount in the dialog instead: at
+     body they would tie the window-level Share modal's layer. */
   z-index: calc(var(--layer-dropdown) + 1100);
   width: min(360px, calc(100vw - (var(--space-4) * 2)));
   max-height: calc(100vh - (var(--space-4) * 2));
@@ -16410,6 +16428,16 @@ pre {
   backdrop-filter: blur(12px) saturate(0.86);
 }
 
+.da-gfs-action-host {
+  display: contents;
+}
+
+/* The sidebar's actions open at the window root, so their backdrop dims the
+   sidebar too, unlike the Files dialogs scoped to the content panel. */
+.da-gfs-action-host .da-gfs-manage-modal {
+  z-index: var(--layer-window-dialog);
+}
+
 .da-gfs-manage-dialog {
   /* Keep every Share-dialog accent in the blue family while preserving the
      global semantic palette used by the rest of Desktop. */
@@ -16472,17 +16500,6 @@ pre {
   line-height: var(--line-height-tight);
   text-overflow: ellipsis;
   white-space: normal;
-}
-
-.da-gfs-manage-dialog__title-edit {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.da-gfs-manage-dialog__title-edit .ui-control {
-  min-width: 0;
 }
 
 .da-gfs-manage-dialog__top-actions {
@@ -16690,21 +16707,6 @@ pre {
   border-color: rgba(var(--danger-rgb), 0.4);
   background: rgba(var(--danger-rgb), 0.09);
   box-shadow: inset 3px 0 0 rgba(var(--danger-rgb), 0.6);
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: end;
-  margin: 0;
-  border-color: rgba(var(--accent-rgb), 0.3);
-  background: rgba(var(--accent-rgb), 0.07);
-}
-
-.da-gfs-manage-dialog__body > .da-gfs-inline-form {
-  margin: 0;
-  border: 0;
-  background: var(--surface-soft);
 }
 
 .da-gfs-new-folder-modal {
@@ -17033,14 +17035,6 @@ pre {
 
 .da-gfs-move-dialog__action-buttons .ui-button {
   border-radius: 999px;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__field {
-  min-width: 0;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__copy {
-  align-self: center;
 }
 
 .da-gfs-manage-section--access .da-gfs-delegation__empty {
@@ -17435,15 +17429,6 @@ pre {
     justify-content: flex-end;
   }
 
-  .da-gfs-manage-dialog__title-edit {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .da-gfs-manage-dialog__title-edit .ui-button:last-child {
-    grid-column: 1 / -1;
-    justify-self: start;
-  }
-
   .da-gfs-manage-dialog__body {
     padding: var(--space-2);
   }
@@ -17465,10 +17450,6 @@ pre {
 
   .da-gfs-move-dialog__action-buttons {
     justify-content: flex-end;
-  }
-
-  .da-gfs-manage-section--actions .da-gfs-inline-form {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

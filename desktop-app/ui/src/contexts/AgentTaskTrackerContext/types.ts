@@ -5,6 +5,7 @@ import type {
   ProgressStep,
   ReadyComposerFileAttachment,
 } from '@/uiTypes'
+import type { ShellCardDescriptor } from '../../../../src/types'
 import type { ChatMessageAttachment } from '../../../../src/types'
 
 /**
@@ -51,6 +52,7 @@ export interface TaskPendingApproval {
   // hidden). Absent means allowed.
   alwaysApproveAllowed?: false
   inputPreview?: ApprovalInputPreview
+  shellCard?: ShellCardDescriptor
 }
 
 /**

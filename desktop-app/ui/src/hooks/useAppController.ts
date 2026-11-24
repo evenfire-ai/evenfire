@@ -11,6 +11,7 @@ import type {
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
+import { gfsSessionScope } from '../lib/gfsSessionAuthority'
 import {
   type HostAuthorityHoldKind,
   type HostAuthorityStore,
@@ -433,6 +434,7 @@ export function useAppController() {
             window.clerum.rpc.approveToolCall(t.agentRef, t.taskId, t.requestId, [t.agentRef], {
               teamId: t.teamId ?? undefined,
               alwaysApprove: t.alwaysApprove === true,
+              ...(t.shellAction ? { shellAction: t.shellAction } : {}),
             }),
           deny: t =>
             window.clerum.rpc.denyToolCall(
@@ -935,7 +937,11 @@ export function useAppController() {
             // Scope this refresh to the replacement session's existing query
             // keys. Other cached principals/environments must not refetch
             // under the newly published main-process session.
-            const currentGfsSessionScope = `${auth.runtimeConfigState?.envKey ?? ''}:${sessionState.me.id}:${sessionState.me.teamId ?? ''}`
+            const currentGfsSessionScope = gfsSessionScope({
+              isAuthenticated: true,
+              me: sessionState.me,
+              runtimeConfigState: auth.runtimeConfigState,
+            })
             await queryClient.invalidateQueries({
               queryKey: desktopQueryKeys.gfsRoot,
               predicate: query =>

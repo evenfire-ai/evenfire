@@ -391,6 +391,14 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   if (parsed.attachments != null) {
     parsed.attachments = parseHostMessageAttachments(parsed.attachments)
   }
+  if (
+    parsed.approvalMode !== undefined &&
+    parsed.approvalMode !== 'manual' &&
+    parsed.approvalMode !== 'auto' &&
+    parsed.approvalMode !== 'allow_all'
+  ) {
+    throw new Error('Invalid host message request: approvalMode')
+  }
   // Both reference lists are checked for shape only; mcp-host enforces the count
   // limits and resolves each reference.
   const fileReferences = parseReferenceList(
@@ -1702,7 +1710,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
 
   ipcMain.handle(
     'rpc:approveToolCall',
-    async (event, { hostRef, taskId, toolCallId, hostRefs, teamId, alwaysApprove }) => {
+    async (
+      event,
+      { hostRef, taskId, toolCallId, hostRefs, teamId, alwaysApprove, shellAction }
+    ) => {
       assertTrustedSender(event)
       const targetHostRef = sanitizeString(hostRef)
       const targetTaskId = sanitizeString(taskId)
@@ -1710,6 +1721,14 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       const targetHostRefs = Array.isArray(hostRefs)
         ? hostRefs.map(v => String(v).trim()).filter(Boolean)
         : undefined
+      if (
+        shellAction !== undefined &&
+        shellAction !== 'once' &&
+        shellAction !== 'command' &&
+        shellAction !== 'shell'
+      ) {
+        throw new Error('shellAction must be once, command, or shell')
+      }
       return service.approveToolCall(
         targetHostRef,
         targetTaskId,
@@ -1718,6 +1737,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
         {
           teamId: sanitizeString(teamId) || undefined,
           alwaysApprove: alwaysApprove === true,
+          ...(shellAction ? { shellAction } : {}),
         }
       )
     }
@@ -1944,6 +1964,34 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
       assertSafeRouteSegment('chatId', chatId)
       return service.renameSession(hostRef, agent, chatId, title)
+    }
+  )
+
+  // Session approval mode. Same route-segment checks as rename, and the same
+  // refusal of a renderer-supplied hostRefs fleet. The mode itself is one of
+  // the three stored values; anything else is rejected before a token is minted.
+  ipcMain.handle(
+    'rpc:setApprovalMode',
+    async (event, payload: { hostRef: string; agent: string; chatId: string; mode: string }) => {
+      assertTrustedSender(event)
+      const hostRef = sanitizeString(payload?.hostRef)
+      const agent = sanitizeString(payload?.agent)
+      const chatId = sanitizeString(payload?.chatId)
+      const requestedMode = sanitizeString(payload?.mode)
+      const mode =
+        requestedMode === 'manual' || requestedMode === 'auto' || requestedMode === 'allow_all'
+          ? requestedMode
+          : undefined
+      if (!hostRef || !agent || !chatId) {
+        throw new Error('hostRef, agent, and chatId are required')
+      }
+      if (!mode) {
+        throw new Error('mode must be manual, auto, or allow_all')
+      }
+      assertSafeRouteSegment('hostRef', hostRef)
+      assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+      assertSafeRouteSegment('chatId', chatId)
+      return service.setApprovalMode(hostRef, agent, chatId, mode)
     }
   )
 

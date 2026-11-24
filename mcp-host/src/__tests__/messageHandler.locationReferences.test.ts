@@ -72,6 +72,7 @@ function setup() {
     dispatch,
     fileReferenceGfs: () => ({ status: 'available', client: { resolve } }),
     logger: { info: vi.fn(), warn: vi.fn() },
+    approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
   })
   // The path main.ts takes for a delivery the queue already admitted.
   const replay = (message: IncomingMessage, options?: { async?: boolean }) =>
