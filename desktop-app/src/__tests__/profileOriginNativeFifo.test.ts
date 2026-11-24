@@ -257,7 +257,10 @@ it.each(['app', 'gfs'] as const)(
     const releaseWrite = deferred<void>()
     const writeFile = fs.writeFile.bind(fs)
     vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
-      if (args[0] === h.optionA.configPath && String(args[1]).includes(rpc2)) {
+      if (
+        args[0] === h.optionA.configPath &&
+        JSON.parse(String(args[1])).rpcProxyBaseUrl === rpc2
+      ) {
         enteredWrite.resolve()
         await releaseWrite.promise
       }
