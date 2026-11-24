@@ -158,10 +158,25 @@ describe('POST /external/oidc/desktop-sign-in/redeem', () => {
     ],
     [
       'invalid_code',
-      { status: 'invalid_code' },
+      { status: 'invalid_code', verifierMismatch: false },
       400,
       { error: 'invalid_desktop_sign_in_code' },
       [],
+    ],
+    [
+      // The same answer as an unknown code; only the log tells them apart.
+      'invalid_code after a wrong verifier',
+      { status: 'invalid_code', verifierMismatch: true },
+      400,
+      { error: 'invalid_desktop_sign_in_code' },
+      [
+        {
+          event: 'oidc_desktop_code_verifier_mismatch',
+          registrationId: provider.registrationId,
+          issuer: provider.issuer,
+          requestId: 'request-fixture-redeem',
+        },
+      ],
     ],
     [
       'refused',

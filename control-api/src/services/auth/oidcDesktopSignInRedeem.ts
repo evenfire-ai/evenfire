@@ -15,11 +15,12 @@ import { type MemberTransaction, currentMembershipIn } from './oidcMemberSignIn.
 
 /**
  * What a redeem ends with. `refused` and `unavailable` spent the code and name
- * its member, so the route can log who it was for.
+ * its member, so the route can log who it was for. `invalid_code` says whether
+ * the verifier was wrong, for the log only: the client's answer is the same.
  */
 export type DesktopSignInRedeemResult =
   | Readonly<{ status: 'signed_in'; body: ReturnType<typeof externalLoginResponseBody> }>
-  | Readonly<{ status: 'invalid_code' }>
+  | Readonly<{ status: 'invalid_code'; verifierMismatch: boolean }>
   | Readonly<{ status: 'refused'; reason: OidcRefusalReason; userId: string }>
   | Readonly<{ status: 'unavailable'; userId: string }>
 
@@ -48,7 +49,17 @@ const TEAMLESS_MEMBER: RedeemTeam = Object.freeze({
   role: 'member',
 })
 
-const INVALID_CODE: DesktopSignInRedeemResult = Object.freeze({ status: 'invalid_code' })
+/** The code is unknown, expired or already redeemed. */
+const UNKNOWN_CODE: DesktopSignInRedeemResult = Object.freeze({
+  status: 'invalid_code',
+  verifierMismatch: false,
+})
+
+/** The code was found, but the verifier does not match it; it stays redeemable. */
+const WRONG_VERIFIER: DesktopSignInRedeemResult = Object.freeze({
+  status: 'invalid_code',
+  verifierMismatch: true,
+})
 
 /**
  * Thrown inside the redeem transaction when the verifier does not match the
@@ -90,7 +101,7 @@ async function redeemInTransaction(
     [hashDesktopSignInCode(input.code)]
   )
   const row = taken.rows[0] as DesktopSignInCodeRow | undefined
-  if (!row) return INVALID_CODE
+  if (!row) return UNKNOWN_CODE
 
   // 2. The verifier.
   if (!verifierMatches(input.codeVerifier, row.code_challenge)) {
@@ -154,7 +165,8 @@ async function redeemInTransaction(
  * session format and loaded the provider configuration.
  *
  * - `invalid_code`: the code is unknown, expired or already redeemed, or the
- *   verifier is wrong. A wrong verifier leaves the code redeemable.
+ *   verifier is wrong (`verifierMismatch`). A wrong verifier leaves the code
+ *   redeemable.
  * - `unavailable`: member sign-in was switched off, or the connection or its
  *   configuration changed, since the code was minted. The code is spent.
  * - `refused`: the account is no longer active. The code is spent.
@@ -175,9 +187,10 @@ export async function redeemDesktopSignInCode(
     return await transaction(db => redeemInTransaction(db, input))
   } catch (error) {
     // Only the wrong-verifier signal is answered here: it was thrown to roll
-    // the delete back, and it answers exactly as an unknown code does, so it
-    // carries nothing to log. Every other error propagates unchanged.
-    if (error instanceof DesktopSignInVerifierMismatch) return INVALID_CODE
+    // the delete back. It becomes `invalid_code` flagged as a verifier
+    // mismatch, which the route logs and answers as an unknown code. Every
+    // other error propagates unchanged.
+    if (error instanceof DesktopSignInVerifierMismatch) return WRONG_VERIFIER
     throw error
   }
 }

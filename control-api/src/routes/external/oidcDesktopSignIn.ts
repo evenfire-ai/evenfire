@@ -41,12 +41,12 @@ function answerRedeem(
   req: Request,
   res: Response
 ): void {
-  const member = (userId: string) => ({
+  const request = {
     registrationId: provider.registrationId,
     issuer: provider.issuer,
-    userId,
     requestId: req.get('x-request-id'),
-  })
+  }
+  const member = (userId: string) => ({ ...request, userId })
   switch (result.status) {
     case 'signed_in':
       logger.info(
@@ -60,6 +60,14 @@ function answerRedeem(
       res.status(200).json(result.body)
       return
     case 'invalid_code':
+      if (result.verifierMismatch) {
+        // The request context only: a wrong verifier names no member to the
+        // log, and the answer stays the unknown-code 400.
+        logger.warn(
+          { event: 'oidc_desktop_code_verifier_mismatch', ...request },
+          'OIDC Desktop sign-in code redeem sent a verifier that does not match its challenge'
+        )
+      }
       res.status(400).json({ error: 'invalid_desktop_sign_in_code' })
       return
     case 'refused':
