@@ -295,11 +295,11 @@ Settings:
   claim must hold: 1–256 characters, no control characters, and no leading or
   trailing whitespace (inner spaces are allowed). The claim matches when it is
   a string exactly equal to the value, or an array of strings with one element
-  exactly equal to it. Anything else is refused, including a missing claim, a
-  prefix or substring, and an array with a non-string element. A claim value
-  the sign-in cannot read, such as an array of more than 32 items or a string
-  over 512 characters, is refused too, and so is an unreadable `roles` claim,
-  whichever claim is required.
+  exactly equal to it. Anything else does not match, including a missing
+  claim, a prefix or substring, and an array with a non-string element. A
+  claim value the sign-in cannot read, such as an array of more than 32 items
+  or a string over 512 characters, refuses sign-in too, and so does an
+  unreadable `roles` claim, whichever claim is required.
 - `CONTROL_API_OIDC_REQUIRED_CLAIM_NAME`: the claim's name, `roles` when
   unset. A name without a value is refused, and so is a name that is an OIDC
   protocol claim (`iss`, `sub`, `aud`, `exp`, `iat`, `nbf`, `jti`, `nonce`,
@@ -367,8 +367,8 @@ Provider checklist:
   set to always be included in the ID token, and use that server's issuer as
   `CONTROL_API_OIDC_ISSUER`. Set `CONTROL_API_OIDC_REQUIRED_CLAIM_NAME` to the
   claim's name, or name the claim `roles`.
-- **More than 32 groups.** A groups claim with more than 32 items is refused,
-  so send only the groups that matter. In Entra ID, emit only the groups
+- **More than 32 groups.** A groups claim with more than 32 items refuses
+  sign-in, so send only the groups that matter. In Entra ID, emit only the groups
   assigned to the application, or use app roles. In Okta, use the groups claim
   filter.
 
