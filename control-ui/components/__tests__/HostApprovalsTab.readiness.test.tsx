@@ -421,7 +421,7 @@ describe('approval settings readiness (spec §7 A3)', () => {
     page.unmount()
   })
 
-  it('T17 a failed refresh after a saved PUT keeps the saved tools on screen and Save usable', async () => {
+  it('T17 a failed refresh after a saved PUT keeps the saved tools on screen, shows an error and leaves Save usable', async () => {
     const { fake, page, driver } = await openFooWithDraft()
     const refresh = fake.hold({ method: 'GET', path: FOO_DETAIL })
     await driver.save()
@@ -438,6 +438,7 @@ describe('approval settings readiness (spec §7 A3)', () => {
 
     expect(writes(fake)[0].applied, 'the PUT was accepted').toBe(true)
     expect.soft(overrides(driver.readView()), 'the tools on screen').toEqual(SAVED_VIEW)
+    expect(errorBanners(), 'error banners after the failed refresh').not.toHaveLength(0)
     // Save is usable again: a further edit is written.
     await driver.edit()
     await driver.editTool('clerum__generate_pdf', 'required')
