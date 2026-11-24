@@ -1,6 +1,7 @@
 'use strict'
-// Regenerates fixtures/classifier-vectors.v1.json and
-// fixtures/file-reference-vectors.v1.json. Every expected output below is
+// Regenerates fixtures/classifier-vectors.v1.json,
+// fixtures/file-reference-vectors.v1.json and
+// fixtures/location-reference-vectors.v1.json. Every expected output below is
 // written by hand; none is computed by the classifier or the parser, so the
 // vectors stay an independent statement of the contract.
 //
@@ -697,6 +698,99 @@ const references = [
   r('mismatch not boolean', { ...attachmentBase, mismatch: 'no' }, invalid),
 ]
 
+const folderBase = {
+  schemaVersion: 1,
+  id: `gfs-folder:personal:${RID}`,
+  name: 'Reports',
+  source: {
+    kind: 'gfs',
+    drive: 'personal',
+    resourceId: RID,
+    gfsUri: `gfs://personal/${RID}`,
+  },
+}
+
+const locations = [
+  r('valid folder reference', folderBase, ok),
+  r('folder name with a backslash', { ...folderBase, name: 'Q3\\drafts' }, ok),
+  r('folder name of 255 code points', { ...folderBase, name: 'ñ'.repeat(255) }, ok),
+  r(
+    'dashed resourceId with a normalized gfsUri',
+    {
+      ...folderBase,
+      id: `gfs-folder:personal:${DASHED_RID}`,
+      source: { ...folderBase.source, resourceId: DASHED_RID },
+    },
+    ok
+  ),
+  r('missing schemaVersion', without(folderBase, 'schemaVersion'), unsupported),
+  r('schemaVersion 2', { ...folderBase, schemaVersion: 2 }, unsupported),
+  r('not an object', `gfs-folder:personal:${RID}`, invalid),
+  r('a list', [folderBase], invalid),
+  r('forged id', { ...folderBase, id: `gfs-folder:personal:${'b'.repeat(32)}` }, invalid),
+  r('file reference id', { ...folderBase, id: `gfs:personal:${RID}@v7` }, invalid),
+  r('missing id', without(folderBase, 'id'), invalid),
+  r('unknown top-level field', { ...folderBase, byteLength: 0 }, invalid),
+  r(
+    'source with a version',
+    { ...folderBase, source: { ...folderBase.source, version: 7 } },
+    invalid
+  ),
+  r(
+    'unknown source field',
+    { ...folderBase, source: { ...folderBase.source, path: '/x' } },
+    invalid
+  ),
+  r(
+    'attachment source',
+    { ...folderBase, source: { kind: 'attachment', attachmentId: 'a', messageId: 'm' } },
+    invalid
+  ),
+  r(
+    'source without drive',
+    { ...folderBase, source: { ...folderBase.source, drive: '' } },
+    invalid
+  ),
+  r(
+    'resourceId that is not 32 hex digits',
+    {
+      ...folderBase,
+      id: 'gfs-folder:personal:res-42',
+      source: { ...folderBase.source, resourceId: 'res-42', gfsUri: 'gfs://personal/res-42' },
+    },
+    invalid
+  ),
+  r(
+    'gfsUri naming another resource',
+    { ...folderBase, source: { ...folderBase.source, gfsUri: `gfs://personal/${'b'.repeat(32)}` } },
+    invalid
+  ),
+  r(
+    'gfsUri on another drive',
+    { ...folderBase, source: { ...folderBase.source, gfsUri: `gfs://shared/${RID}` } },
+    invalid
+  ),
+  r(
+    'gfsUri with the dashed resourceId',
+    {
+      ...folderBase,
+      id: `gfs-folder:personal:${DASHED_RID}`,
+      source: {
+        ...folderBase.source,
+        resourceId: DASHED_RID,
+        gfsUri: `gfs://personal/${DASHED_RID}`,
+      },
+    },
+    invalid
+  ),
+  r('empty name', { ...folderBase, name: '' }, invalid),
+  r('name with a slash', { ...folderBase, name: 'a/b' }, invalid),
+  r('name ..', { ...folderBase, name: '..' }, invalid),
+  r('name with a control character', { ...folderBase, name: 'Re\u0007ports' }, invalid),
+  r('name not in NFC', { ...folderBase, name: 'Cafe\u0301' }, invalid),
+  r('name of 256 code points', { ...folderBase, name: 'ñ'.repeat(256) }, invalid),
+]
+
 fs.mkdirSync(OUT, { recursive: true })
 fs.writeFileSync(
   path.join(OUT, 'classifier-vectors.v1.json'),
@@ -706,4 +800,10 @@ fs.writeFileSync(
   path.join(OUT, 'file-reference-vectors.v1.json'),
   JSON.stringify({ schemaVersion: 1, vectors: references }, null, 2) + '\n'
 )
-console.log(`classifier=${classifier.length} references=${references.length}`)
+fs.writeFileSync(
+  path.join(OUT, 'location-reference-vectors.v1.json'),
+  JSON.stringify({ schemaVersion: 1, vectors: locations }, null, 2) + '\n'
+)
+console.log(
+  `classifier=${classifier.length} references=${references.length} locations=${locations.length}`
+)

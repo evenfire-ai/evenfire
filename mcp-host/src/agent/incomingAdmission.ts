@@ -36,8 +36,8 @@ import { serializeSessionKey } from '../session/types.js'
 import type { FileReferenceGfsAccess } from './fileReferenceGfsGate'
 import {
   type FileReferenceCheckFailure,
-  type FileReferenceResolutionResult,
-  resolveFileReferences,
+  type MessageReferenceResolutionResult,
+  resolveMessageReferences,
 } from './fileReferenceResolver'
 import type { GfsSurfaceRuntimeCapability } from './gfsReferenceSurfaces'
 import { type IncomingAttachmentLimits, validateIncomingAttachments } from './incomingAttachments'
@@ -183,10 +183,16 @@ function approvalModeStoreFailure(provider: string | undefined): MessageResponse
 /**
  * The message a replayed delivery is dispatched with. Admission does not run
  * on a replay, so the fields only admission may set are cleared: a caller can
- * never supply a visual execution identity or file reference resolutions.
+ * never supply a visual execution identity or file or location reference
+ * resolutions.
  */
 export function replayedIncomingMessage(message: IncomingMessage): IncomingMessage {
-  return { ...message, imageModel: undefined, fileReferenceResolutions: undefined }
+  return {
+    ...message,
+    imageModel: undefined,
+    fileReferenceResolutions: undefined,
+    locationReferenceResolutions: undefined,
+  }
 }
 
 export type IncomingAdmission = (
@@ -275,9 +281,12 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       imageModel: undefined,
       // Resolutions are the Host's own answer; a caller cannot pre-fill them.
       fileReferenceResolutions: undefined,
+      locationReferenceResolutions: undefined,
     }
     const fileReferences = message.fileReferences ?? []
+    const locationReferences = message.locationReferences ?? []
     let acceptedFileReferenceIds: string[] = []
+    let acceptedLocationReferenceIds: string[] = []
     deps.logger.info(
       {
         channel: normalizedMessage.channelType,
@@ -432,8 +441,8 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       })()
     }
 
-    // A successful response names every attachment and file reference the Host
-    // accepted, on the sync response and on the async ack alike. Their absence
+    // A successful response names every attachment, file and location reference
+    // the Host accepted, on the sync response and on the async ack alike. Their absence
     // on a send that carried them is how a client detects a Host that dropped
     // them.
     const withAcceptedAttachments = (response: MessageResponse): MessageResponse => {
@@ -454,11 +463,14 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           'Host runtime event'
         )
       }
-      return acceptedAttachmentIds.length || acceptedFileReferenceIds.length
+      return acceptedAttachmentIds.length ||
+        acceptedFileReferenceIds.length ||
+        acceptedLocationReferenceIds.length
         ? {
             ...response,
             ...(acceptedAttachmentIds.length ? { acceptedAttachmentIds } : {}),
             ...(acceptedFileReferenceIds.length ? { acceptedFileReferenceIds } : {}),
+            ...(acceptedLocationReferenceIds.length ? { acceptedLocationReferenceIds } : {}),
           }
         : response
     }
@@ -757,25 +769,28 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       return runHandler()
     }
 
-    if (!fileReferences.length) return admitAndRun()
+    if (!fileReferences.length && !locationReferences.length) return admitAndRun()
     // Issue #666 — every reference is re-authorized under the Host principal
-    // before the task exists. An unavailable file is still a valid turn: it is
-    // listed with its availability. Only a failure to ask gfsc refuses it.
+    // before the task exists. An unavailable file or folder is still a valid
+    // turn: it is listed with its availability. Only a failure to ask gfsc
+    // refuses it: a request to write into a folder must not run somewhere else.
     return (async () => {
-      // Only a GFS reference needs the Host's GFS token.
-      const access: FileReferenceGfsAccess = fileReferences.some(ref => ref.source.kind === 'gfs')
-        ? deps.fileReferenceGfs()
-        : { status: 'unsupported' }
+      // Only a GFS reference needs the Host's GFS token; every location is one.
+      const access: FileReferenceGfsAccess =
+        locationReferences.length || fileReferences.some(ref => ref.source.kind === 'gfs')
+          ? deps.fileReferenceGfs()
+          : { status: 'unsupported' }
       const runtimeSurfaces = deps.gfsSurfaceRuntimeCapability?.(normalizedMessage) ?? {
         workspaceFile: false,
         localExecutor: false,
         visual: false,
       }
-      const resolved: FileReferenceResolutionResult =
+      const resolved: MessageReferenceResolutionResult =
         access.status === 'credentials_failed'
           ? { ok: false, failure: 'credentials', errorClass: access.errorClass }
-          : await resolveFileReferences(
+          : await resolveMessageReferences(
               fileReferences,
+              locationReferences,
               access.status === 'available' ? access.client : null,
               undefined,
               runtimeSurfaces
@@ -786,6 +801,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             event: 'file_reference_refused',
             channel: normalizedMessage.channelType,
             referenceCount: fileReferences.length,
+            locationCount: locationReferences.length,
             failure: resolved.failure,
             errorClass: resolved.errorClass,
             status: resolved.status ?? null,
@@ -794,9 +810,15 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         )
         return { success: false, error: fileReferenceFailure(resolved.failure) }
       }
-      normalizedMessage.fileReferenceResolutions = resolved.resolutions
-      acceptedFileReferenceIds = resolved.resolutions.map(r => r.reference.id)
-      // Classes, sizes and availabilities only: never a file name.
+      if (fileReferences.length) {
+        normalizedMessage.fileReferenceResolutions = resolved.resolutions
+        acceptedFileReferenceIds = resolved.resolutions.map(r => r.reference.id)
+      }
+      if (locationReferences.length) {
+        normalizedMessage.locationReferenceResolutions = resolved.locationResolutions
+        acceptedLocationReferenceIds = resolved.locationResolutions.map(r => r.reference.id)
+      }
+      // Classes, sizes and availabilities only: never a file or folder name.
       deps.logger.info(
         {
           event: 'file_reference_resolved',
@@ -805,6 +827,8 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           fileClasses: resolved.resolutions.map(r => r.reference.class),
           availabilities: resolved.resolutions.map(r => r.availability),
           byteLength: resolved.resolutions.reduce((sum, r) => sum + r.reference.byteLength, 0),
+          locationCount: resolved.locationResolutions.length,
+          locationAvailabilities: resolved.locationResolutions.map(r => r.availability),
         },
         'Host runtime event'
       )
@@ -813,19 +837,42 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
 
     function fileReferenceFailure(failure: FileReferenceCheckFailure): TaskError {
       const provider = deps.hostProvider() ?? 'unknown'
+      const folders = locationReferences.length === 1 ? 'folder' : 'folders'
+      // The failure does not say which reference caused it, so the text names
+      // every kind the message carried. The file-only texts are what clients
+      // already show and must stay as they are.
+      const messages: Record<FileReferenceCheckFailure, string> = !locationReferences.length
+        ? {
+            invalid: 'A referenced file does not match the file it names. Pick the file again.',
+            transient: 'The referenced files could not be checked. Send the message again.',
+            contract: 'The file service returned an unexpected answer for a referenced file.',
+            credentials:
+              'The Host could not authenticate to the file service to check the referenced files.',
+          }
+        : !fileReferences.length
+          ? {
+              invalid:
+                'A referenced folder does not match the folder it names. Pick the folder again.',
+              transient: `The referenced ${folders} could not be checked. Send the message again.`,
+              contract: 'The file service returned an unexpected answer for a referenced folder.',
+              credentials: `The Host could not authenticate to the file service to check the referenced ${folders}.`,
+            }
+          : {
+              invalid: 'A referenced file or folder does not match what it names. Pick it again.',
+              transient:
+                'The referenced files and folders could not be checked. Send the message again.',
+              contract:
+                'The file service returned an unexpected answer for a referenced file or folder.',
+              credentials:
+                'The Host could not authenticate to the file service to check the referenced files and folders.',
+            }
       if (failure === 'invalid')
         return {
           code: FileReferenceErrorCode.Invalid,
-          message: 'A referenced file does not match the file it names. Pick the file again.',
+          message: messages.invalid,
           retryable: false,
           provider,
         }
-      const messages: Record<Exclude<FileReferenceCheckFailure, 'invalid'>, string> = {
-        transient: 'The referenced files could not be checked. Send the message again.',
-        contract: 'The file service returned an unexpected answer for a referenced file.',
-        credentials:
-          'The Host could not authenticate to the file service to check the referenced files.',
-      }
       return {
         code: FileReferenceErrorCode.CheckFailed,
         message: messages[failure],

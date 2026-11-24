@@ -1,5 +1,6 @@
 export * from './fileClassifier'
 export * from './fileReference'
+export * from './locationReference'
 export * from './inheritedAccess'
 export * from './dragPolicy'
 
