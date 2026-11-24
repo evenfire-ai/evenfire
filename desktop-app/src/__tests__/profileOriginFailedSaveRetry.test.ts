@@ -114,7 +114,11 @@ it('does not persist an R1 HTTP discovery into the successful R2 retry after a f
   const realRenameSync = fsSync.renameSync.bind(fsSync)
   let failed = false
   vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
-    if (!failed && args[0] === harness.optionA.configPath && String(args[1]).includes(rpc2)) {
+    if (
+      !failed &&
+      args[0] === harness.optionA.configPath &&
+      JSON.parse(String(args[1])).rpcProxyBaseUrl === rpc2
+    ) {
       failed = true
       throw Object.assign(new Error('injected profile write failure'), { code: 'EACCES' })
     }
