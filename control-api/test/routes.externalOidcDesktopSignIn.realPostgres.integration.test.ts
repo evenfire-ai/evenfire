@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { createHash, randomBytes } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
 import request from 'supertest'
 import { type DbTransactionClient, initDb, withTransaction } from '../src/db.js'
@@ -20,6 +21,11 @@ import { findFirstActiveMembership } from '../src/services/directory/login.js'
 import { acceptInvitationForEmail, softDeleteMember } from '../src/services/directory/membership.js'
 import type { InviteRole } from '../src/services/directory/types.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
+import {
+  type ContractRecord,
+  expectContractFile,
+  normalizeContractBody,
+} from './helpers/contractFixture.js'
 import {
   type FakeIdTokenClaims,
   OIDC_MEMBER_SIGN_IN_FAKE_PUBLIC_IP,
@@ -152,6 +158,7 @@ afterEach(() => {
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
+const CONFIGURATION_PATH = '/external/oidc/profile-flow/configuration'
 const ATTEMPTS_PATH = '/external/oidc/profile-flow/attempts'
 const COMPLETE_PATH = '/external/oidc/profile-flow/complete'
 const REDEEM_PATH = '/external/oidc/desktop-sign-in/redeem'
@@ -161,6 +168,10 @@ const TEAM_NAME = 'Desktop Sign-In Team'
 const SECOND_TEAM_NAME = 'Desktop Second Team'
 const OLDEST_TEAM_NAME = 'Desktop Oldest Team'
 const ADMIN_ACTOR_ID = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f'
+/** The answers only the real chain gives, which the edge's contract test replays. */
+const CONTRACT_FILE = fileURLToPath(
+  new URL('./fixtures/oidc-desktop-sign-in/control-api.realPostgres.json', import.meta.url)
+)
 
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
@@ -220,6 +231,12 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
   let runtimePool: Pool
   /** The one provider every row signs in with, unless the row changes its settings. */
   const desktopFake = createOidcMemberSignInFakeProvider()
+  /** Route answers recorded by the rows below, by contract record key; the last row writes them. */
+  const contract: Record<string, ContractRecord> = {}
+
+  function recordContract(key: string, response: request.Response): void {
+    contract[key] = { status: response.status, body: normalizeContractBody(response.body) }
+  }
 
   /** The profile-flow and redeem routers, with the shared error handler. */
   function chainApp(redeemDependencies: ExternalOidcDesktopSignInDependencies = {}) {
@@ -495,6 +512,15 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
     const member = await seedMember('desktop-plain')
     const team = await seedTeam(TEAM_NAME)
     await seedMembership(team, member.userId, 'member')
+    // What Profile UI reads before it starts an attempt.
+    stubOidcEnvironment(desktopFake.env)
+    const configuration = await request(chainApp()).get(CONFIGURATION_PATH)
+    expect(configuration.status).toBe(200)
+    expect(configuration.body).toEqual({
+      redirectUri: desktopFake.provider.redirectUri,
+      memberAuthenticationActivated: true,
+      displayLabel: desktopFake.provider.displayLabel,
+    })
 
     const { begun, completed, state } = await signInThroughRoute(desktopFake, member.claims)
 
@@ -522,6 +548,9 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
       contract: 'v1',
       claims: { userId: member.userId, email: member.email, teamId: team },
     })
+    recordContract('GET /external/oidc/profile-flow/configuration activated', configuration)
+    recordContract('POST /external/oidc/profile-flow/attempts plain', begun)
+    recordContract('POST /external/oidc/profile-flow/complete member-signed-in', completed)
   })
 
   it('mints at /complete and redeems once for { token, me }', async () => {
@@ -569,6 +598,12 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
       contract: 'v1',
       claims: { userId: member.userId, email: member.email, teamId: team },
     })
+    recordContract('POST /external/oidc/profile-flow/attempts desktop-echo', minted.begun)
+    recordContract(
+      'POST /external/oidc/profile-flow/complete desktop-code-issued',
+      minted.completed
+    )
+    recordContract('POST /external/oidc/desktop-sign-in/redeem signed-in', redeemed)
   })
 
   it('leaves the code redeemable after a wrong verifier', async () => {
@@ -695,6 +730,7 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
     expect(refused.body).toEqual({ error: 'desktop_sign_in_refused', reason: 'account_disabled' })
     expect(await sessionCount(member.userId)).toBe(0)
     expect(await storedCode(minted.code)).toBeUndefined()
+    recordContract('POST /external/oidc/desktop-sign-in/redeem refused-account-disabled', refused)
 
     await reactivate(member.userId)
     const again = await redeem(minted.code, minted.verifier, { sessionContract: 'v2' })
@@ -961,5 +997,36 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
       expect(typeof value === 'string' && value.length >= 20).toBe(true)
       expect(text).not.toContain(value)
     }
+  })
+
+  it('records the contract bodies', async () => {
+    expect(Object.keys(contract).sort()).toEqual(
+      [
+        'GET /external/oidc/profile-flow/configuration activated',
+        'POST /external/oidc/profile-flow/attempts desktop-echo',
+        'POST /external/oidc/profile-flow/attempts plain',
+        'POST /external/oidc/profile-flow/complete desktop-code-issued',
+        'POST /external/oidc/profile-flow/complete member-signed-in',
+        'POST /external/oidc/desktop-sign-in/redeem signed-in',
+        'POST /external/oidc/desktop-sign-in/redeem refused-account-disabled',
+      ].sort()
+    )
+    // The fixed state, nonce and challenge keep the shapes Profile UI accepts,
+    // and the URL still names the recorded configuration's callback.
+    const configured = contract['GET /external/oidc/profile-flow/configuration activated']!
+      .body as { redirectUri: string }
+    for (const key of [
+      'POST /external/oidc/profile-flow/attempts plain',
+      'POST /external/oidc/profile-flow/attempts desktop-echo',
+    ]) {
+      const recorded = contract[key]!.body as { authorizationUrl: string }
+      const params = new URL(recorded.authorizationUrl).searchParams
+      expect(params.get('redirect_uri')).toBe(configured.redirectUri)
+      expect(params.get('state')).toMatch(/^[A-Za-z0-9_-]{32,512}$/)
+      expect(params.get('nonce')).toMatch(/^[A-Za-z0-9_-]{32,512}$/)
+      expect(params.get('code_challenge')).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    }
+
+    await expectContractFile(contract, CONTRACT_FILE)
   })
 })

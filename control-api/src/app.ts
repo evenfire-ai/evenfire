@@ -1,4 +1,4 @@
-import express from 'express'
+import express, { type RequestHandler } from 'express'
 import { posix } from 'node:path'
 import { config } from './config.js'
 import type { DbClient } from './db.js'
@@ -89,6 +89,14 @@ function canonicalRequestPath(path: string): string | null {
     throw err
   }
   return posix.normalize(decoded).replace(/\/+/g, '/')
+}
+
+/**
+ * The JSON 404 for any request no route answered. Exported so the contract
+ * test records the same body the app sends.
+ */
+export const externalNotFoundHandler: RequestHandler = (_req, res) => {
+  res.status(404).json({ error: 'Not Found' })
 }
 
 export function createApp(gateway: K8sGateway) {
@@ -301,9 +309,7 @@ export function createApp(gateway: K8sGateway) {
   api.use(createInternalLlmProviderAttemptRoutes(gateway.llmAllowedModelsConfigMap()))
   app.use('/api/v1', api)
 
-  app.use((_req, res) => {
-    res.status(404).json({ error: 'Not Found' })
-  })
+  app.use(externalNotFoundHandler)
 
   app.use(clerumErrorHandler)
 

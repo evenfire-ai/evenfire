@@ -1,0 +1,98 @@
+{
+  "GET /external/auth/methods password": {
+    "body": {
+      "methods": [
+        "password"
+      ]
+    },
+    "status": 200
+  },
+  "GET /external/auth/methods password-and-oidc": {
+    "body": {
+      "methods": [
+        "password",
+        "oidc"
+      ],
+      "oidc": {
+        "label": "Fake member sign-in provider",
+        "signInUrl": "https://control.example.test/desktop-login"
+      }
+    },
+    "status": 200
+  },
+  "GET /external/unknown not-found": {
+    "body": {
+      "error": "Not Found"
+    },
+    "status": 404
+  },
+  "POST /external/oidc/desktop-sign-in/redeem invalid": {
+    "body": {
+      "error": "invalid_desktop_sign_in_code"
+    },
+    "status": 400
+  },
+  "POST /external/oidc/desktop-sign-in/redeem issuance-unavailable": {
+    "body": {
+      "error": {
+        "code": "session_issuance_temporarily_unavailable",
+        "correlationId": "fixture-correlation",
+        "message": "A session could not be issued right now. Try again in two seconds.",
+        "retryable": true
+      }
+    },
+    "status": 503
+  },
+  "POST /external/oidc/desktop-sign-in/redeem unavailable": {
+    "body": {
+      "error": "desktop_sign_in_unavailable"
+    },
+    "status": 409
+  },
+  "POST /external/oidc/desktop-sign-in/redeem upgrade-required": {
+    "body": {
+      "error": "upgrade_required"
+    },
+    "status": 426
+  },
+  "POST /external/oidc/profile-flow/attempts desktop-unavailable": {
+    "body": {
+      "error": "desktop_sign_in_unavailable"
+    },
+    "status": 409
+  },
+  "POST /external/oidc/profile-flow/attempts invalid": {
+    "body": {
+      "error": "invalid_oidc_attempt"
+    },
+    "status": 400
+  },
+  "POST /external/oidc/profile-flow/cancel cancelled": {
+    "body": {
+      "outcome": "attempt_cancelled"
+    },
+    "status": 200
+  },
+  "POST /external/oidc/profile-flow/complete identity-proof-verified": {
+    "body": {
+      "memberAuthenticationActivated": false,
+      "outcome": "identity_proof_verified"
+    },
+    "status": 200
+  },
+  "POST /external/oidc/profile-flow/complete refused": {
+    "body": {
+      "memberAuthenticationActivated": true,
+      "outcome": "refused",
+      "reason": "not_eligible"
+    },
+    "status": 200
+  },
+  "POST /external/oidc/profile-flow/complete storage-unavailable": {
+    "body": {
+      "error": "oidc_storage_unavailable",
+      "retrySameAttempt": false
+    },
+    "status": 503
+  }
+}
