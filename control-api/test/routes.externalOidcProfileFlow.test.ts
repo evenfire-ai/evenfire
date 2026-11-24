@@ -48,6 +48,7 @@ vi.mock('../src/oidc/protocolEngine.js', async importOriginal => {
       return {
         authorizationUrl: 'https://issuer.example.test/authorize?state=opaque-state',
         expiresAt: new Date('2026-10-30T18:00:00.000Z'),
+        attemptId: '7d1f3c2a-9b4e-4f6a-8c5d-2e1b0a9f8c7d',
       }
     }
 
@@ -97,6 +98,7 @@ describe('Control API OIDC Profile UI foundation boundary', () => {
     const beginIdentityProofAttempt = vi.fn().mockResolvedValue({
       authorizationUrl: 'https://issuer.example.test/authorize?state=opaque-state',
       expiresAt: new Date('2026-10-30T18:00:00.000Z'),
+      attemptId: '7d1f3c2a-9b4e-4f6a-8c5d-2e1b0a9f8c7d',
     })
     const app = appFor({ beginIdentityProofAttempt })
     const browserBinding = 'B'.repeat(43)
@@ -105,6 +107,7 @@ describe('Control API OIDC Profile UI foundation boundary', () => {
       .send({ browserBinding, clientSecret: 'must-not-be-forwarded' })
 
     expect(response.status).toBe(200)
+    // Exact: the attempt id begin returns stays on the server.
     expect(response.body).toEqual({
       authorizationUrl: 'https://issuer.example.test/authorize?state=opaque-state',
       expiresAt: '2026-10-30T18:00:00.000Z',
