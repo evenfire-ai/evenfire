@@ -201,7 +201,7 @@ it.each(['app', 'gfs'] as const)(
       releaseResponse = undefined
       await expect(Promise.race([stale, deadline])).rejects.toThrow()
       expect(writeText).not.toHaveBeenCalled()
-      await expect(fs.access(file)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.readFile(file, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
 
       await service.saveRuntimeConfig(initial)
       service.sessionToken = 'synthetic-session'
