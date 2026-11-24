@@ -69,12 +69,12 @@ describe('control-api proxy answers when control-api does not', () => {
     const { address, port } = upstream.address() as AddressInfo
     // Read once, when the route module loads.
     process.env.CONTROL_API_INTERNAL_URL = `http://${address}:${port}`
-    process.env.CONTROL_API_PROXY_TIMEOUT_MS = PROXY_TIMEOUT_MS
     route = await import('../route')
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
+    restoreEnv('CONTROL_API_PROXY_TIMEOUT_MS', savedEnv.timeout)
   })
 
   afterAll(async () => {
@@ -82,10 +82,12 @@ describe('control-api proxy answers when control-api does not', () => {
     upstream.close()
     await once(upstream, 'close')
     restoreEnv('CONTROL_API_INTERNAL_URL', savedEnv.url)
-    restoreEnv('CONTROL_API_PROXY_TIMEOUT_MS', savedEnv.timeout)
   })
 
   it('answers 504 when the upstream request outlives the proxy timeout', async () => {
+    // Read per request. Only this case arms the short timeout, so it can never
+    // beat the connection reset of the 502 case.
+    process.env.CONTROL_API_PROXY_TIMEOUT_MS = PROXY_TIMEOUT_MS
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     const response = await route.PUT(...hostPut(SILENT_PATH))
