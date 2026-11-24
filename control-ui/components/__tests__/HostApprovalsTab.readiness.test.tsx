@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { getHost, getHostDetailBundle } from '../../lib/api'
 import {
+  type ApprovalSettingsDriver,
   errorBanners,
   openApprovalSettings,
   pageMountDefaults,
@@ -38,6 +39,7 @@ import { buildGuardrailDetailScenario } from '../../test/fixtures/guardrailProdu
 const FOO = '/api/v1/admin/hosts/foo'
 const FOO_DETAIL = `${FOO}/detail`
 const B_DETAIL = '/api/v1/admin/hosts/b/detail'
+const C_DETAIL = '/api/v1/admin/hosts/c/detail'
 
 // Spec §6.4 steps 3 and 4, verbatim.
 const CHANGED_SINCE_OPENED =
@@ -136,6 +138,18 @@ async function openFooWithDraft(
 
 const SAVED_TOOLS = { json_transform: true, system_info: true }
 const SAVED_VIEW = { json_transform: 'Required', system_info: 'Required' }
+// T8's other agents: neither shares a tool with foo's saved view.
+const B_VIEW = { clerum__generate_pdf: 'Required' }
+const C_VIEW = { clerum__generate_docx: 'Required' }
+
+/** foo's saved overrides that are on screen: none when no per-tool section is rendered. */
+function fooSavedShown(driver: ApprovalSettingsDriver): Record<string, string> {
+  if (!perToolSection()) return {}
+  const shown = overrides(driver.readView())
+  return Object.fromEntries(
+    Object.entries(SAVED_VIEW).filter(([name, state]) => shown[name] === state)
+  )
+}
 
 describe('approval settings readiness (spec §7 A3)', () => {
   beforeEach(() => resetApprovalTestState())
@@ -240,10 +254,16 @@ describe('approval settings readiness (spec §7 A3)', () => {
     expect(approvalOf(fake.stored('foo').spec)).toEqual({ tools: SAVED_TOOLS })
   })
 
-  it("T8 a kept instance moved to agent b shows b's tools when a's refresh lands late (harness-only)", async () => {
+  it("T8 a late refresh of an agent the kept instance has left never shows that agent's tools (harness-only)", async () => {
+    // Three agents. After its first load the target keeps the section mounted
+    // and shows the last values it applied until a newer load applies, so the
+    // load that lands last decides the screen. foo's refresh must therefore land
+    // while the screen shows another agent (b) and a load is still out (c):
+    // only then does what is on screen tell whether foo's refresh was painted.
     const fake = createFake({
       foo: seedHost('foo', { approval: { tools: { json_transform: true } } }),
       b: seedHost('b', { approval: { tools: { clerum__generate_pdf: true } } }),
+      c: seedHost('c', { approval: { tools: { clerum__generate_docx: true } } }),
     })
     const page = renderHostPage({ fake, name: 'foo' })
     const driver = await openApprovalSettings(page)
@@ -254,27 +274,33 @@ describe('approval settings readiness (spec §7 A3)', () => {
     await act(async () => {
       await fooRefresh.arrived
     })
-    const bLoad = fake.hold({ method: 'GET', path: B_DETAIL })
+
     page.rerenderKept({ name: 'b' })
+    await waitFor(() => expect(reads(fake, B_DETAIL).some(entry => entry.delivered)).toBe(true))
+    await settle()
+    expect(perToolSection(), "b's per-tool section").not.toBeNull()
+    expect(overrides(driver.readView()), "b's tools").toEqual(B_VIEW)
+
+    const cLoad = fake.hold({ method: 'GET', path: C_DETAIL })
+    page.rerenderKept({ name: 'c' })
     await act(async () => {
-      await bLoad.arrived
+      await cLoad.arrived
     })
-    // foo's refresh lands while b's load is still out, then b's load lands.
-    // Today's section copies its tools only when it mounts, so the load that
-    // lands first is the one it shows: with b's load first, today shows b's
-    // tools and only its dirty flag carries foo's.
     await act(async () => {
       fooRefresh.deliverNow()
     })
     await settle()
+    // The deciding moment. It is asserted after c's load is released, so that
+    // no hold stays open when it fails.
+    const fooShownAfterItsRefresh = fooSavedShown(driver)
     await act(async () => {
-      bLoad.deliverNow()
+      cLoad.deliverNow()
     })
     await settle()
 
-    expect(overrides(driver.readView()), 'the tools on screen').toEqual({
-      clerum__generate_pdf: 'Required',
-    })
+    expect(fooShownAfterItsRefresh, "foo's saved tools after foo's late refresh").toEqual({})
+    expect(overrides(driver.readView()), "c's tools").toEqual(C_VIEW)
+    expect(fooSavedShown(driver), "foo's saved tools after c's load").toEqual({})
     page.unmount()
   })
 
