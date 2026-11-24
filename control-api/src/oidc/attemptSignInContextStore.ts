@@ -6,8 +6,8 @@ import type { DbClient } from '../db.js'
  * A plain Profile sign-in has no context. A Desktop sign-in carries the
  * Desktop's PKCE code challenge; an invitation carries the invitation id and
  * the lower-cased invited email. The rows live in
- * `oidc_attempt_sign_in_contexts` (migration 0160), one per attempt, and the
- * runtime role only inserts and reads them.
+ * `oidc_attempt_sign_in_contexts` (migration `0160_oidc_desktop_sign_in`), one
+ * per attempt, and the runtime role only inserts and reads them.
  */
 export type OidcAttemptSignInContext =
   | Readonly<{ kind: 'desktop_sign_in'; codeChallenge: string }>

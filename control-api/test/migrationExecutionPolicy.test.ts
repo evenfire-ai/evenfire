@@ -582,9 +582,9 @@ describe('D34 PR1 migration runner', () => {
 
     expect(applied).toEqual(RUNNER_MIGRATION_VERSIONS)
     // One transaction per version without post-schema work (0137-0150,
-    // 0153-0154, 0157-0160); a version with it commits its schema, each validation and
-    // its receipt separately: 0151 1 + 4 + 1, 0152 1 + 1 + 1, 0155 1 + 1 + 1,
-    // 0156 1 + 2 + 1.
+    // 0153-0154, 0157 to 0160_oidc_desktop_sign_in); a version with it commits
+    // its schema, each validation and its receipt separately: 0151 1 + 4 + 1,
+    // 0152 1 + 1 + 1, 0155 1 + 1 + 1, 0156 1 + 2 + 1.
     const transactions = 20 + 6 + 3 + 3 + 4
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
@@ -876,7 +876,8 @@ describe('D34 PR1 migration runner', () => {
     expect(withRetries).toEqual([
       ['0146_gfs_authz_team_members_notify', 2],
       ['0147_gfs_watch_session_users_notify', 2],
-      // 0159 and 0160 add a foreign key to users, which needs a lock on it.
+      // Both OIDC migrations below add a foreign key to users, which needs a
+      // lock on it.
       ['0159_oidc_member_links', 2],
       ['0160_oidc_desktop_sign_in', 2],
     ])

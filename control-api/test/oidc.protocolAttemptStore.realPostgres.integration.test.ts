@@ -388,8 +388,8 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
   })
 
   it('stores and claims an attempt on the 0141 table before the browser-binding upgrade', async () => {
-    // 0160's contexts reference the attempts table, so they go first and come
-    // back with it.
+    // The contexts from 0160_oidc_desktop_sign_in reference the attempts
+    // table, so they go first and come back with it.
     await pool!.query('DROP TABLE IF EXISTS oidc_attempt_sign_in_contexts')
     await pool!.query('DROP TABLE IF EXISTS oidc_protocol_attempts')
     await pool!.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
