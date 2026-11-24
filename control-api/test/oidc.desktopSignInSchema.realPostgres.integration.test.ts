@@ -47,9 +47,11 @@ describeRealPostgres('OIDC Desktop sign-in schema on real PostgreSQL', () => {
     pool = new Pool({ connectionString: databaseUrl(adminUrl, database) })
     await initDb({ connect: () => pool!.connect() })
 
-    runtimePool = new Pool({ connectionString: databaseUrl(adminUrl, database) })
-    runtimePool.on('connect', client => {
-      void client.query('SET ROLE control_api_runtime')
+    // The role is a startup parameter, so it is set before the first query on
+    // each connection.
+    runtimePool = new Pool({
+      connectionString: databaseUrl(adminUrl, database),
+      options: '-c role=control_api_runtime',
     })
     const role = await runtimePool.query<{ current_user: string }>('SELECT current_user')
     expect(role.rows).toEqual([{ current_user: 'control_api_runtime' }])
