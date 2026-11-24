@@ -11,6 +11,59 @@ const SERVICE = 'Evenfire'
  */
 const LEGACY_ACCOUNT = 'session-token'
 
+type OperationRelease = () => void
+type OperationAdmission = OperationRelease | Promise<OperationRelease> | null
+
+let tokenStoreAdmissionClosed = false
+const activeTokenStoreOperations = new Set<symbol>()
+const queuedTokenStoreOperations: Array<() => void> = []
+const tokenStoreDrainWaiters = new Set<() => void>()
+
+function trackTokenStoreOperation(): OperationRelease {
+  const operation = Symbol('token-store-operation')
+  activeTokenStoreOperations.add(operation)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    activeTokenStoreOperations.delete(operation)
+    if (activeTokenStoreOperations.size === 0) {
+      const waiters = [...tokenStoreDrainWaiters]
+      tokenStoreDrainWaiters.clear()
+      waiters.forEach(resolve => resolve())
+    }
+  }
+}
+
+function admitTokenStoreOperation(isolated: boolean): OperationAdmission {
+  if (process.platform !== 'darwin' || isolated) return null
+  if (!tokenStoreAdmissionClosed) return trackTokenStoreOperation()
+  return new Promise(resolve => {
+    queuedTokenStoreOperations.push(() => resolve(trackTokenStoreOperation()))
+  })
+}
+
+/** Close admission before Electron's terminal will-quit boundary. */
+export function closeTokenStoreAdmission(): boolean {
+  if (process.platform !== 'darwin') return false
+  tokenStoreAdmissionClosed = true
+  return activeTokenStoreOperations.size > 0
+}
+
+/** Resolve after every operation admitted before shutdown has fully settled. */
+export function waitForTokenStoreOperations(): Promise<void> {
+  if (activeTokenStoreOperations.size === 0) return Promise.resolve()
+  return new Promise(resolve => tokenStoreDrainWaiters.add(resolve))
+}
+
+/** Reopen admission and start queued calls after a deferred Quit is canceled. */
+export function openTokenStoreAdmission(): void {
+  if (!tokenStoreAdmissionClosed) return
+  tokenStoreAdmissionClosed = false
+  const queued = queuedTokenStoreOperations.splice(0)
+  queued.forEach(admit => admit())
+}
+
 /**
  * Exact shape emitted by `resolveEnvKey` (config.ts): a `[a-z0-9_]` slug, a
  * `-` separator, and a 12-hex sha256 suffix. Every call site feeds `envKey`
@@ -205,6 +258,20 @@ export class TokenStore {
     envKey: string,
     options: { legacyEnvKeys?: readonly string[] } = {}
   ): Promise<string | null> {
+    const admission = admitTokenStoreOperation(this.isolatedUserDataPath !== undefined)
+    if (admission === null) return this.getSessionTokenInternal(envKey, options)
+    const release = typeof admission === 'function' ? admission : await admission
+    try {
+      return await this.getSessionTokenInternal(envKey, options)
+    } finally {
+      release()
+    }
+  }
+
+  private async getSessionTokenInternal(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[] }
+  ): Promise<string | null> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const account = accountFor(envKey)
@@ -276,7 +343,7 @@ export class TokenStore {
         try {
           const token = await keytar.getPassword(SERVICE, legacyAccount)
           if (token) {
-            await this.setSessionToken(token, envKey)
+            await this.setSessionTokenInternal(token, envKey)
             await keytar.deletePassword(SERVICE, legacyAccount).catch(() => {})
             return token
           }
@@ -291,7 +358,7 @@ export class TokenStore {
           const encrypted = await fs.readFile(file)
           const token = safeStorage.decryptString(encrypted)
           if (token) {
-            await this.setSessionToken(token, envKey)
+            await this.setSessionTokenInternal(token, envKey)
             await removeTokenFileDurably(file).catch(() => {})
             return token
           }
@@ -306,7 +373,7 @@ export class TokenStore {
         const data = JSON.parse(raw) as { token?: unknown }
         const token = typeof data.token === 'string' && data.token ? data.token : null
         if (token) {
-          await this.setSessionToken(token, envKey)
+          await this.setSessionTokenInternal(token, envKey)
           await removeTokenFileDurably(file).catch(() => {})
           return token
         }
@@ -332,7 +399,7 @@ export class TokenStore {
       try {
         const legacy = await keytar.getPassword(SERVICE, LEGACY_ACCOUNT)
         if (legacy) {
-          await this.setSessionToken(legacy, envKey)
+          await this.setSessionTokenInternal(legacy, envKey)
           await keytar.deletePassword(SERVICE, LEGACY_ACCOUNT).catch(() => {})
           return legacy
         }
@@ -348,7 +415,7 @@ export class TokenStore {
         const encrypted = await fs.readFile(file)
         const token = safeStorage.decryptString(encrypted)
         if (token) {
-          await this.setSessionToken(token, envKey)
+          await this.setSessionTokenInternal(token, envKey)
           await removeTokenFileDurably(file).catch(() => {})
           return token
         }
@@ -364,7 +431,7 @@ export class TokenStore {
       const data = JSON.parse(raw) as { token?: unknown }
       const token = typeof data.token === 'string' && data.token ? data.token : null
       if (token) {
-        await this.setSessionToken(token, envKey)
+        await this.setSessionTokenInternal(token, envKey)
         await removeTokenFileDurably(file).catch(() => {})
       }
       return token
@@ -374,6 +441,17 @@ export class TokenStore {
   }
 
   async setSessionToken(token: string, envKey: string): Promise<void> {
+    const admission = admitTokenStoreOperation(this.isolatedUserDataPath !== undefined)
+    if (admission === null) return this.setSessionTokenInternal(token, envKey)
+    const release = typeof admission === 'function' ? admission : await admission
+    try {
+      await this.setSessionTokenInternal(token, envKey)
+    } finally {
+      release()
+    }
+  }
+
+  private async setSessionTokenInternal(token: string, envKey: string): Promise<void> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const account = accountFor(envKey)
@@ -400,6 +478,20 @@ export class TokenStore {
   async clearSessionToken(
     envKey: string,
     options: { legacyEnvKeys?: readonly string[]; clearLegacyGlobalSlot?: boolean } = {}
+  ): Promise<void> {
+    const admission = admitTokenStoreOperation(this.isolatedUserDataPath !== undefined)
+    if (admission === null) return this.clearSessionTokenInternal(envKey, options)
+    const release = typeof admission === 'function' ? admission : await admission
+    try {
+      await this.clearSessionTokenInternal(envKey, options)
+    } finally {
+      release()
+    }
+  }
+
+  private async clearSessionTokenInternal(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[]; clearLegacyGlobalSlot?: boolean }
   ): Promise<void> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
