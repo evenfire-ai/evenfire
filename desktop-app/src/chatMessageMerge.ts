@@ -1,3 +1,4 @@
+import { normalizeGfsRid } from '@clerum/gfs-interaction-policy'
 import type { ChatMessage, ChatMessageAttachment } from './types.js'
 
 export function messageServerTurnNumber(message: Pick<ChatMessage, 'id' | 'serverTurnNumber'>) {
@@ -14,8 +15,10 @@ function serverSlotKey(message: Pick<ChatMessage, 'id' | 'role' | 'serverTurnNum
   return `${messageServerTurnNumber(message)}\u0000${message.role}`
 }
 
+// Whitespace is collapsed as the history parser collapses it in the labels it
+// reads back, so a name with a double space or a tab still pairs with its local chip.
 function attachmentName(attachment: ChatMessageAttachment): string {
-  return (attachment.filename || attachment.label).trim()
+  return (attachment.filename || attachment.label).replace(/\s+/g, ' ').trim()
 }
 
 type AttachmentRule = { identified: 'enrich' | 'server'; contentEcho: 'unique' | 'retain' }
@@ -24,6 +27,7 @@ type AttachmentRule = { identified: 'enrich' | 'server'; contentEcho: 'unique' |
 const ATTACHMENT_RULES: Record<ChatMessageAttachment['type'], AttachmentRule> = {
   uploaded_file: { identified: 'enrich', contentEcho: 'retain' },
   global_file: { identified: 'enrich', contentEcho: 'retain' },
+  global_folder: { identified: 'enrich', contentEcho: 'retain' },
   agent_file: { identified: 'enrich', contentEcho: 'retain' },
   response_file: { identified: 'enrich', contentEcho: 'unique' },
   plugin: { identified: 'server', contentEcho: 'retain' },
@@ -42,6 +46,11 @@ function attachmentIdentitiesConflict(
         server.version !== local.version)
     )
   }
+  // Hardening for folders, here and in the identity match below: a message names
+  // at most one folder, so pairing by name already reaches the same chip.
+  if (server.type === 'global_folder' && local.type === 'global_folder') {
+    return Boolean(server.gfsUri && local.gfsUri && server.gfsUri !== local.gfsUri)
+  }
   if (server.type === 'agent_file' && local.type === 'agent_file') {
     return Boolean(
       server.filesystemName &&
@@ -59,6 +68,9 @@ function sameStructuredAttachmentIdentity(
   local: ChatMessageAttachment
 ): boolean {
   if (server.type === 'global_file' && local.type === 'global_file') {
+    return Boolean(server.gfsUri && server.gfsUri === local.gfsUri)
+  }
+  if (server.type === 'global_folder' && local.type === 'global_folder') {
     return Boolean(server.gfsUri && server.gfsUri === local.gfsUri)
   }
   if (server.type === 'agent_file' && local.type === 'agent_file') {
@@ -92,6 +104,21 @@ function enrichIdentifiedAttachment(
       resourceId: server.resourceId ?? local.resourceId,
       version: server.version ?? local.version,
       bytes: server.bytes ?? local.bytes,
+    }
+  }
+  if (server.type === 'global_folder') {
+    // The server chip is parsed from the folder's label alone: the content
+    // never carries a folder URI, so its identity only survives on the local
+    // chip. That chip is copied only whole and self-consistent, so a resend
+    // never names a folder its own fields disagree on.
+    if (!local.gfsUri || !local.drive || !local.resourceId) return server
+    const rid = normalizeGfsRid(local.resourceId)
+    if (!rid || local.gfsUri !== `gfs://${local.drive}/${rid}`) return server
+    return {
+      ...server,
+      gfsUri: server.gfsUri ?? local.gfsUri,
+      drive: server.drive ?? local.drive,
+      resourceId: server.resourceId ?? local.resourceId,
     }
   }
   if (server.type === 'agent_file') {

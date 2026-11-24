@@ -1,5 +1,6 @@
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import type { FilesResolvedLocation } from '@lib/tabReferenceSuggestion.types'
 import type { Tone } from '@/uiTypes'
 
 export type GfsDriveResource = GfsBrowserChild & {
@@ -50,9 +51,7 @@ export interface FilesPageProps {
    * The resolved current location and whether it is a file or a folder, so the
    * owner watches it under the right kind; `null` at the root or on unmount.
    */
-  onResolvedLocationChange?: (
-    location: { gfsUri: string; kind: 'file' | 'directory' } | null
-  ) => void
+  onResolvedLocationChange?: (location: FilesResolvedLocation) => void
   /**
    * Open (or focus) a preview tab for a previewable file (spec 18 §3.B.4). The
    * files browser no longer renders a preview modal: `openFilePreview` resolves
@@ -69,16 +68,4 @@ export interface FilesPageProps {
   /** Monotonic App request to open the existing route-entry dialog. */
   routeDialogRequestId?: number
   onRouteDialogRequestHandled?: (requestId: number) => void
-}
-
-/**
- * Structural shape of one `window.clerum.agents.listMine()` entry (the wire
- * type is `AgentWithMcpServers` in `desktop-app/src/types.ts`). Only entries
- * with a valid `host` gfsSubject are delegation targets.
- */
-export interface MyAgentEntry {
-  name: string
-  /** Visible name (Agent CRD `spec.host`) surfaced on the wire; may be absent on older builds. */
-  displayName?: string
-  gfsSubject?: { type: string; id: string }
 }

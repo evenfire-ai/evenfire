@@ -79,4 +79,34 @@ describe('CommunicationChannelAccessSelector', () => {
 
     expect(await screen.findByRole('option', { name: 'Admin' })).toBeInTheDocument()
   })
+  it('keeps every eligible team available beyond the first five', async () => {
+    vi.mocked(getAgentTeams).mockResolvedValue({
+      items: Array.from({ length: 12 }, (_, index) => ({
+        id: `team-${index + 1}`,
+        name: `Eligible team ${index + 1}`,
+      })),
+    })
+    const onTeamsChange = vi.fn()
+    render(
+      <CommunicationChannelAccessSelector
+        agentName="chatllm"
+        inlineDropdowns
+        selectedUserIds={[]}
+        selectedTeamIds={[]}
+        onSelectedUserIdsChange={vi.fn()}
+        onSelectedTeamIdsChange={onTeamsChange}
+      />
+    )
+    await screen.findByRole('option', { name: 'Admin' })
+    fireEvent.click(screen.getByRole('tab', { name: 'Teams (0)' }))
+    expect(screen.getByRole('status')).toHaveTextContent('12 teams have access to this agent.')
+    expect(screen.getAllByRole('option')).toHaveLength(12)
+    fireEvent.click(screen.getByRole('option', { name: 'Eligible team 12' }))
+    expect(onTeamsChange).toHaveBeenCalledWith(['team-12'])
+    fireEvent.change(screen.getByPlaceholderText('Search teams...'), {
+      target: { value: 'Eligible team 12' },
+    })
+    expect(screen.getAllByRole('option')).toHaveLength(1)
+    expect(screen.getByRole('option', { name: 'Eligible team 12' })).toBeInTheDocument()
+  })
 })
