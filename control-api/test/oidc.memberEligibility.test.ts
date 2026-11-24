@@ -265,6 +265,24 @@ describe('the required claim', () => {
     expect(evaluateOidcEligibility(proof({ groups: present([]) }), groups)).toEqual(no)
   })
 
+  it('refuses an array element that is only part of the value', () => {
+    for (const part of ['Evenfire', 'Members', '', 'Evenfire Members Plus']) {
+      expect(evaluateOidcEligibility(proof({ groups: present([part]) }), groups)).toEqual(no)
+      expect(evaluateOidcEligibility(proof({ groups: present(part) }), groups)).toEqual(no)
+    }
+    const superadmin = requires('roles', 'superadmin')
+    for (const part of [['admin'], ['super'], ['super', 'admin']]) {
+      expect(evaluateOidcEligibility(proof({ roles: present(part) }), superadmin)).toEqual(no)
+    }
+    // Positive control: the whole value as an element matches.
+    expect(
+      evaluateOidcEligibility(proof({ groups: present(['Evenfire', 'Evenfire Members']) }), groups)
+    ).toEqual(ok)
+    expect(evaluateOidcEligibility(proof({ roles: present(['superadmin']) }), superadmin)).toEqual(
+      ok
+    )
+  })
+
   it('refuses superadmin and administrators for admin, as a string and as an array element', () => {
     const admin = requires('roles', 'admin')
     for (const value of ['superadmin', 'administrators']) {
