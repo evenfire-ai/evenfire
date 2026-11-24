@@ -15,7 +15,7 @@
       ],
       "oidc": {
         "label": "Fake member sign-in provider",
-        "signInUrl": "https://control.example.test/desktop-login"
+        "signInUrl": "https://profile.example.test/desktop-login"
       }
     },
     "status": 200

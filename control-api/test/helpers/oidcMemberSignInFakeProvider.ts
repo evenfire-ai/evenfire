@@ -87,7 +87,7 @@ const DEFAULT_SUBJECT = 'fake-member-subject'
 const REGISTRATION_ID = 'fake-member-sign-in'
 const CLIENT_ID = 'fake-member-sign-in-client'
 const CLIENT_SECRET = 'fake-member-sign-in-client-secret'
-const REDIRECT_URI = 'https://control.example.test/api/v1/oidc/callback'
+const REDIRECT_URI = 'https://profile.example.test/api/oidc/callback'
 const GENERATION_KEY_HEX = 'cd'.repeat(32)
 const ID_TOKEN_LIFETIME_SECONDS = 300
 
