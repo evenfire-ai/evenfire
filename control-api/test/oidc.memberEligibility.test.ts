@@ -265,6 +265,16 @@ describe('the required claim', () => {
     expect(evaluateOidcEligibility(proof({ groups: present([]) }), groups)).toEqual(no)
   })
 
+  it('refuses an array element that differs from the value only in case or whitespace', () => {
+    for (const near of ['evenfire members', 'Evenfire Members ']) {
+      expect(evaluateOidcEligibility(proof({ groups: present([near]) }), groups)).toEqual(no)
+    }
+    // Positive control: the exact value as an element matches.
+    expect(
+      evaluateOidcEligibility(proof({ groups: present(['Evenfire Members']) }), groups)
+    ).toEqual(ok)
+  })
+
   it('refuses an array element that is only part of the value', () => {
     for (const part of ['Evenfire', 'Members', '', 'Evenfire Members Plus']) {
       expect(evaluateOidcEligibility(proof({ groups: present([part]) }), groups)).toEqual(no)

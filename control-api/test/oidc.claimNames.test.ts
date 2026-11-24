@@ -12,6 +12,25 @@ describe('OIDC evidence claim names', () => {
     }
   })
 
+  it('lists exactly the 14 OIDC protocol claims', () => {
+    expect([...OIDC_PROTOCOL_CLAIMS].sort()).toEqual([
+      'at_hash',
+      'aud',
+      'auth_time',
+      'azp',
+      'c_hash',
+      'exp',
+      'iat',
+      'iss',
+      'jti',
+      'nbf',
+      'nonce',
+      's_hash',
+      'sid',
+      'sub',
+    ])
+  })
+
   it.each(['sub', 'nonce', 'auth_time'])('refuses the protocol claim %s', name => {
     expect(OIDC_PROTOCOL_CLAIMS.has(name)).toBe(true)
     expect(isAcceptableEvidenceClaimName(name)).toBe(false)

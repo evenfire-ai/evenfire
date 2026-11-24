@@ -485,6 +485,19 @@ describe('OIDC member sign-in configuration', () => {
     }
   )
 
+  it.each(['tid', 'idp'])('refuses the claim name %s on an Entra issuer', name => {
+    const message = refusal({ ...ENTRA_ENV, ...requiredClaim(CLAIM_VALUE, name) })
+    expect(message).toBe(CLAIM_NAME_REFUSED)
+    expect(message).not.toContain(CLAIM_VALUE)
+    // Positive control: an unreserved name loads on the same issuer.
+    expect(
+      loadOidcProviderConfiguration(
+        { ...ENTRA_ENV, ...requiredClaim(CLAIM_VALUE, 'groups') },
+        GENERATION_KEY
+      )!.memberEligibility.requiredClaim
+    ).toEqual({ name: 'groups', value: CLAIM_VALUE })
+  })
+
   it('refuses a claim name over 128 characters', () => {
     const message = refusal({ ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, 'c'.repeat(129)) })
     expect(message).toBe(CLAIM_NAME_REFUSED)
@@ -602,6 +615,17 @@ describe('OIDC member sign-in configuration', () => {
     expect(provider.configurationGeneration).toBe(
       currentOidcConfigurationGeneration(provider, SECRET, GENERATION_KEY)
     )
+  })
+
+  it('changes the generation when account creation changes with the same required claim', () => {
+    const generation = (environment: Record<string, string>) =>
+      loadOidcProviderConfiguration(environment, GENERATION_KEY)!.configurationGeneration
+    const claim = { ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, 'groups') }
+    const invitationOnly = generation(claim)
+    const creating = generation({ ...claim, CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' })
+    // Both carry an eligibility part, so this compares account creation alone.
+    expect(invitationOnly).not.toBe(generation(OIDC_ENV))
+    expect(creating).not.toBe(invitationOnly)
   })
 
   it('changes the generation when the claim name or value changes', () => {
