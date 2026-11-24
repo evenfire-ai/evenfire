@@ -1,0 +1,127 @@
+{
+  "version": "current",
+  "approvalProperties": {
+    "defaultPolicy": {
+      "type": "string",
+      "enum": ["cli_only", "channel_users", "designated_approvers"],
+      "description": "Who can approve tool calls. cli_only: Only HTTP /approve /deny endpoints. channel_users: Any authorized channel user. designated_approvers: Only users in approvers list. An explicit cli_only or designated_approvers also governs approval modes on Telegram, email, Slack and Teams: cli_only refuses every raise and runs every such session as manual, and designated_approvers lets only a listed approver raise or keep a raised mode. Every other such session runs as manual. A change applies at each session's next tool call."
+    },
+    "modeCeiling": {
+      "type": "string",
+      "enum": ["manual", "auto", "allow_all"],
+      "description": "Highest interactive approval mode sessions on this Host may run. manual asks on every gated tool. auto judges shell on supported models and runs http_request with no card. allow_all runs gated tools, except cron_manage, which asks exactly when manual would, and a guardrail ask, which still shows its card. Absent means manual. mcp-host reads this from the Host CR only (dev mode reads CLERUM_APPROVAL_CONFIG). An older CRD prunes an unknown value, which fails safe to manual."
+    },
+    "shellClassifierModel": {
+      "type": "string",
+      "description": "Model the shell classifier calls when this Host's model provider is OpenAI. Absent means gpt-5.5. A model the classifier does not allow shows the shell card. With any other provider, auto keeps judging shell with the model serving the turn. An older CRD prunes this field, which is the same as absent."
+    },
+    "channels": {
+      "type": "object",
+      "description": "Per-channel-type approval settings.",
+      "properties": {
+        "telegram": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether Telegram users can approve."
+            },
+            "approvers": {
+              "type": "array",
+              "description": "List of Telegram user IDs allowed to approve. Under designated_approvers, only these users' Telegram sessions may raise or keep a mode above manual.",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowModeChange": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true or absent, a Telegram session may store auto or allow_all, up to modeCeiling. Only false caps that channel at manual."
+            }
+          }
+        },
+        "email": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether email users can approve."
+            },
+            "approvers": {
+              "type": "array",
+              "description": "List of email addresses allowed to approve. Under designated_approvers, only these users' email sessions may raise or keep a mode above manual.",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowModeChange": {
+              "type": "boolean",
+              "default": false,
+              "description": "Only when true may an email session store auto or allow_all, up to modeCeiling. False or absent caps email at manual. Email identity is the From address, which a sender can forge, so the switch defaults to off."
+            }
+          }
+        },
+        "slack": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether Slack users can approve."
+            },
+            "approvers": {
+              "type": "array",
+              "description": "List of Slack user IDs allowed to approve. Under designated_approvers, only these users' Slack sessions may raise or keep a mode above manual.",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowModeChange": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true or absent, a Slack session may store auto or allow_all, up to modeCeiling. Only false caps that channel at manual."
+            }
+          }
+        },
+        "teams": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether Microsoft Teams users can approve."
+            },
+            "approvers": {
+              "type": "array",
+              "description": "List of Teams user IDs allowed to approve. Under designated_approvers, only these users' Teams sessions may raise or keep a mode above manual.",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowModeChange": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true or absent, a Microsoft Teams session may store auto or allow_all, up to modeCeiling. Only false caps that channel at manual."
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "description": "Per-tool approval overrides for native mcp-host tools. Map of native tool name (e.g. http_request, shell_exec) to boolean: true forces approval, false skips approval. Absent entries fall through to each tool's built-in default. Out of scope: MCP tools (gated separately).",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    }
+  },
+  "channelNames": ["telegram", "email", "slack", "teams"],
+  "allowModeChangeDefaults": {
+    "telegram": true,
+    "email": false,
+    "slack": true,
+    "teams": true
+  },
+  "_source": {
+    "command": "parsed from charts/clerum-crds/crds/host.yaml at spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.approval",
+    "sha256": "acae500f8731ee6a6fa1175e9955e8b1e22652437273255c663bade7d9d7371c"
+  }
+}

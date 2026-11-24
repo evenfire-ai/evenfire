@@ -1,0 +1,77 @@
+{
+  "version": "v0.12.1",
+  "approvalProperties": {
+    "defaultPolicy": {
+      "type": "string",
+      "enum": ["cli_only", "channel_users", "designated_approvers"],
+      "description": "Who can approve tool calls. cli_only: Only HTTP /approve /deny endpoints. channel_users: Any authorized channel user. designated_approvers: Only users in approvers list."
+    },
+    "channels": {
+      "type": "object",
+      "description": "Per-channel-type approval settings.",
+      "properties": {
+        "telegram": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether Telegram users can approve."
+            },
+            "approvers": {
+              "type": "array",
+              "description": "List of Telegram user IDs allowed to approve.",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "email": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether email users can approve."
+            },
+            "approvers": {
+              "type": "array",
+              "description": "List of email addresses allowed to approve.",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "slack": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether Slack users can approve."
+            },
+            "approvers": {
+              "type": "array",
+              "description": "List of Slack user IDs allowed to approve.",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "description": "Per-tool approval overrides for native mcp-host tools. Map of native tool name (e.g. http_request, shell_exec) to boolean: true forces approval, false skips approval. Absent entries fall through to each tool's built-in default. Out of scope: MCP tools (gated separately).",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    }
+  },
+  "channelNames": ["telegram", "email", "slack"],
+  "allowModeChangeDefaults": {},
+  "_source": {
+    "command": "git show v0.12.1:charts/clerum-crds/crds/host.yaml | shasum -a 256",
+    "sha256": "967f49bca817bde2a8ddcb9041f8b62c453dbad92975f0ac4d6aa7a0624f3546"
+  }
+}
