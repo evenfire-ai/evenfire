@@ -534,10 +534,10 @@ export type CompactionHandler = (request: {
 
 /**
  * T3.1 — Handler for GET /v1/runtime/sessions/search.
- * `userSub` is the verified JWT identity; callers MUST derive it from the
- * request's `auth.sub`, never from query params. The handler reuses the same
- * `SessionSearchService` that drives the native tool, so the result shape is
- * identical across both surfaces.
+ * `userSub` is the user of the verified rpc-proxy edge caller context
+ * (`RuntimeCallerContext.userId`), never a query parameter. The handler reuses
+ * the same `SessionSearchService` that drives the native tool, so the result
+ * shape is identical across both surfaces.
  */
 export interface SessionSearchRequest {
   userSub: string

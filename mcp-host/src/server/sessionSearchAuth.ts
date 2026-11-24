@@ -11,7 +11,8 @@ const authenticatedV2Search = runtimeEdgeGuard(
 /**
  * Session search is a V2-only route, as it is in rpc-proxy: a request that
  * does not declare V2 runtime authority is refused, and a declared V2 request
- * goes through the strict edge guard.
+ * goes through the strict edge guard. In this release that guard refuses every
+ * V2 request (`v2-refused`), so no request reaches the handler.
  */
 export function sessionSearchAuthority(req: Request, res: Response, next: NextFunction): void {
   if (!declaresV2RuntimeAuthority(req)) {

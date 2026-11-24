@@ -1617,8 +1617,7 @@ export async function handleSessionsListRoute(
 /**
  * T3.1 — GET /v1/runtime/sessions/search. Authenticated full-text search over
  * the trusted-edge user's history. `userSub` comes from rpc-proxy's validated
- * action context (or its isolated v1 edge adapter); caller-supplied `?user=`
- * is silently ignored.
+ * action context; caller-supplied `?user=` is silently ignored.
  *
  * Status codes:
  *   - 200: results returned (possibly empty).

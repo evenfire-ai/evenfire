@@ -3155,7 +3155,9 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onSetApprovalMode(handleSetApprovalMode)
   // T3.1 — session search REST endpoint. Only wired when the feature is
   // enabled and the SQLite backend is live; otherwise the route returns 501
-  // through `handleSessionSearchRoute`.
+  // through `handleSessionSearchRoute`; in this release the edge guard answers
+  // 401 before the handler runs, so the route returns neither 200 nor 501
+  // until V2 edge assertions are accepted.
   if (sessionSearchService) {
     const service = sessionSearchService
     rpcServer.onSessionSearch(async req => {

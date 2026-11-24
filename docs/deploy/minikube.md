@@ -565,7 +565,11 @@ CLERUM_AUTH_JWT_PUBLIC_KEY    = <same public key as rpc-proxy-secrets>
 > which verifies an RS256 token issued by control-api with `aud: "rpc-proxy"` —
 > hence the audience value above. `GET /v1/runtime/sessions/search` is no longer
 > a bearer route: it accepts only caller `rpc-proxy` with declared V2 authority
-> and answers anything else with `401 V2 runtime authority required`. Every other
+> and answers anything else with `401 V2 runtime authority required`. In this
+> release the Host then refuses every request that carries V2 authority (logged
+> as `runtime_edge_assertion_refused`, reason `v2-refused`), so the route answers
+> no search until a later release accepts V2 edge assertions. The
+> `clerum__session_search` tool is not affected. Every other
 > `/v1/runtime/*` route is edge authenticated and **rejects** an `Authorization`
 > header with 401. The edge assertion is verified with the same public key and
 > issuer, but with its own audience, `evenfire-host-runtime-edge`.
