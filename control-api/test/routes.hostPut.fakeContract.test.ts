@@ -18,7 +18,7 @@
  *
  * The script runs once per Host CRD version. On the current CRD it also records
  * the bodies Control UI tests consume, in test/fixtures/wire/: with
- * RECORD_WIRE=1 it writes them; otherwise it asserts they are unchanged.
+ * UPDATE_WIRE_GOLDENS=1 it writes them; otherwise it asserts they are unchanged.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -41,7 +41,7 @@ import {
   buildHostRouteHarness,
 } from './helpers/hostRouteHarness.js'
 
-const RECORD = process.env.RECORD_WIRE === '1'
+const UPDATE = process.env.UPDATE_WIRE_GOLDENS === '1'
 const WIRE_DIR = new URL('./fixtures/wire/', import.meta.url)
 
 // Sent on every real request, so every real answer is deterministic.
@@ -362,7 +362,7 @@ function comparable(observation: Observation) {
 function pinWire(file: string, value: unknown): void {
   const url = new URL(file, WIRE_DIR)
   const actual = JSON.parse(JSON.stringify(value)) as unknown
-  if (RECORD) writeFileSync(url, `${JSON.stringify(actual, null, 2)}\n`)
+  if (UPDATE) writeFileSync(url, `${JSON.stringify(actual, null, 2)}\n`)
   expect(actual, file).toEqual(JSON.parse(readFileSync(url, 'utf8')))
 }
 

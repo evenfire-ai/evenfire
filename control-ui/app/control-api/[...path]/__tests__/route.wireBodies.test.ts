@@ -9,7 +9,7 @@
  * fetch, so each message is the runtime's, not one a test wrote. The test runs
  * in the Node environment, the route's own runtime (`runtime = 'nodejs'`).
  *
- * With RECORD_WIRE=1 the test writes test/fixtures/wire/proxy-504.wire.json and
+ * With UPDATE_WIRE_GOLDENS=1 the test writes test/fixtures/wire/proxy-504.wire.json and
  * proxy-502.wire.json; otherwise it asserts they are unchanged.
  */
 import { NextRequest } from 'next/server'
@@ -20,7 +20,7 @@ import { type Server, createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { resolve } from 'node:path'
 
-const RECORD = process.env.RECORD_WIRE === '1'
+const UPDATE = process.env.UPDATE_WIRE_GOLDENS === '1'
 const WIRE_DIR = resolve(__dirname, '../../../../test/fixtures/wire')
 
 // The upstream holds every request on this path and resets the connection of
@@ -55,7 +55,7 @@ function hostPut(path: string): Parameters<Route['PUT']> {
 
 function pinWire(file: string, value: unknown): void {
   const path = resolve(WIRE_DIR, file)
-  if (RECORD) writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
+  if (UPDATE) writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
   expect(value, file).toEqual(JSON.parse(readFileSync(path, 'utf8')))
 }
 
