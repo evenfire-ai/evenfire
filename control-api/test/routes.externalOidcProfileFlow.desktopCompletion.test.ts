@@ -213,7 +213,8 @@ describe('/complete for a Desktop sign-in attempt', () => {
     })
 
     // The account, link and invitation events fire as for any sign-in; the
-    // Desktop one replaces the session event and carries only `teamless`.
+    // Desktop one replaces the session event: the same member context, and
+    // `teamless` in place of the session contract.
     const member = {
       registrationId: provider.registrationId,
       issuer: provider.issuer,
@@ -225,7 +226,7 @@ describe('/complete for a Desktop sign-in attempt', () => {
       { event: 'oidc_member_account_created', ...member },
       { event: 'oidc_member_link_created', ...member },
       { event: 'oidc_member_invitation_applied', ...member, count: 2 },
-      { event: 'oidc_desktop_code_minted', teamless: true },
+      { event: 'oidc_desktop_code_minted', ...member, teamless: true },
     ])
     expect(flowLog.warn).not.toHaveBeenCalled()
     expect(flowLog.error).not.toHaveBeenCalled()

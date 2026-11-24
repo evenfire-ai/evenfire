@@ -449,7 +449,7 @@ export function createExternalOidcProfileFlowRouter(
     if (result.status === 'desktop_code_issued') {
       // Never the code: with the Desktop's verifier it redeems for a session.
       logger.info(
-        { event: 'oidc_desktop_code_minted', teamless: result.teamless },
+        { event: 'oidc_desktop_code_minted', ...member, teamless: result.teamless },
         'OIDC Desktop sign-in code minted'
       )
       res.status(200).json({
