@@ -20,7 +20,10 @@ export const DESKTOP_SIGN_IN_CODE_RE = /^[A-Za-z0-9_-]{43}$/
 const DESKTOP_CODE_CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/
 /** A code lives 90 s. A lifetime over 120 s is an upstream contract break. */
 const DESKTOP_SIGN_IN_CODE_MAX_TTL_SECONDS = 120
-/** Refusal reasons Profile UI may see. Anything else is an upstream contract break. */
+/**
+ * Refusal reasons Profile UI may see, and that Desktop sign-in redeem relays in its 403.
+ * Anything else is an upstream contract break.
+ */
 export const REFUSAL_REASONS: ReadonlySet<string> = new Set([
   'account_disabled',
   'identity_conflict',
@@ -88,9 +91,10 @@ function socketKey(req: Request): string {
 }
 
 /**
- * One bucket per browser: the forwarded IP (`req.ip` under `trust proxy 1`), falling back to
- * the socket address. An IPv6 address shares a bucket with the rest of its /56, so a holder
- * of a prefix cannot rotate addresses inside it. No request header chooses the key.
+ * One bucket per client IP, for a browser and for Desktop's sign-in redeem and methods calls:
+ * the forwarded IP (`req.ip` under `trust proxy 1`), falling back to the socket address. An
+ * IPv6 address shares a bucket with the rest of its /56, so a holder of a prefix cannot rotate
+ * addresses inside it. No request header chooses the key.
  */
 export function clientRateKey(req: Request): string {
   return `ip:${ipKeyGenerator(connectionKey(req))}`
