@@ -8,7 +8,10 @@
  *
  * `navigate` remounts the page: the shipped build remounts it on every tab or
  * agent change (verified on next 16.4.6). `rerenderKept` keeps the instance and
- * exists only for tests that need the other behaviour.
+ * exists only for tests that need the other behaviour. `navigate` and `remount`
+ * replace only the page: the ToastProvider stays mounted, as the root layout's
+ * does in the app (app/layout.tsx), so a toast raised for a page that is gone
+ * stays on screen. `unmount` removes both.
  *
  * `renderHostPage` stubs the global `fetch` with the fake's, and
  * `resetApprovalTestState` does not restore it. Every test file calls
@@ -126,10 +129,11 @@ function firstErrorBannerText(): string | null {
   return first ? (first.textContent ?? '') : null
 }
 
-function tree() {
+/** The page under a ToastProvider; a new `pageKey` remounts the page and keeps the provider. */
+function tree(pageKey: number) {
   return (
     <ToastProvider>
-      <HostDetailsPage />
+      <HostDetailsPage key={pageKey} />
     </ToastProvider>
   )
 }
@@ -143,29 +147,32 @@ export function renderHostPage(options: {
   api.setControlUIReadPrincipal('unit-test-admin', 'admin')
   navigation.name = options.name
   navigation.tab = options.tab
-  let result = render(tree())
+  let pageKey = 0
+  const result = render(tree(pageKey))
 
   const setParams = (params: PageParams) => {
     navigation.name = params.name
     navigation.tab = params.tab
+  }
+  const remountPage = () => {
+    pageKey += 1
+    result.rerender(tree(pageKey))
   }
 
   const handle: HostPageHandle = {
     async navigate(tabLabel) {
       fireEvent.click(screen.getByRole('tab', { name: tabLabel }))
       // The mocked Link recorded the new segment; mount a fresh page for it.
-      result.unmount()
-      result = render(tree())
+      remountPage()
       await screen.findByRole('tab', { name: tabLabel })
     },
     remount(params) {
-      result.unmount()
       setParams(params)
-      result = render(tree())
+      remountPage()
     },
     rerenderKept(params) {
       setParams({ ...params, tab: params.tab ?? navigation.tab })
-      result.rerender(tree())
+      result.rerender(tree(pageKey))
     },
     unmount() {
       result.unmount()

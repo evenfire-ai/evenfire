@@ -2,8 +2,8 @@
  * The approval settings scenarios that run before the change (spec §8, A6
  * readiness), named after the spec §7 A3 rows they test. Each test asserts the
  * spec's target outcome through the driver, which hides where the per-tool
- * section lives. Against the page before PR A, T2x and T7 pass as baselines
- * and the others fail for the defect their row names.
+ * section lives. Against the page before PR A, T2x passes as a baseline and
+ * the others fail for the defect their row names.
  *
  * The fake runs with `versionRule: false`, as control-api did before PR A. A
  * read the UI cannot start while a save keeps Save disabled is started by the
@@ -153,10 +153,7 @@ function fooSavedShown(driver: ApprovalSettingsDriver): Record<string, string> {
 
 describe('approval settings readiness (spec §7 A3)', () => {
   beforeEach(() => resetApprovalTestState())
-  afterEach(() => {
-    vi.restoreAllMocks()
-    vi.unstubAllGlobals()
-  })
+  afterEach(() => vi.unstubAllGlobals())
 
   it('T1 the per-tool PUT carries its read version, so a spec change made during the PUT survives', async () => {
     const { fake, page, driver } = await openFooWithDraft()
@@ -229,29 +226,27 @@ describe('approval settings readiness (spec §7 A3)', () => {
     page.unmount()
   })
 
-  it('T7 unmounting during the per-tool PUT logs no React state-update warning and the write lands', async () => {
+  it('T7 leaving the tab during the per-tool PUT reports the outcome in the root toast naming the agent', async () => {
+    // "No component write after unmount" cannot be observed on React 18; "Host-changed notice fires" is T8r's (Task 21a).
     const { fake, page, driver } = await openFooWithDraft()
     const put = fake.hold({ method: 'PUT', path: FOO })
     await driver.save()
     await act(async () => {
       await put.arrived
     })
-    const consoleError = vi.spyOn(console, 'error')
-    const consoleWarn = vi.spyOn(console, 'warn')
-    page.unmount()
-    put.deliverNow()
-    // The client got the answer after the unmount, so the continuation ran.
+    await page.navigate('Overview')
+    await act(async () => {
+      put.deliverNow()
+    })
+    // The client got the answer after the tab was left, so the continuation ran.
     await waitFor(() => expect(writes(fake)[0].delivered).toBe(true))
-    await waitFor(() => expect(fake.log.every(entry => entry.delivered)).toBe(true))
     await settle()
 
-    const reactWarnings = [...consoleError.mock.calls, ...consoleWarn.mock.calls]
-      .map(args => args.map(String).join(' '))
-      .filter(text => /state update|not wrapped in act|unmounted component/i.test(text))
-    expect(reactWarnings).toEqual([])
     expect(writes(fake)).toHaveLength(1)
     expect(writes(fake)[0].applied).toBe(true)
     expect(approvalOf(fake.stored('foo').spec)).toEqual({ tools: SAVED_TOOLS })
+    expect(page.toasts('success'), 'success toasts').toContainEqual(expect.stringContaining('foo'))
+    page.unmount()
   })
 
   it("T8 a late refresh of an agent the kept instance has left never shows that agent's tools (harness-only)", async () => {

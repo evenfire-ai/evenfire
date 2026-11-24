@@ -99,6 +99,22 @@ describe('approval page harness', () => {
     page.unmount()
   })
 
+  it('navigate keeps a toast on screen: the ToastProvider outlives the page', async () => {
+    const fake = seedFake()
+    const page = renderHostPage({ fake, name: 'foo' })
+    const edit = await screen.findByRole('button', { name: 'Edit agent name' })
+    await waitFor(() => expect(edit).toBeEnabled())
+    fireEvent.click(edit)
+    fireEvent.change(screen.getByLabelText('Agent name'), { target: { value: 'Renamed agent' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
+    await waitFor(() => expect(page.toasts('success')).toEqual(['Agent configuration saved.']))
+    await page.navigate('Advanced')
+    expect(page.toasts('success')).toEqual(['Agent configuration saved.'])
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Hooks' })).toBeInTheDocument())
+    expect(unanswered(fake)).toEqual([])
+    page.unmount()
+  })
+
   it('toasts(tone) returns only the toasts of that tone', async () => {
     const fake = seedFake()
     const page = renderHostPage({ fake, name: 'foo' })
