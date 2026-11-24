@@ -4,7 +4,6 @@ import { generateKeyPairSync } from 'node:crypto'
 import fs from 'node:fs/promises'
 import http from 'node:http'
 import { createRequire } from 'node:module'
-import os from 'node:os'
 import path from 'node:path'
 import {
   type Deferred,
