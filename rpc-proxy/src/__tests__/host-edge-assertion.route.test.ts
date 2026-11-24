@@ -549,11 +549,38 @@ describe('authentication failures reach the client as 401', () => {
   })
 })
 
-// A single-attempt route (re-issued at most once after the wake) and a route
-// that retries until the hold deadline.
+// Two row sets for the V1 re-resolve before a wake-and-hold retry.
+// V1_WAKE_ROWS: every route of this file that retries through wake-and-hold
+// with the V1 refresh, each passing its own denial answer for a denied
+// re-resolve; the approval-mode PATCH is covered in
+// session-approval-mode-passthrough.test.ts. They run the re-resolved
+// assertion case and one denial case.
+// REFRESH_ROWS: a single-attempt route (re-issued at most once after the wake)
+// and a route that retries until the hold deadline. They run the cases of the
+// shared re-resolve and wake-and-hold code: the other denials, the 401, the
+// Host URL move and the unavailable answers.
 const SINGLE_ATTEMPT_ROW = ROUTE_SCOPE_ROWS.find(row => row.label === 'approve')!
 const RETRY_UNTIL_DEADLINE_ROW = ROUTE_SCOPE_ROWS.find(row => row.label === 'task result')!
 const REFRESH_ROWS = [SINGLE_ATTEMPT_ROW, RETRY_UNTIL_DEADLINE_ROW]
+const V1_WAKE_ROW_LABELS = [
+  'messages',
+  'approve',
+  'deny',
+  'sessions',
+  'session messages',
+  'context breakdown',
+  'models',
+  'set model',
+  'task result',
+  'task cancel',
+  'artifacts list',
+  'artifact download',
+]
+const V1_WAKE_ROWS = V1_WAKE_ROW_LABELS.map(label => {
+  const row = ROUTE_SCOPE_ROWS.find(candidate => candidate.label === label)
+  if (!row) throw new Error(`no route row labelled ${label}`)
+  return row
+})
 
 // The first resolve succeeds; every later Host-access call (a re-resolve before
 // a retry attempt) gets `reresolve(index)`.
@@ -583,7 +610,7 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     config.wakeMaxHoldMs = originalWakeMaxHoldMs
   })
 
-  it.each(REFRESH_ROWS)('$label: the retry carries the re-resolved assertion', async row => {
+  it.each(V1_WAKE_ROWS)('$label: the retry carries the re-resolved assertion', async row => {
     authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
     controlApiHostAccessAnswer = firstResolveThen(index =>
       jsonResponse(200, {
@@ -596,6 +623,8 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     const res = await send(row)
 
     expect(res.status).toBe(200)
+    // Witness: the first attempt failed as Host down and the wake ran once.
+    expect(controlApiCalls.filter(url => url.endsWith('/wake'))).toHaveLength(1)
     expect(hostAccessCalls()).toHaveLength(2)
     expect(hostAccessCalls().every(url => url.includes('/mcp-hosts/chatllm'))).toBe(true)
     expect(hostCalls).toHaveLength(2)
@@ -693,8 +722,13 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     }
   )
 
-  const DENIAL_CASES: Array<{ label: string; answer: () => Response }> = [
+  type DenialCase = { label: string; answer: () => Response }
+  // Runs on every V1 wake row: each route passes its own denial answer.
+  const ROUTE_DENIAL_CASES: DenialCase[] = [
     { label: 'control-api 403', answer: () => jsonResponse(403, { reason: 'host_disabled' }) },
+  ]
+  // Run on REFRESH_ROWS: the other denials the shared re-resolve code maps.
+  const SHARED_DENIAL_CASES: DenialCase[] = [
     { label: 'control-api 404', answer: () => jsonResponse(404, { error: 'not found' }) },
     {
       label: 'a userId mismatch',
@@ -707,8 +741,11 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     },
   ]
 
-  describe.each(REFRESH_ROWS)('$label', row => {
-    it.each(DENIAL_CASES)(
+  describe.each([
+    ...V1_WAKE_ROWS.map(row => ({ ...row, cases: ROUTE_DENIAL_CASES })),
+    ...REFRESH_ROWS.map(row => ({ ...row, cases: SHARED_DENIAL_CASES })),
+  ])('$label', ({ cases, ...row }) => {
+    it.each(cases)(
       'a re-resolve denied by $label answers what the first resolve answers',
       async ({ answer }) => {
         authTokenMock.verifyRpcToken.mockReturnValue(
