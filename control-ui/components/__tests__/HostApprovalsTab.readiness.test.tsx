@@ -112,13 +112,13 @@ async function settle(): Promise<void> {
 }
 
 /**
- * Answers the first `count` GETs of `path` from now with control-api's recorded
- * 500, each as it arrives. A navigation remounts the page, and the target tab
- * reads the Host on its own beside the page, so a first load is more than one
- * read.
+ * Answers `count` GETs of `path` with control-api's recorded 500, each as it
+ * arrives: the `from`-th GET from now (default the first) and the ones after
+ * it. A navigation remounts the page, and the target tab reads the Host on its
+ * own beside the page, so a first load is more than one read.
  */
-function failReads(fake: FakeControlApi, path: string, count: number): void {
-  for (let nth = 1; nth <= count; nth += 1) {
+function failReads(fake: FakeControlApi, path: string, count: number, from = 1): void {
+  for (let nth = from; nth < from + count; nth += 1) {
     const hold = fake.hold({ method: 'GET', path, nth })
     void hold.arrived.then(() => hold.respondWith(DETAIL_500.status, DETAIL_500.body))
   }
@@ -423,7 +423,13 @@ describe('approval settings readiness (spec §7 A3)', () => {
 
   it('T17 a failed refresh after a saved PUT keeps the saved tools on screen, shows an error and leaves Save usable', async () => {
     const { fake, page, driver } = await openFooWithDraft()
+    // Every /detail read after the save fails. In the target a save may be
+    // followed by two loads, the refresh and the Host-changed notice load, and
+    // the newest epoch wins: if only the first failed, a correct tab would show
+    // no error. The first read is answered once the page has rendered; the
+    // later ones, the second save's refresh included, as they arrive.
     const refresh = fake.hold({ method: 'GET', path: FOO_DETAIL })
+    failReads(fake, FOO_DETAIL, 5, 2)
     await driver.save()
     await act(async () => {
       await refresh.arrived
