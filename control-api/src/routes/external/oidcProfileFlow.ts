@@ -74,10 +74,11 @@ function defaultProvider(): Provider | undefined {
 /**
  * At most one engine, for the current configuration generation, so provider
  * discovery is not repeated on every request. The generation covers every
- * protocol setting, the eligibility settings and the client credential; a new
- * generation replaces the engine. A new required claim name is therefore a new
- * engine, which collects that claim. The member sign-in switch is not part of
- * the generation and is read from the provider loaded for each request.
+ * protocol setting, the client credential and the eligibility settings other
+ * than the new-member team; a new generation replaces the engine. A new
+ * required claim name is therefore a new engine, which collects that claim.
+ * The member sign-in switch is not part of the generation and is read from the
+ * provider loaded for each request.
  */
 const engines = new Map<string, OidcProtocolEngine>()
 
