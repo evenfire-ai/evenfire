@@ -3,7 +3,11 @@ import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
-import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
+import {
+  buildGfsFileReference,
+  buildGfsLocationReference,
+  classifyBytes,
+} from '@clerum/gfs-interaction-policy'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests } from '../chatStoreBinding.js'
 import { ApiError } from '../httpClient.js'
@@ -338,6 +342,50 @@ describe('AppService.invokeHostMessage', () => {
       ])
       expect(issueToken).toHaveBeenCalledTimes(1)
       expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
+    })
+
+    it('forwards the folder next to the file references', async () => {
+      const service = serviceWithRpc()
+      const reference = fileReference()
+      const built = buildGfsLocationReference({
+        drive: 'main',
+        resourceId: 'abcdef1234567890abcdef1234567890',
+        gfsUri: 'gfs://main/abcdef1234567890abcdef1234567890',
+        name: 'Reports',
+      })
+      if (!built.ok) throw new Error(built.message)
+
+      await service.invokeHostMessage(
+        'chatllm',
+        {
+          content: 'Save it here',
+          fileReferences: [reference],
+          locationReferences: [built.value],
+        },
+        ['chatllm']
+      )
+
+      expect(service.rpcClient.invokeHostMessage.mock.calls[0][2]).toMatchObject({
+        content: 'Save it here',
+        fileReferences: [reference],
+        locationReferences: [built.value],
+      })
+    })
+
+    it('rejects a non-list folder value before issuing an RPC token', async () => {
+      const service = serviceWithRpc()
+      const issueToken = vi.spyOn(service, 'issueRpcTokenForHostRefs')
+      await expect(
+        service.invokeHostMessage('chatllm', { content: 'hello', locationReferences: {} }, [
+          'chatllm',
+        ])
+      ).rejects.toThrow('Location references must be a list.')
+      expect(issueToken).toHaveBeenCalledTimes(0)
+      // Positive control: without the field the message goes out.
+      await service.invokeHostMessage('chatllm', { content: 'hello' }, ['chatllm'])
+      expect(service.rpcClient.invokeHostMessage.mock.calls[0][2]).not.toHaveProperty(
+        'locationReferences'
+      )
     })
   })
 

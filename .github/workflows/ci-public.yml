@@ -277,7 +277,9 @@ jobs:
         run: npm ci
 
       # Desktop strict-pixel fixture checks consume the Host's locked native
-      # canvas dependency through mcp-host/package.json.
+      # canvas dependency through mcp-host/package.json, and the Desktop unit
+      # suite runs mcp-host's real message admission through
+      # desktop-app/ui/src/hooks/domain/__tests__/__fixtures__/hostAdmissionAck.ts.
       - name: Install Host dependencies for Desktop fixture checks
         if: matrix.service == 'desktop-app'
         working-directory: mcp-host

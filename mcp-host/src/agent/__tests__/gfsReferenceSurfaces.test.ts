@@ -4,7 +4,7 @@ import {
   buildGfsFileReference,
   classifyBytes,
 } from '@clerum/gfs-interaction-policy'
-import { resolveFileReferences } from '../fileReferenceResolver'
+import { resolveMessageReferences } from '../fileReferenceResolver'
 import type { FileReferenceGfscClient } from '../fileReferenceResolver'
 import { classifyGfsReferenceSurfaces } from '../gfsReferenceSurfaces'
 
@@ -118,7 +118,7 @@ describe('classifyGfsReferenceSurfaces', () => {
       }),
     }
 
-    const failClosed = await resolveFileReferences([reference], client)
+    const failClosed = await resolveMessageReferences([reference], [], client)
     expect(failClosed.ok).toBe(true)
     if (!failClosed.ok) return
     expect(failClosed.resolutions[0]!.surfaces).toEqual({
@@ -129,7 +129,7 @@ describe('classifyGfsReferenceSurfaces', () => {
       visual: false,
     })
 
-    const enabled = await resolveFileReferences([reference], client, undefined, {
+    const enabled = await resolveMessageReferences([reference], [], client, undefined, {
       workspaceFile: true,
       localExecutor: true,
       visual: false,

@@ -8344,6 +8344,73 @@ body.sidebar-resizing {
   text-overflow: ellipsis;
 }
 
+.composer-suggested-reference {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.composer-suggested-reference-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 34px;
+  max-width: 260px;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px dashed rgba(var(--edge-rgb), 0.45);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  padding: var(--space-0-5) var(--space-1);
+  cursor: pointer;
+}
+
+.composer-suggested-reference-chip:hover:enabled {
+  background: var(--list-item-hover-bg);
+  border-color: rgba(var(--accent-rgb), 0.34);
+  color: var(--text);
+}
+
+.composer-suggested-reference-chip:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
+.composer-suggested-reference-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.composer-suggested-reference-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.composer-suggested-reference-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-suggested-reference-reason {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--font-size-2xs);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .composer-attachment-remove {
   border: none;
   background: transparent;
@@ -14346,7 +14413,8 @@ pre {
   border-color: rgba(var(--success-rgb), 0.34);
 }
 
-.composer-reference-icon--global_file {
+.composer-reference-icon--global_file,
+.composer-reference-icon--global_folder {
   background: rgba(var(--accent-rgb), 0.15);
   border-color: rgba(var(--accent-rgb), 0.38);
   color: var(--accent-strong);
@@ -14953,46 +15021,6 @@ pre {
 
 .da-gfs-file-action {
   cursor: pointer;
-}
-
-.da-gfs-inline-form {
-  display: flex;
-  align-items: end;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  margin: var(--space-3) 0;
-  padding: var(--space-3);
-  background: var(--surface-soft);
-}
-
-.da-gfs-inline-form__field {
-  display: grid;
-  min-width: min(22rem, 100%);
-  gap: var(--space-1);
-}
-
-.da-gfs-inline-form__field span,
-.da-gfs-inline-form__copy {
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-}
-
-.da-gfs-inline-form__field input {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-}
-
-.da-gfs-inline-form__field input:focus-visible {
-  border-color: var(--focus-ring);
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
 }
 
 .da-gfs-breadcrumb {
@@ -15866,7 +15894,9 @@ pre {
 .da-gfs-resource-menu__panel {
   position: fixed;
   /* The persistent sidebar owns dropdown + 1000. Resource menus are portaled
-     to body and must remain above it while the navigation expands/collapses. */
+     to body and must remain above it while the navigation expands/collapses.
+     Access-row menus inside a Share dialog mount in the dialog instead: at
+     body they would tie the window-level Share modal's layer. */
   z-index: calc(var(--layer-dropdown) + 1100);
   width: min(360px, calc(100vw - (var(--space-4) * 2)));
   max-height: calc(100vh - (var(--space-4) * 2));
@@ -16398,6 +16428,16 @@ pre {
   backdrop-filter: blur(12px) saturate(0.86);
 }
 
+.da-gfs-action-host {
+  display: contents;
+}
+
+/* The sidebar's actions open at the window root, so their backdrop dims the
+   sidebar too, unlike the Files dialogs scoped to the content panel. */
+.da-gfs-action-host .da-gfs-manage-modal {
+  z-index: var(--layer-window-dialog);
+}
+
 .da-gfs-manage-dialog {
   /* Keep every Share-dialog accent in the blue family while preserving the
      global semantic palette used by the rest of Desktop. */
@@ -16460,17 +16500,6 @@ pre {
   line-height: var(--line-height-tight);
   text-overflow: ellipsis;
   white-space: normal;
-}
-
-.da-gfs-manage-dialog__title-edit {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.da-gfs-manage-dialog__title-edit .ui-control {
-  min-width: 0;
 }
 
 .da-gfs-manage-dialog__top-actions {
@@ -16678,21 +16707,6 @@ pre {
   border-color: rgba(var(--danger-rgb), 0.4);
   background: rgba(var(--danger-rgb), 0.09);
   box-shadow: inset 3px 0 0 rgba(var(--danger-rgb), 0.6);
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: end;
-  margin: 0;
-  border-color: rgba(var(--accent-rgb), 0.3);
-  background: rgba(var(--accent-rgb), 0.07);
-}
-
-.da-gfs-manage-dialog__body > .da-gfs-inline-form {
-  margin: 0;
-  border: 0;
-  background: var(--surface-soft);
 }
 
 .da-gfs-new-folder-modal {
@@ -17021,14 +17035,6 @@ pre {
 
 .da-gfs-move-dialog__action-buttons .ui-button {
   border-radius: 999px;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__field {
-  min-width: 0;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__copy {
-  align-self: center;
 }
 
 .da-gfs-manage-section--access .da-gfs-delegation__empty {
@@ -17423,15 +17429,6 @@ pre {
     justify-content: flex-end;
   }
 
-  .da-gfs-manage-dialog__title-edit {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .da-gfs-manage-dialog__title-edit .ui-button:last-child {
-    grid-column: 1 / -1;
-    justify-self: start;
-  }
-
   .da-gfs-manage-dialog__body {
     padding: var(--space-2);
   }
@@ -17453,10 +17450,6 @@ pre {
 
   .da-gfs-move-dialog__action-buttons {
     justify-content: flex-end;
-  }
-
-  .da-gfs-manage-section--actions .da-gfs-inline-form {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

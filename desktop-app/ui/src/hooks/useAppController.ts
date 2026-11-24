@@ -11,6 +11,7 @@ import type {
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
+import { gfsSessionScope } from '../lib/gfsSessionAuthority'
 import {
   type HostAuthorityHoldKind,
   type HostAuthorityStore,
@@ -940,7 +941,11 @@ export function useAppController() {
             // Scope this refresh to the replacement session's existing query
             // keys. Other cached principals/environments must not refetch
             // under the newly published main-process session.
-            const currentGfsSessionScope = `${auth.runtimeConfigState?.envKey ?? ''}:${sessionState.me.id}:${sessionState.me.teamId ?? ''}`
+            const currentGfsSessionScope = gfsSessionScope({
+              isAuthenticated: true,
+              me: sessionState.me,
+              runtimeConfigState: auth.runtimeConfigState,
+            })
             await queryClient.invalidateQueries({
               queryKey: desktopQueryKeys.gfsRoot,
               predicate: query =>
@@ -1159,9 +1164,9 @@ export function useAppController() {
       // Fast path — ONLY when we are already on the chat route. `switchToChat`
       // sets the active chat imperatively and leaves no pending selection behind,
       // which is safe exactly while the agent-selection effect
-      // (useAgentChatController, deps [currentTeamId, navItem, selectedAgent])
+      // (useAgentChatController, deps [currentTeamId, isChatRoute, selectedAgent])
       // is NOT about to re-run. Coming from any other route the `setNavItem`
-      // below flips `navItem`, that effect re-runs, finds no pending selection
+      // below enters the chat route, that effect re-runs, finds no pending selection
       // and takes its reset branch (activeChatId -> null) — which would blank the
       // just-opened session into the "new chat" empty state for a frame and then
       // auto-select the most recent chat instead of the requested one. So from
@@ -1173,10 +1178,11 @@ export function useAppController() {
       // when the route is changing to (or staying on) a non-chat route (the app
       // drawer). The pending selection is what survives a route change — but it is
       // only replayed when the agent-selection effect re-runs (deps include
-      // `navItem`/`selectedAgent`). When `keepNavItem` selects a chat of the
-      // ALREADY-selected agent WITHOUT a route change (drawer reopen / switcher),
-      // neither dep changes, the effect never replays, and the pending selection
-      // is left stuck loading. That case gets an imperative `switchToChat` below.
+      // `isChatRoute`/`selectedAgent`, so a move between two non-chat routes does
+      // not re-run it). When `keepNavItem` selects a chat of the ALREADY-selected
+      // agent without crossing the chat route (drawer reopen / switcher), neither
+      // dep changes, the effect never replays, and the pending selection is left
+      // stuck loading. That case gets an imperative `switchToChat` below.
       if (
         targetChatId &&
         nav.selectedAgent === agentName &&
@@ -1369,10 +1375,10 @@ export function useAppController() {
         }
 
         // Same imperative-fast-path guard as handleSelectChatAgent: `switchToChat`
-        // leaves no pending selection, so it only survives while the route (and
-        // hence the agent-selection effect's deps) does not change. Opening a
-        // notification from the Apps embed / a workspace / settings flips
-        // `navItem` below, re-running that effect into its reset branch — the
+        // leaves no pending selection, so it only survives while the agent-selection
+        // effect does not re-run. Opening a notification from the Apps embed / a
+        // workspace / settings enters the chat route below, which flips that
+        // effect's `isChatRoute` dep and re-runs it into its reset branch — the
         // conversation would blank to the "new chat" empty state and then land on
         // the most recent chat instead of the notification's. From another route
         // we fall through to the pending-selection path, which replays the
@@ -1635,6 +1641,7 @@ export function useAppController() {
     availableTeamIds,
     teamDirectoryHydrated: teamsData.teamDirectoryHydrated,
     authenticatedPrincipalIdentity,
+    authorityScope,
     email: auth.email,
     password: auth.password,
     desktopSetupAuthorizationToken: auth.desktopSetupAuthorizationToken,
@@ -1804,6 +1811,8 @@ export function useAppController() {
     handleAddComposerReferenceAttachments: chat.handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment: chat.handleRemoveComposerReferenceAttachment,
     handleClearComposerAttachments: chat.handleClearComposerAttachments,
+    addSuggestedFileReference: chat.addSuggestedFileReference,
+    addSuggestedLocationReference: chat.addSuggestedLocationReference,
     cancelTask: chat.cancelTask,
 
     // MCP Server

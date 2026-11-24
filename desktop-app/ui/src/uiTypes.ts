@@ -377,8 +377,23 @@ export type ComposerGlobalFileReference = {
   bytes: number
 }
 
+/**
+ * A Global Files folder named as the place the message is about. It carries no
+ * version or size: a folder changes whenever something is created inside it.
+ */
+export type ComposerGlobalFolderReference = {
+  id: string
+  addedOrder?: number
+  type: 'global_folder'
+  resourceId: string
+  drive: string
+  gfsUri: string
+  label: string
+}
+
 export type ComposerReferenceAttachment =
   | ComposerPluginReference
   | ComposerConnectorReference
   | ComposerAgentFileReference
   | ComposerGlobalFileReference
+  | ComposerGlobalFolderReference

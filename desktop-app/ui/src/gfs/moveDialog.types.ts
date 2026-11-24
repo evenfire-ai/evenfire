@@ -24,6 +24,12 @@ type GfsMoveDialogBaseProps = {
   ) => Promise<void>
   onClose: () => void
   busy?: boolean
+  /**
+   * Disables every way to close the dialog (Close, Cancel, backdrop). For an
+   * owner whose commit cannot be recalled once it starts; by default a close
+   * during `busy` still closes and only drops the presentation.
+   */
+  closeLocked?: boolean
   permissionStatus?: 'checking' | 'failed' | null
   /** Central fail-closed boundary (R4 spec §1): destination-listing authority
    *  failures must revoke the session even though the dialog owns these

@@ -5813,7 +5813,12 @@ describe('App deep-link orchestration', () => {
       }
       const gesture = async (expectAdmission: boolean) => {
         if (surface === 'sidebar-dialog') {
+          // Shift+F10 opens the row's menu; Move is one of its actions.
           fireEvent.keyDown(sourceButton(), { key: 'F10', shiftKey: true })
+          const menu = await view.findByRole('menu', { name: `Actions for ${sourceName}` })
+          const moveItem = await within(menu).findByRole('menuitem', { name: 'Move to' })
+          await waitFor(() => expect((moveItem as HTMLButtonElement).disabled).toBe(false))
+          fireEvent.click(moveItem)
           const dialog = await view.findByRole('dialog', { name: `Move file ${sourceName}` })
           fireEvent.click(await within(dialog).findByRole('button', { name: 'Target' }))
           fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Target)' }))
