@@ -90,3 +90,16 @@ export const NATIVE_TOOLS: NativeToolMeta[] = [
     description: 'Read OS / process metadata (CPU, memory, env).',
   },
 ]
+
+/**
+ * Registered tools that deliberately have no `NATIVE_TOOLS` row. The parity
+ * test (`HostApprovalSection.toolParity.test.ts`) requires every tool mcp-host
+ * chat registers to have a row or an entry here, with a reason.
+ */
+export const TOOL_PARITY_EXCLUSIONS: ReadonlyArray<{ name: string; reason: string }> = [
+  {
+    name: 'clerum__tool_call',
+    reason:
+      "mcp-host's tool-use loop rewrites a bridge call to its target tool before the approval gate (resolveBridgeCall in mcp-host/src/agent/toolUseLoopToolBatch.ts), so an override on this name never takes effect.",
+  },
+]
