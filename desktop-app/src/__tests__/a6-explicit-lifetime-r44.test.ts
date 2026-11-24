@@ -93,7 +93,7 @@ it('does not populate an explicit replacement with the old response', async () =
   void action.catch(() => undefined)
   await vi.waitFor(() => expect(get).toHaveBeenCalledOnce())
   await service.deleteRuntimeConfig('custom-file')
-  await expect(fs.access(file)).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(fs.readFile(file, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   await service
     .saveRuntimeConfig({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: rpc, appName: 'A' })
     .catch(() => undefined)
