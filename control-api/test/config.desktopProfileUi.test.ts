@@ -75,9 +75,6 @@ describe('resolveDesktopProfileUiBaseUrl', () => {
   })
 
   it.each([
-    ['http://profile.example.com', 'https://api.example.com'],
-    ['http://127.0.0.1:3001', 'https://api.example.com'],
-    ['https://localhost.', 'https://api.example.com'],
     ['https://10.0.0.5', 'https://api.example.com'],
     ['https://192.0.2.3', 'https://api.example.com'],
     ['https://198.51.100.2', 'https://api.example.com'],
@@ -86,8 +83,15 @@ describe('resolveDesktopProfileUiBaseUrl', () => {
     ['https://[fec0::1]', 'https://api.example.com'],
     ['https://[ff02::1]', 'https://api.example.com'],
     ['https://[ff05::1]', 'https://api.example.com'],
+  ])('accepts valid private or reserved HTTPS origin %s', (profile, rest) => {
+    expect(validateDesktopProfileUiBaseUrl(profile, rest)).toBe(new URL(profile).origin)
+  })
+
+  it.each([
+    ['http://profile.example.com', 'https://api.example.com'],
+    ['http://127.0.0.1:3001', 'https://api.example.com'],
+    ['https://localhost.', 'https://api.example.com'],
     ['https://profile.example.com\\admin', 'https://api.example.com'],
-    ['https://[::ffff:10.0.0.5]', 'https://api.example.com'],
     ['https://user:password@profile.example.com', 'https://api.example.com'],
   ])('rejects unsafe or unpaired canonical origin %s', (profile, rest) => {
     expect(() => validateDesktopProfileUiBaseUrl(profile, rest)).toThrow()

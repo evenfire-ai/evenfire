@@ -13,7 +13,7 @@ export type RecoveryHttpConfig = {
   controlApiBaseUrl: string
   controlApiServiceToken: string
   publicBaseUrl?: string
-  desktopProfileUiBaseUrl?: string
+  desktopProfileUiBaseUrl?: string | null
   jwtPublicKey?: string
   jwtPrivateKey?: string
   jwtIssuer?: string
@@ -100,8 +100,12 @@ export async function startExternalRestHttpProcess(
       EXTERNAL_REST_API_JWT_AUDIENCE: config.jwtAudience || 'profile-ui',
       EXTERNAL_REST_API_PUBLIC_BASE_URL: publicBaseUrl,
       EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL: 'http://127.0.0.1',
-      CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL:
-        config.desktopProfileUiBaseUrl || 'http://127.0.0.1:3001',
+      ...(config.desktopProfileUiBaseUrl === null
+        ? {}
+        : {
+            CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL:
+              config.desktopProfileUiBaseUrl || 'http://127.0.0.1:3001',
+          }),
       EXTERNAL_REST_API_TEST_PORT: config.publicBaseUrl ? String(explicitPort) : '0',
     },
   })
