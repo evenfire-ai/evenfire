@@ -108,8 +108,11 @@ function defaultEngine(provider: Provider): OidcProtocolEngine {
 }
 
 /**
- * Issues the Profile UI session exactly as password login does: no requested contract
- * and no client version, so the same representation is selected.
+ * A Desktop sign-in attempt mints a one-use code bound to the Desktop's code
+ * challenge. It issues no session here, so no session format is selected: the
+ * Desktop's redeem selects one. Any other attempt issues the Profile UI session
+ * exactly as password login does: no requested contract and no client version,
+ * so the same representation is selected.
  *
  * `signInOidcMember` runs in its own default transaction runner: it retries a
  * unique-key conflict only when the PostgreSQL error code reaches it unchanged.
@@ -120,6 +123,14 @@ async function defaultSignInMember(
 ): Promise<OidcMemberSignInResult> {
   const policy = provider.memberSignIn
   if (!policy) throw new Error('OIDC member sign-in is switched off')
+  if (proof.signInContext?.kind === 'desktop_sign_in') {
+    return signInOidcMember({
+      proof,
+      provider,
+      policy,
+      completion: { kind: 'desktop_code', codeChallenge: proof.signInContext.codeChallenge },
+    })
+  }
   const sessionPolicy = await resolveEffectiveUserAccessPolicy()
   const selection = selectExternalSessionRepresentation({}, sessionPolicy)
   if (selection.status !== 'selected') {
@@ -129,8 +140,7 @@ async function defaultSignInMember(
     proof,
     provider,
     policy,
-    contract: selection.contract,
-    sessionPolicy,
+    completion: { kind: 'session', contract: selection.contract, sessionPolicy },
   })
 }
 
@@ -435,6 +445,20 @@ export function createExternalOidcProfileFlowRouter(
         { event: 'oidc_member_invitation_applied', ...member, count: result.invitationsApplied },
         'OIDC member invitations applied'
       )
+    }
+    if (result.status === 'desktop_code_issued') {
+      // Never the code: with the Desktop's verifier it redeems for a session.
+      logger.info(
+        { event: 'oidc_desktop_code_minted', teamless: result.teamless },
+        'OIDC Desktop sign-in code minted'
+      )
+      res.status(200).json({
+        outcome: 'desktop_code_issued',
+        memberAuthenticationActivated: true,
+        code: result.code,
+        expiresInSeconds: result.expiresInSeconds,
+      })
+      return
     }
     logger.info(
       { event: 'oidc_member_signed_in', ...member, sessionContract: result.contract },
