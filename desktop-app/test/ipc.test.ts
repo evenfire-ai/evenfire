@@ -76,23 +76,6 @@ function makeTrustedEvent(senderId = 77) {
   }
 }
 
-function makeSingleReplySyncEvent<T extends object>(event: T): T & { returnValue: unknown } {
-  let replied = false
-  let replyValue: unknown
-  const syncEvent = { ...event }
-  Object.defineProperty(syncEvent, 'returnValue', {
-    configurable: false,
-    enumerable: true,
-    get: () => replyValue,
-    set: (value: unknown) => {
-      if (replied) return
-      replied = true
-      replyValue = value
-    },
-  })
-  return syncEvent as T & { returnValue: unknown }
-}
-
 describe('chat IPC pagination validation', () => {
   it('accepts bounded safe-integer windows', () => {
     expect(sanitizeChatLoadWindow(100, 200)).toEqual({ limit: 100, offset: 200 })
