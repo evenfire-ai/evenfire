@@ -1,5 +1,5 @@
 import { config } from './config'
-import type { ChannelReaderRuntimeSource } from './rpcClient'
+import type { ChannelReaderRuntimeSource, ShellCardDescriptor } from './rpcClient'
 import type { ProgressStep } from './types'
 
 export interface SuspendedEventData {
@@ -8,6 +8,7 @@ export interface SuspendedEventData {
   toolName: string
   displayName: string
   reason?: string
+  shellCard?: ShellCardDescriptor
 }
 
 export interface TerminalEventData {

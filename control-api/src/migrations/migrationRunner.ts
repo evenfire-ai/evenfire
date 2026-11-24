@@ -1,5 +1,6 @@
 import type { DbClient } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { OIDC_MEMBER_LINK_MIGRATION } from '../oidc/memberLinkSchema.js'
 import { GOVERNED_TRACE_RETENTION_MIGRATION } from './governedTraceRetention.js'
 import { GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION } from './governedTraceRetentionHardening.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
@@ -77,6 +78,7 @@ export const RUNNER_MIGRATION_VERSIONS = Object.freeze([
   ...PR2_MIGRATION_VERSIONS,
   GOVERNED_TRACE_RETENTION_MIGRATION,
   GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
+  OIDC_MEMBER_LINK_MIGRATION,
 ] as const)
 
 export type MigrationDescriptor = {

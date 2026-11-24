@@ -22,6 +22,7 @@ describe('migration 017 — index on sessions(parent_session_id)', () => {
       NAME,
       '018-session-denied-tools',
     ])
+    expect(names[names.indexOf('018-session-denied-tools') + 1]).toBe('019-sessions-approval-mode')
     const migration = migrations.find(m => m.name === NAME)!
 
     const db = new Database(':memory:')

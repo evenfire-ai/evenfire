@@ -4,7 +4,11 @@
 import { Bot, Context } from 'grammy'
 import { config } from '../config'
 import { RPCClient } from '../rpcClient'
-import { type TelegramCallbackAction, parseTelegramCallbackData } from '../telegramCallbackData'
+import {
+  type TelegramCallbackAction,
+  type TelegramToolApprovalDecision,
+  parseTelegramCallbackData,
+} from '../telegramCallbackData'
 import {
   AdapterCredentials,
   Attachment,
@@ -30,6 +34,25 @@ import {
 
 const TELEGRAM_MAX_LENGTH = 4096
 const TELEGRAM_CALLBACK_DEBOUNCE_MS = 2_000
+
+function reencodeToolApprovalDecision(
+  decision: TelegramToolApprovalDecision
+): 'a' | 'l' | 'c' | 's' | 'd' | null {
+  switch (decision) {
+    case 'approve':
+      return 'a'
+    case 'approveAlways':
+      return 'l'
+    case 'command':
+      return 'c'
+    case 'shell':
+      return 's'
+    case 'deny':
+      return 'd'
+    default:
+      return null
+  }
+}
 
 type TelegramCallbackQueryMessage = {
   message_id?: number | string
@@ -343,8 +366,11 @@ export class TelegramAdapter implements ChannelAdapter {
 
     let content: string
     if (action.kind === 'toolApprovalDecision') {
-      const decision =
-        action.decision === 'approve' ? 'a' : action.decision === 'approveAlways' ? 'l' : 'd'
+      const decision = reencodeToolApprovalDecision(action.decision)
+      if (!decision) {
+        await this.answerCallbackQuery(callbackCtx, 'Unsupported button.', true)
+        return
+      }
       content = `tool:${decision}:${action.actionToken}`
       rawMessage.telegramToolApprovalActionToken = action.actionToken
       rawMessage.telegramToolApprovalDecision = action.decision

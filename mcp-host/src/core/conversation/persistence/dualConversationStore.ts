@@ -11,6 +11,7 @@
  */
 import { Counter } from 'prom-client'
 import type { ModelSelectionWriteOutcome, ReapedSession } from '../../../db/worker/protocol'
+import type { ApprovalMode } from '../../approval/approvalMode'
 import type { Conversation, PendingApproval, TurnToolCall } from '../../types'
 import type {
   ConversationSessionMessages,
@@ -336,6 +337,15 @@ export class DualConversationStore implements ConversationStore {
     expectedRevision?: number
   ): Promise<ModelSelectionWriteOutcome> {
     return this.sqlite.applyModelSelection(conv, provider, model, expectedRevision)
+  }
+
+  /**
+   * The durable store is the only writer, same as `applyModelSelection`.
+   * It updates the shared conversation after the row is acknowledged, so the
+   * memory side does not keep a second copy of the mode.
+   */
+  async persistApprovalMode(conv: Conversation, mode: ApprovalMode): Promise<void> {
+    await this.sqlite.persistApprovalMode(conv, mode)
   }
 
   async persistSessionUsage(conv: Conversation, usage: SessionTokenUsage): Promise<void> {
