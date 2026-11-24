@@ -159,6 +159,7 @@ const DESKTOP_CODE_RE = /^[A-Za-z0-9_-]{43}$/
 const MEMBER_NAME = 'Desktop Fixture Member'
 const TEAM_NAME = 'Desktop Sign-In Team'
 const SECOND_TEAM_NAME = 'Desktop Second Team'
+const OLDEST_TEAM_NAME = 'Desktop Oldest Team'
 const ADMIN_ACTOR_ID = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f'
 
 function databaseUrl(baseUrl: string, database: string): string {
@@ -328,6 +329,19 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
       status: 'pending',
     })
     return { id: created.invitation.id, token: created.invitation.token }
+  }
+
+  /** Joins a team the way a member does: an invitation, accepted by the directory as the app. */
+  async function acceptInvitationAs(member: Member, teamId: string, role: InviteRole) {
+    const invitation = await seedInvitation(member.email, teamId, role)
+    const accepted = await acceptInvitationForEmail(member.email, invitation.token)
+    expect(accepted).toMatchObject({ data: { userId: member.userId } })
+  }
+
+  /** The team the shared default-team rule (password login's) picks for the member. */
+  async function firstRankedTeam(userId: string): Promise<string | undefined> {
+    const ranked = await findFirstActiveMembership(ownerPool, userId)
+    return (ranked.rows[0] as { team_id: string } | undefined)?.team_id
   }
 
   type StoredCode = { user_id: string; team_id: string | null; code_challenge: string }
@@ -692,18 +706,29 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
 
   it('keeps the stored team when it no longer ranks first', async () => {
     const member = await seedMember('desktop-kept-team')
+    // The member's oldest membership, and their first team_members row.
+    const oldest = await seedTeam(OLDEST_TEAM_NAME)
+    await seedMembership(oldest, member.userId, 'admin', '2 hours')
+    // The team the sign-in keeps: joined later, through an accepted
+    // invitation, so the default-team rule ranks it first at mint.
     const kept = await seedTeam(TEAM_NAME)
-    await seedMembership(kept, member.userId, 'member')
+    await acceptInvitationAs(member, kept, 'member')
+    expect(await firstRankedTeam(member.userId)).toBe(kept)
     const minted = await desktopCodeThroughRoute(member)
     expect(await storedCode(minted.code)).toMatchObject({ team_id: kept })
 
     const other = await seedTeam(SECOND_TEAM_NAME)
-    const invitation = await seedInvitation(member.email, other, 'inviter')
-    const accepted = await acceptInvitationForEmail(member.email, invitation.token)
-    expect(accepted).toMatchObject({ data: { userId: member.userId } })
-    // Witness: the default-team rule now ranks the newly accepted team first.
-    const ranked = await findFirstActiveMembership(ownerPool, member.userId)
-    expect(ranked.rows[0]).toMatchObject({ team_id: other })
+    await acceptInvitationAs(member, other, 'inviter')
+    // Witnesses: the stored team is now neither the oldest membership nor the
+    // one the default-team rule picks, which is the newly accepted team.
+    const byAge = await ownerPool.query<{ team_id: string }>(
+      `SELECT team_id::text AS team_id FROM team_members
+        WHERE user_id = $1::uuid AND status = 'active'
+        ORDER BY created_at, team_id`,
+      [member.userId]
+    )
+    expect(byAge.rows.map(row => row.team_id)).toEqual([oldest, kept, other])
+    expect(await firstRankedTeam(member.userId)).toBe(other)
 
     const redeemed = await redeem(minted.code, minted.verifier)
 
