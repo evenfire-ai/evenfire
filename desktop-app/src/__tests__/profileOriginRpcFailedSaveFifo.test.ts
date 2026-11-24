@@ -44,7 +44,11 @@ it('rejects an old origin after a failed RPC save and same-profile reselection',
   const realWrite = fs.writeFile.bind(fs)
   let failed = false
   vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
-    if (!failed && args[0] === h.optionA.configPath && String(args[1]).includes(rpc2)) {
+    if (
+      !failed &&
+      args[0] === h.optionA.configPath &&
+      JSON.parse(String(args[1])).rpcProxyBaseUrl === rpc2
+    ) {
       failed = true
       throw Object.assign(new Error('injected write failure'), { code: 'EACCES' })
     }
