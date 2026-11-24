@@ -106,6 +106,22 @@ def effective_env(documents, container, namespace, label, target_name)
   values
 end
 
+def validate_control_api_secret_sources(container, config_map_name, label)
+  env_from = Array(container['envFrom'])
+  config_index = env_from.index do |entry|
+    entry.dig('configMapRef', 'name') == config_map_name
+  end
+  known_secret_names = %w[control-api-internal-tokens internal-control-jwt-secrets]
+  later_secret_names = env_from.each_with_index.each_with_object([]) do |(entry, index), names|
+    next unless config_index && index > config_index
+    names << entry.dig('secretRef', 'name') if entry.dig('secretRef', 'name')
+  end
+  unless config_index && later_secret_names.include?('control-api-internal-tokens') &&
+         (later_secret_names - known_secret_names).empty?
+    raise "#{label}: unapproved or unordered Control API Secret source #{later_secret_names.inspect}"
+  end
+end
+
 def parsed_url(value, label, role, origin_only: false)
   raise "#{label}: #{role} URL is empty" unless value.is_a?(String) && !value.empty?
   if origin_only
@@ -205,7 +221,9 @@ checks.each do |deployment_name, (namespace, container_name, config_map_name)|
     documents, container, namespace, label, 'CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL'
   )
   effective_value = effective['CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL']
-  unless effective_value == source_url
+  if deployment_name == 'control-api' && effective_value == :unresolved_secret_override
+    validate_control_api_secret_sources(container, config_map_name, label)
+  elsif effective_value != source_url
     raise "#{label}: #{namespace}/#{deployment_name} effective canonical origin #{effective_value.inspect} differs from #{source_url.inspect}"
   end
 
@@ -213,6 +231,11 @@ checks.each do |deployment_name, (namespace, container_name, config_map_name)|
     'CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL' : 'EXTERNAL_REST_API_PUBLIC_BASE_URL'
   rest_values = effective_env(documents, container, namespace, label, rest_variable)
   rest_value = rest_values[rest_variable]
+  if deployment_name == 'control-api' &&
+     [effective_value, rest_value].include?(:unresolved_secret_override)
+    validate_control_api_secret_sources(container, config_map_name, label)
+    next
+  end
   raise "#{label}: #{namespace}/#{deployment_name} effective #{rest_variable} is unresolved" unless rest_value.is_a?(String)
   validate_profile_origin(effective_value, rest_value, "#{label} #{namespace}/#{deployment_name}")
 end
@@ -388,8 +411,9 @@ else
   echo 'PASS empty explicit Deployment override is rejected'
 fi
 
-# A later envFrom source overrides an earlier envFrom source. This overlay
-# models an accidental second ConfigMap projection in the final workload.
+# A later envFrom source overrides an earlier envFrom source. A second
+# conflicting ConfigMap is not the accepted Secret/ConfigMap divergence and
+# must remain a failed projection check.
 ENVFROM_CONFLICT="$DEPLOY/overlays/profile-ui-envfrom-conflict-regression"
 mkdir -p "$ENVFROM_CONFLICT"
 cat > "$ENVFROM_CONFLICT/conflicting-origin.yaml" <<'YAML'
@@ -428,12 +452,16 @@ patches:
   - path: control-api.patch.yaml
 YAML
 kubectl kustomize "$ENVFROM_CONFLICT" > "$FIXTURE_ROOT/envfrom-conflict.yaml"
-verify_projection "$FIXTURE_ROOT/envfrom-conflict.yaml" \
-  'http://127.0.0.1:3001' 'conflicting envFrom is overridden by canonical explicit projection'
+if verify_projection "$FIXTURE_ROOT/envfrom-conflict.yaml" \
+  'http://127.0.0.1:3001' 'conflicting ConfigMap envFrom'; then
+  echo 'conflicting ConfigMap envFrom escaped projection validation' >&2
+  exit 1
+fi
+echo 'PASS conflicting ConfigMap envFrom is rejected'
 
-# An out-of-band Secret can contain unexpected keys. The Control API's
-# explicit valueFrom projection must keep such a same-named Secret key from
-# becoming a second Profile UI origin source.
+# A later Secret may override ConfigMap values for Control API under the
+# approved Secret precedence. The projection checker must preserve that as an
+# unresolved, ordered Secret source instead of asserting equality with the map.
 SECRET_OVERRIDE="$DEPLOY/overlays/profile-ui-secret-shadow-regression"
 mkdir -p "$SECRET_OVERRIDE"
 cat > "$SECRET_OVERRIDE/control-api-secret.patch.yaml" <<'YAML'
@@ -455,7 +483,45 @@ patches:
 YAML
 kubectl kustomize "$SECRET_OVERRIDE" > "$FIXTURE_ROOT/secret-shadow.yaml"
 verify_projection "$FIXTURE_ROOT/secret-shadow.yaml" \
-  'http://127.0.0.1:3001' 'Secret shadow cannot override canonical origin'
+  'http://127.0.0.1:3001' 'Control API Secret precedence'
+
+# A new unknown Secret source after the projected ConfigMap cannot inherit the
+# existing Control API exception without a corresponding contract review.
+UNKNOWN_CONTROL_SECRET="$DEPLOY/overlays/profile-ui-unknown-control-secret-regression"
+mkdir -p "$UNKNOWN_CONTROL_SECRET"
+cat > "$UNKNOWN_CONTROL_SECRET/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: control-api
+      namespace: control-plane
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value:
+          secretRef:
+            name: unapproved-control-profile-secret
+YAML
+kubectl kustomize "$UNKNOWN_CONTROL_SECRET" > "$FIXTURE_ROOT/unknown-control-secret.yaml"
+if verify_projection "$FIXTURE_ROOT/unknown-control-secret.yaml" \
+  'http://127.0.0.1:3001' 'unknown Control API Secret source' \
+  >"$FIXTURE_ROOT/unknown-control-secret.log" 2>&1; then
+  echo 'unknown Control API Secret source escaped projection validation' >&2
+  exit 1
+fi
+if ! grep -Fq 'unapproved or unordered Control API Secret source' \
+  "$FIXTURE_ROOT/unknown-control-secret.log"; then
+  cat "$FIXTURE_ROOT/unknown-control-secret.log" >&2
+  echo 'unknown Control API Secret failed for an unexpected reason' >&2
+  exit 1
+fi
+echo 'PASS unknown later Control API Secret source is rejected'
 
 # An External REST Secret appended after its canonical ConfigMap can override
 # the environment variable at runtime. Since the oracle never reads Secret
@@ -519,6 +585,7 @@ metadata:
   name: control-api-internal-tokens
   namespace: control-plane
 stringData:
+  CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: https://profile.remote.example.test
   CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL: https://api.remote.example.test
 YAML
 cat > "$LATE_CONTROL_SECRET/kustomization.yaml" <<'YAML'
@@ -543,17 +610,17 @@ patches:
 YAML
 kubectl kustomize "$LATE_CONTROL_SECRET" > "$FIXTURE_ROOT/late-control-secret.yaml"
 verify_projection "$FIXTURE_ROOT/late-control-secret.yaml" \
-  'http://127.0.0.1:3001' 'Control API REST pairing is pinned against later Secret envFrom'
+  'http://127.0.0.1:3001' 'Control API REST Secret precedence may diverge from ConfigMap'
 
 # A missing optional valueFrom does not prove that a prior envFrom Secret
 # value disappears. Preserve that unknown effective value and fail closed.
 OPTIONAL_REST_REFERENCE="$DEPLOY/overlays/profile-ui-optional-rest-reference-regression"
 mkdir -p "$OPTIONAL_REST_REFERENCE"
-cat > "$OPTIONAL_REST_REFERENCE/rest-secret.yaml" <<'YAML'
+cat > "$OPTIONAL_REST_REFERENCE/rest-secret.patch.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
-  name: control-api-remote-rest
+  name: control-api-internal-tokens
   namespace: control-plane
 stringData:
   CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL: https://api.remote.example.test
@@ -563,8 +630,8 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ../../base
-  - rest-secret.yaml
 patches:
+  - path: rest-secret.patch.yaml
   - target:
       group: apps
       version: v1
@@ -572,32 +639,24 @@ patches:
       name: control-api
       namespace: control-plane
     patch: |-
-      - op: replace
-        path: /spec/template/spec/containers/0/env/1/valueFrom/configMapKeyRef/name
-        value: missing-optional-rest-config
       - op: add
-        path: /spec/template/spec/containers/0/env/1/valueFrom/configMapKeyRef/optional
-        value: true
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: missing-optional-rest-config
+              key: CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL
+              optional: true
       - op: add
         path: /spec/template/spec/containers/0/envFrom/-
         value:
           secretRef:
-            name: control-api-remote-rest
+            name: control-api-internal-tokens
 YAML
 kubectl kustomize "$OPTIONAL_REST_REFERENCE" > "$FIXTURE_ROOT/optional-rest-reference.yaml"
-if verify_projection "$FIXTURE_ROOT/optional-rest-reference.yaml" \
-  'http://127.0.0.1:3001' 'missing optional REST reference' control-api \
-  >"$FIXTURE_ROOT/optional-rest-reference.log" 2>&1; then
-  echo 'missing optional REST reference erased a Secret override in the oracle' >&2
-  exit 1
-fi
-if ! grep -Fq 'effective CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL is unresolved' \
-  "$FIXTURE_ROOT/optional-rest-reference.log"; then
-  cat "$FIXTURE_ROOT/optional-rest-reference.log" >&2
-  echo 'optional REST reference failed for an unexpected reason' >&2
-  exit 1
-fi
-echo 'PASS missing optional REST reference preserves unknown Secret precedence and fails closed'
+verify_projection "$FIXTURE_ROOT/optional-rest-reference.yaml" \
+  'http://127.0.0.1:3001' 'missing optional REST reference preserves Secret precedence' control-api
 
 MISSING_REQUIRED_KEY="$DEPLOY/overlays/profile-ui-missing-required-key-regression"
 mkdir -p "$MISSING_REQUIRED_KEY"
@@ -614,9 +673,14 @@ patches:
       name: control-api
       namespace: control-plane
     patch: |-
-      - op: replace
-        path: /spec/template/spec/containers/0/env/1/valueFrom/configMapKeyRef/key
-        value: MISSING_REQUIRED_REST_KEY
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: MISSING_REQUIRED_REST_KEY
 YAML
 kubectl kustomize "$MISSING_REQUIRED_KEY" > "$FIXTURE_ROOT/missing-required-key.yaml"
 if verify_projection "$FIXTURE_ROOT/missing-required-key.yaml" \
@@ -675,9 +739,13 @@ patches:
 YAML
   local rendered="$FIXTURE_ROOT/invalid-${case_name}.yaml"
   kubectl kustomize "$overlay" > "$rendered"
-  for service in control-api external-rest-api; do
+  # Control API receives Secret values after the ConfigMap, and that
+  # divergence is an accepted deployment rule. Its effective origin cannot be
+  # inferred from the rendered ConfigMap in this fixture; validate the
+  # ConfigMap-backed External REST consumer here.
+  for service in external-rest-api; do
     local log="$FIXTURE_ROOT/invalid-${case_name}-${service}.log"
-    if verify_projection "$rendered" '' "invalid $case_name" "$service" >"$log" 2>&1; then
+    if verify_projection "$rendered" "$profile_origin" "invalid $case_name" "$service" >"$log" 2>&1; then
       echo "invalid $case_name origin passed $service validation" >&2
       exit 1
     fi
@@ -687,7 +755,7 @@ YAML
       exit 1
     fi
   done
-  echo "PASS invalid $case_name rejected by Control API and External REST: $expected_error"
+  echo "PASS invalid $case_name rejected by External REST: $expected_error"
 }
 
 # A valid HTTPS IP origin is projected as the same canonical operator value
