@@ -1,6 +1,6 @@
 {
   "_source": {
-    "commit": "41cda16be45b309b682dd510c01a2e92a0b048da",
+    "commit": "984925a6c07daa7a788d9aa6a37a3819eb8df4e3",
     "producer": "mcp-host/src/core/approval/__tests__/approvalProducerFixtures.test.ts",
     "notes": [
       "asks[tool][key] is true when every call of the tool shows a card in that context. Grants are empty.",
@@ -9,6 +9,7 @@
       "Interactive tasks (cronFired false): the controller TaskExecutor builds, then decideApproval. Only a card asks, so a classify result (the shell judge decides) does not.",
       "Cron-fired tasks: on a stateless Host, the cron_manage-only gate, whose suspension is the card; on other Hosts no gate runs.",
       "cron_manage is called with every action its schema lists, because the stateless gate reads the action.",
+      "Answers come from a registry with the GFS download store. Without the store, under designated approvers, and for a sender who is not a listed approver, every answer of a name registered alike is the same (checked). Whether the sender is a listed approver changes only the channel cap, which effectiveMode carries.",
       "custom_tool and server__tool stand for a custom row and an MCP tool. Where chat does not register a tool (mcp-host-tool-approval.json), its row is the gate's answer for that name.",
       "channelType rpc is the Desktop channel."
     ]
@@ -444,6 +445,26 @@
       "manual|true|*|true|*|*|*": false
     },
     "clerum__gfs_create_folder": {
+      "allow_all|absent|*|false|*|*|*": false,
+      "allow_all|absent|*|true|*|*|*": false,
+      "allow_all|false|*|false|*|*|*": false,
+      "allow_all|false|*|true|*|*|*": false,
+      "allow_all|true|*|false|*|*|*": false,
+      "allow_all|true|*|true|*|*|*": false,
+      "auto|absent|*|false|*|*|*": false,
+      "auto|absent|*|true|*|*|*": false,
+      "auto|false|*|false|*|*|*": false,
+      "auto|false|*|true|*|*|*": false,
+      "auto|true|*|false|*|*|*": true,
+      "auto|true|*|true|*|*|*": false,
+      "manual|absent|*|false|*|*|*": false,
+      "manual|absent|*|true|*|*|*": false,
+      "manual|false|*|false|*|*|*": false,
+      "manual|false|*|true|*|*|*": false,
+      "manual|true|*|false|*|*|*": true,
+      "manual|true|*|true|*|*|*": false
+    },
+    "clerum__gfs_download": {
       "allow_all|absent|*|false|*|*|*": false,
       "allow_all|absent|*|true|*|*|*": false,
       "allow_all|false|*|false|*|*|*": false,

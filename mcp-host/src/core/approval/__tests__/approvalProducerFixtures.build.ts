@@ -3,16 +3,29 @@
  * for Control UI, from mcp-host's own code:
  *
  * - the tool table: chat's NativeToolRegistry, constructed as
- *   TaskExecutor.createToolRegistry constructs it (src/agent/taskExecutor.ts,
- *   `new NativeToolRegistry(` then `registerDesktopTools`), over the
- *   ToolContext matrix;
+ *   TaskExecutor.createToolRegistry constructs it (src/agent/taskExecutor.ts:2550,
+ *   then `registerDesktopTools` at :2586), over the ToolContext matrix;
  * - the asks table: the same registry behind the controller TaskExecutor
  *   builds for the task (ApprovalController over UnifiedApprovalGateController,
  *   or no gate), then decideApproval with the mode effectiveApprovalMode gives.
  *
+ * The Host GFS download store is wired as a running Host wires it:
+ * - main.ts:2036-2041 (`initializeAgent`) always bootstraps it, and
+ *   src/gfsRuntime.ts:49-50 puts the GfsDownloadStore and the
+ *   ScopedWorkspaceProvider on one Host root; the store is available once its
+ *   `initialize()` succeeds;
+ * - src/agent/stateMachine.ts:1622-1643 (`createTaskExecutor`) resolves the
+ *   task's caller root with `resolveCallerRootBinding` when there is a store,
+ *   and passes `gfsDownloadStore` and `gfsCallerWorkspacePath`;
+ * - taskExecutor.ts:2529-2548 builds `gfsManagedWorkspaceExecution` and
+ *   `gfsWorkspaceExecutionEnabled` (src/agent/gfsExecutionCapability.ts), and
+ *   :2583-2584 pass the registry `{ ...gfsWorkspace, deliveryAvailable }` and
+ *   `generatedOutputsRoot(...)`.
+ *
  * Nothing here decides approval. The only logic mirrored is wiring:
- * - which controller a task gets (taskExecutor.ts, `interactiveApprovalApplies`
- *   and `cronManageGateApplies`, with approval enabled);
+ * - which controller a task gets (taskExecutor.ts:2624-2662,
+ *   `interactiveApprovalApplies` and `cronManageGateApplies`, with approval
+ *   enabled), and its live approval tools (:2431-2442 and :2645-2652);
  * - how admission reads that controller (src/core/orchestration/toolCallPolicy.ts,
  *   `admitToolCall` and `applyApprovalMode`). A task with approval modes (every
  *   task that is not cron-fired) passes the gate's cause to decideApproval, and
@@ -21,15 +34,29 @@
  */
 import { vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PDFDocument } from 'pdf-lib'
 import { CronScheduler } from '../../../agent/cronScheduler'
+import {
+  type GfsManagedWorkspaceExecution,
+  gfsManagedWorkspaceExecution,
+  gfsStoreCallerIdentity,
+  gfsWorkspaceExecutionEnabled,
+} from '../../../agent/gfsExecutionCapability'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
+import { generatedOutputsRoot } from '../../../agent/taskExecutor'
+import { GfsDownloadStore } from '../../../internalTools/gfsDownloadStore'
+import { logger } from '../../../logger'
 import { MessageQueue } from '../../../queue/messageQueue'
 import type { IncomingMessage } from '../../../server'
 import {
   STATELESS_ALLOW_CRON_MANAGE_ENV,
   STATELESS_LIFECYCLE_ENV,
 } from '../../../statelessCronPolicy'
+import { resolveCallerRootBinding } from '../../../workspace/callerRootBinding'
+import { ScopedWorkspaceProvider } from '../../../workspace/scopedWorkspace'
 import { WorkspaceService } from '../../../workspace/service'
 import { AttachmentReadLedger } from '../../attachments/attachmentReadBudget'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
@@ -45,7 +72,7 @@ import { registerDesktopTools } from '../../tools/desktopTools'
 import { NativeToolRegistry } from '../../tools/nativeToolRegistry'
 import type { WorkflowCallerContext } from '../../tools/workflowShared'
 import type { Attachment } from '../../types'
-import { type ApprovalMode, effectiveApprovalMode } from '../approvalMode'
+import { type ApprovalMode, effectiveApprovalMode, readChannelCap } from '../approvalMode'
 import { decideApproval } from '../decideApproval'
 
 export const CHANNEL_TYPES = ['rpc', 'telegram', 'slack', 'teams', 'email'] as const
@@ -61,6 +88,7 @@ export interface ToolContext {
   gfsScopes: GfsScopeSet
   desktopTools: boolean
   workflowTools: boolean
+  gfsDownloadStore: boolean
 }
 
 /** A pinned file without `_source.commit`, which the test adds when it records. */
@@ -79,9 +107,41 @@ export interface ApprovalAsksFile extends ProducerFile {
   asks: Record<string, Record<string, boolean>>
 }
 
+/** Tool names one registry adds, removes or changes against another, sorted. */
+export interface ToolDelta {
+  added: string[]
+  removed: string[]
+  changed: string[]
+}
+
+/** Inputs that turn GFS delivery off on a Host with a store. */
+export const STORE_FLIPS = ['storeUnavailable', 'shellExecSkipped', 'noCallerRoot'] as const
+export type StoreFlip = (typeof STORE_FLIPS)[number]
+
+/** What the store does to chat's registry, per GFS scope set. */
+export interface StoreEffect {
+  /** An available store against no store: the same in all 320 contexts without one. */
+  store: Record<GfsScopeSet, ToolDelta>
+  /** Each flip against an available store: the same on every channel of the store contexts. */
+  flips: Record<StoreFlip, Record<GfsScopeSet, ToolDelta>>
+}
+
+/** An asks registry built another way, against the recorded one. */
+export interface AsksVariantCheck {
+  variant: string
+  /** Answers compared: every name both registries register, or neither does. */
+  compared: number
+  /** The first differing answers, if any. */
+  differences: string[]
+}
+
 export interface ApprovalProducerFixtures {
   toolApproval: ToolApprovalFile
   approvalAsks: ApprovalAsksFile
+  storeEffect: StoreEffect
+  asksVariants: AsksVariantCheck[]
+  /** readChannelCap on telegram, under the designated-approvers policy the variants use. */
+  senderCaps: { listed: ApprovalMode; unlisted: ApprovalMode }
 }
 
 /** Names no tool registers: one custom row and one MCP tool. */
@@ -96,7 +156,9 @@ const TOOL_APPROVAL_NOTES = [
   'channelType rpc is the Desktop channel: mcp-host has no separate desktop channel type.',
   'Held in every context: the message carries one PDF file attachment (clerum__attachment_read, clerum__document_read and, with gfs.write, clerum__gfs_save_attachment), one context-files mount is configured (clerum__context_files_*), native tool discovery is on (clerum__tool_search, clerum__tool_describe, clerum__tool_call), and a workspace, spillover storage and session search are wired.',
   'workflowTools: the workflow gateway and runtime credentials are configured. On telegram, slack and teams the sender also has a resolved provider identity; an rpc message carries its chat id.',
-  'Not built: clerum__gfs_download, which needs a Host GFS download store. With a store, the file and shell tools also bind to the caller root.',
+  'gfsDownloadStore: the Host GFS download store is available and the task has its caller root, wired as a running Host wires them; a running Host always has a store. Contexts with false have no store, and their values equal those with an unavailable store (checked in every context).',
+  'The store contexts vary the channel and the GFS scopes, the inputs its wiring reads. The store changes the same tools in all 320 contexts without one (checked): it adds clerum__gfs_download, which needs gfs.read.',
+  'With a store, clerum__gfs_download is also missing when tools.shell_exec is false, and file_read and file_write are missing when the caller root cannot be resolved (checked, not recorded).',
 ]
 
 const APPROVAL_ASKS_NOTES = [
@@ -106,6 +168,7 @@ const APPROVAL_ASKS_NOTES = [
   'Interactive tasks (cronFired false): the controller TaskExecutor builds, then decideApproval. Only a card asks, so a classify result (the shell judge decides) does not.',
   'Cron-fired tasks: on a stateless Host, the cron_manage-only gate, whose suspension is the card; on other Hosts no gate runs.',
   'cron_manage is called with every action its schema lists, because the stateless gate reads the action.',
+  'Answers come from a registry with the GFS download store. Without the store, under designated approvers, and for a sender who is not a listed approver, every answer of a name registered alike is the same (checked). Whether the sender is a listed approver changes only the channel cap, which effectiveMode carries.',
   `${CUSTOM_TOOL_PROBE} and ${MCP_TOOL_PROBE} stand for a custom row and an MCP tool. Where chat does not register a tool (mcp-host-tool-approval.json), its row is the gate's answer for that name.`,
   'channelType rpc is the Desktop channel.',
 ]
@@ -154,22 +217,55 @@ const GFS_SCOPES: Record<GfsScopeSet, readonly string[]> = {
 
 const WORKSPACE_PATH = '/tmp'
 const CONVERSATION_ID = 'approval-fixture-conversation'
+const TASK_ID = 'approval-fixture-task'
 const MESSAGE_ID = 'approval-fixture-message'
 const MESSAGE_TEXT = 'approval fixture request'
 const CALL_ID = 'approval-fixture-call'
+const SENDER = 'approval-fixture-sender'
+const OTHER_SENDER = 'approval-fixture-other-sender'
 const NO_GRANTS = {
   task: new Set<string>(),
   always: new Set<string>(),
   autoShell: { wholeTool: false, commands: new Set<string>() },
 }
+const LIVE_GFS_DOWNLOAD: ReadonlySet<string> = new Set(['clerum__gfs_download'])
 
-interface RegistryInputs {
-  statelessLifecycle: boolean
-  allowStatelessCronManage: boolean
-  channelType: ChannelType
-  gfsScopes: GfsScopeSet
-  desktopTools: boolean
-  workflowTools: boolean
+/** The Host approval block without overrides, and the same block under designated approvers. */
+type ApprovalPolicy = Pick<ApprovalConfig, 'defaultPolicy' | 'channels'>
+const OPEN_POLICY: ApprovalPolicy = { defaultPolicy: 'channel_users', channels: {} }
+const DESIGNATED_POLICY: ApprovalPolicy = {
+  defaultPolicy: 'designated_approvers',
+  channels: {
+    telegram: { enabled: true, approvers: [SENDER] },
+    email: { enabled: true, approvers: [SENDER] },
+    slack: { enabled: true, approvers: [SENDER] },
+    teams: { enabled: true, approvers: [SENDER] },
+  },
+}
+
+/** The ToolContext fields a registry is built from; the store comes from `StoreVariant`. */
+type RegistryInputs = Omit<ToolContext, 'gfsDownloadStore'>
+
+/**
+ * The store a task's TaskExecutorDeps carry: none, an available one, or an
+ * available one with one input that turns GFS delivery off.
+ */
+type StoreVariant = 'none' | 'available' | StoreFlip
+
+/** The GFS runtime a running Host bootstraps, on a temporary Host root. */
+interface GfsRuntimeFixture {
+  root: string
+  provider: ScopedWorkspaceProvider
+  /** Initialized, so available. */
+  store: GfsDownloadStore
+  /** Never initialized, so unavailable, as while its initialize() keeps failing. */
+  unavailableStore: GfsDownloadStore
+}
+
+interface BuiltRegistry {
+  registry: NativeToolRegistry
+  /** What taskExecutor.ts:2530 computed; undefined without a store. */
+  gfsWorkspace: GfsManagedWorkspaceExecution | undefined
 }
 
 /** A GFS access token whose claims carry `scopes`; the registry reads only the claims. */
@@ -202,6 +298,39 @@ async function withRegistryEnv<T>(inputs: RegistryInputs, build: () => Promise<T
     return await build()
   } finally {
     vi.unstubAllEnvs()
+  }
+}
+
+async function openGfsRuntime(): Promise<GfsRuntimeFixture> {
+  const root = await mkdtemp(join(tmpdir(), 'approval-fixture-gfs-'))
+  const store = new GfsDownloadStore(root)
+  // initialize() logs one info line when it succeeds, dropped here. Warnings
+  // and errors still print, and any other info line fails the build.
+  const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+  try {
+    await store.initialize()
+    const other = info.mock.calls.filter(([, msg]) => msg !== 'GFS download store initialized')
+    if (other.length > 0) throw new Error(`unexpected store log: ${JSON.stringify(other)}`)
+    if (!store.isAvailable()) throw new Error('the GFS download store is not available')
+  } catch (error) {
+    await rm(root, { recursive: true, force: true })
+    throw error
+  } finally {
+    info.mockRestore()
+  }
+  return {
+    root,
+    provider: new ScopedWorkspaceProvider(root),
+    store,
+    unavailableStore: new GfsDownloadStore(root),
+  }
+}
+
+async function closeGfsRuntime(runtime: GfsRuntimeFixture): Promise<void> {
+  try {
+    await runtime.store.close()
+  } finally {
+    await rm(runtime.root, { recursive: true, force: true })
   }
 }
 
@@ -248,12 +377,16 @@ function nativeToolConfig(statelessLifecycle: boolean): NativeToolConfig {
   }
 }
 
-function chatMessage(channelType: ChannelType, attachment: Attachment): IncomingMessage {
+function chatMessage(
+  channelType: ChannelType,
+  sender: string,
+  attachment: Attachment
+): IncomingMessage {
   return {
     content: MESSAGE_TEXT,
     channelType,
     channelId: 'approval-fixture-channel',
-    sender: 'approval-fixture-sender',
+    sender,
     timestamp: '2026-11-25T00:00:00.000Z',
     messageId: MESSAGE_ID,
     hostRef: 'approval-fixture-host',
@@ -317,19 +450,64 @@ async function registerDesktopToolsChecked(registry: NativeToolRegistry): Promis
   }
 }
 
+/** The task's caller root, as stateMachine.ts:1622-1625 resolves it for a Host with a store. */
+function callerRoot(runtime: GfsRuntimeFixture, message: IncomingMessage): string {
+  const binding = resolveCallerRootBinding(runtime.provider, message)
+  if (!binding.root) throw new Error(`caller root not resolved: ${binding.failureCode}`)
+  return binding.root
+}
+
 /** Chat's native registry, as TaskExecutor.createToolRegistry builds it. */
 async function buildChatRegistry(
-  inputs: RegistryInputs,
-  attachment: Attachment
-): Promise<NativeToolRegistry> {
+  task: { inputs: RegistryInputs; sender: string; store: StoreVariant; policy: ApprovalPolicy },
+  attachment: Attachment,
+  runtime: GfsRuntimeFixture
+): Promise<BuiltRegistry> {
+  const message = chatMessage(task.inputs.channelType, task.sender, attachment)
+  // TaskExecutorDeps (stateMachine.ts:1622-1643): the store, the caller root
+  // (resolved only for a Host with a store; a failed binding passes none), and
+  // the Host approval block.
+  const store =
+    task.store === 'none'
+      ? undefined
+      : task.store === 'storeUnavailable'
+        ? runtime.unavailableStore
+        : runtime.store
+  const callerWorkspacePath =
+    store && task.store !== 'noCallerRoot' ? callerRoot(runtime, message) : undefined
+  const approvalConfig: ApprovalConfig =
+    task.store === 'shellExecSkipped'
+      ? { ...task.policy, tools: { shell_exec: false } }
+      : { ...task.policy }
+  // taskExecutor.ts:2529-2548.
+  const gfsWorkspace = gfsManagedWorkspaceExecution({
+    approvalEnabled: true,
+    source: 'channel',
+    callerIdentity: gfsStoreCallerIdentity(message),
+    store,
+    callerWorkspacePath,
+    approvalConfig,
+    retentionOwnerId: TASK_ID,
+  })
+  const deliveryAvailable = gfsWorkspace
+    ? gfsWorkspaceExecutionEnabled({
+        approvalEnabled: true,
+        source: 'channel',
+        callerIdentity: message.sender,
+        store: gfsWorkspace.store,
+        callerWorkspacePath: gfsWorkspace.callerWorkspacePath,
+        approvalConfig,
+        retentionOwnerId: TASK_ID,
+      })
+    : false
   const registry = new NativeToolRegistry(
-    nativeToolConfig(inputs.statelessLifecycle),
+    nativeToolConfig(task.inputs.statelessLifecycle),
     CONVERSATION_ID,
-    new CronScheduler(new MessageQueue(), { statelessLifecycle: inputs.statelessLifecycle }),
-    chatMessage(inputs.channelType, attachment),
+    new CronScheduler(new MessageQueue(), { statelessLifecycle: task.inputs.statelessLifecycle }),
+    message,
     new WorkspaceService(WORKSPACE_PATH),
     () => ({}),
-    workflowCallerContext(inputs.channelType),
+    workflowCallerContext(task.inputs.channelType),
     { maxBytes: 52_428_800, ledger: new AttachmentReadLedger(), contextWindowTokens: 100_000 },
     new SpilloverStorage({
       workspacePath: WORKSPACE_PATH,
@@ -343,12 +521,11 @@ async function buildChatRegistry(
     { mcpDiscovery: false, nativeDiscovery: true },
     // The active provider only steers shell_exec's child environment.
     'claude',
-    // No Host GFS download store (see TOOL_APPROVAL_NOTES).
-    undefined,
-    undefined
+    gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable } : undefined,
+    generatedOutputsRoot(message, callerWorkspacePath)
   )
   await registerDesktopToolsChecked(registry)
-  return registry
+  return { registry, gfsWorkspace }
 }
 
 function registeredApproval(registry: NativeToolRegistry): Map<string, boolean> {
@@ -361,16 +538,64 @@ function registeredApproval(registry: NativeToolRegistry): Map<string, boolean> 
   )
 }
 
-async function buildToolApproval(attachment: Attachment): Promise<ToolApprovalFile> {
+function toolDelta(from: Map<string, boolean>, to: Map<string, boolean>): ToolDelta {
+  return {
+    added: [...to.keys()].filter(name => !from.has(name)).sort(),
+    removed: [...from.keys()].filter(name => !to.has(name)).sort(),
+    changed: [...to.keys()]
+      .filter(name => from.has(name) && from.get(name) !== to.get(name))
+      .sort(),
+  }
+}
+
+/** Records the delta for its scope set, and throws if another context gave that scope set another one. */
+function sameForScopes(
+  deltas: Map<GfsScopeSet, ToolDelta>,
+  inputs: RegistryInputs,
+  delta: ToolDelta,
+  what: string
+): void {
+  const earlier = deltas.get(inputs.gfsScopes)
+  if (earlier && JSON.stringify(earlier) !== JSON.stringify(delta)) {
+    throw new Error(
+      `${what} changes ${JSON.stringify(delta)} at ${JSON.stringify(inputs)}, but ${JSON.stringify(earlier)} elsewhere with the same GFS scopes`
+    )
+  }
+  deltas.set(inputs.gfsScopes, delta)
+}
+
+/**
+ * The store contexts vary what the store wiring reads: the channel and sender
+ * that name the caller, and the GFS scopes that gate clerum__gfs_download.
+ * Every other field keeps its first value; `sameForScopes` checks that the
+ * store does the same in every other context.
+ */
+function recordsStoreContext(inputs: RegistryInputs): boolean {
+  return (
+    !inputs.statelessLifecycle &&
+    !inputs.allowStatelessCronManage &&
+    !inputs.desktopTools &&
+    !inputs.workflowTools
+  )
+}
+
+async function buildToolApproval(
+  attachment: Attachment,
+  runtime: GfsRuntimeFixture
+): Promise<{ file: ToolApprovalFile; storeEffect: StoreEffect }> {
   const contexts: ToolContext[] = []
   const approvals: Array<Map<string, boolean>> = []
+  const storeContexts: ToolContext[] = []
+  const storeApprovals: Array<Map<string, boolean>> = []
+  const storeDeltas = new Map<GfsScopeSet, ToolDelta>()
+  const flipDeltas = new Map(STORE_FLIPS.map(flip => [flip, new Map<GfsScopeSet, ToolDelta>()]))
   for (const statelessLifecycle of BOOLEANS) {
     for (const allowStatelessCronManage of BOOLEANS) {
       for (const channelType of CHANNEL_TYPES) {
         for (const gfsScopes of GFS_SCOPE_SETS) {
           for (const desktopTools of BOOLEANS) {
             for (const workflowTools of BOOLEANS) {
-              const context: ToolContext = {
+              const inputs: RegistryInputs = {
                 statelessLifecycle,
                 allowStatelessCronManage,
                 channelType,
@@ -378,32 +603,69 @@ async function buildToolApproval(attachment: Attachment): Promise<ToolApprovalFi
                 desktopTools,
                 workflowTools,
               }
-              contexts.push(context)
-              approvals.push(
-                await withRegistryEnv(context, async () =>
-                  registeredApproval(await buildChatRegistry(context, attachment))
-                )
-              )
+              await withRegistryEnv(inputs, async () => {
+                const approvalWith = async (store: StoreVariant) =>
+                  registeredApproval(
+                    (
+                      await buildChatRegistry(
+                        { inputs, sender: SENDER, store, policy: OPEN_POLICY },
+                        attachment,
+                        runtime
+                      )
+                    ).registry
+                  )
+                const none = await approvalWith('none')
+                const available = await approvalWith('available')
+                const unavailable = await approvalWith('storeUnavailable')
+                const unlike = toolDelta(none, unavailable)
+                if (unlike.added.length + unlike.removed.length + unlike.changed.length > 0) {
+                  throw new Error(
+                    `an unavailable store differs from no store at ${JSON.stringify(inputs)}: ${JSON.stringify(unlike)}`
+                  )
+                }
+                sameForScopes(storeDeltas, inputs, toolDelta(none, available), 'The store')
+                contexts.push({ ...inputs, gfsDownloadStore: false })
+                approvals.push(none)
+                if (!recordsStoreContext(inputs)) return
+                storeContexts.push({ ...inputs, gfsDownloadStore: true })
+                storeApprovals.push(available)
+                for (const flip of STORE_FLIPS) {
+                  const flipped =
+                    flip === 'storeUnavailable' ? unavailable : await approvalWith(flip)
+                  sameForScopes(flipDeltas.get(flip)!, inputs, toolDelta(available, flipped), flip)
+                }
+              })
             }
           }
         }
       }
     }
   }
+  contexts.push(...storeContexts)
+  approvals.push(...storeApprovals)
   const names = [...new Set(approvals.flatMap(approval => [...approval.keys()]))].sort()
   const tools = Object.fromEntries(
     names.map(name => [name, approvals.map(approval => approval.get(name) ?? null)])
   )
+  const byScopes = (deltas: Map<GfsScopeSet, ToolDelta>) =>
+    Object.fromEntries(GFS_SCOPE_SETS.map(scopes => [scopes, deltas.get(scopes)!])) as Record<
+      GfsScopeSet,
+      ToolDelta
+    >
   return {
-    _source: { producer: PRODUCER, notes: TOOL_APPROVAL_NOTES },
-    contexts,
-    tools,
+    file: { _source: { producer: PRODUCER, notes: TOOL_APPROVAL_NOTES }, contexts, tools },
+    storeEffect: {
+      store: byScopes(storeDeltas),
+      flips: Object.fromEntries(
+        STORE_FLIPS.map(flip => [flip, byScopes(flipDeltas.get(flip)!)])
+      ) as StoreEffect['flips'],
+    },
   }
 }
 
 /** The controller TaskExecutor gives a task, with approval enabled. */
 function taskController(
-  registry: NativeToolRegistry,
+  built: BuiltRegistry,
   approvalConfig: () => ApprovalConfig | undefined,
   task: { cronFired: boolean; statelessLifecycle: boolean }
 ): LoopController {
@@ -411,23 +673,33 @@ function taskController(
   const cronManageGateOnly = task.cronFired && task.statelessLifecycle
   if (!interactive && !cronManageGateOnly) return new DefaultLoopController()
   // Without an MCP manager TaskExecutor passes the native registry as both registries.
-  const gate = new UnifiedApprovalGateController(registry, approvalConfig, registry, {
+  const gate = new UnifiedApprovalGateController(built.registry, approvalConfig, built.registry, {
     statelessLifecycle: task.statelessLifecycle,
     cronManageGateOnly,
   })
-  // No GFS download store, so no live approval tools.
   return new ApprovalController(makeFakeConversation(), gate, {
     honorDenials: !cronManageGateOnly,
-    toolRegistry: registry,
+    toolRegistry: built.registry,
+    // TaskExecutor.liveApprovalTools for a chat task; a cron task's source is
+    // never 'channel', so it gets none.
+    liveApprovalTools: interactive
+      ? () =>
+          built.gfsWorkspace && approvalConfig()?.tools?.shell_exec !== false
+            ? LIVE_GFS_DOWNLOAD
+            : undefined
+      : undefined,
     forcedApprovalGate: gate,
     modeAware: interactive,
   })
 }
 
-function overrideConfig(toolName: string, override: Override): ApprovalConfig {
+function overrideConfig(
+  policy: ApprovalPolicy,
+  toolName: string,
+  override: Override
+): ApprovalConfig {
   return {
-    defaultPolicy: 'channel_users',
-    channels: {},
+    ...policy,
     ...(override === 'absent' ? {} : { tools: { [toolName]: override === 'true' } }),
   }
 }
@@ -496,12 +768,130 @@ function collapse(tool: string, full: Map<string, boolean>): Record<string, bool
   )
 }
 
+/** Every answer of one registry: tool name to full key to whether the call asks. */
+function registryAnswers(
+  built: BuiltRegistry,
+  names: readonly string[],
+  policy: ApprovalPolicy,
+  inputs: RegistryInputs
+): Map<string, Map<string, boolean>> {
+  const answers = new Map(names.map(name => [name, new Map<string, boolean>()]))
+  // Set for each tool and override before the controller is asked.
+  let approvalConfig: ApprovalConfig | undefined
+  for (const cronFired of BOOLEANS) {
+    const controller = taskController(built, () => approvalConfig, {
+      cronFired,
+      statelessLifecycle: inputs.statelessLifecycle,
+    })
+    for (const toolName of names) {
+      const asksByKey = answers.get(toolName)!
+      const calls = callArguments(built.registry, toolName)
+      for (const override of OVERRIDES) {
+        approvalConfig = overrideConfig(policy, toolName, override)
+        const results = calls.map(args => ({
+          args,
+          answer: controller.beforeTool(toolName, args, CALL_ID),
+        }))
+        for (const stored of MODES) {
+          for (const ceiling of MODES) {
+            for (const cap of MODES) {
+              const mode = effectiveApprovalMode(stored, ceiling, cap)
+              for (const judge of BOOLEANS) {
+                const asks = results.every(({ args, answer }) =>
+                  answerAsks(answer, { toolName, args }, { cronFired, mode, judge })
+                )
+                const key = [
+                  mode,
+                  override,
+                  inputs.channelType,
+                  cronFired,
+                  inputs.statelessLifecycle,
+                  inputs.allowStatelessCronManage,
+                  judge,
+                ].join('|')
+                const earlier = asksByKey.get(key)
+                if (earlier !== undefined && earlier !== asks) {
+                  throw new Error(
+                    `${toolName} at ${key}: two (stored, ceiling, cap) combinations with this effective mode disagree`
+                  )
+                }
+                asksByKey.set(key, asks)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return answers
+}
+
+interface AsksVariant {
+  variant: string
+  store: 'none' | 'available'
+  sender: string
+  policy: ApprovalPolicy
+}
+
+/** The registry the asks table records: the store, a listed sender, no approver policy. */
+const RECORDED_ASKS: AsksVariant = {
+  variant: 'recorded',
+  store: 'available',
+  sender: SENDER,
+  policy: OPEN_POLICY,
+}
+
+/** Registries the key has no field for, compared with the recorded one. */
+const ASKS_VARIANTS: readonly AsksVariant[] = [
+  { variant: 'no GFS download store', store: 'none', sender: SENDER, policy: OPEN_POLICY },
+  {
+    variant: 'designated approvers, sender listed',
+    store: 'available',
+    sender: SENDER,
+    policy: DESIGNATED_POLICY,
+  },
+  {
+    variant: 'designated approvers, sender not listed',
+    store: 'available',
+    sender: OTHER_SENDER,
+    policy: DESIGNATED_POLICY,
+  },
+]
+
+const MAX_REPORTED_DIFFERENCES = 20
+
+/** Compares every answer of a name both registries register, or neither does. */
+function compareAnswers(
+  recorded: { built: BuiltRegistry; answers: Map<string, Map<string, boolean>> },
+  variant: { built: BuiltRegistry; answers: Map<string, Map<string, boolean>> },
+  check: AsksVariantCheck
+): void {
+  for (const [name, byKey] of recorded.answers) {
+    const registeredAlike =
+      (recorded.built.registry.get(name) === null) === (variant.built.registry.get(name) === null)
+    if (!registeredAlike) continue
+    for (const [key, asks] of byKey) {
+      check.compared += 1
+      const other = variant.answers.get(name)?.get(key)
+      if (other !== asks && check.differences.length < MAX_REPORTED_DIFFERENCES) {
+        check.differences.push(`${name} at ${key}: recorded ${asks}, ${check.variant} ${other}`)
+      }
+    }
+  }
+}
+
 async function buildApprovalAsks(
   attachment: Attachment,
-  toolNames: readonly string[]
-): Promise<ApprovalAsksFile> {
+  toolNames: readonly string[],
+  runtime: GfsRuntimeFixture
+): Promise<{ file: ApprovalAsksFile; checks: AsksVariantCheck[] }> {
   const names = [...toolNames, CUSTOM_TOOL_PROBE, MCP_TOOL_PROBE]
   const full = new Map(names.map(name => [name, new Map<string, boolean>()]))
+  const checks: AsksVariantCheck[] = ASKS_VARIANTS.map(({ variant }) => ({
+    variant,
+    compared: 0,
+    differences: [],
+  }))
   for (const channelType of CHANNEL_TYPES) {
     for (const statelessLifecycle of BOOLEANS) {
       for (const allowStatelessCronManage of BOOLEANS) {
@@ -515,76 +905,67 @@ async function buildApprovalAsks(
           workflowTools: true,
         }
         await withRegistryEnv(inputs, async () => {
-          const registry = await buildChatRegistry(inputs, attachment)
-          for (const definition of registry.listDefinitions()) {
-            if (!toolNames.includes(definition.name)) {
-              throw new Error(`${definition.name} is registered but missing from the tool table`)
-            }
-          }
-          for (const probe of [CUSTOM_TOOL_PROBE, MCP_TOOL_PROBE]) {
-            if (registry.get(probe)) throw new Error(`${probe} is a registered tool`)
-          }
-          // Set for each tool and override before the controller is asked.
-          let approvalConfig: ApprovalConfig | undefined
-          for (const cronFired of BOOLEANS) {
-            const controller = taskController(registry, () => approvalConfig, {
-              cronFired,
-              statelessLifecycle,
-            })
-            for (const toolName of names) {
-              const asksByKey = full.get(toolName)!
-              const calls = callArguments(registry, toolName)
-              for (const override of OVERRIDES) {
-                approvalConfig = overrideConfig(toolName, override)
-                const answers = calls.map(args => ({
-                  args,
-                  answer: controller.beforeTool(toolName, args, CALL_ID),
-                }))
-                for (const stored of MODES) {
-                  for (const ceiling of MODES) {
-                    for (const cap of MODES) {
-                      const mode = effectiveApprovalMode(stored, ceiling, cap)
-                      for (const judge of BOOLEANS) {
-                        const asks = answers.every(({ args, answer }) =>
-                          answerAsks(answer, { toolName, args }, { cronFired, mode, judge })
-                        )
-                        const key = [
-                          mode,
-                          override,
-                          channelType,
-                          cronFired,
-                          statelessLifecycle,
-                          allowStatelessCronManage,
-                          judge,
-                        ].join('|')
-                        const earlier = asksByKey.get(key)
-                        if (earlier !== undefined && earlier !== asks) {
-                          throw new Error(
-                            `${toolName} at ${key}: two (stored, ceiling, cap) combinations with this effective mode disagree`
-                          )
-                        }
-                        asksByKey.set(key, asks)
-                      }
-                    }
-                  }
-                }
+          const answersOf = async ({ store, sender, policy }: AsksVariant) => {
+            const built = await buildChatRegistry(
+              { inputs, sender, store, policy },
+              attachment,
+              runtime
+            )
+            for (const definition of built.registry.listDefinitions()) {
+              if (!toolNames.includes(definition.name)) {
+                throw new Error(`${definition.name} is registered but missing from the tool table`)
               }
             }
+            for (const probe of [CUSTOM_TOOL_PROBE, MCP_TOOL_PROBE]) {
+              if (built.registry.get(probe)) throw new Error(`${probe} is a registered tool`)
+            }
+            return { built, answers: registryAnswers(built, names, policy, inputs) }
+          }
+          const recorded = await answersOf(RECORDED_ASKS)
+          for (const [name, byKey] of recorded.answers) {
+            for (const [key, asks] of byKey) full.get(name)!.set(key, asks)
+          }
+          for (const [index, variant] of ASKS_VARIANTS.entries()) {
+            compareAnswers(recorded, await answersOf(variant), checks[index])
           }
         })
       }
     }
   }
   return {
-    _source: { producer: PRODUCER, notes: APPROVAL_ASKS_NOTES },
-    keys: KEY_FIELDS.map(([field]) => field),
-    asks: Object.fromEntries(names.map(name => [name, collapse(name, full.get(name)!)])),
+    file: {
+      _source: { producer: PRODUCER, notes: APPROVAL_ASKS_NOTES },
+      keys: KEY_FIELDS.map(([field]) => field),
+      asks: Object.fromEntries(names.map(name => [name, collapse(name, full.get(name)!)])),
+    },
+    checks,
+  }
+}
+
+/** The cap telegram gives each sender under the designated-approvers policy. */
+function senderCaps(): ApprovalProducerFixtures['senderCaps'] {
+  const designated: ApprovalConfig = { ...DESIGNATED_POLICY }
+  const snapshot = { effective: designated, hostSpec: designated }
+  return {
+    listed: readChannelCap(snapshot, 'telegram', SENDER),
+    unlisted: readChannelCap(snapshot, 'telegram', OTHER_SENDER),
   }
 }
 
 export async function buildApprovalProducerFixtures(): Promise<ApprovalProducerFixtures> {
   const attachment = await pdfAttachment()
-  const toolApproval = await buildToolApproval(attachment)
-  const approvalAsks = await buildApprovalAsks(attachment, Object.keys(toolApproval.tools))
-  return { toolApproval, approvalAsks }
+  const runtime = await openGfsRuntime()
+  try {
+    const tools = await buildToolApproval(attachment, runtime)
+    const asks = await buildApprovalAsks(attachment, Object.keys(tools.file.tools), runtime)
+    return {
+      toolApproval: tools.file,
+      approvalAsks: asks.file,
+      storeEffect: tools.storeEffect,
+      asksVariants: asks.checks,
+      senderCaps: senderCaps(),
+    }
+  } finally {
+    await closeGfsRuntime(runtime)
+  }
 }

@@ -25,6 +25,7 @@ import {
   CUSTOM_TOOL_PROBE,
   MCP_TOOL_PROBE,
   type ProducerFile,
+  type ToolDelta,
   buildApprovalProducerFixtures,
 } from './approvalProducerFixtures.build'
 
@@ -149,11 +150,33 @@ describe('approval producer fixtures for Control UI', () => {
 
   it('registers the named tools in the matching contexts', () => {
     const { contexts, tools } = fixtures.toolApproval
-    // 2 stateless x 2 allow x 5 channels x 4 GFS scope sets x 2 desktop x 2 workflow.
-    expect(contexts).toHaveLength(320)
+    // Without a store: 2 stateless x 2 allow x 5 channels x 4 GFS scope sets x
+    // 2 desktop x 2 workflow. With one: 5 channels x 4 GFS scope sets.
+    expect(contexts).toHaveLength(340)
     for (const [name, values] of Object.entries(tools)) {
       expect(values, name).toHaveLength(contexts.length)
     }
+    expect(contexts.filter(context => context.gfsDownloadStore)).toEqual(
+      ['rpc', 'telegram', 'slack', 'teams', 'email'].flatMap(channelType =>
+        ['none', 'read', 'write', 'read-write'].map(gfsScopes => ({
+          statelessLifecycle: false,
+          allowStatelessCronManage: false,
+          channelType,
+          gfsScopes,
+          desktopTools: false,
+          workflowTools: false,
+          gfsDownloadStore: true,
+        }))
+      )
+    )
+    expect(tools.clerum__gfs_download).toEqual(
+      contexts.map(context =>
+        context.gfsDownloadStore &&
+        (context.gfsScopes === 'read' || context.gfsScopes === 'read-write')
+          ? false
+          : null
+      )
+    )
 
     expect(tools.cron_manage).toEqual(
       contexts.map(context => !(context.statelessLifecycle && !context.allowStatelessCronManage))
@@ -180,6 +203,55 @@ describe('approval producer fixtures for Control UI', () => {
     expect(tools.shell_exec).toEqual(contexts.map(() => true))
   })
 
+  it('records what the GFS download store changes, and what turns its delivery off', () => {
+    const delta = (change: Partial<ToolDelta> = {}): ToolDelta => ({
+      added: [],
+      removed: [],
+      changed: [],
+      ...change,
+    })
+    const download = ['clerum__gfs_download']
+    const fileTools = ['file_read', 'file_write']
+    // The store adds the download tool with gfs.read, and changes nothing else.
+    expect(fixtures.storeEffect.store).toEqual({
+      none: delta(),
+      read: delta({ added: download }),
+      write: delta(),
+      'read-write': delta({ added: download }),
+    })
+    const loseDownload = {
+      none: delta(),
+      read: delta({ removed: download }),
+      write: delta(),
+      'read-write': delta({ removed: download }),
+    }
+    expect(fixtures.storeEffect.flips).toEqual({
+      storeUnavailable: loseDownload,
+      shellExecSkipped: loseDownload,
+      // Without a caller root the file tools are not registered either.
+      noCallerRoot: {
+        none: delta({ removed: fileTools }),
+        read: delta({ removed: [...download, ...fileTools] }),
+        write: delta({ removed: fileTools }),
+        'read-write': delta({ removed: [...download, ...fileTools] }),
+      },
+    })
+  })
+
+  it('answers the same without the store, under designated approvers and for an unlisted sender', () => {
+    // The policy tells the two senders apart: only the listed one may raise on telegram.
+    expect(fixtures.senderCaps).toEqual({ listed: 'allow_all', unlisted: 'manual' })
+    expect(fixtures.asksVariants.map(check => check.variant)).toEqual([
+      'no GFS download store',
+      'designated approvers, sender listed',
+      'designated approvers, sender not listed',
+    ])
+    for (const check of fixtures.asksVariants) {
+      expect(check.compared, check.variant).toBeGreaterThan(0)
+      expect(check.differences, check.variant).toEqual([])
+    }
+  })
+
   it('answers the asks spot checks', () => {
     // Adapter-served tools never ask by default; an explicit Required asks below allow_all.
     expect(asksAt('clerum__gfs_write')).toBe(false)
@@ -187,6 +259,9 @@ describe('approval producer fixtures for Control UI', () => {
     expect(asksAt('clerum__gfs_write', { override: 'true', effectiveMode: 'allow_all' })).toBe(
       false
     )
+    // The registered download tool, not an unregistered `__` name, which would always ask.
+    expect(asksAt('clerum__gfs_download')).toBe(false)
+    expect(asksAt('clerum__gfs_download', { override: 'true' })).toBe(true)
 
     // Shell: manual asks, allow_all runs, auto asks only when no judge can classify it.
     expect(asksAt('shell_exec')).toBe(true)

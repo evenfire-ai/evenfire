@@ -1,6 +1,6 @@
 {
   "_source": {
-    "commit": "41cda16be45b309b682dd510c01a2e92a0b048da",
+    "commit": "984925a6c07daa7a788d9aa6a37a3819eb8df4e3",
     "producer": "mcp-host/src/core/approval/__tests__/approvalProducerFixtures.test.ts",
     "notes": [
       "tools[name][i] is the tool's own requiresApproval() in contexts[i]; null means chat does not register the tool there.",
@@ -8,7 +8,9 @@
       "channelType rpc is the Desktop channel: mcp-host has no separate desktop channel type.",
       "Held in every context: the message carries one PDF file attachment (clerum__attachment_read, clerum__document_read and, with gfs.write, clerum__gfs_save_attachment), one context-files mount is configured (clerum__context_files_*), native tool discovery is on (clerum__tool_search, clerum__tool_describe, clerum__tool_call), and a workspace, spillover storage and session search are wired.",
       "workflowTools: the workflow gateway and runtime credentials are configured. On telegram, slack and teams the sender also has a resolved provider identity; an rpc message carries its chat id.",
-      "Not built: clerum__gfs_download, which needs a Host GFS download store. With a store, the file and shell tools also bind to the caller root."
+      "gfsDownloadStore: the Host GFS download store is available and the task has its caller root, wired as a running Host wires them; a running Host always has a store. Contexts with false have no store, and their values equal those with an unavailable store (checked in every context).",
+      "The store contexts vary the channel and the GFS scopes, the inputs its wiring reads. The store changes the same tools in all 320 contexts without one (checked): it adds clerum__gfs_download, which needs gfs.read.",
+      "With a store, clerum__gfs_download is also missing when tools.shell_exec is false, and file_read and file_write are missing when the caller root cannot be resolved (checked, not recorded)."
     ]
   },
   "contexts": [
@@ -18,7 +20,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -26,7 +29,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -34,7 +38,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -42,7 +47,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -50,7 +56,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -58,7 +65,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -66,7 +74,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -74,7 +83,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -82,7 +92,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -90,7 +101,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -98,7 +110,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -106,7 +119,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -114,7 +128,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -122,7 +137,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -130,7 +146,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -138,7 +155,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -146,7 +164,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -154,7 +173,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -162,7 +182,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -170,7 +191,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -178,7 +200,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -186,7 +209,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -194,7 +218,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -202,7 +227,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -210,7 +236,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -218,7 +245,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -226,7 +254,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -234,7 +263,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -242,7 +272,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -250,7 +281,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -258,7 +290,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -266,7 +299,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -274,7 +308,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -282,7 +317,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -290,7 +326,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -298,7 +335,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -306,7 +344,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -314,7 +353,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -322,7 +362,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -330,7 +371,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -338,7 +380,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -346,7 +389,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -354,7 +398,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -362,7 +407,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -370,7 +416,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -378,7 +425,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -386,7 +434,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -394,7 +443,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -402,7 +452,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -410,7 +461,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -418,7 +470,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -426,7 +479,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -434,7 +488,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -442,7 +497,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -450,7 +506,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -458,7 +515,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -466,7 +524,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -474,7 +533,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -482,7 +542,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -490,7 +551,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -498,7 +560,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -506,7 +569,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -514,7 +578,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -522,7 +587,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -530,7 +596,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -538,7 +605,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -546,7 +614,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -554,7 +623,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -562,7 +632,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -570,7 +641,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -578,7 +650,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -586,7 +659,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -594,7 +668,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -602,7 +677,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -610,7 +686,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -618,7 +695,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -626,7 +704,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -634,7 +713,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -642,7 +722,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -650,7 +731,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -658,7 +740,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -666,7 +749,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -674,7 +758,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -682,7 +767,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -690,7 +776,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -698,7 +785,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -706,7 +794,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -714,7 +803,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -722,7 +812,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -730,7 +821,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -738,7 +830,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -746,7 +839,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -754,7 +848,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -762,7 +857,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -770,7 +866,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -778,7 +875,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -786,7 +884,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -794,7 +893,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -802,7 +902,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -810,7 +911,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -818,7 +920,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -826,7 +929,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -834,7 +938,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -842,7 +947,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -850,7 +956,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -858,7 +965,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -866,7 +974,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -874,7 +983,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -882,7 +992,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -890,7 +1001,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -898,7 +1010,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -906,7 +1019,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -914,7 +1028,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -922,7 +1037,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -930,7 +1046,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -938,7 +1055,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -946,7 +1064,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -954,7 +1073,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -962,7 +1082,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -970,7 +1091,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -978,7 +1100,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -986,7 +1109,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -994,7 +1118,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1002,7 +1127,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1010,7 +1136,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1018,7 +1145,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1026,7 +1154,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1034,7 +1163,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1042,7 +1172,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1050,7 +1181,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1058,7 +1190,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1066,7 +1199,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1074,7 +1208,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1082,7 +1217,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1090,7 +1226,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1098,7 +1235,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1106,7 +1244,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1114,7 +1253,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1122,7 +1262,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1130,7 +1271,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1138,7 +1280,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1146,7 +1289,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1154,7 +1298,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1162,7 +1307,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1170,7 +1316,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1178,7 +1325,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1186,7 +1334,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1194,7 +1343,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1202,7 +1352,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1210,7 +1361,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1218,7 +1370,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1226,7 +1379,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1234,7 +1388,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1242,7 +1397,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1250,7 +1406,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1258,7 +1415,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1266,7 +1424,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1274,7 +1433,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1282,7 +1442,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": false,
@@ -1290,7 +1451,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1298,7 +1460,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1306,7 +1469,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1314,7 +1478,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1322,7 +1487,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1330,7 +1496,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1338,7 +1505,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1346,7 +1514,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1354,7 +1523,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1362,7 +1532,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1370,7 +1541,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1378,7 +1550,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1386,7 +1559,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1394,7 +1568,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1402,7 +1577,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1410,7 +1586,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1418,7 +1595,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1426,7 +1604,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1434,7 +1613,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1442,7 +1622,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1450,7 +1631,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1458,7 +1640,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1466,7 +1649,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1474,7 +1658,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1482,7 +1667,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1490,7 +1676,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1498,7 +1685,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1506,7 +1694,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1514,7 +1703,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1522,7 +1712,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1530,7 +1721,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1538,7 +1730,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1546,7 +1739,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1554,7 +1748,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1562,7 +1757,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1570,7 +1766,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1578,7 +1775,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1586,7 +1784,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1594,7 +1793,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1602,7 +1802,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1610,7 +1811,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1618,7 +1820,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1626,7 +1829,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1634,7 +1838,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1642,7 +1847,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1650,7 +1856,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1658,7 +1865,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1666,7 +1874,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1674,7 +1883,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1682,7 +1892,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1690,7 +1901,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1698,7 +1910,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1706,7 +1919,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1714,7 +1928,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1722,7 +1937,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1730,7 +1946,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1738,7 +1955,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1746,7 +1964,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1754,7 +1973,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1762,7 +1982,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1770,7 +1991,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1778,7 +2000,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1786,7 +2009,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1794,7 +2018,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1802,7 +2027,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1810,7 +2036,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1818,7 +2045,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1826,7 +2054,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1834,7 +2063,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1842,7 +2072,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1850,7 +2081,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1858,7 +2090,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1866,7 +2099,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1874,7 +2108,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1882,7 +2117,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1890,7 +2126,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1898,7 +2135,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1906,7 +2144,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1914,7 +2153,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1922,7 +2162,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1930,7 +2171,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1938,7 +2180,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1946,7 +2189,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1954,7 +2198,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1962,7 +2207,8 @@
       "channelType": "rpc",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1970,7 +2216,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1978,7 +2225,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1986,7 +2234,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -1994,7 +2243,8 @@
       "channelType": "rpc",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2002,7 +2252,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2010,7 +2261,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2018,7 +2270,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2026,7 +2279,8 @@
       "channelType": "rpc",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2034,7 +2288,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2042,7 +2297,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2050,7 +2306,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2058,7 +2315,8 @@
       "channelType": "rpc",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2066,7 +2324,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2074,7 +2333,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2082,7 +2342,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2090,7 +2351,8 @@
       "channelType": "telegram",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2098,7 +2360,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2106,7 +2369,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2114,7 +2378,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2122,7 +2387,8 @@
       "channelType": "telegram",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2130,7 +2396,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2138,7 +2405,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2146,7 +2414,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2154,7 +2423,8 @@
       "channelType": "telegram",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2162,7 +2432,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2170,7 +2441,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2178,7 +2450,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2186,7 +2459,8 @@
       "channelType": "telegram",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2194,7 +2468,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2202,7 +2477,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2210,7 +2486,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2218,7 +2495,8 @@
       "channelType": "slack",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2226,7 +2504,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2234,7 +2513,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2242,7 +2522,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2250,7 +2531,8 @@
       "channelType": "slack",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2258,7 +2540,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2266,7 +2549,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2274,7 +2558,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2282,7 +2567,8 @@
       "channelType": "slack",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2290,7 +2576,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2298,7 +2585,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2306,7 +2594,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2314,7 +2603,8 @@
       "channelType": "slack",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2322,7 +2612,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2330,7 +2621,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2338,7 +2630,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2346,7 +2639,8 @@
       "channelType": "teams",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2354,7 +2648,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2362,7 +2657,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2370,7 +2666,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2378,7 +2675,8 @@
       "channelType": "teams",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2386,7 +2684,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2394,7 +2693,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2402,7 +2702,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2410,7 +2711,8 @@
       "channelType": "teams",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2418,7 +2720,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2426,7 +2729,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2434,7 +2738,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2442,7 +2747,8 @@
       "channelType": "teams",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2450,7 +2756,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2458,7 +2765,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2466,7 +2774,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2474,7 +2783,8 @@
       "channelType": "email",
       "gfsScopes": "none",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2482,7 +2792,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2490,7 +2801,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2498,7 +2810,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2506,7 +2819,8 @@
       "channelType": "email",
       "gfsScopes": "read",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2514,7 +2828,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2522,7 +2837,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2530,7 +2846,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2538,7 +2855,8 @@
       "channelType": "email",
       "gfsScopes": "write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2546,7 +2864,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2554,7 +2873,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": false,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2562,7 +2882,8 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": false
+      "workflowTools": false,
+      "gfsDownloadStore": false
     },
     {
       "statelessLifecycle": true,
@@ -2570,7 +2891,188 @@
       "channelType": "email",
       "gfsScopes": "read-write",
       "desktopTools": true,
-      "workflowTools": true
+      "workflowTools": true,
+      "gfsDownloadStore": false
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "rpc",
+      "gfsScopes": "none",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "rpc",
+      "gfsScopes": "read",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "rpc",
+      "gfsScopes": "write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "rpc",
+      "gfsScopes": "read-write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "telegram",
+      "gfsScopes": "none",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "telegram",
+      "gfsScopes": "read",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "telegram",
+      "gfsScopes": "write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "telegram",
+      "gfsScopes": "read-write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "slack",
+      "gfsScopes": "none",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "slack",
+      "gfsScopes": "read",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "slack",
+      "gfsScopes": "write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "slack",
+      "gfsScopes": "read-write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "teams",
+      "gfsScopes": "none",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "teams",
+      "gfsScopes": "read",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "teams",
+      "gfsScopes": "write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "teams",
+      "gfsScopes": "read-write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "email",
+      "gfsScopes": "none",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "email",
+      "gfsScopes": "read",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "email",
+      "gfsScopes": "write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
+    },
+    {
+      "statelessLifecycle": false,
+      "allowStatelessCronManage": false,
+      "channelType": "email",
+      "gfsScopes": "read-write",
+      "desktopTools": false,
+      "workflowTools": false,
+      "gfsDownloadStore": true
     }
   ],
   "tools": {
@@ -2894,7 +3396,27 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "browser_get_content": [
       null,
@@ -3216,7 +3738,27 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "browser_navigate": [
       null,
@@ -3538,7 +4080,27 @@
       null,
       null,
       true,
-      true
+      true,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "browser_open": [
       null,
@@ -3860,7 +4422,27 @@
       null,
       null,
       true,
-      true
+      true,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "browser_screenshot": [
       null,
@@ -4182,7 +4764,27 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "browser_type": [
       null,
@@ -4504,9 +5106,49 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "clerum__attachment_read": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -5148,9 +5790,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "clerum__context_files_read": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -5792,9 +6474,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "clerum__generate_chart": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -6436,9 +7158,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "clerum__generate_docx": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -7080,9 +7842,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "clerum__generate_pdf": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -7724,9 +8526,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "clerum__generate_xlsx": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -8368,6 +9210,26 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "clerum__gfs_accessible": [
@@ -8690,6 +9552,26 @@
       false,
       false,
       false,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
       false
     ],
     "clerum__gfs_copy": [
@@ -9012,6 +9894,26 @@
       false,
       false,
       false,
+      false,
+      null,
+      null,
+      null,
+      false,
+      null,
+      null,
+      null,
+      false,
+      null,
+      null,
+      null,
+      false,
+      null,
+      null,
+      null,
+      false,
+      null,
+      null,
+      null,
       false
     ],
     "clerum__gfs_create_file": [
@@ -9333,6 +10235,26 @@
       false,
       false,
       false,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
       false,
       false
     ],
@@ -9656,6 +10578,368 @@
       false,
       false,
       false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false
+    ],
+    "clerum__gfs_download": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
       false
     ],
     "clerum__gfs_list": [
@@ -9978,6 +11262,26 @@
       false,
       false,
       false,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
       false
     ],
     "clerum__gfs_read": [
@@ -10300,6 +11604,26 @@
       false,
       false,
       false,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
       false
     ],
     "clerum__gfs_rename": [
@@ -10621,6 +11945,26 @@
       false,
       false,
       false,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
       false,
       false
     ],
@@ -10944,6 +12288,26 @@
       false,
       false,
       false,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
       false
     ],
     "clerum__gfs_save_attachment": [
@@ -11265,6 +12629,26 @@
       false,
       false,
       false,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
       false,
       false
     ],
@@ -11588,6 +12972,26 @@
       false,
       false,
       false,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
+      false,
+      null,
       false
     ],
     "clerum__gfs_write": [
@@ -11910,9 +13314,49 @@
       false,
       false,
       false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      null,
+      null,
+      false,
       false
     ],
     "clerum__session_search": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -12554,9 +13998,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "clerum__tool_call": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -13198,9 +14682,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "clerum__tool_search": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -13842,6 +15366,26 @@
       true,
       true,
       true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
       true
     ],
     "desktop_click": [
@@ -14164,7 +15708,27 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "desktop_drag": [
       null,
@@ -14486,7 +16050,27 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "desktop_key": [
       null,
@@ -14808,7 +16392,27 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "desktop_mouse_move": [
       null,
@@ -15130,7 +16734,27 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "desktop_screenshot": [
       null,
@@ -15452,7 +17076,27 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "desktop_type": [
       null,
@@ -15774,9 +17418,49 @@
       null,
       null,
       false,
-      false
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
     ],
     "file_read": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -16418,9 +18102,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "http_request": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
       true,
       true,
       true,
@@ -17062,9 +18786,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "memory_read": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -17706,9 +19470,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "memory_tree": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,
@@ -18350,9 +20154,49 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "shell_exec": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
       true,
       true,
       true,
@@ -18994,6 +20838,26 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false
     ],
     "workflow_health": [
@@ -19301,6 +21165,26 @@
       false,
       null,
       false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
       null,
       null,
       null,
@@ -19638,6 +21522,26 @@
       null,
       null,
       null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
       null
     ],
     "workflow_result": [
@@ -19945,6 +21849,26 @@
       false,
       null,
       false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
       null,
       null,
       null,
@@ -20282,6 +22206,26 @@
       null,
       null,
       null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
       null
     ],
     "workflow_trigger": [
@@ -20589,6 +22533,26 @@
       false,
       null,
       false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
       null,
       null,
       null,
