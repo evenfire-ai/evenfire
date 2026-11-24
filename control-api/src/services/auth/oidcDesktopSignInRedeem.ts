@@ -14,15 +14,26 @@ import { hashDesktopSignInCode, s256Challenge } from './oidcDesktopSignInCode.js
 import { type MemberTransaction, currentMembershipIn } from './oidcMemberSignIn.js'
 
 /**
+ * Why a code minted earlier no longer matches the connection: member sign-in
+ * is switched off, the registration id changed, or the configuration
+ * generation changed.
+ */
+export type DesktopSignInConnectionMismatchCause =
+  | 'switch_off'
+  | 'registration_changed'
+  | 'generation_changed'
+
+/**
  * What a redeem ends with. `refused` and `unavailable` spent the code and name
- * its member, so the route can log who it was for. `invalid_code` says whether
- * the verifier was wrong, for the log only: the client's answer is the same.
+ * its member, so the route can log who it was for; `unavailable` also says
+ * why. `invalid_code` says whether the verifier was wrong. These are for the
+ * log only: the client's answers do not change.
  */
 export type DesktopSignInRedeemResult =
   | Readonly<{ status: 'signed_in'; body: ReturnType<typeof externalLoginResponseBody> }>
   | Readonly<{ status: 'invalid_code'; verifierMismatch: boolean }>
   | Readonly<{ status: 'refused'; reason: OidcRefusalReason; userId: string }>
-  | Readonly<{ status: 'unavailable'; userId: string }>
+  | Readonly<{ status: 'unavailable'; userId: string; cause: DesktopSignInConnectionMismatchCause }>
 
 type DesktopSignInRedeemInput = Readonly<{
   code: string
@@ -82,6 +93,22 @@ function verifierMatches(codeVerifier: string, codeChallenge: string): boolean {
 }
 
 /**
+ * Why a code no longer matches the connection this request runs, checked in
+ * this order; undefined when it still matches.
+ */
+function connectionMismatchCause(
+  row: DesktopSignInCodeRow,
+  provider: OidcProviderConfiguration
+): DesktopSignInConnectionMismatchCause | undefined {
+  if (!provider.memberAuthenticationActivated) return 'switch_off'
+  if (row.registration_id !== provider.registrationId) return 'registration_changed'
+  if (row.configuration_generation !== provider.configurationGeneration) {
+    return 'generation_changed'
+  }
+  return undefined
+}
+
+/**
  * The redeem transaction. Taking the code is a `DELETE … RETURNING`, so a
  * concurrent redeem of the same code waits on the row lock and then finds no
  * row. A wrong verifier throws and rolls the delete back. A connection change
@@ -110,13 +137,9 @@ async function redeemInTransaction(
 
   // 3. The connection: member sign-in is still on, and the code was minted
   // against the connection and configuration this request runs.
-  const { provider } = input
-  if (
-    !provider.memberAuthenticationActivated ||
-    row.registration_id !== provider.registrationId ||
-    row.configuration_generation !== provider.configurationGeneration
-  ) {
-    return Object.freeze({ status: 'unavailable', userId: row.user_id })
+  const cause = connectionMismatchCause(row, input.provider)
+  if (cause !== undefined) {
+    return Object.freeze({ status: 'unavailable', userId: row.user_id, cause })
   }
 
   // 4. The account, re-checked under its row lock. The code row's user

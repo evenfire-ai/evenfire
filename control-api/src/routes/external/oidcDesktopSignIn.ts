@@ -79,7 +79,11 @@ function answerRedeem(
       return
     case 'unavailable':
       logger.warn(
-        { event: 'oidc_desktop_code_connection_mismatch', ...member(result.userId) },
+        {
+          event: 'oidc_desktop_code_connection_mismatch',
+          ...member(result.userId),
+          cause: result.cause,
+        },
         'OIDC Desktop sign-in code was minted under another connection or before member sign-in was switched off'
       )
       sendUnavailable(res)

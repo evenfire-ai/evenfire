@@ -185,13 +185,16 @@ describe('POST /external/oidc/desktop-sign-in/redeem', () => {
       { error: 'desktop_sign_in_refused', reason: 'account_disabled' },
       [{ event: 'oidc_desktop_code_refused', ...member, reason: 'account_disabled' }],
     ],
-    [
-      'unavailable',
-      { status: 'unavailable', userId: USER_ID },
-      409,
-      { error: 'desktop_sign_in_unavailable' },
-      [{ event: 'oidc_desktop_code_connection_mismatch', ...member }],
-    ],
+    ...(['switch_off', 'registration_changed', 'generation_changed'] as const).map(
+      cause =>
+        [
+          `unavailable (${cause})`,
+          { status: 'unavailable', userId: USER_ID, cause },
+          409,
+          { error: 'desktop_sign_in_unavailable' },
+          [{ event: 'oidc_desktop_code_connection_mismatch', ...member, cause }],
+        ] as const
+    ),
   ] as const
 
   it.each(rows)('maps %s to its status and body', async (_name, result, status, body, events) => {
@@ -352,7 +355,9 @@ describe('POST /external/oidc/desktop-sign-in/redeem', () => {
     // A switch-off found after mint is decided inside redeem's transaction,
     // which commits the delete; the route must not answer 409 before it.
     const switchedOff = { ...provider, memberSignIn: null, memberAuthenticationActivated: false }
-    const redeem = vi.fn().mockResolvedValue({ status: 'unavailable', userId: USER_ID })
+    const redeem = vi
+      .fn()
+      .mockResolvedValue({ status: 'unavailable', userId: USER_ID, cause: 'switch_off' })
 
     const response = await request(appFor({ getProvider: () => switchedOff, redeem }))
       .post(REDEEM_PATH)

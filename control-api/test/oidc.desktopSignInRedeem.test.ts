@@ -94,4 +94,34 @@ describe('redeemDesktopSignInCode before the account is read', () => {
     // The code was found: the mismatch is the verifier's, not an unknown code.
     expect(query).toHaveBeenCalledTimes(1)
   })
+
+  const switchedOff = { ...provider, memberSignIn: null, memberAuthenticationActivated: false }
+  const mismatches = [
+    ['switch_off', switchedOff, codeRow()],
+    [
+      'registration_changed',
+      provider,
+      codeRow({ registration_id: 'fixture-earlier-registration' }),
+    ],
+    [
+      'generation_changed',
+      provider,
+      codeRow({ configuration_generation: 'v1:fixture-earlier-generation' }),
+    ],
+  ] as const
+
+  it.each(mismatches)(
+    'answers unavailable with cause %s and reads no account',
+    async (cause, current, row) => {
+      const { query, transaction } = transactionReturning(row)
+
+      await expect(redeemWith(transaction, { provider: current })).resolves.toEqual({
+        status: 'unavailable',
+        userId: USER_ID,
+        cause,
+      })
+      // Only the code's delete ran: the result returns before the user lock.
+      expect(query).toHaveBeenCalledTimes(1)
+    }
+  )
 })
