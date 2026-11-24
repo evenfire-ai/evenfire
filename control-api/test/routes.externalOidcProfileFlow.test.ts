@@ -643,5 +643,70 @@ describe('Control API OIDC member sign-in completion', () => {
       ])
       expect(flowLog.error).not.toHaveBeenCalled()
     })
+
+    /**
+     * Each environment loaded before its setting was removed, so the refusal
+     * comes from the removed name alone. Account creation then required a
+     * domain list, so the role row leaves account creation unset rather than
+     * name two removed settings.
+     */
+    const REMOVED_SETTING_ENV: Record<string, Record<string, string>> = {
+      CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: {
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+        CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: 'company.example.test',
+      },
+      CONTROL_API_OIDC_REQUIRED_ROLE: {
+        CONTROL_API_OIDC_REQUIRED_ROLE: 'Evenfire.Member',
+      },
+    }
+
+    it.each(['CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS', 'CONTROL_API_OIDC_REQUIRED_ROLE'])(
+      'answers 503 and logs the failure for the removed setting %s',
+      async setting => {
+        const signInMember = vi.fn()
+        const createEngine = vi.fn()
+        const app = express()
+        app.use(express.json())
+        app.use(createExternalOidcProfileFlowRouter({ createEngine, signInMember }))
+        const settingEnv = REMOVED_SETTING_ENV[setting]!
+        stubOidcEnvironment('acknowledged')
+        for (const [name, value] of Object.entries(settingEnv)) vi.stubEnv(name, value)
+
+        const configuration = await request(app).get('/external/oidc/profile-flow/configuration')
+        const attempt = await request(app)
+          .post('/external/oidc/profile-flow/attempts')
+          .send({ browserBinding: 'B'.repeat(43) })
+        const completion = await request(app).post(COMPLETE_PATH).send(completeBody)
+
+        for (const response of [configuration, attempt, completion]) {
+          expect(response.status).toBe(503)
+          expect(response.body).toEqual({ error: 'oidc_configuration_unavailable' })
+        }
+        // Every refusal names the removed setting, and never its value.
+        expect(flowLog.error).toHaveBeenCalledTimes(3)
+        for (const [payload] of flowLog.error.mock.calls) {
+          expect(payload).toEqual({
+            event: 'oidc_configuration_unavailable',
+            errorClass: 'Error',
+            fields: [setting],
+          })
+        }
+        expect(loggedText()).not.toContain(settingEnv[setting])
+        expect(createEngine).not.toHaveBeenCalled()
+        expect(signInMember).not.toHaveBeenCalled()
+
+        // Control: without the removed setting, the same environment loads.
+        flowLog.error.mockReset()
+        vi.stubEnv(setting, undefined)
+        const configured = await request(app).get('/external/oidc/profile-flow/configuration')
+        expect(configured.status).toBe(200)
+        expect(configured.body).toEqual({
+          redirectUri: REGISTRATION_ENV.CONTROL_API_OIDC_REDIRECT_URI,
+          memberAuthenticationActivated: true,
+          displayLabel: REGISTRATION_ENV.CONTROL_API_OIDC_DISPLAY_LABEL,
+        })
+        expect(flowLog.error).not.toHaveBeenCalled()
+      }
+    )
   })
 })
