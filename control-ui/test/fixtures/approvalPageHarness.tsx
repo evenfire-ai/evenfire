@@ -9,12 +9,17 @@
  * `navigate` remounts the page: the shipped build remounts it on every tab or
  * agent change (verified on next 16.4.6). `rerenderKept` keeps the instance and
  * exists only for tests that need the other behaviour.
+ *
+ * `renderHostPage` stubs the global `fetch` with the fake's, and
+ * `resetApprovalTestState` does not restore it. Every test file calls
+ * `vi.unstubAllGlobals()` in `afterEach`.
  */
 import React from 'react'
 import { expect, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import { ToastProvider } from '../../components/Toast'
+import type { ToastTone } from '../../components/Toast/types'
 import * as api from '../../lib/api'
 import { __resetReadRequestCacheForTests } from '../../lib/readRequestCache'
 import type { FakeControlApi, FakeControlApiOptions } from './fakeControlApi'
@@ -68,9 +73,11 @@ export type ApprovalToolState = 'default' | 'required' | 'skip'
 export interface HostPageHandle {
   navigate(tabLabel: string): Promise<void>
   remount(params: PageParams): void
+  /** Re-renders the same page instance. An omitted `tab` keeps the tab the page shows. */
   rerenderKept(params: PageParams): void
   unmount(): void
-  toasts(): string[]
+  /** The texts of the toasts on screen, only those of `tone` when it is given. */
+  toasts(tone?: ToastTone): string[]
   banner(): string | null
 }
 
@@ -92,10 +99,9 @@ const STATE_LABELS: Record<ApprovalToolState, string> = {
 }
 
 /**
- * The page's mount reads that the fake does not model, answered with recorded
- * wire bodies. `/admin/llm-models` comes from control-api's recorded route
- * answer (./llmModelRows). The others are the empty answers of the routes'
- * list shapes; a read missing here answers 404 in `fake.log`.
+ * The page's one mount read that the fake does not model, `/admin/llm-models`,
+ * answered with control-api's recorded route answer (./llmModelRows). Any other
+ * read the fake does not model answers 404 and shows in `fake.log`.
  */
 export function pageMountDefaults(): NonNullable<FakeControlApiOptions['defaults']> {
   return {
@@ -108,6 +114,16 @@ export function pageMountDefaults(): NonNullable<FakeControlApiOptions['defaults
 
 export function resetApprovalTestState(): void {
   __resetReadRequestCacheForTests()
+}
+
+/** Every error banner on the page, in document order. `banner()` and `message()` read the first. */
+export function errorBanners(): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('.cu-banner--error'))
+}
+
+function firstErrorBannerText(): string | null {
+  const [first] = errorBanners()
+  return first ? (first.textContent ?? '') : null
 }
 
 function tree() {
@@ -148,27 +164,28 @@ export function renderHostPage(options: {
       result = render(tree())
     },
     rerenderKept(params) {
-      setParams(params)
+      setParams({ ...params, tab: params.tab ?? navigation.tab })
       result.rerender(tree())
     },
     unmount() {
       result.unmount()
     },
-    toasts() {
-      return Array.from(document.querySelectorAll('.cu-toast__text')).map(
-        node => node.textContent ?? ''
-      )
+    toasts(tone) {
+      const selector = tone ? `.cu-toast--${tone} .cu-toast__text` : '.cu-toast__text'
+      return Array.from(document.querySelectorAll(selector)).map(node => node.textContent ?? '')
     },
-    banner() {
-      const node = document.querySelector('.cu-banner--error')
-      return node ? (node.textContent ?? '') : null
-    },
+    banner: firstErrorBannerText,
   }
   return handle
 }
 
+/** The per-tool approval section, or null when the page does not render it. */
+export function perToolSection(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('.cu-host-approval-section')
+}
+
 function section(): HTMLElement {
-  const node = document.querySelector<HTMLElement>('.cu-host-approval-section')
+  const node = perToolSection()
   if (!node) throw new Error('The per-tool approval section is not rendered')
   return node
 }
@@ -181,10 +198,18 @@ const unavailable = (what: string) => async () => {
   throw new Error(`${what} does not exist in today's per-tool approval section`)
 }
 
-/** Opens Advanced → "Per-tool approval". Always in edit view today. */
-export async function openApprovalSettings(page: HostPageHandle): Promise<ApprovalSettingsDriver> {
+/**
+ * Goes to where the approval settings live, today Advanced → "Per-tool
+ * approval", without waiting for the section: a failed load renders none.
+ */
+export async function showApprovalSettings(page: HostPageHandle): Promise<void> {
   if (!screen.queryByRole('tab', { name: 'Per-tool approval' })) await page.navigate('Advanced')
   fireEvent.click(await screen.findByRole('tab', { name: 'Per-tool approval' }))
+}
+
+/** Opens the per-tool section once it has loaded. Always in edit view today. */
+export async function openApprovalSettings(page: HostPageHandle): Promise<ApprovalSettingsDriver> {
+  await showApprovalSettings(page)
   await waitFor(() => section())
   await waitFor(() => expect(screen.queryByRole('status', { name: /Loading approval/ })).toBeNull())
 
@@ -221,8 +246,6 @@ export async function openApprovalSettings(page: HostPageHandle): Promise<Approv
       }
       return view
     },
-    message() {
-      return document.querySelector('.cu-banner--error')?.textContent ?? null
-    },
+    message: firstErrorBannerText,
   }
 }
