@@ -20,6 +20,10 @@ import {
   applyPendingPr1Migrations,
 } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
+import {
+  OIDC_DESKTOP_SIGN_IN_MIGRATION,
+  applyOidcDesktopSignInSchema,
+} from './oidc/desktopSignInSchema.js'
 import { OIDC_MEMBER_LINK_MIGRATION, applyOidcMemberLinkSchema } from './oidc/memberLinkSchema.js'
 import {
   applyOidcProtocolAttemptBrowserBindingSchema,
@@ -6791,6 +6795,12 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: OIDC_MEMBER_LINK_MIGRATION,
     apply: applyOidcMemberLinkSchema,
+    lockRetries: 2,
+  },
+  {
+    // Its foreign key to users needs a lock on users, as 0159's does.
+    version: OIDC_DESKTOP_SIGN_IN_MIGRATION,
+    apply: applyOidcDesktopSignInSchema,
     lockRetries: 2,
   },
 ]

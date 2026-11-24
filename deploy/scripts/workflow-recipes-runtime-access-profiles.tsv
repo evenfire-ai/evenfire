@@ -58,6 +58,8 @@ oauth_grants	none
 oidc_protocol_attempts	none
 oidc_connections	none
 user_oidc_links	none
+oidc_attempt_sign_in_contexts	none
+oidc_desktop_sign_in_codes	none
 password_admission_rollout_state	none
 password_identifier_state	none
 password_verification_pace	none

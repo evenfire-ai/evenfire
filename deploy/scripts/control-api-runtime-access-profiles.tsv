@@ -58,6 +58,8 @@ oauth_grants	legacy_dml
 oidc_protocol_attempts	legacy_dml
 oidc_connections	append
 user_oidc_links	append
+oidc_attempt_sign_in_contexts	append
+oidc_desktop_sign_in_codes	insert_delete
 password_admission_rollout_state	none
 password_identifier_state	legacy_dml
 password_verification_pace	legacy_dml
