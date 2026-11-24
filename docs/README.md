@@ -61,6 +61,7 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 | [Desktop setup & updates](how-to/desktop-setup-and-updates.md)                | Environments, invitation setup, updates                                   |
 | [Manage users and teams](how-to/manage-users-and-teams.md)                    | Members, teams, roles, control admins, agent access                       |
 | [Member invitations on self-hosted](how-to/member-invitations-self-hosted.md) | Hosted mode zero-config emails vs running your own service                |
+| [OIDC sign-in](../control-api/README.md#oidc-member-sign-in-unreleased)       | Member sign-in (unreleased, off by default) and a provider checklist      |
 | [Track usage & set budgets](how-to/token-budgets-and-usage.md)                | Enable budgets, scope, block vs warn                                      |
 | [Connect to the registry](how-to/connect-to-registry.md)                      | Self-hosted registry connect flow                                         |
 | [Publish a plugin](how-to/publish-plugin-to-registry.md)                      | Publish under your org with an `efrk_` key                                |
