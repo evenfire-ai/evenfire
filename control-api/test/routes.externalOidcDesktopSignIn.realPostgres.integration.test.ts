@@ -1011,8 +1011,9 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
         'POST /external/oidc/desktop-sign-in/redeem refused-account-disabled',
       ].sort()
     )
-    // The fixed state, nonce and challenge keep the shapes Profile UI accepts,
-    // and the URL still names the recorded configuration's callback.
+    // recordContract already refused a missing, repeated or malformed state,
+    // nonce or code_challenge, and an expiresAt Profile UI's start route would
+    // refuse. The URL Profile UI receives must name the recorded callback.
     const configured = contract['GET /external/oidc/profile-flow/configuration activated']!
       .body as { redirectUri: string }
     for (const key of [
@@ -1022,9 +1023,6 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
       const recorded = contract[key]!.body as { authorizationUrl: string }
       const params = new URL(recorded.authorizationUrl).searchParams
       expect(params.get('redirect_uri')).toBe(configured.redirectUri)
-      expect(params.get('state')).toMatch(/^[A-Za-z0-9_-]{32,512}$/)
-      expect(params.get('nonce')).toMatch(/^[A-Za-z0-9_-]{32,512}$/)
-      expect(params.get('code_challenge')).toMatch(/^[A-Za-z0-9_-]{43}$/)
     }
 
     await expectContractFile(contract, CONTRACT_FILE)
