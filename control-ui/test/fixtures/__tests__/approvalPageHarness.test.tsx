@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import {
   openApprovalSettings,
   pageMountDefaults,
+  perToolSection,
   renderHostPage,
   resetApprovalTestState,
 } from '../approvalPageHarness'
@@ -83,6 +84,32 @@ describe('approval page harness', () => {
     const marker = screen.getByRole('tab', { name: 'Advanced' })
     page.rerenderKept({ name: 'foo', tab: 'advanced' })
     expect(screen.getByRole('tab', { name: 'Advanced' })).toBe(marker)
+    expect(unanswered(fake)).toEqual([])
+    page.unmount()
+  })
+
+  it('rerenderKept keeps the tab the page shows when params omit it', async () => {
+    const fake = seedFake({ http_request: false })
+    const page = renderHostPage({ fake, name: 'foo' })
+    const driver = await openApprovalSettings(page)
+    page.rerenderKept({ name: 'foo' })
+    expect(perToolSection()).not.toBeNull()
+    expect(driver.readView().http_request).toBe('Skip')
+    expect(unanswered(fake)).toEqual([])
+    page.unmount()
+  })
+
+  it('toasts(tone) returns only the toasts of that tone', async () => {
+    const fake = seedFake()
+    const page = renderHostPage({ fake, name: 'foo' })
+    const edit = await screen.findByRole('button', { name: 'Edit agent name' })
+    await waitFor(() => expect(edit).toBeEnabled())
+    fireEvent.click(edit)
+    fireEvent.change(screen.getByLabelText('Agent name'), { target: { value: 'Renamed agent' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
+    await waitFor(() => expect(page.toasts('success')).toEqual(['Agent configuration saved.']))
+    expect(page.toasts('error')).toEqual([])
+    expect(page.toasts()).toEqual(['Agent configuration saved.'])
     expect(unanswered(fake)).toEqual([])
     page.unmount()
   })
