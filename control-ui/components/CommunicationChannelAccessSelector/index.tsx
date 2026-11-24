@@ -22,6 +22,7 @@ export function CommunicationChannelAccessSelector({
   agentName,
   disabled,
   inlineDropdowns = false,
+  showHeader = true,
   selectedTeamIds,
   selectedUserIds,
   onSelectedTeamIdsChange,
@@ -119,14 +120,16 @@ export function CommunicationChannelAccessSelector({
 
   return (
     <section className="cu-channel-access">
-      <div className="cu-channel-access__header">
-        <div>
-          <p className="cu-section-title">Communication access</p>
-          <p className="cu-muted">
-            Select only members or teams that already have access to this agent.
-          </p>
+      {showHeader ? (
+        <div className="cu-channel-access__header">
+          <div>
+            <p className="cu-section-title">Communication access</p>
+            <p className="cu-muted">
+              Select only members or teams that already have access to this agent.
+            </p>
+          </div>
         </div>
-      </div>
+      ) : null}
       {!agentName.trim() ? (
         <div className="cu-empty cu-empty--compact">
           Select an agent before granting chat access.
@@ -167,6 +170,12 @@ export function CommunicationChannelAccessSelector({
           ) : (
             <div className="cu-field cu-field--compact">
               <label htmlFor="channel-access-teams">Teams</label>
+              {!loading ? (
+                <span className="cu-field__hint" role="status">
+                  {teamOptions.length} {teamOptions.length === 1 ? 'team has' : 'teams have'} access
+                  to this agent.
+                </span>
+              ) : null}
               <SelectionDropdown
                 key="teams"
                 id="channel-access-teams"

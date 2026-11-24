@@ -3,9 +3,9 @@ import { useAuthContext } from '@contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
 import { DRAG_COLD_CHECK_BUDGET, DRAG_COLD_CHECK_MAX_CONCURRENCY } from '@constants/gfsBrowser'
 import { desktopQueryKeys, isGfsSessionGeneration } from '@hooks/domain/queryKeys'
+import { gfsSessionScope } from '@lib/gfsSessionAuthority'
+import type { GfsAccessState } from '@lib/gfsSessionAuthority.types'
 import type { GfsDragSessionApi, GfsDragSource, GfsHoverCheckLease } from './dragSession.types'
-
-type GfsAccessState = 'active' | 'revoked'
 
 /** Same lease rules for shared gestures and provider-absent single-surface mode. */
 export class GfsHoverCheckBudget {
@@ -101,15 +101,6 @@ export type {
 
 const GfsDragSessionContext = createContext<GfsDragSessionApi | null>(null)
 
-function sessionScopeOf(auth: {
-  isAuthenticated: boolean
-  me: { id: string; teamId: string | null } | null
-  runtimeConfigState: { envKey: string } | null
-}): string | null {
-  const envKey = auth.runtimeConfigState?.envKey ?? ''
-  return auth.isAuthenticated && auth.me ? `${envKey}:${auth.me.id}:${auth.me.teamId ?? ''}` : null
-}
-
 export function GfsDragSessionProvider({ children }: { children: React.ReactNode }) {
   const storeRef = useRef<GfsDragSessionStore | null>(null)
   if (!storeRef.current) storeRef.current = new GfsDragSessionStore()
@@ -117,7 +108,7 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
 
   const { isAuthenticated, me, runtimeConfigState, sessionGeneration } = useAuthContext()
   const scope = useMemo(
-    () => sessionScopeOf({ isAuthenticated, me, runtimeConfigState }),
+    () => gfsSessionScope({ isAuthenticated, me, runtimeConfigState }),
     [isAuthenticated, me, runtimeConfigState]
   )
 
@@ -134,6 +125,9 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
     gcTime: Infinity,
     staleTime: Infinity,
   })
+  // `initialData` seeds the entry on every render, so this fallback only
+  // narrows the type; it is the same render-time read the browser controller
+  // makes. A missing scope or generation is refused separately below.
   const accessState: GfsAccessState = accessStateQuery.data ?? 'active'
   const previousAuthorityRef = useRef({ scope, generation: sessionGeneration ?? null })
 

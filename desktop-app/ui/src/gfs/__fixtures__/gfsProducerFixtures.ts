@@ -140,6 +140,35 @@ export async function listAccessiblePage(
   return structuredClone(page)
 }
 
+/** Run a created folder view through the real `GfsClient.createResource`
+ *  (envelope unwrap) and the IPC clone — what `gfs.createFolder` resolves to. */
+export async function createFolderResult(
+  parentResourceId: string,
+  created: GfsChildView
+): Promise<Awaited<ReturnType<typeof window.clerum.gfs.createFolder>>> {
+  const client = new GfsClient(stubTransport({ ok: true, data: created }))
+  const resource = await client.createResource(
+    { parentResourceId, drive: 'main', name: created.name, kind: 'directory' },
+    SESSION_TOKEN
+  )
+  return structuredClone(resource)
+}
+
+/** Run a successful rename receipt through the real `GfsClient.renameResource`
+ *  and the IPC clone — what `gfs.renameResource` resolves to. */
+export async function renameResourceResult(
+  resourceId: string,
+  newName: string,
+  version: number
+): Promise<Awaited<ReturnType<typeof window.clerum.gfs.renameResource>>> {
+  const client = new GfsClient(stubTransport({ ok: true, data: { resourceId, version } }))
+  const receipt = await client.renameResource(
+    { resourceId, drive: 'main', newName, ifMatch: version - 1 },
+    SESSION_TOKEN
+  )
+  return structuredClone(receipt)
+}
+
 /** Run a successful PATCH receipt through the real GfsClient and IPC clone. */
 export async function moveResourceReceipt(
   resourceId: string,

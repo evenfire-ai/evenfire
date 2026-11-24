@@ -2,6 +2,9 @@ import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { parse } from 'yaml'
 import { ToastProvider } from '@components/Toast'
 import EditCommunicationChannelPage from '../../app/communication-channels/[name]/edit/page'
 import * as api from '../../lib/api'
@@ -44,6 +47,13 @@ afterEach(() => {
 
 type ChannelSpec = Record<string, unknown>
 
+const MINIKUBE_CHANNEL = parse(
+  readFileSync(
+    resolve(__dirname, '../../../deploy/overlays/minikube/instances/communicationchannel.yaml'),
+    'utf8'
+  )
+) as { spec: ChannelSpec }
+
 function mockChannel(name: string, spec: ChannelSpec, annotations?: Record<string, string>) {
   navigation.params = { name }
   vi.mocked(api.apiGet).mockImplementation(async path => {
@@ -71,6 +81,12 @@ async function renderLoadedPage() {
   await waitFor(() => {
     expect(screen.queryByText('Loading communication channel...')).not.toBeInTheDocument()
   })
+  fireEvent.click(await screen.findByRole('button', { name: /Provider/ }))
+}
+
+function selectProvider(name: string) {
+  fireEvent.click(screen.getByRole('button', { name: 'Communication channel provider' }))
+  fireEvent.click(screen.getByRole('option', { name }))
 }
 
 const SLACK_CHANNEL_SPEC: ChannelSpec = {
@@ -138,13 +154,14 @@ describe('EditCommunicationChannelPage', () => {
       expect(screen.queryByText('Loading communication channel...')).not.toBeInTheDocument()
     })
 
+    fireEvent.click(screen.getByRole('button', { name: /Provider/ }))
     expect(screen.getByText('Teams Request URL')).toBeInTheDocument()
     // Scoped to the readonly value field: the placeholder command block below
     // also renders this same path as part of its (marker-origin) endpoint.
     const requestUrlValue = document.querySelector('.cu-readonly-field.cu-copy-field__value')
     expect(requestUrlValue?.textContent ?? '').toMatch(/\/webhooks\/teams\//)
     expect(screen.getByText('General')).toBeInTheDocument()
-    expect(screen.getByText('Channel')).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: 'Channel' })).toBeInTheDocument()
   })
 })
 
@@ -212,9 +229,9 @@ describe('EditCommunicationChannelPage channel credentials', () => {
         screen.getByText('A value is stored. Leave this field blank to keep it.')
       ).toBeVisible()
     })
-    expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('')
+    expect(screen.getByLabelText('Telegram bot token')).toHaveValue('')
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
     const signingSecret = screen.getByLabelText('Slack Signing Secret') as HTMLInputElement
     expect(signingSecret.value).not.toBe('**********')
     expect(signingSecret.value).toBe('')
@@ -233,8 +250,8 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     })
     await renderLoadedPage()
 
-    await waitFor(() => expect(screen.getByLabelText('Telegram Bot Token')).toBeEnabled())
-    const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
+    await waitFor(() => expect(screen.getByLabelText('Telegram bot token')).toBeEnabled())
+    const telegramToken = screen.getByLabelText('Telegram bot token') as HTMLInputElement
     expect(telegramToken.value).toBe('')
     expect(telegramToken.placeholder).toBe('123456789:ABCDEF…')
   })
@@ -260,14 +277,14 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     // rejected promise.
     expect(screen.getByText('secrets is forbidden')).toBeInTheDocument()
 
-    const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
+    const telegramToken = screen.getByLabelText('Telegram bot token') as HTMLInputElement
     expect(telegramToken.getAttribute('aria-busy')).toBe(null)
     expect(telegramToken.value).toBe('')
     expect(telegramToken.placeholder).toBe('Stored value unknown')
     // Rotation still works: a PUT overwrites whatever is there and needs to
     // know nothing about it. Deleting an invisible key does not.
     expect(telegramToken).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Clear Telegram Bot Token' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Clear Telegram bot token' })).toBeDisabled()
     // The page itself still loaded: the read failure is scoped to the panel.
     expect(screen.getByLabelText(/Telegram bot handle/)).toHaveValue('@ops_bot')
   })
@@ -319,7 +336,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     expect(
       screen.getByText('The credentials response did not list the stored keys.')
     ).toBeInTheDocument()
-    const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
+    const telegramToken = screen.getByLabelText('Telegram bot token') as HTMLInputElement
     expect(telegramToken.placeholder).toBe('Stored value unknown')
     expect(telegramToken).toBeEnabled()
   })
@@ -352,7 +369,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     })
     await renderLoadedPage()
 
-    fireEvent.change(screen.getByLabelText('Telegram Bot Token'), {
+    fireEvent.change(screen.getByLabelText('Telegram bot token'), {
       target: { value: 'replacement-token' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
@@ -390,7 +407,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
       return {}
     })
     await renderLoadedPage()
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
     fireEvent.change(screen.getByLabelText('Slack Signing Secret'), {
       target: { value: 'signing-secret-draft' },
     })
@@ -436,7 +453,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     mockChannelCredentials(channel, SLACK_CHANNEL_SPEC, { keys: [] })
     vi.mocked(api.apiSend).mockRejectedValue(new Error('credential write failed'))
     await renderLoadedPage()
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
     fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
       target: { value: 'bot-token-draft' },
     })
@@ -475,7 +492,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     })
     vi.mocked(api.apiSend).mockRejectedValue(new Error('credential write failed'))
     await renderLoadedPage()
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
     fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
       target: { value: 'bot-token-draft' },
     })
@@ -516,7 +533,7 @@ describe('EditCommunicationChannelPage setup guidance', () => {
     mockChannel('slack-channel', SLACK_CHANNEL_SPEC)
     await renderLoadedPage()
 
-    expect(screen.getByText('Answer only when the app is mentioned')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Slack reply behavior' })).toBeInTheDocument()
     expect(screen.getByText(THREAD_MENTION_COPY)).toBeInTheDocument()
   })
 
@@ -524,7 +541,7 @@ describe('EditCommunicationChannelPage setup guidance', () => {
     mockChannel(LABELLED_TELEGRAM_CHANNEL, LABELLED_TELEGRAM_SPEC, STALE_SLACK_LABEL)
     await renderLoadedPage()
 
-    expect(screen.getByText('Answer only when the bot is mentioned')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Telegram reply behavior' })).toBeInTheDocument()
     expect(screen.queryByText(THREAD_MENTION_COPY)).not.toBeInTheDocument()
   })
 })
@@ -567,7 +584,7 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
     mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
     await renderLoadedPage()
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
 
     expect(screen.getByText('Slack Request URL')).toBeInTheDocument()
     expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
@@ -582,7 +599,7 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
     mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
     await renderLoadedPage()
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
 
     expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
     expect(screen.getByText('Available once this channel has a Slack App Name')).toBeInTheDocument()
@@ -604,7 +621,7 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
     mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
     await renderLoadedPage()
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
 
     expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
 
@@ -635,7 +652,7 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
     mockChannel(LABELLED_TELEGRAM_CHANNEL, LABELLED_TELEGRAM_SPEC, STALE_SLACK_LABEL)
     await renderLoadedPage()
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
 
     // The annotation still fills the visible field. Only the URL and the manifest are gated.
     expect(screen.getByLabelText(/Slack App Name/)).toHaveValue('Evenfire')
@@ -654,7 +671,7 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
     mockChannel(LABELLED_TELEGRAM_CHANNEL, LABELLED_TELEGRAM_SPEC, STALE_SLACK_LABEL)
     await renderLoadedPage()
-    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    selectProvider('Slack')
 
     expect(screen.queryByText('Slack App Manifest')).not.toBeInTheDocument()
 
@@ -683,13 +700,13 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     // Before typing, the URL should show Unavailable
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
     expect(screen.queryByText(/\/webhooks\/teams\/teams%3A/)).not.toBeInTheDocument()
 
-    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+    await user.type(screen.getByLabelText(/^Name/), 'evenfire-bot')
 
     // After typing into the bot name field, the URL should appear. Scoped to
     // the readonly value field: the placeholder command block below also
@@ -709,14 +726,14 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
     expect(
       screen.getByText('Enter the Name above and this channel gets its Teams Request URL.')
     ).toBeInTheDocument()
 
-    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+    await user.type(screen.getByLabelText(/^Name/), 'evenfire-bot')
 
     // A URL now exists, but it is relative, so the hint must not claim it is usable.
     expect(
@@ -735,8 +752,8 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
-    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+    selectProvider('Microsoft Teams')
+    await user.type(screen.getByLabelText(/^Name/), 'evenfire-bot')
 
     expect(
       screen.getByText('Use this URL as the Messaging endpoint for the Teams bot app.')
@@ -759,7 +776,7 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
     expect(screen.queryByText(/\/webhooks\/teams\/teams%3A/)).not.toBeInTheDocument()
@@ -776,11 +793,11 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
 
-    await user.type(screen.getByLabelText(/name/i), 'New Bot Name')
+    await user.type(screen.getByLabelText(/^Name/), 'New Bot Name')
 
     // Scoped to the readonly value field: the placeholder command block below
     // also renders this same path as part of its (marker-origin) endpoint.
@@ -807,7 +824,7 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     expect(screen.getByText('Create the Teams bot')).toBeInTheDocument()
     const command = screen.getByText(/teams app create/).closest('pre')
@@ -819,8 +836,8 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
 
     // Repair path: retyping the Name field, as when a channel is recreated under
     // a new name, regenerates the command with the new name and the same origin.
-    await user.clear(screen.getByLabelText(/name/i))
-    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot-2')
+    await user.clear(screen.getByLabelText(/^Name/))
+    await user.type(screen.getByLabelText(/^Name/), 'evenfire-bot-2')
     const updatedCommand = screen.getByText(/teams app create/).closest('pre')
     expect(updatedCommand).toHaveTextContent('--name "evenfire-bot-2"')
   })
@@ -839,7 +856,7 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     const warning = document.querySelector('.cu-banner--warning')
     expect(warning?.textContent ?? '').toMatch(/no public webhook origin/)
@@ -865,13 +882,13 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     const command = screen.getByText(/teams app create/).closest('pre')
     expect(command).toHaveTextContent('--name "<bot-name>"')
     expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeDisabled()
 
-    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+    await user.type(screen.getByLabelText(/^Name/), 'evenfire-bot')
 
     expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
   })
@@ -884,10 +901,10 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
-    expect(screen.queryByText('Create the Teams bot')).not.toBeInTheDocument()
+    expect(screen.getByText('Create the Teams bot')).toBeInTheDocument()
     expect(screen.queryByText(/teams app create/)).not.toBeInTheDocument()
     expect(screen.queryByText(/no public webhook origin/)).not.toBeInTheDocument()
   })
@@ -898,19 +915,19 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
  * permits sideloading, used to hit both assumptions unannounced, only after
  * copying the `teams app create` command. The prerequisites block exists to
  * surface both before that command, and to point at the full guide. Unlike
- * the create page, this section renders unconditionally on the Teams tab
+ * the create page, this section renders unconditionally for the Teams provider
  * (it does not wait for teamsRequestUrl), so no draft setup is needed here.
  */
 describe('EditCommunicationChannelPage Teams prerequisites', () => {
   const TEAMS_GUIDE_URL =
     'https://github.com/evenfire-ai/evenfire/blob/main/docs/how-to/connect-teams.md'
 
-  it('shows CLI install/login and the sideloading check on the Teams tab', async () => {
+  it('shows CLI install/login and the sideloading check for the Teams provider', async () => {
     mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     expect(screen.getByText(/npm install -g @microsoft\/teams\.cli/)).toBeInTheDocument()
     expect(screen.getByText('teams login')).toBeInTheDocument()
@@ -926,7 +943,7 @@ describe('EditCommunicationChannelPage Teams prerequisites', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     const link = screen.getByRole('link', { name: /Teams setup guide/i })
     expect(link).toHaveAttribute('href', TEAMS_GUIDE_URL)
@@ -956,9 +973,9 @@ describe('EditCommunicationChannelPage Teams name validation', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
-    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    const nameInput = screen.getByLabelText(/^name\b/i) as HTMLInputElement
     // The placeholder is a display name, so it does not imply a kebab rule.
     expect(nameInput.placeholder).toBe('Evenfire Bot')
 
@@ -976,7 +993,7 @@ describe('EditCommunicationChannelPage Teams name validation', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
     await user.type(screen.getByLabelText(/^CLIENT_ID/), '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82')
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
@@ -994,9 +1011,9 @@ describe('EditCommunicationChannelPage Teams name validation', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
-    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    const nameInput = screen.getByLabelText(/^name\b/i) as HTMLInputElement
     await user.clear(nameInput)
     // Pasted rather than typed: 81 keystrokes through userEvent is slow, and the
     // field holds what it is given either way.
@@ -1016,9 +1033,9 @@ describe('EditCommunicationChannelPage Teams name validation', () => {
     await renderLoadedPage()
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
 
-    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    const nameInput = screen.getByLabelText(/^name\b/i) as HTMLInputElement
     await user.clear(nameInput)
     await user.type(nameInput, 'Evenfire Bot 2')
 
@@ -1035,8 +1052,8 @@ describe('EditCommunicationChannelPage Teams name validation', () => {
 /**
  * deleteConversation persists a full spec through persistDraft without going
  * anywhere near handleSave, so a check that lived only in handleSave let it
- * write a value Save would refuse. Validation lives on persistDraft, the one
- * boundary both paths cross.
+ * write a value Save would refuse. Both write paths use the shared draft
+ * validation before sending their full-spec PUT.
  */
 describe('EditCommunicationChannelPage conversation delete validation', () => {
   const TEAMS_CONVERSATION = {
@@ -1047,19 +1064,19 @@ describe('EditCommunicationChannelPage conversation delete validation', () => {
     confirmedAt: '2026-07-10T12:00:00Z',
   }
 
-  async function openTeamsTabWithConversation(appName: string) {
+  async function openTeamsProviderWithConversation(appName: string) {
     mockChannel('teams-channel', {
       teamsSettings: { appName, appId: '', tenantId: '' },
       teams: [TEAMS_CONVERSATION],
     })
     await renderLoadedPage()
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    selectProvider('Microsoft Teams')
     return user
   }
 
   it('deletes a conversation through the same validation as Save', async () => {
-    const user = await openTeamsTabWithConversation('My Bot')
+    const user = await openTeamsProviderWithConversation('My Bot')
 
     await user.click(screen.getByRole('button', { name: 'Actions for General' }))
     await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
@@ -1073,9 +1090,9 @@ describe('EditCommunicationChannelPage conversation delete validation', () => {
   })
 
   it('refuses to delete a conversation while the Name field holds a value Save would refuse', async () => {
-    const user = await openTeamsTabWithConversation('evenfire')
+    const user = await openTeamsProviderWithConversation('evenfire')
 
-    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    const nameInput = screen.getByLabelText(/^name\b/i) as HTMLInputElement
     await user.clear(nameInput)
     fireEvent.change(nameInput, { target: { value: 'a'.repeat(81) } })
 
@@ -1125,5 +1142,235 @@ describe('EditCommunicationChannelPage spec.email preservation on Save', () => {
     expect(path).toBe('/api/v1/admin/communication-channels/inbox-channel')
     expect(body.spec.email).toEqual(EMAIL_GROUPS)
     expect(body.spec.telegramSettings?.botHandle).toBe('@new_bot')
+  })
+})
+
+describe('shared channel details layout', () => {
+  it.each([
+    {
+      provider: 'Telegram',
+      spec: { telegramSettings: { botHandle: '@fixture_bot' } },
+      field: 'Telegram bot token',
+    },
+    {
+      provider: 'Slack',
+      spec: { slackSettings: { botHandle: 'Fixture app' } },
+      field: 'Slack Signing Secret',
+    },
+    {
+      provider: 'Microsoft Teams',
+      spec: { teamsSettings: { appName: 'Fixture bot' } },
+      field: 'CLIENT_SECRET',
+    },
+  ])(
+    'uses the same three sections and preserves $provider drafts between sections',
+    async ({ provider, spec, field }) => {
+      mockChannel('fixture-channel', spec)
+      await renderLoadedPage()
+      expect(
+        screen.getByRole('button', { name: 'Communication channel provider' })
+      ).toHaveTextContent(provider)
+      fireEvent.change(screen.getByLabelText(field), { target: { value: 'fixture-replacement' } })
+      fireEvent.click(screen.getByRole('button', { name: /Access.*Members and teams/ }))
+      expect(screen.getByRole('heading', { name: 'Communication access' })).toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'Communication channel provider' })
+      ).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: /Channel.*Name and assign/ }))
+      expect(screen.getByRole('textbox', { name: /Channel name/ })).toBeDisabled()
+      expect(screen.getByRole('textbox', { name: /Channel name/ })).toHaveValue('fixture-channel')
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      expect(screen.getByLabelText(field)).toHaveValue('fixture-replacement')
+      expect(api.apiSend).not.toHaveBeenCalled()
+    }
+  )
+})
+
+describe('prevent removing the last supported channel provider', () => {
+  it('does not start conversation deletion while a validated Save is pending', async () => {
+    mockChannel('fixture-pending-save', {
+      telegramSettings: { botHandle: '@fixture_bot' },
+      telegram: [{ channelId: 'fixture-chat', title: 'Fixture chat', chatType: 'private' }],
+    })
+    let completeWrite!: (value: unknown) => void
+    vi.mocked(api.apiSend).mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          completeWrite = resolve
+        })
+    )
+    await renderLoadedPage()
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), {
+      target: { value: '@fixture_replacement' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.apiSend).mock.calls[0]).toEqual([
+      'PUT',
+      '/api/v1/admin/communication-channels/fixture-pending-save',
+      expect.objectContaining({
+        spec: expect.objectContaining({
+          telegramSettings: expect.objectContaining({ botHandle: '@fixture_replacement' }),
+        }),
+      }),
+    ])
+    expect(screen.getByRole('button', { name: 'Saving...' })).toBeDisabled()
+    expect(screen.getByLabelText(/Telegram bot handle/)).toBeDisabled()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Actions for Fixture chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+    completeWrite({})
+    await waitFor(() => expect(screen.queryByText('Saving...')).not.toBeInTheDocument())
+  })
+
+  it('blocks overlapping Save during deletion and keeps last-provider validation after a failed write', async () => {
+    mockChannel('fixture-pending-deletion', {
+      telegramSettings: { botHandle: '@fixture_bot' },
+      telegram: [{ channelId: 'fixture-chat', title: 'Fixture chat', chatType: 'private' }],
+    })
+    let failWrite!: (reason: Error) => void
+    vi.mocked(api.apiSend).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failWrite = reject
+        })
+    )
+    await renderLoadedPage()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Actions for Fixture chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalledTimes(1))
+    const [method, path, body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      { spec: ChannelSpec },
+    ]
+    expect(method).toBe('PUT')
+    expect(path).toBe('/api/v1/admin/communication-channels/fixture-pending-deletion')
+    expect(body.spec).toHaveProperty('telegramSettings.botHandle', '@fixture_bot')
+    expect(body.spec.telegram).toEqual([])
+    expect(screen.getByRole('button', { name: 'Saving...' })).toBeDisabled()
+    expect(screen.getByLabelText(/Telegram bot handle/)).toBeDisabled()
+    // Exercise the handler too, independently of the disabled submit button.
+    fireEvent.submit(screen.getByRole('button', { name: 'Saving...' }).closest('form')!)
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+
+    failWrite(new Error('fixture write failed'))
+    expect(await screen.findByText('fixture write failed')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Actions for Fixture chat' })).toBeEnabled()
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), { target: { value: '' } })
+    await user.click(screen.getByRole('button', { name: 'Actions for Fixture chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+    expect(
+      await screen.findByText('Keep at least one channel provider configured before saving.')
+    ).toBeVisible()
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    {
+      provider: 'Telegram',
+      spec: { telegramSettings: { botHandle: '@fixture_bot' } },
+      fields: [/Telegram bot handle/],
+    },
+    {
+      provider: 'Slack',
+      spec: { slackSettings: { botHandle: 'Fixture app' } },
+      fields: [/Slack App Name/],
+    },
+    {
+      provider: 'Microsoft Teams',
+      spec: { teamsSettings: { appName: 'Fixture bot' } },
+      fields: [/^Name/],
+    },
+  ])(
+    'blocks Save after clearing the last $provider configuration and allows repair',
+    async ({ spec, fields }) => {
+      mockChannel('fixture-provider-removal', spec)
+      await renderLoadedPage()
+      for (const field of fields)
+        fireEvent.change(screen.getByLabelText(field), { target: { value: '' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+      expect(
+        await screen.findByText('Keep at least one channel provider configured before saving.')
+      ).toBeVisible()
+      expect(api.apiSend).not.toHaveBeenCalled()
+
+      fireEvent.change(screen.getByLabelText(fields[0]), { target: { value: 'fixture_bot' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+      await waitFor(() =>
+        expect(api.apiSend).toHaveBeenCalledWith(
+          'PUT',
+          '/api/v1/admin/communication-channels/fixture-provider-removal',
+          expect.objectContaining({ spec: expect.any(Object) })
+        )
+      )
+    }
+  )
+
+  it('blocks deleting the last conversation after clearing its provider identity', async () => {
+    mockChannel('fixture-provider-removal', {
+      telegramSettings: { botHandle: '@fixture_bot' },
+      telegram: [{ channelId: 'fixture-chat', title: 'Fixture chat', chatType: 'private' }],
+    })
+    await renderLoadedPage()
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), { target: { value: '' } })
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Actions for Fixture chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+    expect(
+      await screen.findByText('Keep at least one channel provider configured before saving.')
+    ).toBeVisible()
+    expect(api.apiSend).not.toHaveBeenCalled()
+  })
+
+  it('allows removing one provider when another supported provider remains', async () => {
+    mockChannel('fixture-multi-provider', {
+      telegramSettings: { botHandle: '@fixture_bot' },
+      slackSettings: { botHandle: 'Fixture app' },
+    })
+    await renderLoadedPage()
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [method, path, body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      { spec: ChannelSpec },
+    ]
+    expect(method).toBe('PUT')
+    expect(path).toBe('/api/v1/admin/communication-channels/fixture-multi-provider')
+    expect(body.spec).not.toHaveProperty('telegramSettings')
+    expect(body.spec).toHaveProperty('slackSettings.botHandle', 'Fixture app')
+  })
+
+  it.each([
+    { record: 'email-only', spec: MINIKUBE_CHANNEL.spec },
+    { record: 'providerless', spec: { hostRef: 'fixture-old-agent' } },
+  ])('keeps a legacy $record record editable through its direct URL', async ({ spec }) => {
+    mockChannel('fixture-legacy-channel', spec)
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('button', { name: /Channel.*Name and assign/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Agent\b/i }))
+    fireEvent.click(screen.getByRole('option', { name: 'agent-a' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [method, path, body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      { spec: ChannelSpec },
+    ]
+    expect(method).toBe('PUT')
+    expect(path).toBe('/api/v1/admin/communication-channels/fixture-legacy-channel')
+    expect(body.spec.hostRef).toBe('agent-a')
+    expect(body.spec).not.toHaveProperty('telegramSettings')
+    expect(body.spec).toEqual(expect.objectContaining({ ...spec, hostRef: 'agent-a' }))
   })
 })

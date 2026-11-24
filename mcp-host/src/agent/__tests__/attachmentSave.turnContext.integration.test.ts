@@ -97,6 +97,7 @@ async function runTask() {
       capability: { state: 'supported', evidence: EVIDENCE },
     })),
     approvalConfig: undefined,
+    approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
     config: {
       maxTaskDuration: 300000,
       maxToolCallsPerTask: 10,
