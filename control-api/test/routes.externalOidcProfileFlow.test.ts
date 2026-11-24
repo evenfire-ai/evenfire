@@ -513,15 +513,15 @@ describe('Control API OIDC member sign-in completion', () => {
     expect(engineConstructions).toEqual([
       {
         generation: 'engine-cache-generation-a',
-        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
+        policyEvidenceClaimNames: ['acct', 'idp', 'roles', 'tid', 'xms_edov'],
       },
       {
         generation: 'engine-cache-generation-b',
-        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
+        policyEvidenceClaimNames: ['acct', 'idp', 'roles', 'tid', 'xms_edov'],
       },
       {
         generation: 'engine-cache-generation-a',
-        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
+        policyEvidenceClaimNames: ['acct', 'idp', 'roles', 'tid', 'xms_edov'],
       },
     ])
   })
@@ -601,6 +601,47 @@ describe('Control API OIDC member sign-in completion', () => {
       }
       expect(createEngine).not.toHaveBeenCalled()
       expect(signInMember).not.toHaveBeenCalled()
+    })
+
+    it('builds a new engine with the new evidence list when the claim name changes', async () => {
+      // The default getProvider and createEngine: the route loads the provider
+      // from the environment and builds the engine from it.
+      const app = express()
+      app.use(express.json())
+      app.use(createExternalOidcProfileFlowRouter())
+      const attemptRequiring = (claimName: string) => {
+        stubOidcEnvironment('acknowledged')
+        vi.stubEnv('CONTROL_API_OIDC_REQUIRED_CLAIM_NAME', claimName)
+        vi.stubEnv('CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE', 'evenfire-users')
+        return request(app)
+          .post('/external/oidc/profile-flow/attempts')
+          .send({ browserBinding: 'B'.repeat(43) })
+      }
+      engineConstructions.length = 0
+
+      expect((await attemptRequiring('groups')).status).toBe(200)
+      expect((await attemptRequiring('department')).status).toBe(200)
+
+      expect(engineConstructions).toHaveLength(2)
+      const [first, second] = engineConstructions
+      expect(first!.generation).not.toBe(second!.generation)
+      expect(first!.policyEvidenceClaimNames).toEqual([
+        'acct',
+        'groups',
+        'idp',
+        'roles',
+        'tid',
+        'xms_edov',
+      ])
+      expect(second!.policyEvidenceClaimNames).toEqual([
+        'acct',
+        'department',
+        'idp',
+        'roles',
+        'tid',
+        'xms_edov',
+      ])
+      expect(flowLog.error).not.toHaveBeenCalled()
     })
   })
 })

@@ -54,13 +54,6 @@ export const BASE_MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze([
 ] as const)
 
 /**
- * The base list alone, without the configured required claim name. The member
- * sign-in route still builds its engine with it; `memberPolicyEvidenceClaimNames`
- * adds the configured name.
- */
-export const MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = BASE_MEMBER_POLICY_EVIDENCE_CLAIM_NAMES
-
-/**
  * The claims an engine must keep as verified evidence for this policy: the base
  * list plus the required claim's name, deduplicated and sorted.
  */
