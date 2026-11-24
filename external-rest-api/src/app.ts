@@ -9,6 +9,7 @@ import { requireTrustedBrowserMutation } from './middleware/browserMutationGuard
 import { withExternalRequestContext } from './requestContext.js'
 import { createAccessRouter } from './routes/access.js'
 import { createAuthRouter } from './routes/auth.js'
+import { createAuthMethodsRouter } from './routes/authMethods.js'
 import { createContextSharedFilesystemsRouter } from './routes/contextSharedFilesystems.js'
 import { createDesktopRouter } from './routes/desktop.js'
 import { createDirectoryRouter } from './routes/directory.js'
@@ -21,6 +22,7 @@ import { createMembersRouter } from './routes/members.js'
 import { createNotificationsRouter } from './routes/notifications.js'
 import { createOauthCallbackRouter } from './routes/oauthCallback.js'
 import { createOauthGrantsRouter } from './routes/oauthGrants.js'
+import { createOidcDesktopSignInRouter } from './routes/oidcDesktopSignIn.js'
 import { createOidcProfileFlowRouter } from './routes/oidcProfileFlow.js'
 import { createRpcRouter } from './routes/rpc.js'
 import { createRpcDelegationsRouter } from './routes/rpcDelegations.js'
@@ -117,6 +119,8 @@ export function createApp() {
   const api = express.Router()
   api.use(createAuthRouter())
   api.use(createOidcProfileFlowRouter())
+  api.use(createOidcDesktopSignInRouter())
+  api.use(createAuthMethodsRouter())
   api.use(createAccessRouter())
   api.use(createDesktopRouter())
   api.use(createMeRouter())

@@ -56,7 +56,8 @@ function shouldExposeBearerToken(req: { header: (name: string) => string | undef
   return !origin && !fetchSite
 }
 
-function requestedSessionContract(req: Request): 'v2' | undefined {
+/** The session contract a client asks for. Desktop sign-in redeem forwards it the same way. */
+export function requestedSessionContract(req: Request): 'v2' | undefined {
   return req.header('x-evenfire-session-contract') === 'v2' ? 'v2' : undefined
 }
 

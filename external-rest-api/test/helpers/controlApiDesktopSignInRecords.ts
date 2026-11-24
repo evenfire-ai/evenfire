@@ -1,3 +1,4 @@
+import { vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 
 /**
@@ -35,4 +36,20 @@ export function controlApiRecord(name: string): ControlApiRecord {
     throw new Error(`expected one control-api record named "${name}", found ${matches.length}`)
   }
   return matches[0]!
+}
+
+/**
+ * Stubs `fetch` so control-api answers each call with the record, or with what the function
+ * returns at call time. A function that throws stands for an unreachable control-api.
+ */
+export function controlApiAnswers(answer: ControlApiRecord | (() => ControlApiRecord)) {
+  const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => {
+    const { status, body } = typeof answer === 'function' ? answer() : answer
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
 }
