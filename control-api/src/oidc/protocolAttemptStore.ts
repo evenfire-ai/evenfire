@@ -5,6 +5,11 @@ import {
   deriveOAuthEncryptionKey,
   encryptAes256Gcm,
 } from '../oauth/encryption.js'
+import {
+  type OidcAttemptSignInContext,
+  type OidcAttemptSignInContextColumns,
+  signInContextFromClaimRow,
+} from './attemptSignInContextStore.js'
 
 export const OIDC_PROTOCOL_ATTEMPT_TTL_MS = 10 * 60 * 1000
 const ATTEMPT_PURPOSE = 'identity-proof-v1'
@@ -35,9 +40,10 @@ export type ClaimedOidcProtocolAttempt = OidcProtocolAttemptBinding &
     nonce: string
     createdAt: Date
     expiresAt: Date
+    signInContext: OidcAttemptSignInContext | null
   }>
 
-type ClaimedRow = {
+type ClaimedRow = OidcAttemptSignInContextColumns & {
   id: string
   registration_id: string
   configuration_generation: string
@@ -201,7 +207,12 @@ export async function insertOidcProtocolAttempt(
   return { id: row.id, expiresAt: asDate(row.expires_at) }
 }
 
-/** Atomic pending→redeeming claim. A state can be successfully claimed once. */
+/**
+ * Atomic pending→redeeming claim. A state can be successfully claimed once.
+ * The same statement reads the attempt's sign-in context: it locks only the
+ * attempt row, and the context columns are selected by name so the attempt's
+ * `created_at` is never shadowed by the context's.
+ */
 export async function claimOidcProtocolAttempt(
   db: Pick<DbClient, 'query'>,
   encryptionKeyHex: string,
@@ -241,7 +252,13 @@ export async function claimOidcProtocolAttempt(
                   attempt.response_mode, attempt.created_at, attempt.expires_at,
                   candidate.pkce_verifier_encrypted, candidate.nonce_encrypted
      )
-     SELECT * FROM claimed`,
+     SELECT claimed.*,
+            ctx.context_kind AS ctx_kind,
+            ctx.desktop_code_challenge AS ctx_code_challenge,
+            ctx.invitation_id AS ctx_invitation_id,
+            ctx.invited_email AS ctx_invited_email
+       FROM claimed
+       LEFT JOIN oidc_attempt_sign_in_contexts AS ctx ON ctx.attempt_id = claimed.id`,
     [
       stateHash,
       browserBindingHash,
@@ -269,6 +286,7 @@ export async function claimOidcProtocolAttempt(
     nonce: decryptAttemptSecret(key, row.id, 'nonce', row.nonce_encrypted),
     createdAt: asDate(row.created_at),
     expiresAt: asDate(row.expires_at),
+    signInContext: signInContextFromClaimRow(row),
   }
 }
 
