@@ -73,6 +73,17 @@ function recordValue(value: unknown): Record<string, unknown> | null {
     : null
 }
 
+const HOST_SPEC_REQUIRED_ISSUES = [{ field: 'spec', message: 'spec is required' }]
+
+/**
+ * A Host write must carry a `spec` object. Every Host guard below is gated on
+ * `body.spec`, so a spec-less body would otherwise skip all of them (field
+ * validation, model allowlist, secretRef, approval rules).
+ */
+function hostBodyLacksSpec(plural: string, body: { spec?: unknown } | undefined): boolean {
+  return plural === 'hosts' && recordValue(body?.spec) === null
+}
+
 function resourcePreconditionsFromResource(resource: unknown): ResourcePreconditions | undefined {
   const metadata = recordValue((resource as { metadata?: unknown } | null)?.metadata)
   const uid = metadata?.uid
@@ -630,6 +641,11 @@ export function createAdminResourcesRouter(
         return
       }
 
+      if (hostBodyLacksSpec(plural, body)) {
+        res.status(422).json({ errors: HOST_SPEC_REQUIRED_ISSUES })
+        return
+      }
+
       // F0.3: identifier/display field validation for hosts + contexts (create =
       // no ratchet; every present field is validated).
       if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
@@ -902,6 +918,11 @@ export function createAdminResourcesRouter(
         }
         spec: Record<string, unknown>
       }
+      if (hostBodyLacksSpec(plural, body)) {
+        res.status(422).json({ errors: HOST_SPEC_REQUIRED_ISSUES })
+        return
+      }
+
       // Pieza D tolerations granted during Host validation, emitted only after
       // the CR persists (below). Empty for every non-host / non-tolerated write.
       const hostTolerations: HostSpecIncoherenceToleratedEvent[] = []
