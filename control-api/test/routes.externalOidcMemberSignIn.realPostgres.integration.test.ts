@@ -294,9 +294,10 @@ describeRealPostgres(
       expect((await tableCounts()).users).toBe(before.users + 1)
     }
 
-    it('33 roles under REQUIRED_ROLE are not_eligible and write no row', async () => {
+    it('33 roles under a required roles claim are not_eligible and write no row', async () => {
       const requiredRole = 'Evenfire.Member'
-      const fake = entraFake('on', { CONTROL_API_OIDC_REQUIRED_ROLE: requiredRole })
+      // The claim name defaults to `roles`.
+      const fake = entraFake('on', { CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: requiredRole })
       const member = memberClaims('too-many-roles')
       const roles = (count: number) => [
         ...Array.from({ length: count - 1 }, (_, index) => `fixture-role-${index}`),

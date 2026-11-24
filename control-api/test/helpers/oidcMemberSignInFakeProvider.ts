@@ -57,7 +57,11 @@ export type OidcMemberSignInFakeProviderOptions = {
 
 export type OidcMemberSignInFakeProvider = {
   provider: OidcProviderConfiguration
-  /** Built with the route's own policy evidence claim names (MEMBER_POLICY_EVIDENCE_CLAIM_NAMES). */
+  /**
+   * Built with the route's own policy evidence claim names
+   * (MEMBER_POLICY_EVIDENCE_CLAIM_NAMES): the base list, which collects `roles`
+   * but not another configured required claim name.
+   */
   engine: OidcProtocolEngine
   /** The exact `CONTROL_API_OIDC_*` environment the provider was loaded from. */
   env: Record<string, string>

@@ -1,5 +1,9 @@
 import type { OidcMemberSignInPolicy } from './configuration.js'
-import type { OidcVerifiedClaimObservation, VerifiedOidcIdentityProof } from './protocolEngine.js'
+import type {
+  OidcVerifiedClaimObservation,
+  OidcVerifiedClaimValue,
+  VerifiedOidcIdentityProof,
+} from './protocolEngine.js'
 
 export type OidcEligibility =
   | Readonly<{ eligible: true; guest: boolean }>
@@ -36,12 +40,12 @@ function isPlausibleEmail(value: unknown): value is string {
 }
 
 /**
- * The claims member eligibility reads (tenant, guest markers, roles) beyond the
- * email claims the protocol engine always keeps, plus `xms_edov`, the Entra
- * email-domain proof that `oidcEmailState` reads. The member sign-in route builds
- * its engine with exactly these, so each is kept as verified evidence.
+ * The claims member eligibility always reads (tenant, guest markers, roles)
+ * beyond the email claims the protocol engine always keeps, plus `xms_edov`,
+ * the Entra email-domain proof that `oidcEmailState` reads. `roles` stays here
+ * whichever claim is required, so an unsupported `roles` still refuses.
  */
-export const MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze([
+export const BASE_MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze([
   'tid',
   'idp',
   'roles',
@@ -49,8 +53,41 @@ export const MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = Object.freeze([
   'xms_edov',
 ] as const)
 
-/** Claims whose "unsupported" observation means we cannot judge eligibility. */
+/**
+ * The base list alone, without the configured required claim name. The member
+ * sign-in route still builds its engine with it; `memberPolicyEvidenceClaimNames`
+ * adds the configured name.
+ */
+export const MEMBER_POLICY_EVIDENCE_CLAIM_NAMES = BASE_MEMBER_POLICY_EVIDENCE_CLAIM_NAMES
+
+/**
+ * The claims an engine must keep as verified evidence for this policy: the base
+ * list plus the required claim's name, deduplicated and sorted.
+ */
+export function memberPolicyEvidenceClaimNames(policy: OidcMemberSignInPolicy): readonly string[] {
+  const names = new Set<string>(BASE_MEMBER_POLICY_EVIDENCE_CLAIM_NAMES)
+  if (policy.requiredClaim !== null) names.add(policy.requiredClaim.name)
+  return Object.freeze([...names].sort())
+}
+
+/**
+ * Claims whose "unsupported" observation means we cannot judge eligibility.
+ * The required claim's name joins them; `roles` stays whichever claim is required.
+ */
 const ELIGIBILITY_CLAIMS = ['tid', 'idp', 'roles', 'acct', 'email_verified', 'xms_edov'] as const
+
+/**
+ * A string exactly equal to the value, or an array of strings with an element
+ * exactly equal to it. Anything else, including a mixed array, does not match.
+ */
+function matchesRequiredClaim(value: OidcVerifiedClaimValue, required: string): boolean {
+  if (typeof value === 'string') return value === required
+  return (
+    Array.isArray(value) &&
+    value.every(element => typeof element === 'string') &&
+    value.includes(required)
+  )
+}
 
 /**
  * Whether an `idp` claim value names the pinned tenant's own directory.
@@ -75,7 +112,11 @@ export function evaluateOidcEligibility(
   proof: VerifiedOidcIdentityProof,
   policy: OidcMemberSignInPolicy
 ): OidcEligibility {
-  for (const name of ELIGIBILITY_CLAIMS) {
+  const judgedClaims: readonly string[] =
+    policy.requiredClaim === null
+      ? ELIGIBILITY_CLAIMS
+      : [...ELIGIBILITY_CLAIMS, policy.requiredClaim.name]
+  for (const name of judgedClaims) {
     if (observe(proof, name).status === 'unsupported') return NOT_ELIGIBLE
   }
 
@@ -97,13 +138,11 @@ export function evaluateOidcEligibility(
     if (guest && !policy.allowGuests) return NOT_ELIGIBLE
   }
 
-  if (policy.requiredRole !== null) {
-    const roles = observe(proof, 'roles')
+  if (policy.requiredClaim !== null) {
+    const claim = observe(proof, policy.requiredClaim.name)
     if (
-      roles.status !== 'present' ||
-      !Array.isArray(roles.value) ||
-      !roles.value.every(role => typeof role === 'string') ||
-      !roles.value.includes(policy.requiredRole)
+      claim.status !== 'present' ||
+      !matchesRequiredClaim(claim.value, policy.requiredClaim.value)
     ) {
       return NOT_ELIGIBLE
     }

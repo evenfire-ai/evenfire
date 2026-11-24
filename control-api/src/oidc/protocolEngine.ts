@@ -16,6 +16,7 @@ import {
   setJwksCache,
 } from 'openid-client'
 import type { DbClient } from '../db.js'
+import { isAcceptableEvidenceClaimName } from './claimNames.js'
 import {
   type OidcProviderConfiguration,
   currentOidcConfigurationGeneration,
@@ -150,22 +151,6 @@ const MAX_VERIFIED_CLAIM_DEPTH = 8
 const MAX_VERIFIED_CLAIM_NODES = 256
 const MAX_VERIFIED_CLAIM_VALUE_BYTES = 4096
 const BASE_VERIFIED_CLAIM_NAMES = ['email', 'email_verified'] as const
-const OIDC_PROTOCOL_CLAIMS = new Set([
-  'iss',
-  'sub',
-  'aud',
-  'exp',
-  'iat',
-  'nbf',
-  'jti',
-  'nonce',
-  'azp',
-  'auth_time',
-  'at_hash',
-  'c_hash',
-  's_hash',
-  'sid',
-])
 
 /** Runtime provenance check for future in-process composition; this is not a token. */
 export function isVerifiedOidcIdentityProof(value: unknown): value is VerifiedOidcIdentityProof {
@@ -610,14 +595,7 @@ export class OidcProtocolEngine {
     const selectedNames = [...BASE_VERIFIED_CLAIM_NAMES, ...names]
     if (
       selectedNames.length > MAX_VERIFIED_CLAIMS ||
-      names.some(
-        name =>
-          typeof name !== 'string' ||
-          name.length === 0 ||
-          name.length > MAX_VERIFIED_CLAIM_NAME_LENGTH ||
-          /[\u0000-\u001f\u007f]/.test(name) ||
-          OIDC_PROTOCOL_CLAIMS.has(name)
-      ) ||
+      names.some(name => typeof name !== 'string' || !isAcceptableEvidenceClaimName(name)) ||
       new Set(names).size !== names.length
     ) {
       throw new TypeError('OIDC policy-evidence claim selection is invalid')

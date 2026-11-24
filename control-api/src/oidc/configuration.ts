@@ -2,6 +2,7 @@ import { createHash, createHmac } from 'node:crypto'
 import { isIP } from 'node:net'
 import { z } from 'zod'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
+import { OIDC_ELIGIBILITY_RESERVED_CLAIMS, isAcceptableEvidenceClaimName } from './claimNames.js'
 
 const ENV = {
   registrationId: 'CONTROL_API_OIDC_REGISTRATION_ID',
@@ -27,11 +28,11 @@ const OPTIONAL_ENV = {
   memberSignIn: 'CONTROL_API_OIDC_MEMBER_SIGN_IN',
   unreleased: 'CONTROL_API_OIDC_UNRELEASED',
   tenantId: 'CONTROL_API_OIDC_TENANT_ID',
-  requiredRole: 'CONTROL_API_OIDC_REQUIRED_ROLE',
+  requiredClaimName: 'CONTROL_API_OIDC_REQUIRED_CLAIM_NAME',
+  requiredClaimValue: 'CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE',
   allowGuests: 'CONTROL_API_OIDC_ALLOW_GUESTS',
   newMemberTeamId: 'CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID',
   accountCreation: 'CONTROL_API_OIDC_ACCOUNT_CREATION',
-  allowedEmailDomains: 'CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS',
 } as const
 
 const OIDC_OPTIONAL_ENV_NAMES = new Set<string>(Object.values(OPTIONAL_ENV))
@@ -50,21 +51,38 @@ const ENTRA_MULTI_TENANT_AUTHORITIES: ReadonlySet<string> = new Set([
   '9188040d-6c67-4c5b-b112-36a304b66dad',
 ])
 
-const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const DOMAIN_LABEL_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+/**
+ * Google's shared issuer signs in every Google account, so it needs the `hd`
+ * (hosted domain) claim to narrow sign-in to one Workspace domain.
+ */
+const GOOGLE_SHARED_ISSUER_HOST = 'accounts.google.com'
 
-export type OidcAccountCreation = 'entra' | 'allowed_domains' | 'disabled'
+const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const DEFAULT_REQUIRED_CLAIM_NAME = 'roles'
+const MAX_REQUIRED_CLAIM_VALUE_LENGTH = 256
+
+/**
+ * Whether a first sign-in with no matching account creates one. `entra`: an
+ * Entra issuer pinned to one tenant always creates. `enabled`: the operator
+ * attests that the non-Entra issuer signs in only the company's people.
+ * `disabled`: only existing accounts sign in.
+ */
+export type OidcAccountCreation = 'entra' | 'enabled' | 'disabled'
+
+/**
+ * A top-level ID token claim that must be a string exactly equal to `value`, or
+ * an array of strings with one element exactly equal to it.
+ */
+export type OidcRequiredClaim = Readonly<{ name: string; value: string }>
 
 export type OidcMemberSignInPolicy = Readonly<{
   /** Set only for Entra issuers. */
   entraTenantId: string | null
-  requiredRole: string | null
+  requiredClaim: OidcRequiredClaim | null
   allowGuests: boolean
   /** UUID string. */
   newMemberTeamId: string | null
   accountCreation: OidcAccountCreation
-  /** Lowercased, without a leading '@'. */
-  allowedEmailDomains: readonly string[]
 }>
 
 /** True only for the Microsoft Entra ID sovereign-cloud login hosts; CIAM and B2C hosts are not Entra. */
@@ -180,18 +198,17 @@ function computeConfigurationGeneration(
   // A registration with no eligibility settings keeps its pre-policy generation.
   const eligibilityPart =
     eligibility.entraTenantId === null &&
-    eligibility.requiredRole === null &&
+    eligibility.requiredClaim === null &&
     !eligibility.allowGuests &&
-    eligibility.accountCreation === 'disabled' &&
-    eligibility.allowedEmailDomains.length === 0
+    eligibility.accountCreation === 'disabled'
       ? []
       : [
           [
             eligibility.entraTenantId,
-            eligibility.requiredRole,
+            eligibility.requiredClaim?.name ?? null,
+            eligibility.requiredClaim?.value ?? null,
             eligibility.allowGuests,
             eligibility.accountCreation,
-            eligibility.allowedEmailDomains,
           ],
         ]
   const generationPayload = JSON.stringify([
@@ -216,12 +233,14 @@ function parseMemberEligibility(
 ): OidcMemberSignInPolicy {
   const bad = new Set<string>()
   const tenantRaw = environment[OPTIONAL_ENV.tenantId]
-  const roleRaw = environment[OPTIONAL_ENV.requiredRole]
+  const claimNameRaw = environment[OPTIONAL_ENV.requiredClaimName]
+  const claimValueRaw = environment[OPTIONAL_ENV.requiredClaimValue]
   const guestsRaw = environment[OPTIONAL_ENV.allowGuests]
   const teamRaw = environment[OPTIONAL_ENV.newMemberTeamId]
   const creationRaw = environment[OPTIONAL_ENV.accountCreation]
-  const domainsRaw = environment[OPTIONAL_ENV.allowedEmailDomains]
   const entraIssuer = isEntraIssuerHost(issuerUrl.hostname)
+  // The URL parser lowercases the hostname, so any casing of the host matches.
+  const googleSharedIssuer = issuerUrl.hostname === GOOGLE_SHARED_ISSUER_HOST
 
   let tenantId: string | null = null
   if (tenantRaw !== undefined) {
@@ -250,20 +269,45 @@ function parseMemberEligibility(
     }
   }
 
-  let requiredRole: string | null = null
-  if (roleRaw !== undefined) {
-    if (roleRaw.length >= 1 && roleRaw.length <= 256 && !/[\u0000-\u0020\u007f]/.test(roleRaw)) {
-      requiredRole = roleRaw
-    } else {
-      bad.add(OPTIONAL_ENV.requiredRole)
-    }
+  // A name alone would load and be silently ignored, so it needs a value.
+  const claimName = claimNameRaw ?? DEFAULT_REQUIRED_CLAIM_NAME
+  if (
+    claimNameRaw !== undefined &&
+    (claimValueRaw === undefined ||
+      !isAcceptableEvidenceClaimName(claimNameRaw) ||
+      OIDC_ELIGIBILITY_RESERVED_CLAIMS.has(claimNameRaw))
+  ) {
+    bad.add(OPTIONAL_ENV.requiredClaimName)
+  }
+  // Inner spaces are allowed: group names have them.
+  if (
+    claimValueRaw !== undefined &&
+    (claimValueRaw.length === 0 ||
+      claimValueRaw.length > MAX_REQUIRED_CLAIM_VALUE_LENGTH ||
+      claimValueRaw !== claimValueRaw.trim() ||
+      /[\u0000-\u001f\u007f]/.test(claimValueRaw))
+  ) {
+    bad.add(OPTIONAL_ENV.requiredClaimValue)
+  }
+  // Without `hd`, any Google account could sign in.
+  if (googleSharedIssuer && (claimValueRaw === undefined || claimName !== 'hd')) {
+    bad.add(OPTIONAL_ENV.requiredClaimName)
   }
 
   let allowGuests = false
   if (guestsRaw !== undefined) {
     if (guestsRaw === 'true') {
       allowGuests = true
-      if (tenantRaw === undefined || roleRaw === undefined) bad.add(OPTIONAL_ENV.allowGuests)
+      // Guests need the tenant pin and a `roles` requirement, an app role the
+      // tenant assigns. Another name could be a claim every token carries
+      // (such as `ver`), which would admit every guest.
+      if (
+        tenantRaw === undefined ||
+        claimValueRaw === undefined ||
+        claimName !== DEFAULT_REQUIRED_CLAIM_NAME
+      ) {
+        bad.add(OPTIONAL_ENV.allowGuests)
+      }
     } else {
       bad.add(OPTIONAL_ENV.allowGuests)
     }
@@ -275,32 +319,9 @@ function parseMemberEligibility(
     else bad.add(OPTIONAL_ENV.newMemberTeamId)
   }
 
-  let allowedEmailDomains: string[] = []
-  if (domainsRaw !== undefined) {
-    allowedEmailDomains = domainsRaw.split(',').map(entry => entry.trim().toLowerCase())
-    const valid = allowedEmailDomains.every(
-      domain =>
-        domain.length <= 253 &&
-        domain.includes('.') &&
-        domain.split('.').every(label => DOMAIN_LABEL_PATTERN.test(label))
-    )
-    if (!valid) {
-      allowedEmailDomains = []
-      bad.add(OPTIONAL_ENV.allowedEmailDomains)
-    }
-  }
-
-  // The domain list only limits allowed_domains creation. Without it (and on
-  // Entra, which creates for the pinned tenant) the list would load and be
-  // silently ignored, so an operator could believe creation is limited.
-  if (domainsRaw !== undefined && (creationRaw !== 'enabled' || entraIssuer)) {
-    bad.add(OPTIONAL_ENV.allowedEmailDomains)
-  }
   if (creationRaw !== undefined && creationRaw !== 'enabled') bad.add(OPTIONAL_ENV.accountCreation)
+  // Entra always creates for the pinned tenant, so the setting would be ignored there.
   if (creationRaw !== undefined && entraIssuer) bad.add(OPTIONAL_ENV.accountCreation)
-  if (creationRaw === 'enabled' && allowedEmailDomains.length === 0) {
-    bad.add(OPTIONAL_ENV.accountCreation)
-  }
 
   if (bad.size > 0) {
     throw new Error(`Invalid OIDC provider configuration field(s): ${[...bad].sort().join(', ')}`)
@@ -309,22 +330,23 @@ function parseMemberEligibility(
   const accountCreation: OidcAccountCreation = entraIssuer
     ? 'entra'
     : creationRaw === 'enabled'
-      ? 'allowed_domains'
+      ? 'enabled'
       : 'disabled'
   return Object.freeze({
     entraTenantId: entraIssuer ? tenantId : null,
-    requiredRole,
+    requiredClaim:
+      claimValueRaw === undefined ? null : Object.freeze({ name: claimName, value: claimValueRaw }),
     allowGuests,
     newMemberTeamId,
     accountCreation,
-    allowedEmailDomains: Object.freeze(allowedEmailDomains),
   })
 }
 
 /**
- * Loads the one optional operator-managed OIDC registration. No OIDC-prefixed
- * setting silently opts into a default; a partial or unknown configuration is
- * rejected. The credential is used only to derive a keyed generation digest.
+ * Loads the one optional operator-managed OIDC registration. A partial or
+ * unknown configuration is rejected rather than completed with defaults; the
+ * one filled-in value is the required claim name, `roles` when only a value is
+ * set. The credential is used only to derive a keyed generation digest.
  */
 export function loadOidcProviderConfiguration(
   environment: NodeJS.ProcessEnv,

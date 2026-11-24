@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { OidcMemberSignInPolicy } from '../src/oidc/configuration.js'
-import { evaluateOidcEligibility, oidcEmailState } from '../src/oidc/memberEligibility.js'
+import {
+  BASE_MEMBER_POLICY_EVIDENCE_CLAIM_NAMES,
+  evaluateOidcEligibility,
+  memberPolicyEvidenceClaimNames,
+  oidcEmailState,
+} from '../src/oidc/memberEligibility.js'
 import type {
   OidcVerifiedClaimObservation,
   VerifiedOidcIdentityProof,
@@ -28,16 +33,17 @@ function proof(
 function policy(overrides: Partial<OidcMemberSignInPolicy> = {}): OidcMemberSignInPolicy {
   return {
     entraTenantId: null,
-    requiredRole: null,
+    requiredClaim: null,
     allowGuests: false,
     newMemberTeamId: null,
     accountCreation: 'disabled',
-    allowedEmailDomains: [],
     ...overrides,
   }
 }
 const entra = (overrides: Partial<OidcMemberSignInPolicy> = {}) =>
   policy({ entraTenantId: TENANT, ...overrides })
+const requiresRole = policy({ requiredClaim: { name: 'roles', value: 'Evenfire.User' } })
+const requires = (name: string, value: string) => policy({ requiredClaim: { name, value } })
 
 describe('evaluateOidcEligibility', () => {
   const ok = { eligible: true, guest: false }
@@ -201,46 +207,200 @@ describe('evaluateOidcEligibility', () => {
       no,
     ],
     [
-      'required role present in roles',
+      'required roles claim present in roles',
       proof({ roles: present(['a', 'Evenfire.User']) }),
-      policy({ requiredRole: 'Evenfire.User' }),
+      requiresRole,
+      ok,
+    ],
+    ['required roles claim absent from roles', proof({ roles: present(['a']) }), requiresRole, no],
+    [
+      'required roles claim with a missing roles claim',
+      proof({ roles: missing }),
+      requiresRole,
+      no,
+    ],
+    [
+      'required roles claim with roles as a matching string',
+      proof({ roles: present('Evenfire.User') }),
+      requiresRole,
       ok,
     ],
     [
-      'required role absent from roles',
-      proof({ roles: present(['a']) }),
-      policy({ requiredRole: 'Evenfire.User' }),
-      no,
-    ],
-    [
-      'required role with a missing roles claim',
-      proof({ roles: missing }),
-      policy({ requiredRole: 'Evenfire.User' }),
-      no,
-    ],
-    [
-      'required role with roles as a string rather than an array',
-      proof({ roles: present('Evenfire.User') }),
-      policy({ requiredRole: 'Evenfire.User' }),
-      no,
-    ],
-    [
-      'required role with a non-string entry in roles',
+      'required roles claim with a non-string entry in roles',
       proof({ roles: present(['Evenfire.User', 3]) }),
-      policy({ requiredRole: 'Evenfire.User' }),
+      requiresRole,
       no,
     ],
-    [
-      'unsupported roles',
-      proof({ roles: unsupported }),
-      policy({ requiredRole: 'Evenfire.User' }),
-      no,
-    ],
-    ['unsupported roles without a required role', proof({ roles: unsupported }), policy(), no],
+    ['unsupported roles', proof({ roles: unsupported }), requiresRole, no],
+    ['unsupported roles without a required claim', proof({ roles: unsupported }), policy(), no],
     ['unsupported email_verified', proof({ email_verified: unsupported }), policy(), no],
     ['an observation absent from the evidence is treated as missing', proof({}), entra(), no],
   ])('%s', (_name, input, pol, expected) => {
     expect(evaluateOidcEligibility(input, pol)).toEqual(expected)
+  })
+})
+
+describe('the required claim', () => {
+  const ok = { eligible: true, guest: false }
+  const no = { eligible: false, reason: 'not_eligible' }
+  const groups = requires('groups', 'Evenfire Members')
+
+  it('matches a string claim exactly', () => {
+    expect(evaluateOidcEligibility(proof({ groups: present('Evenfire Members') }), groups)).toEqual(
+      ok
+    )
+    for (const near of ['evenfire members', 'Evenfire Members ', 'Evenfire', 'Evenfire Members+']) {
+      expect(evaluateOidcEligibility(proof({ groups: present(near) }), groups)).toEqual(no)
+    }
+  })
+
+  it('matches an array of strings containing the value', () => {
+    expect(
+      evaluateOidcEligibility(
+        proof({ groups: present(['Staff', 'Evenfire Members', 'Contractors']) }),
+        groups
+      )
+    ).toEqual(ok)
+    expect(evaluateOidcEligibility(proof({ groups: present(['Staff']) }), groups)).toEqual(no)
+    expect(evaluateOidcEligibility(proof({ groups: present([]) }), groups)).toEqual(no)
+  })
+
+  it('refuses superadmin and administrators for admin, as a string and as an array element', () => {
+    const admin = requires('roles', 'admin')
+    for (const value of ['superadmin', 'administrators']) {
+      expect(evaluateOidcEligibility(proof({ roles: present(value) }), admin)).toEqual(no)
+      expect(evaluateOidcEligibility(proof({ roles: present([value]) }), admin)).toEqual(no)
+    }
+    // Positive control: the exact value matches in both shapes.
+    expect(evaluateOidcEligibility(proof({ roles: present('admin') }), admin)).toEqual(ok)
+    expect(evaluateOidcEligibility(proof({ roles: present(['admin']) }), admin)).toEqual(ok)
+  })
+
+  it('refuses a mixed array', () => {
+    for (const mixed of [
+      ['Evenfire Members', 3],
+      ['Evenfire Members', null],
+      ['Evenfire Members', ['Evenfire Members']],
+      ['Evenfire Members', { name: 'Evenfire Members' }],
+    ]) {
+      expect(evaluateOidcEligibility(proof({ groups: present(mixed) }), groups)).toEqual(no)
+    }
+    // Positive control: the same array without the non-string element matches.
+    expect(
+      evaluateOidcEligibility(proof({ groups: present(['Evenfire Members']) }), groups)
+    ).toEqual(ok)
+  })
+
+  it.each([
+    ['a number', 7],
+    ['a boolean', true],
+    ['null', null],
+    ['an object', { 'Evenfire Members': true }],
+  ])('refuses a claim that is %s', (_shape, value) => {
+    expect(evaluateOidcEligibility(proof({ groups: present(value) }), groups)).toEqual(no)
+    // Positive control: the same claim as a matching string is eligible.
+    expect(evaluateOidcEligibility(proof({ groups: present('Evenfire Members') }), groups)).toEqual(
+      ok
+    )
+  })
+
+  it('refuses a missing claim', () => {
+    expect(evaluateOidcEligibility(proof({ groups: missing }), groups)).toEqual(no)
+    // A claim the evidence does not carry at all is missing too.
+    expect(evaluateOidcEligibility(proof({}), groups)).toEqual(no)
+    // Positive control: the same proof shape with the claim present matches.
+    expect(evaluateOidcEligibility(proof({ groups: present('Evenfire Members') }), groups)).toEqual(
+      ok
+    )
+  })
+
+  it('refuses an unsupported claim', () => {
+    expect(evaluateOidcEligibility(proof({ groups: unsupported }), groups)).toEqual(no)
+    // An unsupported `roles` still refuses when another claim is required.
+    expect(
+      evaluateOidcEligibility(
+        proof({ groups: present('Evenfire Members'), roles: unsupported }),
+        groups
+      )
+    ).toEqual(no)
+    // Positive control: the same claim present, with roles not unsupported, matches.
+    expect(
+      evaluateOidcEligibility(
+        proof({ groups: present('Evenfire Members'), roles: missing }),
+        groups
+      )
+    ).toEqual(ok)
+  })
+
+  it('applies alongside the Entra tenant check', () => {
+    const entraGroups = entra({ requiredClaim: { name: 'groups', value: 'Evenfire Members' } })
+    expect(
+      evaluateOidcEligibility(
+        proof({ tid: present(TENANT), groups: present(['Evenfire Members']) }),
+        entraGroups
+      )
+    ).toEqual(ok)
+    expect(
+      evaluateOidcEligibility(
+        proof({ tid: present('other'), groups: present(['Evenfire Members']) }),
+        entraGroups
+      )
+    ).toEqual(no)
+    expect(
+      evaluateOidcEligibility(proof({ tid: present(TENANT), groups: missing }), entraGroups)
+    ).toEqual(no)
+  })
+})
+
+describe('memberPolicyEvidenceClaimNames', () => {
+  it('keeps collecting roles when no claim is required', () => {
+    expect(BASE_MEMBER_POLICY_EVIDENCE_CLAIM_NAMES).toEqual([
+      'tid',
+      'idp',
+      'roles',
+      'acct',
+      'xms_edov',
+    ])
+    expect(memberPolicyEvidenceClaimNames(policy())).toEqual([
+      'acct',
+      'idp',
+      'roles',
+      'tid',
+      'xms_edov',
+    ])
+    expect(memberPolicyEvidenceClaimNames(entra())).toEqual([
+      'acct',
+      'idp',
+      'roles',
+      'tid',
+      'xms_edov',
+    ])
+  })
+
+  it('adds the configured claim name once, sorted', () => {
+    expect(memberPolicyEvidenceClaimNames(requires('groups', 'Evenfire Members'))).toEqual([
+      'acct',
+      'groups',
+      'idp',
+      'roles',
+      'tid',
+      'xms_edov',
+    ])
+    expect(memberPolicyEvidenceClaimNames(requires('hd', 'example.test'))).toEqual([
+      'acct',
+      'hd',
+      'idp',
+      'roles',
+      'tid',
+      'xms_edov',
+    ])
+    expect(memberPolicyEvidenceClaimNames(requiresRole)).toEqual([
+      'acct',
+      'idp',
+      'roles',
+      'tid',
+      'xms_edov',
+    ])
   })
 })
 
