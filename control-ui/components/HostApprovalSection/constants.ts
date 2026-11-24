@@ -100,6 +100,6 @@ export const TOOL_PARITY_EXCLUSIONS: ReadonlyArray<{ name: string; reason: strin
   {
     name: 'clerum__tool_call',
     reason:
-      "mcp-host's tool-use loop rewrites a bridge call to its target tool before the approval gate (resolveBridgeCall in mcp-host/src/agent/toolUseLoopToolBatch.ts), so an override on this name never takes effect.",
+      "mcp-host's tool-use loop rewrites a bridge call to its target tool before the approval gate (resolveBridgeCall in mcp-host/src/core/orchestration/toolUseLoopToolBatch.ts), so an override on this name never takes effect.",
   },
 ]
