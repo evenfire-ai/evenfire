@@ -132,18 +132,16 @@ describe('useAuthController desktop setup failures', () => {
     ).resolves.toEqual(['You must be invited to be part of a team.'])
   })
 
-  it('keeps desktop setup success correlated to its browser dispatch', async () => {
+  it('shows desktop setup success after starting browser authorization', async () => {
     const { hook, setStatus } = await mountAuthController()
-    auth.startDesktopSetup.mockResolvedValueOnce({ correlationId: 'setup-dispatch-1' })
+    auth.startDesktopSetup.mockResolvedValueOnce(undefined)
     act(() => hook.result.current.setEmail('user@example.com'))
 
     await act(async () => hook.result.current.handleStartDesktopSetup())
 
     expect(setStatus).toHaveBeenCalledWith(
       'Check your browser to authorize desktop setup.',
-      'success',
-      undefined,
-      { profileUiCorrelationId: 'setup-dispatch-1' }
+      'success'
     )
   })
 

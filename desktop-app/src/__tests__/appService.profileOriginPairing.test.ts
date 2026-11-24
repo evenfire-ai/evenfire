@@ -41,9 +41,9 @@ async function persistActiveProfileOrigin(
   harness: Awaited<ReturnType<typeof createNativeCommitTestHarness>>,
   origin: string
 ): Promise<void> {
-  const identity = harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()
+  const identity = harness.runtimeConfig.captureProfileOriginBinding()
   if (!identity) throw new Error('active profile identity is unavailable')
-  await harness.runtimeConfig.persistProfileUiOrigin(identity, origin)
+  await harness.runtimeConfig.persistProfileOriginForBinding(identity, origin)
 }
 
 function authenticate(service: LinkService, suffix: string): void {
@@ -90,8 +90,8 @@ describe('AppService active Profile origin pairing', () => {
       }
       async run(model: Model, real: Real): Promise<void> {
         await real.service.selectRuntimeConfig(real.options[this.environment].id)
-        model.selected = this.environment
         if (model.pending) model.pending.selectionChanged = true
+        model.selected = this.environment
         expect(real.runtimeConfig.getActiveRuntimeConfigOptionId()).toBe(
           real.options[this.environment].id
         )
@@ -156,6 +156,7 @@ describe('AppService active Profile origin pairing', () => {
       async run(model: Model, real: Real): Promise<void> {
         const environment = model.selected
         const origin = model.serverOrigins[environment]
+        model.requests[environment] += 1
         const before = real.discovery.mock.calls.length
         const action = real.service.openForgotPassword('user@example.test')
         await vi.waitFor(() => expect(real.discovery).toHaveBeenCalledTimes(before + 1))
@@ -186,17 +187,20 @@ describe('AppService active Profile origin pairing', () => {
           const expectedError =
             model.selected === expected.environment
               ? 'stale_session_generation'
-              : 'stale_runtime_environment'
+              : 'Profile UI deployment changed'
           await expect(real.scheduler.waitFor(pending.action)).rejects.toThrow(expectedError)
           expect(real.shell.openExternal).toHaveBeenCalledTimes(opensBefore)
         }
-        // Persistence is profile-bound and may complete even when the action's
-        // later session/environment authorization rejects browser dispatch.
-        model.profiles[expected.environment].origin = expected.origin
-        model.requests[expected.environment] += 1
+        // Selection changes invalidate discovery admission, so neither the old
+        // profile nor the new one receives metadata from the stale response.
+        if (model.selected === expected.environment) {
+          model.profiles[expected.environment].origin = expected.origin
+        }
         real.pending = undefined
         model.pending = undefined
-        expect(await readSavedOrigin(real, expected.environment)).toBe(expected.origin)
+        expect(await readSavedOrigin(real, expected.environment)).toBe(
+          model.selected === expected.environment ? expected.origin : null
+        )
         expect(real.requests).toEqual(model.requests)
       }
       toString(): string {
@@ -307,7 +311,7 @@ describe('AppService active Profile origin pairing', () => {
     )
   })
 
-  it('opens Forgot Password on built-in Localhost without discovery or profile persistence', async () => {
+  it('uses selected Localhost REST discovery without persisting an origin', async () => {
     const harness = await createNativeCommitTestHarness({
       configuredRest: 'https://api.saved.example.test',
       restA: 'https://api.saved.example.test',
@@ -327,7 +331,10 @@ describe('AppService active Profile origin pairing', () => {
     expect(shell.openExternal).toHaveBeenCalledWith(
       'http://127.0.0.1:3001/forgot-password?email=user%40example.test'
     )
-    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:8091/api/v1/desktop/environment',
+      expect.objectContaining({ redirect: 'manual' })
+    )
     expect((await fs.readdir(storagePath)).sort()).toEqual(filesBefore)
     expect(harness.runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(
       '__localhost__'
@@ -364,7 +371,7 @@ describe('AppService active Profile origin pairing', () => {
 
   it('does not persist an unsafe Profile origin returned by discovery', async () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
-    const identity = runtimeConfig.getActiveRuntimeConfigProfileIdentity()
+    const identity = runtimeConfig.captureProfileOriginBinding()
     if (!identity) throw new Error('active profile identity is unavailable')
     const discovery = vi.fn().mockResolvedValue({
       externalRestApiBaseUrl: restA,
@@ -380,9 +387,7 @@ describe('AppService active Profile origin pairing', () => {
 
     await expect(service.openForgotPassword('user@example.test')).rejects.toThrow()
     expect(discovery).toHaveBeenCalledOnce()
-    expect(runtimeConfig.getActiveRuntimeConfigProfileIdentity()).not.toHaveProperty(
-      'profileUiBaseUrl'
-    )
+    expect(runtimeConfig.captureProfileOriginBinding()).not.toHaveProperty('profileUiBaseUrl')
     expect(shell.openExternal).not.toHaveBeenCalled()
   })
 
@@ -401,12 +406,10 @@ describe('AppService active Profile origin pairing', () => {
     const { shell } = await import('electron')
 
     await expect(service.openForgotPassword('user@example.test')).rejects.toThrow(
-      'desktop_environment_rest_endpoint_mismatch'
+      'Desktop environment discovery binding mismatch'
     )
-    expect(discovery).toHaveBeenCalledWith(restA, expect.any(AbortSignal))
-    expect(runtimeConfig.getActiveRuntimeConfigProfileIdentity()).not.toHaveProperty(
-      'profileUiBaseUrl'
-    )
+    expect(discovery).toHaveBeenCalledWith(restA)
+    expect(runtimeConfig.captureProfileOriginBinding()).not.toHaveProperty('profileUiBaseUrl')
     expect(shell.openExternal).not.toHaveBeenCalled()
   })
 
@@ -509,10 +512,10 @@ describe('AppService active Profile origin pairing', () => {
       authenticate(service, 'invalid-origin')
 
       await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-        'operator_profile_ui_origin_invalid'
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
       )
       await expect(service.createGfsResourceDeepLink(gfsUri)).rejects.toThrow(
-        'operator_profile_ui_origin_invalid'
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
       )
     }
   )
@@ -559,14 +562,14 @@ describe('AppService active Profile origin pairing', () => {
     const { shell } = await import('electron')
 
     await expect(service.openForgotPassword('user@example.test')).rejects.toThrow(
-      'desktop_environment_response_url_mismatch'
+      'Desktop environment discovery response URL mismatch'
     )
     expect(fetchMock).toHaveBeenCalledWith(
       desktopEnvironmentDiscoveryUrl(rest),
-      expect.objectContaining({ redirect: 'error' })
+      expect.objectContaining({ redirect: 'manual' })
     )
     expect(shell.openExternal).not.toHaveBeenCalled()
-    expect(harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()).not.toHaveProperty(
+    expect(harness.runtimeConfig.captureProfileOriginBinding()).not.toHaveProperty(
       'profileUiBaseUrl'
     )
   })

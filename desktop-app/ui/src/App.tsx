@@ -4528,15 +4528,6 @@ export function App() {
       >
         <WindowTitleBar actionsRef={setTitlebarActionsRoot} leadingRef={setTitlebarLeadingRoot} />
         <div className="app-root" inert={bootSplashLoading || undefined}>
-          {vm.profileUiDispatchFailureVisible ? (
-            <div
-              className="app-profile-ui-dispatch-error"
-              data-testid="profile-ui-dispatch-failure"
-              role="alert"
-            >
-              <StatusBanner tone="error" text="Profile UI could not be opened in your browser." />
-            </div>
-          ) : null}
           {vm.isAuthenticated ? (
             <NavigationContext.Provider value={navValue}>
               <ChatLinkActivationContext.Provider value={chatLinkActivation}>

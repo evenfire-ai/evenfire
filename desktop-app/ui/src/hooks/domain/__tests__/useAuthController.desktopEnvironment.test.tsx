@@ -370,6 +370,11 @@ describe('Desktop environment handoff', () => {
       appName: 'Untrusted Profile label',
     }
     const { AuthClient } = await import('../../../../../src/authClient')
+    vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment').mockResolvedValue({
+      externalRestApiBaseUrl: linked.externalRestApiBaseUrl,
+      rpcProxyBaseUrl: 'https://new-rpc.example.test',
+      appName: 'Discovered environment',
+    })
     vi.spyOn(AuthClient.prototype, 'getDesktopEnvironmentForEndpoint').mockResolvedValue({
       externalRestApiBaseUrl: linked.externalRestApiBaseUrl,
       rpcProxyBaseUrl: 'https://new-rpc.example.test',
@@ -959,12 +964,12 @@ describe('Desktop environment handoff', () => {
     const { AppService } = await import('../../../../../src/appService')
     const service = new AppService()
     const serviceInternals = service as unknown as {
-      authClient: { getDesktopEnvironmentForEndpoint: ReturnType<typeof vi.fn> }
+      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
       applyRuntimeEnvironmentChange: (operation: () => Promise<void>) => Promise<void>
       saveRuntimeConfig: typeof service.saveRuntimeConfig
     }
     serviceInternals.authClient = {
-      getDesktopEnvironmentForEndpoint: vi.fn().mockResolvedValue({
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
         externalRestApiBaseUrl: targetEnvironment.externalRestApiBaseUrl,
         rpcProxyBaseUrl: 'https://rpc.untrusted-discovery.test',
         appName: 'Discovered tenant',
@@ -990,7 +995,7 @@ describe('Desktop environment handoff', () => {
       rpcProxyBaseUrl: targetRpcProxyBaseUrl,
       appName: 'Example base API',
     })
-    expect(serviceInternals.authClient.getDesktopEnvironmentForEndpoint).not.toHaveBeenCalled()
+    expect(serviceInternals.authClient.getDesktopEnvironment).not.toHaveBeenCalled()
     expect(mocks.saveRuntimeConfig).not.toHaveBeenCalled()
     expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(
       savedTarget.id,
@@ -1120,12 +1125,12 @@ describe('Desktop environment handoff', () => {
     const { AppService } = await import('../../../../../src/appService')
     const service = new AppService()
     const serviceInternals = service as unknown as {
-      authClient: { getDesktopEnvironmentForEndpoint: ReturnType<typeof vi.fn> }
+      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
       applyRuntimeEnvironmentChange: (operation: () => Promise<void>) => Promise<void>
       saveRuntimeConfig: typeof service.saveRuntimeConfig
     }
     serviceInternals.authClient = {
-      getDesktopEnvironmentForEndpoint: vi.fn().mockResolvedValue({
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
         externalRestApiBaseUrl: otherEnvironment.externalRestApiBaseUrl,
         rpcProxyBaseUrl: 'https://rpc.overwrite.test',
         appName: 'Overwritten tenant',
@@ -1137,7 +1142,7 @@ describe('Desktop environment handoff', () => {
     await service.saveRuntimeConfig(setupEnvironment)
 
     const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
-    expect(serviceInternals.authClient.getDesktopEnvironmentForEndpoint).toHaveBeenCalledOnce()
+    expect(serviceInternals.authClient.getDesktopEnvironment).toHaveBeenCalledOnce()
     expect(finalState.activeOptionId).toBe(setupOption.id)
     expect(finalState.options.find(option => option.id === discoveryTarget.id)).toMatchObject({
       externalRestApiBaseUrl: otherEnvironment.externalRestApiBaseUrl,
@@ -1154,12 +1159,12 @@ describe('Desktop environment handoff', () => {
     const { AppService } = await import('../../../../../src/appService')
     const service = new AppService()
     const serviceInternals = service as unknown as {
-      authClient: { getDesktopEnvironmentForEndpoint: ReturnType<typeof vi.fn> }
+      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
       applyRuntimeEnvironmentChange: (operation: () => Promise<void>) => Promise<void>
       saveRuntimeConfig: typeof service.saveRuntimeConfig
     }
     serviceInternals.authClient = {
-      getDesktopEnvironmentForEndpoint: vi.fn().mockResolvedValue({
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
         externalRestApiBaseUrl: otherEnvironment.externalRestApiBaseUrl,
         rpcProxyBaseUrl: 'https://rpc.overwrite.test',
         appName: 'Other tenant',
@@ -1183,7 +1188,7 @@ describe('Desktop environment handoff', () => {
     const existingOther = finalState.options.find(
       option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
     )
-    expect(serviceInternals.authClient.getDesktopEnvironmentForEndpoint).toHaveBeenCalledOnce()
+    expect(serviceInternals.authClient.getDesktopEnvironment).toHaveBeenCalledOnce()
     expect(finalState.activeOptionId).toBe(savedTarget?.id)
     expect(savedTarget?.rpcProxyBaseUrl).toBe('')
     expect(existingOther).toMatchObject(otherEnvironment)

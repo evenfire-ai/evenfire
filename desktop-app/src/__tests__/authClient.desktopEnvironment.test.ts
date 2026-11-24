@@ -32,22 +32,24 @@ describe('Desktop environment discovery request URL', () => {
   })
 
   it('rejects a discovery response larger than the bounded contract', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          externalRestApiBaseUrl: 'https://rest.customer.example.test',
-          rpcProxyBaseUrl: 'https://rpc.customer.example.test',
-          profileUiBaseUrl: 'https://profile.customer.example.test',
-          appName: 'x'.repeat(70 * 1024),
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } }
-      )
+    const restEndpoint = 'https://rest.customer.example.test'
+    const expectedUrl = `${restEndpoint}/api/v1/desktop/environment`
+    const oversizedResponse = new Response(
+      JSON.stringify({
+        externalRestApiBaseUrl: restEndpoint,
+        rpcProxyBaseUrl: 'https://rpc.customer.example.test',
+        profileUiBaseUrl: 'https://profile.customer.example.test',
+        appName: 'x'.repeat(70 * 1024),
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
     )
+    Object.defineProperty(oversizedResponse, 'url', { value: expectedUrl })
+    const fetchMock = vi.fn().mockResolvedValue(oversizedResponse)
     vi.spyOn(globalThis, 'fetch').mockImplementation(fetchMock)
 
-    await expect(
-      new AuthClient().getDesktopEnvironmentForEndpoint('https://rest.customer.example.test')
-    ).rejects.toThrow('Desktop environment discovery response exceeded the size limit')
+    await expect(new AuthClient().getDesktopEnvironmentForEndpoint(restEndpoint)).rejects.toThrow(
+      'Desktop environment discovery response exceeded the size limit'
+    )
   })
 
   it('rejects a redirect from the actual discovery endpoint', async () => {

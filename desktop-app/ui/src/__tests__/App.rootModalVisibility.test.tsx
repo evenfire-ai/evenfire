@@ -389,6 +389,11 @@ describe('PR1087 App-root native visibility owners', () => {
         profileUiBaseUrl: 'https://profile-c.example.test',
         responseUrl: `${newRest}/api/v1/desktop/environment`,
       }),
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
+        appName: 'Environment C',
+        externalRestApiBaseUrl: newRest,
+        rpcProxyBaseUrl: 'https://rpc-c.example.test',
+      }),
     }
     producer.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {})
     await producer.googleLogin('synthetic-google-token')

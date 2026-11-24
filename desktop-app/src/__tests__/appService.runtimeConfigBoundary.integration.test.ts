@@ -137,6 +137,12 @@ describe('AppService RPC discovery restore boundary', () => {
     }
     service.tokenStore = tokenStore
     service.authClient = {
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
+        externalRestApiBaseUrl: restBaseUrl,
+        rpcProxyBaseUrl: rpcBaseUrl,
+        appName: 'Environment A',
+        responseUrl: `${restBaseUrl}/api/v1/desktop/environment`,
+      }),
       getDesktopEnvironmentForEndpoint: vi.fn().mockResolvedValue({
         externalRestApiBaseUrl: restBaseUrl,
         rpcProxyBaseUrl: rpcBaseUrl,

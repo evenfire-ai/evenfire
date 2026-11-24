@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
 import fsp from 'node:fs/promises'
-import path from 'node:path'
 import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
-  deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
 import { desktopEnvironmentDiscoveryUrl } from '../desktopEnvironmentUrl.js'
 
@@ -44,10 +42,8 @@ async function authenticatedLinkService(
 
 async function expectShareLinksAt(service: LinkService, profileOrigin: string): Promise<void> {
   const resourceUri = 'gfs://main/0123456789abcdef0123456789abcdef'
-  const [app, gfs] = await Promise.all([
-    service.createSandboxUiDeepLink(),
-    service.createGfsResourceDeepLink(resourceUri),
-  ])
+  const app = await service.createSandboxUiDeepLink()
+  const gfs = await service.createGfsResourceDeepLink(resourceUri)
 
   expect({ app: app.url, gfs: gfs.url }).toEqual({
     app: `${profileOrigin}/open/apps/sandbox-recipes/task-board?path=%2Ftasks%2F42`,
@@ -97,14 +93,13 @@ describe('AppService configured custom Profile origin', () => {
       error => error
     )
     expect(discovery).not.toHaveBeenCalled()
-    expect(invalidOriginFailure).toMatchObject({ message: 'saved_profile_origin_invalid' })
-    expect(runtimeConfig.getActiveRuntimeConfigProfileIdentity()).toMatchObject({
-      externalRestApiBaseUrl: rest,
+    expect(invalidOriginFailure).toMatchObject({ message: 'Invalid Profile UI origin' })
+    expect(JSON.parse(await fsp.readFile(activeOption.configPath, 'utf8'))).toMatchObject({
       profileUiBaseUrl: invalidSavedOrigin,
     })
   })
 
-  it('rejects saved IPv6 site-local Profile UI origins without rediscovery', async () => {
+  it('accepts a saved IPv6 site-local HTTPS Profile UI origin without rediscovery', async () => {
     const rest = 'https://api-stable.example.test'
     const invalidSavedOrigin = 'https://[fec0::1]'
     const harness = await createNativeCommitTestHarness({
@@ -139,7 +134,9 @@ describe('AppService configured custom Profile origin', () => {
         responseUrl: `${rest}/api/v1/desktop/environment`,
       })
 
-    await expect(service.createSandboxUiDeepLink()).rejects.toThrow('saved_profile_origin_invalid')
+    await expect(service.createSandboxUiDeepLink()).resolves.toMatchObject({
+      url: `${invalidSavedOrigin}/open/apps/sandbox-recipes/task-board?path=%2Ftasks%2F42`,
+    })
 
     expect(discovery).not.toHaveBeenCalled()
   })
@@ -151,9 +148,9 @@ describe('AppService configured custom Profile origin', () => {
       configuredRest: rest,
       restA: rest,
     })
-    const identity = harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()
+    const identity = harness.runtimeConfig.captureProfileOriginBinding()
     if (!identity) throw new Error('saved environment identity is unavailable')
-    await harness.runtimeConfig.persistProfileUiOrigin(identity, savedProfile)
+    await harness.runtimeConfig.persistProfileOriginForBinding(identity, savedProfile)
     const service = await authenticatedLinkService(harness, 'synthetic-session-stable')
     const { AuthClient } = await import('../authClient.js')
     const discovery = vi
@@ -169,8 +166,8 @@ describe('AppService configured custom Profile origin', () => {
     await expectShareLinksAt(service, savedProfile)
 
     expect(discovery).not.toHaveBeenCalled()
-    expect(harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()).toMatchObject({
-      externalRestApiBaseUrl: rest,
+    expect(harness.runtimeConfig.captureProfileOriginBinding()).toMatchObject({
+      restBaseUrl: rest,
       profileUiBaseUrl: savedProfile,
     })
   })
@@ -206,8 +203,8 @@ describe('AppService configured custom Profile origin', () => {
       sessionGeneration
     )
     expect(harness.runtimeConfig.getActiveEnvKey()).toBe(environmentKey)
-    expect(harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()).toMatchObject({
-      externalRestApiBaseUrl: rest,
+    expect(harness.runtimeConfig.captureProfileOriginBinding()).toMatchObject({
+      restBaseUrl: rest,
       profileUiBaseUrl: profileOrigin,
     })
   })
@@ -234,7 +231,7 @@ describe('AppService configured custom Profile origin', () => {
       })
 
     await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-      'profile_ui_origin_unavailable_from_server'
+      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
     )
     expect(discovery).toHaveBeenCalledOnce()
     expect(JSON.parse(await fsp.readFile(option.configPath, 'utf8'))).not.toHaveProperty(
@@ -246,9 +243,7 @@ describe('AppService configured custom Profile origin', () => {
     const rest = 'https://customer-rest.example.test/api?tenant=one'
     const profileOrigin = 'https://profile.customer.example.test'
     const harness = await createNativeCommitTestHarness({ configuredRest: rest, restA: rest })
-    const service = harness.service as unknown as {
-      resolveProfileUiBaseUrl: () => Promise<string>
-    }
+    const service = await authenticatedLinkService(harness, 'synthetic-session-discovery')
     const { AuthClient } = await import('../authClient.js')
     const discovery = vi
       .spyOn(AuthClient.prototype, 'getDesktopEnvironmentForEndpoint')
@@ -260,20 +255,20 @@ describe('AppService configured custom Profile origin', () => {
         responseUrl: desktopEnvironmentDiscoveryUrl(rest),
       })
 
-    await expect(service.resolveProfileUiBaseUrl()).resolves.toBe(profileOrigin)
-    expect(discovery).toHaveBeenCalledWith(rest, expect.any(AbortSignal))
-    expect(harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()).toMatchObject({
-      externalRestApiBaseUrl: rest,
+    await expect(service.createSandboxUiDeepLink()).resolves.toMatchObject({
+      url: `${profileOrigin}/open/apps/sandbox-recipes/task-board?path=%2Ftasks%2F42`,
+    })
+    expect(discovery).toHaveBeenCalledWith(rest)
+    expect(harness.runtimeConfig.captureProfileOriginBinding()).toMatchObject({
+      restBaseUrl: rest,
       profileUiBaseUrl: profileOrigin,
     })
   })
 
-  it('cooldowns legacy remote discovery after an omitted Profile origin', async () => {
+  it('preserves the REST-derived fallback when an older server omits the Profile origin', async () => {
     const rest = 'https://customer-rest.example.test/api?tenant=one'
     const harness = await createNativeCommitTestHarness({ configuredRest: rest, restA: rest })
-    const service = harness.service as unknown as {
-      resolveProfileUiBaseUrl: () => Promise<string>
-    }
+    const service = await authenticatedLinkService(harness, 'synthetic-session-legacy')
     const { AuthClient } = await import('../authClient.js')
     const discovery = vi
       .spyOn(AuthClient.prototype, 'getDesktopEnvironmentForEndpoint')
@@ -283,34 +278,21 @@ describe('AppService configured custom Profile origin', () => {
         appName: 'Customer',
         responseUrl: desktopEnvironmentDiscoveryUrl(rest),
       })
-    let now = 100_000
-    vi.spyOn(Date, 'now').mockImplementation(() => now)
-
-    await expect(service.resolveProfileUiBaseUrl()).rejects.toThrow(
-      'profile_ui_origin_unavailable_from_server'
+    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
+      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
     )
-    now += 999
-    await expect(service.resolveProfileUiBaseUrl()).rejects.toThrow('profile_ui_retry_cooldown')
     expect(discovery).toHaveBeenCalledOnce()
-
-    now += 1
-    await expect(service.resolveProfileUiBaseUrl()).rejects.toThrow(
-      'profile_ui_origin_unavailable_from_server'
-    )
-    expect(discovery).toHaveBeenCalledTimes(2)
-    expect(harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()).not.toHaveProperty(
+    expect(harness.runtimeConfig.captureProfileOriginBinding()).not.toHaveProperty(
       'profileUiBaseUrl'
     )
   })
 
-  it('bounds Profile origin staging and fences a late stage completion', async () => {
+  it('persists discovered origin to the selected profile before returning its share link', async () => {
     const rest = 'https://api-timeout.example.test'
     const profileOrigin = 'https://profile-timeout.example.test'
     const harness = await createNativeCommitTestHarness({ configuredRest: rest, restA: rest })
-    const service = harness.service as unknown as {
-      resolveProfileUiBaseUrl: () => Promise<string>
-    }
-    const identity = harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()
+    const service = await authenticatedLinkService(harness, 'synthetic-session-persist-origin')
+    const identity = harness.runtimeConfig.captureProfileOriginBinding()
     if (!identity) throw new Error('saved environment identity is unavailable')
     const activeOption = harness.runtimeConfig
       .getDesktopRuntimeConfigState()
@@ -326,52 +308,22 @@ describe('AppService configured custom Profile origin', () => {
       responseUrl: desktopEnvironmentDiscoveryUrl(rest),
     })
 
-    const controller = new AbortController()
-    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(controller.signal)
-    const stage = deferred<void>()
-    const stageStarted = deferred<void>()
-    const originalWriteFile = fsp.writeFile.bind(fsp)
-    const fsPromises = fsp as unknown as { writeFile: (...args: any[]) => Promise<void> }
-    let held = false
-    const writeSpy = vi.spyOn(fsPromises, 'writeFile').mockImplementation((...args: any[]) => {
-      if (!held && String(args[0]).includes('.runtime-config-stage-')) {
-        held = true
-        stageStarted.resolve()
-        return stage.promise.then(() =>
-          originalWriteFile(...(args as Parameters<typeof fsp.writeFile>))
-        )
-      }
-      return originalWriteFile(...(args as Parameters<typeof fsp.writeFile>))
-    })
-
-    try {
-      const action = service.resolveProfileUiBaseUrl()
-      await stageStarted.promise
-      expect(timeoutSpy).toHaveBeenCalledWith(10_000)
-      controller.abort()
-      await expect(action).rejects.toThrow('profile_ui_action_timeout')
-      expect(await fsp.readFile(activeOption.configPath, 'utf8')).toBe(before)
-
-      stage.resolve()
-      await vi.waitFor(async () => {
-        expect(await fsp.readFile(activeOption.configPath, 'utf8')).toBe(before)
-        expect(
-          (await fsp.readdir(path.dirname(activeOption.configPath))).filter(name =>
-            name.includes('.runtime-config-stage-')
-          )
-        ).toEqual([])
-      })
-    } finally {
-      stage.resolve()
-      writeSpy.mockRestore()
+    const result = await service.createSandboxUiDeepLink()
+    expect(result.url).toBe(
+      `${profileOrigin}/open/apps/sandbox-recipes/task-board?path=%2Ftasks%2F42`
+    )
+    const saved = JSON.parse(await fsp.readFile(activeOption.configPath, 'utf8')) as {
+      profileUiBaseUrl?: string
     }
+    expect(saved.profileUiBaseUrl).toBe(profileOrigin)
+    expect(await fsp.readFile(activeOption.configPath, 'utf8')).not.toBe(before)
   })
 
   it('uses the approved loopback fallback for an old server without persisting it', async () => {
     const rest = 'http://127.0.0.1:8091'
     const harness = await createNativeCommitTestHarness({ configuredRest: rest, restA: rest })
     const service = harness.service as unknown as {
-      resolveProfileUiBaseUrl: () => Promise<string>
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
     }
     const { AuthClient } = await import('../authClient.js')
     const discovery = vi
@@ -383,10 +335,11 @@ describe('AppService configured custom Profile origin', () => {
         responseUrl: desktopEnvironmentDiscoveryUrl(rest),
       })
 
-    await expect(service.resolveProfileUiBaseUrl()).resolves.toBe('http://127.0.0.1:3001')
-    await expect(service.resolveProfileUiBaseUrl()).resolves.toBe('http://127.0.0.1:3001')
+    await expect(service.openForgotPassword('user@example.test')).resolves.toMatchObject({
+      profileUiUrl: 'http://127.0.0.1:3001/forgot-password?email=user%40example.test',
+    })
     expect(discovery).toHaveBeenCalledOnce()
-    expect(harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()).not.toHaveProperty(
+    expect(harness.runtimeConfig.captureProfileOriginBinding()).not.toHaveProperty(
       'profileUiBaseUrl'
     )
   })
@@ -407,9 +360,9 @@ describe('AppService configured custom Profile origin', () => {
     await service.selectRuntimeConfig(harness.optionB.id)
     expect(service.sessionToken).toBeNull()
     expect(service.me).toBeNull()
-    const developmentIdentity = harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()
+    const developmentIdentity = harness.runtimeConfig.captureProfileOriginBinding()
     if (!developmentIdentity) throw new Error('development profile identity is unavailable')
-    await harness.runtimeConfig.persistProfileUiOrigin(
+    await harness.runtimeConfig.persistProfileOriginForBinding(
       developmentIdentity,
       'https://profile.dev.example.test'
     )
@@ -457,9 +410,9 @@ describe('AppService configured custom Profile origin', () => {
     await service.selectRuntimeConfig(harness.optionB.id)
     expect(service.sessionToken).toBeNull()
     expect(service.me).toBeNull()
-    const otherIdentity = harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()
+    const otherIdentity = harness.runtimeConfig.captureProfileOriginBinding()
     if (!otherIdentity) throw new Error('other profile identity is unavailable')
-    await harness.runtimeConfig.persistProfileUiOrigin(
+    await harness.runtimeConfig.persistProfileOriginForBinding(
       otherIdentity,
       'https://profile.other.evenfire.test'
     )
@@ -490,8 +443,8 @@ describe('AppService configured custom Profile origin', () => {
       fc.property(fc.integer({ min: 1, max: 1_000_000 }), deploymentId => {
         const activeRest = `https://api.other-${deploymentId}.evenfire.test`
         harness.runtimeConfig.config.externalRestApiBaseUrl = activeRest
-        expect(() => harness.runtimeConfig.getActiveDeploymentProfileUiBaseUrl()).toThrow(
-          'profile_ui_origin_missing'
+        expect(harness.runtimeConfig.getActiveDeploymentProfileUiBaseUrl()).toBe(
+          `https://profile.other-${deploymentId}.evenfire.test`
         )
 
         harness.runtimeConfig.config.externalRestApiBaseUrl = devRest

@@ -46,7 +46,7 @@ export interface AuthContextValue {
     message: string,
     tone?: Tone,
     payload?: unknown,
-    options?: { global?: boolean; toast?: boolean; profileUiCorrelationId?: string }
+    options?: { global?: boolean; toast?: boolean }
   ) => void
   loadSession: (options?: { preserveNav?: boolean }) => Promise<void>
   handlePasswordLogin: () => Promise<void>

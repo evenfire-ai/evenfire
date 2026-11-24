@@ -8,7 +8,6 @@ export type SetStatusFn = (
     global?: boolean
     toast?: boolean
     toastDurationMs?: number
-    profileUiCorrelationId?: string
   }
 ) => void
 

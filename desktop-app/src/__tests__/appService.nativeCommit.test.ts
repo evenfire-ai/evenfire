@@ -261,36 +261,19 @@ describe('AppService native auth and environment commit ordering', () => {
     })
   })
 
-  it('rejects a staged selection superseded by a login before queue admission', async () => {
-    const { service, runtimeConfig, restA, restB, optionB } = await createNativeCommitTestHarness()
+  it('uses the selected environment for a login admitted after selection', async () => {
+    const { service, runtimeConfig, restB, optionB } = await createNativeCommitTestHarness()
     const loginStarted = deferred<void>()
     const releaseLogin = deferred<void>()
-    const stageStarted = deferred<void>()
-    const releaseStage = deferred<void>()
-    const originalWriteFile = fs.writeFile.bind(fs)
-    const fsPromises = fs as unknown as { writeFile: (...args: any[]) => Promise<void> }
-    let heldStage = false
-    vi.spyOn(fsPromises, 'writeFile').mockImplementation((...args: any[]) => {
-      if (!heldStage && String(args[0]).includes('.runtime-config-stage-')) {
-        heldStage = true
-        stageStarted.resolve()
-        return releaseStage.promise.then(() =>
-          originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
-        )
-      }
-      return originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
-    })
-    let handoffRequestRest = ''
+    let loginRequestRest = ''
     service.authClient = {
       googleLogin: vi.fn(async (token: string) => {
         const requestRest = runtimeConfig.config.externalRestApiBaseUrl
-        if (token === 'handoff-login') {
-          handoffRequestRest = requestRest
+        if (token === 'post-selection-login') {
+          loginRequestRest = requestRest
           loginStarted.resolve()
           await releaseLogin.promise
-          return requestRest === restA
-            ? { token: 'synthetic-session-a-next', me: { id: 'user-a' } }
-            : { token: 'synthetic-session-b', me: { id: 'user-b' } }
+          return { token: 'synthetic-session-b', me: { id: 'user-b' } }
         }
         return { token: 'synthetic-session-a', me: { id: 'user-a' } }
       }),
@@ -298,26 +281,23 @@ describe('AppService native auth and environment commit ordering', () => {
     await service.googleLogin('initial-login')
 
     const selection = service.selectRuntimeConfig(optionB.id)
-    await stageStarted.promise
-    const handoffLogin = service.googleLogin('handoff-login')
+    const login = service.googleLogin('post-selection-login')
     await loginStarted.promise
-    releaseStage.resolve()
-    await expect(selection).rejects.toThrow('stale_session_generation')
+    expect(loginRequestRest).toBe(restB)
     releaseLogin.resolve()
-    const loginOutcome = await handoffLogin
+    const [, loginOutcome] = await Promise.all([selection, login])
 
-    expect(handoffRequestRest).toBe(restA)
-    expect(loginOutcome).toMatchObject({ authenticated: true, me: { id: 'user-a' } })
-    expect(runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).not.toBe(optionB.id)
+    expect(loginOutcome).toMatchObject({ authenticated: true, me: { id: 'user-b' } })
+    expect(runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(optionB.id)
     await expect(service.getSessionState()).resolves.toMatchObject({
       authenticated: true,
-      me: { id: 'user-a' },
+      me: { id: 'user-b' },
     })
     await expect(service.listGfsUploadSessions()).resolves.toEqual([])
     expect(service.gfsScopeIdentity).toMatchObject({
-      ownerId: 'user-a',
+      ownerId: 'user-b',
       environmentKey: runtimeConfig.getDesktopRuntimeConfigState().envKey,
-      baseUrl: restA,
+      baseUrl: restB,
     })
   })
 })

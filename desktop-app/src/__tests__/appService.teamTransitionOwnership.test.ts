@@ -90,12 +90,12 @@ describe('AppService deliberate team transition ownership', () => {
       getMeStarted.resolve()
       return getMeResponse.promise
     })
-    const getDesktopEnvironmentForEndpoint = vi.fn(() => {
+    const getDesktopEnvironment = vi.fn(() => {
       discoveryStarted.resolve()
       return discovery.promise
     })
     app.authClient = {
-      getDesktopEnvironmentForEndpoint,
+      getDesktopEnvironment,
       getMe,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
@@ -133,7 +133,7 @@ describe('AppService deliberate team transition ownership', () => {
       appName: string
     }>()
     const discoveryStarted = deferred<void>()
-    const getDesktopEnvironmentForEndpoint = vi.fn(() => {
+    const getDesktopEnvironment = vi.fn(() => {
       discoveryStarted.resolve()
       return discovery.promise
     })
@@ -150,7 +150,7 @@ describe('AppService deliberate team transition ownership', () => {
       return loginResponse.promise
     })
     app.authClient = {
-      getDesktopEnvironmentForEndpoint,
+      getDesktopEnvironment,
       googleLogin,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
@@ -197,12 +197,12 @@ describe('AppService deliberate team transition ownership', () => {
     }
     app.tokenStore.getSessionToken.mockResolvedValue('saved-session-a')
     const getMe = vi.fn().mockResolvedValue(me)
-    const getDesktopEnvironmentForEndpoint = vi.fn(() => {
+    const getDesktopEnvironment = vi.fn(() => {
       discoveryStarted.resolve()
       return discovery.promise
     })
     app.authClient = {
-      getDesktopEnvironmentForEndpoint,
+      getDesktopEnvironment,
       getMe,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
@@ -225,7 +225,7 @@ describe('AppService deliberate team transition ownership', () => {
     })
     await save
     await expect(restore).resolves.toEqual({ authenticated: true, me, sessionGeneration: 3 })
-    expect(getDesktopEnvironmentForEndpoint).toHaveBeenCalledOnce()
+    expect(getDesktopEnvironment).toHaveBeenCalledOnce()
 
     expect(runtimeConfig.getDesktopRuntimeConfigState().currentConfig.rpcProxyBaseUrl).toBe(
       'https://rpc-discovered.example.test'
@@ -341,13 +341,13 @@ describe('AppService deliberate team transition ownership', () => {
         appName: 'Environment A',
       })
       const me = testSessionMe()
-      const getDesktopEnvironmentForEndpoint = vi
+      const getDesktopEnvironment = vi
         .fn()
         .mockRejectedValue(new Error('RPC discovery unavailable'))
       const googleLogin = vi.fn().mockResolvedValue(testLoginResult('google-session-a', me))
       const passwordLogin = vi.fn().mockResolvedValue(testLoginResult('password-session-a', me))
       const app = service as unknown as { authClient: unknown }
-      app.authClient = { getDesktopEnvironmentForEndpoint, googleLogin, passwordLogin }
+      app.authClient = { getDesktopEnvironment, googleLogin, passwordLogin }
 
       const result =
         loginMethod === 'Google'
@@ -355,7 +355,7 @@ describe('AppService deliberate team transition ownership', () => {
           : await service.passwordLogin('user-a@example.test', 'synthetic-password')
 
       expect(result).toMatchObject({ authenticated: true, me })
-      expect(getDesktopEnvironmentForEndpoint).toHaveBeenCalledOnce()
+      expect(getDesktopEnvironment).toHaveBeenCalledOnce()
       if (loginMethod === 'Google') {
         expect(googleLogin).toHaveBeenCalledWith('synthetic-google-token')
         expect(passwordLogin).not.toHaveBeenCalled()
@@ -393,7 +393,7 @@ describe('AppService deliberate team transition ownership', () => {
       appName: string
     }>()
     const discoveryStarted = deferred<void>()
-    const getDesktopEnvironmentForEndpoint = vi.fn(() => {
+    const getDesktopEnvironment = vi.fn(() => {
       discoveryStarted.resolve()
       return discovery.promise
     })
@@ -407,7 +407,7 @@ describe('AppService deliberate team transition ownership', () => {
     }
     app.authClient = {
       googleLogin: vi.fn().mockResolvedValue(testLoginResult()),
-      getDesktopEnvironmentForEndpoint,
+      getDesktopEnvironment,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
     app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }

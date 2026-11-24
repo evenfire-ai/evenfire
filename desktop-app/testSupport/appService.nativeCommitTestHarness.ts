@@ -114,7 +114,7 @@ export async function createNativeCommitTestHarness(options: NativeCommitTestHar
     getSessionToken: vi.fn().mockResolvedValue(null),
     setSessionToken: vi.fn().mockResolvedValue(undefined),
   } as never
-  return { service, runtimeConfig, restA, restB, optionA, optionB, userDataDir }
+  return { service, runtimeConfig, restA, restB, optionA, optionB }
 }
 
 export async function cleanupNativeCommitTestHarness(): Promise<void> {

@@ -11,6 +11,13 @@ import { electronMocks } from './sandboxUiElectronFakes.js'
 // the modules it stands for): a mock factory that does would wait on itself.
 
 export const configModule = {
+  captureProfileOriginBinding: () => ({
+    profileId: null,
+    filePath: null,
+    restBaseUrl: 'https://rest.example',
+    rpcBaseUrl: 'https://rpc.example',
+    witness: null,
+  }),
   getActiveEnvKey: () => 'test-env',
   getActiveLegacyEnvKeys: () => [],
   config: {

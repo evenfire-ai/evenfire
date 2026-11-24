@@ -753,27 +753,6 @@ describe('App deep-link orchestration', () => {
   const clearPendingGfsDeepLinks = vi.fn(async () => gfsQueue.clear())
   const acknowledgeGfsDeepLink = vi.fn(async (id: number) => gfsQueue.acknowledge(id))
 
-  it('shows accepted Profile UI dispatch failure as a status alert without a toast', () => {
-    commonHarness.renderActualToastStack = true
-    currentController = makeController({
-      initialExperienceLoading: false,
-      profileUiDispatchFailureVisible: true,
-      toasts: [],
-    })
-
-    const view = renderApp(<App />)
-
-    expect(within(view.container).getByRole('alert').textContent).toContain(
-      'Profile UI could not be opened in your browser.'
-    )
-    expect(view.container.querySelector('.toast-stack')).toBeNull()
-
-    act(() => {
-      currentController.profileUiDispatchFailureVisible = false
-      forceControllerRender()
-    })
-    expect(view.container.querySelector('[data-testid="profile-ui-dispatch-failure"]')).toBeNull()
-  })
   const listPendingGfsDeepLinks = vi.fn(async () => ({ links: gfsQueue.list() }))
   let main: SandboxUiMainFake
   const acceptedHeldAppIds: number[] = []

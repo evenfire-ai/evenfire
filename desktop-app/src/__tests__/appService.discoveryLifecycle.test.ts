@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -65,13 +64,12 @@ async function fixture() {
   const store = new TokenStore({ isolatedUserDataPath: directory })
   const service = new AppService()
   ;(service as unknown as { tokenStore: InstanceType<typeof TokenStore> }).tokenStore = store
-  const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironmentForEndpoint')
+  const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment')
   discovery.mockRejectedValueOnce(new Error('initial discovery unavailable'))
   discovery.mockResolvedValue({
     externalRestApiBaseUrl: rest,
     rpcProxyBaseUrl: rpc,
     appName: 'A',
-    responseUrl: `${rest}/api/v1/desktop/environment`,
   })
   vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue(
     testLoginResult('synthetic-session-a', testSessionMe())
@@ -147,7 +145,6 @@ describe('RPC discovery lifecycle through native producers', () => {
       externalRestApiBaseUrl: string
       rpcProxyBaseUrl: string
       appName: string
-      responseUrl: string
     }>()
     const started = pending<void>()
     discovery.mockImplementationOnce(() => {
@@ -174,7 +171,6 @@ describe('RPC discovery lifecycle through native producers', () => {
       externalRestApiBaseUrl: rest,
       rpcProxyBaseUrl: rpc,
       appName: 'A',
-      responseUrl: `${rest}/api/v1/desktop/environment`,
     })
     await health
     expect(config.config.externalRestApiBaseUrl).toBe(restB)
@@ -251,6 +247,57 @@ describe('RPC discovery lifecycle through native producers', () => {
     }
   )
 
+  it.each(['Google', 'password'])(
+    'keeps failed pre-login discovery persistence isolated during %s login',
+    async kind => {
+      const { service, config, store, discovery, AuthClient, configPath, rpc } = await fixture()
+      await store.setSessionToken('synthetic-saved-session', config.getActiveEnvKey())
+      const me = pending<ReturnType<typeof testSessionMe>>()
+      const started = pending<void>()
+      vi.spyOn(AuthClient.prototype, 'getMe').mockImplementation(() => {
+        started.resolve()
+        return me.promise
+      })
+      const restore = service.getSessionState()
+      await started.promise
+      await waitPastDiscoveryCooldown()
+      await service.getDependenciesHealth()
+      const write = fs.writeFile.bind(fs)
+      let rejected = false
+      vi.spyOn(fs, 'writeFile').mockImplementation(async (file, ...args) => {
+        if (String(file) === configPath && !rejected) {
+          rejected = true
+          throw new Error('fixture prelogin persistence denied')
+        }
+        return write(file, ...args)
+      })
+      discovery.mockRejectedValue(new Error('subsequent discovery unavailable'))
+      const loginResponse = pending<ReturnType<typeof testLoginResult>>()
+      const loginStarted = pending<void>()
+      const dispatchLogin = () => {
+        loginStarted.resolve()
+        return loginResponse.promise
+      }
+      vi.spyOn(AuthClient.prototype, 'googleLogin').mockImplementation(dispatchLogin)
+      vi.spyOn(AuthClient.prototype, 'passwordLogin').mockImplementation(dispatchLogin)
+      const login =
+        kind === 'Google'
+          ? service.googleLogin('synthetic-google')
+          : service.passwordLogin('user@example.test', 'fixture-password')
+      const result = login.catch(error => error as Error)
+      await loginStarted.promise
+      me.resolve(testSessionMe())
+      await restore
+      expect(config.config.rpcProxyBaseUrl).toBe('')
+      loginResponse.reject(new Error('fixture login rejected'))
+      expect(await result).toMatchObject({ message: 'fixture login rejected' })
+      expect(rejected).toBe(true)
+      expect(config.config.rpcProxyBaseUrl).toBe(rpc)
+      expect(JSON.parse(await fs.readFile(configPath, 'utf8')).rpcProxyBaseUrl).toBe(rpc)
+      expect(service.getCachedUserId()).toBeNull()
+    }
+  )
+
   it('retries discovery persistence after logout ends auth but its config write fails', async () => {
     const { service, config, configPath, store, rest, rpc, discovery, chat } = await fixture()
     await service.googleLogin('synthetic-google-token')
@@ -258,14 +305,14 @@ describe('RPC discovery lifecycle through native producers', () => {
     const oldKey = config.getActiveEnvKey()
     await waitPastDiscoveryCooldown()
     await service.getDependenciesHealth()
-    const rename = fsSync.renameSync.bind(fsSync)
+    const writeFile = fs.writeFile.bind(fs)
     let rejected = false
-    const failure = vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
-      if (String(destination).endsWith('.runtime-config-transaction.json') && !rejected) {
+    const failure = vi.spyOn(fs, 'writeFile').mockImplementation((filePath, ...args) => {
+      if (String(filePath) === configPath && !rejected) {
         rejected = true
-        throw new Error('fixture journal install denied')
+        throw new Error('fixture runtime config write denied')
       }
-      return rename(source, destination)
+      return writeFile(filePath, ...args)
     })
     await service.logout()
     failure.mockRestore()
@@ -316,7 +363,6 @@ describe('RPC discovery lifecycle through native producers', () => {
         externalRestApiBaseUrl: rest,
         rpcProxyBaseUrl: invalid,
         appName: 'A',
-        responseUrl: `${rest}/api/v1/desktop/environment`,
       } as never)
       const activeGeneration = service.getSessionGeneration()
       await service.getDependenciesHealth()
