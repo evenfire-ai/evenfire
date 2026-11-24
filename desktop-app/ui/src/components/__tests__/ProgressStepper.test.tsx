@@ -242,6 +242,61 @@ describe('ProgressStepper — active status with steps', () => {
   })
 })
 
+describe('ProgressStepper — internal tool progress labels', () => {
+  it.each<{
+    state: ProgressStep['state']
+    llmElapsedMs?: number
+    errorSummary?: string
+    label: string
+  }>([
+    { state: 'running', label: 'Using Evenfire' },
+    { state: 'completed', llmElapsedMs: 9000, label: 'Thinking after Evenfire (9s)' },
+    { state: 'completed', label: 'Finished Evenfire' },
+    { state: 'error', label: 'Issue in Evenfire' },
+    {
+      state: 'error',
+      errorSummary: 'Connection refused',
+      label: 'Issue in Evenfire: Connection refused',
+    },
+  ])('renders $label for an internal tool', ({ state, llmElapsedMs, errorSummary, label }) => {
+    const step = makeStep({
+      toolName: 'clerum__tool_search',
+      displayName: 'Clerum',
+      state,
+      errorSummary,
+    })
+    render(<ProgressStepper progress={makeProgress({ steps: [step], llmElapsedMs })} />)
+    expect(screen.getByText(label)).toBeDefined()
+  })
+
+  it.each(['active', 'completed'] as const)(
+    'rebrands the expanded tool label in %s progress without changing the function name',
+    status => {
+      const step = Object.freeze(
+        makeStep({ toolName: 'clerum__tool_search', displayName: 'Clerum' })
+      )
+      render(<ProgressStepper progress={makeProgress({ status, steps: [step] })} />)
+      fireEvent.click(screen.getByRole('button', { name: /More details/ }))
+      expect(screen.getByText('Evenfire')).toBeDefined()
+      expect(screen.getByText('tool_search')).toBeDefined()
+      expect(screen.queryByText('Clerum')).toBeNull()
+    }
+  )
+
+  it.each([
+    { toolName: 'airtable__getRecords', displayName: 'Airtable' },
+    { toolName: 'shell_exec', displayName: 'Shell' },
+    { toolName: 'Clerum', displayName: 'Clerum' },
+    { toolName: 'clerum__generate_pdf', displayName: 'Generate PDF' },
+  ])('preserves the supplied label $displayName for $toolName', ({ toolName, displayName }) => {
+    const step = makeStep({ toolName, displayName, state: 'running' })
+    render(<ProgressStepper progress={makeProgress({ steps: [step] })} />)
+    expect(screen.getByText(`Using ${displayName}`)).toBeDefined()
+    expandDetails()
+    expect(screen.getByText(displayName)).toBeDefined()
+  })
+})
+
 describe('ProgressStepper — completed status', () => {
   it('shows summary with tool count and expand button', () => {
     const steps = [
