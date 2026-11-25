@@ -19,8 +19,9 @@ export function isOidcReturnTo(value: unknown): value is OidcReturnTo {
 }
 
 /**
- * Most bytes `/api/oidc/start` reads from its unauthenticated form body to find `returnTo`.
- * LoginPanel's real body, `returnTo=desktop-setup`, is 22 bytes.
+ * Most bytes `/api/oidc/start` and `/api/oidc/desktop-start` read from their unauthenticated
+ * form bodies (`readStartForm`). LoginPanel's real body, `returnTo=desktop-setup`, is 22 bytes;
+ * the Desktop sign-in form, two 43-character values, is 117 bytes.
  */
 export const OIDC_START_FORM_MAX_BYTES = 1024
 

@@ -15,6 +15,7 @@ import {
 } from '../app/api/oidc/_desktop'
 import {
   OidcProfileFlowError,
+  PROFILE_SESSION_COOKIE_PREFIX,
   beginOidcAttempt,
   browserCookieName,
   completeOidcProfileFlow,
@@ -25,9 +26,12 @@ import {
   returnToCookieName,
 } from '../app/api/oidc/_flow'
 import { GET } from '../app/api/oidc/callback/route'
+import { POST as desktopStart } from '../app/api/oidc/desktop-start/route'
+import { POST as plainStart } from '../app/api/oidc/start/route'
 import { DESKTOP_SIGN_IN_COPY, OIDC_REFUSAL_MESSAGES } from '../app/constants/oidc'
+import { PROFILE_ROUTES } from '../app/constants/routes'
 import { buildEvenfireDesktopAppContentSecurityPolicy } from '../lib/desktopAppLinks'
-import { edgeRecord, edgeResponse } from './edgeFixtures'
+import { edgeRecord, edgeResponse, edgeSetCookies } from './edgeFixtures'
 
 // Every upstream body below is External REST's recorded answer
 // (external-rest-api/test/fixtures/oidc-desktop-sign-in/edge.json). A derived variant says so
@@ -37,6 +41,8 @@ const EDGE_ATTEMPT_PLAIN = 'POST /api/v1/oidc/profile-flow/attempts plain'
 const EDGE_ATTEMPT_DESKTOP_ECHO = 'POST /api/v1/oidc/profile-flow/attempts desktop-echo'
 const EDGE_ATTEMPT_DESKTOP_UNAVAILABLE =
   'POST /api/v1/oidc/profile-flow/attempts desktop-unavailable'
+const EDGE_ATTEMPT_INVALID = 'POST /api/v1/oidc/profile-flow/attempts invalid'
+const EDGE_MEMBER_SIGNED_IN = 'POST /api/v1/oidc/profile-flow/complete member-signed-in'
 const EDGE_DESKTOP_CODE_ISSUED = 'POST /api/v1/oidc/profile-flow/complete desktop-code-issued'
 const EDGE_INVITATION_EMAIL_MISMATCH =
   'POST /api/v1/oidc/profile-flow/complete refused-invitation-email-mismatch'
@@ -502,4 +508,311 @@ test("the Desktop error page fires the package's error link for the Desktop stat
     )
     assert.ok(body.includes(`<p class="body-copy">${message}</p>`), error)
   }
+})
+
+// /api/oidc/desktop-start. The Origin is the origin of `configuration activated`'s redirectUri.
+const profileOrigin = new URL(edgeCallbackUri).origin
+const desktopEchoUrl = (edgeRecord(EDGE_ATTEMPT_DESKTOP_ECHO).body as { authorizationUrl: string })
+  .authorizationUrl
+const desktopEchoState = new URL(desktopEchoUrl).searchParams.get('state') ?? ''
+const DESKTOP_FORM = [
+  ['desktopChallenge', CODE_CHALLENGE],
+  ['desktopState', DESKTOP_STATE],
+] as const
+const ATTEMPT_COOKIE = /^([^=;]+)=([^;]*); Path=\/; Max-Age=\d+; Secure; HttpOnly; SameSite=Lax$/
+
+/** A urlencoded form POST to `path`, as a browser sends it, with its Content-Length. */
+function formPost(
+  path: string,
+  fields: ReadonlyArray<readonly [string, string]>,
+  headers: Record<string, string> = {}
+): Request {
+  const body = new URLSearchParams(fields.map(([key, value]) => [key, value])).toString()
+  return new Request(new URL(path, profileOrigin), {
+    method: 'POST',
+    headers: {
+      origin: profileOrigin,
+      'content-type': 'application/x-www-form-urlencoded',
+      'content-length': String(Buffer.byteLength(body)),
+      ...headers,
+    },
+    body,
+  })
+}
+
+function desktopStartForm(
+  fields: ReadonlyArray<readonly [string, string]> = DESKTOP_FORM,
+  headers: Record<string, string> = {}
+): Request {
+  return formPost(PROFILE_ROUTES.oidcDesktopStart, fields, headers)
+}
+
+/** The attempt cookie's name and value, with the attributes every attempt cookie carries. */
+function attemptCookie(setCookie: string | undefined): Readonly<{ name: string; value: string }> {
+  const match = ATTEMPT_COOKIE.exec(setCookie ?? '')
+  assert.ok(match, `expected an attempt cookie, got ${setCookie}`)
+  return { name: match[1], value: match[2] }
+}
+
+function attemptBody(calls: readonly UpstreamCall[]): Record<string, unknown> {
+  const attempt = calls.find(call => call.path === ATTEMPTS_PATH)?.body
+  assert.ok(attempt && typeof attempt === 'object', 'expected an /attempts request')
+  return attempt as Record<string, unknown>
+}
+
+/**
+ * The Desktop page that fires `unavailable` for the posted state, with `message` (its apostrophes
+ * escaped, as the page writes them), `status`, no redirect and no cookie.
+ */
+async function assertUnavailablePage(
+  response: Response,
+  message: string,
+  status: number,
+  label: string
+): Promise<void> {
+  const body = await response.text()
+  assert.equal(response.status, status, label)
+  assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8', label)
+  assert.ok(
+    body.includes(`evenfire://desktop-login?state=${DESKTOP_STATE}&error=unavailable`),
+    label
+  )
+  assert.equal(
+    scriptLink(body),
+    buildDesktopLoginErrorLink({ state: DESKTOP_STATE, error: 'unavailable' }),
+    label
+  )
+  assert.ok(body.includes(`<p class="body-copy">${message.replaceAll("'", '&#39;')}</p>`), label)
+  assert.equal(response.headers.get('location'), null, label)
+  assert.deepEqual(response.headers.getSetCookie(), [], label)
+}
+
+test('posts only the challenge upstream and keeps the state inside the binding cookie', async () => {
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, attempts: EDGE_ATTEMPT_DESKTOP_ECHO },
+    async calls => {
+      const response = await desktopStart(desktopStartForm())
+      const attempt = attemptBody(calls)
+      const cookies = response.headers.getSetCookie()
+      const cookie = attemptCookie(cookies[0])
+      const value = DESKTOP_BINDING_COOKIE_RE.exec(cookie.value)
+
+      assert.equal(response.status, 303)
+      assert.equal(response.headers.get('location'), desktopEchoUrl)
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, ATTEMPTS_PATH]
+      )
+      assert.deepEqual(Object.keys(attempt), ['browserBinding', 'desktopSignIn'])
+      assert.deepEqual(attempt.desktopSignIn, { codeChallenge: CODE_CHALLENGE })
+      assert.equal(cookies.length, 1)
+      assert.equal(cookie.name, browserCookieName(desktopEchoState))
+      assert.ok(value, `expected a Desktop binding cookie value, got ${cookie.value}`)
+      assert.equal(value[1], attempt.browserBinding)
+      assert.equal(value[2], DESKTOP_STATE)
+      for (const call of calls) {
+        assert.equal(JSON.stringify(call.body ?? null).includes(DESKTOP_STATE), false, call.path)
+      }
+    }
+  )
+})
+
+for (const [label, attempts, message, status] of [
+  ['attempts plain', EDGE_ATTEMPT_PLAIN, DESKTOP_SIGN_IN_COPY.unavailable, 409],
+  [
+    'attempts desktop-unavailable',
+    EDGE_ATTEMPT_DESKTOP_UNAVAILABLE,
+    DESKTOP_SIGN_IN_COPY.unavailable,
+    409,
+  ],
+  ['attempts invalid', EDGE_ATTEMPT_INVALID, DESKTOP_SIGN_IN_COPY.invalidLink, 400],
+  [
+    'a transport failure',
+    (): Response => {
+      throw new TypeError('fetch failed')
+    },
+    DESKTOP_SIGN_IN_COPY.startFailed,
+    503,
+  ],
+] as const) {
+  test(`fires unavailable and sets no cookie for ${label}`, async () => {
+    await withEdge({ configuration: EDGE_CONFIGURATION, attempts }, async calls => {
+      const response = await desktopStart(desktopStartForm())
+      await assertUnavailablePage(response, message, status, label)
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, ATTEMPTS_PATH]
+      )
+    })
+  })
+}
+
+test('chooses the unavailable copy by the desktop_sign_in_unavailable code, not by 409', async () => {
+  // Derived variant of `attempts desktop-unavailable` with the code swapped. Profile UI keeps any
+  // upstream 409, so only the code says that Desktop sign-in is off here.
+  const otherConflict = () =>
+    edgeVariant(EDGE_ATTEMPT_DESKTOP_UNAVAILABLE, { error: 'oidc_attempt_rejected' })
+  await withEdge({ configuration: EDGE_CONFIGURATION, attempts: otherConflict }, async () => {
+    const response = await desktopStart(desktopStartForm())
+    await assertUnavailablePage(response, DESKTOP_SIGN_IN_COPY.startFailed, 503, 'another 409')
+  })
+})
+
+test('fires unavailable for a cross-origin post, a configuration failure or an unusable attempt', async () => {
+  // Derived variant of `attempts desktop-echo` whose expiry has already passed.
+  const expired = () =>
+    edgeVariant(EDGE_ATTEMPT_DESKTOP_ECHO, {
+      ...(edgeRecord(EDGE_ATTEMPT_DESKTOP_ECHO).body as Record<string, unknown>),
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+    })
+  const unreachable = (): Response => {
+    throw new TypeError('fetch failed')
+  }
+  for (const [label, answers, headers, status, paths] of [
+    [
+      'a cross-origin post',
+      { configuration: EDGE_CONFIGURATION, attempts: EDGE_ATTEMPT_DESKTOP_ECHO },
+      { origin: 'https://other.example.test' },
+      403,
+      [CONFIGURATION_PATH],
+    ],
+    [
+      'an unreachable configuration',
+      { configuration: unreachable, attempts: EDGE_ATTEMPT_DESKTOP_ECHO },
+      {},
+      503,
+      [CONFIGURATION_PATH],
+    ],
+    [
+      'an expired attempt',
+      { configuration: EDGE_CONFIGURATION, attempts: expired },
+      {},
+      503,
+      [CONFIGURATION_PATH, ATTEMPTS_PATH],
+    ],
+  ] as const) {
+    await withEdge(answers, async calls => {
+      const response = await desktopStart(desktopStartForm(DESKTOP_FORM, headers))
+      await assertUnavailablePage(response, DESKTOP_SIGN_IN_COPY.startFailed, status, label)
+      assert.deepEqual(
+        calls.map(call => call.path),
+        paths,
+        label
+      )
+    })
+  }
+})
+
+test('answers a malformed state with plain text and no link', async () => {
+  const challenge = ['desktopChallenge', CODE_CHALLENGE] as const
+  const oversized = [...DESKTOP_FORM, ['pad', 'x'.repeat(2048)]] as const
+  for (const [label, request] of [
+    ['no desktopState', desktopStartForm([challenge])],
+    [
+      'a 42-character desktopState',
+      desktopStartForm([challenge, ['desktopState', DESKTOP_STATE.slice(1)]]),
+    ],
+    [
+      'a desktopState outside base64url',
+      desktopStartForm([challenge, ['desktopState', `+${DESKTOP_STATE.slice(1)}`]]),
+    ],
+    [
+      'two desktopState values',
+      desktopStartForm([...DESKTOP_FORM, ['desktopState', DESKTOP_STATE]]),
+    ],
+    ['a form above the length cap', desktopStartForm(oversized)],
+    ['a form sent as text/plain', desktopStartForm(DESKTOP_FORM, { 'content-type': 'text/plain' })],
+  ] as const) {
+    await withEdge(
+      { configuration: EDGE_CONFIGURATION, attempts: EDGE_ATTEMPT_DESKTOP_ECHO },
+      async calls => {
+        const response = await desktopStart(request)
+        const text = await response.text()
+        assert.equal(response.status, 400, label)
+        assert.equal(text, DESKTOP_SIGN_IN_COPY.invalidLink, label)
+        assert.equal(response.headers.get('content-type'), 'text/plain; charset=utf-8', label)
+        assert.equal(response.headers.get('cache-control'), 'no-store', label)
+        assert.equal(text.includes('evenfire://'), false, label)
+        assert.equal(response.headers.get('location'), null, label)
+        assert.deepEqual(response.headers.getSetCookie(), [], label)
+        assert.deepEqual(calls, [], label)
+      }
+    )
+  }
+})
+
+test('fires unavailable for a malformed challenge with a valid state', async () => {
+  const state = ['desktopState', DESKTOP_STATE] as const
+  for (const [label, fields] of [
+    ['no desktopChallenge', [state]],
+    ['a 42-character desktopChallenge', [['desktopChallenge', CODE_CHALLENGE.slice(1)], state]],
+    ['two desktopChallenge values', [...DESKTOP_FORM, ['desktopChallenge', CODE_CHALLENGE]]],
+  ] as const) {
+    await withEdge(
+      { configuration: EDGE_CONFIGURATION, attempts: EDGE_ATTEMPT_DESKTOP_ECHO },
+      async calls => {
+        const response = await desktopStart(desktopStartForm(fields))
+        await assertUnavailablePage(response, DESKTOP_SIGN_IN_COPY.invalidLink, 400, label)
+        assert.deepEqual(calls, [], label)
+      }
+    )
+  }
+})
+
+test('plain /api/oidc/start never forwards Desktop fields', async () => {
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, attempts: EDGE_ATTEMPT_PLAIN },
+    async calls => {
+      const response = await plainStart(formPost(PROFILE_ROUTES.oidcStart, DESKTOP_FORM))
+      const attempt = attemptBody(calls)
+      const cookies = response.headers.getSetCookie()
+
+      assert.equal(response.status, 303)
+      assert.deepEqual(Object.keys(attempt), ['browserBinding'])
+      assert.equal(cookies.length, 1)
+      assert.equal(attemptCookie(cookies[0]).value, attempt.browserBinding)
+      for (const call of calls) {
+        const body = JSON.stringify(call.body ?? null)
+        assert.equal(
+          body.includes(CODE_CHALLENGE) || body.includes(DESKTOP_STATE),
+          false,
+          call.path
+        )
+      }
+    }
+  )
+})
+
+test('starts a provider round trip even with a Profile session cookie present', async () => {
+  // The session cookie as External REST sets it on a member sign-in, sent back by the browser.
+  const [sessionSetCookie = ''] = edgeSetCookies(EDGE_MEMBER_SIGNED_IN)
+  const sessionCookie = sessionSetCookie.slice(0, sessionSetCookie.indexOf(';'))
+  assert.ok(sessionCookie.startsWith(PROFILE_SESSION_COOKIE_PREFIX))
+  const request = desktopStartForm(DESKTOP_FORM, { cookie: sessionCookie })
+  // Records every header the route reads, so a read of the Cookie header shows.
+  const headersRead: string[] = []
+  const readHeader = request.headers.get.bind(request.headers)
+  request.headers.get = (name: string) => {
+    headersRead.push(name.toLowerCase())
+    return readHeader(name)
+  }
+
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, attempts: EDGE_ATTEMPT_DESKTOP_ECHO },
+    async calls => {
+      const response = await desktopStart(request)
+      const cookies = response.headers.getSetCookie()
+
+      assert.equal(response.status, 303)
+      assert.equal(response.headers.get('location'), desktopEchoUrl)
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, ATTEMPTS_PATH]
+      )
+      assert.equal(cookies.length, 1)
+      assert.match(attemptCookie(cookies[0]).value, DESKTOP_BINDING_COOKIE_RE)
+      assert.ok(headersRead.includes('origin'), 'expected the route to read Origin')
+      assert.equal(headersRead.includes('cookie'), false)
+    }
+  )
 })

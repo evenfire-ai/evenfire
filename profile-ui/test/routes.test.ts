@@ -51,6 +51,11 @@ test('PROFILE_ROUTES resolve to App Router pages or route handlers', () => {
   assert.deepEqual(unresolved, [])
 })
 
+test('names the Desktop sign-in page and its start route', () => {
+  assert.equal(PROFILE_ROUTES.desktopLogin, '/desktop-login')
+  assert.equal(PROFILE_ROUTES.oidcDesktopStart, '/api/oidc/desktop-start')
+})
+
 test('desktop app route stays aligned with the shared handoff contract', () => {
   assert.equal(
     PROFILE_ROUTES.openDesktopApp('sandbox-recipes', 'task-board'),
