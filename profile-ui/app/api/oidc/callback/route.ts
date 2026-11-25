@@ -20,6 +20,7 @@ import {
   refusedRedirect,
   requestPathMatchesCallback,
   responseForFlowError,
+  singleCallbackState,
 } from '../_flow'
 
 const UNVERIFIABLE_TEXT = 'Identity proof could not be verified.'
@@ -169,18 +170,13 @@ async function finishDesktopAttempt(
 }
 
 /**
- * The answer to a configuration failure when the binding cookie names a Desktop attempt, or
- * undefined to keep today's JSON answer. Without the configuration the callback cannot finish the
- * attempt, so a failure a reload cannot pass (`retryable` false: no provider configured, or its
- * settings unusable) fires `failed` for the Desktop state and clears the attempt's cookies (design
- * section 8). A retryable failure keeps the attempt and its cookie for a reload. A plain attempt,
- * or a callback whose cookie is missing or unreadable, keeps today's answer and fires nothing.
+ * The `failed` page for a Desktop attempt this callback cannot finish, named by `state`: its
+ * binding cookie, read as the callback reads it, holds a Desktop value. The page clears the
+ * attempt's cookies. Undefined when that cookie is missing, unreadable or a plain binding; the
+ * caller then keeps its plain answer and no link fires (design section 8).
  */
-function desktopConfigurationFailure(request: Request, error: unknown): Response | undefined {
-  if (error instanceof OidcProfileFlowError && error.retryable) return undefined
-  const callback = parseCallbackParameters(request)
-  if (callback.kind === 'invalid') return undefined
-  const cookieName = browserCookieName(callback.state)
+function desktopFailurePage(request: Request, state: string, status: number): Response | undefined {
+  const cookieName = browserCookieName(state)
   if (readSingleCookie(request, cookieName)) return undefined
   const desktop = readDesktopBindingCookie(request, cookieName)
   if (!desktop) return undefined
@@ -188,12 +184,32 @@ function desktopConfigurationFailure(request: Request, error: unknown): Response
     desktopState: desktop.desktopState,
     error: 'failed',
     message: DESKTOP_SIGN_IN_COPY.failed,
-    // `requestExternal` turns every transport, status and JSON failure into an
-    // OidcProfileFlowError, so the 503 is reached only by a programming error. It ends the attempt
-    // as the Desktop branch's other failures do; Profile UI has no logger to report it to.
-    status: error instanceof OidcProfileFlowError ? error.status : 503,
-    cookies: finishedAttemptCookies(request, callback.state),
+    status,
+    cookies: finishedAttemptCookies(request, state),
   })
+}
+
+/**
+ * The answer to a configuration failure when the binding cookie names a Desktop attempt, or
+ * undefined to keep today's JSON answer. Without the configuration the callback cannot finish the
+ * attempt, so a failure a reload cannot pass (`retryable` false: no provider configured, or its
+ * settings unusable) fires `failed` for the Desktop state and clears the attempt's cookies (design
+ * section 8), even when the rest of the callback is malformed. A retryable failure keeps the
+ * attempt and its cookie for a reload. A plain attempt, a callback with no single well-formed
+ * state, or one whose cookie is missing or unreadable keeps today's answer and fires nothing.
+ */
+function desktopConfigurationFailure(request: Request, error: unknown): Response | undefined {
+  if (error instanceof OidcProfileFlowError && error.retryable) return undefined
+  const state = singleCallbackState(request)
+  if (state === undefined) return undefined
+  // `requestExternal` turns every transport, status and JSON failure into an
+  // OidcProfileFlowError, so the 503 is reached only by a programming error. It ends the attempt
+  // as the Desktop branch's other failures do; Profile UI has no logger to report it to.
+  return desktopFailurePage(
+    request,
+    state,
+    error instanceof OidcProfileFlowError ? error.status : 503
+  )
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -213,7 +229,12 @@ export async function GET(request: Request): Promise<Response> {
 
   const callback = parseCallbackParameters(request)
   if (callback.kind === 'invalid') {
-    return noStoreText(UNVERIFIABLE_TEXT, 400)
+    // A malformed callback (a second code, a code with an error, an empty issuer) cannot finish
+    // its attempt, but one well-formed state still names it. A Desktop attempt is told it failed;
+    // a plain one, or one whose cookie is missing or unreadable, keeps today's answer.
+    const state = singleCallbackState(request)
+    const desktopFailure = state === undefined ? undefined : desktopFailurePage(request, state, 400)
+    return desktopFailure ?? noStoreText(UNVERIFIABLE_TEXT, 400)
   }
   // The attempt's kind comes only from its binding cookie: a bare binding is a plain attempt, and
   // `desktop.<binding>.<desktopState>` a Desktop one. Without either, no attempt can be answered,

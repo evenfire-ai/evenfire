@@ -1399,6 +1399,127 @@ test('fires no link when the Desktop cookie is missing', async () => {
   }
 })
 
+/**
+ * Callbacks `parseCallbackParameters` refuses as invalid that still carry exactly one well-formed
+ * state, so they still name their attempt's binding cookie.
+ */
+const MALFORMED_WITH_STATE = [
+  `state=${edgeState}&code=provider-code&code=other-code`,
+  `state=${edgeState}&code=provider-code&error=login_required`,
+  `state=${edgeState}&code=provider-code&iss=`,
+  `state=${edgeState}&code=provider%20code`,
+  `state=${edgeState}&error=login_required&error=consent_required`,
+  `state=${edgeState}&error=login_required&iss=a&iss=b`,
+  `state=${edgeState}`,
+] as const
+
+/**
+ * Callbacks with no single well-formed state, each with a readable Desktop cookie under the name a
+ * reader of the first or the unchecked state would look up.
+ */
+function noSingleStateCases(): ReadonlyArray<readonly [string, readonly string[]]> {
+  const shortState = edgeState.slice(0, 31)
+  const shortStateCookie = `${browserCookieName(shortState)}=${desktopBindingCookieValue(BINDING, DESKTOP_STATE)}`
+  return [
+    [`state=${edgeState}&state=${edgeState}&code=provider-code`, [desktopCookie]],
+    [`state=${edgeState}&state=${edgeState}&error=login_required`, [desktopCookie]],
+    [`state=${shortState}&code=provider-code`, [shortStateCookie]],
+    [`state=${shortState}&code=provider-code&code=other-code`, [shortStateCookie]],
+    ['code=provider-code', [desktopCookie]],
+  ]
+}
+
+test('fires failed for a malformed callback that names a Desktop attempt', async () => {
+  for (const search of MALFORMED_WITH_STATE) {
+    assert.deepEqual(
+      parseCallbackParameters(callbackRequest(search, [])),
+      { kind: 'invalid' },
+      search
+    )
+    await withEdge(
+      {
+        configuration: EDGE_CONFIGURATION,
+        complete: EDGE_DESKTOP_CODE_ISSUED,
+        cancel: EDGE_CANCELLED,
+      },
+      async calls => {
+        await assertDesktopPage(
+          await GET(callbackRequest(search, [desktopCookie, returnCookie])),
+          {
+            link: FAILED_LINK,
+            message: DESKTOP_SIGN_IN_COPY.failed,
+            status: 400,
+            cookies: [bindingClear, clearCookie(returnToCookieName(edgeState))],
+          },
+          search
+        )
+        assert.deepEqual(
+          calls.map(call => call.path),
+          [CONFIGURATION_PATH],
+          search
+        )
+      }
+    )
+  }
+})
+
+test("keeps today's 400 for a malformed callback on a plain attempt or without a readable Desktop cookie", async () => {
+  const name = browserCookieName(edgeState)
+  for (const [label, cookies] of [
+    ['a plain attempt', [bindingCookie, returnCookie]],
+    ['no cookie', []],
+    ['a 42-character state', [`${name}=desktop.${BINDING}.${DESKTOP_STATE.slice(1)}`]],
+    ['the Desktop cookie twice', [desktopCookie, desktopCookie]],
+    ['a plain and a Desktop cookie', [bindingCookie, desktopCookie]],
+  ] as const) {
+    for (const search of MALFORMED_WITH_STATE) {
+      await withEdge(
+        {
+          configuration: EDGE_CONFIGURATION,
+          complete: EDGE_DESKTOP_CODE_ISSUED,
+          cancel: EDGE_CANCELLED,
+        },
+        async calls => {
+          await assertNoLink(
+            await GET(callbackRequest(search, cookies)),
+            { text: INVALID_TEXT, status: 400, cookies: [] },
+            `${label}: ${search}`
+          )
+          assert.deepEqual(
+            calls.map(call => call.path),
+            [CONFIGURATION_PATH],
+            `${label}: ${search}`
+          )
+        }
+      )
+    }
+  }
+})
+
+test('fires no link for a Desktop cookie when the callback has no single well-formed state', async () => {
+  for (const [search, cookies] of noSingleStateCases()) {
+    await withEdge(
+      {
+        configuration: EDGE_CONFIGURATION,
+        complete: EDGE_DESKTOP_CODE_ISSUED,
+        cancel: EDGE_CANCELLED,
+      },
+      async calls => {
+        await assertNoLink(
+          await GET(callbackRequest(search, cookies)),
+          { text: INVALID_TEXT, status: 400, cookies: [] },
+          search
+        )
+        assert.deepEqual(
+          calls.map(call => call.path),
+          [CONFIGURATION_PATH],
+          search
+        )
+      }
+    )
+  }
+})
+
 test('sends exactly the cookie binding to /complete and /cancel, and never the state', async () => {
   const cookieBinding = DESKTOP_BINDING_COOKIE_RE.exec(
     desktopCookie.slice(desktopCookie.indexOf('=') + 1)
@@ -1672,4 +1793,62 @@ test("keeps today's JSON for a configuration failure on a plain attempt or witho
       })
     }
   }
+})
+
+test("fires failed for a Desktop attempt's non-retryable configuration failure on a malformed callback", async () => {
+  for (const [label, configuration, status] of NON_RETRYABLE_CONFIGURATION) {
+    for (const search of MALFORMED_WITH_STATE) {
+      await withEdge({ configuration }, async calls => {
+        await assertDesktopPage(
+          await GET(callbackRequest(search, [desktopCookie, returnCookie])),
+          {
+            link: FAILED_LINK,
+            message: DESKTOP_SIGN_IN_COPY.failed,
+            status,
+            cookies: [bindingClear, clearCookie(returnToCookieName(edgeState))],
+          },
+          `${label}: ${search}`
+        )
+        assert.deepEqual(
+          calls.map(call => call.path),
+          [CONFIGURATION_PATH],
+          `${label}: ${search}`
+        )
+      })
+    }
+  }
+})
+
+test("keeps today's JSON for a configuration failure when a malformed callback names no Desktop attempt", async () => {
+  for (const [label, configuration, status, code] of NON_RETRYABLE_CONFIGURATION) {
+    for (const [search, cookies] of [
+      ...noSingleStateCases(),
+      ...MALFORMED_WITH_STATE.map(search => [search, [bindingCookie, desktopCookie]] as const),
+    ]) {
+      await withEdge({ configuration }, async calls => {
+        await assertConfigurationJson(
+          await GET(callbackRequest(search, cookies)),
+          new OidcProfileFlowError(status, code, false),
+          `${label}: ${search}`
+        )
+        assert.deepEqual(
+          calls.map(call => call.path),
+          [CONFIGURATION_PATH],
+          `${label}: ${search}`
+        )
+      })
+    }
+  }
+  // A retryable failure keeps the attempt and its cookie for a reload, malformed or not.
+  await withEdge({ configuration: EDGE_RATE_LIMITED }, async calls => {
+    await assertConfigurationJson(
+      await GET(callbackRequest(MALFORMED_WITH_STATE[0], [desktopCookie, returnCookie])),
+      new OidcProfileFlowError(429, 'oidc_unavailable', true),
+      'a rate-limited configuration'
+    )
+    assert.deepEqual(
+      calls.map(call => call.path),
+      [CONFIGURATION_PATH]
+    )
+  })
 })

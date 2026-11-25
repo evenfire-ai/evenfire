@@ -548,6 +548,16 @@ export function validateAuthorizationUrl(rawUrl: unknown, callback: string): URL
   }
 }
 
+/**
+ * The callback's state when its URL carries exactly one well-formed `state`, whatever its other
+ * parameters; otherwise undefined. A callback `parseCallbackParameters` refuses as invalid can
+ * still name its attempt this way.
+ */
+export function singleCallbackState(request: Request): string | undefined {
+  const stateValues = new URL(request.url).searchParams.getAll('state')
+  return stateValues.length === 1 && validState(stateValues[0]) ? stateValues[0] : undefined
+}
+
 export function parseCallbackParameters(
   request: Request
 ):
@@ -557,13 +567,12 @@ export function parseCallbackParameters(
   | Readonly<{ kind: 'provider-error'; state: string }>
   | Readonly<{ kind: 'invalid' }> {
   const params = new URL(request.url).searchParams
-  const stateValues = params.getAll('state')
+  const state = singleCallbackState(request)
   const codes = params.getAll('code')
   const errors = params.getAll('error')
   const issuers = params.getAll('iss')
   if (
-    stateValues.length !== 1 ||
-    !validState(stateValues[0]) ||
+    state === undefined ||
     codes.length > 1 ||
     errors.length > 1 ||
     issuers.length > 1 ||
@@ -571,7 +580,6 @@ export function parseCallbackParameters(
   ) {
     return { kind: 'invalid' }
   }
-  const state = stateValues[0]
   if (codes.length === 1) {
     const issuer = issuers[0]
     const code = codes[0]
