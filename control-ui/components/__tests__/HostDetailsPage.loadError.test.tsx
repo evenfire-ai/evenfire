@@ -168,7 +168,7 @@ describe('a failed /detail read on the Approvals tab (Ruling 44(c))', () => {
     page.unmount()
   })
 
-  it('keeps the page’s banner on the Overview tab, with the header’s own error beside it', async () => {
+  it('keeps the page’s banner as the one display on the Overview tab (M6, ruling 59b)', async () => {
     const fake = createFake()
     failRead(fake, 1)
     const page = renderHostPage({ fake, name: 'foo' })
@@ -180,7 +180,8 @@ describe('a failed /detail read on the Approvals tab (Ruling 44(c))', () => {
       '/detail answers'
     ).toEqual([500])
     expect(errorBanners().map(banner => banner.textContent)).toEqual(['500 Internal Server Error'])
-    expect(screen.getByText(HEADER_ERROR), 'the header’s error').toBeInTheDocument()
+    expect(screen.queryByText(HEADER_ERROR), 'the header’s error').toBeNull()
+    expect(screen.getByText('Agent: foo'), 'the title falls back to the route name').toBeVisible()
     expect(headerSkeleton(), 'the title skeleton').toBeNull()
     page.unmount()
   })

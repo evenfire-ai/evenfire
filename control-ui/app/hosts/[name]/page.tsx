@@ -1422,18 +1422,20 @@ export default function HostDetailsPage() {
     }
   }
 
+  // The page's read failure shows in the header only where the page banner gives
+  // way to the tab's own banner (Approvals), so every failure has one display.
+  const loadErrorInHeader = activeTab === 'approvals' && loadError !== '' && error === loadError
+
   return (
     <DetailPageShell<HostTab>
       activeTab={activeTab}
       backLabel="Back to agents"
-      error={
-        editingModel || (activeTab === 'approvals' && loadError && error === loadError) ? '' : error
-      }
+      error={editingModel || loadErrorInHeader ? '' : error}
       icon={<IconRobot />}
       onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
       subtitle={
-        loadError ? (
+        loadErrorInHeader ? (
           <span role="alert" className="cu-agent-detail-load-error">
             {`${HOST_LOAD_ERROR_PREFIX} ${loadError}`}
           </span>
