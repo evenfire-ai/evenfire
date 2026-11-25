@@ -1,5 +1,5 @@
 {
-  "_source": "control-api/test/routes.hostPut.fakeContract.test.ts: versioned PUT /api/v1/admin/hosts/foo whose replace the apiserver refuses with an RBAC Forbidden Status (deploy/base/cluster-wide/clusterrolebindings.yaml names control-api's service account), forwarded by clerumErrorHandler's 4xx branch (NODE_ENV=production)",
+  "_source": "control-api/test/routes.hostPut.fakeContract.test.ts: versioned PUT /api/v1/admin/hosts/foo whose replace the harness's in-memory apiserver refuses with a modelled RBAC Forbidden Status (control-api's service account from deploy/base/cluster-wide/clusterrolebindings.yaml), forwarded by clerumErrorHandler's 4xx branch (NODE_ENV=production). The status and the { error, correlationId } envelope are control-api's; the message text is modelled, not captured from a cluster",
   "status": 403,
   "body": {
     "error": "hosts.clerum.io \"foo\" is forbidden: User \"system:serviceaccount:control-plane:control-api\" cannot update resource \"hosts\" in API group \"clerum.io\" in the namespace \"mcp-host\"",
