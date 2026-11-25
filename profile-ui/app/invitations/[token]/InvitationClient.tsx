@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { Button } from '@components/Button'
 import { PROFILE_ROUTES } from '@constants/routes'
 import {
   AuthExpiredError,
@@ -16,6 +17,7 @@ import {
   acceptInvitation,
   clearUnconfirmedLogout,
   getEvenfireDownloadUrl,
+  getOidcSignInMethod,
   setupAcceptedInvitationPasswordWithToken,
   setupInvitationPasswordWithToken,
 } from '@lib/api'
@@ -26,11 +28,26 @@ import {
   formatRemaining,
 } from '@lib/invitations'
 import { formatTeamRole } from '@lib/teamRoles'
-import type { InvitationPreview } from '@/app/types/api'
+import type { InvitationPreview, OidcSignInMethod } from '@/app/types/api'
 import { InvitationActionPanel } from './InvitationActionPanel'
-import type { InvitationClientProps } from './types'
+import type { InvitationClientProps, InvitationPanelMode } from './types'
 
 type PasswordPhase = 'editing' | 'submitting' | 'updated' | 'outcome_unknown' | 'terminal'
+
+/**
+ * The panels below which the page offers "Continue with <label>" (plan decision 4). The password
+ * panel does not: its invitation is already accepted, or it is a password reset.
+ */
+const PROVIDER_SIGN_IN_MODES: ReadonlySet<InvitationPanelMode> = new Set([
+  'link-error',
+  'accept',
+  'expired',
+  'used',
+])
+
+function offersProviderSignIn(mode: InvitationPanelMode, isPasswordReset: boolean): boolean {
+  return !isPasswordReset && PROVIDER_SIGN_IN_MODES.has(mode)
+}
 
 function statusForInvitation(invitation: InvitationPreview): string {
   if (invitation.purpose === 'password_reset') {
@@ -99,6 +116,7 @@ export function InvitationClient({
   const [confirmPassword, setConfirmPassword] = useState('')
   const [submitting, setSubmitting] = useState<'accept' | 'password' | null>(null)
   const [passwordPhase, setPasswordPhase] = useState<PasswordPhase>('editing')
+  const [oidcMethod, setOidcMethod] = useState<OidcSignInMethod | null>(null)
   const actionInFlightRef = useRef(false)
 
   useEffect(() => {
@@ -175,6 +193,37 @@ export function InvitationClient({
       : invitationUsed
         ? 'This invitation has already been used.'
         : status || (error ? 'We could not open this invitation.' : 'Invitation loaded.')
+  const panelMode: InvitationPanelMode = !invitation
+    ? 'link-error'
+    : passwordUpdated
+      ? 'password-updated'
+      : recoveryOutcomeUnknown
+        ? 'outcome-unknown'
+        : passwordTerminal
+          ? 'terminal'
+          : invitationUsed
+            ? 'used'
+            : invitationExpired
+              ? 'expired'
+              : showPasswordSetup
+                ? 'password-setup'
+                : 'accept'
+  const providerSignInOffered = offersProviderSignIn(panelMode, isPasswordReset)
+  // Kept from the first render: only a page that opens on one of those panels asks for the
+  // configuration, so a password reset or the password panel makes no request.
+  const [providerSignInAtOpen] = useState(providerSignInOffered)
+
+  useEffect(() => {
+    if (!providerSignInAtOpen) return
+    let cancelled = false
+    void getOidcSignInMethod().then(method => {
+      // No method (member sign-in off, or the configuration unreachable) leaves the page as it is.
+      if (!cancelled && method) setOidcMethod(method)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [providerSignInAtOpen])
 
   function friendlyInvitationError(value: unknown, isRecovery = false): string {
     if (!(value instanceof Error)) return 'Failed to update invitation.'
@@ -421,28 +470,28 @@ export function InvitationClient({
           </div>
         ) : null}
 
-        {!invitation ? (
+        {panelMode === 'link-error' ? (
           <InvitationActionPanel mode="link-error" loginHref={profileLoginHref} />
-        ) : passwordUpdated ? (
+        ) : panelMode === 'password-updated' ? (
           <InvitationActionPanel
             mode="password-updated"
             loginHref={profileLoginHref}
             downloadUrl={downloadUrl}
             isPasswordReset={isPasswordReset}
           />
-        ) : recoveryOutcomeUnknown ? (
+        ) : panelMode === 'outcome-unknown' ? (
           <InvitationActionPanel
             mode="outcome-unknown"
             loginHref={profileLoginHref}
             forgotPasswordHref={forgotPasswordHref}
           />
-        ) : passwordTerminal ? (
+        ) : panelMode === 'terminal' ? (
           <InvitationActionPanel
             mode="terminal"
             loginHref={profileLoginHref}
             forgotPasswordHref={forgotPasswordHref}
           />
-        ) : invitationUsed ? (
+        ) : panelMode === 'used' ? (
           <InvitationActionPanel
             mode="used"
             loginHref={profileLoginHref}
@@ -450,9 +499,9 @@ export function InvitationClient({
             isPasswordReset={isPasswordReset}
             forgotPasswordHref={forgotPasswordHref}
           />
-        ) : invitationExpired ? (
+        ) : panelMode === 'expired' ? (
           <InvitationActionPanel mode="expired" loginHref={profileLoginHref} />
-        ) : showPasswordSetup ? (
+        ) : panelMode === 'password-setup' ? (
           <InvitationActionPanel
             mode="password-setup"
             isPasswordReset={isPasswordReset}
@@ -473,6 +522,15 @@ export function InvitationClient({
             onAcceptAction={handleAcceptAction}
           />
         )}
+
+        {oidcMethod && providerSignInOffered ? (
+          <form method="post" action={PROFILE_ROUTES.oidcStart}>
+            <input type="hidden" name="invitationToken" value={invitationToken} />
+            <Button type="submit" variant="secondary" className="cu-btn--block">
+              Continue with {oidcMethod.label}
+            </Button>
+          </form>
+        ) : null}
       </section>
     </main>
   )

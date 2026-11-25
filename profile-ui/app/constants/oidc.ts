@@ -27,6 +27,14 @@ export function isOidcReturnTo(value: unknown): value is OidcReturnTo {
  */
 export const OIDC_START_FORM_MAX_BYTES = 8192
 
+/**
+ * An invitation token `/api/oidc/start` forwards. Tokens are made by the registration hub, in
+ * another repository, so only printable ASCII and a length are checked. External REST
+ * (`INVITATION_TOKEN_RE`) and Control API (`OIDC_INVITATION_TOKEN_RE`) apply the same rule; Profile
+ * UI keeps its own copy because it imports neither.
+ */
+export const OIDC_INVITATION_TOKEN_RE = /^[\x21-\x7e]{1,2048}$/
+
 export const OIDC_GENERIC_RESULT_MESSAGE = "Sign-in couldn't be completed. Start again."
 
 export const OIDC_REFUSAL_MESSAGES: Readonly<Record<OidcRefusalReason, string>> = {

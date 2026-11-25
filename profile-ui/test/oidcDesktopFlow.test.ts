@@ -850,6 +850,122 @@ test('starts a provider round trip even with a Profile session cookie present', 
   )
 })
 
+// /api/oidc/start from the invitation page. The edge answers an attempt that carries a token with
+// a plain attempt (`attempts plain`): nothing about the invitation is echoed.
+const plainAttemptUrl = (edgeRecord(EDGE_ATTEMPT_PLAIN).body as { authorizationUrl: string })
+  .authorizationUrl
+/** Printable ASCII, with characters a form percent-encodes, so a re-encoded token shows. */
+const INVITATION_TOKEN = `fixture-invitation-token+/=%20&?#~'"\\`
+
+/** The invitation page's form posted to /api/oidc/start, with the upstream calls it made. */
+async function startFromInvitationForm(
+  fields: ReadonlyArray<readonly [string, string]>
+): Promise<Readonly<{ response: Response; calls: readonly UpstreamCall[] }>> {
+  let result: Readonly<{ response: Response; calls: readonly UpstreamCall[] }> | undefined
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, attempts: EDGE_ATTEMPT_PLAIN },
+    async calls => {
+      result = { response: await plainStart(formPost(PROFILE_ROUTES.oidcStart, fields)), calls }
+    }
+  )
+  assert.ok(result)
+  return result
+}
+
+/**
+ * A 303 to the provider that set only the binding cookie, after one configuration read and one
+ * attempt.
+ */
+function assertStartedWithBindingOnly(
+  response: Response,
+  calls: readonly UpstreamCall[],
+  label: string
+): void {
+  const cookies = response.headers.getSetCookie()
+  assert.equal(response.status, 303, label)
+  assert.equal(response.headers.get('location'), plainAttemptUrl, label)
+  assert.deepEqual(
+    calls.map(call => call.path),
+    [CONFIGURATION_PATH, ATTEMPTS_PATH],
+    label
+  )
+  assert.equal(cookies.length, 1, label)
+  const cookie = attemptCookie(cookies[0])
+  assert.equal(cookie.name, browserCookieName(edgeState), label)
+  assert.equal(cookie.value, attemptBody(calls).browserBinding, label)
+}
+
+test('forwards a well-formed invitationToken with the binding', async () => {
+  const { response, calls } = await startFromInvitationForm([['invitationToken', INVITATION_TOKEN]])
+  const attempt = attemptBody(calls)
+
+  assertStartedWithBindingOnly(response, calls, 'a well-formed token')
+  assert.deepEqual(Object.keys(attempt), ['browserBinding', 'invitationToken'])
+  assert.equal(attempt.invitationToken, INVITATION_TOKEN)
+})
+
+test('forwards a 2048-character invitationToken exactly when its form is over 1 KiB', async () => {
+  // Every character after the prefix is one a form percent-encodes, so the token alone takes
+  // 6128 bytes: past PR 1's 1 KiB form cap, inside the 8 KiB one with returnTo beside it.
+  const token = `fixture-${'%&+=/?#!'.repeat(255)}`
+  const fields = [
+    ['invitationToken', token],
+    ['returnTo', 'desktop-setup'],
+  ] as const
+  const formBytes = Buffer.byteLength(
+    new URLSearchParams(fields.map(field => [...field])).toString()
+  )
+  assert.equal(token.length, 2048)
+  assert.ok(formBytes > 1024 && formBytes <= 8192, `form is ${formBytes} bytes`)
+
+  const { response, calls } = await startFromInvitationForm(fields)
+  const attempt = attemptBody(calls)
+  const cookies = response.headers.getSetCookie()
+
+  assert.equal(response.status, 303)
+  assert.equal(response.headers.get('location'), plainAttemptUrl)
+  assert.deepEqual(Object.keys(attempt), ['browserBinding', 'invitationToken'])
+  assert.equal(attempt.invitationToken, token)
+  assert.equal(cookies.length, 2)
+  assert.equal(attemptCookie(cookies[0]).value, attempt.browserBinding)
+  assert.deepEqual(attemptCookie(cookies[1]), {
+    name: returnToCookieName(edgeState),
+    value: 'desktop-setup',
+  })
+})
+
+test('drops an oversize or non-printable invitationToken and still starts', async () => {
+  const oversize = `fixture-${'t'.repeat(2041)}`
+  assert.equal(oversize.length, 2049)
+  for (const [label, fields] of [
+    ['2049 characters', [['invitationToken', oversize]]],
+    ['a space', [['invitationToken', 'fixture invitation token']]],
+    // What Next.js hands the page for a percent-encoded non-ASCII path segment.
+    ['a character outside ASCII', [['invitationToken', 'fixture-invitation-tokén']]],
+    ['a control character', [['invitationToken', 'fixture-invitation-token\t']]],
+    ['an empty value', [['invitationToken', '']]],
+    [
+      'two values',
+      [
+        ['invitationToken', INVITATION_TOKEN],
+        ['invitationToken', INVITATION_TOKEN],
+      ],
+    ],
+    // The form is not read at all, so even a well-formed token stays behind.
+    [
+      'a form over the 8 KiB cap',
+      [
+        ['invitationToken', INVITATION_TOKEN],
+        ['pad', 'x'.repeat(8192)],
+      ],
+    ],
+  ] as const) {
+    const { response, calls } = await startFromInvitationForm(fields)
+    assertStartedWithBindingOnly(response, calls, label)
+    assert.deepEqual(Object.keys(attemptBody(calls)), ['browserBinding'], label)
+  }
+})
+
 // /api/oidc/callback for a Desktop attempt. The provider's callback state names the binding
 // cookie; the cookie's value carries the Desktop marker, the binding and the state Evenfire
 // Desktop chose.
