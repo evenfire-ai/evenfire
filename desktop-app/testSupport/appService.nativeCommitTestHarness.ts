@@ -80,6 +80,7 @@ export async function createNativeCommitTestHarness(options: NativeCommitTestHar
       setName: vi.fn(),
       setPath: vi.fn(),
     },
+    shell: { openExternal: vi.fn().mockResolvedValue(undefined) },
   }))
 
   const [{ AppService }, runtimeConfig] = await Promise.all([

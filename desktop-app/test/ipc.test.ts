@@ -13,6 +13,7 @@ import type { HostStatusStreamEvent } from '../src/types.js'
 
 const testState = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
+  const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const downloadsDir = '/tmp/clerum-test'
   const ipcMainMock = {
     handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
@@ -20,33 +21,58 @@ const testState = vi.hoisted(() => {
     }),
     // The real ipcMain also carries event listeners (gfs:abort); registration
     // must not depend on them being exercised.
-    on: vi.fn(),
+    on: vi.fn((channel: string, listener: (...args: unknown[]) => unknown) => {
+      listeners.set(channel, listener)
+    }),
   }
-  return { handlers, ipcMainMock, downloadsDir }
+  return { handlers, listeners, ipcMainMock, downloadsDir }
 })
 
 vi.mock('electron', () => ({
   ipcMain: testState.ipcMainMock,
-  app: { getPath: () => testState.downloadsDir },
+  app: { getPath: () => testState.downloadsDir, isReady: () => true },
 }))
 
 function makeTrustedEvent(senderId = 77) {
   const destroyedCallbacks: Array<() => void> = []
+  const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
+  const frame = {
+    url: 'file:///index.html',
+    isDestroyed: vi.fn(() => false),
+  }
   const sender = {
     id: senderId,
     isDestroyed: vi.fn(() => false),
+    mainFrame: frame,
     send: vi.fn(),
-    once: vi.fn((eventName: string, callback: () => void) => {
-      if (eventName === 'destroyed') destroyedCallbacks.push(callback)
+    on: vi.fn((eventName: string, callback: (...args: unknown[]) => void) => {
+      const callbacks = listeners.get(eventName) ?? new Set()
+      callbacks.add(callback)
+      listeners.set(eventName, callbacks)
     }),
+    once: vi.fn((eventName: string, callback: () => void) => {
+      if (eventName === 'destroyed') {
+        destroyedCallbacks.push(callback)
+        const callbacks = listeners.get(eventName) ?? new Set()
+        callbacks.add(callback)
+        listeners.set(eventName, callbacks)
+      }
+    }),
+    removeListener: vi.fn((eventName: string, callback: (...args: unknown[]) => void) => {
+      listeners.get(eventName)?.delete(callback)
+    }),
+    emit: (eventName: string, ...args: unknown[]) => {
+      for (const callback of [...(listeners.get(eventName) ?? [])]) callback(...args)
+    },
   }
   return {
     event: {
-      senderFrame: { url: 'file:///index.html' },
+      senderFrame: frame,
       sender,
     },
     sender,
     destroy: () => destroyedCallbacks.forEach(callback => callback()),
+    emit: sender.emit,
   }
 }
 
@@ -103,6 +129,13 @@ describe('ipc host status stream handlers', () => {
     deleteRuntimeConfig: vi.fn(),
     googleLogin: vi.fn(),
     openProfileSettings: vi.fn(),
+    getProfileUiDispatchBinding: vi.fn(() => ({
+      sessionGeneration: 7,
+      profileId: 'profile-a',
+      profileIncarnation: 'incarnation-a',
+      restBaseUrl: 'https://api.example.test',
+    })),
+    isProfileUiDispatchBindingCurrent: vi.fn(() => true),
     logout: vi.fn(),
     listTeams: vi.fn(),
     listTeamMembers: vi.fn(),
@@ -163,6 +196,7 @@ describe('ipc host status stream handlers', () => {
 
   beforeEach(async () => {
     testState.handlers.clear()
+    testState.listeners.clear()
     vi.clearAllMocks()
     await fs.rm(testState.downloadsDir, { recursive: true, force: true })
     await fs.mkdir(testState.downloadsDir, { recursive: true })

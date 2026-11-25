@@ -8,8 +8,8 @@ service. You opt in with one environment variable; the platform enrolls itself.
 
 Set on the **control-api** container (in your overlay's ConfigMap):
 
-| Variable | Value |
-|---|---|
+| Variable                               | Value    |
+| -------------------------------------- | -------- |
 | `CONTROL_API_MEMBER_REGISTRATION_MODE` | `hosted` |
 
 Requirements:
@@ -89,7 +89,7 @@ invitation whose link points anywhere else. Member invitations link to your
 Profile UI; admin invitations, email confirmations, and admin password resets
 link to your Control UI — so when those are different hostnames, control-api
 holds one credential for each and signs every request with the credential
-matching that request's destination. This is also *why* both base URLs must
+matching that request's destination. This is also _why_ both base URLs must
 be real, publicly resolvable domains: the domain is what the credential is
 bound to, and it is where your invitees will be sent.
 
@@ -118,12 +118,12 @@ Hosted mode never takes control-api down. Every failure degrades to a clear
 error on the invitation endpoints while the rest of the platform keeps
 running:
 
-| Symptom | Cause | What to do |
-|---|---|---|
-| Invitations return `503 member_registration_unavailable` | The hub is unreachable, or enrollment hasn't succeeded yet | Check egress to `registration.evenfire.ai`. Nothing to restart — control-api retries on the next invitation. |
-| Invitations return `503 member_registration_misconfigured`; the boot log says "requires a real, publicly resolvable domain" | A UI base URL points at `localhost`, an IP literal, or a single-word hostname | Set the two UI base URLs to real domains. |
-| control-api refuses to start, naming `CONTROL_API_MEMBER_REGISTRATION_HMAC_KID` / `…_TENANT_ID` | Leftover remote-mode identity from a previous setup | Remove those two variables — hosted mode manages its own identity. |
-| Boot log warns `CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET is set but IGNORED` | The standard deploy injects this legacy value | Nothing — harmless by design. |
+| Symptom                                                                                                                     | Cause                                                                         | What to do                                                                                                   |
+| --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Invitations return `503 member_registration_unavailable`                                                                    | The hub is unreachable, or enrollment hasn't succeeded yet                    | Check egress to `registration.evenfire.ai`. Nothing to restart — control-api retries on the next invitation. |
+| Invitations return `503 member_registration_misconfigured`; the boot log says "requires a real, publicly resolvable domain" | A UI base URL points at `localhost`, an IP literal, or a single-word hostname | Set the two UI base URLs to real domains.                                                                    |
+| control-api refuses to start, naming `CONTROL_API_MEMBER_REGISTRATION_HMAC_KID` / `…_TENANT_ID`                             | Leftover remote-mode identity from a previous setup                           | Remove those two variables — hosted mode manages its own identity.                                           |
+| Boot log warns `CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET is set but IGNORED`                                             | The standard deploy injects this legacy value                                 | Nothing — harmless by design.                                                                                |
 
 ## The advanced path (remote mode — run your own service)
 
@@ -131,12 +131,12 @@ If you prefer to run your own `member-registration-service` instance (a
 separate repository), leave the mode unset (`remote`) and configure it exactly
 as before:
 
-| Variable | Value |
-|---|---|
+| Variable                                           | Value                                                                                               |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL` | your instance, e.g. `http://member-registration-service.registration.svc.cluster.local:8092/api/v1` |
-| `CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET` | the per-tenant HMAC secret your instance minted |
-| `CONTROL_API_MEMBER_REGISTRATION_HMAC_KID` | the matching key id |
-| `CONTROL_API_MEMBER_REGISTRATION_TENANT_ID` | the matching tenant id |
+| `CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET`      | the per-tenant HMAC secret your instance minted                                                     |
+| `CONTROL_API_MEMBER_REGISTRATION_HMAC_KID`         | the matching key id                                                                                 |
+| `CONTROL_API_MEMBER_REGISTRATION_TENANT_ID`        | the matching tenant id                                                                              |
 
 Email delivery (SMTP/provider) is configured in that service — see its
 repository's docs.

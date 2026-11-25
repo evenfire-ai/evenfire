@@ -839,9 +839,9 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   })
   ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
-    const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
-    await clipboard.writeText(result.url)
-    return result
+    return service.createGfsResourceDeepLink(sanitizeString(payload?.uri), url =>
+      Promise.resolve().then(() => clipboard.writeText(url))
+    )
   })
   ipcMain.handle(
     'gfs:download',
@@ -2554,9 +2554,9 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {
     assertTrustedSender(event)
     const teamId = sanitizeString(payload?.teamId)
-    const result = await service.createSandboxUiDeepLink(teamId || undefined)
-    await clipboard.writeText(result.url)
-    return result
+    return service.createSandboxUiDeepLink(teamId || undefined, url =>
+      Promise.resolve().then(() => clipboard.writeText(url))
+    )
   })
 
   ipcMain.handle('sandboxUi:setBounds', async (event, payload: { bounds: unknown }) => {

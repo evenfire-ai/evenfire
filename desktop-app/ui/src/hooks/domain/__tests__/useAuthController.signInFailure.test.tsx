@@ -132,6 +132,19 @@ describe('useAuthController desktop setup failures', () => {
     ).resolves.toEqual(['You must be invited to be part of a team.'])
   })
 
+  it('shows desktop setup success after starting browser authorization', async () => {
+    const { hook, setStatus } = await mountAuthController()
+    auth.startDesktopSetup.mockResolvedValueOnce(undefined)
+    act(() => hook.result.current.setEmail('user@example.com'))
+
+    await act(async () => hook.result.current.handleStartDesktopSetup())
+
+    expect(setStatus).toHaveBeenCalledWith(
+      'Check your browser to authorize desktop setup.',
+      'success'
+    )
+  })
+
   it('recognizes the bare code', async () => {
     await expect(startSetupRejectedWith('invitation_config_not_found')).resolves.toEqual([
       'You must be invited to be part of a team.',

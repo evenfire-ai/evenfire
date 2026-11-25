@@ -101,6 +101,7 @@ export type DesktopEnvironmentDiscovery = {
   appName: string
   externalRestApiBaseUrl: string
   rpcProxyBaseUrl: string
+  profileUiBaseUrl?: string
 }
 
 export type DesktopReleasePolicy = {
@@ -752,6 +753,7 @@ export type DesktopRuntimeConfig = {
   externalRestApiBaseUrl: string
   rpcProxyBaseUrl?: string
   appName?: string
+  profileUiBaseUrl?: string | null
 }
 
 export type DesktopRuntimeConfigOption = {

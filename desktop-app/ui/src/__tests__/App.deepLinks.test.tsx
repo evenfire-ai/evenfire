@@ -751,6 +751,7 @@ describe('App deep-link orchestration', () => {
   let mainNavigationGeneration = new GfsUserNavigationGeneration()
   const clearPendingGfsDeepLinks = vi.fn(async () => gfsQueue.clear())
   const acknowledgeGfsDeepLink = vi.fn(async (id: number) => gfsQueue.acknowledge(id))
+
   const listPendingGfsDeepLinks = vi.fn(async () => ({ links: gfsQueue.list() }))
   let main: SandboxUiMainFake
   const acceptedHeldAppIds: number[] = []

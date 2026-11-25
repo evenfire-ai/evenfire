@@ -375,6 +375,13 @@ describe('Desktop environment handoff', () => {
       rpcProxyBaseUrl: 'https://new-rpc.example.test',
       appName: 'Discovered environment',
     })
+    vi.spyOn(AuthClient.prototype, 'getDesktopEnvironmentForEndpoint').mockResolvedValue({
+      externalRestApiBaseUrl: linked.externalRestApiBaseUrl,
+      rpcProxyBaseUrl: 'https://new-rpc.example.test',
+      appName: 'Discovered environment',
+      profileUiBaseUrl: 'https://new-profile.example.test',
+      responseUrl: `${linked.externalRestApiBaseUrl}/api/v1/desktop/environment`,
+    })
     mocks.saveRuntimeConfig.mockImplementationOnce((config, generation) =>
       nativeAppService!.saveRuntimeConfig(config, generation)
     )
@@ -407,6 +414,14 @@ describe('Desktop environment handoff', () => {
 
   it('rejects a saved linked profile when another native profile becomes active before verification', async () => {
     const linked = { externalRestApiBaseUrl: 'https://new-api.example.test', appName: 'New' }
+    const { AuthClient } = await import('../../../../../src/authClient')
+    vi.spyOn(AuthClient.prototype, 'getDesktopEnvironmentForEndpoint').mockResolvedValue({
+      externalRestApiBaseUrl: linked.externalRestApiBaseUrl,
+      rpcProxyBaseUrl: 'https://new-rpc.example.test',
+      appName: linked.appName,
+      profileUiBaseUrl: 'https://new-profile.example.test',
+      responseUrl: `${linked.externalRestApiBaseUrl}/api/v1/desktop/environment`,
+    })
     const other = runtimeConfigModule!
       .getDesktopRuntimeConfigState()
       .options.find(
@@ -958,6 +973,8 @@ describe('Desktop environment handoff', () => {
         externalRestApiBaseUrl: targetEnvironment.externalRestApiBaseUrl,
         rpcProxyBaseUrl: 'https://rpc.untrusted-discovery.test',
         appName: 'Discovered tenant',
+        profileUiBaseUrl: 'https://profile.target.example.test',
+        responseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1/desktop/environment`,
       }),
     }
     serviceInternals.applyRuntimeEnvironmentChange = operation => operation()
@@ -1117,6 +1134,7 @@ describe('Desktop environment handoff', () => {
         externalRestApiBaseUrl: otherEnvironment.externalRestApiBaseUrl,
         rpcProxyBaseUrl: 'https://rpc.overwrite.test',
         appName: 'Overwritten tenant',
+        responseUrl: `${setupEnvironment.externalRestApiBaseUrl}/api/v1/desktop/environment`,
       }),
     }
     serviceInternals.applyRuntimeEnvironmentChange = operation => operation()
@@ -1150,6 +1168,7 @@ describe('Desktop environment handoff', () => {
         externalRestApiBaseUrl: otherEnvironment.externalRestApiBaseUrl,
         rpcProxyBaseUrl: 'https://rpc.overwrite.test',
         appName: 'Other tenant',
+        responseUrl: `${linkedEnvironment.externalRestApiBaseUrl}/api/v1/desktop/environment`,
       }),
     }
     serviceInternals.applyRuntimeEnvironmentChange = operation => operation()

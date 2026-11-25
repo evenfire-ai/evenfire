@@ -1,0 +1,3 @@
+varReference:
+  - path: data/CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
+    kind: ConfigMap

@@ -15,7 +15,7 @@ assert_packages() {
   shift
   local actual
   local expected
-  actual="$(CI_TEST_PRODUCER_INSTALL_DRY_RUN=1 bash "${INSTALLER}" "${service}")"
+  actual="$(CI_TEST_PRODUCER_INSTALL_DRY_RUN=1 bash "${INSTALLER}" "${service}" | sort)"
   expected="$(printf '%s\n' "$@" | sort)"
   [[ "${actual}" == "${expected}" ]] || {
     printf 'FAIL: %s producer dependencies\nexpected:\n%s\nactual:\n%s\n' \
@@ -33,13 +33,13 @@ grep -Fq \
   'bash scripts/ci/install-test-producer-dependencies.sh control-api' \
   "${WORKFLOW}" || fail 'real PostgreSQL CI does not install discovered producer dependencies'
 
-assert_packages rpc-proxy control-api
-assert_packages workflow-recipes control-api rpc-proxy
+assert_packages rpc-proxy control-api desktop-app
+assert_packages workflow-recipes control-api rpc-proxy desktop-app
 assert_packages external-rest-api control-api
 assert_packages mcp-host control-api rpc-proxy
-assert_packages control-api workflow-recipes
+assert_packages control-api desktop-app workflow-recipes
 assert_packages packages/action-context-contracts
 assert_packages control-ui
-assert_packages desktop-app
+assert_packages desktop-app external-rest-api
 
 echo 'PASS: CI materializes producer dependencies derived from producer-backed tests'

@@ -31,6 +31,8 @@ spec:
         - envFrom:
             - secretRef:
                 name: external-rest-api-secrets
+            - configMapRef:
+                name: desktop-profile-ui-config
           env:
             - name: EXTERNAL_REST_API_PORT
               value: '8091'

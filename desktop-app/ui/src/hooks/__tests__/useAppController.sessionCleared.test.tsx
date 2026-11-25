@@ -48,3 +48,86 @@ describe('useAppController session-cleared notice', () => {
     app.unmount()
   })
 })
+
+describe('useAppController retained environment behavior', () => {
+  it('keeps a committed environment selected when origin discovery rejects', async () => {
+    const stateA = {
+      configured: true,
+      isLocalhost: false,
+      selectorVisible: true,
+      activeOptionId: 'profile-a',
+      currentConfig: {
+        externalRestApiBaseUrl: 'https://api.a.example.test',
+        rpcProxyBaseUrl: 'https://rpc.a.example.test',
+        appName: 'Environment A',
+      },
+      envKey: 'environment-a',
+      storagePath: '/harness/runtime-configs',
+      options: [
+        {
+          id: 'profile-a',
+          label: 'Environment A',
+          source: 'file' as const,
+          configPath: '/harness/runtime-configs/environment-a.json',
+          externalRestApiBaseUrl: 'https://api.a.example.test',
+          rpcProxyBaseUrl: 'https://rpc.a.example.test',
+          appName: 'Environment A',
+          profileIncarnation: 'incarnation-a',
+        },
+      ],
+    }
+    const stateB = {
+      ...stateA,
+      activeOptionId: 'profile-b',
+      currentConfig: {
+        externalRestApiBaseUrl: 'https://api.b.example.test',
+        rpcProxyBaseUrl: 'https://rpc.b.example.test',
+        appName: 'Environment B',
+      },
+      envKey: 'environment-b',
+      options: [
+        ...stateA.options,
+        {
+          id: 'profile-b',
+          label: 'Environment B',
+          source: 'file' as const,
+          configPath: '/harness/runtime-configs/environment-b.json',
+          externalRestApiBaseUrl: 'https://api.b.example.test',
+          rpcProxyBaseUrl: 'https://rpc.b.example.test',
+          appName: 'Environment B',
+          profileIncarnation: 'incarnation-b',
+        },
+      ],
+    }
+    const { clerum, handle } = installAppControllerClerum({
+      startAuthenticated: false,
+      runtimeConfigState: stateA,
+    })
+    const auth = (clerum as unknown as { auth: Record<string, ReturnType<typeof vi.fn>> }).auth
+    auth.saveRuntimeConfig.mockImplementation(async () => {
+      handle.setRuntimeConfigState(stateB)
+      throw new Error('Profile UI resolution is unavailable')
+    })
+
+    const app = renderAppController()
+    await waitFor(() =>
+      expect(app.result.current.runtimeConfigState?.activeOptionId).toBe('profile-a')
+    )
+    await act(async () =>
+      app.result.current.handleSaveRuntimeConfig({
+        externalRestApiBaseUrl: 'https://api.b.example.test',
+        rpcProxyBaseUrl: 'https://rpc.b.example.test',
+        appName: 'Environment B',
+      })
+    )
+
+    await waitFor(() =>
+      expect(app.result.current.runtimeConfigState?.activeOptionId).toBe('profile-b')
+    )
+    expect(app.result.current.runtimeConfigState?.currentConfig).toMatchObject({
+      externalRestApiBaseUrl: 'https://api.b.example.test',
+      rpcProxyBaseUrl: 'https://rpc.b.example.test',
+    })
+    app.unmount()
+  })
+})

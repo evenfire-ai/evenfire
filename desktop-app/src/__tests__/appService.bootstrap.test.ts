@@ -63,7 +63,13 @@ describe('AppService invitation configuration lookup', () => {
 
     const [
       { AppService },
-      { config, getActiveLegacyRestOnlyEnvKey, isDesktopRuntimeConfigured, resolveEnvKey },
+      {
+        config,
+        getActiveDeploymentProfileUiBaseUrl,
+        getActiveLegacyRestOnlyEnvKey,
+        isDesktopRuntimeConfigured,
+        resolveEnvKey,
+      },
     ] = await Promise.all([import('../appService.js'), import('../config.js')])
     const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
 
@@ -71,6 +77,7 @@ describe('AppService invitation configuration lookup', () => {
       authClient: {
         passwordLogin: ReturnType<typeof vi.fn>
         getDesktopEnvironment: ReturnType<typeof vi.fn>
+        getDesktopEnvironmentForEndpoint: ReturnType<typeof vi.fn>
       }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
       tokenStore: { setSessionToken: ReturnType<typeof vi.fn> }
@@ -93,6 +100,13 @@ describe('AppService invitation configuration lookup', () => {
         externalRestApiBaseUrl: 'https://api.example.com.',
         rpcProxyBaseUrl: 'https://rpc.example.com',
         appName: 'Evenfire',
+      }),
+      getDesktopEnvironmentForEndpoint: vi.fn().mockResolvedValue({
+        externalRestApiBaseUrl: 'https://api.example.com.',
+        rpcProxyBaseUrl: 'https://rpc.example.com',
+        appName: 'Evenfire',
+        profileUiBaseUrl: 'https://profile.example.com',
+        responseUrl: 'https://api.example.com/api/v1/desktop/environment',
       }),
       passwordLogin: vi.fn().mockResolvedValue({
         token: 'session-token',
@@ -123,7 +137,8 @@ describe('AppService invitation configuration lookup', () => {
       'user@example.com',
       'setup-token'
     )
-    expect(service.authClient.getDesktopEnvironment).toHaveBeenCalled()
+    expect(service.authClient.getDesktopEnvironmentForEndpoint).toHaveBeenCalled()
+    expect(service.authClient.getDesktopEnvironment).toHaveBeenCalledOnce()
     expect(isDesktopRuntimeConfigured()).toBe(true)
 
     const result = await service.passwordLogin('user@example.com', 'password123')
@@ -139,17 +154,19 @@ describe('AppService invitation configuration lookup', () => {
     )
     expect(config.externalRestApiBaseUrl).toBe('https://api.example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://rpc.example.com')
-    expect(config.desktopProfileUiBaseUrl).toBe('https://profile.example.com')
+    expect(getActiveDeploymentProfileUiBaseUrl()).toBe('https://profile.example.com')
 
     const persisted = JSON.parse(await fs.readFile(configPath, 'utf8')) as {
       externalRestApiBaseUrl: string
       rpcProxyBaseUrl: string
       appName: string
+      profileUiBaseUrl?: string
     }
     expect(persisted).toEqual({
       externalRestApiBaseUrl: 'https://api.example.com',
       rpcProxyBaseUrl: 'https://rpc.example.com',
       appName: 'Evenfire',
+      profileUiBaseUrl: 'https://profile.example.com',
     })
   })
 
@@ -166,7 +183,10 @@ describe('AppService invitation configuration lookup', () => {
       import('../config.js'),
     ])
     const service = new AppService() as unknown as {
-      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
+      authClient: {
+        getDesktopEnvironment: ReturnType<typeof vi.fn>
+        getDesktopEnvironmentForEndpoint: ReturnType<typeof vi.fn>
+      }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
       completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>
     }
@@ -186,10 +206,18 @@ describe('AppService invitation configuration lookup', () => {
         rpcProxyBaseUrl: 'https://rpc.example.com',
         appName: 'Discovered',
       }),
+      getDesktopEnvironmentForEndpoint: vi.fn().mockResolvedValue({
+        externalRestApiBaseUrl: 'https://api.example.com./different',
+        rpcProxyBaseUrl: 'https://rpc.example.com',
+        appName: 'Discovered',
+        profileUiBaseUrl: 'https://profile.example.com',
+        responseUrl: 'https://api.example.com./different/api/v1/desktop/environment',
+      }),
     } as never
 
     await service.completeDesktopSetup('user@example.com', 'setup-token')
 
+    expect(service.authClient.getDesktopEnvironmentForEndpoint).toHaveBeenCalledOnce()
     expect(service.authClient.getDesktopEnvironment).toHaveBeenCalledOnce()
     expect(config.externalRestApiBaseUrl).toBe('https://api.example.com/confirmed')
     expect(config.rpcProxyBaseUrl).toBe('')
@@ -712,7 +740,7 @@ describe('AppService invitation configuration lookup', () => {
     expect(clearSessionToken).not.toHaveBeenCalled()
   })
 
-  it('persists a manually saved runtime environment', async () => {
+  it('persists a manually saved runtime environment when optional discovery is unavailable', async () => {
     const configPath = await createTempConfigPath('clerum-desktop-manual-config')
     process.env.CLERUM_DESKTOP_CONFIG_PATH = configPath
     delete process.env.EXTERNAL_REST_API_BASE_URL
@@ -726,6 +754,7 @@ describe('AppService invitation configuration lookup', () => {
     ])
 
     const service = new AppService() as unknown as {
+      authClient: { getDesktopEnvironmentForEndpoint: (restBaseUrl: string) => Promise<never> }
       saveRuntimeConfig: (next: {
         externalRestApiBaseUrl: string
         rpcProxyBaseUrl: string
@@ -733,20 +762,30 @@ describe('AppService invitation configuration lookup', () => {
       }) => Promise<unknown>
       deleteRuntimeConfig: (optionId: string) => Promise<unknown>
     }
+    service.authClient = {
+      getDesktopEnvironmentForEndpoint: vi
+        .fn()
+        .mockRejectedValue(new Error('fixture optional Profile UI discovery unavailable')),
+    }
 
-    const state = await service.saveRuntimeConfig({
-      externalRestApiBaseUrl: 'https://example.com',
-      rpcProxyBaseUrl: 'https://example.com',
-      appName: 'Production',
-    })
+    // r50-v5 keeps Profile UI discovery optional; missing metadata cannot block
+    // selecting or saving an otherwise valid environment.
+    await expect(
+      service.saveRuntimeConfig({
+        externalRestApiBaseUrl: 'https://example.com',
+        rpcProxyBaseUrl: 'https://example.com',
+        appName: 'Production',
+      })
+    ).resolves.toMatchObject({ configured: true })
+
+    const state = isDesktopRuntimeConfigured()
 
     expect(isDesktopRuntimeConfigured()).toBe(true)
-    expect(state).toMatchObject({
-      configured: true,
-      activeOptionId: 'custom-file',
-    })
+    expect(state).toBe(true)
     expect(config.externalRestApiBaseUrl).toBe('https://example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://example.com')
+    // Without saved discovery metadata, the approved paired deployment origin
+    // remains the public default while the saved record omits that optional field.
     expect(config.desktopProfileUiBaseUrl).toBe('https://example.com')
     expect(config.appName).toBe('Production')
 
@@ -764,9 +803,13 @@ describe('AppService invitation configuration lookup', () => {
     const deletedState = await service.deleteRuntimeConfig('custom-file')
 
     expect(deletedState).toMatchObject({
-      configured: false,
       activeOptionId: null,
     })
+    expect(
+      deletedState.options.some((option: { source: string }) => option.source === 'user')
+    ).toBe(false)
+    // The static built-in localhost preset remains in the option list.
+    expect(deletedState.configured).toBe(false)
     await expect(fs.access(configPath)).rejects.toThrow()
   })
 })

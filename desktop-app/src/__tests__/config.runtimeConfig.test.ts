@@ -13,7 +13,52 @@ describe('desktop runtime config', () => {
   const originalRendererUrl = process.env.EVENFIRE_RENDERER_URL
   let tempUserDataDir: string | null = null
 
-  beforeEach(() => {
+  it('does not treat a hostname with a 127 prefix as an IPv4 loopback address', async () => {
+    const runtime = await import('../config.js')
+    expect(() =>
+      runtime.validateProfileUiOrigin('http://127.attacker.example', 'http://127.0.0.1:8091')
+    ).toThrow()
+  })
+
+  it('treats the absolute localhost DNS name as loopback for pairing checks', async () => {
+    const runtime = await import('../config.js')
+    expect(runtime.validateProfileUiOrigin('http://localhost.:3001', 'http://127.0.0.1:8091')).toBe(
+      'http://localhost.:3001'
+    )
+    expect(() =>
+      runtime.validateProfileUiOrigin('https://localhost.', 'https://api.remote.example.test')
+    ).toThrow()
+  })
+
+  it.each([
+    ['dot segments', 'http://localhost.:3001/..'],
+    ['encoded dot segments', 'http://localhost.:3001/%2e%2e'],
+    ['empty query delimiter', 'http://localhost.:3001/?'],
+    ['empty fragment delimiter', 'http://localhost.:3001/#'],
+    ['trailing backslash', 'http://localhost.:3001\\'],
+  ])('rejects raw Profile UI URL syntax with %s before URL normalization', async (_label, raw) => {
+    const runtime = await import('../config.js')
+    expect(() => runtime.validateProfileUiOrigin(raw, 'http://127.0.0.1:8091')).toThrow()
+  })
+
+  it.each([
+    'https://192.0.2.3',
+    'https://198.51.100.2',
+    'https://203.0.113.3',
+    'https://[::ffff:192.0.2.3]',
+    'https://[fec0::1]',
+    'https://[ff02::1]',
+    'https://[ff05::1]',
+  ])('accepts a valid HTTPS Profile UI address %s', async origin => {
+    const runtime = await import('../config.js')
+    expect(runtime.validateProfileUiOrigin(origin, 'https://api.example.test')).toBe(
+      new URL(origin).origin
+    )
+  })
+
+  beforeEach(async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-runtime-config-'))
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(tempUserDataDir, 'runtime-config.json')
     vi.doUnmock('electron')
     vi.resetModules()
   })
@@ -60,7 +105,7 @@ describe('desktop runtime config', () => {
     vi.resetModules()
   })
 
-  it('resolves shareable Profile origins from the active deployment across transitions', async () => {
+  it('derives the Profile origin from the active REST deployment when the operator pair does not match', async () => {
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.prod.evenfire.test'
     process.env.PROFILE_UI_BASE_URL = 'https://profile.prod.evenfire.test'
     vi.doMock('electron', () => ({
@@ -73,6 +118,7 @@ describe('desktop runtime config', () => {
       },
     }))
     const runtime = await import('../config.js')
+    runtime.config.externalRestApiBaseUrl = 'https://customer-rest.example.test:9443/api?tenant=one'
 
     runtime.config.externalRestApiBaseUrl = 'https://api.dev.evenfire.test'
     expect(runtime.config.desktopProfileUiBaseUrl).toBe('https://profile.prod.evenfire.test')
@@ -122,9 +168,235 @@ describe('desktop runtime config', () => {
     )
   })
 
+  it('persists a discovered origin permanently with its exact legacy environment', async () => {
+    const rest = 'https://api.legacy-customer.example.test:9443/api?tenant=legacy'
+    const profile = 'https://profile.customer.example.test:9444'
+    process.env.EXTERNAL_REST_API_BASE_URL = rest
+    delete process.env.PROFILE_UI_BASE_URL
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: () => '/tmp/evenfire',
+        isPackaged: false,
+        isReady: () => false,
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: rest,
+      rpcProxyBaseUrl: 'https://rpc.customer.example.test',
+      appName: 'Legacy Customer',
+    })
+    const identity = runtime.captureProfileOriginBinding()
+    if (!identity.profileId || !identity.filePath)
+      throw new Error('saved environment binding is unavailable')
+    await runtime.persistProfileOriginForBinding(identity, profile)
+    const savedPath = runtime
+      .getDesktopRuntimeConfigState()
+      .options.find(option => option.id === identity.profileId)?.configPath
+    expect(savedPath).toBeTruthy()
+    expect(JSON.parse(await fsp.readFile(savedPath!, 'utf8'))).toMatchObject({
+      externalRestApiBaseUrl: rest,
+      profileUiBaseUrl: profile,
+    })
+
+    vi.resetModules()
+    const restarted = await import('../config.js')
+    expect(restarted.captureProfileOriginBinding()).toMatchObject({
+      profileId: identity.profileId,
+      restBaseUrl: rest,
+      profileUiBaseUrl: profile,
+    })
+  })
+
+  it('preserves the saved origin through a generic save for the same deployment binding', async () => {
+    const rest = 'https://api.customer.example.test:9443/api?tenant=save'
+    const profile = 'https://profile.customer.example.test:9444'
+    process.env.EXTERNAL_REST_API_BASE_URL = rest
+    delete process.env.PROFILE_UI_BASE_URL
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: () => '/tmp/evenfire',
+        isPackaged: false,
+        isReady: () => false,
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: rest,
+      rpcProxyBaseUrl: 'https://rpc.customer.example.test',
+      appName: 'Customer',
+    })
+    const identity = runtime.captureProfileOriginBinding()
+    if (!identity.profileId) throw new Error('saved environment binding is unavailable')
+    await runtime.persistProfileOriginForBinding(identity, profile)
+
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: rest,
+      rpcProxyBaseUrl: 'https://rpc.customer.example.test',
+      appName: 'Customer Updated',
+    })
+
+    expect(runtime.captureProfileOriginBinding()).toMatchObject({
+      profileId: identity.profileId,
+      restBaseUrl: rest,
+      profileUiBaseUrl: profile,
+    })
+  })
+
+  it('does not publish a Profile origin when writing the saved record fails', async () => {
+    const rest = 'https://api.customer.example.test:9443/api?tenant=failed-write'
+    const profile = 'https://profile.customer.example.test:9444'
+    process.env.EXTERNAL_REST_API_BASE_URL = rest
+    delete process.env.PROFILE_UI_BASE_URL
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: () => '/tmp/evenfire',
+        isPackaged: false,
+        isReady: () => false,
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: rest,
+      rpcProxyBaseUrl: '',
+      appName: 'Customer',
+    })
+    const identity = runtime.captureProfileOriginBinding()
+    if (!identity.profileId) throw new Error('saved environment binding is unavailable')
+    const option = runtime
+      .getDesktopRuntimeConfigState()
+      .options.find(candidate => candidate.id === identity.profileId)
+    if (!option?.configPath) throw new Error('saved environment file is unavailable')
+
+    const write = fsp.writeFile.bind(fsp)
+    const failure = vi.spyOn(fsp, 'writeFile').mockImplementation((...args: any[]) => {
+      if (String(args[0]) === option.configPath) throw new Error('fixture profile write denied')
+      return write(...(args as Parameters<typeof fsp.writeFile>))
+    })
+    try {
+      await expect(runtime.persistProfileOriginForBinding(identity, profile)).rejects.toThrow(
+        'fixture profile write denied'
+      )
+    } finally {
+      failure.mockRestore()
+    }
+
+    expect(runtime.captureProfileOriginBinding()).not.toHaveProperty('profileUiBaseUrl')
+    expect(JSON.parse(await fsp.readFile(option.configPath, 'utf8'))).not.toHaveProperty(
+      'profileUiBaseUrl'
+    )
+  })
+
+  it('removes the permanently saved Profile origin with its deleted environment', async () => {
+    const rest = 'https://api.delete-origin.example.test'
+    const profile = 'https://profile.delete-origin.example.test'
+    process.env.EXTERNAL_REST_API_BASE_URL = rest
+    delete process.env.PROFILE_UI_BASE_URL
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: () => '/tmp/evenfire',
+        isPackaged: false,
+        isReady: () => false,
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: rest,
+      rpcProxyBaseUrl: '',
+      appName: 'Delete origin',
+    })
+    const identity = runtime.captureProfileOriginBinding()
+    if (!identity.profileId) throw new Error('saved environment binding is unavailable')
+    const option = runtime
+      .getDesktopRuntimeConfigState()
+      .options.find(candidate => candidate.id === identity.profileId)
+    if (!option?.configPath) throw new Error('saved environment file is unavailable')
+    await runtime.persistProfileOriginForBinding(identity, profile)
+    expect(JSON.parse(await fsp.readFile(option.configPath, 'utf8'))).toMatchObject({
+      profileUiBaseUrl: profile,
+    })
+
+    await runtime.deleteDesktopRuntimeConfigOption(identity.profileId)
+
+    expect(runtime.getDesktopRuntimeConfigState().options).not.toContainEqual(
+      expect.objectContaining({ id: identity.profileId })
+    )
+    await expect(fsp.access(option.configPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('keeps saved loopback environments persistent while Localhost stays a static preset', async () => {
+    const rest = 'http://127.0.0.1:27191'
+    const rpc = 'http://127.0.0.1:27194'
+    const oldProfile = 'http://127.0.0.1:27101'
+    const newProfile = 'http://127.0.0.1:27201'
+    process.env.EXTERNAL_REST_API_BASE_URL = rest
+    process.env.RPC_PROXY_BASE_URL = rpc
+    delete process.env.PROFILE_UI_BASE_URL
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: () => '/tmp/evenfire',
+        isPackaged: false,
+        isReady: () => false,
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+    const initialState = runtime.getDesktopRuntimeConfigState()
+    expect(initialState.options).toContainEqual(
+      expect.objectContaining({ id: '__localhost__', source: 'localhost', configPath: null })
+    )
+    await runtime.selectDesktopRuntimeConfigOption('__localhost__')
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('http://127.0.0.1:3001')
+
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: rest,
+      rpcProxyBaseUrl: rpc,
+      appName: 'User loopback',
+    })
+    let identity = runtime.captureProfileOriginBinding()
+    if (!identity.profileId) throw new Error('saved user profile binding is unavailable')
+    await runtime.persistProfileOriginForBinding(identity, oldProfile)
+    let option = runtime
+      .getDesktopRuntimeConfigState()
+      .options.find(candidate => candidate.id === identity!.profileId)
+    if (!option?.configPath) throw new Error('saved user profile file is unavailable')
+    expect(JSON.parse(await fsp.readFile(option.configPath, 'utf8'))).toMatchObject({
+      profileUiBaseUrl: oldProfile,
+    })
+
+    await runtime.deleteDesktopRuntimeConfigOption(identity.profileId)
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: rest,
+      rpcProxyBaseUrl: rpc,
+      appName: 'User loopback',
+    })
+    identity = runtime.captureProfileOriginBinding()
+    if (!identity.profileId) throw new Error('re-added user profile binding is unavailable')
+    expect(identity).not.toHaveProperty('profileUiBaseUrl')
+    await runtime.persistProfileOriginForBinding(identity, newProfile)
+    option = runtime
+      .getDesktopRuntimeConfigState()
+      .options.find(candidate => candidate.id === identity!.profileId)
+    if (!option?.configPath) throw new Error('re-added user profile file is unavailable')
+    expect(JSON.parse(await fsp.readFile(option.configPath, 'utf8'))).toMatchObject({
+      profileUiBaseUrl: newProfile,
+    })
+  })
+
   it('uses the paired configured local Profile port for real App and GFS share links', async () => {
     process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:27191'
+    process.env.RPC_PROXY_BASE_URL = 'http://127.0.0.1:27194'
     process.env.PROFILE_UI_BASE_URL = 'https://127.0.0.1:27101'
+    process.env.EVENFIRE_RENDERER_URL = 'http://127.0.0.1:5173'
     vi.doMock('electron', () => ({
       app: {
         getPath: () => '/tmp/evenfire',
@@ -141,6 +413,9 @@ describe('desktop runtime config', () => {
       shell: { openExternal: vi.fn() },
     }))
     const runtime = await import('../config.js')
+    await runtime.selectDesktopRuntimeConfigOption('__localhost__')
+    runtime.config.externalRestApiBaseUrl = 'http://127.0.0.1:27191'
+    runtime.config.rpcProxyBaseUrl = 'http://127.0.0.1:27194'
 
     vi.doMock('../sandboxUiDriver.js', () => ({
       getActiveSandboxUi: vi.fn(),
@@ -206,7 +481,6 @@ describe('desktop runtime config', () => {
     expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('https://127.0.0.1:27101')
 
     for (const invalidOrigin of [
-      'https://unrelated.example.test',
       'http://user:secret@127.0.0.1:27101',
       'http://127.0.0.1:27101/profile',
       'http://127.0.0.1:27101?tenant=one',
@@ -217,6 +491,10 @@ describe('desktop runtime config', () => {
         'Cannot resolve a shareable Profile UI link for the active desktop deployment'
       )
     }
+    runtime.config.desktopProfileUiBaseUrl = 'https://unrelated.example.test'
+    expect(() => runtime.getActiveDeploymentProfileUiBaseUrl()).toThrow(
+      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+    )
 
     runtime.config.desktopProfileUiBaseUrl = 'http://127.0.0.1:27101'
     runtime.config.externalRestApiBaseUrl = 'http://localhost:27191'
@@ -310,8 +588,12 @@ describe('desktop runtime config', () => {
       },
     }))
 
-    const { config, getDesktopRuntimeConfigState, selectDesktopRuntimeConfigOption } =
-      await import('../config.js')
+    const {
+      config,
+      getActiveDeploymentProfileUiBaseUrl,
+      getDesktopRuntimeConfigState,
+      selectDesktopRuntimeConfigOption,
+    } = await import('../config.js')
 
     expect(config.externalRestApiBaseUrl).toBe('https://example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://example.com')
@@ -336,6 +618,10 @@ describe('desktop runtime config', () => {
     })
     expect(config.externalRestApiBaseUrl).toBe('http://127.0.0.1:8091')
     expect(config.rpcProxyBaseUrl).toBe('http://127.0.0.1:8094')
+    expect(getActiveDeploymentProfileUiBaseUrl()).toBe('http://127.0.0.1:3001')
+    expect(
+      getDesktopRuntimeConfigState().options.find(option => option.id === '__localhost__')
+    ).toMatchObject({ configPath: null, source: 'localhost' })
   })
 
   it('ignores CLERUM_DESKTOP_CONFIG_PATH in packaged builds', async () => {

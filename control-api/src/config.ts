@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
 import {
   type SigningMaterial,
@@ -35,6 +36,72 @@ function warnedBoundedIntegerEnv(name: string, fallback: number, min: number, ma
     `${name} is outside [${min}, ${max}] or not an integer; using the default`
   )
   return fallback
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+  return (
+    normalized === 'localhost' ||
+    normalized === '::1' ||
+    (isIP(normalized) === 4 && normalized.startsWith('127.'))
+  )
+}
+
+export function validateDesktopProfileUiBaseUrl(raw: string, externalRestBaseUrl: string): string {
+  const value = raw.trim()
+  const rawOrigin = /^(https?):\/\/([^/?#]+)([^?#]*)(?:\?[^#]*)?(?:#.*)?$/i.exec(value)
+  if (
+    !value ||
+    value !== raw ||
+    value.includes('\\') ||
+    /[\u0000-\u0020\u007f]/.test(value) ||
+    !rawOrigin ||
+    (rawOrigin[3] !== '' && rawOrigin[3] !== '/') ||
+    value.includes('?') ||
+    value.includes('#')
+  ) {
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
+  }
+
+  let profileUrl: URL
+  let restUrl: URL
+  try {
+    profileUrl = new URL(value)
+    restUrl = new URL(externalRestBaseUrl)
+  } catch {
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
+  }
+  if (
+    !['http:', 'https:'].includes(profileUrl.protocol) ||
+    profileUrl.username ||
+    profileUrl.password ||
+    !['http:', 'https:'].includes(restUrl.protocol)
+  ) {
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
+  }
+
+  const profileHost = profileUrl.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+  const restLoopback = isLoopbackHostname(restUrl.hostname)
+  const profileLoopback = isLoopbackHostname(profileHost)
+  if (profileLoopback && !restLoopback) {
+    throw new Error('Loopback Profile UI origin requires a loopback External REST origin')
+  }
+  if (!profileLoopback && profileUrl.protocol !== 'https:') {
+    throw new Error('Non-loopback Profile UI origins must use HTTPS')
+  }
+
+  return profileUrl.origin
+}
+
+export function resolveDesktopProfileUiBaseUrl(): string {
+  const configured = process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
+  return configured === undefined ? 'http://127.0.0.1:3001' : configured
 }
 
 type Config = {
@@ -901,7 +968,12 @@ export const config: Config = {
   desktopRpcProxyBaseUrl:
     process.env.CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094',
   desktopProfileUiBaseUrl:
-    process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL || 'http://127.0.0.1:3001',
+    process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL === undefined
+      ? resolveDesktopProfileUiBaseUrl()
+      : validateDesktopProfileUiBaseUrl(
+          resolveDesktopProfileUiBaseUrl(),
+          process.env.CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091'
+        ),
   desktopAppName: process.env.CONTROL_API_DESKTOP_APP_NAME || 'Evenfire',
   // Narrow, explicit elevation switch. Missing/false is intentionally OFF;
   // this must not inherit registry, password-seeding, or generic deploy mode.

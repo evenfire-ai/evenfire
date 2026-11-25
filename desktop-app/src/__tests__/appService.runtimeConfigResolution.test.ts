@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import path from 'node:path'
 import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
@@ -6,7 +7,18 @@ import {
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
 import { testLoginResult, testSessionMe } from '../../testSupport/authTestFixtures.js'
 
-afterEach(cleanupNativeCommitTestHarness)
+afterEach(async () => {
+  vi.restoreAllMocks()
+  await cleanupNativeCommitTestHarness()
+})
+
+function discoveryResponseUrl(restBaseUrl: string): string {
+  return new URL(`${restBaseUrl.replace(/\/+$/, '')}/api/v1/desktop/environment`).href
+}
+
+async function waitPastDiscoveryCooldown(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 1_010))
+}
 
 type DesktopEnvironmentDiscovery = {
   externalRestApiBaseUrl: string
@@ -15,6 +27,10 @@ type DesktopEnvironmentDiscovery = {
 }
 
 describe('AppService runtime config discovery ownership', () => {
+  // Current direct-file persistence and FIFO behavior are covered by the
+  // Profile-origin save, model, and native-owner tests; removed stage/journal
+  // transactions are intentionally absent from this runtime contract.
+
   it('uses RPC discovery completed before the signed-out login result is installed', async () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     await runtimeConfig.saveDesktopRuntimeConfig({
@@ -33,6 +49,7 @@ describe('AppService runtime config discovery ownership', () => {
     app.authClient = {
       getDesktopEnvironment: vi.fn().mockResolvedValue({
         externalRestApiBaseUrl: restA,
+        responseUrl: discoveryResponseUrl(restA),
         rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
         appName: 'Environment A',
       }),
@@ -66,6 +83,7 @@ describe('AppService runtime config discovery ownership', () => {
       .mockRejectedValueOnce(new Error('temporary discovery failure'))
       .mockResolvedValue({
         externalRestApiBaseUrl: restA,
+        responseUrl: discoveryResponseUrl(restA),
         rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
         appName: 'Environment A',
       })
@@ -105,6 +123,7 @@ describe('AppService runtime config discovery ownership', () => {
     app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
 
     await service.googleLogin('google-token-a')
+    await waitPastDiscoveryCooldown()
     const generation = service.getSessionGeneration()
     const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
     const activeBindingCount = vi.mocked(bindChatStoreForUser).mock.calls.length
@@ -209,10 +228,12 @@ describe('AppService runtime config discovery ownership', () => {
 
     const restore = service.getSessionState()
     await getMeStarted.promise
+    await waitPastDiscoveryCooldown()
     const discoveryRequest = app.resolveRuntimeConfigIfNeeded()
     await discoveryStarted.promise
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })
@@ -276,6 +297,7 @@ describe('AppService runtime config discovery ownership', () => {
         .mockRejectedValueOnce(new Error('initial discovery unavailable'))
         .mockResolvedValue({
           externalRestApiBaseUrl: restA,
+          responseUrl: discoveryResponseUrl(restA),
           rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
           appName: 'Environment A',
         }),
@@ -289,6 +311,7 @@ describe('AppService runtime config discovery ownership', () => {
 
     const restore = service.getSessionState()
     await restoreStarted.promise
+    await waitPastDiscoveryCooldown()
     await app.getDependenciesHealth()
     await service.googleLogin('google-token-a')
     restoredMe.resolve(testSessionMe())
@@ -337,6 +360,7 @@ describe('AppService runtime config discovery ownership', () => {
       .mockRejectedValueOnce(new Error('initial discovery unavailable'))
       .mockResolvedValue({
         externalRestApiBaseUrl: restA,
+        responseUrl: discoveryResponseUrl(restA),
         rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
         appName: 'A',
       })
@@ -386,6 +410,7 @@ describe('AppService runtime config discovery ownership', () => {
     app.authClient = {
       getDesktopEnvironment: vi.fn().mockResolvedValue({
         externalRestApiBaseUrl: restA,
+        responseUrl: discoveryResponseUrl(restA),
         rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
         appName: 'Environment A',
       }),
@@ -427,12 +452,75 @@ describe('AppService runtime config discovery ownership', () => {
 
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })
     await Promise.all([first, second])
 
     expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-discovered.example.test')
+  })
+
+  it('starts fresh RPC discovery after a custom profile is deleted and recreated', async () => {
+    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(
+      runtimeConfig.getDesktopRuntimeConfigState().storagePath,
+      'custom-runtime-config.json'
+    )
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
+    const oldBinding = runtimeConfig.captureProfileOriginBinding()
+    expect(oldBinding.profileId).toBe('custom-file')
+
+    const oldDiscovery = deferred<DesktopEnvironmentDiscovery>()
+    const newDiscovery = deferred<DesktopEnvironmentDiscovery>()
+    const getDesktopEnvironment = vi
+      .fn()
+      .mockReturnValueOnce(oldDiscovery.promise)
+      .mockReturnValueOnce(newDiscovery.promise)
+    const app = service as unknown as {
+      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
+      resolveRuntimeConfigIfNeeded: () => Promise<void>
+    }
+    app.authClient = { getDesktopEnvironment }
+
+    const firstResolution = app.resolveRuntimeConfigIfNeeded()
+    await vi.waitFor(() => expect(getDesktopEnvironment).toHaveBeenCalledOnce())
+    await runtimeConfig.deleteDesktopRuntimeConfigOption('custom-file')
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A recreated',
+    })
+    const newBinding = runtimeConfig.captureProfileOriginBinding()
+    expect(newBinding).toMatchObject({
+      profileId: oldBinding.profileId,
+      filePath: oldBinding.filePath,
+      restBaseUrl: oldBinding.restBaseUrl,
+      rpcBaseUrl: oldBinding.rpcBaseUrl,
+    })
+    expect(newBinding.witness).not.toBe(oldBinding.witness)
+
+    const secondResolution = app.resolveRuntimeConfigIfNeeded()
+    await vi.waitFor(() => expect(getDesktopEnvironment).toHaveBeenCalledTimes(2))
+    newDiscovery.resolve({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: 'https://rpc-new.example.test',
+      appName: 'Environment A recreated',
+    })
+    await secondResolution
+    oldDiscovery.resolve({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: 'https://rpc-old.example.test',
+      appName: 'Environment A',
+    })
+    await expect(firstResolution).rejects.toThrow('stale_runtime_environment')
+
+    expect(getDesktopEnvironment).toHaveBeenCalledTimes(2)
+    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-new.example.test')
   })
 
   it('clears a rejected discovery entry so the next call can retry', async () => {
@@ -448,6 +536,7 @@ describe('AppService runtime config discovery ownership', () => {
       .mockRejectedValueOnce(new Error('temporary discovery failure'))
       .mockResolvedValue({
         externalRestApiBaseUrl: restA,
+        responseUrl: discoveryResponseUrl(restA),
         rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
         appName: 'Environment A',
       })

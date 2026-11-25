@@ -177,6 +177,33 @@ Your overlay lists `deploy/base` as a resource and adds what base leaves out.
 Use [`deploy/overlays/minikube/kustomization.yaml`](../../deploy/overlays/minikube/kustomization.yaml)
 as the reference.
 
+Set the existing `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` key only in the
+`control-api-config` ConfigMap. The root Kustomization projects that final
+operator value into External REST for Desktop discovery, and supported renders
+require that source key. Control API retains its existing `envFrom` precedence:
+a later Secret can give Control API a different effective Profile UI origin.
+This accepted ConfigMap/Secret divergence is not synchronized. If you manually
+configure External REST outside the supported Kustomize projection, it may use
+its independently supplied value. The optional discovery field is omitted when
+its effective value is absent or invalid. If an overlay replaces
+`control-api-config`, keep `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`; Kustomize
+requires it to render the External REST ConfigMap.
+
+Applying a ConfigMap does not update environment variables in existing Pods.
+After changing the operator value, apply the complete overlay, then restart and
+wait for both backend Deployments:
+
+```sh
+KCTX=<your-context>
+OVERLAY=<path-to-your-overlay>
+kubectl --context "$KCTX" cluster-info
+kubectl --context "$KCTX" apply -k "$OVERLAY"
+kubectl --context "$KCTX" -n control-plane rollout restart deploy/control-api
+kubectl --context "$KCTX" -n profiles rollout restart deploy/external-rest-api
+kubectl --context "$KCTX" -n control-plane rollout status deploy/control-api
+kubectl --context "$KCTX" -n profiles rollout status deploy/external-rest-api
+```
+
 **Images.** Base refers to images by local `clerum/<name>` names. Add the
 [`deploy/components/ghcr-images`](../../deploy/components/ghcr-images/kustomization.yaml)
 component, which rewrites them to `ghcr.io/evenfire-ai/<name>` at the release

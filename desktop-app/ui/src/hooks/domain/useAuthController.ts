@@ -382,6 +382,7 @@ export function useAuthController({
       }
       return state
     } catch (error) {
+      await refreshRuntimeConfigState().catch(() => undefined)
       const message = error instanceof Error ? error.message : String(error)
       if (
         expectedSessionGeneration !== undefined &&
@@ -399,6 +400,14 @@ export function useAuthController({
       ) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus('The desktop session changed while processing this link. Open it again.', 'info')
+      } else if (expectedSessionGeneration !== undefined) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          message.includes('Profile UI resolution is unavailable')
+            ? 'Desktop environment setup could not verify the confirmed REST and RPC endpoints.'
+            : `Environment setup failed: ${message}`,
+          'error'
+        )
       } else {
         setStatus(`Environment setup failed: ${message}`, 'error')
       }
@@ -420,6 +429,7 @@ export function useAuthController({
       setRuntimeConfigState(state)
       setStatus('Environment deleted.', 'success', undefined, { global: false, toast: true })
     } catch (error) {
+      await refreshRuntimeConfigState().catch(() => undefined)
       setStatus(
         `Failed to delete environment: ${error instanceof Error ? error.message : String(error)}`,
         'error'
@@ -449,6 +459,7 @@ export function useAuthController({
         reportDesktopEnvironmentSelected(state, setStatus)
         return state
       } catch (error) {
+        await refreshRuntimeConfigState().catch(() => undefined)
         setStatus(
           `Failed to switch environment: ${error instanceof Error ? error.message : String(error)}`,
           'error'
@@ -458,7 +469,7 @@ export function useAuthController({
         setBusy(false)
       }
     },
-    [applySelectedRuntimeConfigState, setStatus]
+    [applySelectedRuntimeConfigState, refreshRuntimeConfigState, setStatus]
   )
 
   const handleSelectRuntimeConfigForHandoff = useCallback(
@@ -481,6 +492,7 @@ export function useAuthController({
         }
         return selection
       } catch (error) {
+        await refreshRuntimeConfigState().catch(() => undefined)
         const message = error instanceof Error ? error.message : String(error)
         if (message.includes('stale_session_generation')) {
           setStatus(
@@ -509,7 +521,7 @@ export function useAuthController({
         setBusy(false)
       }
     },
-    [applySelectedRuntimeConfigState, setStatus]
+    [applySelectedRuntimeConfigState, refreshRuntimeConfigState, setStatus]
   )
 
   useEffect(() => {
@@ -555,6 +567,7 @@ export function useAuthController({
       })
       return state
     } catch (error) {
+      await refreshRuntimeConfigState().catch(() => undefined)
       setStatus(
         `Failed to unselect environment: ${error instanceof Error ? error.message : String(error)}`,
         'error'

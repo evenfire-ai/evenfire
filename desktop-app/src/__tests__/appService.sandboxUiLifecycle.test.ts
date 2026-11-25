@@ -33,6 +33,7 @@ vi.mock(
 
 const authMocks = vi.hoisted(() => ({
   getDesktopEnvironment: vi.fn(),
+  getDesktopEnvironmentForEndpoint: vi.fn(),
   getMe: vi.fn(),
   googleLogin: vi.fn(),
   health: vi.fn(),
@@ -53,7 +54,17 @@ vi.mock('../config.js', async importOriginal => {
   return {
     validateRpcProxyBaseUrl,
     getActiveDeploymentProfileUiBaseUrl: () => 'https://profile.example.com',
-    getActiveRuntimeConfigOptionId: () => null,
+    getPairedProfileUiOverride: () => undefined,
+    getActiveRuntimeConfigOptionId: () => 'test-profile',
+    captureProfileOriginBinding: () => ({
+      profileId: 'test-profile',
+      filePath: '/tmp/runtime-config.json',
+      restBaseUrl: 'http://rest',
+      rpcBaseUrl: 'https://rpc.example',
+      witness: 'test-record-witness',
+      profileUiBaseUrl: 'https://profile.example.com',
+    }),
+    persistProfileOriginForBinding: vi.fn().mockResolvedValue(undefined),
     getActiveEnvKey: () => 'test-env',
     getActiveLegacyEnvKeys: () => [],
     hydrateDesktopRuntimeConfig: () => undefined,
@@ -106,6 +117,7 @@ vi.mock('../authClient.js', () => ({
     getMe = authMocks.getMe
     googleLogin = authMocks.googleLogin
     getDesktopEnvironment = authMocks.getDesktopEnvironment
+    getDesktopEnvironmentForEndpoint = authMocks.getDesktopEnvironmentForEndpoint
   },
 }))
 
@@ -219,6 +231,12 @@ beforeEach(async () => {
   authMocks.getMe.mockResolvedValue(null)
   authMocks.googleLogin.mockReset()
   authMocks.getDesktopEnvironment.mockReset()
+  authMocks.getDesktopEnvironment.mockResolvedValue({
+    externalRestApiBaseUrl: 'http://rest',
+    rpcProxyBaseUrl: 'https://rpc.example',
+    appName: 'Test environment',
+  })
+  authMocks.getDesktopEnvironmentForEndpoint.mockReset()
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   electronMocks.views.length = 0
   electronMocks.sessionObject.cookies.set.mockResolvedValue(undefined)
@@ -264,6 +282,7 @@ describe('AppService sandbox-ui effective RPC endpoint', () => {
         externalRestApiBaseUrl: 'http://rest',
         rpcProxyBaseUrl: discoveredRpcUrl,
         appName: 'Discovered environment',
+        responseUrl: 'http://rest/api/v1/desktop/environment',
       })
     authMocks.googleLogin.mockResolvedValue({
       token: 'fake-session-token',

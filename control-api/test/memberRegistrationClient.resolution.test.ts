@@ -102,6 +102,10 @@ describe('member-registration client per-host resolution', () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain(
       'https://registration.evenfire.ai/api/v1/invitations-flow/invitations'
     )
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toMatchObject({
+      desktopProfileUiBaseUrl: cfg.desktopProfileUiBaseUrl,
+    })
+    expect(enrollment.ensureEnrollment).toHaveBeenCalledWith('profile.acme.com')
   })
 
   it('admin SEND and VALIDATE sign with the control-ui host credential', async () => {

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const electron = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn(),
   invoke: vi.fn(),
+  sendSync: vi.fn(() => true),
   off: vi.fn(),
   on: vi.fn(),
 }))
@@ -11,6 +12,7 @@ vi.mock('electron', () => ({
   contextBridge: { exposeInMainWorld: electron.exposeInMainWorld },
   ipcRenderer: {
     invoke: electron.invoke,
+    sendSync: electron.sendSync,
     off: electron.off,
     on: electron.on,
   },
@@ -18,8 +20,10 @@ vi.mock('electron', () => ({
 }))
 
 afterEach(() => {
+  vi.useRealTimers()
   electron.exposeInMainWorld.mockReset()
   electron.invoke.mockReset()
+  electron.sendSync.mockReset().mockReturnValue(true)
   electron.off.mockReset()
   electron.on.mockReset()
   vi.resetModules()

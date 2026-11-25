@@ -321,6 +321,13 @@ Read the notes for every release you skip over, not only the target release.
    applied.
 4. **Follow any feature-specific runbook** below.
 
+For a release whose Desktop App uses Profile UI origin discovery, roll out the
+backend that serves `GET /api/v1/desktop/environment` first. Apply the canonical
+Profile UI origin through the backend's deployment configuration and wait for
+External REST to become Ready before distributing the Desktop update. During a
+rollback, return Desktop clients to the prior version before rolling back the
+backend that serves discovery.
+
 ### Feature-specific notes
 
 | Note                                                                               | Read it when                                                                                                                                                                                                                                                                                                                  |

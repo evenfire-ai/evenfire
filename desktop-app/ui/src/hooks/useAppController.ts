@@ -159,7 +159,11 @@ export function useAppController() {
       message: string,
       tone: Tone = 'info',
       payload?: unknown,
-      options: { global?: boolean; toast?: boolean; toastDurationMs?: number } = {}
+      options: {
+        global?: boolean
+        toast?: boolean
+        toastDurationMs?: number
+      } = {}
     ) => {
       const { global: updateGlobal = true, toast = true } = options
       if (updateGlobal) {

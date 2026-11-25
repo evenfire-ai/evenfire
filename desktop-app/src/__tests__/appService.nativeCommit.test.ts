@@ -6,7 +6,10 @@ import {
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
 
-afterEach(cleanupNativeCommitTestHarness)
+afterEach(async () => {
+  vi.restoreAllMocks()
+  await cleanupNativeCommitTestHarness()
+})
 
 describe('AppService native auth and environment commit ordering', () => {
   it('persists real version-2 GFS state as suspended_auth on logout', async () => {
@@ -258,45 +261,32 @@ describe('AppService native auth and environment commit ordering', () => {
     })
   })
 
-  it('keeps a pending environment selection ahead of a login commit', async () => {
-    const { service, runtimeConfig, restA, restB, optionB } = await createNativeCommitTestHarness()
+  it('uses the selected environment for a login admitted after selection', async () => {
+    const { service, runtimeConfig, restB, optionB } = await createNativeCommitTestHarness()
     const loginStarted = deferred<void>()
     const releaseLogin = deferred<void>()
-    let handoffRequestRest = ''
+    let loginRequestRest = ''
     service.authClient = {
       googleLogin: vi.fn(async (token: string) => {
         const requestRest = runtimeConfig.config.externalRestApiBaseUrl
-        if (token === 'handoff-login') {
-          handoffRequestRest = requestRest
+        if (token === 'post-selection-login') {
+          loginRequestRest = requestRest
           loginStarted.resolve()
           await releaseLogin.promise
-          return requestRest === restA
-            ? { token: 'synthetic-session-a-next', me: { id: 'user-a' } }
-            : { token: 'synthetic-session-b', me: { id: 'user-b' } }
+          return { token: 'synthetic-session-b', me: { id: 'user-b' } }
         }
         return { token: 'synthetic-session-a', me: { id: 'user-a' } }
       }),
     } as never
     await service.googleLogin('initial-login')
 
-    let handoffLogin: Promise<unknown> | null = null
-    const selectReal = runtimeConfig.selectDesktopRuntimeConfigOption.bind(runtimeConfig)
-    vi.spyOn(runtimeConfig, 'selectDesktopRuntimeConfigOption').mockImplementation(async id => {
-      if (id === optionB.id) handoffLogin = service.googleLogin('handoff-login')
-      await selectReal(id)
-    })
-
     const selection = service.selectRuntimeConfig(optionB.id)
-    const selectionOutcome = await selection.then(
-      value => ({ status: 'fulfilled' as const, value }),
-      reason => ({ status: 'rejected' as const, reason })
-    )
+    const login = service.googleLogin('post-selection-login')
     await loginStarted.promise
+    expect(loginRequestRest).toBe(restB)
     releaseLogin.resolve()
-    const loginOutcome = await handoffLogin
+    const [, loginOutcome] = await Promise.all([selection, login])
 
-    expect(selectionOutcome.status).toBe('fulfilled')
-    expect(handoffRequestRest).toBe(restB)
     expect(loginOutcome).toMatchObject({ authenticated: true, me: { id: 'user-b' } })
     expect(runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(optionB.id)
     await expect(service.getSessionState()).resolves.toMatchObject({

@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import { dirname, join } from 'node:path'
 import { parseVerifierMaterial } from '@clerum/jwt-key-policy'
 import { readDevVerifierMaterial, resolveDevKeyStoreDir } from '@clerum/jwt-key-policy/dev-store'
@@ -23,6 +24,7 @@ type Config = {
   profileSessionCookieTtlSeconds: number
   publicBaseUrl: string
   desktopRpcProxyBaseUrl: string
+  desktopProfileUiBaseUrl?: string
   desktopAppName: string
   desktopReleaseBaseUrl: string
   gfsUploadRequestPerMinute: number
@@ -45,6 +47,78 @@ function requiredOrDevDefault(name: string, devDefault: string): string {
   if (value) return value
   if (process.env.NODE_ENV !== 'production') return devDefault
   return required(name)
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+  return (
+    normalized === 'localhost' ||
+    normalized === '::1' ||
+    (isIP(normalized) === 4 && normalized.startsWith('127.'))
+  )
+}
+
+export function validateDesktopProfileUiBaseUrl(raw: string, publicRestBaseUrl: string): string {
+  const value = raw.trim()
+  const rawOrigin = /^(https?):\/\/([^/?#]+)([^?#]*)(?:\?[^#]*)?(?:#.*)?$/i.exec(value)
+  if (
+    !value ||
+    value !== raw ||
+    value.includes('\\') ||
+    /[\u0000-\u0020\u007f]/.test(value) ||
+    !rawOrigin ||
+    (rawOrigin[3] !== '' && rawOrigin[3] !== '/') ||
+    value.includes('?') ||
+    value.includes('#')
+  ) {
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
+  }
+
+  let profileUrl: URL
+  let restUrl: URL
+  try {
+    profileUrl = new URL(value)
+    restUrl = new URL(publicRestBaseUrl)
+  } catch {
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
+  }
+  if (
+    !['http:', 'https:'].includes(profileUrl.protocol) ||
+    profileUrl.username ||
+    profileUrl.password ||
+    !['http:', 'https:'].includes(restUrl.protocol)
+  ) {
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
+  }
+
+  const profileHost = profileUrl.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+  const restLoopback = isLoopbackHostname(restUrl.hostname)
+  const profileLoopback = isLoopbackHostname(profileHost)
+  if (profileLoopback && !restLoopback) {
+    throw new Error('Loopback Profile UI origin requires a loopback External REST origin')
+  }
+  if (!profileLoopback && profileUrl.protocol !== 'https:') {
+    throw new Error('Non-loopback Profile UI origins must use HTTPS')
+  }
+  return profileUrl.origin
+}
+
+function optionalDesktopProfileUiBaseUrl(
+  raw: string | undefined,
+  restBaseUrl: string
+): string | undefined {
+  if (!raw) return undefined
+  try {
+    return validateDesktopProfileUiBaseUrl(raw, restBaseUrl)
+  } catch {
+    return undefined
+  }
 }
 
 function positiveIntegerFromEnv(name: string, defaultValue: number): number {
@@ -201,6 +275,10 @@ export const config: Config = {
     'EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL',
     'http://127.0.0.1:8094'
   ).replace(/\/+$/, ''),
+  desktopProfileUiBaseUrl: optionalDesktopProfileUiBaseUrl(
+    process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL,
+    requiredOrDevDefault('EXTERNAL_REST_API_PUBLIC_BASE_URL', 'http://127.0.0.1:8091')
+  ),
   desktopAppName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME || 'Evenfire',
   desktopReleaseBaseUrl: (
     process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL ||

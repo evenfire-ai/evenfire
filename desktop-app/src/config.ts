@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
+import { isIP } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import {
@@ -47,6 +48,26 @@ type StoredRuntimeProfile = {
   createdAt: string
   updatedAt: string
   config: DesktopRuntimeConfig
+}
+
+const originRecordWitnesses = new WeakMap<StoredRuntimeProfile, object>()
+
+function originRecordWitness(profile: StoredRuntimeProfile): object {
+  let witness = originRecordWitnesses.get(profile)
+  if (!witness) {
+    witness = {}
+    originRecordWitnesses.set(profile, witness)
+  }
+  return witness
+}
+
+export type ProfileOriginBinding = {
+  profileId: string | null
+  filePath: string | null
+  restBaseUrl: string
+  rpcBaseUrl: string
+  witness: object | null
+  profileUiBaseUrl?: string | null
 }
 
 const DEFAULT_APP_NAME = 'Evenfire'
@@ -220,7 +241,15 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
 }
 
 function isLoopbackHostname(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+  return (
+    normalized === 'localhost' ||
+    normalized === '::1' ||
+    (isIP(normalized) === 4 && normalized.startsWith('127.'))
+  )
 }
 
 function sameProfileUiPairingRestEndpoint(left: string, right: string): boolean {
@@ -243,6 +272,17 @@ function sameProfileUiPairingRestEndpoint(left: string, right: string): boolean 
   }
 }
 
+export function getPairedProfileUiOverride(forBrowser = false): string | undefined {
+  if (
+    !config.desktopProfileUiBaseUrlExplicit ||
+    !configuredProfileUiRestBaseUrl ||
+    !sameProfileUiPairingRestEndpoint(config.externalRestApiBaseUrl, configuredProfileUiRestBaseUrl)
+  ) {
+    return undefined
+  }
+  return forBrowser ? config.desktopProfileUiBaseUrl : getActiveDeploymentProfileUiBaseUrl()
+}
+
 /** Resolve the Profile origin paired with the currently active Desktop deployment. */
 export function getActiveDeploymentProfileUiBaseUrl(): string {
   const externalRestApiBaseUrl = config.externalRestApiBaseUrl
@@ -253,10 +293,13 @@ export function getActiveDeploymentProfileUiBaseUrl(): string {
     sameProfileUiPairingRestEndpoint(externalRestApiBaseUrl, configuredProfileUiRestBaseUrl)
 
   if (explicitPairMatches) {
-    const explicitProfileUiBaseUrl = normalizeConfiguredProfileUiOrigin(
-      config.desktopProfileUiBaseUrl
-    )
-    if (!explicitProfileUiBaseUrl) {
+    let explicitProfileUiBaseUrl: string
+    try {
+      explicitProfileUiBaseUrl = validateProfileUiOrigin(
+        config.desktopProfileUiBaseUrl,
+        externalRestApiBaseUrl
+      )
+    } catch {
       throw new Error(
         'Cannot resolve a shareable Profile UI link for the active desktop deployment'
       )
@@ -302,6 +345,39 @@ function normalizeConfiguredProfileUiOrigin(value: string): string | null {
   }
 }
 
+/** Validate only the optional origin returned by the selected deployment. */
+export function validateProfileUiOrigin(value: unknown, externalRestApiBaseUrl: string): string {
+  if (typeof value !== 'string' || !/^https?:\/\/[^/?#\\\s]+\/?$/i.test(value)) {
+    throw new Error('Invalid Profile UI origin')
+  }
+  const origin = new URL(value)
+  if (
+    origin.username ||
+    origin.password ||
+    origin.pathname !== '/' ||
+    origin.search ||
+    origin.hash
+  ) {
+    throw new Error('Invalid Profile UI origin')
+  }
+  const profileIsLoopback = isLoopbackHostname(origin.hostname)
+  let restIsLoopback = false
+  try {
+    const rest = new URL(externalRestApiBaseUrl)
+    restIsLoopback =
+      (rest.protocol === 'http:' || rest.protocol === 'https:') && isLoopbackHostname(rest.hostname)
+  } catch {
+    throw new Error('Invalid External REST endpoint')
+  }
+  if (
+    (profileIsLoopback && !restIsLoopback) ||
+    (origin.protocol !== 'https:' && !profileIsLoopback)
+  ) {
+    throw new Error('Invalid Profile UI origin')
+  }
+  return origin.origin
+}
+
 function runtimeConfigDirectoryPath(): string {
   const explicit = explicitRuntimeConfigPath()
   if (explicit) return path.dirname(explicit)
@@ -333,10 +409,20 @@ function normalizeRuntimeConfig(
   if (!externalRestApiBaseUrl) {
     return null
   }
+  let profileUiBaseUrl: string | null | undefined
+  if (Object.prototype.hasOwnProperty.call(value, 'profileUiBaseUrl')) {
+    try {
+      profileUiBaseUrl = validateProfileUiOrigin(value.profileUiBaseUrl, externalRestApiBaseUrl)
+    } catch {
+      // Preserve the distinction between absent legacy metadata and invalid metadata.
+      profileUiBaseUrl = null
+    }
+  }
   return {
     externalRestApiBaseUrl,
     rpcProxyBaseUrl,
     appName: toOptionalTrimmed(value.appName) || DEFAULT_APP_NAME,
+    ...(profileUiBaseUrl !== undefined ? { profileUiBaseUrl } : {}),
   }
 }
 
@@ -818,7 +904,42 @@ export function isDesktopRuntimeConfigured(): boolean {
   return desktopRuntimeConfigured
 }
 
-export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Promise<void> {
+function carrySameProfileOrigin(
+  existing: StoredRuntimeProfile | undefined,
+  next: DesktopRuntimeConfig,
+  trustedRpcEnrichment: boolean
+): void {
+  if (!existing || typeof existing.config.profileUiBaseUrl !== 'string') return
+  if (
+    !sameDesktopRestEndpoint(existing.config.externalRestApiBaseUrl, next.externalRestApiBaseUrl)
+  ) {
+    return
+  }
+  const previousRpc = existing.config.rpcProxyBaseUrl?.trim() || ''
+  const nextRpc = next.rpcProxyBaseUrl?.trim() || ''
+  const sameRpc =
+    previousRpc === nextRpc ||
+    (Boolean(previousRpc && nextRpc) && sameDesktopRestEndpoint(previousRpc, nextRpc))
+  const verifiedEnrichment =
+    trustedRpcEnrichment &&
+    existing.id === activeRuntimeOptionId &&
+    !previousRpc &&
+    Boolean(nextRpc)
+  if (!sameRpc && !verifiedEnrichment) return
+  try {
+    next.profileUiBaseUrl = validateProfileUiOrigin(
+      existing.config.profileUiBaseUrl,
+      next.externalRestApiBaseUrl
+    )
+  } catch {
+    // Invalid saved metadata is never carried into a newly written profile.
+  }
+}
+
+export async function saveDesktopRuntimeConfig(
+  next: DesktopRuntimeConfig,
+  options: { trustedRpcEnrichment?: boolean } = {}
+): Promise<void> {
   hydrateDesktopRuntimeConfig()
   const validated = validateRuntimeConfig(next)
   validated.externalRestApiBaseUrl = canonicalizeDesktopRestEndpoint(
@@ -828,17 +949,18 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
   if (explicitPath) {
     const timestamp = new Date().toISOString()
     const existing = storedProfiles.find(profile => profile.id === 'custom-file')
+    carrySameProfileOrigin(existing, validated, options.trustedRpcEnrichment === true)
     await writeRuntimeConfig(explicitPath, validated)
-    storedProfiles = [
-      {
-        id: 'custom-file',
-        appName: validated.appName?.trim() || DEFAULT_APP_NAME,
-        filePath: explicitPath,
-        createdAt: existing?.createdAt || timestamp,
-        updatedAt: timestamp,
-        config: validated,
-      },
-    ]
+    const replacement: StoredRuntimeProfile = {
+      id: 'custom-file',
+      appName: validated.appName?.trim() || DEFAULT_APP_NAME,
+      filePath: explicitPath,
+      createdAt: existing?.createdAt || timestamp,
+      updatedAt: timestamp,
+      config: validated,
+    }
+    if (existing) originRecordWitnesses.set(replacement, originRecordWitness(existing))
+    storedProfiles = [replacement]
     activeRuntimeOptionId = 'custom-file'
     applyRuntimeConfig(validated, true)
     return
@@ -848,12 +970,16 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
     sameDesktopRestEndpoint(profile.config.externalRestApiBaseUrl, validated.externalRestApiBaseUrl)
   )
   if (existing) {
+    carrySameProfileOrigin(existing, validated, options.trustedRpcEnrichment === true)
     existing.updatedAt = new Date().toISOString()
     existing.appName = validated.appName?.trim() || DEFAULT_APP_NAME
     existing.config = {
       externalRestApiBaseUrl: validated.externalRestApiBaseUrl,
       rpcProxyBaseUrl: validated.rpcProxyBaseUrl || '',
       appName: validated.appName?.trim() || DEFAULT_APP_NAME,
+      ...(validated.profileUiBaseUrl !== undefined
+        ? { profileUiBaseUrl: validated.profileUiBaseUrl }
+        : {}),
     }
     await writeRuntimeConfig(existing.filePath, existing.config)
     activeRuntimeOptionId = existing.id
@@ -918,6 +1044,62 @@ export function resolveEnvKey(externalRestApiBaseUrl: string, rpcProxyBaseUrl = 
 export function getActiveRuntimeConfigOptionId(): string | null {
   hydrateDesktopRuntimeConfig()
   return activeRuntimeOptionId
+}
+
+/** Capture the selected deployment and, when present, its live saved record. */
+export function captureProfileOriginBinding(): ProfileOriginBinding {
+  hydrateDesktopRuntimeConfig()
+  const profile = storedProfiles.find(item => item.id === activeRuntimeOptionId)
+  return {
+    profileId: profile?.id ?? null,
+    filePath: profile?.filePath ?? null,
+    restBaseUrl: config.externalRestApiBaseUrl,
+    rpcBaseUrl: config.rpcProxyBaseUrl,
+    witness: profile ? originRecordWitness(profile) : null,
+    ...(profile && Object.prototype.hasOwnProperty.call(profile.config, 'profileUiBaseUrl')
+      ? { profileUiBaseUrl: profile.config.profileUiBaseUrl }
+      : {}),
+  }
+}
+
+function sameOptionalEndpoint(left: string, right: string): boolean {
+  return left === right || (Boolean(left && right) && sameDesktopRestEndpoint(left, right))
+}
+
+/** Caller must hold the existing native auth/environment owner. */
+export async function persistProfileOriginForBinding(
+  binding: ProfileOriginBinding,
+  origin: string
+): Promise<void> {
+  const profile = storedProfiles.find(item => item.id === binding.profileId)
+  if (
+    !profile ||
+    profile.filePath !== binding.filePath ||
+    originRecordWitness(profile) !== binding.witness ||
+    activeRuntimeOptionId !== binding.profileId ||
+    !sameDesktopRestEndpoint(config.externalRestApiBaseUrl, binding.restBaseUrl) ||
+    !sameOptionalEndpoint(config.rpcProxyBaseUrl, binding.rpcBaseUrl)
+  ) {
+    throw new Error('Profile UI deployment changed')
+  }
+  const disk = JSON.parse(await fsp.readFile(profile.filePath, 'utf8')) as unknown
+  if (!disk || typeof disk !== 'object' || Array.isArray(disk)) {
+    throw new Error('Invalid saved desktop profile')
+  }
+  const fields = disk as Record<string, unknown>
+  if (
+    typeof fields.externalRestApiBaseUrl !== 'string' ||
+    !sameDesktopRestEndpoint(fields.externalRestApiBaseUrl, binding.restBaseUrl) ||
+    !sameOptionalEndpoint(String(fields.rpcProxyBaseUrl || ''), binding.rpcBaseUrl)
+  ) {
+    throw new Error('Saved desktop profile binding changed')
+  }
+  await fsp.writeFile(
+    profile.filePath,
+    JSON.stringify({ ...fields, profileUiBaseUrl: origin }, null, 2),
+    { encoding: 'utf8', mode: 0o600 }
+  )
+  profile.config = { ...profile.config, profileUiBaseUrl: origin }
 }
 
 /** Env key for the CURRENTLY active runtime config (main-process surfaces). */

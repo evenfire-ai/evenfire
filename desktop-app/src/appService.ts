@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
+import { isIP } from 'node:net'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
 import { bindChatStoreForUser, unbindChatStore } from './chatStoreBinding.js'
 import {
+  type ProfileOriginBinding,
+  captureProfileOriginBinding,
   clearDesktopRuntimeConfigSelection,
   config,
   deleteDesktopRuntimeConfigOption,
@@ -12,15 +15,19 @@ import {
   getActiveLegacyEnvKeys,
   getActiveRuntimeConfigOptionId,
   getDesktopRuntimeConfigState,
+  getPairedProfileUiOverride,
   hydrateDesktopRuntimeConfig,
   isDesktopRuntimeConfigured,
+  persistProfileOriginForBinding,
   resolveEnvKey,
   saveDesktopRuntimeConfig,
   selectDesktopRuntimeConfigOption,
+  validateProfileUiOrigin,
   validateRpcProxyBaseUrl,
 } from './config.js'
 import {
   canonicalizeDesktopRestEndpoint,
+  desktopEnvironmentDiscoveryUrl,
   sameDesktopRestEndpoint,
 } from './desktopEnvironmentUrl.js'
 import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
@@ -121,6 +128,7 @@ const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
 
 type RuntimeConfigDiscovery = {
   profileId: string | null
+  profileRecordWitness: object | null
   externalRestApiBaseUrl: string
   rpcProxyBaseUrl: string
   appName: string
@@ -144,16 +152,31 @@ function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
 }
 
 function requireProfileUiBaseUrlForBrowserAction(): string {
-  if (!config.desktopProfileUiBaseUrlExplicit) {
-    return config.desktopProfileUiBaseUrl
-  }
   const explicitBaseUrl = normalizeExplicitProfileUiBaseUrl(config.desktopProfileUiBaseUrl)
   if (!explicitBaseUrl) {
     throw new Error(PROFILE_UI_BASE_URL_ORIGIN_ERROR)
   }
-  return explicitBaseUrl
+  return validateProfileUiOrigin(explicitBaseUrl, config.externalRestApiBaseUrl)
 }
 
+function canTrustProfileOriginFromRestEndpoint(restBaseUrl: string): boolean {
+  try {
+    const endpoint = new URL(restBaseUrl)
+    if (endpoint.protocol === 'https:') return true
+    if (endpoint.protocol !== 'http:') return false
+    const hostname = endpoint.hostname
+      .toLowerCase()
+      .replace(/^\[|\]$/g, '')
+      .replace(/\.$/, '')
+    return (
+      hostname === 'localhost' ||
+      hostname === '::1' ||
+      (isIP(hostname) === 4 && hostname.startsWith('127.'))
+    )
+  } catch {
+    return false
+  }
+}
 /**
  * Guarded wrapper around `shell.openExternal` for URLs that originate in data
  * (server responses, config, deep-links) rather than fixed constants. Electron
@@ -169,10 +192,10 @@ function requireProfileUiBaseUrlForBrowserAction(): string {
  * On rejection only the offending scheme is surfaced — never the full URL,
  * whose query string may carry tokens or other secrets.
  */
-async function openExternalDataUrl(
+async function prepareExternalDataUrl(
   rawUrl: string,
   options: { requireHttps?: boolean } = {}
-): Promise<void> {
+): Promise<() => Promise<void>> {
   const value = String(rawUrl ?? '')
   let parsed: URL
   try {
@@ -185,7 +208,15 @@ async function openExternalDataUrl(
     throw new Error(`Refusing to open external URL with unsupported scheme "${parsed.protocol}"`)
   }
   const { shell } = await import('electron')
-  await shell.openExternal(value)
+  return () => shell.openExternal(value)
+}
+
+async function openExternalDataUrl(
+  rawUrl: string,
+  options: { requireHttps?: boolean } = {}
+): Promise<void> {
+  const dispatch = await prepareExternalDataUrl(rawUrl, options)
+  await dispatch()
 }
 
 /**
@@ -914,13 +945,15 @@ export class AppService {
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
-  private profileUiBaseUrlCache: { key: string; value: string } | null = null
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private restoreSavedSessionReservationStarted = false
-  private runtimeConfigResolutionInFlight = new Map<string, { promise: Promise<void> }>()
+  private runtimeConfigResolutionInFlight = new Map<
+    object | null,
+    Map<string, { promise: Promise<void> }>
+  >()
   private effectiveRuntimeRpcEndpoint: RuntimeConfigDiscovery | null = null
   private pendingRuntimeConfigDiscovery: RuntimeConfigDiscovery | null = null
   private savedSessionRestoreAttemptedEnvKey: string | null = null
@@ -1142,11 +1175,14 @@ export class AppService {
   private captureAuthEnvironmentBinding(): {
     environmentKey: string
     profileId: string | null
+    profileRecordWitness: object | null
     restBaseUrl: string
   } {
+    const profileBinding = captureProfileOriginBinding()
     return {
       environmentKey: getActiveEnvKey(),
-      profileId: getActiveRuntimeConfigOptionId(),
+      profileId: profileBinding.profileId,
+      profileRecordWitness: profileBinding.witness,
       restBaseUrl: canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl),
     }
   }
@@ -1154,11 +1190,13 @@ export class AppService {
   private assertAuthEnvironmentBinding(binding: {
     environmentKey: string
     profileId: string | null
+    profileRecordWitness: object | null
     restBaseUrl: string
   }): void {
     const current = this.captureAuthEnvironmentBinding()
     if (
       current.profileId !== binding.profileId ||
+      current.profileRecordWitness !== binding.profileRecordWitness ||
       !sameDesktopRestEndpoint(current.restBaseUrl, binding.restBaseUrl)
     ) {
       throw new Error('stale_runtime_environment')
@@ -1169,6 +1207,7 @@ export class AppService {
     const currentBinding = this.captureAuthEnvironmentBinding()
     return (
       currentBinding.profileId === discovery.profileId &&
+      currentBinding.profileRecordWitness === discovery.profileRecordWitness &&
       sameDesktopRestEndpoint(currentBinding.restBaseUrl, discovery.externalRestApiBaseUrl)
     )
   }
@@ -1243,7 +1282,6 @@ export class AppService {
     this.sessionToken = token
     if (tokenChanged) {
       this.rpcTokenManager.clear()
-      this.profileUiBaseUrlCache = null
       this.accessCatalog = null
       await this.tokenStore.setSessionToken(token, getActiveEnvKey())
     }
@@ -1610,7 +1648,6 @@ export class AppService {
     this.sessionToken = null
     this.me = null
     this.clearEffectiveRuntimeRpcEndpoint()
-    this.profileUiBaseUrlCache = null
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
@@ -2283,7 +2320,9 @@ export class AppService {
       if (sameUploadBoundary) {
         await saveDesktopRuntimeConfig(next)
         this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
-      } else await this.applyRuntimeEnvironmentChange(() => saveDesktopRuntimeConfig(next))
+      } else {
+        await this.applyRuntimeEnvironmentChange(() => saveDesktopRuntimeConfig(next))
+      }
     })
     await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
     return getDesktopRuntimeConfigState()
@@ -2345,27 +2384,49 @@ export class AppService {
     profileUiUrl: string
     appName: string
   }> {
+    const { sessionGeneration, selectedOptionId } = await this.withNativeAuthEnvironmentCommit(
+      async () => {
+        this.assertProfileHandoffSessionIsSignedOut()
+        return {
+          sessionGeneration: this.sessionGeneration,
+          selectedOptionId: getActiveRuntimeConfigOptionId(),
+        }
+      }
+    )
+    if (selectedOptionId !== null) throw new Error('desktop_setup_environment_already_selected')
     try {
       const activation = await this.memberRegistrationServiceClient.getInvitationProfile(email)
       if (activation.email.trim().toLowerCase() !== email.trim().toLowerCase()) {
         throw new Error('invitation configuration mismatch')
       }
-
-      const profileUiUrl = new URL(
-        '/desktop-setup',
-        `${activation.profileUiBaseUrl.replace(/\/+$/, '')}/`
-      )
-      profileUiUrl.searchParams.set('email', activation.email)
-      await openExternalDataUrl(profileUiUrl.toString())
-      return {
-        profileUiUrl: profileUiUrl.toString(),
-        appName: activation.appName,
+      if (
+        this.sessionGeneration !== sessionGeneration ||
+        getActiveRuntimeConfigOptionId() !== selectedOptionId
+      ) {
+        throw new Error('stale_invitation_environment')
       }
-    } catch (error) {
-      if (error instanceof ApiError) {
-        if (error.status === 404) {
-          throw new Error('invitation_config_not_found')
+      const profileUiBaseUrl = validateProfileUiOrigin(
+        activation.profileUiBaseUrl,
+        config.externalRestApiBaseUrl
+      )
+      const profileUiUrl = new URL('/desktop-setup', `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
+      profileUiUrl.searchParams.set('email', activation.email)
+      const dispatch = await prepareExternalDataUrl(profileUiUrl.toString())
+      let launch: Promise<void> | undefined
+      const result = await this.withNativeAuthEnvironmentCommit(async () => {
+        this.assertSessionGeneration(sessionGeneration)
+        if (getActiveRuntimeConfigOptionId() !== selectedOptionId) {
+          throw new Error('desktop_setup_environment_already_selected')
         }
+        launch = dispatch()
+        return { profileUiUrl: profileUiUrl.toString(), appName: activation.appName }
+      })
+      if (!launch) throw new Error('Profile UI browser dispatch was not admitted')
+      await launch
+      return result
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        throw new Error('invitation_config_not_found')
       }
       throw error
     }
@@ -2380,12 +2441,113 @@ export class AppService {
     return this.openProfileDesktopSetup(normalizedEmail)
   }
 
+  private assertProfileOriginBinding(binding: ProfileOriginBinding): void {
+    const current = captureProfileOriginBinding()
+    const sameRpc =
+      current.rpcBaseUrl === binding.rpcBaseUrl ||
+      (Boolean(current.rpcBaseUrl && binding.rpcBaseUrl) &&
+        sameDesktopRestEndpoint(current.rpcBaseUrl, binding.rpcBaseUrl))
+    if (
+      current.profileId !== binding.profileId ||
+      current.filePath !== binding.filePath ||
+      !sameDesktopRestEndpoint(current.restBaseUrl, binding.restBaseUrl) ||
+      !sameRpc
+    ) {
+      throw new Error('Profile UI deployment changed')
+    }
+  }
+
+  private async dispatchProfileOriginUrl(
+    binding: ProfileOriginBinding,
+    sessionGeneration: number,
+    url: string
+  ): Promise<void> {
+    const dispatch = await prepareExternalDataUrl(url)
+    let launch: Promise<void> | undefined
+    await this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertProfileOriginBinding(binding)
+      const current = captureProfileOriginBinding()
+      if (current.witness !== binding.witness) {
+        throw new Error('Profile UI deployment changed')
+      }
+      this.assertSessionGeneration(sessionGeneration)
+      launch = dispatch()
+    })
+    if (!launch) throw new Error('Profile UI browser dispatch was not admitted')
+    await launch
+  }
+
+  /** Resolve outside the native owner: saving metadata re-enters that owner. */
+  private async resolveAuthoritativeProfileOrigin(
+    binding = captureProfileOriginBinding(),
+    forBrowser = false
+  ): Promise<string | undefined> {
+    this.assertProfileOriginBinding(binding)
+    const pairedOverride = getPairedProfileUiOverride(forBrowser)
+    if (pairedOverride)
+      return forBrowser ? requireProfileUiBaseUrlForBrowserAction() : pairedOverride
+    if (!canTrustProfileOriginFromRestEndpoint(binding.restBaseUrl)) return undefined
+    if (binding.profileUiBaseUrl !== undefined) {
+      return validateProfileUiOrigin(binding.profileUiBaseUrl, binding.restBaseUrl)
+    }
+
+    let discovery: Awaited<ReturnType<AuthClient['getDesktopEnvironmentForEndpoint']>>
+    try {
+      discovery = await this.authClient.getDesktopEnvironmentForEndpoint(binding.restBaseUrl)
+    } catch (error) {
+      this.assertProfileOriginBinding(binding)
+      if (
+        error instanceof Error &&
+        (error.message === 'desktop_environment_redirect_rejected' ||
+          error.message === 'Desktop environment discovery response URL mismatch')
+      ) {
+        throw error
+      }
+      return undefined
+    }
+    this.assertProfileOriginBinding(binding)
+    if (
+      !sameDesktopRestEndpoint(
+        discovery.responseUrl,
+        desktopEnvironmentDiscoveryUrl(binding.restBaseUrl)
+      )
+    ) {
+      throw new Error('Desktop environment discovery response URL mismatch')
+    }
+    if (!Object.prototype.hasOwnProperty.call(discovery, 'profileUiBaseUrl')) return undefined
+    if (!sameDesktopRestEndpoint(discovery.externalRestApiBaseUrl, binding.restBaseUrl)) {
+      throw new Error('Desktop environment discovery binding mismatch')
+    }
+    const origin = validateProfileUiOrigin(discovery.profileUiBaseUrl, binding.restBaseUrl)
+    await this.withNativeAuthEnvironmentCommit(async () => {
+      if (binding.profileId) {
+        const cachedProfile = getDesktopRuntimeConfigState().options.find(
+          option => option.id === binding.profileId
+        )
+        const cachedRpc = cachedProfile?.rpcProxyBaseUrl?.trim() || ''
+        const boundRpc = binding.rpcBaseUrl.trim()
+        const cachedBindingMatches =
+          cachedProfile !== undefined &&
+          sameDesktopRestEndpoint(cachedProfile.externalRestApiBaseUrl, binding.restBaseUrl) &&
+          (cachedRpc === boundRpc ||
+            (Boolean(cachedRpc && boundRpc) && sameDesktopRestEndpoint(cachedRpc, boundRpc)))
+        if (cachedBindingMatches) await persistProfileOriginForBinding(binding, origin)
+      } else this.assertProfileOriginBinding(binding)
+    })
+    this.assertProfileOriginBinding(binding)
+    return origin
+  }
+
   async openForgotPassword(email: string): Promise<{ profileUiUrl: string }> {
     const normalizedEmail = email.trim().toLowerCase()
-    const profileUiBaseUrl = requireProfileUiBaseUrlForBrowserAction()
+    const binding = captureProfileOriginBinding()
+    const sessionGeneration = this.sessionGeneration
+    const profileUiBaseUrl =
+      (await this.resolveAuthoritativeProfileOrigin(binding, true)) ||
+      requireProfileUiBaseUrlForBrowserAction()
     const profileUiUrl = new URL('/forgot-password', `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
     if (normalizedEmail) profileUiUrl.searchParams.set('email', normalizedEmail)
-    await openExternalDataUrl(profileUiUrl.toString())
+    await this.dispatchProfileOriginUrl(binding, sessionGeneration, profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
   }
 
@@ -2394,7 +2556,11 @@ export class AppService {
     options: ProfileSettingsOpenOptions = {}
   ): Promise<{ profileUiUrl: string }> {
     const normalizedEmail = email.trim().toLowerCase()
-    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(normalizedEmail)
+    const binding = captureProfileOriginBinding()
+    const sessionGeneration = this.sessionGeneration
+    const profileUiBaseUrl =
+      (await this.resolveAuthoritativeProfileOrigin(binding, true)) ||
+      (await this.resolveProfileUiBaseUrl(normalizedEmail))
 
     const network = String(options.network || '')
       .trim()
@@ -2405,7 +2571,7 @@ export class AppService {
         : '/settings/profile'
     const profileUiUrl = new URL(socialPath, `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
     if (options.action === 'password') profileUiUrl.searchParams.set('action', 'password')
-    await openExternalDataUrl(profileUiUrl.toString())
+    await this.dispatchProfileOriginUrl(binding, sessionGeneration, profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
   }
 
@@ -2428,10 +2594,6 @@ export class AppService {
       if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
       throw new Error('Cannot resolve the Profile UI for this desktop session')
     }
-    const cacheKey = `${getActiveEnvKey()}:${this.me?.id || ''}:${normalizedEmail}`
-    if (this.profileUiBaseUrlCache?.key === cacheKey) {
-      return this.profileUiBaseUrlCache.value
-    }
     try {
       const activation =
         await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
@@ -2442,7 +2604,6 @@ export class AppService {
         }
         return config.desktopProfileUiBaseUrl
       }
-      this.profileUiBaseUrlCache = { key: cacheKey, value: profileUiBaseUrl }
       return profileUiBaseUrl
     } catch (error) {
       if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
@@ -2493,7 +2654,14 @@ export class AppService {
       const shouldResolve = await this.withNativeAuthEnvironmentCommit(
         async () => this.sessionGeneration === committedGeneration
       )
-      if (shouldResolve) await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
+      if (shouldResolve) {
+        await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
+        const profileBinding = captureProfileOriginBinding()
+        if (profileBinding.profileId && profileBinding.profileUiBaseUrl === undefined) {
+          // Profile UI metadata is optional and must not block invitation setup.
+          await this.resolveAuthoritativeProfileOrigin(profileBinding).catch(() => undefined)
+        }
+      }
       return getDesktopRuntimeConfigState()
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
@@ -2654,23 +2822,37 @@ export class AppService {
     })
     if (!request) return
 
+    const { environmentBinding } = request
     const resolutionKey = JSON.stringify([
-      request.environmentBinding.profileId,
+      environmentBinding.environmentKey,
+      environmentBinding.profileId,
       request.externalRestApiBaseUrl,
     ])
-    const inFlight = this.runtimeConfigResolutionInFlight.get(resolutionKey)
+    const witness = environmentBinding.profileRecordWitness
+    let bindingRequests = this.runtimeConfigResolutionInFlight.get(witness)
+    if (!bindingRequests) {
+      bindingRequests = new Map()
+      this.runtimeConfigResolutionInFlight.set(witness, bindingRequests)
+    }
+    const inFlight = bindingRequests.get(resolutionKey)
     if (inFlight) {
       await inFlight.promise
       return
     }
 
     const resolution = { promise: this.resolveRuntimeConfigRequest(request) }
-    this.runtimeConfigResolutionInFlight.set(resolutionKey, resolution)
+    bindingRequests.set(resolutionKey, resolution)
     try {
       await resolution.promise
     } finally {
-      if (this.runtimeConfigResolutionInFlight.get(resolutionKey) === resolution) {
-        this.runtimeConfigResolutionInFlight.delete(resolutionKey)
+      if (bindingRequests.get(resolutionKey) === resolution) {
+        bindingRequests.delete(resolutionKey)
+        if (
+          bindingRequests.size === 0 &&
+          this.runtimeConfigResolutionInFlight.get(witness) === bindingRequests
+        ) {
+          this.runtimeConfigResolutionInFlight.delete(witness)
+        }
       }
     }
   }
@@ -2681,10 +2863,11 @@ export class AppService {
     environmentBinding: {
       environmentKey: string
       profileId: string | null
+      profileRecordWitness: object | null
       restBaseUrl: string
     }
   }): Promise<void> {
-    const discovered = await this.authClient.getDesktopEnvironment()
+    const discovered = await this.authClient.getDesktopEnvironment(request.externalRestApiBaseUrl)
     const rpcProxyBaseUrl = validateRpcProxyBaseUrl(discovered.rpcProxyBaseUrl)
     if (
       !sameDesktopRestEndpoint(discovered.externalRestApiBaseUrl, request.externalRestApiBaseUrl)
@@ -2695,6 +2878,7 @@ export class AppService {
       this.assertAuthEnvironmentBinding(request.environmentBinding)
       await this.applyRuntimeConfigDiscovery({
         profileId: request.environmentBinding.profileId,
+        profileRecordWitness: request.environmentBinding.profileRecordWitness,
         externalRestApiBaseUrl: request.externalRestApiBaseUrl,
         rpcProxyBaseUrl,
         appName: discovered.appName || request.appName,
@@ -2731,13 +2915,16 @@ export class AppService {
     }
 
     const previousEnvKey = getActiveEnvKey()
-    await saveDesktopRuntimeConfig({
-      // Discovery only enriches the selected profile. Commit it while signed
-      // out so the next auth boundary owns token and chat migration.
-      externalRestApiBaseUrl: discovery.externalRestApiBaseUrl,
-      rpcProxyBaseUrl: discovery.rpcProxyBaseUrl,
-      appName: discovery.appName,
-    })
+    await saveDesktopRuntimeConfig(
+      {
+        // Discovery only enriches the selected profile. Commit it while signed
+        // out so the next auth boundary owns token and chat migration.
+        externalRestApiBaseUrl: discovery.externalRestApiBaseUrl,
+        rpcProxyBaseUrl: discovery.rpcProxyBaseUrl,
+        appName: discovery.appName,
+      },
+      { trustedRpcEnrichment: true }
+    )
     if (getActiveEnvKey() !== previousEnvKey) this.rpcTokenManager.clear()
     if (this.pendingRuntimeConfigDiscovery === discovery) {
       this.pendingRuntimeConfigDiscovery = null
@@ -6277,37 +6464,74 @@ export class AppService {
     await driver.unmountSandboxUiView(reason)
   }
 
-  async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
-    return this.withNativeAuthEnvironmentCommit(async () => {
+  async createSandboxUiDeepLink(
+    teamId?: string,
+    writeClipboard?: (url: string) => Promise<void>
+  ): Promise<{ url: string }> {
+    const captured = await this.withNativeAuthEnvironmentCommit(async () => {
       this.requireSessionToken()
       if (!this.me) throw new Error('Not authenticated')
       const environmentBinding = this.captureAuthEnvironmentBinding()
       const driver = await import('./sandboxUiDriver.js')
-      const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
       const location = driver.getActiveSandboxUiLocation()
       if (!location) throw new Error('No app is currently open')
-      const profileUiBaseUrl = getActiveDeploymentProfileUiBaseUrl()
       this.assertAuthEnvironmentBinding(environmentBinding)
       return {
-        url: buildSandboxUiWebLink(profileUiBaseUrl, {
-          ...location,
-          teamId: String(teamId || '').trim() || undefined,
-        }),
+        environmentBinding,
+        originBinding: captureProfileOriginBinding(),
+        location,
+        sessionGeneration: this.sessionGeneration,
+      }
+    })
+    const profileUiBaseUrl =
+      (await this.resolveAuthoritativeProfileOrigin(captured.originBinding)) ||
+      getActiveDeploymentProfileUiBaseUrl()
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(captured.sessionGeneration)
+      this.assertAuthEnvironmentBinding(captured.environmentBinding)
+      this.assertProfileOriginBinding(captured.originBinding)
+      const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
+      const url = buildSandboxUiWebLink(profileUiBaseUrl, {
+        ...captured.location,
+        teamId: String(teamId || '').trim() || undefined,
+      })
+      if (writeClipboard) await writeClipboard(url)
+      return {
+        url,
       }
     })
   }
 
-  async createGfsResourceDeepLink(uri: string): Promise<{ url: string }> {
-    return this.withNativeAuthEnvironmentCommit(async () => {
+  async createGfsResourceDeepLink(
+    uri: string,
+    writeClipboard?: (url: string) => Promise<void>
+  ): Promise<{ url: string }> {
+    const captured = await this.withNativeAuthEnvironmentCommit(async () => {
       this.requireSessionToken()
       if (!this.me) throw new Error('Not authenticated')
       const environmentBinding = this.captureAuthEnvironmentBinding()
-      const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
+      const { normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
       const canonicalUri = normalizeGfsResourceUri(uri)
       if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
-      const profileUiBaseUrl = getActiveDeploymentProfileUiBaseUrl()
       this.assertAuthEnvironmentBinding(environmentBinding)
-      return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
+      return {
+        environmentBinding,
+        originBinding: captureProfileOriginBinding(),
+        canonicalUri,
+        sessionGeneration: this.sessionGeneration,
+      }
+    })
+    const profileUiBaseUrl =
+      (await this.resolveAuthoritativeProfileOrigin(captured.originBinding)) ||
+      getActiveDeploymentProfileUiBaseUrl()
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(captured.sessionGeneration)
+      this.assertAuthEnvironmentBinding(captured.environmentBinding)
+      this.assertProfileOriginBinding(captured.originBinding)
+      const { buildGfsResourceWebLink } = await import('./gfsDeepLinks.js')
+      const url = buildGfsResourceWebLink(profileUiBaseUrl, captured.canonicalUri)
+      if (writeClipboard) await writeClipboard(url)
+      return { url }
     })
   }
 

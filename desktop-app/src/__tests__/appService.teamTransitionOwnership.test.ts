@@ -10,6 +10,10 @@ import {
   testTeamSwitchResult,
 } from '../../testSupport/authTestFixtures.js'
 
+function discoveryResponseUrl(restBaseUrl: string): string {
+  return new URL(`${restBaseUrl.replace(/\/+$/, '')}/api/v1/desktop/environment`).href
+}
+
 afterEach(async () => {
   vi.useRealTimers()
   await cleanupNativeCommitTestHarness()
@@ -67,6 +71,7 @@ describe('AppService deliberate team transition ownership', () => {
     })
     const discovery = deferred<{
       externalRestApiBaseUrl: string
+      responseUrl: string
       rpcProxyBaseUrl: string
       appName: string
     }>()
@@ -103,6 +108,7 @@ describe('AppService deliberate team transition ownership', () => {
     expect(getMe).not.toHaveBeenCalled()
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })
@@ -122,6 +128,7 @@ describe('AppService deliberate team transition ownership', () => {
     })
     const discovery = deferred<{
       externalRestApiBaseUrl: string
+      responseUrl: string
       rpcProxyBaseUrl: string
       appName: string
     }>()
@@ -156,6 +163,7 @@ describe('AppService deliberate team transition ownership', () => {
     expect(googleLogin).not.toHaveBeenCalled()
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })
@@ -170,6 +178,7 @@ describe('AppService deliberate team transition ownership', () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     const discovery = deferred<{
       externalRestApiBaseUrl: string
+      responseUrl: string
       rpcProxyBaseUrl: string
       appName: string
     }>()
@@ -210,6 +219,7 @@ describe('AppService deliberate team transition ownership', () => {
     expect(getMe).not.toHaveBeenCalled()
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })
@@ -378,6 +388,7 @@ describe('AppService deliberate team transition ownership', () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     const discovery = deferred<{
       externalRestApiBaseUrl: string
+      responseUrl: string
       rpcProxyBaseUrl: string
       appName: string
     }>()
@@ -413,6 +424,7 @@ describe('AppService deliberate team transition ownership', () => {
     await expect(service.logout()).resolves.toBeTypeOf('number')
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })

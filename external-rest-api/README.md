@@ -42,6 +42,13 @@ See `.env.example`.
 Environment variables:
 
 - `EXTERNAL_REST_API_PORT`: HTTP port the service listens on (default `8091`).
+- `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`: optional Profile UI origin used in Desktop
+  environment discovery. Supported Kustomize deployments project the required
+  `control-api-config` value into External REST. Control API keeps its existing environment
+  precedence, so a later Secret can give Control API a different effective origin. Manual
+  External REST configuration may also use its independently supplied value. A missing or
+  invalid value is omitted from Desktop environment discovery; no runtime synchronization is
+  performed.
 - `EXTERNAL_REST_API_CORS_ORIGIN`: Allowed CORS origin for browser requests (`*` allows all origins).
 - `EXTERNAL_REST_API_GOOGLE_CLIENT_ID`: Google OAuth client ID used to verify incoming Google ID tokens.
 - `EXTERNAL_REST_API_CONTROL_API_BASE_URL`: Base URL for internal calls to `control-api` (typically through the profile control funnel).
@@ -105,8 +112,10 @@ npm install
 CLERUM_DEV_MODE=true npm run dev
 ```
 
-`make dev` also opts into this local mode. It is rejected with
-`NODE_ENV=production`. Without this opt-in, set
+`make dev` also opts into this local mode and supplies the local Profile UI
+origin default when the variable is unset. Set the optional Profile UI origin
+explicitly to override that value in Desktop discovery. This mode is rejected with
+`NODE_ENV=production`. Without the opt-in, set
 `EXTERNAL_REST_API_JWT_PUBLIC_KEY` explicitly.
 
 The shared store defaults to `control-api/.dev-keys` in the same checkout.
