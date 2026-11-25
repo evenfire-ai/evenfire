@@ -245,10 +245,15 @@ async function signInResolvedMember(
   db: DbTransactionClient,
   input: OidcMemberSignInInput
 ): Promise<OidcMemberSignInResult> {
+  const context = input.proof.signInContext
   const resolution = await resolveOidcAccount(db, {
     proof: input.proof,
     provider: input.provider,
     policy: input.policy,
+    invitation:
+      context?.kind === 'invitation'
+        ? { invitationId: context.invitationId, invitedEmail: context.invitedEmail }
+        : null,
   })
   if (resolution.status === 'refused') return resolution
   const { account } = resolution

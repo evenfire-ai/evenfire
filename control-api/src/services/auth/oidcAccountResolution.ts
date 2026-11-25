@@ -12,6 +12,14 @@ export type OidcRefusalReason =
   | 'not_eligible'
   | 'no_account'
   | 'provider_configuration'
+  | 'invitation_email_mismatch'
+
+/**
+ * The invitation an attempt was started from: its id and the invited address,
+ * lower-cased. Only these two values reach account resolution, never the
+ * invitation token.
+ */
+export type OidcInvitationContext = Readonly<{ invitationId: string; invitedEmail: string }>
 
 /**
  * Why a `provider_configuration` refusal happened. It is for the operator's log
@@ -168,6 +176,11 @@ function accountCreationAllowed(policy: OidcMemberSignInPolicy): boolean {
   }
 }
 
+/** An invitation applies by address, compared case-insensitively. */
+function differsFromInvitation(invitation: OidcInvitationContext | null, email: string): boolean {
+  return invitation !== null && email.toLowerCase() !== invitation.invitedEmail.toLowerCase()
+}
+
 async function newMemberTeamExists(db: Query, teamId: string): Promise<boolean> {
   // KEY SHARE keeps the team from being deleted before the membership insert.
   const result = await db.query(`SELECT 1 FROM teams WHERE id = $1 FOR KEY SHARE`, [teamId])
@@ -178,6 +191,12 @@ async function newMemberTeamExists(db: Query, teamId: string): Promise<boolean> 
  * Maps a verified OIDC identity to a member account (v5 §4, rows 1–7).
  * Runs inside the caller's transaction; locks the user row before deciding.
  * Refusals write nothing except the `oidc_connections` record.
+ *
+ * A sign-in started from an invitation link passes the invitation. After the
+ * earlier refusals, and before any account, link or membership is written,
+ * the invited address is compared with the account's: a linked account's
+ * stored email, otherwise the verified email claim. A different address is
+ * refused with `invitation_email_mismatch`.
  */
 export async function resolveOidcAccount(
   db: DbTransactionClient,
@@ -185,9 +204,10 @@ export async function resolveOidcAccount(
     proof: VerifiedOidcIdentityProof
     provider: OidcProviderConfiguration
     policy: OidcMemberSignInPolicy
+    invitation: OidcInvitationContext | null
   }>
 ): Promise<OidcResolution> {
-  const { proof, provider, policy } = input
+  const { proof, provider, policy, invitation } = input
   if (
     proof.registrationId !== provider.registrationId ||
     proof.issuer !== provider.issuer ||
@@ -222,6 +242,8 @@ export async function resolveOidcAccount(
     // The link's foreign key is ON DELETE RESTRICT, so its user always exists.
     if (!user) throw new Error('OIDC link references a missing user')
     if (user.lifecycle_state !== 'active') return refused('account_disabled')
+    // A linked account resolves without the claim, so its stored email is compared.
+    if (differsFromInvitation(invitation, user.email)) return refused('invitation_email_mismatch')
     return resolved(user, { account: false, link: false }, guest)
   }
 
@@ -233,6 +255,8 @@ export async function resolveOidcAccount(
   if (emailState === 'domain_claim_missing') {
     return refused('provider_configuration', 'email_domain_claim_missing')
   }
+  // Before the email lookup, so a different address writes no link and no account.
+  if (differsFromInvitation(invitation, claimEmail)) return refused('invitation_email_mismatch')
 
   // Rows 3, 5 and 6: email finds an existing member the first time only.
   const matches = await db.query(

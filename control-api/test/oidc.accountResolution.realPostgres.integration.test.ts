@@ -97,7 +97,13 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     proof: VerifiedOidcIdentityProof
   ): Promise<OidcResolution> {
     return withTransaction(
-      db => resolveOidcAccount(db, { proof, provider: fake.provider, policy: policyOf(fake) }),
+      db =>
+        resolveOidcAccount(db, {
+          proof,
+          provider: fake.provider,
+          policy: policyOf(fake),
+          invitation: null,
+        }),
       testPool
     )
   }
@@ -963,6 +969,7 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
             proof: foreignProof,
             provider: defaultFake.provider,
             policy: policyOf(defaultFake),
+            invitation: null,
           }),
         testPool
       )
@@ -1000,6 +1007,7 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
           proof: firstProof,
           provider: fake.provider,
           policy: policyOf(fake),
+          invitation: null,
         })
         const second = resolve(fake, secondProof)
         await waitForLockWaiter()
