@@ -105,7 +105,7 @@ describe('Desktop sign-in page', () => {
       screen.getByText('This signs in the Evenfire Desktop app on this computer.')
     ).toBeInTheDocument()
 
-    // The page asks only for the provider label: no session read, no other call.
+    // The panel asks only for the provider label: no session read, no other call.
     expect(fetchMock).toHaveBeenCalled()
     for (const [url] of fetchMock.mock.calls) expect(url).toBe(CONFIGURATION_PATH)
     expect(mocks.navigateToDesktopApp).not.toHaveBeenCalled()
