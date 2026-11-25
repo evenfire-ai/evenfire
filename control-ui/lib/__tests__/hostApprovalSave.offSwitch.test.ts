@@ -12,8 +12,8 @@
  * (test/fixtures/wire), or the fake's own answer, which
  * control-api/test/routes.hostPut.fakeContract.test.ts pins to the real routes.
  * No producer answers 429 on these routes (they mount no rate limiter, spec
- * A6), so the 429 tests send one with no body; two of them add a `Retry-After`
- * header whose value is the test's own.
+ * A6), so the 429 tests send one with no body; three of them add a
+ * `Retry-After` header whose value is the test's own.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -445,6 +445,25 @@ describe('Set to Manual now (spec §6.3)', () => {
       expect(reads(fake), 'the fresh read and the read after the 409').toHaveLength(2)
     })
 
+    it('a 2xx PUT answer that is no Host may have written: the next Manual read is saved, not already', async () => {
+      const fake = createFake({ modeCeiling: 'auto' })
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      const switching = setManualNow('foo')
+      await put.arrived
+      // control-api applies the write; the answer the client gets is a 200 with no body.
+      put.applyNow()
+      await vi.waitFor(() => expect(writes(fake)[0].applied).toBe(true))
+      put.respondWith(200, undefined)
+      const outcome = await drive(switching)
+
+      expect(outcome).toEqual({ kind: 'saved', stored: fake.stored('foo') })
+      expect(
+        writes(fake).map(entry => [entry.applied, entry.delivered, entry.response?.status])
+      ).toEqual([[true, true, 200]])
+      expect(reads(fake), 'the fresh read and the read after the answer').toHaveLength(2)
+      expect(storedApproval(fake)).toEqual({ modeCeiling: 'manual' })
+    })
+
     it.each([
       ["the proxy's 502", PROXY_502],
       ["the proxy's 504", PROXY_504],
@@ -559,6 +578,31 @@ describe('Set to Manual now (spec §6.3)', () => {
 
       expect(outcome).toEqual({ kind: 'saved', stored: fake.stored('foo') })
       expect(writes(fake).map(entry => entry.response?.status)).toEqual([429, 200])
+      expect(starts).toHaveLength(2)
+      expect(starts[1]).toBeGreaterThanOrEqual(3_000)
+      expect(starts[1]).toBeLessThan(3_250)
+    })
+
+    it('a 429 on the read waits its Retry-After too', async () => {
+      const starts: number[] = []
+      const fake = createFake(
+        { modeCeiling: 'auto' },
+        {
+          schedule: async (point, entry) => {
+            if (point === 'arrival' && entry.kind === 'read') starts.push(clock.now())
+          },
+        }
+      )
+      withRetryAfter(fake, '3')
+      const read = fake.hold({ method: 'GET', path: FOO })
+      const switching = setManualNow('foo')
+      await read.arrived
+      read.respondWith(429, undefined)
+      const outcome = await drive(switching)
+
+      expect(outcome).toEqual({ kind: 'saved', stored: fake.stored('foo') })
+      expect(reads(fake).map(entry => entry.response?.status)).toEqual([429, 200])
+      expect(writes(fake), 'PUTs').toHaveLength(1)
       expect(starts).toHaveLength(2)
       expect(starts[1]).toBeGreaterThanOrEqual(3_000)
       expect(starts[1]).toBeLessThan(3_250)
