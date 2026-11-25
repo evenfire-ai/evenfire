@@ -314,17 +314,20 @@ export function createExternalOidcProfileFlowRouter(
       return res.status(409).json({ error: 'desktop_sign_in_unavailable' })
     }
     let result: Awaited<ReturnType<Engine['beginIdentityProofAttempt']>>
+    let attempt: Readonly<{ authorizationUrl: string; expiresAt: string }>
+    // The answer is built inside the try too: Express 4 does not catch an
+    // async handler's throw, so any failure must reach safeFailure.
     try {
       result = await createEngine(provider).beginIdentityProofAttempt({
         browserBinding: req.body.browserBinding,
         signal: oidcOperationSignal(req),
       })
+      attempt = {
+        authorizationUrl: result.authorizationUrl,
+        expiresAt: result.expiresAt.toISOString(),
+      }
     } catch (error) {
       return safeFailure(error, res)
-    }
-    const attempt = {
-      authorizationUrl: result.authorizationUrl,
-      expiresAt: result.expiresAt.toISOString(),
     }
     if (desktopSignIn.status === 'absent') return res.status(200).json(attempt)
     // The claim reads the context in its own statement, so an attempt whose
