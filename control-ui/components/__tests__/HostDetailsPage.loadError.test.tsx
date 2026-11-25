@@ -98,7 +98,10 @@ describe('a failed /detail read on the Approvals tab (Ruling 44(c))', () => {
     expect(errorBanners(), 'error banners').toHaveLength(1)
     expect(tabLoadBanner(), 'the tab’s banner').not.toBeNull()
     expect(within(tabLoadBanner()!).getByRole('button', { name: 'Retry' })).toBeInTheDocument()
-    expect(screen.getByText(HEADER_ERROR), 'the header’s error').toBeInTheDocument()
+    expect(
+      screen.getAllByRole('alert').map(alert => alert.textContent),
+      'alerts: the tab’s banner and the header’s error'
+    ).toContain(HEADER_ERROR)
     expect(screen.getByText('Agent: foo'), 'the title falls back to the route name').toBeVisible()
     expect(headerSkeleton(), 'the title skeleton').toBeNull()
     page.unmount()
@@ -153,7 +156,13 @@ describe('a failed /detail read on the Approvals tab (Ruling 44(c))', () => {
       '/detail answers'
     ).toEqual([200, 200, 500])
     expect(tabLoadBanner(), 'the tab’s banner').toBeNull()
-    expect(screen.getByText(HEADER_ERROR), 'the header’s error').toBeInTheDocument()
+    // The error is announced (role alert) with its exact text, and no page banner shows (I1).
+    const alerts = screen.getAllByRole('alert')
+    expect(
+      alerts.map(alert => alert.textContent),
+      'alerts on screen'
+    ).toEqual([HEADER_ERROR])
+    expect(errorBanners(), 'error banners').toHaveLength(0)
     expect(screen.getByText('Agent: foo')).toBeVisible()
     expect(headerSkeleton(), 'the title skeleton').toBeNull()
     page.unmount()

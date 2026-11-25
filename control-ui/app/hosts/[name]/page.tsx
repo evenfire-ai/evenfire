@@ -1433,9 +1433,13 @@ export default function HostDetailsPage() {
       onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
       subtitle={
-        loadError
-          ? `${HOST_LOAD_ERROR_PREFIX} ${loadError}`
-          : 'Configuration and access for this agent.'
+        loadError ? (
+          <span role="alert" className="cu-agent-detail-load-error">
+            {`${HOST_LOAD_ERROR_PREFIX} ${loadError}`}
+          </span>
+        ) : (
+          'Configuration and access for this agent.'
+        )
       }
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"

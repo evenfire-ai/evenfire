@@ -11114,6 +11114,13 @@ td.cu-registry-description {
   border-radius: 6px;
 }
 
+/* The page's own load failure, shown in the header where the page banner gives
+ * way to the tab's own banner (Approvals). */
+.cu-agent-detail-load-error {
+  color: var(--cu-danger);
+  font-weight: var(--cu-font-weight-medium);
+}
+
 /* Detail-page header title skeleton: bounded inline block so it reads as a
  * loading title next to the icon, not a full-width bar (QA: no slug flash). */
 .cu-agent-detail-title-skeleton {
