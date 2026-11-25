@@ -8,6 +8,7 @@
  * `fetch` replaced (spec A6). T32 needs a page instance kept across agents, so
  * it runs on the page harness, whose kept instance keeps the section mounted.
  */
+import { Suspense, startTransition, useMemo, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   act,
@@ -64,6 +65,7 @@ import {
   TOOL_PARITY_EXCLUSIONS,
 } from '../HostApprovalSection/constants'
 import { useApprovalToolsSection } from '../HostApprovalSection/hooks'
+import type { HostApprovalSectionProps } from '../HostApprovalSection/types'
 
 const controlUiCss = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
 
@@ -835,6 +837,68 @@ describe('HostApprovalSection — another agent', () => {
     expect(sectionMessage(), "on b's page").toBeNull()
     expect(shownRows(), "b's read view").toEqual({ file_write: 'Required' })
     expect(sectionButton('Edit')).toBeEnabled()
+  })
+})
+
+describe('HostApprovalSection — a render React does not commit (review R41(1))', () => {
+  beforeEach(() => resetSectionTestState())
+  afterEach(() => {
+    cleanup()
+    resetSectionTestState()
+    vi.unstubAllGlobals()
+  })
+
+  // Never settles: a component that throws it stays suspended.
+  const NEVER = new Promise<never>(() => {})
+
+  function SuspendedUnlessFoo({ name }: { name: string }): null {
+    if (name !== 'foo') throw NEVER
+    return null
+  }
+
+  it('a save shows its outcome on the agent still on screen when a render for another agent is not committed', async () => {
+    const fake = createSectionFake(
+      { tools: { json_transform: true } },
+      { others: { b: seedHost('b', { approval: { tools: { file_write: true } } }) } }
+    )
+    const onSettled = vi.fn<HostApprovalSectionProps['onSettled']>()
+    let showAgent: (name: string) => void = () => {}
+    // A page whose move to another agent is a transition that suspends, as an
+    // App Router navigation can: React renders the section for b, keeps foo on
+    // screen, and never commits that render.
+    function Page() {
+      const [name, setName] = useState('foo')
+      showAgent = next => startTransition(() => setName(next))
+      const props = useMemo(() => propsFromStore(fake, name), [name])
+      return (
+        <Suspense fallback={null}>
+          <HostApprovalSection {...props} onSettled={onSettled} />
+          <SuspendedUnlessFoo name={name} />
+        </Suspense>
+      )
+    }
+    render(<Page />)
+    clickEdit()
+    setRow('system_info', 'required')
+    const put = fake.hold({ method: 'PUT', path: FOO_PATH })
+    await clickSave()
+    await act(async () => {
+      await put.arrived
+    })
+
+    await act(async () => {
+      showAgent('b')
+    })
+    expect(rowSelect('system_info').value, "foo's edit view is still on screen").toBe('required')
+
+    await act(async () => {
+      put.respondWith(HOST_PUT_403.status, HOST_PUT_403.body)
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0], 'reported to the tab').toMatchObject({ kind: 'error' })
+    expect(sectionMessage(), "foo's outcome, on foo's section").not.toBeNull()
+    expect(rowSelect('system_info').value, 'the draft').toBe('required')
   })
 })
 

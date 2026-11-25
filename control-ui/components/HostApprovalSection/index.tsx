@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useId, useRef, useState } from 'react'
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { IconAlertTriangle, IconX } from '@components/icons'
 import { Button, Field, SelectInput, TextInput } from '@components/ui'
 import { approvalBlockOf, effectiveApproval } from '@lib/approvalEffective'
@@ -112,11 +112,15 @@ export function HostApprovalSection({
   const savingRef = useRef(false)
   const mountedRef = useRef(true)
   const messageRef = useRef<HTMLDivElement | null>(null)
-  // The values a continuation must check: what the section shows now.
+  // The values a continuation must check: what the section shows now. They
+  // are written when a render commits, so a render React never commits (a
+  // transition to another agent that suspends) does not move them.
   const hostRef = useRef(host)
-  hostRef.current = host
   const stateRef = useRef(state)
-  stateRef.current = state
+  useLayoutEffect(() => {
+    hostRef.current = host
+    stateRef.current = state
+  }, [host, state])
 
   // A message or dialog belongs to the agent it was raised for.
   if (shownHost !== host) {
