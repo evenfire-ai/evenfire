@@ -46,6 +46,12 @@ add_producer() {
 contains_executable_reference 'control-api/test/fixtures/' && add_producer control-api
 contains_executable_reference 'rpc-proxy/node_modules/.bin/tsx' && add_producer rpc-proxy
 contains_executable_reference 'workflow-recipes/src/' && add_producer workflow-recipes
+contains_executable_reference 'desktop-app/src/' && add_producer desktop-app
+# Desktop tests import the real External REST route but its CI leg has no
+# separate producer install step. Control API has an explicit install/build.
+if [[ "${SERVICE}" == 'desktop-app' ]]; then
+  contains_executable_reference 'external-rest-api/src/' && add_producer external-rest-api
+fi
 
 if [[ "${#producers[@]}" -eq 0 ]]; then
   exit 0
