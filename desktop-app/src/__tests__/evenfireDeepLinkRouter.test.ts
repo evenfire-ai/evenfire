@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { buildDesktopLoginCodeLink, buildGfsResourceDeepLink } from '@clerum/desktop-app-links'
+import { buildGfsResourceDeepLink } from '@clerum/desktop-app-links'
+import { buildDesktopLoginCodeLink } from '../browserSignInModel.js'
 import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
 
 type SentMessage = {
@@ -31,8 +32,7 @@ function createWindow(id: string, sent: SentMessage[]): TestWindow {
   return window
 }
 
-// PR 2's builder writes the link the Profile UI sends to end a Desktop sign-in. Tier 0 reads it
-// straight from the package until `browserSignInModel.ts`, which will own PR 2's names, exists.
+// PR 2's builder writes the link the Profile UI sends to end a Desktop sign-in.
 const DESKTOP_LOGIN_LINK = buildDesktopLoginCodeLink({
   state: 'fake-desktop-login-state-'.padEnd(43, 's'),
   code: 'fake-desktop-login-code-'.padEnd(43, 'c'),
