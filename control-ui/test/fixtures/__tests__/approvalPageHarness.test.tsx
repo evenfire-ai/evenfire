@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { notifyHostChanged, subscribeHostChanged } from '../../../lib/hostApprovalDisplay'
 import {
   type ApprovalClock,
   __setApprovalClockForTests,
@@ -147,5 +148,19 @@ describe('approval page harness', () => {
 
     resetApprovalTestState()
     expect(getApprovalClock().clock).toBe(realApprovalClock)
+  })
+
+  it('resetApprovalTestState forgets every Host-changed listener', () => {
+    const before = vi.fn()
+    subscribeHostChanged('foo', before)
+    resetApprovalTestState()
+
+    const after = vi.fn()
+    subscribeHostChanged('foo', after)
+    notifyHostChanged('foo')
+    expect(before).not.toHaveBeenCalled()
+    expect(after).toHaveBeenCalledTimes(1)
+    // Closes the channel this test opened.
+    resetApprovalTestState()
   })
 })
