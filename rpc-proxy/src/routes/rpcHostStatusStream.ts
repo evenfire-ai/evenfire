@@ -104,10 +104,6 @@ export function createRpcHostStatusStreamRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
 
         const perUserCount = activeStreamCountsByUser.get(auth.sub) || 0
         const perUserHostCount =

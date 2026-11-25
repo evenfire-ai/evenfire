@@ -114,7 +114,7 @@ export async function resolveHostConnectionForUser(
     directRunBinding?: DirectRunBindingRequest
     authorizedActionV2?: AuthorizedActionV2
   }
-): Promise<ResolvedServerConnection | HostAccessDenial | null> {
+): Promise<ResolvedServerConnection | HostAccessDenial> {
   const expectedRef = `${config.hostNamespace}/${hostRef}`
   const authorizedActionV2 = edgeContext?.authorizedActionV2
   const destination = authorizedActionV2?.checkpoint.destination

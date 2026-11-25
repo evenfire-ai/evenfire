@@ -656,10 +656,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
         if (host.attributionBindingStatus === 'unavailable') {
           console.warn(
             JSON.stringify({
@@ -772,10 +768,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
 
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=host-wake`)
         let wake: HostWakeApiResponse
@@ -885,10 +877,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Translate Desktop App fields → mcp-host approval API fields.
         // Identity is always the JWT auth.sub (server-assigned, matches the
@@ -962,10 +950,6 @@ export function createRpcRouter(): Router {
         )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1051,10 +1035,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
         const upstreamUrl = new URL(`${host.url.replace(/\/+$/, '')}/v1/runtime/sessions/search`)
         upstreamUrl.searchParams.set('q', rawQuery!)
         upstreamUrl.searchParams.set(
@@ -1130,10 +1110,6 @@ export function createRpcRouter(): Router {
         )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1226,10 +1202,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
         const baseUrl = host.url.replace(/\/+$/, '')
         const upstreamUrl = new URL(
           `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent!)}/${encodeURIComponent(chatId!)}/messages`
@@ -1317,10 +1289,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
         const baseUrl = host.url.replace(/\/+$/, '')
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-context-breakdown agent=${agent} chatId=${chatId}`
@@ -1401,10 +1369,6 @@ export function createRpcRouter(): Router {
         )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1496,10 +1460,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
         const baseUrl = host.url.replace(/\/+$/, '')
         const logHost = hostRef.replace(/[\r\n]/g, '')
         const logAgent = agent.replace(/[\r\n]/g, '')
@@ -1578,10 +1538,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
         const baseUrl = host.url.replace(/\/+$/, '')
         const upstreamUrl = chatId
           ? `${baseUrl}/v1/runtime/models?chatId=${encodeURIComponent(chatId)}`
@@ -1654,10 +1610,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
         const baseUrl = host.url.replace(/\/+$/, '')
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=set-model`)
         // Wake-eligible finite operation (§11.4): scope stays host:model:write.
@@ -1721,7 +1673,7 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host) || !host) {
+        if (isHostAccessDenied(host)) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1787,7 +1739,7 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host) || !host) {
+        if (isHostAccessDenied(host)) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1870,10 +1822,6 @@ export function createRpcRouter(): Router {
         )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1973,10 +1921,6 @@ export function createRpcRouter(): Router {
         )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -2087,10 +2031,6 @@ export function createRpcRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
         const sinceEventId =
           typeof req.query.sinceEventId === 'string' ? req.query.sinceEventId : undefined
         const activity = await forwardHostActivity(host, limit, sinceEventId)
@@ -2125,10 +2065,6 @@ export function createRpcRouter(): Router {
         )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
 
@@ -2171,10 +2107,6 @@ export function createRpcRouter(): Router {
         )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
 

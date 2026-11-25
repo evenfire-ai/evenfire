@@ -66,10 +66,6 @@ export function createRpcHostProgressStreamRouter(): Router {
           respondHostAccessDenied(res, host)
           return
         }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
 
         res.setHeader('content-type', 'text/event-stream')
         res.setHeader('cache-control', 'no-cache, no-transform')
