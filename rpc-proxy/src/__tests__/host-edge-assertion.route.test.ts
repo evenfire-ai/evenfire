@@ -711,6 +711,7 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
       authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
       controlApiHostAccessAnswer = firstResolveThen(() => jsonResponse(401, { error: 'expired' }))
       hostAnswer = hostDownThen(() => jsonResponse(200, {}))
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
       const res = await send(row)
 
@@ -719,6 +720,16 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
       expect(hostAccessCalls()).toHaveLength(2)
       expect(res.status).toBe(401)
       expect(res.body).toEqual({ error: 'Unauthorized' })
+      // The log names the control-api re-check, not the Host.
+      const retryLines = warn.mock.calls
+        .map(args => String(args[0]))
+        .filter(line => line.includes('[RPC_PROXY] wake-hold'))
+      expect(retryLines).toEqual([
+        expect.stringContaining(
+          '[RPC_PROXY] wake-hold authority re-check retry failed host=chatllm error=ControlApiHostAccessRejectedError'
+        ),
+      ])
+      warn.mockRestore()
     }
   )
 

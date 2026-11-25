@@ -842,6 +842,9 @@ export async function respondWithWakeAndHold(
     case 'proceed': {
       let availabilityFailures = 0
       let attempts = 0
+      // Which step of the retry threw: the control-api authority re-check before
+      // the forward, or the forward to the Host itself.
+      let retryStage: 'authority re-check' | 'upstream' = 'authority re-check'
       const maxAttempts = options.retryUntilDeadline ? Infinity : 1
       const minAttemptTimeoutMs = Math.min(MIN_ADMISSION_RETRY_TIMEOUT_MS, config.upstreamTimeoutMs)
       while (Date.now() < deadlineMs) {
@@ -858,6 +861,7 @@ export async function respondWithWakeAndHold(
           const remainingMs = deadlineMs - Date.now()
           if (remainingMs < minAttemptTimeoutMs) break
           attempts++
+          retryStage = 'authority re-check'
           if (options.reauthorizeV2) {
             await options.reauthorizeV2()
           } else if (options.refreshV1Host) {
@@ -867,6 +871,7 @@ export async function respondWithWakeAndHold(
               return
             }
           }
+          retryStage = 'upstream'
           await options.attemptUpstream(Math.min(config.upstreamTimeoutMs, remainingMs), deadlineMs)
           return
         } catch (error) {
@@ -907,9 +912,10 @@ export async function respondWithWakeAndHold(
             return
           }
           // The host answered with a non-availability failure — exactly
-          // today's behavior for an up-but-erroring host.
+          // today's behavior for an up-but-erroring host — or the authority
+          // re-check before the forward failed (for example a control-api 401).
           console.warn(
-            `[RPC_PROXY] wake-hold upstream retry failed host=${safeHostRef} error=${describeErrorForLog(
+            `[RPC_PROXY] wake-hold ${retryStage} retry failed host=${safeHostRef} error=${describeErrorForLog(
               error
             )}`
           )
