@@ -258,6 +258,7 @@ describe('Control API OIDC member sign-in completion', () => {
     'not_eligible',
     'no_account',
     'provider_configuration',
+    'invitation_email_mismatch',
   ] as const
 
   function appWithMemberSignIn(signInMember: (...args: never[]) => unknown, memberSignIn = true) {
@@ -387,6 +388,8 @@ describe('Control API OIDC member sign-in completion', () => {
         reason,
       })
       expect(signInMember).toHaveBeenCalledTimes(1)
+      // At info, with the reason alone: no cause, no address, no token.
+      expect(flowLog.info).toHaveBeenCalledTimes(1)
       expect(loggedEvents()).toEqual([
         {
           event: 'oidc_member_refused',
