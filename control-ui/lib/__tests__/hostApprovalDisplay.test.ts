@@ -107,6 +107,29 @@ describe('approval tab display state', () => {
     expect(tab.snapshot()).toEqual(v4)
   })
 
+  it('isNewestLoad answers whether a token is still the newest load of its state', () => {
+    // Task 21a shows a failed load's error, and releases Save, only for the
+    // newest load (spec C10, A4 L2).
+    const tab = createApprovalTabState('foo')
+    const first = tab.startLoad()
+    expect(tab.isNewestLoad(first)).toBe(true)
+
+    const second = tab.startLoad()
+    expect(tab.isNewestLoad(first)).toBe(false)
+    expect(tab.isNewestLoad(second)).toBe(true)
+
+    // A load another state starts changes neither answer.
+    const other = createApprovalTabState('foo')
+    const elsewhere = other.startLoad()
+    expect(tab.isNewestLoad(second)).toBe(true)
+    expect(tab.isNewestLoad(elsewhere)).toBe(false)
+    expect(other.isNewestLoad(elsewhere)).toBe(true)
+
+    // Landing does not end it: a load stays the newest until another starts.
+    expect(tab.applyLoad(second, host('foo', 'rv-1', { modeCeiling: 'auto' }))).toBe(true)
+    expect(tab.isNewestLoad(second)).toBe(true)
+  })
+
   it('a load token from another tab state is refused', () => {
     // Task 21a may make a new state when a kept instance comes back to an
     // agent; a load of the old state must not count as the new state's newest.

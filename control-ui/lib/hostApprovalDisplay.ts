@@ -40,6 +40,13 @@ export type ApprovalTabState = {
   /** Starts a load: it takes a new epoch, and every older load stops counting. */
   startLoad(): ApprovalLoadToken
   /**
+   * Whether `token` is still the newest load this state started. A load
+   * stays the newest after it lands, until another starts. The tab shows a
+   * failed load's error, and releases Save, only for the newest load (spec
+   * C10, A4 L2).
+   */
+  isNewestLoad(token: ApprovalLoadToken): boolean
+  /**
    * Applies a landed load. False, with nothing changed, when `token` is not
    * the newest load this state started or `data` is not this state's Host.
    */
@@ -53,9 +60,10 @@ export type ApprovalTabState = {
    */
   applyWrite(group: WriteGroup, stored: HostResource): boolean
   /**
-   * The composed Host: null until a load has applied. The same object until
-   * the next applied load or write, so it can be a React external-store
-   * snapshot. Read-only.
+   * The composed Host: null until a load has applied. Each applied load or
+   * write replaces it with a new object, and nothing else changes it. The
+   * state tells no one of a change: the caller reads it again after an
+   * `applyLoad` or `applyWrite` that returned true. Read-only.
    */
   snapshot(): HostResource | null
 }
@@ -188,14 +196,19 @@ export function createApprovalTabState(host: string): ApprovalTabState {
     composed = next
   }
 
+  function isNewestLoad(token: ApprovalLoadToken): boolean {
+    return token.epoch === newestEpoch
+  }
+
   return {
     startLoad() {
       lastEpoch += 1
       newestEpoch = lastEpoch
       return { epoch: newestEpoch, seqAtStart: seq }
     },
+    isNewestLoad,
     applyLoad(token, data) {
-      if (token.epoch !== newestEpoch || !isHost(data, host)) return false
+      if (!isNewestLoad(token) || !isHost(data, host)) return false
       shown = { data: structuredClone(data), seqAtStart: token.seqAtStart }
       compose()
       return true
