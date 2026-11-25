@@ -489,6 +489,7 @@ function AddCustomTool({ customNames, disabled, onAdd }: AddCustomToolProps) {
   const [rowState, setRowState] = useState<'required' | 'skip'>('required')
   const contentId = useId()
   const inputId = useId()
+  const hintId = useId()
   const errorId = useId()
   const error = validateCustomName(name, customNames)
 
@@ -515,14 +516,15 @@ function AddCustomTool({ customNames, disabled, onAdd }: AddCustomToolProps) {
       {open ? (
         <div className="cu-host-approval-section__add-form" id={contentId}>
           <Field
-            description={CUSTOM_TOOL_HINT}
+            // Field gives its hint no id; this one names the hint for the input.
+            description={<span id={hintId}>{CUSTOM_TOOL_HINT}</span>}
             error={error}
             errorId={errorId}
             htmlFor={inputId}
             label="Tool name"
           >
             <TextInput
-              aria-describedby={error ? errorId : undefined}
+              aria-describedby={error ? `${hintId} ${errorId}` : hintId}
               aria-invalid={error ? true : undefined}
               disabled={disabled}
               id={inputId}

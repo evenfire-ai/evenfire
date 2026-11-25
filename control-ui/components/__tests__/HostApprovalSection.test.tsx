@@ -60,6 +60,7 @@ import { createFakeControlApi } from '../../test/fixtures/fakeControlApi'
 import { HostApprovalSection } from '../HostApprovalSection'
 import {
   CLUSTER_DEFAULT_TEXT,
+  CUSTOM_TOOL_HINT,
   NATIVE_TOOLS,
   NO_OVERRIDES_TEXT,
   TOOL_PARITY_EXCLUSIONS,
@@ -435,6 +436,23 @@ describe('HostApprovalSection — edit view', () => {
     expect(add).toBeEnabled()
     fireEvent.click(add)
     expect(shownOverrides()).toEqual({ custom_lookup: 'Skip', custom_memory_lookup: 'Required' })
+  })
+
+  it('describes the custom tool name with its hint, and with its error while one shows (ruling 41, item 3)', () => {
+    renderSection(createSectionFake({ tools: {} }))
+    clickEdit()
+    fireEvent.click(sectionButton('Add a tool by name'))
+    const input = within(section()).getByLabelText('Tool name')
+
+    expect(input, 'no error yet').toHaveAccessibleDescription(CUSTOM_TOOL_HINT)
+
+    fireEvent.change(input, { target: { value: 'BadName' } })
+    expect(input, 'with an error').toHaveAccessibleDescription(
+      `${CUSTOM_TOOL_HINT} Use lower snake_case (start with a letter; letters, digits, underscore).`
+    )
+
+    fireEvent.change(input, { target: { value: 'custom_memory_lookup' } })
+    expect(input, 'the error is gone').toHaveAccessibleDescription(CUSTOM_TOOL_HINT)
   })
 
   it('Review Focus 3: renders and removes a stored off-pattern tool key', async () => {
