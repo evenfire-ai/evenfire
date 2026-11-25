@@ -492,7 +492,7 @@ describe('HostDetailsPage identity integration', () => {
 
   it('keeps Per-tool approval actions in the top toolbar without a duplicate title', async () => {
     mockParams = { name: 'foo', tab: 'approval-settings' }
-    const { container } = render(<HostDetailsPage />)
+    render(<HostDetailsPage />)
 
     // The section opens in its read view; Edit opens the editor.
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
@@ -500,7 +500,13 @@ describe('HostDetailsPage identity integration', () => {
     expect(
       screen.getByRole('button', { name: 'Save' }).closest('.cu-host-approval-section__actions')
     ).not.toBeNull()
-    expect(container.querySelector('.cu-host-approval-section .cu-section-title')).toBeNull()
+    // Ruling 41, item 8: one title for the per-tool section on the page, its own heading.
+    const titles = screen.getAllByRole('heading', { name: /per-tool/i })
+    expect(
+      titles.map(title => title.textContent),
+      'one per-tool title'
+    ).toEqual(['Per-tool overrides'])
+    expect(titles[0].closest('.cu-host-approval-section'), "the section's own").not.toBeNull()
   })
 
   it('shows the agent description in place of the identifier and truncates long copy', async () => {
