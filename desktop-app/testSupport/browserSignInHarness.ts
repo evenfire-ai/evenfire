@@ -9,6 +9,7 @@ import type { AppService } from '../src/appService.js'
 import type { TokenStore } from '../src/tokenStore.js'
 import type { SessionMe } from '../src/types.js'
 import { testSessionMe, testTeamSwitchResult } from './authTestFixtures.js'
+import { type EdgeRecordKey, readEdgeRecord } from './edgeContractRecords.js'
 
 /**
  * The real `AppService` for the browser sign-in model (state model §7.3): a temp `userData`
@@ -142,9 +143,6 @@ const DISCOVERED_RPC_BASE_URL = 'https://rpc-discovered.example.test'
 const DISCOVERED_APP_NAME = 'Evenfire'
 const SETUP_REST_BASE_URL = 'https://api-setup.example.test'
 
-const EDGE_RECORDS_PATH = fileURLToPath(
-  new URL('../../external-rest-api/test/fixtures/oidc-desktop-sign-in/edge.json', import.meta.url)
-)
 const LEGACY_PROFILES_PATH = fileURLToPath(
   new URL('./fixtures/legacy-duplicate-profiles/runtime-configs', import.meta.url)
 )
@@ -191,16 +189,12 @@ type ActiveHarness = {
 const activeHarnesses: ActiveHarness[] = []
 
 /**
- * Task 2's `testSupport/edgeContractRecords.ts` reader will own every read of PR 1's edge
- * records. Until then the harness reads the two values it needs here, so it never types a
- * recorded value by hand.
+ * A recorded body, read through `edgeContractRecords.ts`, which owns every read of PR 1's edge
+ * records. The harness reads the two values it needs from it, so it never types a recorded
+ * value by hand.
  */
-async function readEdgeRecordBody(key: string): Promise<Record<string, unknown>> {
-  const records = JSON.parse(await fs.readFile(EDGE_RECORDS_PATH, 'utf8')) as Record<
-    string,
-    { body?: unknown }
-  >
-  const body = records[key]?.body
+function edgeRecordBody(key: EdgeRecordKey): Record<string, unknown> {
+  const { body } = readEdgeRecord(key)
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     throw new Error(`edge.json has no body for the record "${key}"`)
   }
@@ -263,10 +257,8 @@ export async function createBrowserSignInHarness(
   options: BrowserSignInHarnessOptions = {}
 ): Promise<BrowserSignInHarness> {
   const scheduler = options.scheduler
-  const [codeIssued, signedIn] = await Promise.all([
-    readEdgeRecordBody('POST /api/v1/oidc/profile-flow/complete desktop-code-issued'),
-    readEdgeRecordBody('POST /api/v1/oidc/desktop-sign-in/redeem signed-in'),
-  ])
+  const codeIssued = edgeRecordBody('POST /api/v1/oidc/profile-flow/complete desktop-code-issued')
+  const signedIn = edgeRecordBody('POST /api/v1/oidc/desktop-sign-in/redeem signed-in')
   const restA = requireString(codeIssued.environment, 'desktop-code-issued body.environment')
   const redeemUserId = requireString(
     (signedIn.me as { id?: unknown } | undefined)?.id,
