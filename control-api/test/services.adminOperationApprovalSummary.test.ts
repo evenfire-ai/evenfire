@@ -328,6 +328,19 @@ describe('the administrative trace read profile', () => {
     ).toEqual({ resource_class: 'Host', status: 'attempted' })
   })
 
+  it('discloses a summary whose tool name holds a DEL character, and it parses back to the name', () => {
+    const name = `tool${String.fromCharCode(127)}name`
+    const summary = serializeApprovalChangeSummary(
+      change({ tools: { [name]: { old: null, new: true } } })
+    )
+    expect(summary).not.toContain(String.fromCharCode(127))
+    expect(projectTraceSafeFields({ status: 'attempted', summary }, 'administrative')).toEqual({
+      status: 'attempted',
+      summary,
+    })
+    expect(Object.keys((JSON.parse(summary) as HostApprovalChange).tools)).toEqual([name])
+  })
+
   it('drops a summary that is not a string of at most the cap', () => {
     const tooLong = 'x'.repeat(MAX_APPROVAL_CHANGE_SUMMARY_LENGTH + 1)
     expect(
@@ -342,6 +355,10 @@ describe('the administrative trace read profile', () => {
 
   it('does not widen any other profile', () => {
     for (const profile of ['infrastructure', 'session'] as const) {
+      // Positive partner: the profile still returns its allowed keys for the same event.
+      expect(projectTraceSafeFields({ status: 'ok', summary: '{}' }, profile)).toEqual({
+        status: 'ok',
+      })
       expect(projectTraceSafeFields({ status: 'ok', summary: '{}' }, profile)).not.toHaveProperty(
         'summary'
       )

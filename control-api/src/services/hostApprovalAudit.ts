@@ -172,6 +172,15 @@ export function buildHostApprovalChange(input: {
 export const MAX_APPROVAL_CHANGE_SUMMARY_LENGTH = 4096
 
 /**
+ * JSON text with U+007F escaped. `JSON.stringify` leaves DEL raw (it escapes
+ * only U+0000 to U+001F), and the trace read drops a summary that holds a
+ * control character, so a valid summary would vanish from the detail read.
+ */
+function encode(value: unknown): string {
+  return JSON.stringify(value).replaceAll(String.fromCharCode(127), '\\u007f')
+}
+
+/**
  * The change as the JSON text kept on the administrative intent event
  * (`summary`, spec §6.8). The text is always valid JSON of at most
  * `MAX_APPROVAL_CHANGE_SUMMARY_LENGTH` characters, never a JSON string cut
@@ -187,7 +196,7 @@ export const MAX_APPROVAL_CHANGE_SUMMARY_LENGTH = 4096
 export function serializeApprovalChangeSummary(change: HostApprovalChange): string {
   const toolKeys = Object.keys(change.tools)
   for (let kept = toolKeys.length; kept >= 0; kept -= 1) {
-    const text = JSON.stringify({
+    const text = encode({
       ...change,
       tools: Object.fromEntries(toolKeys.slice(0, kept).map(key => [key, change.tools[key]])),
       toolsTruncated: change.toolsTruncated + (toolKeys.length - kept),
@@ -195,7 +204,7 @@ export function serializeApprovalChangeSummary(change: HostApprovalChange): stri
     if (text.length <= MAX_APPROVAL_CHANGE_SUMMARY_LENGTH) return text
   }
   const counts = Object.values(change.approvers)
-  return JSON.stringify({
+  return encode({
     truncated: true,
     fieldCount: Object.keys(change.fields).length,
     toolCount: toolKeys.length + change.toolsTruncated,
