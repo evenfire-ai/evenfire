@@ -146,6 +146,24 @@ describe('a failed /detail read on the Approvals tab (Ruling 44(c))', () => {
     page.unmount()
   })
 
+  it('does not retry the page’s read when only the tab’s read failed (M2, ruling 59c)', async () => {
+    const fake = createFake()
+    failRead(fake, TAB_READ)
+    const page = await openApprovals(fake)
+    expect(tabLoadBanner(), 'the tab’s banner before Retry').not.toBeNull()
+    fireEvent.click(within(tabLoadBanner()!).getByRole('button', { name: 'Retry' }))
+    await settle()
+
+    // One read for the tab's retry and none for the page: it had not failed.
+    expect(
+      reads(fake, FOO_DETAIL).map(entry => entry.response?.status),
+      '/detail answers'
+    ).toEqual([200, 500, 200, 200])
+    expect(tabLoadBanner(), 'the tab’s banner after Retry').toBeNull()
+    expect(errorBanners(), 'error banners').toHaveLength(0)
+    page.unmount()
+  })
+
   it('still shows the error when only the page’s own read fails', async () => {
     const fake = createFake()
     failRead(fake, PAGE_READ)
