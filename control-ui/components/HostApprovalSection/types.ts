@@ -22,7 +22,11 @@ export interface HostApprovalSectionProps {
    * The Host the tab shows for `host`, or null while it has none: the
    * Approvals tab renders the section only once it has shown an agent, and
    * passes null while a kept page moves to another agent, until that agent's
-   * first load. The section takes it as described in `useApprovalToolsSection`.
+   * first load. If that first load fails, the tab drops the section (no
+   * section after a failed first load, C13) and shows a new one later. A save
+   * the dropped section was running still reports through `onSettled`, and
+   * the tab then sends its outcome to the root toast, naming the agent. The
+   * section takes `stored` as described in `useApprovalToolsSection`.
    */
   stored: HostResource | null
   /** Whether that Host has no `spec.approval` of its own: a save is a first save. */
