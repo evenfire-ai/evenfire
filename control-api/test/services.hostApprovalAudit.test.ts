@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   MAX_TOOL_KEYS,
+  MAX_TOOL_NAME_LENGTH,
   MAX_VALUE_LENGTH,
   buildHostApprovalChange,
 } from '../src/services/hostApprovalAudit.js'
@@ -79,5 +80,16 @@ describe('buildHostApprovalChange', () => {
     expect(typeof extra).toBe('string')
     expect((extra as string).length).toBe(MAX_VALUE_LENGTH)
     expect((extra as string).startsWith('["xxx')).toBe(true)
+  })
+
+  it('cuts a tool name to 64 characters', () => {
+    const longName = 't'.repeat(200)
+    const change = buildHostApprovalChange({
+      before: block({ tools: {} }),
+      after: block({ tools: { [longName]: false } }),
+    })
+    expect(MAX_TOOL_NAME_LENGTH).toBe(64)
+    expect(Object.keys(change?.tools ?? {})).toEqual(['t'.repeat(64)])
+    expect(change?.tools['t'.repeat(64)]).toEqual({ old: null, new: false })
   })
 })

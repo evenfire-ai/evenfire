@@ -13,6 +13,8 @@ import { approvalBlocksEqual } from './hostApprovalRules.js'
 
 /** A per-tool override map may be large; the line lists at most this many changed tools. */
 export const MAX_TOOL_KEYS = 50
+/** Tool names (the keys of `tools`) are cut to this many characters. */
+export const MAX_TOOL_NAME_LENGTH = 64
 /** Other strings (values and field keys) are cut to this many characters. */
 export const MAX_VALUE_LENGTH = 128
 
@@ -119,7 +121,7 @@ export function buildHostApprovalChange(input: {
       toolsTruncated += 1
       continue
     }
-    tools[cut(key)] = { old: oldValue, new: newValue }
+    tools[key.slice(0, MAX_TOOL_NAME_LENGTH)] = { old: oldValue, new: newValue }
   }
 
   const approvers: HostApprovalChange['approvers'] = {}
