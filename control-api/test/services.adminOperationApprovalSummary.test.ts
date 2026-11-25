@@ -268,6 +268,39 @@ describe('the intent event of a Host request', () => {
     expect(Object.keys(parsed.fields)).toEqual(['modeCeiling'])
   })
 
+  it('an empty approval block that appears is logged and summarized, and one that goes is too', async () => {
+    const info = vi.fn()
+    vi.spyOn(rootLogger, 'child').mockReturnValue({ info } as never)
+    const created = await request(harness!.app)
+      .post(HOSTS_PATH)
+      .send({
+        metadata: { name: 'bar' },
+        spec: { ...(SEED.spec as Record<string, unknown>), host: 'bar', approval: {} },
+      })
+    expect(created.status).toBe(201)
+    const create = intents().find(call => call.input.action === 'create')
+    expect(JSON.parse(create!.input.summary!)).toMatchObject({
+      fields: {},
+      inheritedBefore: true,
+      blockRemoved: false,
+    })
+    expect(info).toHaveBeenCalledTimes(1)
+    expect((info.mock.calls[0][0] as Record<string, unknown>).inheritedBefore).toBe(true)
+
+    // The seeded Host has a block; a PUT without one removes it.
+    info.mockClear()
+    const { spec, resourceVersion } = await readHost()
+    const { approval: _removed, ...withoutApproval } = spec
+    void _removed
+    const removed = await request(harness!.app)
+      .put(HOST_PATH)
+      .send({ metadata: { resourceVersion }, spec: withoutApproval })
+    expect(removed.status).toBe(200)
+    const update = intents().find(call => call.input.action === 'update')
+    expect(JSON.parse(update!.input.summary!)).toMatchObject({ blockRemoved: true })
+    expect(info).toHaveBeenCalledTimes(1)
+  })
+
   it('no summary when approval is unchanged', async () => {
     // The apiserver prunes and defaults the approval block on every write; one
     // write first settles the stored block.

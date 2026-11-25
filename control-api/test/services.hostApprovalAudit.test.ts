@@ -102,12 +102,44 @@ describe('buildHostApprovalChange', () => {
     expect(JSON.stringify(change)).not.toMatch(/seeded-/)
   })
 
+  it('reports a block that appears: absent to {} and null to {}', () => {
+    for (const before of [undefined, null]) {
+      expect(buildHostApprovalChange({ before, after: block({}) })).toEqual({
+        fields: {},
+        tools: {},
+        toolsTruncated: 0,
+        approvers: {},
+        blockRemoved: false,
+        inheritedBefore: true,
+      })
+    }
+  })
+
+  it('reports a block that disappears: {} to absent', () => {
+    for (const after of [undefined, null]) {
+      expect(buildHostApprovalChange({ before: block({}), after })).toEqual({
+        fields: {},
+        tools: {},
+        toolsTruncated: 0,
+        approvers: {},
+        blockRemoved: true,
+        inheritedBefore: false,
+      })
+    }
+  })
+
   it('is null when only keys outside the audited leaves differ', () => {
     expect(
       buildHostApprovalChange({
         before: block({ modeCeiling: 'manual' }),
         after: block({ modeCeiling: 'manual', approverIds: ['seeded-one@example.invalid'] }),
       })
+    ).toBeNull()
+  })
+
+  it('is null for {} to {} with only a non-schema key differing', () => {
+    expect(
+      buildHostApprovalChange({ before: block({}), after: block({ approverIds: ['seeded-x'] }) })
     ).toBeNull()
   })
 

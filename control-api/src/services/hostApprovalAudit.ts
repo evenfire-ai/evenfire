@@ -107,11 +107,13 @@ function countDifference(from: unknown[], to: unknown[]): number {
  * the caller logs.
  */
 export function buildHostApprovalChange(input: {
-  before: Record<string, unknown> | undefined
-  after: Record<string, unknown> | undefined
+  before: Record<string, unknown> | null | undefined
+  after: Record<string, unknown> | null | undefined
 }): HostApprovalChange | null {
-  const beforeApproval = input.before
-  const afterApproval = input.after
+  // `null` counts as absent, as mcp-host's effective approval
+  // (`host.spec.approval || cluster default`) does.
+  const beforeApproval = input.before ?? undefined
+  const afterApproval = input.after ?? undefined
   if (approvalBlocksEqual(beforeApproval, afterApproval)) return null
 
   const before = flatten(beforeApproval)
@@ -147,9 +149,12 @@ export function buildHostApprovalChange(input: {
     if (added > 0 || removed > 0) approvers[cut(key)] = { added, removed }
   }
 
-  // Only keys outside the audited leaves differed (or the block gained or lost
-  // nothing audited): nothing to report.
+  // Nothing to report when the block is present on both sides or absent on
+  // both and only keys outside the audited leaves differ. A block that appears
+  // or disappears is always reported, even an empty one: `{}` is truthy, so it
+  // replaces the cluster default (and removing it restores that default).
   if (
+    (beforeApproval === undefined) === (afterApproval === undefined) &&
     Object.keys(fields).length === 0 &&
     Object.keys(tools).length === 0 &&
     toolsTruncated === 0 &&
