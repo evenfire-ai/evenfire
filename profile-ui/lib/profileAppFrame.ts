@@ -1,7 +1,8 @@
 /**
- * Pages that render without a session. The OIDC pages are public because a signed-out
- * browser lands on them: the result page explains a refusal, and the signed-in page must
- * release a stale logout fence before the session is read again.
+ * Pages the frame renders without its session gate and shell. The OIDC pages are public
+ * because a signed-out browser lands on them: the result page explains a refusal, and the
+ * signed-in page must release a stale logout fence before the session is read again.
+ * /desktop-setup gates itself: its own AuthGate shows sign-in in place, without the shell.
  */
 const PUBLIC_PROFILE_UI_PREFIXES = [
   '/desktop-setup',
