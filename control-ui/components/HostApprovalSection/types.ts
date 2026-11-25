@@ -109,8 +109,12 @@ export type SectionMessage = Exclude<ToolsSaveOutcome, { kind: 'saved' } | { kin
 
 export interface ShownMessage {
   outcome: SectionMessage
-  /** For an error: the save Retry sends again, offered while its edit session is open. */
-  retry?: SaveRun
+  /**
+   * For an error raised in the edit session still open: offer Retry. Retry is
+   * Save: it saves the draft as it is when pressed, through the same dialogs,
+   * and is disabled whenever Save is.
+   */
+  retry?: boolean
 }
 
 export interface ReadViewProps {
@@ -148,8 +152,9 @@ export interface AddCustomToolProps {
 export interface OutcomeMessageProps {
   message: ShownMessage
   messageRef: RefObject<HTMLDivElement>
-  saving: boolean
-  onRetry: (run: SaveRun) => void
+  /** Retry is disabled whenever Save is. */
+  retryDisabled: boolean
+  onRetry: () => void
 }
 
 export interface FirstSaveDialogProps {

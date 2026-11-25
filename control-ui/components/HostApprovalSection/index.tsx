@@ -166,9 +166,9 @@ export function HostApprovalSection({
         }
         return
       case 'error':
-        // Nothing was written: Retry sends the same save again, while its
-        // edit session is the open one.
-        setMessage({ outcome, retry: sameSession ? run : undefined })
+        // Nothing was written. Retry, offered while this edit session is the
+        // open one, is Save: it saves the draft as it is when pressed.
+        setMessage({ outcome, retry: sameSession })
         return
       default:
         setMessage({ outcome })
@@ -225,7 +225,7 @@ export function HostApprovalSection({
   }
 
   function handleSave(): void {
-    if (savingRef.current || !state.editing || !isDirty) return
+    if (savingRef.current || !state.editing || !isDirty || loadPending) return
     // The callback of this render names this save's agent (types.ts).
     if (state.base.inherited) {
       setDialog({ kind: 'first_save', editSession: state.editSession, report: onSettled })
@@ -243,6 +243,8 @@ export function HostApprovalSection({
     setMessage(null)
     section.cancel()
   }
+
+  const saveDisabled = !state.editing || !isDirty || loadPending
 
   const dialogOpen =
     dialog !== null &&
@@ -269,8 +271,8 @@ export function HostApprovalSection({
         <OutcomeMessage
           message={message}
           messageRef={messageRef}
-          onRetry={run => void runSave(run)}
-          saving={saving}
+          retryDisabled={saving || saveDisabled}
+          onRetry={handleSave}
         />
       ) : null}
 
@@ -302,12 +304,7 @@ export function HostApprovalSection({
           <Button disabled={saving} size="sm" variant="ghost" onClick={handleCancel}>
             Cancel
           </Button>
-          <Button
-            disabled={!isDirty || loadPending}
-            loading={saving}
-            variant="primary"
-            onClick={handleSave}
-          >
+          <Button disabled={saveDisabled} loading={saving} variant="primary" onClick={handleSave}>
             Save
           </Button>
         </div>
@@ -551,7 +548,7 @@ function AddCustomTool({ customNames, disabled, onAdd }: AddCustomToolProps) {
   )
 }
 
-function OutcomeMessage({ message, messageRef, saving, onRetry }: OutcomeMessageProps) {
+function OutcomeMessage({ message, messageRef, retryDisabled, onRetry }: OutcomeMessageProps) {
   const { outcome, retry } = message
   let body: React.ReactNode
   switch (outcome.kind) {
@@ -592,7 +589,7 @@ function OutcomeMessage({ message, messageRef, saving, onRetry }: OutcomeMessage
         <>
           <p className="cu-host-approval-section__message-text">{outcome.message}</p>
           {retry ? (
-            <Button disabled={saving} size="sm" variant="ghost" onClick={() => onRetry(retry)}>
+            <Button disabled={retryDisabled} size="sm" variant="ghost" onClick={onRetry}>
               Retry
             </Button>
           ) : null}

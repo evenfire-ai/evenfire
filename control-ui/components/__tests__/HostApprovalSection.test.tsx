@@ -678,6 +678,41 @@ describe('HostApprovalSection — saving', () => {
     expect(sectionMessage()).toBeNull()
   })
 
+  it('Retry saves the draft as it is now, as Save does, and waits for the Save release', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true } })
+    const { onSettled, rerenderSection } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    const put = fake.hold({ method: 'PUT', path: FOO_PATH })
+    await clickSave()
+    await act(async () => {
+      await put.arrived
+    })
+    await act(async () => {
+      put.respondWith(HOST_PUT_403.status, HOST_PUT_403.body)
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+    const retry = () =>
+      within(sectionMessage()!).getByRole('button', { name: 'Retry' }) as HTMLButtonElement
+
+    // The rows are usable again after the error; the admin changes another one.
+    setRow('memory_write', 'required')
+    rerenderSection({ loadPending: true })
+    expect(retry(), 'Retry while the newest load is pending').toBeDisabled()
+    expect(sectionButton('Save'), 'Save while the newest load is pending').toBeDisabled()
+    rerenderSection({ loadPending: false })
+    expect(retry(), 'Retry once the load has settled').toBeEnabled()
+
+    await act(async () => {
+      fireEvent.click(retry())
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(2))
+    expect(onSettled.mock.calls[1][0]).toMatchObject({ kind: 'saved' })
+    expect(fake.stored('foo').spec.approval, 'both rows, not the draft of the first Save').toEqual({
+      tools: { json_transform: true, memory_write: true, system_info: true },
+    })
+  })
+
   it('a save that may not have applied closes its edit session and keeps the message', async () => {
     const fake = createSectionFake({ tools: { json_transform: true } })
     const { onSettled } = renderSection(fake)
