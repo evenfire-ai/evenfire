@@ -1157,16 +1157,16 @@ describe('Set to Manual now (spec §6.3)', () => {
     it('the fallback never puts a value that is not a Kubernetes name into the command', async () => {
       const fake = createFake({ modeCeiling: 'auto' })
       const outcome = await drive(setManualNow('a b', { namespace: 'ns;id' }))
+      const logged = fake.log.map(entry => [entry.kind, entry.response?.status])
 
       // The message the real client gives the same read.
       const oracle = await getHost('a b', { signal: new AbortController().signal }).then(
         () => 'no error',
         (error: unknown) => (error as Error).message
       )
+      expect(logged, "the switch's one read, and no PUT").toEqual([['read', 404]])
       expect(oracle).not.toBe('no error')
       expect(outcome).toEqual({ kind: 'failed', message: oracle, fallback: FALLBACK })
-      expect(fake.log.length, 'the switch did read').toBeGreaterThan(1)
-      expect(fake.log.every(entry => entry.kind === 'read')).toBe(true)
     })
   })
 })
