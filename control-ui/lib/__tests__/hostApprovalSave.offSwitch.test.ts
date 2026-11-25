@@ -471,6 +471,26 @@ describe('Set to Manual now (spec §6.3)', () => {
       expect(storedApproval(fake)).toEqual({ modeCeiling: 'manual' })
     })
 
+    it("R13s a PUT stored but answered by control-api's 500 is saved, not already", async () => {
+      const fake = createFake({ modeCeiling: 'auto' })
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      const switching = setManualNow('foo')
+      await put.arrived
+      // control-api stores the write, then answers 500: a failed commit after
+      // the replace (spec §3).
+      put.applyNow()
+      await vi.waitFor(() => expect(writes(fake)[0].applied).toBe(true))
+      put.respondWith(CONTROL_API_500.status, CONTROL_API_500.body)
+      const outcome = await drive(switching)
+
+      expect(outcome).toEqual({ kind: 'saved', stored: fake.stored('foo') })
+      expect(writes(fake).map(entry => [entry.applied, entry.response?.status])).toEqual([
+        [true, 500],
+      ])
+      expect(reads(fake), 'the fresh read and the read after the 500').toHaveLength(2)
+      expect(storedApproval(fake)).toEqual({ modeCeiling: 'manual' })
+    })
+
     it.each([
       ["the proxy's 502", PROXY_502],
       ["the proxy's 504", PROXY_504],
