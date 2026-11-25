@@ -1,0 +1,56 @@
+{
+  "_source": {
+    "recorded": "2026-11-25, with kubectl get -o json --show-managed-fields",
+    "object": "A synthetic Host applied with server-side apply (kubectl apply --server-side --field-manager=example-deployer, kubectl v1.37.0) to a disposable local cluster (Kubernetes v1.37.0) with only the Host CRD installed: charts/clerum-crds/crds/host.yaml (sha256 acae500f8731ee6a6fa1175e9955e8b1e22652437273255c663bade7d9d7371c).",
+    "signal": "A managedFields entry with operation Apply (manager example-deployer) owns f:spec.f:approval. There is no last-applied-configuration annotation.",
+    "synthetic": "Every value comes from a made-up manifest. After the read, metadata.uid was removed, and metadata.creationTimestamp, metadata.resourceVersion and the managedFields time were set to the fixed values the other manifest-signal fixtures use. Everything else is as the apiserver returned it: spec, the managedFields managers, operations, apiVersions, fieldsTypes and fieldsV1 paths, and (client-side apply only) the last-applied-configuration annotation, which kubectl wrote."
+  },
+  "apiVersion": "clerum.io/v1alpha1",
+  "kind": "Host",
+  "metadata": {
+    "creationTimestamp": "2026-01-01T00:00:00Z",
+    "generation": 1,
+    "managedFields": [
+      {
+        "apiVersion": "clerum.io/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:spec": {
+            "f:approval": {
+              "f:defaultPolicy": {},
+              "f:modeCeiling": {}
+            },
+            "f:channels": {},
+            "f:contextRef": {},
+            "f:host": {},
+            "f:model": {
+              "f:connectionRef": {},
+              "f:name": {},
+              "f:provider": {}
+            }
+          }
+        },
+        "manager": "example-deployer",
+        "operation": "Apply",
+        "time": "2026-01-01T00:00:00Z"
+      }
+    ],
+    "name": "server-side-applied-agent",
+    "namespace": "example-agents",
+    "resourceVersion": "1000"
+  },
+  "spec": {
+    "approval": {
+      "defaultPolicy": "channel_users",
+      "modeCeiling": "allow_all"
+    },
+    "channels": [],
+    "contextRef": "example-context",
+    "host": "Server Side Applied Agent",
+    "model": {
+      "connectionRef": "example-connection",
+      "name": "example-model",
+      "provider": "codex-subscription"
+    }
+  }
+}

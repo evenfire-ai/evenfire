@@ -1,0 +1,104 @@
+{
+  "_source": {
+    "recorded": "2026-11-25, read-only, with kubectl get -o json --show-managed-fields, from a live cluster",
+    "object": "A Host created and edited through the Control UI (control-api's agent PUT: the node-fetch Update entry that owns the whole spec, and control-api's clerum.io/administrative-intent-* annotations), then changed with kubectl patch, whose Update entry owns f:spec.f:approval.",
+    "signal": "None. There is no last-applied-configuration annotation and no Apply entry. Both managedFields entries are Update entries, which never count, although one of them owns f:spec.f:approval.",
+    "synthetic": "Scrubbed for the public repository. Synthetic: metadata.name, metadata.namespace, metadata.creationTimestamp, metadata.resourceVersion, metadata.generation, both clerum.io/administrative-intent-* annotation values, the managedFields times (their order kept), and every spec value outside spec.approval (host, contextRef, model.provider, model.name, model.connectionRef). Removed: metadata.uid (stricter than a synthetic value). As read: spec.approval (enum and boolean values only), spec.channels (empty), the annotation keys, and the managedFields managers, operations, apiVersions, fieldsTypes and fieldsV1 paths."
+  },
+  "apiVersion": "clerum.io/v1alpha1",
+  "kind": "Host",
+  "metadata": {
+    "annotations": {
+      "clerum.io/administrative-intent-generation": "2",
+      "clerum.io/administrative-intent-id": "00000000-0000-4000-8000-000000000000"
+    },
+    "creationTimestamp": "2026-01-01T00:00:00Z",
+    "generation": 3,
+    "managedFields": [
+      {
+        "apiVersion": "clerum.io/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:annotations": {
+              ".": {},
+              "f:clerum.io/administrative-intent-generation": {},
+              "f:clerum.io/administrative-intent-id": {}
+            }
+          },
+          "f:spec": {
+            ".": {},
+            "f:channels": {},
+            "f:contextRef": {},
+            "f:host": {},
+            "f:model": {
+              ".": {},
+              "f:connectionRef": {},
+              "f:name": {},
+              "f:provider": {}
+            }
+          }
+        },
+        "manager": "node-fetch",
+        "operation": "Update",
+        "time": "2026-01-01T00:00:00Z"
+      },
+      {
+        "apiVersion": "clerum.io/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:spec": {
+            "f:approval": {
+              ".": {},
+              "f:channels": {
+                ".": {},
+                "f:slack": {
+                  ".": {},
+                  "f:allowModeChange": {},
+                  "f:enabled": {}
+                },
+                "f:telegram": {
+                  ".": {},
+                  "f:allowModeChange": {},
+                  "f:enabled": {}
+                }
+              },
+              "f:defaultPolicy": {},
+              "f:modeCeiling": {}
+            }
+          }
+        },
+        "manager": "kubectl-patch",
+        "operation": "Update",
+        "time": "2026-01-01T00:01:00Z"
+      }
+    ],
+    "name": "control-ui-edited-agent",
+    "namespace": "example-agents",
+    "resourceVersion": "1000"
+  },
+  "spec": {
+    "approval": {
+      "channels": {
+        "slack": {
+          "allowModeChange": true,
+          "enabled": true
+        },
+        "telegram": {
+          "allowModeChange": true,
+          "enabled": true
+        }
+      },
+      "defaultPolicy": "channel_users",
+      "modeCeiling": "allow_all"
+    },
+    "channels": [],
+    "contextRef": "example-context",
+    "host": "Control UI Edited Agent",
+    "model": {
+      "connectionRef": "example-connection",
+      "name": "example-model",
+      "provider": "codex-subscription"
+    }
+  }
+}
