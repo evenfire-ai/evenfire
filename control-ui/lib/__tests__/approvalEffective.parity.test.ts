@@ -179,6 +179,12 @@ describe('effectiveApproval values', () => {
     expect(effectiveApproval({ shellClassifierModel: 'm1' }).shellClassifierModel).toBe('m1')
   })
 
+  it('tools omit non-boolean entries and keep true and false', () => {
+    const tools = effectiveApproval({ tools: { a: true, b: false, c: 'yes', d: null, e: 1 } }).tools
+    expect(tools).toEqual({ a: true, b: false })
+    expect(Object.keys(tools).sort()).toEqual(['a', 'b'])
+  })
+
   it('tools keep three values: absent is not collapsed to a default', () => {
     expect(effectiveApproval({ tools: { a: true, b: false } }).tools).toEqual({ a: true, b: false })
     expect('c' in effectiveApproval({ tools: { a: true } }).tools).toBe(false)
