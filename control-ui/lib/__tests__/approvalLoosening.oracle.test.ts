@@ -246,33 +246,72 @@ function sweep(): Outcome[] {
 }
 
 /**
- * The cases each named exception excuses: an item where the oracle shows no
- * loosening for that Host. Keyed by the exported ids. A test below fails when
- * the two lists differ.
+ * The function does not see `stateless` or `allowStatelessCron`, so it lists a
+ * change wherever some Host with the same ceiling loosens.
  */
-const EXCEPTION_SCOPE: Record<string, (c: Case) => boolean> = {
-  // custom_tool stands for a custom row. Removing a Required row and setting
-  // a row to Skip are items (spec §6.6); removing a Skip row is not. Ruling
-  // 32(c): removing a Required `__` row that does not resolve (server__tool,
-  // true → absent) is covered here too.
-  custom_row_unknown_default: c =>
-    (c.tool === CUSTOM_PROBE && (c.from === 'true' || c.to === 'false')) ||
-    (c.tool === MCP_PROBE && c.from === 'true' && c.to === 'absent'),
-  // The function does not see `stateless` or `allowStatelessCron`. So it lists
-  // a cron_manage change wherever some Host with the same ceiling loosens.
-  cron_manage_stateless_host: c =>
-    c.tool === 'cron_manage' &&
-    HOSTS.some(
-      other =>
-        other.ceiling === c.host.ceiling && oracleWitness(c.tool, c.from, c.to, other) !== null
-    ),
-  // server__tool stands for a `__` name that does not resolve to a native tool.
-  // Its override never takes effect.
-  unresolved_mcp_skip_row: c => c.tool === MCP_PROBE && c.to === 'false',
+function someHostWithTheCeilingLoosens(c: Case): boolean {
+  return HOSTS.some(
+    other => other.ceiling === c.host.ceiling && oracleWitness(c.tool, c.from, c.to, other) !== null
+  )
 }
 
+/**
+ * The cases each named exception excuses, clause by clause: an item where the
+ * oracle shows no loosening for that Host. A test below fails when the
+ * exceptions named here differ from the exported ones, or when a clause
+ * excuses no case.
+ */
+const EXCEPTION_CLAUSES: ReadonlyArray<{
+  exception: string
+  clause: string
+  inScope: (c: Case) => boolean
+}> = [
+  {
+    // custom_tool stands for a custom row with a plain name (spec §6.6).
+    exception: 'custom_row_unknown_default',
+    clause: 'a plain custom name: removing a Required row, or setting the row to Skip',
+    inScope: c => c.tool === CUSTOM_PROBE && (c.from === 'true' || c.to === 'false'),
+  },
+  {
+    // server__tool stands for a `__` name that does not resolve to a native tool.
+    exception: 'custom_row_unknown_default',
+    clause: 'Ruling 32(c): removing a Required `__` row that does not resolve',
+    inScope: c => c.tool === MCP_PROBE && c.from === 'true' && c.to === 'absent',
+  },
+  {
+    exception: 'cron_manage_stateless_host',
+    clause: 'cron_manage Required → Default, listed where its default asks',
+    inScope: c =>
+      c.tool === 'cron_manage' &&
+      c.from === 'true' &&
+      c.to === 'absent' &&
+      someHostWithTheCeilingLoosens(c),
+  },
+  {
+    exception: 'cron_manage_stateless_host',
+    clause: 'cron_manage Default → Skip, listed where its default never asks',
+    inScope: c =>
+      c.tool === 'cron_manage' &&
+      c.from === 'absent' &&
+      c.to === 'false' &&
+      someHostWithTheCeilingLoosens(c),
+  },
+  {
+    // The override of a `__` name that does not resolve never takes effect.
+    exception: 'unresolved_mcp_skip_row',
+    clause: 'a `__` row that does not resolve, set to Skip from Default',
+    inScope: c => c.tool === MCP_PROBE && c.from === 'absent' && c.to === 'false',
+  },
+  {
+    exception: 'unresolved_mcp_skip_row',
+    clause: 'a `__` row that does not resolve, set to Skip from Required',
+    inScope: c => c.tool === MCP_PROBE && c.from === 'true' && c.to === 'false',
+  },
+]
+
+/** The clauses that excuse this case. */
 function excusedBy(c: Case): string[] {
-  return Object.keys(EXCEPTION_SCOPE).filter(id => EXCEPTION_SCOPE[id](c))
+  return EXCEPTION_CLAUSES.filter(entry => entry.inScope(c)).map(entry => entry.clause)
 }
 
 function describeCase(c: Case): string {
@@ -336,18 +375,20 @@ describe('looseningItems against the oracle, single path', () => {
     expect(unexplained).toEqual([])
   })
 
-  it('each named exception excuses at least one case and has a reason', () => {
-    expect(Object.keys(EXCEPTION_SCOPE).sort()).toEqual(
+  it('each clause of each named exception excuses at least one case, and each exception has a reason', () => {
+    expect([...new Set(EXCEPTION_CLAUSES.map(entry => entry.exception))].sort()).toEqual(
       TOOL_LOOSENING_EXCEPTIONS.map(exception => exception.id).sort()
     )
+    for (const exception of TOOL_LOOSENING_EXCEPTIONS) {
+      expect(exception.reason.trim().length, exception.id).toBeGreaterThan(0)
+    }
     const used = new Map<string, number>()
     for (const outcome of sweep()) {
       if (outcome.witness !== null || outcome.items.length === 0) continue
-      for (const id of excusedBy(outcome)) used.set(id, (used.get(id) ?? 0) + 1)
+      for (const clause of excusedBy(outcome)) used.set(clause, (used.get(clause) ?? 0) + 1)
     }
-    for (const exception of TOOL_LOOSENING_EXCEPTIONS) {
-      expect(exception.reason.trim().length, exception.id).toBeGreaterThan(0)
-      expect(used.get(exception.id) ?? 0, exception.id).toBeGreaterThan(0)
+    for (const entry of EXCEPTION_CLAUSES) {
+      expect(used.get(entry.clause) ?? 0, entry.clause).toBeGreaterThan(0)
     }
   })
 
@@ -440,6 +481,37 @@ describe('looseningItems, rule by rule', () => {
     expect(items('absent', 'false')).toEqual(custom)
     expect(items('true', 'absent')).toEqual(custom)
     expect(items('false', 'absent')).toEqual([])
+  })
+
+  it('pins all six changes of a plain custom name and of a `__` name that does not resolve', () => {
+    // Spec §6.6: adding a Skip custom row and removing a Required one both loosen.
+    const changes: ReadonlyArray<[Override, Override, boolean]> = [
+      ['absent', 'false', true], // adding a Skip row
+      ['true', 'absent', true], // removing a Required row
+      ['true', 'false', true], // Required → Skip
+      ['false', 'absent', false], // removing a Skip row
+      ['absent', 'true', false], // adding a Required row
+      ['false', 'true', false], // Skip → Required
+    ]
+    for (const name of ['my_tool', 'my_server__my_tool']) {
+      expect(
+        NATIVE_TOOLS.some(tool => tool.name === name),
+        name
+      ).toBe(false)
+      for (const [from, to, listed] of changes) {
+        for (const ceiling of CEILINGS) {
+          expect(
+            looseningItems({
+              before: block(name, from),
+              after: block(name, to),
+              ceiling,
+              firstSave: false,
+            }),
+            `${name} ${from} → ${to} (ceiling ${ceiling})`
+          ).toEqual(listed ? [{ path: `tools.${name}`, rule: 'custom_row_unknown_default' }] : [])
+        }
+      }
+    }
   })
 
   it('a value outside the schema counts as asking before the change and as not asking after it', () => {
