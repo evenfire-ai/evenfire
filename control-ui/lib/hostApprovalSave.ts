@@ -592,7 +592,10 @@ async function offSwitchAttempt(run: OffSwitchRun): Promise<OffSwitchOutcome | O
     const status = read.timedOut ? undefined : statusOf(read.error)
     const message = read.timedOut ? REQUEST_TIMED_OUT_MESSAGE : messageOf(read.error)
     // Step 6 (ruling 35): a 4xx other than 409 and 429 ends the run, as on the
-    // PUT. apiGet has already sent a 401 down the session path, once.
+    // PUT. apiGet has already sent a 401 down the session path, once. A session
+    // change during the read raises the same 401 error, without calling the
+    // session handler (api.ts, assertNetworkCurrent), so that run ends too,
+    // with "Session expired". That is intended (ruling 36).
     if (status !== undefined && status < 500 && status !== 409 && status !== 429) {
       return offSwitchFailed(run, message)
     }
