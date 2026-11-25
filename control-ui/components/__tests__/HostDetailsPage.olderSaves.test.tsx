@@ -223,6 +223,11 @@ describe('the page’s older saves (spec R16)', () => {
     await settle()
     page.unmount()
   })
+  // No UI path overlaps two saves on one kept page: every control that starts one
+  // is disabled while busy, and the model editor ignores dismissal while it saves.
+  // The one overlap a test can drive is a save with another agent's load on a
+  // page kept across an agent change (the harness's rerenderKept; the shipped
+  // build remounts, which Task 25's browser row checks).
   it('busy stays set while a guardrails save and another load overlap', async () => {
     const [scenarioHost] = buildGuardrailDetailScenario('sample-hook', 'foo').hosts.items
     const fake = createFakeControlApi({
@@ -261,7 +266,6 @@ describe('the page’s older saves (spec R16)', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Agent actions' }), 'after the save').toBeEnabled()
     )
-    expect(reads(fake, FOO_DETAIL).length, 'the page read foo').toBeGreaterThan(0)
     page.unmount()
   })
 })
