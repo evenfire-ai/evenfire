@@ -5705,10 +5705,6 @@ td.cu-registry-description {
   overflow-wrap: anywhere;
 }
 
-.cu-host-approvals-tab__switch-tool {
-  font-family: var(--cu-font-mono);
-}
-
 .cu-host-approvals-tab__switch-manifest {
   color: var(--cu-warning);
 }

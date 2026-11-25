@@ -3,8 +3,9 @@
 import React, { useSyncExternalStore } from 'react'
 import { Button } from '@components/ui'
 import { approvalBlockOf, effectiveApproval } from '@lib/approvalEffective'
-import { neverAskTools, skipOverrides } from '@lib/approvalToolCatalog'
+import { skipOverrides } from '@lib/approvalToolCatalog'
 import { isSettingManual, subscribeSettingManual } from '@lib/hostApprovalSave'
+import { NeverAskList } from './ReadViews'
 import { manifestSignal, manifestWarningText } from './banners'
 import {
   ALREADY_MANUAL_TEXT,
@@ -16,7 +17,7 @@ import {
   HOW_TO_CHANGE_URL,
   KILL_SWITCH_HOW_TO_URL,
   MANUAL_SAVED_TEXT,
-  NEVER_ASK_TOOLS_TEXT,
+  NEVER_ASK_LISTED_BELOW_TEXT,
   NO_EFFECT_WHEN_OFF_TEXT,
   NO_SKIP_TEXT,
   OFF_SWITCH_FALLBACK_INTRO,
@@ -29,24 +30,6 @@ import {
 } from './constants'
 import type { OffSwitchProps, OffSwitchResultProps } from './types'
 
-/** Every tool chat registers that runs without a card (the producer fixture, spec §6.11). */
-const NEVER_ASK_TOOLS = neverAskTools()
-
-/** Step 7's never-ask list: each tool, with its conditions after it. */
-function NeverAskTools() {
-  return (
-    <>
-      {NEVER_ASK_TOOLS.map((tool, index) => (
-        <React.Fragment key={tool.name}>
-          {index > 0 ? ', ' : null}
-          <code className="cu-host-approvals-tab__switch-tool">{tool.name}</code>
-          {tool.conditions ? ` (${tool.conditions})` : null}
-        </React.Fragment>
-      ))}
-    </>
-  )
-}
-
 /**
  * What a run reports in the tab that ran it (spec §6.3 steps 6 and 7).
  *
@@ -58,8 +41,9 @@ function NeverAskTools() {
  * 47). The cluster-default clause shows only when that Host has no approval
  * settings of its own, as the clause says (Ruling 48(a)): the test the
  * protocol's `inherited` makes, which also covers a `saved` run whose last
- * read found the block gone. The never-ask list is the producer fixture's
- * (spec §6.11).
+ * read found the block gone. The never-ask list, the producer fixture's
+ * (spec §6.11), is "listed below" in the read view's disclosure, closed until
+ * opened (Ruling 48(b)).
  */
 function OffSwitchResult({ outcome }: OffSwitchResultProps) {
   if (outcome.kind === 'failed') {
@@ -91,10 +75,9 @@ function OffSwitchResult({ outcome }: OffSwitchResultProps) {
         <a className="cu-link" href={`#${PER_TOOL_SECTION_ID}`}>
           {SKIP_TOOLS_TEXT}
         </a>
-        {` (${skip}); ${NEVER_ASK_TOOLS_TEXT} (`}
-        <NeverAskTools />
-        {`); ${CHATS_ALREADY_GAVE_TEXT} ${NO_EFFECT_WHEN_OFF_TEXT}`}
+        {` (${skip}); ${NEVER_ASK_LISTED_BELOW_TEXT}; ${CHATS_ALREADY_GAVE_TEXT} ${NO_EFFECT_WHEN_OFF_TEXT}`}
       </p>
+      <NeverAskList />
       {manifest.managed ? (
         <p className="cu-host-approvals-tab__switch-manifest">
           {manifestWarningText(manifest.values)}

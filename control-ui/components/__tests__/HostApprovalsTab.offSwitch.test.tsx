@@ -95,10 +95,11 @@ const HOW_TO =
 const PER_TOOL_ANCHOR = 'approval-per-tool-overrides'
 
 /**
- * Spec §6.3 step 7, verbatim, around its three lists. The "It was already
- * Manual" clause shows only when no attempt of the run may have written. The
+ * Spec §6.3 step 7, verbatim, around its lists. The "It was already Manual"
+ * clause shows only when no attempt of the run may have written. The
  * cluster-default clause shows only for an agent with no approval settings of
- * its own (`inherited`), which it names itself (Ruling 48(a)).
+ * its own (`inherited`), which it names itself (Ruling 48(a)). The never-ask
+ * list is "listed below", in a disclosure as in the read view (Ruling 48(b)).
  */
 function manualMessage(parts: { already: boolean; skip: string; inherited?: boolean }): string {
   const clusterDefault = parts.inherited
@@ -107,16 +108,11 @@ function manualMessage(parts: { already: boolean; skip: string; inherited?: bool
   return (
     `Manual is saved.${parts.already ? ' It was already Manual.' : ''} Running chats apply it at their next tool call. ` +
     `Still running without a card: tools set to Skip (${parts.skip}${clusterDefault}); ` +
-    `tools that never ask (${NEVER_ASK}); ` +
+    'tools that never ask (listed below); ' +
     "approvals chats already gave: 'Always allow' for every tool except shell, in every chat; 'Always allow' for shell and approvals for the rest of a task on shell_exec and http_request, in chats that were already in Manual; cron_manage approvals, in every chat; and scheduled tasks (on stateless agents they still ask before creating or enabling another schedule). " +
     'This has no effect if your platform team turned approvals off for the cluster.'
   )
 }
-
-/** The never-ask list step 7 inserts: the producer fixture's tools (spec §6.11), each with its conditions. */
-const NEVER_ASK = neverAskTools()
-  .map(tool => (tool.conditions ? `${tool.name} (${tool.conditions})` : tool.name))
-  .join(', ')
 
 /** The Skip list of a Host with no Skip override (the read view's word for it). */
 const NO_SKIP = 'none'
@@ -454,6 +450,45 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       expect(
         within(result).getByRole('link', { name: 'Still running without a card' })
       ).toHaveAttribute('href', `${HOW_TO}#kill-switch`)
+      tab.unmount()
+    })
+
+    it('lists the tools that never ask in a disclosure below the message: its count, closed, then every tool with its conditions (Ruling 48(b))', async () => {
+      const fake = tabFake({ modeCeiling: 'auto' })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await approvalSettingsDriver()
+      await clickAndSettle()
+
+      // The producer fixture's list (spec §6.11), as in the read view (Ruling 44(d)).
+      const neverAsk = neverAskTools()
+      const result = offSwitchResult() as HTMLElement
+      const summary = within(result).getByText(`Tools that never ask (${neverAsk.length})`)
+      const details = summary.closest('details') as HTMLDetailsElement
+      expect(result, 'the disclosure is part of the result').toContainElement(details)
+      expect(resultParagraphs()[0], 'the message points at it').toContain(
+        'tools that never ask (listed below)'
+      )
+
+      // Closed by default: no tool shows.
+      expect(details.open).toBe(false)
+      const items = Array.from(details.querySelectorAll('li'))
+      expect(items, 'one row per tool').toHaveLength(neverAsk.length)
+      for (const item of items) expect(item).not.toBeVisible()
+
+      // Opened, it shows every tool, each with its conditions.
+      fireEvent.click(summary)
+      expect(details.open).toBe(true)
+      for (const item of items) expect(item).toBeVisible()
+      expect(items.map(item => item.querySelector('code')?.textContent)).toEqual(
+        neverAsk.map(tool => tool.name)
+      )
+      expect(items.map(item => item.textContent)).toEqual(
+        neverAsk.map(tool => `${tool.name}${tool.conditions ?? ''}`)
+      )
+      expect(
+        neverAsk.filter(tool => tool.conditions).length,
+        'tools whose rows carry conditions'
+      ).toBeGreaterThan(0)
       tab.unmount()
     })
 

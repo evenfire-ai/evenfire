@@ -181,7 +181,12 @@ export const STILL_RUNNING_TEXT = 'Still running without a card'
 export const SKIP_TOOLS_TEXT = 'tools set to Skip'
 /** Only for an agent with no approval settings of its own, which it names (Ruling 48(a)). */
 export const CLUSTER_DEFAULT_SKIP_CLAUSE = `on an agent without its own settings, also ${CLUSTER_DEFAULT_SKIP_TEXT}`
-export const NEVER_ASK_TOOLS_TEXT = 'tools that never ask'
+/**
+ * Step 7's never-ask list is "listed below", in the read view's disclosure
+ * (Ruling 48(b), as Ruling 44(d) for the Manual row): about 50 tools, each
+ * with its conditions, do not read well inline.
+ */
+export const NEVER_ASK_LISTED_BELOW_TEXT = 'tools that never ask (listed below)'
 export const CHATS_ALREADY_GAVE_TEXT =
   "approvals chats already gave: 'Always allow' for every tool except shell, in every chat; 'Always allow' for shell and approvals for the rest of a task on shell_exec and http_request, in chats that were already in Manual; cron_manage approvals, in every chat; and scheduled tasks (on stateless agents they still ask before creating or enabling another schedule)."
 export const NO_EFFECT_WHEN_OFF_TEXT =

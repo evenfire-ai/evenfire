@@ -71,7 +71,12 @@ function modeDescription(
   return manualDescription(skipOverrides(tools).join(', ') || NO_SKIP_TEXT)
 }
 
-function NeverAskList() {
+/**
+ * "Tools that never ask (N)": a disclosure, closed until opened, of every tool
+ * with its conditions (Ruling 44(d)). The Manual row shows it, and so does the
+ * off switch's result (Ruling 48(b)).
+ */
+export function NeverAskList() {
   return (
     <details className="cu-advanced-details cu-host-approvals-tab__never-ask">
       <summary>{neverAskSummary(NEVER_ASK_TOOLS.length)}</summary>
