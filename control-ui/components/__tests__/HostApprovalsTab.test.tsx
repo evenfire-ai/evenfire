@@ -73,6 +73,9 @@ const JUDGE_NOTE = 'Which model judges shell commands in Auto.'
 const CLUSTER_DEFAULT = 'Set by the cluster default (not shown here).'
 // Spec §6.4 step 13, verbatim.
 const MAYBE_MESSAGE = 'The save may not have applied. Reload to check.'
+// Spec §6.4 step 4, verbatim.
+const CHANGED_SINCE_OPENED =
+  'These settings changed since you opened them. Reload to see the latest.'
 
 // The success toast of a save, in the tab that ran it and as a continuation
 // (C18: only the continuation names the agent, so T7 tells them apart).
@@ -631,6 +634,63 @@ describe('HostApprovalsTab', () => {
       expect(tab.toasts('warning')).toEqual([`Per-tool overrides for agent foo: ${MAYBE_MESSAGE}`])
       expect(fooNotices, "foo's Host-changed notice").toHaveBeenCalledTimes(1)
       expect(approvalOf(fake.stored('foo')), 'the write landed').toEqual({ tools: SAVED_TOOLS })
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('a stop that wrote nothing still fires the Host-changed notice, in the tab (review R45(8))', async () => {
+      const fake = tabFake({ tools: { json_transform: true } })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      const driver = await approvalSettingsDriver()
+      await driver.edit()
+      fake.writeExternal('foo', spec => {
+        ;(spec.approval as Record<string, unknown>).tools = {
+          json_transform: true,
+          shell_exec: false,
+        }
+      })
+      await driver.editTool('system_info', 'required')
+      const fooNotices = vi.fn()
+      subscribeHostChanged('foo', fooNotices)
+
+      await driver.save()
+      await waitFor(() => expect(driver.message()).toBe(CHANGED_SINCE_OPENED))
+      expect(writes(fake), 'nothing written').toEqual([])
+      expect(fooNotices, "foo's Host-changed notice").toHaveBeenCalledTimes(1)
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('a stop that wrote nothing still fires the Host-changed notice, after the tab was left (review R45(8))', async () => {
+      const fake = tabFake({ tools: { json_transform: true } })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      const driver = await approvalSettingsDriver()
+      await driver.edit()
+      fake.writeExternal('foo', spec => {
+        ;(spec.approval as Record<string, unknown>).tools = {
+          json_transform: true,
+          shell_exec: false,
+        }
+      })
+      await driver.editTool('system_info', 'required')
+      const read = fake.hold({ method: 'GET', path: FOO })
+      await driver.save()
+      await act(async () => {
+        await read.arrived
+      })
+      const fooNotices = vi.fn()
+      subscribeHostChanged('foo', fooNotices)
+
+      tab.leave()
+      await act(async () => {
+        read.deliverNow()
+      })
+      await waitFor(() => expect(tab.toasts('error')).toHaveLength(1))
+      expect(tab.toasts('error')).toEqual([
+        `Per-tool overrides for agent foo were not saved. ${CHANGED_SINCE_OPENED}`,
+      ])
+      expect(writes(fake), 'nothing written').toEqual([])
+      expect(fooNotices, "foo's Host-changed notice").toHaveBeenCalledTimes(1)
       expect(unanswered(fake)).toEqual([])
       tab.unmount()
     })
