@@ -139,6 +139,14 @@ function subscriptionInventoryMessage(error: unknown, brand: string): string {
     : `Could not load ${brand} subscriptions`
 }
 
+// The older saves read the Host with this signal. It is never aborted: its only
+// job is to keep that read out of the shared in-flight GET map in lib/api, so it
+// cannot join a read of the Host whose spec is older than the version the save
+// sends (spec R16). Aborting it, on an agent change or on unmount, would drop a
+// save the admin pressed (the PUT would not be sent) and land an AbortError in
+// the error state of a page that is gone.
+const NEVER_ABORTED_SIGNAL = new AbortController().signal
+
 function AgentActionsMenu({ busy, onDelete }: { busy: boolean; onDelete: () => void }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -560,18 +568,10 @@ export default function HostDetailsPage() {
     setSectionActions(actions)
   }, [])
 
-  // Aborted when the page goes away. The older saves read the Host with this
-  // signal, which also keeps that read from joining another read of the Host in
-  // flight (lib/api): a joined read can carry a spec older than the version the
-  // save sends. An agent change does not abort it (spec R16).
-  const unmountAbortRef = useRef<AbortController | null>(null)
-
   useEffect(() => {
     mountedRef.current = true
-    unmountAbortRef.current = new AbortController()
     return () => {
       mountedRef.current = false
-      unmountAbortRef.current?.abort()
     }
   }, [])
 
@@ -970,7 +970,7 @@ export default function HostDetailsPage() {
     try {
       // Re-fetch to preserve fields that aren't editable in this form. K8s
       // replaceNamespacedCustomObject is a full replace, not a merge.
-      const currentHost = await getHost(routeName, { signal: unmountAbortRef.current?.signal })
+      const currentHost = await getHost(routeName, { signal: NEVER_ABORTED_SIGNAL })
       const currentWorkflowControl = currentHost.spec?.workflowControl
       // Overview owns only identity/shape fields (name, display, context,
       // channels). Model, secret, fallback policy and the per-host
@@ -1150,7 +1150,7 @@ export default function HostDetailsPage() {
     beginBusy()
     setError('')
     try {
-      const currentHost = await getHost(routeName, { signal: unmountAbortRef.current?.signal })
+      const currentHost = await getHost(routeName, { signal: NEVER_ABORTED_SIGNAL })
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
         model: {
@@ -1357,7 +1357,7 @@ export default function HostDetailsPage() {
       try {
         // An agent change does not abort this read: the PUT is still sent with
         // the version taken above and refused with 409 if the Host moved on.
-        const currentHost = await getHost(routeName, { signal: unmountAbortRef.current?.signal })
+        const currentHost = await getHost(routeName, { signal: NEVER_ABORTED_SIGNAL })
         const nextSpec = {
           ...currentHost.spec,
           guardrails: next,
