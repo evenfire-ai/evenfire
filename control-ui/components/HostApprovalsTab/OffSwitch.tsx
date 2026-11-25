@@ -55,7 +55,11 @@ function NeverAskTools() {
  * switch's own read or write (`outcome.stored`), never from the page: the Skip
  * overrides, with every stored key set to Skip whatever its name (spec §6.11),
  * and the manifest warning, worded as the manifest banner (spec §6.7, Ruling
- * 47). The never-ask list is the producer fixture's (spec §6.11).
+ * 47). The cluster-default clause shows only when that Host has no approval
+ * settings of its own, as the clause says (Ruling 48(a)): the test the
+ * protocol's `inherited` makes, which also covers a `saved` run whose last
+ * read found the block gone. The never-ask list is the producer fixture's
+ * (spec §6.11).
  */
 function OffSwitchResult({ outcome }: OffSwitchResultProps) {
   if (outcome.kind === 'failed') {
@@ -67,7 +71,9 @@ function OffSwitchResult({ outcome }: OffSwitchResultProps) {
       </div>
     )
   }
-  const skip = skipOverrides(effectiveApproval(approvalBlockOf(outcome.stored)).tools)
+  const block = approvalBlockOf(outcome.stored)
+  const listed = skipOverrides(effectiveApproval(block).tools).join(', ') || NO_SKIP_TEXT
+  const skip = block === undefined ? `${listed}; ${CLUSTER_DEFAULT_SKIP_CLAUSE}` : listed
   const manifest = manifestSignal(outcome.stored)
   const lead = [
     MANUAL_SAVED_TEXT,
@@ -85,7 +91,7 @@ function OffSwitchResult({ outcome }: OffSwitchResultProps) {
         <a className="cu-link" href={`#${PER_TOOL_SECTION_ID}`}>
           {SKIP_TOOLS_TEXT}
         </a>
-        {` (${skip.join(', ') || NO_SKIP_TEXT}; ${CLUSTER_DEFAULT_SKIP_CLAUSE}); ${NEVER_ASK_TOOLS_TEXT} (`}
+        {` (${skip}); ${NEVER_ASK_TOOLS_TEXT} (`}
         <NeverAskTools />
         {`); ${CHATS_ALREADY_GAVE_TEXT} ${NO_EFFECT_WHEN_OFF_TEXT}`}
       </p>

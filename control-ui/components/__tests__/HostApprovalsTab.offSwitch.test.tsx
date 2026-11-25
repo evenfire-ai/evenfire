@@ -96,12 +96,17 @@ const PER_TOOL_ANCHOR = 'approval-per-tool-overrides'
 
 /**
  * Spec §6.3 step 7, verbatim, around its three lists. The "It was already
- * Manual" clause shows only when no attempt of the run may have written.
+ * Manual" clause shows only when no attempt of the run may have written. The
+ * cluster-default clause shows only for an agent with no approval settings of
+ * its own (`inherited`), which it names itself (Ruling 48(a)).
  */
-function manualMessage(parts: { already: boolean; skip: string }): string {
+function manualMessage(parts: { already: boolean; skip: string; inherited?: boolean }): string {
+  const clusterDefault = parts.inherited
+    ? '; on an agent without its own settings, also any the cluster default sets to Skip, not shown here'
+    : ''
   return (
     `Manual is saved.${parts.already ? ' It was already Manual.' : ''} Running chats apply it at their next tool call. ` +
-    `Still running without a card: tools set to Skip (${parts.skip}; on an agent without its own settings, also any the cluster default sets to Skip, not shown here); ` +
+    `Still running without a card: tools set to Skip (${parts.skip}${clusterDefault}); ` +
     `tools that never ask (${NEVER_ASK}); ` +
     "approvals chats already gave: 'Always allow' for every tool except shell, in every chat; 'Always allow' for shell and approvals for the rest of a task on shell_exec and http_request, in chats that were already in Manual; cron_manage approvals, in every chat; and scheduled tasks (on stateless agents they still ask before creating or enabling another schedule). " +
     'This has no effect if your platform team turned approvals off for the cluster.'
@@ -458,10 +463,26 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       await approvalSettingsDriver()
       await clickAndSettle()
 
-      expect(resultParagraphs()).toEqual([manualMessage({ already: true, skip: NO_SKIP })])
+      expect(resultParagraphs()).toEqual([
+        manualMessage({ already: true, skip: NO_SKIP, inherited: true }),
+      ])
       expect(reads(fake), "the switch's own read").toHaveLength(1)
       expect(writes(fake), 'nothing written').toEqual([])
       expect(fake.stored('foo').spec, 'no block created').not.toHaveProperty('approval')
+      tab.unmount()
+    })
+
+    it('an agent with its own settings, even an empty block, gets the message without the cluster-default clause (Ruling 48(a))', async () => {
+      // `{}` is a block of the agent's own (Review Focus 1): mcp-host reads no
+      // cluster default for it.
+      const fake = tabFake({})
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await approvalSettingsDriver()
+      await clickAndSettle()
+
+      expect(resultParagraphs()).toEqual([manualMessage({ already: true, skip: NO_SKIP })])
+      expect(resultParagraphs()[0]).not.toContain('cluster default')
+      expect(writes(fake), 'nothing written').toEqual([])
       tab.unmount()
     })
 

@@ -179,6 +179,7 @@ export const ALREADY_MANUAL_TEXT = 'It was already Manual.'
 export const APPLIED_AT_NEXT_CALL_TEXT = 'Running chats apply it at their next tool call.'
 export const STILL_RUNNING_TEXT = 'Still running without a card'
 export const SKIP_TOOLS_TEXT = 'tools set to Skip'
+/** Only for an agent with no approval settings of its own, which it names (Ruling 48(a)). */
 export const CLUSTER_DEFAULT_SKIP_CLAUSE = `on an agent without its own settings, also ${CLUSTER_DEFAULT_SKIP_TEXT}`
 export const NEVER_ASK_TOOLS_TEXT = 'tools that never ask'
 export const CHATS_ALREADY_GAVE_TEXT =
