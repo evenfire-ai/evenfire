@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { HostApprovalSection } from '../HostApprovalSection'
-import { NATIVE_TOOLS } from '../HostApprovalSection/constants'
+import { NATIVE_TOOLS, TOOL_PARITY_EXCLUSIONS } from '../HostApprovalSection/constants'
 import { useApprovalToolsDraft } from '../HostApprovalSection/hooks'
 
 const controlUiCss = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
@@ -12,8 +12,17 @@ const controlUiCss = readFileSync(resolve(__dirname, '../../app/globals.css'), '
 describe('HostApprovalSection — constants', () => {
   it('lists every tool chat registers except the bridge, and not the retired workflow names', () => {
     const names = NATIVE_TOOLS.map(t => t.name)
-    // The complete list is pinned to the producer fixture by HostApprovalSection.toolParity.test.ts.
-    expect(names).toHaveLength(56)
+    const wire = JSON.parse(
+      readFileSync(
+        resolve(__dirname, '../../../mcp-host/test/fixtures/wire/mcp-host-tool-approval.json'),
+        'utf8'
+      )
+    ) as { tools: Record<string, unknown> }
+    const excluded = new Set(TOOL_PARITY_EXCLUSIONS.map(entry => entry.name))
+    const expected = Object.keys(wire.tools)
+      .filter(name => !excluded.has(name))
+      .sort()
+    expect(names).toEqual(expected)
     expect(names).toContain('shell_exec')
     expect(names).toContain('cron_manage')
     expect(names).toContain('workflow_trigger')

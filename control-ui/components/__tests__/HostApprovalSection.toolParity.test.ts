@@ -14,7 +14,7 @@ import { resolve } from 'node:path'
 import { NATIVE_TOOLS, TOOL_PARITY_EXCLUSIONS } from '../HostApprovalSection/constants'
 
 type ToolApprovalWire = {
-  contexts: unknown[]
+  contexts: Array<{ desktopTools: boolean }>
   tools: Record<string, Array<boolean | null>>
 }
 
@@ -90,6 +90,17 @@ describe('NATIVE_TOOLS matches the tools chat registers', () => {
       }
     }
     expect(mismatches).toEqual([])
+  })
+
+  it('desktopOnly rows are exactly the tools registered only where the Desktop tools are', () => {
+    const desktopOnlyInFixture = registered.filter(name => {
+      const where = WIRE.tools[name].flatMap((value, i) => (value === null ? [] : [i]))
+      return where.length > 0 && where.every(i => WIRE.contexts[i].desktopTools)
+    })
+    // Partner: the fixture does hold Desktop-only tools, so an empty match cannot pass.
+    expect(desktopOnlyInFixture.length).toBeGreaterThan(0)
+    const flagged = rows.filter(row => row.desktopOnly === true).map(row => row.name)
+    expect(flagged.sort()).toEqual(desktopOnlyInFixture)
   })
 
   it('the fixture records tools whose value varies across contexts', () => {
