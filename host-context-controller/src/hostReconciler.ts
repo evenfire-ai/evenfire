@@ -102,31 +102,126 @@ const HOST_PLURAL = 'hosts'
 export const RPC_PROXY_EDGE_PROTOCOL_LABEL = 'clerum.io/rpc-proxy-edge-protocol'
 export const RPC_PROXY_EDGE_PROTOCOL_V1 = 'signed-assertion-v1'
 
+const RPC_PROXY_DEPLOYMENT_NAME = 'rpc-proxy'
+const RPC_PROXY_POD_SELECTOR = 'app=rpc-proxy'
+const RPC_PROXY_COHORT_BLOCKER_POD_NAME_LIMIT = 10
+/** Role and RoleBinding that grant HCC the two cohort reads in the RPC Proxy namespace. */
+export const RPC_PROXY_RUNTIME_RBAC_NAME = 'host-context-controller-rpc-proxy-runtime'
+/** ServiceAccount the RPC Proxy runtime RoleBinding binds, as `namespace/name`. */
+export const RPC_PROXY_RUNTIME_RBAC_SUBJECT = 'control-plane/host-context-controller'
+/** Repository manifest that declares the RPC Proxy runtime Role and RoleBinding. */
+export const RPC_PROXY_RUNTIME_RBAC_MANIFEST = 'deploy/base/rpc-proxy/rbac.yaml'
+
 /**
- * True when no RPC Proxy pod can still serve without the edge assertion: the
- * Deployment's current generation is observed, its template carries the
- * protocol label, and every pod that is not terminal (Succeeded or Failed)
- * carries it too. Terminating pods count, because they can serve during their
- * grace period. Replica counts and readiness are deliberately not read: a surge
- * rollout of a labelled release, an eviction or a failed pod must not block
- * Host Deployment writes.
+ * Every reason the RPC Proxy cohort can still serve without the edge assertion;
+ * an empty list means it cannot. The cohort is ready when the Deployment's
+ * current generation is observed, its template carries the protocol label, and
+ * every pod that is not terminal (Succeeded or Failed) carries it too.
+ * Terminating pods count, because they can serve during their grace period.
+ * Replica counts and readiness are deliberately not read: a surge rollout of a
+ * labelled release, an eviction or a failed pod must not block Host Deployment
+ * writes. The observed generation is compared only when the generation is a
+ * number. Unlabelled pod names are sorted and capped at ten.
  */
-export function rpcProxyProtocolCohortIsReady(
+export function rpcProxyProtocolCohortBlockers(
   deployment: k8s.V1Deployment,
   pods: k8s.V1Pod[]
-): boolean {
+): string[] {
+  const blockers: string[] = []
   const generation = deployment.metadata?.generation
-  return (
-    typeof generation === 'number' &&
-    (deployment.status?.observedGeneration ?? 0) >= generation &&
-    deployment.spec?.template?.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] ===
-      RPC_PROXY_EDGE_PROTOCOL_V1 &&
-    pods
-      .filter(pod => pod.status?.phase !== 'Succeeded' && pod.status?.phase !== 'Failed')
-      .every(
-        pod => pod.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] === RPC_PROXY_EDGE_PROTOCOL_V1
+  if (typeof generation !== 'number') {
+    blockers.push(`Deployment "${RPC_PROXY_DEPLOYMENT_NAME}" has no numeric metadata.generation`)
+  } else {
+    const observedGeneration = deployment.status?.observedGeneration
+    if ((observedGeneration ?? 0) < generation) {
+      blockers.push(
+        `Deployment "${RPC_PROXY_DEPLOYMENT_NAME}" status.observedGeneration ` +
+          `${observedGeneration ?? 'absent'} is below metadata.generation ${generation}`
       )
-  )
+    }
+  }
+  const templateProtocol =
+    deployment.spec?.template?.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL]
+  if (templateProtocol !== RPC_PROXY_EDGE_PROTOCOL_V1) {
+    blockers.push(
+      `Deployment "${RPC_PROXY_DEPLOYMENT_NAME}" pod template label ` +
+        `${RPC_PROXY_EDGE_PROTOCOL_LABEL} is ` +
+        `${templateProtocol === undefined ? 'absent' : `"${templateProtocol}"`}, ` +
+        `expected "${RPC_PROXY_EDGE_PROTOCOL_V1}"`
+    )
+  }
+  const unlabelled = pods
+    .filter(pod => pod.status?.phase !== 'Succeeded' && pod.status?.phase !== 'Failed')
+    .filter(
+      pod => pod.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] !== RPC_PROXY_EDGE_PROTOCOL_V1
+    )
+    .map(pod => pod.metadata?.name ?? '<unnamed>')
+    .sort()
+  if (unlabelled.length > 0) {
+    const shown = unlabelled.slice(0, RPC_PROXY_COHORT_BLOCKER_POD_NAME_LIMIT).join(', ')
+    const more = unlabelled.length - RPC_PROXY_COHORT_BLOCKER_POD_NAME_LIMIT
+    blockers.push(
+      `${unlabelled.length} non-terminal pod(s) without ` +
+        `${RPC_PROXY_EDGE_PROTOCOL_LABEL}=${RPC_PROXY_EDGE_PROTOCOL_V1}: ${shown}` +
+        (more > 0 ? ` and ${more} more` : '')
+    )
+  }
+  return blockers
+}
+
+export type RpcProxyEdgeCohortBarrierReason =
+  | 'deployment-read-failed'
+  | 'pod-list-failed'
+  | 'cohort-not-ready'
+
+/**
+ * Thrown when the strict MCP Host rollout barrier blocks a Host Deployment
+ * write. It deliberately has no `code`: callers that branch on a Kubernetes
+ * status (`getErrorCode`) must not mistake it for the failed read in `cause`.
+ */
+export class RpcProxyEdgeCohortBarrierError extends Error {
+  readonly reason: RpcProxyEdgeCohortBarrierReason
+  readonly statusCode?: number
+
+  constructor(
+    reason: RpcProxyEdgeCohortBarrierReason,
+    message: string,
+    readFailure?: { statusCode: number | undefined; cause: unknown }
+  ) {
+    super(message, readFailure && { cause: readFailure.cause })
+    this.name = 'RpcProxyEdgeCohortBarrierError'
+    this.reason = reason
+    if (readFailure?.statusCode !== undefined) this.statusCode = readFailure.statusCode
+  }
+}
+
+function rpcProxyEdgeCohortReadError(
+  reason: 'deployment-read-failed' | 'pod-list-failed',
+  namespace: string,
+  error: unknown
+): RpcProxyEdgeCohortBarrierError {
+  const code = getErrorCode(error)
+  const statusCode = typeof code === 'number' ? code : undefined
+  const read =
+    reason === 'deployment-read-failed'
+      ? `reading Deployment "${RPC_PROXY_DEPLOYMENT_NAME}"`
+      : `listing pods "${RPC_PROXY_POD_SELECTOR}"`
+  let message =
+    `RPC Proxy edge protocol cohort cannot be read: ${read} in namespace "${namespace}" ` +
+    `failed with ${statusCode === undefined ? 'no HTTP status' : `HTTP ${statusCode}`}; ` +
+    'strict MCP Host rollout is blocked'
+  if (statusCode === 403) {
+    message +=
+      `. HCC needs get on deployments/${RPC_PROXY_DEPLOYMENT_NAME} and list on pods in ` +
+      `namespace "${namespace}", granted by Role and RoleBinding "${RPC_PROXY_RUNTIME_RBAC_NAME}" ` +
+      `to ServiceAccount ${RPC_PROXY_RUNTIME_RBAC_SUBJECT}, declared in ` +
+      RPC_PROXY_RUNTIME_RBAC_MANIFEST
+  } else if (statusCode === 404 && reason === 'deployment-read-failed') {
+    message +=
+      `. No Deployment "${RPC_PROXY_DEPLOYMENT_NAME}" exists in namespace "${namespace}"; ` +
+      'check CONTEXT_MAPPER_RPC_PROXY_NAMESPACE'
+  }
+  return new RpcProxyEdgeCohortBarrierError(reason, message, { statusCode, cause: error })
 }
 
 /**
@@ -741,17 +836,31 @@ export class HostReconciler {
   }
 
   private async assertRpcProxyEdgeCohortReady(): Promise<void> {
-    const deployment = await this.appsApi.readNamespacedDeployment({
-      name: 'rpc-proxy',
-      namespace: config.rpcProxyNamespace,
-    })
-    const pods = await this.coreApi.listNamespacedPod({
-      namespace: config.rpcProxyNamespace,
-      labelSelector: 'app=rpc-proxy',
-    })
-    if (!rpcProxyProtocolCohortIsReady(deployment, pods.items ?? [])) {
-      throw new Error(
-        'RPC Proxy edge protocol cohort is not fully on signed-assertion-v1; strict MCP Host rollout is blocked'
+    const namespace = config.rpcProxyNamespace
+    let deployment: k8s.V1Deployment
+    try {
+      deployment = await this.appsApi.readNamespacedDeployment({
+        name: RPC_PROXY_DEPLOYMENT_NAME,
+        namespace,
+      })
+    } catch (error) {
+      throw rpcProxyEdgeCohortReadError('deployment-read-failed', namespace, error)
+    }
+    let pods: k8s.V1PodList
+    try {
+      pods = await this.coreApi.listNamespacedPod({
+        namespace,
+        labelSelector: RPC_PROXY_POD_SELECTOR,
+      })
+    } catch (error) {
+      throw rpcProxyEdgeCohortReadError('pod-list-failed', namespace, error)
+    }
+    const blockers = rpcProxyProtocolCohortBlockers(deployment, pods.items ?? [])
+    if (blockers.length > 0) {
+      throw new RpcProxyEdgeCohortBarrierError(
+        'cohort-not-ready',
+        `RPC Proxy edge protocol cohort is not fully on ${RPC_PROXY_EDGE_PROTOCOL_V1}; ` +
+          `strict MCP Host rollout is blocked: ${blockers.join('; ')}`
       )
     }
   }
