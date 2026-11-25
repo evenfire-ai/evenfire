@@ -198,8 +198,8 @@ const SIGN_IN_URL_CASES: ReadonlyArray<readonly [string, unknown, string | null]
 ]
 
 /**
- * Review Focus 3: [label, usable, the answer, what `readUsableOidc` returns]. Each answer is
- * `oidc-only` with only `oidc.signInUrl` replaced.
+ * Review Focus 3: [the derivation's label, usable, the answer, what `readUsableOidc` returns].
+ * Each answer is `oidc-only` with only `oidc.signInUrl` replaced.
  */
 export const SIGN_IN_URL_SHAPES: ReadonlyArray<
   readonly [
@@ -208,14 +208,15 @@ export const SIGN_IN_URL_SHAPES: ReadonlyArray<
     answer: LoginMethodsHttpAnswer,
     usableOidc: { label: string; signInUrl: string } | null,
   ]
-> = SIGN_IN_URL_CASES.map(([label, signInUrl, normalized]) => [
-  label,
-  normalized !== null,
-  oidcOnly(`${normalized === null ? 'nothing-usable' : 'oidc-only'}:signInUrl ${label}`, {
-    signInUrl,
-  }),
-  normalized === null ? null : { label: RECORDED_OIDC.label, signInUrl: normalized },
-])
+> = SIGN_IN_URL_CASES.map(([shape, signInUrl, normalized]) => {
+  const label = `${normalized === null ? 'nothing-usable' : 'oidc-only'}:signInUrl ${shape}`
+  return [
+    label,
+    normalized !== null,
+    oidcOnly(label, { signInUrl }),
+    normalized === null ? null : { label: RECORDED_OIDC.label, signInUrl: normalized },
+  ] as const
+})
 
 const PASSWORD_FORM: LoginMethodsModel = { kind: 'methods', provider: null, password: true }
 const MISCONFIGURED: LoginMethodsModel = { kind: 'misconfigured' }
@@ -244,6 +245,17 @@ export const LOGIN_SCREEN_ROWS: ReadonlyArray<
     { kind: 'methods', provider: { label: LABEL_OF_80 }, password: false },
   ],
   ['password', loginMethodsAnswer(readEdgeRecord(PASSWORD_METHOD)), PASSWORD_FORM],
+  [
+    // The `oidc` object alone does not offer the provider: `methods` must list it.
+    'password:oidc-not-listed',
+    loginMethodsAnswer(
+      deriveEdgeRecord(BOTH_METHODS, 'password:oidc-not-listed', recorded => {
+        const body = methodsBody(recorded)
+        return { ...body, methods: body.methods.filter(method => method !== 'oidc') }
+      })
+    ),
+    PASSWORD_FORM,
+  ],
   [
     'password-and-unknown-name',
     fromPassword('password-and-unknown-name', methods => [...methods, 'sso']),
@@ -296,7 +308,7 @@ export const LOGIN_SCREEN_ROWS: ReadonlyArray<
     MISCONFIGURED,
   ],
   ...SIGN_IN_URL_SHAPES.filter(([, usable]) => !usable).map(
-    ([label, , answer]) => [`nothing-usable:signInUrl ${label}`, answer, MISCONFIGURED] as const
+    ([label, , answer]) => [label, answer, MISCONFIGURED] as const
   ),
   // No body: what the code that fetches hands over for a 503 (`GET /api/v1/auth/methods
   // unavailable`), another 5xx or a network failure.

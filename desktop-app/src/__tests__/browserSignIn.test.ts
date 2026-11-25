@@ -56,12 +56,17 @@ describe('edge records', () => {
 
   it('derives a labelled record and leaves the recorded one as it was', () => {
     const key = 'GET /api/v1/auth/methods password'
-    const derived = deriveEdgeRecord(key, 'nothing-usable:empty', body => ({
-      ...(body as object),
-      methods: [],
-    }))
-    expect(derived.body).toEqual({ methods: [] })
-    expect(readEdgeRecord(key).body).toEqual({ methods: ['password'] })
+    // A copy, so a reader that handed out one shared parse cannot change it too.
+    const recorded = structuredClone(readEdgeRecord(key).body)
+    // The edit empties the list it was given in place, so a shared parse would show the change
+    // on the next read.
+    const derived = deriveEdgeRecord(key, 'nothing-usable:empty', body => {
+      const { methods } = body as { methods: unknown[] }
+      methods.splice(0)
+      return body
+    })
+    expect(derived.body).toEqual({ ...(recorded as object), methods: [] })
+    expect(readEdgeRecord(key).body).toEqual(recorded)
     expect(() => deriveEdgeRecord(key, 'unchanged', body => body)).toThrow('changed nothing')
   })
 
