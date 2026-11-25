@@ -1,20 +1,25 @@
 import jwt from 'jsonwebtoken'
 import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
-import { ActionAuthorityCheckpointError, type AuthorizedActionV2 } from '../actionAuthorityV2.js'
+import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
   type DirectRunBindingRequest,
+  type ResolvedHostConnection,
   type UserAllowedServers,
   fetchHostConnectionFromControlApi,
   fetchUserAllowedServersFromControlApi,
 } from './controlApiRestService.js'
 import {
-  CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR,
-  type HostAccessDenial,
-  isHostAccessDenied,
+  type HostAuthorityUnavailable,
+  type HostResolveRefusal,
+  isHostResolveRefusal,
 } from './hostAccessDenial.js'
-import { sanitizeHostRefForLog } from './wakeAndHold.js'
+import {
+  describeErrorForLog,
+  isUpstreamTimeoutError,
+  sanitizeHostRefForLog,
+} from './wakeAndHold.js'
 
 export { validateRpcRequest, forwardRpcToServer } from './mcpRpcService.js'
 export {
@@ -103,6 +108,59 @@ export function v2HostEdgeAssertion(authorizedActionV2: AuthorizedActionV2): str
   return authorizedActionV2.hostEdgeAssertion
 }
 
+/**
+ * The one caller of the V1 control-api Host-access client, at the first
+ * resolve and at the re-resolve, and the only place that catches what the
+ * client throws: a timeout becomes the `timeout` refusal, anything else
+ * `request_failed`. Every unavailable outcome, thrown or returned, writes
+ * exactly one warn line, the operator's only view of the cause (the client
+ * answer carries none). Denials and rejections are not logged: a 401 is the
+ * normal expired-token path.
+ */
+async function resolveV1HostConnection(
+  userId: string,
+  hostRef: string,
+  rpcAccessToken: string,
+  phase: 'resolve' | 're-resolve',
+  directRunBinding: DirectRunBindingRequest | undefined
+): Promise<ResolvedHostConnection | HostResolveRefusal> {
+  let resolved: ResolvedHostConnection | HostResolveRefusal
+  try {
+    resolved = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
+      directRunBinding,
+    })
+  } catch (error) {
+    const refusal: HostAuthorityUnavailable = {
+      unavailable: true,
+      cause: isUpstreamTimeoutError(error) ? 'timeout' : 'request_failed',
+    }
+    logHostResolveUnavailable(hostRef, phase, refusal, { error })
+    return refusal
+  }
+  if ('unavailable' in resolved) logHostResolveUnavailable(hostRef, phase, resolved, null)
+  return resolved
+}
+
+function logHostResolveUnavailable(
+  hostRef: string,
+  phase: 'resolve' | 're-resolve',
+  refusal: HostAuthorityUnavailable,
+  caught: { error: unknown } | null
+): void {
+  const host = sanitizeHostRefForLog(hostRef)
+  if (refusal.cause === 'edge_assertion_missing') {
+    console.warn(
+      `[RPC_PROXY] control-api answered the host resolve without an edge assertion; upgrade control-api before RPC Proxy host=${host}`
+    )
+    return
+  }
+  const status = refusal.cause === 'http_status' ? ` status=${refusal.status}` : ''
+  const error = caught ? ` error=${describeErrorForLog(caught.error)}` : ''
+  console.warn(
+    `[RPC_PROXY] control-api host resolve unavailable phase=${phase} host=${host} cause=${refusal.cause}${status}${error}`
+  )
+}
+
 export async function resolveHostConnectionForUser(
   userId: string,
   hostRef: string,
@@ -114,7 +172,7 @@ export async function resolveHostConnectionForUser(
     directRunBinding?: DirectRunBindingRequest
     authorizedActionV2?: AuthorizedActionV2
   }
-): Promise<ResolvedServerConnection | HostAccessDenial> {
+): Promise<ResolvedServerConnection | HostResolveRefusal> {
   const expectedRef = `${config.hostNamespace}/${hostRef}`
   const authorizedActionV2 = edgeContext?.authorizedActionV2
   const destination = authorizedActionV2?.checkpoint.destination
@@ -130,24 +188,14 @@ export async function resolveHostConnectionForUser(
       attributionBindingStatus: undefined,
     }
   } else {
-    let resolved: Awaited<ReturnType<typeof fetchHostConnectionFromControlApi>>
-    try {
-      resolved = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
-        directRunBinding: edgeContext?.directRunBinding,
-      })
-    } catch (error) {
-      // The route answers this error as 503 `authority_unavailable` without its
-      // message, so this line is where the operator sees the cause.
-      if (error instanceof Error && error.name === CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR) {
-        console.warn(
-          `[RPC_PROXY] control-api answered the host resolve without an edge assertion; upgrade control-api before RPC Proxy host=${sanitizeHostRefForLog(
-            hostRef
-          )}`
-        )
-      }
-      throw error
-    }
-    if (isHostAccessDenied(resolved)) return resolved
+    const resolved = await resolveV1HostConnection(
+      userId,
+      hostRef,
+      rpcAccessToken,
+      'resolve',
+      edgeContext?.directRunBinding
+    )
+    if (isHostResolveRefusal(resolved)) return resolved
     const { edgeAssertion, ...connection } = resolved
     host = {
       ...connection,
@@ -214,14 +262,12 @@ export function isHeldEdgeAssertionNearExpiry(
  * form (no direct-run binding) with the caller's RPC token.
  *
  * - A held assertion without a readable `exp` throws.
- * - A denial (control-api 403/404, or a user or Host mismatch) is returned for
- *   the route to answer as it answers a denial at its first resolve.
- * - A control-api 401 (`ControlApiHostAccessRejectedError`) is rethrown as is,
- *   so it reaches the client as 401.
- * - Any other failure of the control-api call (network, timeout, other non-2xx,
- *   a response without an edge assertion) is rethrown as a 503
- *   `authority_unavailable`, which is never wake-eligible: a control-api network
- *   failure must not be read as the Host being down.
+ * - Every refusal of the control-api call (a denial, a 401 or 409 rejection,
+ *   or an unavailable authority: timeout, network failure, another status, a
+ *   body that is not a connection, no edge assertion) is returned for the route
+ *   to answer as it answers that refusal at its first resolve. None of them is
+ *   wake-eligible: a control-api failure must not be read as the Host being
+ *   down.
  * - A connection whose URL differs from the first resolve throws.
  *
  * On success it rewrites the assertion header in place, synchronously after the
@@ -232,23 +278,18 @@ export async function refreshV1HostConnection(
   userId: string,
   hostRef: string,
   rpcAccessToken: string
-): Promise<HostAccessDenial | null> {
+): Promise<HostResolveRefusal | null> {
   if (!isHeldEdgeAssertionNearExpiry(host.headers[HOST_EDGE_ASSERTION_HEADER], Date.now())) {
     return null
   }
-  let resolved: Awaited<ReturnType<typeof fetchHostConnectionFromControlApi>>
-  try {
-    resolved = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken)
-  } catch (error) {
-    if (error instanceof Error && error.name === 'ControlApiHostAccessRejectedError') throw error
-    console.warn(
-      `[RPC_PROXY] host connection re-resolve failed host=${sanitizeHostRefForLog(hostRef)} error=${
-        error instanceof Error ? error.name : typeof error
-      }`
-    )
-    throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
-  }
-  if (isHostAccessDenied(resolved)) return resolved
+  const resolved = await resolveV1HostConnection(
+    userId,
+    hostRef,
+    rpcAccessToken,
+    're-resolve',
+    undefined
+  )
+  if (isHostResolveRefusal(resolved)) return resolved
   if (resolved.url !== host.url) {
     throw new Error('Control API returned a different Host URL on re-resolve')
   }

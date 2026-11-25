@@ -6,7 +6,7 @@ import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { requestHostWakeFromControlApi } from '../services/controlApiRestService.js'
-import { isHostAccessDenied } from '../services/hostAccessDenial.js'
+import { isHostResolveRefusal } from '../services/hostAccessDenial.js'
 import {
   refreshV1HostConnection,
   resolveHostConnectionForUser,
@@ -160,7 +160,7 @@ describe('V1 wake-and-hold keeps each request on its own latest assertion', () =
           const host = await resolveHostConnectionForUser(USER_ID, 'chatllm', token, {
             requestId,
           })
-          if (!host || isHostAccessDenied(host)) throw new Error('first resolve was denied')
+          if (isHostResolveRefusal(host)) throw new Error('first resolve was refused')
           const attempt = async () => {
             await fetch(`${host.url}/v1/runtime/approvals/approve`, {
               method: 'POST',
@@ -181,8 +181,8 @@ describe('V1 wake-and-hold keeps each request on its own latest assertion', () =
               coordinator,
               refreshV1Host: {
                 refresh: () => refreshV1HostConnection(host, USER_ID, 'chatllm', token),
-                respondDenied: () => {
-                  throw new Error('re-resolve was denied')
+                respondRefused: () => {
+                  throw new Error('re-resolve was refused')
                 },
               },
               attemptUpstream: attempt,

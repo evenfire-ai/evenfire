@@ -37,11 +37,9 @@ import {
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
 import {
-  type HostAccessDenial,
-  type HostAccessDenialCode,
-  isHostAccessDenied,
-  respondControlApiAuthorityUnavailable,
-  respondHostAccessDenied,
+  type HostResolveRefusal,
+  isHostResolveRefusal,
+  respondHostResolveRefusal,
   withoutReservedHostAccessCode,
 } from '../services/hostAccessDenial.js'
 import {
@@ -98,11 +96,10 @@ function readApprovalModeBody(body: unknown): ApprovalMode | null {
 // Keep legacy denial precedence (scope before body parsing), while v2 route
 // binding must see parsed body data before its remote Control API checkpoint.
 /**
- * Pre-wake host error mapping: a control-api answer without an edge assertion
- * gets 503 `authority_unavailable` (respondControlApiAuthorityUnavailable), an
- * authentication failure gets the answer of respondAuthenticationFailure (401,
- * or the control-api rejection's answer), fetch timeout → 504, everything
- * else → 502.
+ * Pre-wake host error mapping: a Host 401 gets the answer of
+ * respondAuthenticationFailure (401), fetch timeout → 504, everything else →
+ * 502. A control-api refusal of the Host resolve never reaches this mapping:
+ * the route answers it with respondHostResolveRefusal.
  *
  * Guards `res.headersSent` (§11.5): this is the terminal responder that
  * route-level outer catches invoke after a held request may already have
@@ -118,7 +115,6 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
     )
     return
   }
-  if (respondControlApiAuthorityUnavailable(res, error)) return
   if (respondAuthenticationFailure(res, error)) return
   if (isUpstreamTimeoutError(error)) {
     res.status(504).json({ error: 'Gateway Timeout' })
@@ -187,55 +183,13 @@ function sessionDrainingFence(response: Response, body: string): Error | null {
   })
 }
 
-export type ControlApiHostAccessRejection =
-  | { status: 401 | 409 }
-  | { status: 403; code: HostAccessDenialCode }
-
-function controlApiHostAccessRejection(error: unknown): ControlApiHostAccessRejection | null {
-  if (!(error instanceof Error) || error.name !== 'ControlApiHostAccessRejectedError') {
-    return null
-  }
-  const { status, denialCode } = error as Error & { status?: unknown; denialCode?: unknown }
-  if (status === 401 || status === 409) return { status }
-  if (
-    status === 403 &&
-    (denialCode === 'host_access_revoked' || denialCode === 'host_access_denied')
-  ) {
-    return { status, code: denialCode }
-  }
-  return null
-}
-
-export function respondControlApiHostAccessRejection(
-  res: ExpressResponse,
-  rejection: ControlApiHostAccessRejection
-): void {
-  if (res.headersSent) {
-    console.warn(
-      `[RPC_PROXY] suppressing duplicate terminal response (host-access-rejection ${rejection.status})`
-    )
-    return
-  }
-  if (rejection.status === 401) {
-    res.status(401).json({ error: 'Unauthorized' })
-    return
-  }
-  if (rejection.status === 403) {
-    respondHostAccessDenied(res, rejection.code)
-    return
-  }
-  res.status(409).json({ error: 'Direct run attribution conflict' })
-}
-
 /**
- * The one mapping of an authentication failure to the client, called by both
- * terminal error paths (respondUpstreamUnavailable and apiErrorHandler) right
- * after respondControlApiAuthorityUnavailable.
+ * The one mapping of a Host authentication failure to the client, called by
+ * both terminal error paths (respondUpstreamUnavailable and apiErrorHandler).
  * A Host 401 means the edge assertion was refused, usually because it or the
  * RPC token expired: the client gets 401 so it refreshes its token, never a
- * 500 or 502. A control-api host access rejection gets its own answer. Errors
- * are matched by `name`, like controlApiHostAccessRejection. Returns false,
- * having written nothing, for every other error.
+ * 500 or 502. The error is matched by `name`. Returns false, having written
+ * nothing, for every other error.
  */
 export function respondAuthenticationFailure(res: ExpressResponse, error: unknown): boolean {
   if (
@@ -244,11 +198,6 @@ export function respondAuthenticationFailure(res: ExpressResponse, error: unknow
     (error as Error & { status?: unknown }).status === 401
   ) {
     res.status(401).json({ error: 'Unauthorized' })
-    return true
-  }
-  const rejection = controlApiHostAccessRejection(error)
-  if (rejection) {
-    respondControlApiHostAccessRejection(res, rejection)
     return true
   }
   return false
@@ -282,14 +231,15 @@ function mutatingCallSignal(timeoutMs: number | undefined, res: ExpressResponse)
 /**
  * The authority refresh a wake-and-hold retry runs before each attempt: V2
  * re-runs the action checkpoint, V1 re-resolves the Host connection for a fresh
- * edge assertion when the held one is near its `exp`. `respondDenied` is the route's answer for a denial at its
- * first resolve, used when the V1 re-resolve is denied.
+ * edge assertion when the held one is near its `exp`. `respondRefused` is the
+ * route's answer for a refusal at its first resolve, used when the V1
+ * re-resolve is refused.
  */
 function wakeAndHoldAuthorityOptions(
   req: AuthedRequest,
   hostRef: string,
   host: ResolvedServerConnection,
-  respondDenied: (denial: HostAccessDenial) => void
+  respondRefused: (refusal: HostResolveRefusal) => void
 ) {
   const initial = req.authorizedActionV2
   if (!initial) {
@@ -298,7 +248,7 @@ function wakeAndHoldAuthorityOptions(
     return {
       refreshV1Host: {
         refresh: () => refreshV1HostConnection(host, userId, hostRef, rpcAccessToken),
-        respondDenied,
+        respondRefused,
       },
     }
   }
@@ -652,8 +602,8 @@ export function createRpcRouter(): Router {
               : {}),
           })
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         if (host.attributionBindingStatus === 'unavailable') {
@@ -703,8 +653,8 @@ export function createRpcRouter(): Router {
               // The per-request messageId makes a re-presented POST a
               // duplicate_delivery replay, so retrying until the deadline is safe.
               retryUntilDeadline: true,
-              ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-                respondHostAccessDenied(res, denial)
+              ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+                respondHostResolveRefusal(res, refusal, 'forbidden')
               ),
               attemptUpstream: async (timeoutMs, deadlineMs) => {
                 const retried = await forwardHostMessageToHost(host, forwardedBody, {
@@ -726,11 +676,6 @@ export function createRpcRouter(): Router {
         // the wake path (which would re-forward an already-delivered message).
         res.status(200).json(upstreamResponse)
       } catch (error) {
-        const rejection = controlApiHostAccessRejection(error)
-        if (rejection) {
-          respondControlApiHostAccessRejection(res, rejection)
-          return
-        }
         console.warn(
           `[RPC_PROXY] host message forward failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
             error
@@ -764,8 +709,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
 
@@ -873,8 +818,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -915,8 +860,8 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -948,8 +893,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -986,8 +931,8 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1031,8 +976,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const upstreamUrl = new URL(`${host.url.replace(/\/+$/, '')}/v1/runtime/sessions/search`)
@@ -1073,8 +1018,8 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: forwardSearch,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1108,8 +1053,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1159,8 +1104,8 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: forwardSessionList,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1198,8 +1143,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1250,8 +1195,8 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: forwardTranscript,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1285,8 +1230,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1326,8 +1271,8 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1367,8 +1312,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1456,8 +1401,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1501,8 +1446,8 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1534,8 +1479,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1573,8 +1518,8 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1606,8 +1551,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1641,8 +1586,8 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1673,8 +1618,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          res.status(404).json({ error: 'Host not found or not accessible' })
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'not_found')
           return
         }
 
@@ -1703,8 +1648,8 @@ export function createRpcRouter(): Router {
               deadlineMs: wakeDeadlineMs,
               // idempotent GET: a re-issued read cannot duplicate a side effect
               retryUntilDeadline: true,
-              ...wakeAndHoldAuthorityOptions(req, hostRef, host, () =>
-                res.status(404).json({ error: 'Host not found or not accessible' })
+              ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+                respondHostResolveRefusal(res, refusal, 'not_found')
               ),
               attemptUpstream: attemptTaskResult,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1739,8 +1684,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          res.status(404).json({ error: 'Host not found or not accessible' })
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'not_found')
           return
         }
 
@@ -1778,8 +1723,8 @@ export function createRpcRouter(): Router {
               claims: auth,
               rpcAccessToken,
               deadlineMs: wakeDeadlineMs,
-              ...wakeAndHoldAuthorityOptions(req, hostRef, host, () =>
-                res.status(404).json({ error: 'Host not found or not accessible' })
+              ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+                respondHostResolveRefusal(res, refusal, 'not_found')
               ),
               attemptUpstream: attemptCancel,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1820,8 +1765,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1853,8 +1798,8 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -1919,8 +1864,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1998,8 +1943,8 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
-            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
-              respondHostAccessDenied(res, denial)
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, refusal =>
+              respondHostResolveRefusal(res, refusal, 'forbidden')
             ),
             attemptUpstream: attemptDownload,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
@@ -2027,8 +1972,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
         const sinceEventId =
@@ -2063,8 +2008,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
 
@@ -2105,8 +2050,8 @@ export function createRpcRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
 

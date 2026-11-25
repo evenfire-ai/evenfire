@@ -800,15 +800,11 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
       expect(hostAccessCalls()).toHaveLength(2)
       expect(res.status).toBe(401)
       expect(res.body).toEqual({ error: 'Unauthorized' })
-      // The log names the control-api re-check, not the Host.
+      // The rejection is an answer, not a failed retry: the hold loop logs nothing.
       const retryLines = warn.mock.calls
         .map(args => String(args[0]))
         .filter(line => line.includes('[RPC_PROXY] wake-hold'))
-      expect(retryLines).toEqual([
-        expect.stringContaining(
-          '[RPC_PROXY] wake-hold authority re-check retry failed host=chatllm error=ControlApiHostAccessRejectedError'
-        ),
-      ])
+      expect(retryLines).toEqual([])
       warn.mockRestore()
     }
   )
@@ -880,30 +876,46 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     expect(res.status).toBe(502)
   })
 
-  const UNAVAILABLE_CASES: Array<{ label: string; answer: () => Response }> = [
+  const UNAVAILABLE_CASES: Array<{
+    label: string
+    answer: () => Response
+    status: number
+    body: Record<string, unknown>
+  }> = [
     {
       label: 'a network failure',
       answer: () => {
         throw new TypeError('fetch failed')
       },
+      status: 503,
+      body: { error: 'authority_unavailable' },
     },
     {
       label: 'a timeout',
       answer: () => {
         throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
       },
+      status: 504,
+      body: { error: 'Gateway Timeout' },
     },
-    { label: 'a control-api 503', answer: () => jsonResponse(503, { error: 'unavailable' }) },
+    {
+      label: 'a control-api 503',
+      answer: () => jsonResponse(503, { error: 'unavailable' }),
+      status: 503,
+      body: { error: 'authority_unavailable' },
+    },
     {
       label: 'a 200 without an edge assertion',
       answer: () => jsonResponse(200, { ...OLD_SHAPE_CONNECTION }),
+      status: 503,
+      body: { error: 'authority_unavailable' },
     },
   ]
 
   describe.each(REFRESH_ROWS)('$label', row => {
     it.each(UNAVAILABLE_CASES)(
-      'a re-resolve that fails with $label answers 503 authority_unavailable at once',
-      async ({ answer }) => {
+      'a re-resolve that fails with $label answers $status at once',
+      async ({ answer, status, body }) => {
         authTokenMock.verifyRpcToken.mockReturnValue(
           claimsWithScopes([row.scope, 'host:wake:write'])
         )
@@ -917,8 +929,8 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
         expect(hostCalls).toHaveLength(1)
         expect(hostCalls[0]!.path).toBe(row.hostPath)
         expect(hostAccessCalls()).toHaveLength(2)
-        expect(res.status).toBe(503)
-        expect(res.body).toEqual({ error: 'authority_unavailable' })
+        expect(res.status).toBe(status)
+        expect(res.body).toEqual(body)
       }
     )
   })
@@ -938,14 +950,14 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     try {
       await expect(
         refreshV1HostConnection(host, USER_ID, 'chat\r\nllm\tforged', 'rpc-access-token')
-      ).rejects.toMatchObject({ status: 503 })
+      ).resolves.toEqual({ unavailable: true, cause: 'request_failed' })
 
       // Exactly one line: it is also the witness that the failure path ran.
       const lines = warn.mock.calls
         .map(args => String(args[0]))
-        .filter(line => line.startsWith('[RPC_PROXY] host connection re-resolve failed'))
+        .filter(line => line.startsWith('[RPC_PROXY] control-api host resolve unavailable'))
       expect(lines).toEqual([
-        '[RPC_PROXY] host connection re-resolve failed host=chatllmforged error=TypeError',
+        '[RPC_PROXY] control-api host resolve unavailable phase=re-resolve host=chatllmforged cause=request_failed error=TypeError',
       ])
     } finally {
       warn.mockRestore()
@@ -1215,5 +1227,343 @@ describe('streams and the assertion expiry', () => {
       expect(lateEventAt).toBeGreaterThanOrEqual(expSeconds * 1000)
     },
     10_000
+  )
+})
+
+// The outcome of every control-api answer at the V1 Host resolve, through the
+// real routes (S1: first resolve; S2: re-resolve before a wake-and-hold retry).
+// Each stub carries its expected outcome per control-api method: a refusal of
+// the refusal writer's table, a denial (answered 403 with its code, or 404 on
+// the task routes), or a success.
+type ControlApiMethod = 'GET' | 'POST'
+type StubOutcome =
+  | { kind: 'refusal'; status: number; body: Record<string, unknown> }
+  | { kind: 'denied'; code: 'host_access_revoked' | 'host_access_denied' }
+  | { kind: 'success' }
+type FailureStub = {
+  failure: string
+  answer: (method: ControlApiMethod) => Response
+  GET: StubOutcome
+  POST: StubOutcome
+}
+
+const UNAVAILABLE: StubOutcome = {
+  kind: 'refusal',
+  status: 503,
+  body: { error: 'authority_unavailable' },
+}
+const DENIED: StubOutcome = { kind: 'denied', code: 'host_access_denied' }
+
+// A 200 body that is a valid connection except for `override`; a POST answer
+// carries a valid binding status, so the field under test decides the outcome.
+function connectionAnswer(method: ControlApiMethod, override: Record<string, unknown>): Response {
+  return jsonResponse(200, {
+    ...OLD_SHAPE_CONNECTION,
+    edgeAssertion,
+    ...(method === 'POST' ? { bindingStatus: 'recorded' } : {}),
+    ...override,
+  })
+}
+
+function withoutKey(key: string): Record<string, unknown> {
+  const connection: Record<string, unknown> = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
+  delete connection[key]
+  return connection
+}
+
+const FAILURE_STUBS: FailureStub[] = [
+  ...[401, 409].map(
+    (status): FailureStub => ({
+      failure: String(status),
+      answer: () => jsonResponse(status, { error: 'rejected' }),
+      GET: {
+        kind: 'refusal',
+        status,
+        body: { error: status === 401 ? 'Unauthorized' : 'Direct run attribution conflict' },
+      },
+      POST: {
+        kind: 'refusal',
+        status,
+        body: { error: status === 401 ? 'Unauthorized' : 'Direct run attribution conflict' },
+      },
+    })
+  ),
+  {
+    failure: '403 with the reason team_membership_missing',
+    answer: () =>
+      new Response(JSON.stringify({ error: 'Forbidden' }), {
+        status: 403,
+        headers: {
+          'content-type': 'application/json',
+          'x-host-access-denial-reason': 'team_membership_missing',
+        },
+      }),
+    GET: { kind: 'denied', code: 'host_access_revoked' },
+    POST: { kind: 'denied', code: 'host_access_revoked' },
+  },
+  {
+    failure: '403 without a reason',
+    answer: () => jsonResponse(403, { error: 'Forbidden' }),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    failure: '404',
+    answer: () => jsonResponse(404, { error: 'not found' }),
+    GET: DENIED,
+    POST: UNAVAILABLE,
+  },
+  ...[400, 429, 500, 503].map(
+    (status): FailureStub => ({
+      failure: String(status),
+      answer: () => jsonResponse(status, { error: 'control-api-detail' }),
+      GET: UNAVAILABLE,
+      POST: UNAVAILABLE,
+    })
+  ),
+  {
+    failure: 'timeout',
+    answer: () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    },
+    GET: { kind: 'refusal', status: 504, body: { error: 'Gateway Timeout' } },
+    POST: { kind: 'refusal', status: 504, body: { error: 'Gateway Timeout' } },
+  },
+  {
+    failure: 'network failure',
+    answer: () => {
+      throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })
+    },
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    failure: '200 without an edge assertion',
+    answer: method => connectionAnswer(method, { edgeAssertion: undefined }),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    failure: '200 text/html',
+    answer: () =>
+      new Response('<html>control-api-detail</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    failure: '200 JSON null',
+    answer: () => jsonResponse(200, null),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    failure: '200 for another user',
+    answer: method => connectionAnswer(method, { userId: 'another-user' }),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    failure: '200 without a url',
+    answer: method =>
+      jsonResponse(200, {
+        ...withoutKey('url'),
+        ...(method === 'POST' ? { bindingStatus: 'recorded' } : {}),
+      }),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    failure: '200 for another hostRef',
+    answer: method => connectionAnswer(method, { hostRef: 'another-host' }),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    failure: '200 JSON []',
+    answer: () => jsonResponse(200, []),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    failure: '204 without a body',
+    answer: () => new Response(null, { status: 204 }),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    failure: '200 with an invalid bindingStatus',
+    answer: () =>
+      jsonResponse(200, { ...OLD_SHAPE_CONNECTION, edgeAssertion, bindingStatus: 'not-a-status' }),
+    GET: { kind: 'success' },
+    POST: UNAVAILABLE,
+  },
+]
+
+// The task routes answer a denial 404; every other V1 route 403 with the code.
+const NOT_FOUND_DENIAL_LABELS = new Set(['task result', 'task cancel'])
+
+type ExpectedAnswer = { status: number; body: Record<string, unknown> }
+
+function expectedRefusal(label: string, outcome: StubOutcome): ExpectedAnswer | null {
+  if (outcome.kind === 'success') return null
+  if (outcome.kind === 'refusal') return { status: outcome.status, body: outcome.body }
+  if (NOT_FOUND_DENIAL_LABELS.has(label)) {
+    return { status: 404, body: { error: 'Host not found or not accessible' } }
+  }
+  return {
+    status: 403,
+    body: { error: 'Forbidden: user cannot access this host', code: outcome.code },
+  }
+}
+
+function wakeCalls(): string[] {
+  return controlApiCalls.filter(url => url.endsWith('/wake'))
+}
+
+// The row's success leg of the existing harness: wake answers 200 with one
+// control-api wake call and no Host call; every other route reaches the Host
+// once (a stream route is aborted once the Host call is observable).
+async function expectRowReachesHost(row: FirstResolveRow): Promise<void> {
+  if (row.hostPath === null) {
+    const woken = await send(row)
+    expect(woken.status).toBe(200)
+    expect(wakeCalls()).toHaveLength(1)
+    expect(hostCalls).toEqual([])
+  } else {
+    await sendUntilHostCall(row)
+    expect(hostCalls).toHaveLength(1)
+    expect(hostCalls[0]!.path).toBe(row.hostPath)
+  }
+  expect(hostAccessCalls()).toHaveLength(1)
+}
+
+type FirstResolveOutcomeRow = FirstResolveRow & { controlApiMethod: ControlApiMethod }
+
+const FIRST_RESOLVE_OUTCOME_ROWS: FirstResolveOutcomeRow[] = [
+  ...FIRST_RESOLVE_ROWS.map(row => ({ ...row, controlApiMethod: 'GET' as const })),
+  {
+    label: 'messages with threadId',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/messages',
+    body: { content: 'hi', threadId: 'session-1' },
+    scope: HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/messages'],
+    hostPath: '/v1/runtime/messages',
+    controlApiMethod: 'POST',
+  },
+]
+
+const FIRST_RESOLVE_OUTCOME_CASES = FIRST_RESOLVE_OUTCOME_ROWS.flatMap(row =>
+  FAILURE_STUBS.map(stub => {
+    const outcome = stub[row.controlApiMethod]
+    const expected = expectedRefusal(row.label, outcome)
+    return {
+      route: row.label,
+      failure: stub.failure,
+      status: expected ? String(expected.status) : 'the Host',
+      row,
+      stub,
+      expected,
+    }
+  })
+)
+
+describe('V1 first resolve outcome', () => {
+  it('covers every V1 first-resolve route and every failure stub', () => {
+    expect(FIRST_RESOLVE_ROWS).toHaveLength(21)
+    expect(FIRST_RESOLVE_OUTCOME_CASES).toHaveLength(22 * FAILURE_STUBS.length)
+  })
+
+  it.each(FIRST_RESOLVE_OUTCOME_CASES)(
+    '$route: control-api $failure answers $status',
+    async ({ row, stub, expected }) => {
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope]))
+      controlApiHostAccessAnswer = () => stub.answer(row.controlApiMethod)
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        if (expected === null) {
+          // The stub is a success for this method: the request reaches the Host.
+          await expectRowReachesHost(row)
+          return
+        }
+
+        const res = await send(row)
+
+        // Witness: the resolve reached control-api once; its refusal stopped
+        // the request before any Host call and any wake.
+        expect(hostAccessCalls()).toHaveLength(1)
+        expect(res.status).toBe(expected.status)
+        expect(res.body).toEqual(expected.body)
+        expect(hostCalls).toEqual([])
+        expect(wakeCalls()).toEqual([])
+
+        // The same request with a valid control-api answer reaches the Host.
+        controlApiCalls = []
+        controlApiHostAccessAnswer = null
+        await expectRowReachesHost(row)
+      } finally {
+        warn.mockRestore()
+      }
+    }
+  )
+})
+
+const RE_RESOLVE_OUTCOME_CASES = V1_WAKE_ROWS.flatMap(row =>
+  FAILURE_STUBS.filter(stub => stub.failure !== '200 with an invalid bindingStatus').map(stub => {
+    const expected = expectedRefusal(row.label, stub.GET)
+    if (expected === null) throw new Error(`${stub.failure} is not a refusal on GET`)
+    return { route: row.label, failure: stub.failure, status: expected.status, row, stub, expected }
+  })
+)
+
+describe('V1 re-resolve outcome', () => {
+  const originalWakeMaxHoldMs = config.wakeMaxHoldMs
+
+  beforeEach(() => {
+    // Bounds a retry-until-deadline route.
+    config.wakeMaxHoldMs = 3_000
+    // The first resolve's assertion is within the margin of its exp, so the
+    // retry re-resolves it.
+    edgeAssertion = signEdgeAssertion(nearExpSeconds(), [])
+    controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
+  })
+
+  afterEach(() => {
+    config.wakeMaxHoldMs = originalWakeMaxHoldMs
+  })
+
+  it('covers every V1 wake route and every failure stub but the GET success', () => {
+    expect(V1_WAKE_ROWS).toHaveLength(12)
+    expect(RE_RESOLVE_OUTCOME_CASES).toHaveLength(12 * (FAILURE_STUBS.length - 1))
+  })
+
+  it.each(RE_RESOLVE_OUTCOME_CASES)(
+    '$route: a re-resolve that gets $failure answers $status',
+    async ({ row, stub, expected }) => {
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+      controlApiHostAccessAnswer = firstResolveThen(() => stub.answer('GET'))
+      hostAnswer = hostDownThen(() => jsonResponse(200, {}))
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        const res = await send(row)
+
+        // Witness: the first forward failed as Host down, the wake ran once
+        // and the retry re-resolved. The refusal then ended the request: no
+        // second Host call and no further control-api call.
+        expect(hostCalls).toHaveLength(1)
+        expect(hostAccessCalls()).toHaveLength(2)
+        expect(wakeCalls()).toHaveLength(1)
+        expect(res.status).toBe(expected.status)
+        expect(res.body).toEqual(expected.body)
+        const retryFailures = warn.mock.calls
+          .map(args => String(args[0]))
+          .filter(line => line.startsWith('[RPC_PROXY] wake-hold') && line.includes('retry failed'))
+        expect(retryFailures).toEqual([])
+      } finally {
+        warn.mockRestore()
+      }
+    }
   )
 })

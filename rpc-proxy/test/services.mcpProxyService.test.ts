@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
+import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
 import { config } from '../src/config.js'
 import {
   forwardHostMessageToHost,
   forwardRpcToServer,
   isHeldEdgeAssertionNearExpiry,
+  refreshV1HostConnection,
   resolveHostConnectionForUser,
   validateRpcRequest,
 } from '../src/services/mcpProxyService.js'
@@ -322,5 +324,167 @@ describe('isHeldEdgeAssertionNearExpiry', () => {
     expect(() => isHeldEdgeAssertionNearExpiry(value, EXP_SECONDS * 1000)).toThrow(
       'Held edge assertion has no readable exp'
     )
+  })
+})
+
+describe('V1 Host resolve: thrown and unavailable control-api answers', () => {
+  const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const USER_ID = 'user-secret-id-1'
+  const TOKEN = 'rpc-token-secret-1'
+  const LINE_PREFIX = '[RPC_PROXY] control-api host resolve unavailable'
+
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  // A body that fails while it is read, with a timeout: what undici does when
+  // the request deadline fires after the headers arrived.
+  function bodyReadTimeout(): Response {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(
+          new DOMException('body-read-detail: aborted due to timeout', 'TimeoutError')
+        )
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+
+  const THROWN_CASES = [
+    {
+      label: 'a network failure',
+      fetch: () =>
+        Promise.reject(
+          new TypeError('network-detail: fetch failed', { cause: { code: 'ECONNREFUSED' } })
+        ),
+      cause: 'request_failed',
+      error: 'TypeError code=ECONNREFUSED',
+      detail: 'network-detail',
+    },
+    {
+      label: 'a timeout',
+      fetch: () =>
+        Promise.reject(new DOMException('timeout-detail: aborted due to timeout', 'TimeoutError')),
+      cause: 'timeout',
+      error: 'TimeoutError',
+      detail: 'timeout-detail',
+    },
+    {
+      label: 'a non-JSON 200',
+      fetch: () =>
+        Promise.resolve(
+          new Response('<html>html-detail</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          })
+        ),
+      cause: 'request_failed',
+      error: 'SyntaxError',
+      detail: 'html-detail',
+    },
+    {
+      label: 'a body-read timeout',
+      fetch: () => Promise.resolve(bodyReadTimeout()),
+      cause: 'timeout',
+      error: 'TimeoutError',
+      detail: 'body-read-detail',
+    },
+  ] as const
+
+  function resolveLines(warn: { mock: { calls: unknown[][] } }): string[] {
+    return warn.mock.calls.map(args => String(args[0])).filter(line => line.startsWith(LINE_PREFIX))
+  }
+
+  function expectNoSecret(line: string, detail: string): void {
+    expect(line).not.toContain(USER_ID)
+    expect(line).not.toContain(TOKEN)
+    expect(line).not.toContain(detail)
+  }
+
+  function nearExpiryHost(): ResolvedServerConnection {
+    const exp = Math.floor(Date.now() / 1000) + 1
+    return {
+      name: 'agent2',
+      url: 'http://agent2.mcp-host:8080',
+      headers: {
+        [HOST_EDGE_ASSERTION_HEADER]: jwt.sign(
+          { sub: USER_ID, iat: exp - 300, exp },
+          EDGE_KEYS.privateKey,
+          { algorithm: 'RS256' }
+        ),
+      },
+    }
+  }
+
+  it.each(THROWN_CASES)(
+    'resolveHostConnectionForUser returns unavailable when the control-api call throws: $label',
+    async ({ fetch, cause, error, detail }) => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(fetch)
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+      const resolved = await resolveHostConnectionForUser(USER_ID, 'agent2', TOKEN)
+
+      expect(fetchMock).toHaveBeenCalledOnce()
+      expect(resolved).toEqual({ unavailable: true, cause })
+      // Exactly one line: it is also the witness that the catch ran.
+      const lines = resolveLines(warn)
+      expect(lines).toEqual([
+        `${LINE_PREFIX} phase=resolve host=agent2 cause=${cause} error=${error}`,
+      ])
+      expectNoSecret(lines[0]!, detail)
+    }
+  )
+
+  it.each(THROWN_CASES)(
+    'refreshV1HostConnection returns unavailable when the control-api call throws: $label',
+    async ({ fetch, cause, error, detail }) => {
+      const host = nearExpiryHost()
+      const heldAssertion = host.headers[HOST_EDGE_ASSERTION_HEADER]
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(fetch)
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+      const refusal = await refreshV1HostConnection(host, USER_ID, 'agent2', TOKEN)
+
+      expect(fetchMock).toHaveBeenCalledOnce()
+      expect(refusal).toEqual({ unavailable: true, cause })
+      expect(host.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(heldAssertion)
+      const lines = resolveLines(warn)
+      expect(lines).toEqual([
+        `${LINE_PREFIX} phase=re-resolve host=agent2 cause=${cause} error=${error}`,
+      ])
+      expectNoSecret(lines[0]!, detail)
+    }
+  )
+
+  it('resolveHostConnectionForUser logs one line for a returned http_status 503', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(mkResponse(503, JSON.stringify({ error: 'status-detail' })))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const resolved = await resolveHostConnectionForUser(USER_ID, 'agent2', TOKEN)
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(resolved).toEqual({ unavailable: true, cause: 'http_status', status: 503 })
+    const lines = resolveLines(warn)
+    expect(lines).toEqual([`${LINE_PREFIX} phase=resolve host=agent2 cause=http_status status=503`])
+    expectNoSecret(lines[0]!, 'status-detail')
+  })
+
+  it('refreshV1HostConnection logs one line for a returned http_status 503', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(mkResponse(503, JSON.stringify({ error: 'status-detail' })))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const refusal = await refreshV1HostConnection(nearExpiryHost(), USER_ID, 'agent2', TOKEN)
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(refusal).toEqual({ unavailable: true, cause: 'http_status', status: 503 })
+    const lines = resolveLines(warn)
+    expect(lines).toEqual([
+      `${LINE_PREFIX} phase=re-resolve host=agent2 cause=http_status status=503`,
+    ])
+    expectNoSecret(lines[0]!, 'status-detail')
   })
 })

@@ -9,11 +9,7 @@ import {
   requireRpcAuth,
 } from '../middleware/auth.js'
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
-import {
-  isHostAccessDenied,
-  respondControlApiAuthorityUnavailable,
-  respondHostAccessDenied,
-} from '../services/hostAccessDenial.js'
+import { isHostResolveRefusal, respondHostResolveRefusal } from '../services/hostAccessDenial.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
 
 function sanitizedStreamErrorMessage(): string {
@@ -62,8 +58,8 @@ export function createRpcHostProgressStreamRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
 
@@ -199,7 +195,6 @@ export function createRpcHostProgressStreamRouter(): Router {
         })
       } catch (error) {
         if (!res.headersSent) {
-          if (respondControlApiAuthorityUnavailable(res, error)) return
           res.status(500).json({ error: 'Internal Server Error' })
           return
         }

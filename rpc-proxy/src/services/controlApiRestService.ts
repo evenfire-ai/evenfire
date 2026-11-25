@@ -3,9 +3,8 @@ import { type AuthorizedActionV2, actionAuthorityCheckpointRequest } from '../ac
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
-  CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR,
-  type HostAccessDenial,
   type HostAccessDenialCode,
+  type HostResolveRefusal,
   hostAccessDenialCodeForReason,
   hostAccessDenied,
 } from './hostAccessDenial.js'
@@ -46,8 +45,10 @@ function controlApiBaseUrl(): string {
 // Shared upstream deadline for every control-api call in this file. Without it a
 // hung control-api pins the proxy socket indefinitely (the sibling host rail in
 // mcpHostRestService.ts already bounds its fetches at the same budget).
-// AbortSignal.timeout throws a TimeoutError, which the app error handler maps to
-// a 504 via isUpstreamTimeoutError — never a silent 500 or an unbounded wait.
+// AbortSignal.timeout throws a TimeoutError: the Host resolve's caller turns it
+// into a `timeout` refusal (504), and for the other clients here the app error
+// handler maps it to a 504 via isUpstreamTimeoutError — never a silent 500 or an
+// unbounded wait.
 function upstreamAbortSignal(): AbortSignal {
   return AbortSignal.timeout(config.upstreamTimeoutMs)
 }
@@ -58,38 +59,8 @@ export type DirectRunBindingRequest = {
   origin: 'direct_chat' | 'channel_event' | 'api'
 }
 
-export class ControlApiHostAccessRejectedError extends Error {
-  /**
-   * Set for a 403 only: whether control-api's denial reason proves the access
-   * was removed from the user. Absent for 401/409, which are not authorization
-   * denials of the Host.
-   */
-  readonly denialCode: HostAccessDenialCode | null
-  constructor(
-    readonly status: number,
-    denialCode: HostAccessDenialCode | null = null
-  ) {
-    super(`Control API rejected host access (${status})`)
-    this.name = 'ControlApiHostAccessRejectedError'
-    this.denialCode = denialCode
-  }
-}
-
-/**
- * control-api authorized the Host (200) but issued no edge assertion: control-api
- * is older than rpc-proxy. The Host refuses rpc-proxy traffic without one, so the
- * request cannot proceed; routes answer it as 503 `authority_unavailable`
- * (`respondControlApiAuthorityUnavailable`), never with this message.
- */
-export class ControlApiHostEdgeAssertionMissingError extends Error {
-  constructor() {
-    super('Control API MCP host response has no edge assertion')
-    this.name = CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR
-  }
-}
-
-// Typed rejection for the connectors read-model, mirroring the host rail above.
-// A generic Error collapses to 500 in the app error handler, which the desktop
+// Typed rejection for the connectors read-model. A generic Error collapses to
+// 500 in the app error handler, which the desktop
 // reads as non-refreshable — so an expired/rotated rpc access token (401) would
 // never trigger a token refresh and the panel would stay broken. Carrying the
 // status lets the route map 401/403 to a real status the client can act on.
@@ -247,7 +218,10 @@ export async function fetchHostConnectionFromControlApi(
     directRunBinding?: DirectRunBindingRequest
     fetchImpl?: typeof fetch
   } = {}
-): Promise<ResolvedHostConnection | HostAccessDenial> {
+): Promise<ResolvedHostConnection | HostResolveRefusal> {
+  // Every HTTP answer becomes a value. What `fetch` or `response.json()` throws
+  // (network failure, timeout, a body that is not JSON) propagates to the one
+  // caller, which classifies it.
   const directRunBinding = options.directRunBinding
   const response = await (options.fetchImpl ?? fetch)(
     `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
@@ -262,23 +236,21 @@ export async function fetchHostConnectionFromControlApi(
     }
   )
 
-  if (!directRunBinding && response.status === 403) {
+  const status = response.status
+  if (status === 403) {
     return hostAccessDenied(await readHostAccessDenialCode(response))
   }
-  if (!directRunBinding && response.status === 404) {
+  if (!directRunBinding && status === 404) {
     await drainBody(response)
     return hostAccessDenied('host_access_denied')
   }
-  if (response.status === 403) {
-    throw new ControlApiHostAccessRejectedError(403, await readHostAccessDenialCode(response))
-  }
-  if (response.status === 401 || response.status === 409) {
+  if (status === 401 || status === 409) {
     await drainBody(response)
-    throw new ControlApiHostAccessRejectedError(response.status)
+    return { rejected: true, status }
   }
   if (!response.ok) {
     await drainBody(response)
-    throw new Error(`Control API MCP host lookup failed (${response.status})`)
+    return { unavailable: true, cause: 'http_status', status }
   }
 
   const parsed = (await response.json()) as Partial<UserAllowedHost>
@@ -296,13 +268,14 @@ export async function fetchHostConnectionFromControlApi(
     attributionBindingStatus !== 'recorded' &&
     attributionBindingStatus !== 'unavailable'
   ) {
-    throw new Error('Control API MCP host binding response was invalid')
+    return { unavailable: true, cause: 'invalid_binding_status' }
   }
   // The Host accepts rpc-proxy traffic only with this assertion: a control-api
-  // that does not issue one cannot authorize a Host request.
+  // that does not issue one (one older than rpc-proxy) cannot authorize a Host
+  // request.
   const edgeAssertion = parsed.edgeAssertion
   if (typeof edgeAssertion !== 'string' || edgeAssertion === '') {
-    throw new ControlApiHostEdgeAssertionMissingError()
+    return { unavailable: true, cause: 'edge_assertion_missing' }
   }
 
   return {

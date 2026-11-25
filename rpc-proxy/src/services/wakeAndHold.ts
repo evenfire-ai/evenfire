@@ -3,7 +3,7 @@ import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import type { ResolvedServerConnection, RpcAccessClaims } from '../types.js'
 import { type HostWakeApiResponse, requestHostWakeFromControlApi } from './controlApiRestService.js'
-import type { HostAccessDenial } from './hostAccessDenial.js'
+import type { HostResolveRefusal } from './hostAccessDenial.js'
 import { forwardHostHealth } from './mcpHostRestService.js'
 
 /** Strip control characters and newlines from user-derived hostRef before log interpolation. */
@@ -762,14 +762,14 @@ export type RespondWithWakeAndHoldOptions = {
    * V1 requests: runs before each retry attempt and re-resolves the Host
    * connection when the held edge assertion is near its `exp`, so the retry
    * carries a fresh edge assertion; otherwise it makes no control-api call and
-   * the retry reuses the held assertion. A returned denial ends the retry
-   * through `respondDenied`, the route's answer for a denial at its first
-   * resolve. Called where `reauthorizeV2` is called, for requests without
-   * `authorizedActionV2`.
+   * the retry reuses the held assertion. A returned refusal (denial, rejection
+   * or unavailable authority) ends the retry through `respondRefused`, the
+   * route's answer for that refusal at its first resolve. Called where
+   * `reauthorizeV2` is called, for requests without `authorizedActionV2`.
    */
   refreshV1Host?: {
-    refresh: () => Promise<HostAccessDenial | null>
-    respondDenied: (denial: HostAccessDenial) => void
+    refresh: () => Promise<HostResolveRefusal | null>
+    respondRefused: (refusal: HostResolveRefusal) => void
   }
   /**
    * Re-issues the original upstream request with a deadline-bounded timeout.
@@ -865,9 +865,9 @@ export async function respondWithWakeAndHold(
           if (options.reauthorizeV2) {
             await options.reauthorizeV2()
           } else if (options.refreshV1Host) {
-            const denial = await options.refreshV1Host.refresh()
-            if (denial) {
-              options.refreshV1Host.respondDenied(denial)
+            const refusal = await options.refreshV1Host.refresh()
+            if (refusal) {
+              options.refreshV1Host.respondRefused(refusal)
               return
             }
           }
@@ -913,7 +913,8 @@ export async function respondWithWakeAndHold(
           }
           // The host answered with a non-availability failure — exactly
           // today's behavior for an up-but-erroring host — or the authority
-          // re-check before the forward failed (for example a control-api 401).
+          // re-check before the forward threw (for example a held V1 assertion
+          // without a readable `exp`, or a re-resolved Host URL that changed).
           console.warn(
             `[RPC_PROXY] wake-hold ${retryStage} retry failed host=${safeHostRef} error=${describeErrorForLog(
               error

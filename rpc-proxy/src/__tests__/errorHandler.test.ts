@@ -3,7 +3,6 @@ import express from 'express'
 import request from 'supertest'
 import { createApp } from '../app.js'
 import { apiErrorHandler } from '../errorHandler.js'
-import { ControlApiHostEdgeAssertionMissingError } from '../services/controlApiRestService.js'
 
 function appThrowing(error: unknown) {
   const app = express()
@@ -36,14 +35,6 @@ describe('apiErrorHandler', () => {
     ).get('/boom')
     expect(res.status).toBe(413)
     expect(res.body).toEqual({ error: 'Payload Too Large' })
-  })
-
-  it('maps a control-api answer without an edge assertion to 503 without the message', async () => {
-    const res = await request(appThrowing(new ControlApiHostEdgeAssertionMissingError())).get(
-      '/boom'
-    )
-    expect(res.status).toBe(503)
-    expect(res.body).toEqual({ error: 'authority_unavailable' })
   })
 
   it('maps anything else to 500 without the message and logs the error by name', async () => {
