@@ -63,6 +63,13 @@ function isEdgeContractRecord(value: unknown): value is EdgeContractRecord {
   )
 }
 
+/** The whole file, parsed afresh, with each `FIXTURE_EXPIRES_AT` set to now + 600 s. */
+function readEdgeRecordFile(): Record<string, unknown> {
+  return JSON.parse(readFileSync(EDGE_RECORDS_URL, 'utf8'), (_name, value: unknown) =>
+    value === FIXTURE_EXPIRES_AT ? new Date(Date.now() + 600_000).toISOString() : value
+  ) as Record<string, unknown>
+}
+
 /**
  * The record named `key`, read afresh from the file, so a caller may change what it gets. Each
  * `FIXTURE_EXPIRES_AT` becomes now + 600 s, as every PR 1 reader does. A key outside
@@ -72,14 +79,30 @@ export function readEdgeRecord(key: EdgeRecordKey): EdgeContractRecord {
   if (!KNOWN_KEYS.has(key)) {
     throw new Error(`"${key}" is not a key this PR reads (DESKTOP_EDGE_RECORD_KEYS)`)
   }
-  const records = JSON.parse(readFileSync(EDGE_RECORDS_URL, 'utf8'), (_name, value: unknown) =>
-    value === FIXTURE_EXPIRES_AT ? new Date(Date.now() + 600_000).toISOString() : value
-  ) as Record<string, unknown>
+  const records = readEdgeRecordFile()
   const record = Object.hasOwn(records, key) ? records[key] : undefined
   if (!isEdgeContractRecord(record)) {
     throw new Error(`edge.json has no record "${key}" of the recorded shape`)
   }
   return record
+}
+
+/**
+ * Every record in the file that answers `status`, with its key, including records outside
+ * `DESKTOP_EDGE_RECORD_KEYS`. It serves checks that must also see a record PR 1 adds later, such
+ * as D17's tier-1 check on refusal reasons. A record of another shape throws.
+ */
+export function readEdgeRecordsWithStatus(
+  status: number
+): ReadonlyArray<readonly [key: string, record: EdgeContractRecord]> {
+  const found: Array<readonly [string, EdgeContractRecord]> = []
+  for (const [key, record] of Object.entries(readEdgeRecordFile())) {
+    if (!isEdgeContractRecord(record)) {
+      throw new Error(`edge.json record "${key}" is not of the recorded shape`)
+    }
+    if (record.status === status) found.push([key, record])
+  }
+  return found
 }
 
 /**
