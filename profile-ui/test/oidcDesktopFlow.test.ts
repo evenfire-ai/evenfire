@@ -2,6 +2,18 @@ import assert from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
 import test from 'node:test'
 import {
+  buildDesktopLoginCodeLink,
+  buildDesktopLoginErrorLink,
+  parseDesktopLoginLink,
+} from '@clerum/desktop-app-links'
+import {
+  DESKTOP_BINDING_COOKIE_RE,
+  desktopBindingCookieValue,
+  desktopLoginErrorPage,
+  desktopLoginPage,
+  readDesktopBindingCookie,
+} from '../app/api/oidc/_desktop'
+import {
   OidcProfileFlowError,
   beginOidcAttempt,
   browserCookieName,
@@ -9,9 +21,12 @@ import {
   newBrowserBinding,
   parseCallbackParameters,
   postOidcProfileFlow,
+  readSingleCookie,
   returnToCookieName,
 } from '../app/api/oidc/_flow'
 import { GET } from '../app/api/oidc/callback/route'
+import { DESKTOP_SIGN_IN_COPY, OIDC_REFUSAL_MESSAGES } from '../app/constants/oidc'
+import { buildEvenfireDesktopAppContentSecurityPolicy } from '../lib/desktopAppLinks'
 import { edgeRecord, edgeResponse } from './edgeFixtures'
 
 // Every upstream body below is External REST's recorded answer
@@ -46,6 +61,8 @@ const CODE_CHALLENGE = createHash('sha256')
   .update(randomBytes(32).toString('base64url'))
   .digest('base64url')
 const bindingCookie = `${browserCookieName(edgeState)}=${BINDING}`
+/** The state Evenfire Desktop puts in the sign-in page's fragment. */
+const DESKTOP_STATE = randomBytes(32).toString('base64url')
 const returnCookie = `${returnToCookieName(edgeState)}=desktop-setup`
 
 type UpstreamCall = Readonly<{ path: string; body: unknown }>
@@ -356,4 +373,128 @@ test("the edge's terminal 503 for an unrecognised outcome ends the attempt", asy
       [CONFIGURATION_PATH, COMPLETE_PATH]
     )
   })
+})
+
+function cookieRequest(cookie: string): Request {
+  return new Request(edgeCallbackUri, { headers: { cookie } })
+}
+
+test('a frozen copy of PR2 binding rule rejects the Desktop cookie value, as the live reader does', () => {
+  // profile-ui/app/api/oidc/_flow.ts:17 at 85ca44ca5: the binding rule of a callback without
+  // Desktop sign-in.
+  const FROZEN_PR2_BINDING_RE = /^[A-Za-z0-9_-]{43}$/
+  const name = browserCookieName(edgeState)
+  const value = desktopBindingCookieValue(BINDING, DESKTOP_STATE)
+
+  assert.equal(value, `desktop.${BINDING}.${DESKTOP_STATE}`)
+  assert.match(value, DESKTOP_BINDING_COOKIE_RE)
+  assert.doesNotMatch(value, FROZEN_PR2_BINDING_RE)
+  assert.equal(readSingleCookie(cookieRequest(`${name}=${value}`), name), undefined)
+  assert.deepEqual(readDesktopBindingCookie(cookieRequest(`${name}=${value}`), name), {
+    binding: BINDING,
+    desktopState: DESKTOP_STATE,
+  })
+})
+
+test('reads a Desktop binding only from exactly one well-formed cookie', () => {
+  const name = browserCookieName(edgeState)
+  const value = desktopBindingCookieValue(BINDING, DESKTOP_STATE)
+  for (const [label, cookie] of [
+    ['a duplicate', `${name}=${value}; ${name}=${value}`],
+    ['another prefix', `${name}=profile.${BINDING}.${DESKTOP_STATE}`],
+    ['a 42-character binding', `${name}=desktop.${BINDING.slice(1)}.${DESKTOP_STATE}`],
+    ['a 42-character state', `${name}=desktop.${BINDING}.${DESKTOP_STATE.slice(1)}`],
+    ['a plain binding', `${name}=${BINDING}`],
+    ['an oversized header', `${name}=${value}; padding=${'x'.repeat(16_384)}`],
+  ] as const) {
+    assert.equal(readDesktopBindingCookie(cookieRequest(cookie), name), undefined, label)
+  }
+  assert.deepEqual(
+    readDesktopBindingCookie(cookieRequest(`other=1; ${name}=${value}`), name),
+    { binding: BINDING, desktopState: DESKTOP_STATE },
+    'one well-formed cookie among others'
+  )
+  assert.throws(() => desktopBindingCookieValue(BINDING.slice(1), DESKTOP_STATE), /binding/)
+  assert.throws(() => desktopBindingCookieValue(BINDING, `${DESKTOP_STATE}.`), /binding/)
+})
+
+/** The link the page's one script fires, read back from its `const link = "…";`. */
+function scriptLink(body: string): string {
+  const match = body.match(/<script nonce="[^"]+">const link = ("[^"]*");/)
+  assert.ok(match?.[1], 'expected the handoff script to name its link')
+  return JSON.parse(match[1]) as string
+}
+
+test('the Desktop handoff page sends no-store, no-referrer, a nonce CSP and only the given cookies', async () => {
+  const { code, environment } = edgeRecord(EDGE_DESKTOP_CODE_ISSUED).body as {
+    code: string
+    environment: string
+  }
+  const link = buildDesktopLoginCodeLink({ state: DESKTOP_STATE, code, environment })
+  const cookies = [clearCookie(browserCookieName(edgeState))]
+  const response = desktopLoginPage({
+    link,
+    message: DESKTOP_SIGN_IN_COPY.handoffMessage,
+    status: 200,
+    cookies,
+  })
+  const body = await response.text()
+  const nonce = body.match(/<script nonce="([^"]+)">/)?.[1] ?? ''
+
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('cache-control'), 'no-store')
+  assert.equal(response.headers.get('referrer-policy'), 'no-referrer')
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+  assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8')
+  assert.equal(
+    response.headers.get('content-security-policy'),
+    buildEvenfireDesktopAppContentSecurityPolicy(nonce)
+  )
+  assert.match(response.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/)
+  assert.deepEqual(response.headers.getSetCookie(), cookies)
+  assert.ok(body.includes(`<title>${DESKTOP_SIGN_IN_COPY.handoffTitle}</title>`))
+  assert.ok(body.includes(`<p class="body-copy">${DESKTOP_SIGN_IN_COPY.handoffMessage}</p>`))
+  assert.equal(scriptLink(body), link)
+
+  assert.throws(
+    () =>
+      desktopLoginPage({
+        link,
+        message: DESKTOP_SIGN_IN_COPY.handoffMessage,
+        status: 200,
+        cookies: [...cookies, 'profile_session=fixture-session; Path=/; Secure; HttpOnly'],
+      }),
+    /profile_session/
+  )
+})
+
+test("the Desktop error page fires the package's error link for the Desktop state", async () => {
+  for (const [error, reason, message, status] of [
+    ['refused', 'account_disabled', OIDC_REFUSAL_MESSAGES.account_disabled, 403],
+    ['failed', undefined, DESKTOP_SIGN_IN_COPY.failed, 503],
+  ] as const) {
+    const cookies = [clearCookie(browserCookieName(edgeState))]
+    const response = desktopLoginErrorPage({
+      desktopState: DESKTOP_STATE,
+      error,
+      ...(reason ? { reason } : {}),
+      message,
+      status,
+      cookies,
+    })
+    const body = await response.text()
+    const link = scriptLink(body)
+
+    assert.equal(response.status, status, error)
+    assert.deepEqual(response.headers.getSetCookie(), cookies, error)
+    assert.equal(link, buildDesktopLoginErrorLink({ state: DESKTOP_STATE, error, reason }), error)
+    assert.deepEqual(
+      parseDesktopLoginLink(link),
+      reason
+        ? { kind: 'error', state: DESKTOP_STATE, error, reason }
+        : { kind: 'error', state: DESKTOP_STATE, error },
+      error
+    )
+    assert.ok(body.includes(`<p class="body-copy">${message}</p>`), error)
+  }
 })

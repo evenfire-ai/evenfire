@@ -27,7 +27,7 @@ const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
 const DESKTOP_SIGN_IN_CODE_RE = /^[A-Za-z0-9_-]{43}$/
 const CALLBACK_PATH = '/api/oidc/callback'
 /** The member session cookie External REST sets for password login (`sessionCookie.ts`). */
-const PROFILE_SESSION_COOKIE_PREFIX = 'profile_session='
+export const PROFILE_SESSION_COOKIE_PREFIX = 'profile_session='
 const SAFE_FAILURES = [
   'oidc_not_configured',
   'oidc_attempt_rejected',
@@ -295,7 +295,7 @@ export function returnToCookieName(state: string): string {
 }
 
 /** Every value the request's Cookie header carries under `name`, or none for an oversized header. */
-function cookieValues(request: Request, name: string): string[] {
+export function cookieValues(request: Request, name: string): string[] {
   const header = request.headers.get('cookie')
   if (!header || header.length > 16_384) return []
   const values: string[] = []

@@ -5,6 +5,7 @@ import {
   buildGfsResourceDeepLink,
   buildSandboxUiDeepLink,
   normalizeGfsResourceUri,
+  parseDesktopLoginLink,
   parseGfsResourceDeepLink,
 } from '@clerum/desktop-app-links'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
@@ -153,6 +154,32 @@ function buildDesktopHandoffDocument(
         If nothing happens, install or update to the latest Evenfire Desktop, then try again.
       </p>`,
     `window.location.replace(${scriptString(deepLink)})`
+  )
+}
+
+/**
+ * The page that hands a Desktop sign-in result to Evenfire Desktop. It fires `link` once on load,
+ * and its button fires it again by script, for a browser that asked first. A code link carries a
+ * one-time sign-in code, so the link is written once, inside the nonce script, and never as an
+ * anchor or as text. Throws unless the package parses `link` as a Desktop sign-in link.
+ */
+export function buildDesktopLoginHandoffDocument(
+  link: string,
+  scriptNonce: string,
+  copy: Readonly<{ title: string; message: string }>
+): string {
+  if (!parseDesktopLoginLink(link)) {
+    throw new Error('Cannot hand off an invalid Desktop sign-in link')
+  }
+  return buildDesktopHandoffShell(
+    scriptNonce,
+    { title: copy.title, description: copy.message },
+    '      <button type="button" id="open-evenfire-desktop" class="open-button">' +
+      'Open Evenfire Desktop</button>',
+    `const link = ${scriptString(link)}; ` +
+      "document.getElementById('open-evenfire-desktop')" +
+      ".addEventListener('click', () => { window.location.href = link }); " +
+      'window.location.replace(link)'
   )
 }
 

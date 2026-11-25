@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import test from 'node:test'
+import { buildDesktopLoginCodeLink } from '@clerum/desktop-app-links'
+import { DESKTOP_SIGN_IN_COPY } from '../app/constants/oidc'
 import {
   buildDesktopEnvironmentLink,
+  buildDesktopLoginHandoffDocument,
   buildEvenfireDesktopAppContentSecurityPolicy,
   buildEvenfireDesktopAppLink,
   buildEvenfireDesktopAppRedirectDocument,
   buildEvenfireDesktopGfsResourceRedirectDocument,
   navigateToDesktopApp,
 } from '../lib/desktopAppLinks'
+import { edgeRecord } from './edgeFixtures'
 
 function withDesktopHandoffEnabled<T>(run: () => T): T {
   const original = process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
@@ -201,4 +205,77 @@ test('the app and resource handoff documents keep their bytes on the shared shel
     ),
     'd73af696264c9f9001be835fe537c1d5a1ce8eb4537952a1b51566ccd42d34f3'
   )
+})
+
+const HANDOFF_COPY = {
+  title: DESKTOP_SIGN_IN_COPY.handoffTitle,
+  message: DESKTOP_SIGN_IN_COPY.handoffMessage,
+}
+
+/**
+ * A code link built by the package from External REST's recorded desktop_code_issued answer
+ * (external-rest-api/test/fixtures/oidc-desktop-sign-in/edge.json), for a fresh Desktop state.
+ */
+function desktopCodeLink(): Readonly<{ link: string; code: string }> {
+  const { code, environment } = edgeRecord(
+    'POST /api/v1/oidc/profile-flow/complete desktop-code-issued'
+  ).body as { code: string; environment: string }
+  const state = randomBytes(32).toString('base64url')
+  return { link: buildDesktopLoginCodeLink({ state, code, environment }), code }
+}
+
+test('the Desktop handoff document has no anchor, a scripted button and the link once', () => {
+  const { link, code } = desktopCodeLink()
+  const scriptNonce = 'dGVzdC1ub25jZQ=='
+  const body = buildDesktopLoginHandoffDocument(link, scriptNonce, HANDOFF_COPY)
+  const scripts = [...body.matchAll(/<script nonce="([^"]+)">([^<]*)<\/script>/g)]
+  const cspNonce = buildEvenfireDesktopAppContentSecurityPolicy(scriptNonce).match(
+    /script-src 'nonce-([^']+)'/
+  )?.[1]
+
+  assert.equal(body.split(code).length - 1, 1)
+  assert.ok(!/<a\b/i.test(body))
+  assert.match(
+    body,
+    /<button type="button" id="open-evenfire-desktop"[^>]*>Open Evenfire Desktop<\/button>/
+  )
+  assert.ok(body.includes(`<h1>${HANDOFF_COPY.title}</h1>`))
+  assert.ok(body.includes(`<p class="body-copy">${HANDOFF_COPY.message}</p>`))
+  assert.equal((body.match(/<script\b/g) ?? []).length, 1)
+  assert.equal(scripts.length, 1)
+  assert.equal(scripts[0][1], cspNonce)
+
+  // Runs the one script against a stand-in window and button.
+  const replaced: string[] = []
+  const location = { href: 'about:blank', replace: (url: string) => void replaced.push(url) }
+  const clickListeners: Array<() => void> = []
+  const button = {
+    addEventListener: (type: string, listener: () => void) => {
+      if (type === 'click') clickListeners.push(listener)
+    },
+  }
+  const getElementById = (id: string) => (id === 'open-evenfire-desktop' ? button : null)
+  new Function('window', 'document', scripts[0][2])({ location }, { getElementById })
+  assert.deepEqual(replaced, [link])
+  assert.equal(location.href, 'about:blank')
+  assert.equal(clickListeners.length, 1)
+  clickListeners[0]()
+  assert.equal(location.href, link)
+  assert.deepEqual(replaced, [link])
+})
+
+test('the Desktop handoff document refuses https and evenfire://app links', () => {
+  const { link } = desktopCodeLink()
+  const query = link.slice(link.indexOf('?'))
+  for (const [label, refused] of [
+    ['an https link with the same query', `https://profile.example.test/desktop-login${query}`],
+    ['an evenfire://app link', 'evenfire://app/sandbox-recipes/agentic-task-board'],
+    ['a code link with an extra parameter', `${link}&extra=1`],
+  ] as const) {
+    assert.throws(
+      () => buildDesktopLoginHandoffDocument(refused, 'dGVzdC1ub25jZQ==', HANDOFF_COPY),
+      /invalid Desktop sign-in link/,
+      label
+    )
+  }
 })
