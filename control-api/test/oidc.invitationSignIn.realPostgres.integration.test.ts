@@ -994,6 +994,84 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
       expect(waited, 'the sign-in waited on the users insert').toBe(true)
     })
 
+    it('signs in to the account a password acceptance created after the email lookup found none', async () => {
+      const alice = `${uniqueLabel('alice')}@fixture.test`
+      const subject = uniqueLabel('lookup-race-subject')
+      const teamId = await seedTeam('lookup-race-team')
+      const invitation = await seedInvitation({ email: alice, teamId })
+      const proof = await invitationProof(
+        defaultFake,
+        { sub: subject, email: alice, email_verified: true },
+        { invitationId: invitation.id, invitedEmail: alice }
+      )
+
+      let acceptedUserId = ''
+      /** The invitation link's own password acceptance, committed in full. */
+      async function acceptByPassword(): Promise<void> {
+        const acceptance = await testPool.connect()
+        try {
+          await acceptance.query('BEGIN')
+          // The sign-in holds no lock this needs, so a wait here is a defect, not the pause.
+          await acceptance.query(`SET LOCAL lock_timeout = '5s'`)
+          const byPassword = await acceptInvitationForEmailInTransaction(
+            acceptance as unknown as DbClient,
+            alice,
+            invitation.token
+          )
+          if (!('data' in byPassword) || !byPassword.data) {
+            throw new Error('the password acceptance was refused')
+          }
+          acceptedUserId = byPassword.data.userId
+          await acceptance.query('COMMIT')
+        } catch (error) {
+          await acceptance.query('ROLLBACK')
+          throw error
+        } finally {
+          acceptance.release()
+        }
+      }
+
+      // The email lookup, and not the reselect after the insert: only the lookup has LIMIT 2.
+      const emailLookup = /FROM users\s+WHERE lower\(email\) = lower\(\$1\)[\s\S]*LIMIT 2/
+      const pauses: Array<{ lookupRows: number }> = []
+      // Once the lookup has returned, the acceptance commits before the sign-in's next statement.
+      const pausingAfterLookup: TransactionRunner = work =>
+        committed(db => {
+          const query: DbClient['query'] = async (text, values) => {
+            const result = await db.query(text, values)
+            if (pauses.length === 0 && emailLookup.test(text)) {
+              pauses.push({ lookupRows: result.rowCount ?? 0 })
+              await acceptByPassword()
+            }
+            return result
+          }
+          return work(
+            new Proxy(db, {
+              get: (target, key) => (key === 'query' ? query : Reflect.get(target, key)),
+            })
+          )
+        })
+
+      const outcome = await signIn(defaultFake, proof, { transaction: pausingAfterLookup })
+      // The pause ran once, on a lookup that found no account yet.
+      expect(pauses).toEqual([{ lookupRows: 0 }])
+      expect(acceptedUserId).not.toBe('')
+      expect(outcome).toMatchObject({
+        status: 'signed_in',
+        userId: acceptedUserId,
+        created: { account: false, link: true },
+        invitationsApplied: 0,
+      })
+      expect(outcome).not.toHaveProperty('created.byInvitation')
+      expect(await userCount(alice)).toBe(1)
+      expect(await linkCount(subject)).toBe(1)
+      expect(await invitationState(invitation.id)).toEqual({
+        status: 'accepted',
+        accepted_user_id: acceptedUserId,
+      })
+      expect(await membershipsOf(acceptedUserId)).toEqual([{ team_id: teamId, role: 'member' }])
+    })
+
     it('requires eligibility before the exception', async () => {
       const fake = createOidcMemberSignInFakeProvider({
         memberSignInEnv: {

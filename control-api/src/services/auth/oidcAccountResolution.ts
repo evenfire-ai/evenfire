@@ -241,10 +241,12 @@ async function invitationQualifies(
  * With account creation off, a matching invitation that is pending creates
  * the one account it was sent to (design §9's exception). The account gets
  * neither the new-member team nor its check: only the teams of the person's
- * pending invitations, which the sign-in applies afterwards. If the
- * invitation stops qualifying while the sign-in waits on its lock, this
- * throws OidcInvitationWithdrawnError, so the caller's transaction rolls back
- * whole.
+ * pending invitations, which the sign-in applies afterwards. Whether the
+ * invitation qualifies is read before the email lookup, so a password
+ * acceptance of it that commits during the sign-in leads to the account that
+ * acceptance created, never to `no_account`. If the invitation stops
+ * qualifying while the sign-in waits on its lock, this throws
+ * OidcInvitationWithdrawnError, so the caller's transaction rolls back whole.
  */
 export async function resolveOidcAccount(
   db: DbTransactionClient,
@@ -306,6 +308,19 @@ export async function resolveOidcAccount(
   // Before the email lookup, so a different address writes no link and no account.
   if (differsFromInvitation(invitation, claimEmail)) return refused('invitation_email_mismatch')
 
+  // With creation off, only the invitation the attempt came from may create
+  // the account: decided from this unlocked read, so an invitation that
+  // doesn't qualify writes no user, and checked again under its lock below.
+  // It runs before the email lookup. A password acceptance of this invitation
+  // that commits after it is then found by the lookup, or makes the insert
+  // below lose, so the person signs in to the account it created.
+  const creatingInvitation =
+    invitation !== null &&
+    !accountCreationAllowed(policy) &&
+    (await invitationQualifies(db, invitation, 'unlocked'))
+      ? invitation
+      : null
+
   // Rows 3, 5 and 6: email finds an existing member the first time only.
   const matches = await db.query(
     `SELECT id, email, name, picture, lifecycle_state, lifecycle_version
@@ -322,7 +337,6 @@ export async function resolveOidcAccount(
 
   // Row 4: create the account. With creation off, only the invitation the
   // attempt came from may create it: the one account it was sent to.
-  let creatingInvitation: OidcInvitationContext | null = null
   if (accountCreationAllowed(policy)) {
     if (
       policy.newMemberTeamId !== null &&
@@ -330,13 +344,9 @@ export async function resolveOidcAccount(
     ) {
       return refused('provider_configuration', 'unknown_new_member_team')
     }
-  } else {
-    // Decided from an unlocked read, so an invitation that doesn't qualify
-    // writes no user. It is checked again under its lock below.
-    if (invitation === null || !(await invitationQualifies(db, invitation, 'unlocked'))) {
-      return refused('no_account')
-    }
-    creatingInvitation = invitation
+  } else if (creatingInvitation === null) {
+    // No invitation, or none that qualified at the read before the lookup.
+    return refused('no_account')
   }
 
   const name = proof.attributes.name || null
