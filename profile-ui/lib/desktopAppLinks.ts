@@ -144,9 +144,35 @@ function buildDesktopHandoffDocument(
     throw new Error('Cannot redirect to an invalid desktop app link')
   }
 
-  const nonce = normalizeScriptNonce(scriptNonce)
   const escapedLink = escapeHtml(deepLink)
-  const scriptLink = JSON.stringify(deepLink).replaceAll('<', '\\u003c')
+  return buildDesktopHandoffShell(
+    scriptNonce,
+    copy,
+    `      <a class="open-button" href="${escapedLink}">Open in Evenfire</a>
+      <p class="body-copy">
+        If nothing happens, install or update to the latest Evenfire Desktop, then try again.
+      </p>`,
+    `window.location.replace(${scriptString(deepLink)})`
+  )
+}
+
+/** A string as a script literal that cannot close its `<script>` element. */
+function scriptString(value: string): string {
+  return JSON.stringify(value).replaceAll('<', '\\u003c')
+}
+
+/**
+ * The page every Desktop handoff document shares: the nonce style block, a card with the title
+ * and description, the caller's actions and one nonce script. `actionsHtml` and `script` go in
+ * as given, so the caller escapes every value it puts in them.
+ */
+function buildDesktopHandoffShell(
+  scriptNonce: string,
+  copy: Readonly<{ title: string; description: string }>,
+  actionsHtml: string,
+  script: string
+): string {
+  const nonce = normalizeScriptNonce(scriptNonce)
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -245,13 +271,10 @@ function buildDesktopHandoffDocument(
         <h1>${escapeHtml(copy.title)}</h1>
         <p class="body-copy">${escapeHtml(copy.description)}</p>
       </div>
-      <a class="open-button" href="${escapedLink}">Open in Evenfire</a>
-      <p class="body-copy">
-        If nothing happens, install or update to the latest Evenfire Desktop, then try again.
-      </p>
+${actionsHtml}
     </section>
   </main>
-  <script nonce="${nonce}">window.location.replace(${scriptLink})</script>
+  <script nonce="${nonce}">${script}</script>
 </body>
 </html>`
 }

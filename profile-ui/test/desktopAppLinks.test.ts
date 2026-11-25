@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import {
   buildDesktopEnvironmentLink,
   buildEvenfireDesktopAppContentSecurityPolicy,
   buildEvenfireDesktopAppLink,
   buildEvenfireDesktopAppRedirectDocument,
+  buildEvenfireDesktopGfsResourceRedirectDocument,
   navigateToDesktopApp,
 } from '../lib/desktopAppLinks'
 
@@ -173,5 +175,30 @@ test('buildEvenfireDesktopAppRedirectDocument rejects an invalid script nonce', 
         '"><script>alert(1)</script>'
       ),
     /invalid script nonce/
+  )
+})
+
+test('the app and resource handoff documents keep their bytes on the shared shell', () => {
+  // sha256 of each document as e9ba60538 rendered it, before the shell was shared. A change to
+  // the handoff page changes these on purpose.
+  const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
+  const scriptNonce = 'dGVzdC1ub25jZQ=='
+  assert.equal(
+    sha256(
+      buildEvenfireDesktopAppRedirectDocument(
+        'evenfire://app/sandbox-recipes/agentic-task-board?path=%2Ftasks%2Ftask-42&team=team-123',
+        scriptNonce
+      )
+    ),
+    '6f8d3ab6624138e875b70cd01b09cfdb3d65c7a564a0e79501584744fce39548'
+  )
+  assert.equal(
+    sha256(
+      buildEvenfireDesktopGfsResourceRedirectDocument(
+        'gfs://main/0123456789abcdef0123456789abcdef',
+        scriptNonce
+      )
+    ),
+    'd73af696264c9f9001be835fe537c1d5a1ce8eb4537952a1b51566ccd42d34f3'
   )
 })
