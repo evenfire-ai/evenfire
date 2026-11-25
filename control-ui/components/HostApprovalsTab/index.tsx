@@ -141,7 +141,7 @@ function ReadViewsSkeleton() {
  * edit session when its agent changes, and a save of the previous agent that
  * settles later closes only the edit session it started in.
  */
-export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
+export function HostApprovalsTab({ host, onRetry }: HostApprovalsTabProps) {
   const { showToast } = useToast()
   const [view, setView] = useState(() => viewOf(host))
   // Whether this instance has shown an agent's settings. From then on the
@@ -414,6 +414,7 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
           onRetry={() => {
             retriedRef.current = view.state
             load(view)
+            onRetry?.()
           }}
         />
       ) : null}

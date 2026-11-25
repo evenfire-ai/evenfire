@@ -10,6 +10,12 @@ export interface HostApprovalsTabProps {
    * that agent from its own first load: nothing of the previous one stays.
    */
   host: string
+  /**
+   * Called when the admin presses the tab's Retry, alongside the tab's own
+   * reload. The host page uses it to retry its own read of the agent if that
+   * read failed; the tab reads nothing of the page's state.
+   */
+  onRetry?: () => void
 }
 
 /**

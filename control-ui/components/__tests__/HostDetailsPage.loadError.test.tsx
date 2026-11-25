@@ -104,7 +104,7 @@ describe('a failed /detail read on the Approvals tab (Ruling 44(c))', () => {
     page.unmount()
   })
 
-  it('leaves no banner and no skeleton once the tab’s Retry succeeds', async () => {
+  it('retries the page’s own failed read with the tab’s Retry and leaves no error behind (ruling 57)', async () => {
     const fake = createFake()
     failRead(fake, TAB_READ)
     failRead(fake, PAGE_READ)
@@ -114,13 +114,32 @@ describe('a failed /detail read on the Approvals tab (Ruling 44(c))', () => {
 
     expect(
       reads(fake, FOO_DETAIL).map(entry => entry.response?.status),
-      '/detail answers'
-    ).toEqual([200, 500, 500, 200])
+      '/detail answers: the tab’s retry and the page’s retry were both sent'
+    ).toEqual([200, 500, 500, 200, 200])
     expect(errorBanners(), 'error banners').toHaveLength(0)
     expect(tabLoadBanner(), 'the tab’s banner').toBeNull()
     expect(headerSkeleton(), 'the title skeleton').toBeNull()
-    // The page's own read still failed, and the header says so in place.
+    expect(screen.queryByText(HEADER_ERROR), 'the header’s error').toBeNull()
+    expect(screen.getByText('Agent: foo'), 'the agent’s title').toBeVisible()
+    page.unmount()
+  })
+
+  it('keeps the header’s error when the page’s retry fails again while the tab’s succeeds (ruling 57)', async () => {
+    const fake = createFake()
+    failRead(fake, TAB_READ)
+    failRead(fake, PAGE_READ)
+    failRead(fake, 5)
+    const page = await openApprovals(fake)
+    fireEvent.click(within(tabLoadBanner()!).getByRole('button', { name: 'Retry' }))
+    await settle()
+
+    expect(
+      reads(fake, FOO_DETAIL).map(entry => entry.response?.status),
+      '/detail answers: the page’s retry was sent and failed'
+    ).toEqual([200, 500, 500, 200, 500])
+    expect(tabLoadBanner(), 'the tab’s banner').toBeNull()
     expect(screen.getByText(HEADER_ERROR), 'the header’s error').toBeInTheDocument()
+    expect(headerSkeleton(), 'the title skeleton').toBeNull()
     page.unmount()
   })
 

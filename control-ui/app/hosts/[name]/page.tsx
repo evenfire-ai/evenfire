@@ -1654,7 +1654,15 @@ export default function HostDetailsPage() {
 
         {/* The Approvals tab owns its loads, states and saves (spec §6.5); it
             reads nothing of the page's. */}
-        {activeTab === 'approvals' && <HostApprovalsTab host={routeName} />}
+        {activeTab === 'approvals' && (
+          <HostApprovalsTab
+            host={routeName}
+            // The tab's Retry also retries the page's own read, only when that read failed.
+            onRetry={() => {
+              if (loadError) void loadData()
+            }}
+          />
+        )}
 
         {activeTab === 'advanced' && (
           <HostAdvancedTab
