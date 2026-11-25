@@ -36,7 +36,7 @@ function fooHost(): HostObject {
     {
       metadata: { name: 'foo' },
       spec: {
-        host: 'foo',
+        host: 'Foo Display',
         contextRef: 'ctx-a',
         secretRef: 'foo-llm',
         channels: [],
@@ -123,7 +123,8 @@ describe('a failed /detail read on the Approvals tab (Ruling 44(c))', () => {
     expect(tabLoadBanner(), 'the tab’s banner').toBeNull()
     expect(headerSkeleton(), 'the title skeleton').toBeNull()
     expect(screen.queryByText(HEADER_ERROR), 'the header’s error').toBeNull()
-    expect(screen.getByText('Agent: foo'), 'the agent’s title').toBeVisible()
+    // The display name, not the route-name fallback.
+    expect(screen.getByText('Agent: Foo Display'), 'the agent’s title').toBeVisible()
     page.unmount()
   })
 

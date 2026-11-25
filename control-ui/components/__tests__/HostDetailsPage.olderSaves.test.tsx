@@ -185,7 +185,8 @@ describe('the page’s older saves (spec R16)', () => {
         otherHold.deliverNow()
         await other
       })
-      // The save went through once the other read was answered.
+      // The save's PUT was applied. It did not wait for the other read: the hold
+      // covers only the first GET, so the save's own read was never held.
       await waitFor(() => expect(writes(fake).some(entry => entry.applied)).toBe(true))
       await settle()
       page.unmount()
