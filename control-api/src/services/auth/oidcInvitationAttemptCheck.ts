@@ -36,16 +36,35 @@ export type OidcInvitationCheckInput = Readonly<{ invitationToken: string; clien
 
 const logger = rootLogger.child({ component: 'oidc_profile_flow' })
 
+/** A check's result, and the class of what the validate step threw for a refusal. */
+type Settled = Readonly<{ result: OidcInvitationCheck; errorName?: string }>
+
 function plain(fallback: OidcInvitationFallback): OidcInvitationCheck {
   return { status: 'plain', fallback }
 }
 
-/** A hub failure: a typed availability failure, or a refusal of the token. */
-function classifyHubFailure(error: unknown): OidcInvitationFallback {
-  return error instanceof MemberRegistrationUnavailableError ||
+/**
+ * An error's class, never its message: the message can carry the invitation
+ * token or the invited email. The constructor's name, because `name` can be
+ * anything (pg's DatabaseError sets it to 'error').
+ */
+function errorClassName(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : error === null ? 'null' : typeof error
+}
+
+/**
+ * A hub failure: a typed availability failure, or a refusal of the token.
+ * Anything else the validate step throws is a refusal too, named by its
+ * class, so an unexpected throw stays visible next to a hub 4xx.
+ */
+function hubFailure(error: unknown): Settled {
+  if (
+    error instanceof MemberRegistrationUnavailableError ||
     error instanceof MemberRegistrationMisconfiguredError
-    ? 'hub_unavailable'
-    : 'hub_refused'
+  ) {
+    return { result: plain('hub_unavailable') }
+  }
+  return { result: plain('hub_refused'), errorName: errorClassName(error) }
 }
 
 /**
@@ -57,7 +76,7 @@ function logStepFailure(step: 'bucket' | 'local_read', error: unknown): void {
     {
       event: 'oidc_invitation_check_step_failed',
       step,
-      errorName: error instanceof Error ? error.name : typeof error,
+      errorName: errorClassName(error),
     },
     'OIDC invitation check step failed; the attempt starts without the invitation'
   )
@@ -159,23 +178,28 @@ export function createOidcInvitationAttemptCheck(
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const result = await new Promise<OidcInvitationCheck>(resolve => {
+      const { result, errorName } = await new Promise<Settled>(resolve => {
         timer = setTimeout(() => {
-          resolve(plain('hub_deadline'))
+          resolve({ result: plain('hub_deadline') })
           controller.abort()
         }, deadlineMs)
         // Both handlers are attached as the steps start. A hub failure after
         // the deadline answered is classified here and dropped (resolve has
         // no effect by then), so it is never an unhandled rejection.
-        runSteps(input, controller.signal).then(resolve, error =>
-          resolve(plain(classifyHubFailure(error)))
+        runSteps(input, controller.signal).then(
+          checked => resolve({ result: checked }),
+          error => resolve(hubFailure(error))
         )
       })
       if (result.status === 'plain') {
         const operational =
           result.fallback === 'hub_deadline' || result.fallback === 'hub_unavailable'
         logger[operational ? 'warn' : 'info'](
-          { event: 'oidc_invitation_check_fell_back', fallback: result.fallback },
+          {
+            event: 'oidc_invitation_check_fell_back',
+            fallback: result.fallback,
+            ...(errorName === undefined ? {} : { errorName }),
+          },
           'OIDC attempt starts without the invitation'
         )
       }

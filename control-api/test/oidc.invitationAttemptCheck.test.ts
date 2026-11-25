@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ipKeyGenerator } from 'express-rate-limit'
+import { DatabaseError } from 'pg'
 import type { RateLimitCheck, RateLimitDecision } from '../src/middleware/rateLimitMiddleware.js'
 import { rateLimitHitsTotal } from '../src/observability/metrics.js'
 import {
@@ -171,6 +172,22 @@ function fellBackEvents(): unknown[][] {
     .map(entry => [entry[1], entry[2]])
 }
 
+/** Each fell_back event's level and fallback, in order. */
+function fellBackLevels(): unknown[][] {
+  return logged
+    .filter(entry => (entry[2] as { event?: unknown })?.event === 'oidc_invitation_check_fell_back')
+    .map(entry => [entry[0], (entry[2] as { fallback?: unknown }).fallback])
+}
+
+/** Each step_failed event with its level. */
+function stepFailures(): unknown[][] {
+  return logged
+    .filter(
+      entry => (entry[2] as { event?: unknown })?.event === 'oidc_invitation_check_step_failed'
+    )
+    .map(entry => [entry[0], entry[2]])
+}
+
 describe('the hub check for an OIDC attempt started from an invitation', () => {
   beforeEach(() => {
     __resetMemberRegistrationEnrollmentForTests()
@@ -312,8 +329,159 @@ describe('the hub check for an OIDC attempt started from an invitation', () => {
     })
 
     expect(await check(input())).toStrictEqual(plain(fallback))
+    // A refusal names the class of what the validate step threw.
     expect(fellBackEvents()).toEqual([
-      [{ component: 'oidc_profile_flow' }, { event: 'oidc_invitation_check_fell_back', fallback }],
+      [
+        { component: 'oidc_profile_flow' },
+        {
+          event: 'oidc_invitation_check_fell_back',
+          fallback,
+          ...(fallback === 'hub_refused' ? { errorName: 'Error' } : {}),
+        },
+      ],
+    ])
+  })
+
+  it('logs hub_deadline and hub_unavailable at warn, and every other fallback at info', async () => {
+    // Rejects only once the deadline has answered, so the deadline decides.
+    const answersOnlyOnAbort = (_token: string, signal: AbortSignal) =>
+      new Promise<never>((_resolve, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => reject(new MemberRegistrationUnavailableError('fixture: aborted')),
+          { once: true }
+        )
+      })
+    const cases: Array<
+      [OidcInvitationFallback, Parameters<typeof createOidcInvitationAttemptCheck>[0]]
+    > = [
+      ['hub_deadline', { limiter: allowedLimiter, validate: answersOnlyOnAbort, deadlineMs: 5 }],
+      [
+        'hub_unavailable',
+        {
+          limiter: allowedLimiter,
+          validate: async () => {
+            throw new MemberRegistrationUnavailableError('fixture: hub unreachable')
+          },
+        },
+      ],
+      [
+        'hub_refused',
+        {
+          limiter: allowedLimiter,
+          validate: async () => {
+            throw new Error(
+              'Member registration service POST /invitations-flow/validate failed (400): invalid_token'
+            )
+          },
+        },
+      ],
+      ['over_limit', { limiter: async () => deniedDecision, validate: hubAccepts() }],
+      [
+        'not_member_invitation',
+        {
+          limiter: allowedLimiter,
+          validate: hubAccepts(),
+          readInvitation: async () => pendingRow({ purpose: 'password_reset' }),
+        },
+      ],
+      [
+        'not_pending',
+        { limiter: allowedLimiter, validate: hubAccepts(), readInvitation: async () => null },
+      ],
+    ]
+
+    for (const [fallback, deps] of cases) {
+      expect(await createOidcInvitationAttemptCheck(deps)(input())).toStrictEqual(plain(fallback))
+    }
+
+    expect(fellBackLevels()).toEqual([
+      ['warn', 'hub_deadline'],
+      ['warn', 'hub_unavailable'],
+      ['info', 'hub_refused'],
+      ['info', 'over_limit'],
+      ['info', 'not_member_invitation'],
+      ['info', 'not_pending'],
+    ])
+  })
+
+  it('logs a limiter throw as a failed bucket step, by its class, and calls no hub', async () => {
+    const validate = hubAccepts()
+    const check = createOidcInvitationAttemptCheck({
+      limiter: async () => {
+        throw new TypeError('fixture: limiter bug')
+      },
+      validate,
+      readInvitation: async () => pendingRow(),
+    })
+
+    expect(await check(input())).toStrictEqual(plain('over_limit'))
+    expect(validate).not.toHaveBeenCalled()
+    expect(stepFailures()).toEqual([
+      [
+        'error',
+        { event: 'oidc_invitation_check_step_failed', step: 'bucket', errorName: 'TypeError' },
+      ],
+    ])
+    expect(fellBackLevels()).toEqual([['info', 'over_limit']])
+  })
+
+  it('names an unexpected validate throw by its class in the hub_refused fallback', async () => {
+    const check = createOidcInvitationAttemptCheck({
+      limiter: allowedLimiter,
+      validate: async () => {
+        throw new TypeError(`Cannot read properties of undefined (reading '${INVITED_EMAIL}')`)
+      },
+      readInvitation: async () => pendingRow(),
+    })
+
+    expect(await check(input())).toStrictEqual(plain('hub_refused'))
+    expect(fellBackEvents()).toEqual([
+      [
+        { component: 'oidc_profile_flow' },
+        {
+          event: 'oidc_invitation_check_fell_back',
+          fallback: 'hub_refused',
+          errorName: 'TypeError',
+        },
+      ],
+    ])
+    // The class only: never the message, which here holds the email.
+    expect(loggedText().toLowerCase()).not.toContain(INVITED_EMAIL.toLowerCase())
+  })
+
+  it('names a failed local read by its class, not by the name pg gives it', async () => {
+    // pg's answer to a read Postgres cancelled: the class, message, length,
+    // code and server fields are copied from a live run (statement_timeout).
+    const failure = Object.assign(
+      new DatabaseError('canceling statement due to statement timeout', 109, 'error'),
+      {
+        severity: 'ERROR',
+        code: '57014',
+        file: 'postgres.c',
+        line: '3394',
+        routine: 'ProcessInterrupts',
+      }
+    )
+    expect(failure.name).toBe('error')
+    const check = createOidcInvitationAttemptCheck({
+      limiter: allowedLimiter,
+      validate: hubAccepts(),
+      readInvitation: async () => {
+        throw failure
+      },
+    })
+
+    expect(await check(input())).toStrictEqual(plain('not_pending'))
+    expect(stepFailures()).toEqual([
+      [
+        'error',
+        {
+          event: 'oidc_invitation_check_step_failed',
+          step: 'local_read',
+          errorName: 'DatabaseError',
+        },
+      ],
     ])
   })
 
@@ -599,7 +767,7 @@ describe('the hub check for an OIDC attempt started from an invitation', () => {
     expect(fellBackEvents()).toEqual([
       [
         { component: 'oidc_profile_flow' },
-        { event: 'oidc_invitation_check_fell_back', fallback: 'hub_refused' },
+        { event: 'oidc_invitation_check_fell_back', fallback: 'hub_refused', errorName: 'Error' },
       ],
       [
         { component: 'oidc_profile_flow' },
