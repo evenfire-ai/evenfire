@@ -172,6 +172,10 @@ type MapRouteRow = {
   hostRoute: HostEdgeRpcProxyRoute
 }
 
+// Session search refuses V1 tokens after the scope stage, so it never reaches the Host
+// with the tokens this table uses; it has its own test below.
+const SESSION_SEARCH_ROUTE: HostEdgeRpcProxyRoute = 'GET /v1/runtime/sessions/search'
+
 // One row per rpc-proxy route that forwards to a guarded Host route, with the
 // map row of the Host route it reaches.
 const MAP_ROUTE_ROWS: MapRouteRow[] = [
@@ -350,6 +354,15 @@ async function sendUntilHostCall(
 }
 
 describe('rpc-proxy reads each Host route scope from the edge scope map', () => {
+  it('covers every Host route of the map, in the table or the session search test, and no other', () => {
+    const mapRoutes = Object.keys(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES).sort()
+    const tableRoutes = new Set(MAP_ROUTE_ROWS.map(row => row.hostRoute))
+    expect(tableRoutes.has(SESSION_SEARCH_ROUTE)).toBe(false)
+    const coveredRoutes = [...tableRoutes, SESSION_SEARCH_ROUTE].sort()
+    expect(mapRoutes.length).toBeGreaterThan(0)
+    expect(coveredRoutes).toEqual(mapRoutes)
+  })
+
   it.each(MAP_ROUTE_ROWS)(
     '$label requires the map value of $hostRoute and reaches that Host route',
     async row => {
@@ -378,7 +391,7 @@ describe('rpc-proxy reads each Host route scope from the edge scope map', () => 
       method: 'get' as const,
       path: '/rpc/hosts/chatllm/sessions/search?q=hello',
     }
-    const searchValue = mapValue('GET /v1/runtime/sessions/search')
+    const searchValue = mapValue(SESSION_SEARCH_ROUTE)
     authTokenMock.verifyRpcToken.mockReturnValue(
       claimsWithScopes([...realScopes, ...MAP_VALUES.filter(value => value !== searchValue)])
     )
