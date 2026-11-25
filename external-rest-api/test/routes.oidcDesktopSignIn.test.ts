@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import request from 'supertest'
 import {
@@ -8,6 +8,7 @@ import {
 } from './helpers/controlApiDesktopSignInRecords.js'
 
 const REDEEM = '/api/v1/oidc/desktop-sign-in/redeem'
+const FALLBACK_MSG = 'desktop sign-in redeem answered 503'
 /** An Origin the edge is configured to trust, so the global browser guard lets it through. */
 const CONFIGURED_ORIGIN = 'https://profile-fixture.example.test'
 const ISSUANCE_UNAVAILABLE = { error: 'session_issuance_temporarily_unavailable' }
@@ -55,11 +56,38 @@ async function edge() {
   return request(createApp())
 }
 
+/**
+ * Stubs `fetch` so control-api's path answers a page that is not JSON, as the funnel's nginx
+ * does when it blocks a path or loses control-api.
+ */
+function upstreamPage(status: number, page: string) {
+  const fetchMock = vi.fn(
+    async (_url: string | URL, _init?: RequestInit) =>
+      new Response(page, { status, headers: { 'content-type': 'text/html' } })
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+/** Every `console.error` call of one test; only the edge's fallback log writes there. */
+let errorLog: MockInstance<typeof console.error>
+
+/** The one line logged, as written: a single JSON string. */
+function onlyLoggedLine(): string {
+  expect(errorLog).toHaveBeenCalledTimes(1)
+  const args = errorLog.mock.calls[0]!
+  expect(args).toHaveLength(1)
+  expect(typeof args[0]).toBe('string')
+  return args[0] as string
+}
+
 beforeEach(() => {
   vi.stubEnv('EXTERNAL_REST_API_CORS_ORIGIN', CONFIGURED_ORIGIN)
+  errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 
 afterEach(() => {
+  errorLog.mockRestore()
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
 })
@@ -299,12 +327,23 @@ describe('edge POST /oidc/desktop-sign-in/redeem: request and answers', () => {
     expect(res.body).toEqual(body)
     expect(res.headers['set-cookie']).toBeUndefined()
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    // Every generic 503 logs one line; an answer control-api meant is relayed unlogged.
+    expect(errorLog).toHaveBeenCalledTimes(status === 503 ? 1 : 0)
   })
 
   it('answers 503 when control-api cannot be reached', async () => {
     const fetchMock = controlApiAnswers(() => {
       throw new TypeError('fetch failed')
     })
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual(ISSUANCE_UNAVAILABLE)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers 503 for a non-JSON page from the funnel', async () => {
+    const fetchMock = upstreamPage(502, '<html>Bad Gateway</html>')
     const res = await (await edge()).post(REDEEM).send(redeemBody)
 
     expect(res.status).toBe(503)
@@ -329,5 +368,80 @@ describe('edge POST /oidc/desktop-sign-in/redeem: request and answers', () => {
     expect(other.status).toBe(200)
     // The limiter guards the redeem path only, not every route mounted after it.
     expect((await app.get('/api/v1/no-such-route')).status).toBe(404)
+  })
+})
+
+describe('edge POST /oidc/desktop-sign-in/redeem: the fallback log', () => {
+  /**
+   * What no fallback line may carry: the request's values, the token and email control-api's
+   * sign-in holds, and the error message.
+   */
+  function expectNothingSecret(line: string): void {
+    const email = String((me as { email: unknown }).email)
+    for (const value of [CODE, VERIFIER, token, email, '/external/', 'Control API']) {
+      expect(line).not.toContain(value)
+    }
+  }
+
+  it('logs an unreachable control-api once, by class', async () => {
+    controlApiAnswers(() => {
+      throw new TypeError('fetch failed')
+    })
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(503)
+    const line = onlyLoggedLine()
+    expect(JSON.parse(line)).toEqual({ msg: FALLBACK_MSG, error: 'ControlApiTransportError' })
+    expectNothingSecret(line)
+  })
+
+  it.each([
+    [502, '<html>Bad Gateway</html>'],
+    [503, '<html>Unavailable</html>'],
+  ])(
+    'logs a non-JSON %i page once, by class and the status that came back',
+    async (status, page) => {
+      upstreamPage(status, page)
+      const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+      expect(res.status).toBe(503)
+      const line = onlyLoggedLine()
+      expect(JSON.parse(line)).toEqual({
+        msg: FALLBACK_MSG,
+        error: 'ControlApiNonJsonResponseError',
+        upstreamStatus: status,
+      })
+      expectNothingSecret(line)
+      expect(line).not.toContain(page)
+    }
+  )
+
+  it("logs control-api's own 503 once, by class and status", async () => {
+    controlApiAnswers(issuanceUnavailable)
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(503)
+    const line = onlyLoggedLine()
+    expect(JSON.parse(line)).toEqual({
+      msg: FALLBACK_MSG,
+      error: 'ControlApiError',
+      upstreamStatus: 503,
+    })
+    expectNothingSecret(line)
+  })
+
+  it('logs an unusable sign-in once, by its status and never its body', async () => {
+    // The recorded sign-in with only `me` removed: its token is still in the body.
+    controlApiAnswers(derived(signedIn, { me: null }))
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(503)
+    const line = onlyLoggedLine()
+    expect(JSON.parse(line)).toEqual({
+      msg: FALLBACK_MSG,
+      error: 'unusable_answer',
+      upstreamStatus: 200,
+    })
+    expectNothingSecret(line)
   })
 })

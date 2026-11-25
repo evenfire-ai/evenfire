@@ -117,6 +117,30 @@ export class ControlApiPathError extends ControlApiError {
   }
 }
 
+export type ControlApiFailureLogFields = Readonly<{ error: string; upstreamStatus?: number }>
+
+/**
+ * The `error` a route logs for a control-api answer it could not use. Such an answer carries
+ * no error object, so it has no class to name.
+ */
+export const UNUSABLE_CONTROL_API_ANSWER = 'unusable_answer'
+
+/**
+ * What an edge route may log about a failed control-api call: the error's class and, when
+ * control-api answered, the status it answered (for a non-JSON body, the status that came back,
+ * not the 502 this client turns it into). Never the message, which embeds the control-api path
+ * and upstream error text, and never the body.
+ */
+export function controlApiFailureLogFields(error: unknown): ControlApiFailureLogFields {
+  // `constructor.name`, not `name`: ControlApiNonJsonResponseError inherits ControlApiError's.
+  const errorClass = error instanceof Error ? error.constructor.name : typeof error
+  if (error instanceof ControlApiNonJsonResponseError) {
+    return { error: errorClass, upstreamStatus: error.upstreamStatus }
+  }
+  if (error instanceof ControlApiError) return { error: errorClass, upstreamStatus: error.status }
+  return { error: errorClass }
+}
+
 const DOT_SEGMENT = /^(?:\.|\.\.)$/
 const RAW_QUERY_CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import {
   type ControlApiRecord,
@@ -8,6 +8,7 @@ import {
 
 const METHODS = '/api/v1/auth/methods'
 const METHODS_UNAVAILABLE = { error: 'methods_unavailable' }
+const FALLBACK_MSG = 'auth methods answered 503'
 
 const password = controlApiRecord('GET /external/auth/methods password')
 const passwordAndOidc = controlApiRecord('GET /external/auth/methods password-and-oidc')
@@ -45,7 +46,44 @@ async function edge() {
   return request(createApp())
 }
 
+/**
+ * Stubs `fetch` so control-api's path answers a page that is not JSON, as the funnel's nginx
+ * does when it blocks a path or loses control-api.
+ */
+function upstreamPage(status: number, page: string) {
+  const fetchMock = vi.fn(
+    async (_url: string | URL, _init?: RequestInit) =>
+      new Response(page, { status, headers: { 'content-type': 'text/html' } })
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+/** Every `console.error` call of one test; only the edge's fallback log writes there. */
+let errorLog: MockInstance<typeof console.error>
+
+/** The one line logged, as written: a single JSON string. */
+function onlyLoggedLine(): string {
+  expect(errorLog).toHaveBeenCalledTimes(1)
+  const args = errorLog.mock.calls[0]!
+  expect(args).toHaveLength(1)
+  expect(typeof args[0]).toBe('string')
+  return args[0] as string
+}
+
+/** What no fallback line may carry: control-api's answer and the error message. */
+function expectNothingUpstream(line: string): void {
+  for (const value of [oidc.label, oidc.signInUrl, '/external/', 'Control API']) {
+    expect(line).not.toContain(value)
+  }
+}
+
+beforeEach(() => {
+  errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+})
+
 afterEach(() => {
+  errorLog.mockRestore()
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
@@ -148,6 +186,8 @@ describe('edge GET /auth/methods: the rebuilt answer', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(String(fetchMock.mock.calls[0]![0])).toMatch(/\/external\/auth\/methods$/)
     expect(fetchMock.mock.calls[0]![1]!.method).toBe('GET')
+    // Every 503 logs one line; a 200 logs nothing.
+    expect(errorLog).toHaveBeenCalledTimes(status === 503 ? 1 : 0)
   })
 
   it('relays control-api 404 as 404', async () => {
@@ -157,6 +197,8 @@ describe('edge GET /auth/methods: the rebuilt answer', () => {
     expect(res.status).toBe(404)
     expect(res.body).toEqual({ error: 'Not Found' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    // A control-api older than the route is not an outage.
+    expect(errorLog).not.toHaveBeenCalled()
   })
 
   it('answers 503 methods_unavailable on a transport error', async () => {
@@ -168,6 +210,72 @@ describe('edge GET /auth/methods: the rebuilt answer', () => {
     expect(res.status).toBe(503)
     expect(res.body).toEqual(METHODS_UNAVAILABLE)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('edge GET /auth/methods: the fallback log', () => {
+  it('logs an unreachable control-api once, by class', async () => {
+    controlApiAnswers(() => {
+      throw new TypeError('fetch failed')
+    })
+    const res = await (await edge()).get(METHODS)
+
+    expect(res.status).toBe(503)
+    const line = onlyLoggedLine()
+    expect(JSON.parse(line)).toEqual({ msg: FALLBACK_MSG, error: 'ControlApiTransportError' })
+    expectNothingUpstream(line)
+  })
+
+  it.each([
+    [502, '<html>Bad Gateway</html>'],
+    [503, '<html>Unavailable</html>'],
+  ])(
+    'logs a non-JSON %i page once, by class and the status that came back',
+    async (status, page) => {
+      const fetchMock = upstreamPage(status, page)
+      const res = await (await edge()).get(METHODS)
+
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual(METHODS_UNAVAILABLE)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const line = onlyLoggedLine()
+      expect(JSON.parse(line)).toEqual({
+        msg: FALLBACK_MSG,
+        error: 'ControlApiNonJsonResponseError',
+        upstreamStatus: status,
+      })
+      expectNothingUpstream(line)
+      expect(line).not.toContain(page)
+    }
+  )
+
+  it("logs control-api's own 503 once, by class and status", async () => {
+    controlApiAnswers(controlApi503)
+    const res = await (await edge()).get(METHODS)
+
+    expect(res.status).toBe(503)
+    const line = onlyLoggedLine()
+    expect(JSON.parse(line)).toEqual({
+      msg: FALLBACK_MSG,
+      error: 'ControlApiError',
+      upstreamStatus: 503,
+    })
+    expectNothingUpstream(line)
+  })
+
+  it('logs an unusable 200 once, by its status and never its body', async () => {
+    // The recorded answer with only `methods` broken: its oidc block is still in the body.
+    controlApiAnswers(derived(passwordAndOidc, { methods: 'password' }))
+    const res = await (await edge()).get(METHODS)
+
+    expect(res.status).toBe(503)
+    const line = onlyLoggedLine()
+    expect(JSON.parse(line)).toEqual({
+      msg: FALLBACK_MSG,
+      error: 'unusable_answer',
+      upstreamStatus: 200,
+    })
+    expectNothingUpstream(line)
   })
 })
 

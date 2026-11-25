@@ -1,5 +1,11 @@
 import { type Response, Router } from 'express'
-import { ControlApiError, controlApiRequestWithStatus } from '../controlApiClient.js'
+import {
+  ControlApiError,
+  type ControlApiFailureLogFields,
+  UNUSABLE_CONTROL_API_ANSWER,
+  controlApiFailureLogFields,
+  controlApiRequestWithStatus,
+} from '../controlApiClient.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import { requestedSessionContract } from './auth.js'
 import { DESKTOP_SIGN_IN_CODE_RE, REFUSAL_REASONS, clientRateKey } from './oidcProfileFlow.js'
@@ -21,7 +27,21 @@ function sendIssuanceUnavailable(res: Response): void {
   res.status(503).json({ error: 'session_issuance_temporarily_unavailable' })
 }
 
-/** Rebuilds a control-api failure from the allow-list. Anything not listed is the 503 row. */
+/**
+ * Logs one generic 503. Nothing else would: control-api never saw a request the edge could not
+ * deliver, the funnel's non-JSON 502 is not control-api's own answer, and an edge defect is the
+ * edge's. This service has no structured logger, so this is the console line gfsWatch writes.
+ * Only the class and the upstream status are written: a message embeds the control-api path and
+ * upstream error text, and nothing here may log the code, verifier or token.
+ */
+function logIssuanceFallback(fields: ControlApiFailureLogFields): void {
+  console.error(JSON.stringify({ msg: 'desktop sign-in redeem answered 503', ...fields }))
+}
+
+/**
+ * Rebuilds a control-api failure from the allow-list. Anything not listed is the 503 row,
+ * logged by class and upstream status.
+ */
 function relayFailure(error: ControlApiError, res: Response): void {
   const code = error.code
   if (code !== null && RELAYED_FAILURES.get(error.status) === code) {
@@ -40,6 +60,7 @@ function relayFailure(error: ControlApiError, res: Response): void {
     res.status(403).json({ error: 'desktop_sign_in_refused', reason })
     return
   }
+  logIssuanceFallback(controlApiFailureLogFields(error))
   sendIssuanceUnavailable(res)
 }
 
@@ -105,6 +126,8 @@ export function createOidcDesktopSignInRouter(): Router {
         res.status(200).json({ token: data.token, me: data.me })
         return
       }
+      // A 2xx that is not the 200 `{ token, me }` carries no error object: the status only.
+      logIssuanceFallback({ error: UNUSABLE_CONTROL_API_ANSWER, upstreamStatus: status })
       sendIssuanceUnavailable(res)
     } catch (error) {
       if (error instanceof ControlApiError) {
@@ -112,8 +135,9 @@ export function createOidcDesktopSignInRouter(): Router {
         return
       }
       // Not forwarded to the global handler, which would answer 500: an unreachable
-      // control-api, or any other failure, is the contract's 503 row. control-api logs its own
-      // failures, and nothing here may log the code, verifier or token.
+      // control-api, or any other failure, is the contract's 503 row. The global handler
+      // would not log it either, so it is logged here by class (logIssuanceFallback).
+      logIssuanceFallback(controlApiFailureLogFields(error))
       sendIssuanceUnavailable(res)
     }
   })

@@ -1,5 +1,11 @@
 import { Router } from 'express'
-import { ControlApiError, controlApiRequestWithStatus } from '../controlApiClient.js'
+import {
+  ControlApiError,
+  type ControlApiFailureLogFields,
+  UNUSABLE_CONTROL_API_ANSWER,
+  controlApiFailureLogFields,
+  controlApiRequestWithStatus,
+} from '../controlApiClient.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import { clientRateKey } from './oidcProfileFlow.js'
 
@@ -13,6 +19,17 @@ const CACHE_TTL_MS = 30_000
 
 type OidcMethod = Readonly<{ label: string; signInUrl: string }>
 type MethodsAnswer = Readonly<{ methods: readonly string[]; oidc?: OidcMethod }>
+
+/**
+ * Logs one `503 methods_unavailable`. Nothing else would: control-api never saw a request the
+ * edge could not deliver, the funnel's non-JSON 502 is not control-api's own answer, and an edge
+ * defect is the edge's. This service has no structured logger, so this is the console line
+ * gfsWatch writes. Only the class and the upstream status are written: a message embeds the
+ * control-api path and upstream error text.
+ */
+function logMethodsUnavailable(fields: ControlApiFailureLogFields): void {
+  console.error(JSON.stringify({ msg: 'auth methods answered 503', ...fields }))
+}
 
 /** `oidc` as exactly `{ label, signInUrl }`, or nothing when either field breaks its bounds. */
 function usableOidc(value: unknown): OidcMethod | undefined {
@@ -74,6 +91,8 @@ export function createAuthMethodsRouter(): Router {
       )
       const answer = status === 200 ? rebuildMethods(data) : undefined
       if (!answer) {
+        // A 2xx that is not a usable 200 carries no error object: the status only.
+        logMethodsUnavailable({ error: UNUSABLE_CONTROL_API_ANSWER, upstreamStatus: status })
         res.status(503).json({ error: 'methods_unavailable' })
         return
       }
@@ -86,7 +105,9 @@ export function createAuthMethodsRouter(): Router {
       }
       // Not forwarded to the global handler, which would answer 500 or relay control-api's
       // body: any other failure, an unreachable control-api included, is the contract's 503
-      // row, and Desktop offers Retry. control-api logs its own failures.
+      // row, and Desktop offers Retry. The global handler would not log it either, so it is
+      // logged here by class (logMethodsUnavailable).
+      logMethodsUnavailable(controlApiFailureLogFields(error))
       res.status(503).json({ error: 'methods_unavailable' })
     }
   })
