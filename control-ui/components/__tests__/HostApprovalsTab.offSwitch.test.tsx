@@ -35,6 +35,7 @@ import {
   approvalSettingsDriver,
   clickSetToManual,
   offSwitchResult,
+  overrides,
   perToolSection,
   reads,
   renderApprovalsTab,
@@ -384,6 +385,42 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       expect(rowValue('Highest mode')).toBe('Manual')
       expect(notices).toHaveBeenCalledTimes(1)
       expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+  })
+
+  describe('the per-tool section (spec §6.3 step 8)', () => {
+    it('closes nothing: an open per-tool draft stays through the switch and the load after it', async () => {
+      const fake = tabFake({ modeCeiling: 'auto', tools: { json_transform: true } })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      const driver = await approvalSettingsDriver()
+      await driver.edit()
+      await driver.editTool('system_info', 'required')
+      const loadsBefore = reads(fake, FOO_DETAIL).length
+
+      await clickAndSettle()
+      // The notice's load lands while the section is still being edited.
+      await waitFor(() =>
+        expect(
+          reads(fake, FOO_DETAIL)
+            .slice(loadsBefore)
+            .some(entry => entry.delivered)
+        ).toBe(true)
+      )
+      await waitFor(() => expect(rowValue('Highest mode')).toBe('Manual'))
+      await settle()
+
+      expect(overrides(driver.readView()), 'the draft').toEqual({
+        json_transform: 'Required',
+        system_info: 'Required',
+      })
+      const section = perToolSection() as HTMLElement
+      expect(within(section).getByRole('button', { name: 'Save' }), 'still dirty').toBeEnabled()
+      expect(writes(fake), "the switch's PUT only").toHaveLength(1)
+      expect(fake.stored('foo').spec.approval).toEqual({
+        modeCeiling: 'manual',
+        tools: { json_transform: true },
+      })
       tab.unmount()
     })
   })
