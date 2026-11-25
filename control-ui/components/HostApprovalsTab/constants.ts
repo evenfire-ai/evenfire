@@ -6,6 +6,7 @@ import type { ApprovalCeiling, FirstSavePolicy } from '@components/HostApprovalS
 import type { EffectiveApproval } from '@lib/approvalEffective'
 import {
   APPROVAL_CREATED_ELSEWHERE_MESSAGE,
+  type OffSwitchOutcome,
   TOOLS_CHANGED_MESSAGE,
   type ToolsSaveOutcome,
   notStoredMessage,
@@ -145,6 +146,59 @@ export function policyText(policy: EffectiveApproval['policy']): string {
   return firstSavePolicyLabel(policy === 'open' ? 'channel_users' : 'cli_only')
 }
 
+// ── Set to Manual now (spec §6.3) ──────────────────────────────────────────
+
+export const SET_MANUAL_LABEL = 'Set to Manual now'
+/** Spec §6.3 step 1: the switch's text in every tab of the agent while a run goes on. */
+export const SETTING_MANUAL_LABEL = 'Setting Manual…'
+
+/** Spec §6.2 and §6.10, verbatim: PR A's static line under the switch. */
+export const APPROVALS_OFF_NOTE =
+  'Has no effect if your platform team turned approvals off for the cluster.'
+export const HOW_TO_CHANGE_LABEL = 'How to change these'
+
+/**
+ * The approvals how-to. Its text is Task 24's, which keeps these anchors. The
+ * link is on `main`, as `TEAMS_SETUP_GUIDE_URL` is (app/constants/teams.ts).
+ */
+const APPROVALS_HOW_TO_URL =
+  'https://github.com/evenfire-ai/evenfire/blob/main/docs/how-to/configure-approvals.md'
+/** "How to change these": the how-to's Approval modes section, which sets each of them on the Host. */
+export const HOW_TO_CHANGE_URL = `${APPROVALS_HOW_TO_URL}#approval-modes`
+/** Spec §6.3 step 7: the how-to's kill-switch section, which says what the switch does not stop. */
+export const KILL_SWITCH_HOW_TO_URL = `${APPROVALS_HOW_TO_URL}#kill-switch`
+
+/** The per-tool section's anchor, which the switch's message links to. */
+export const PER_TOOL_SECTION_ID = 'approval-per-tool-overrides'
+
+// Spec §6.3 step 7, verbatim, in the order the message reads. The tab puts
+// the lists between them and links two of them.
+export const MANUAL_SAVED_TEXT = 'Manual is saved.'
+/** Only for "Already Manual": no attempt of the run may have written. */
+export const ALREADY_MANUAL_TEXT = 'It was already Manual.'
+export const APPLIED_AT_NEXT_CALL_TEXT = 'Running chats apply it at their next tool call.'
+export const STILL_RUNNING_TEXT = 'Still running without a card'
+export const SKIP_TOOLS_TEXT = 'tools set to Skip'
+export const CLUSTER_DEFAULT_SKIP_CLAUSE = `on an agent without its own settings, also ${CLUSTER_DEFAULT_SKIP_TEXT}`
+export const NEVER_ASK_TOOLS_TEXT = 'tools that never ask'
+export const CHATS_ALREADY_GAVE_TEXT =
+  "approvals chats already gave: 'Always allow' for every tool except shell, in every chat; 'Always allow' for shell and approvals for the rest of a task on shell_exec and http_request, in chats that were already in Manual; cron_manage approvals, in every chat; and scheduled tasks (on stateless agents they still ask before creating or enabling another schedule)."
+export const NO_EFFECT_WHEN_OFF_TEXT =
+  'This has no effect if your platform team turned approvals off for the cluster.'
+
+/** `text` ending its own sentence: a full stop is added only when it has none. */
+function asSentence(text: string): string {
+  return /[.!?]$/.test(text) ? text : `${text}.`
+}
+
+/** Spec §6.3 step 6: a failed switch with its last error, in the tab that ran it (no agent named, C18). */
+export function offSwitchFailedText(message: string): string {
+  return `Manual was not saved. ${asSentence(message)}`
+}
+
+/** Spec §6.3 step 6: what comes before the how-to's kubectl command. */
+export const OFF_SWITCH_FALLBACK_INTRO = 'To set Manual by hand, run:'
+
 // ── Toasts (spec §6.4 step 10, §6.5 "After unmount", C18) ──────────────────
 
 /**
@@ -202,5 +256,40 @@ export function continuationToast(host: string, outcome: ToolsSaveOutcome): Cont
       return problem(`Per-tool overrides for agent ${host}: ${notStoredMessage(outcome.fields)}`)
     default:
       return problem(`Per-tool overrides for agent ${host} were not saved. ${stopReason(outcome)}`)
+  }
+}
+
+/**
+ * Spec §6.3 step 7: a failed switch always also goes to the root toast. In the
+ * tab that ran it, which shows the failure itself, the toast names no agent.
+ */
+export function offSwitchFailedToast(message: string): ContinuationToast {
+  return problem(offSwitchFailedText(message))
+}
+
+/**
+ * Spec §6.3 step 7: the root toast for a switch whose tab unmounted or now
+ * shows another agent: every outcome, named after the agent. A failure carries
+ * the kubectl fallback, since no tab shows it.
+ */
+export function offSwitchContinuationToast(
+  host: string,
+  outcome: OffSwitchOutcome
+): ContinuationToast {
+  switch (outcome.kind) {
+    case 'saved':
+      return {
+        message: `Manual is saved for agent ${host}. ${APPLIED_AT_NEXT_CALL_TEXT}`,
+        options: { tone: 'success' },
+      }
+    case 'already':
+      return {
+        message: `Manual is saved for agent ${host}. ${ALREADY_MANUAL_TEXT} ${APPLIED_AT_NEXT_CALL_TEXT}`,
+        options: { tone: 'success' },
+      }
+    case 'failed':
+      return problem(
+        `Manual was not saved for agent ${host}. ${asSentence(outcome.message)} ${OFF_SWITCH_FALLBACK_INTRO} ${outcome.fallback}`
+      )
   }
 }

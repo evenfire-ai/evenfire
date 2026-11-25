@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import type { ToastOptions } from '@components/Toast/types'
 import type { HostResource } from '@lib/api'
 import type { ApprovalTabState } from '@lib/hostApprovalDisplay'
+import type { OffSwitchOutcome } from '@lib/hostApprovalSave'
 
 export interface HostApprovalsTabProps {
   /**
@@ -36,15 +37,37 @@ export interface ApprovalsTabView {
    * applied.
    */
   loadError: string | null
+  /**
+   * The outcome of the last "Set to Manual now" this tab ran that settled
+   * while it showed this agent (spec §6.3 step 7). Null until one does, and
+   * from the next press until that run settles.
+   */
+  switchResult: OffSwitchOutcome | null
 }
 
 /** A load's end, as the tab applies it. */
 export type LoadResult = { kind: 'answered'; host: unknown } | { kind: 'failed'; error: unknown }
 
-/** A root toast for a save the tab no longer shows (spec §6.5 "After unmount"). */
+/**
+ * A root toast: for an outcome the tab no longer shows (spec §6.5 "After
+ * unmount"), or for a failed "Set to Manual now" (spec §6.3 step 7).
+ */
 export interface ContinuationToast {
   message: string
   options: ToastOptions
+}
+
+export interface OffSwitchProps {
+  /** The agent the tab shows. */
+  host: string
+  /** The outcome to show (`ApprovalsTabView.switchResult`). */
+  result: OffSwitchOutcome | null
+  /** Starts the switch for `host`. Called only while no switch runs for it. */
+  onSetManual: () => void
+}
+
+export interface OffSwitchResultProps {
+  outcome: OffSwitchOutcome
 }
 
 export interface ReadViewProps {

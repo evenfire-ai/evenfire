@@ -12,16 +12,26 @@ import {
   notifyHostChanged,
   subscribeHostChanged,
 } from '@lib/hostApprovalDisplay'
-import type { ToolsSaveOutcome } from '@lib/hostApprovalSave'
+import {
+  type OffSwitchOutcome,
+  type ToolsSaveOutcome,
+  isSettingManual,
+  offSwitchFallback,
+  setManualNow,
+} from '@lib/hostApprovalSave'
 import { emitRootToast } from '@lib/rootToast'
+import { OffSwitch } from './OffSwitch'
 import { ApprovalModesView, WhoCanRaiseView } from './ReadViews'
 import { InheritingBanner, ManifestBanner, manifestSignal } from './banners'
 import {
   LOADING_LABEL,
   NOT_THIS_AGENT_MESSAGE,
+  PER_TOOL_SECTION_ID,
   TOOLS_SAVED_TOAST,
   continuationToast,
   loadErrorText,
+  offSwitchContinuationToast,
+  offSwitchFailedToast,
 } from './constants'
 import type {
   ApprovalsTabView,
@@ -38,6 +48,7 @@ function viewOf(host: string): ApprovalsTabView {
     snapshot: null,
     loadPending: true,
     loadError: null,
+    switchResult: null,
   }
 }
 
@@ -48,6 +59,12 @@ function messageOf(error: unknown): string {
       ? (error as { message?: unknown }).message
       : undefined
   return typeof message === 'string' && message.length > 0 ? message : String(error)
+}
+
+/** The namespace of the Host the tab shows, for the switch's fallback; undefined before a load. */
+function namespaceOf(host: HostResource | null): string | undefined {
+  const namespace = host?.metadata?.namespace
+  return typeof namespace === 'string' && namespace.length > 0 ? namespace : undefined
 }
 
 /**
@@ -82,10 +99,10 @@ function ReadViewsSkeleton() {
 }
 
 /**
- * The Approvals tab of one agent (spec §6.2, §6.5, §6.12). It owns its loads,
- * its error and loading state and its mounted flag, and reads nothing of the
- * page's. It shows the read views of the approval settings and the per-tool
- * section.
+ * The Approvals tab of one agent (spec §6.2, §6.3, §6.5, §6.12). It owns its
+ * loads, its error and loading state and its mounted flag, and reads nothing
+ * of the page's. It shows "Set to Manual now", the read views of the approval
+ * settings and the per-tool section.
  *
  * **Loads.** Each load reads `/detail` with its own signal, so it never joins an
  * older read (R9), and takes a new epoch in the agent's display state
@@ -108,6 +125,15 @@ function ReadViewsSkeleton() {
  * agent's first load failed): a section shown again is a new one, which knows
  * nothing of the save. Every save that ends fires the Host-changed notice,
  * which loads again every Approvals tab of that agent, this one included.
+ *
+ * **Set to Manual now.** The switch shows in every state of the tab, the
+ * first load's skeleton and a failed first load included, always in one place
+ * (C13). Only the press that starts a run for the agent reports it (spec
+ * §6.3 step 1). While the tab is mounted and shows that agent, its outcome
+ * shows in the tab, and the switch's own read or write seeds the ceiling
+ * group of the display state it shows now; a failure also goes to the root
+ * toast. Otherwise the outcome goes to the root toast, naming the agent (spec
+ * §6.3 step 7). Every run that ends fires the Host-changed notice.
  *
  * **Another agent.** A kept instance given another agent starts a new view in
  * the same render, so nothing of the previous agent shows; the section ends its
@@ -262,6 +288,71 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
     [showToast]
   )
 
+  const settleSwitch = useCallback(
+    (ranHost: string, outcome: OffSwitchOutcome): void => {
+      const current = viewRef.current
+      // Spec §6.3 step 7: an outcome shows in the tab that ran the switch
+      // while it is mounted and shows that agent. Otherwise it goes to the
+      // root toast, naming the agent, and writes nothing to the tab (C18).
+      if (!mountedRef.current || current.host !== ranHost) {
+        const toast = offSwitchContinuationToast(ranHost, outcome)
+        emitRootToast(toast.message, toast.options)
+        notifyHostChanged(ranHost)
+        return
+      }
+      // The switch's own read or write seeds the ceiling group of the display
+      // state the tab shows now (spec §6.5), which a kept instance may have
+      // made since the run started; a load that started before it does not
+      // undo it. Before any load has applied, the state records it and the
+      // snapshot stays null.
+      const seeded =
+        outcome.kind !== 'failed' && current.state.applyWrite('ceiling', outcome.stored)
+      const snapshot = current.state.snapshot()
+      setView(shown =>
+        shown.state === current.state
+          ? { ...shown, ...(seeded ? { snapshot } : {}), switchResult: outcome }
+          : shown
+      )
+      // A failure always also goes to the root toast. In this tab, which
+      // shows the failure, the toast names no agent.
+      if (outcome.kind === 'failed') {
+        const toast = offSwitchFailedToast(outcome.message)
+        showToast(toast.message, toast.options)
+      }
+      // Ruling 43(b): every settled switch loads every Approvals tab of the
+      // agent again, this one included.
+      notifyHostChanged(ranHost)
+    },
+    [showToast]
+  )
+
+  const setManual = useCallback((): void => {
+    const target = viewRef.current
+    // Spec §6.3 step 1: only the press that starts a run reports it. A press
+    // while a run goes on for this agent, from this tab or another, is
+    // ignored: the protocol would hand back the running promise.
+    if (isSettingManual(target.host)) return
+    // The decision is the switch's own read's (C6). Page data gives only the
+    // namespace, which the fallback uses when no read of the run answers.
+    const namespace = namespaceOf(target.snapshot)
+    setView(shown => (shown.state === target.state ? { ...shown, switchResult: null } : shown))
+    void setManualNow(target.host, { namespace }).then(
+      outcome => settleSwitch(target.host, outcome),
+      (error: unknown) => {
+        // The protocol turns every request's failure into an outcome, so a
+        // run that throws is a bug. It is shown as a failure, with the
+        // fallback, and reported to the console: control-ui has no client
+        // logger (lib/hostApprovalSave.ts reports its listeners' errors so).
+        console.error('Set to Manual now: the run threw; it is shown as a failure.', error)
+        settleSwitch(target.host, {
+          kind: 'failed',
+          message: messageOf(error),
+          fallback: offSwitchFallback(target.host, namespace),
+        })
+      }
+    )
+  }, [settleSwitch])
+
   // The section calls the `onSettled` of the render where Save was pressed,
   // so `host` and `generation` here are the save's agent and section.
   const { generation } = section
@@ -285,6 +376,13 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
         <>
           {block === undefined ? <InheritingBanner /> : null}
           {manifest.managed ? <ManifestBanner values={manifest.values} /> : null}
+        </>
+      ) : null}
+      {/* Spec §6.3: in every state of the tab, and always in this place, so a
+          load that lands keeps its result and its focus. */}
+      <OffSwitch host={view.host} result={view.switchResult} onSetManual={setManual} />
+      {view.snapshot !== null ? (
+        <>
           <ApprovalModesView host={view.snapshot} />
           <WhoCanRaiseView host={view.snapshot} />
         </>
@@ -292,14 +390,16 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
         <ReadViewsSkeleton />
       ) : null}
       {showSection ? (
-        <HostApprovalSection
-          ceiling={effectiveApproval(block).modeCeiling}
-          host={host}
-          inherited={block === undefined}
-          loadPending={view.loadPending}
-          stored={view.snapshot}
-          onSettled={handleSettled}
-        />
+        <div id={PER_TOOL_SECTION_ID}>
+          <HostApprovalSection
+            ceiling={effectiveApproval(block).modeCeiling}
+            host={host}
+            inherited={block === undefined}
+            loadPending={view.loadPending}
+            stored={view.snapshot}
+            onSettled={handleSettled}
+          />
+        </div>
       ) : null}
     </div>
   )

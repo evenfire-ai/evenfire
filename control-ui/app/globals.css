@@ -5660,6 +5660,53 @@ td.cu-registry-description {
   color: var(--cu-text-soft);
 }
 
+/* "Set to Manual now" (spec §6.3): the button with PR A's static line beside
+   it, and the outcome of the last run the tab showed below them. */
+.cu-host-approvals-tab__switch {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approvals-tab__switch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-2) var(--cu-space-3);
+}
+
+/* While a run goes on: disabled with aria-disabled, so it keeps the focus. */
+.cu-host-approvals-tab__switch-bar .cu-btn[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cu-host-approvals-tab__switch-note {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-sm);
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-host-approvals-tab__switch-result {
+  display: grid;
+  gap: var(--cu-space-2);
+  margin-bottom: 0;
+}
+
+.cu-host-approvals-tab__switch-result p {
+  margin: 0;
+  line-height: var(--cu-line-height-normal);
+  overflow-wrap: anywhere;
+}
+
+.cu-host-approvals-tab__switch-tool {
+  font-family: var(--cu-font-mono);
+}
+
+.cu-host-approvals-tab__switch-manifest {
+  color: var(--cu-warning);
+}
+
 @media (max-width: 640px) {
   .cu-host-approvals-tab__row {
     grid-template-columns: minmax(0, 1fr);

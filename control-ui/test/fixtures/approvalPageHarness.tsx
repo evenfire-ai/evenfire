@@ -293,6 +293,32 @@ export function perToolSection(): HTMLElement | null {
   return document.querySelector<HTMLElement>('.cu-host-approval-section')
 }
 
+/**
+ * "Set to Manual now", wherever the Approvals tab shows it: in every state of
+ * the tab, the first load's skeleton and a failed first load included (spec
+ * §6.3). While a switch runs for the agent, its text is "Setting Manual…".
+ */
+export function setToManualButton(): HTMLElement {
+  return screen.getByRole('button', { name: /^(Set to Manual now|Setting Manual…)$/ })
+}
+
+/** Presses "Set to Manual now" once, inside act. It needs no loaded data. */
+export async function clickSetToManual(): Promise<void> {
+  const button = setToManualButton()
+  await act(async () => {
+    fireEvent.click(button)
+  })
+}
+
+/**
+ * The off switch's result in the tab that ran it (spec §6.3 steps 6 and 7):
+ * its message, or its failure with the kubectl fallback. Null when it shows
+ * none.
+ */
+export function offSwitchResult(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('.cu-host-approvals-tab__switch-result')
+}
+
 function section(): HTMLElement {
   const node = perToolSection()
   if (!node) throw new Error('The per-tool approval section is not rendered')
@@ -307,10 +333,6 @@ function button(name: string): HTMLElement {
 function saveMessageText(): string | null {
   const node = perToolSection()?.querySelector<HTMLElement>('.cu-host-approval-section__message')
   return node ? (node.textContent ?? '') : null
-}
-
-const unavailable = (what: string) => async () => {
-  throw new Error(`${what} does not exist in the Approvals tab yet`)
 }
 
 /**
@@ -385,7 +407,7 @@ export async function approvalSettingsDriver(): Promise<ApprovalSettingsDriver> 
         fireEvent.click(within(dialog).getByRole('button', { name: LOOSENING_CONFIRM_LABEL }))
       })
     },
-    clickSetToManual: unavailable('"Set to Manual now"'),
+    clickSetToManual,
     readView() {
       const view: Record<string, string> = {}
       for (const row of section().querySelectorAll<HTMLElement>('[data-tool-row]')) {

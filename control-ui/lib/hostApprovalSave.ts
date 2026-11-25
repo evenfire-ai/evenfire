@@ -458,10 +458,10 @@ const NO_HOST_MESSAGE = 'Control API answered without a Host.'
  *   5xx, the run's next read once it shows Manual (T4u).
  * - `already`: the run's read found the ceiling Manual (an absent or invalid
  *   ceiling included), and no attempt of this run may have written. `stored`
- *   is that read: this module never gives null. `inherited` is true when the
- *   Host has no `spec.approval` (absent or null). mcp-host reads the ceiling
- *   from the Host's own block only, so such a Host runs Manual, and the switch
- *   never creates the block (spec §6.3 step 3).
+ *   is that read. `inherited` is true when the Host has no `spec.approval`
+ *   (absent or null). mcp-host reads the ceiling from the Host's own block
+ *   only, so such a Host runs Manual, and the switch never creates the block
+ *   (spec §6.3 step 3).
  * - `failed`: nothing this run sent is known to have stored Manual. `message`
  *   is the last error: the client's formatted error of the last request,
  *   `REQUEST_TIMED_OUT_MESSAGE` for one the 8 s timer ended, each
@@ -471,7 +471,7 @@ const NO_HOST_MESSAGE = 'Control API answered without a Host.'
  */
 export type OffSwitchOutcome =
   | { kind: 'saved'; stored: HostResource }
-  | { kind: 'already'; stored: HostResource | null; inherited: boolean }
+  | { kind: 'already'; stored: HostResource; inherited: boolean }
   | { kind: 'failed'; message: string; fallback: string }
 
 /** An attempt the run makes again (spec §6.3 step 4), after `retryAfterMs` and a backoff. */
@@ -721,9 +721,9 @@ function offSwitchFailed(run: OffSwitchRun, message: string): OffSwitchOutcome {
  * Spec §6.3 step 6: the how-to's command that lowers the ceiling by hand. The
  * admin pastes it into a shell, so a name or namespace that is no Kubernetes
  * name (no Host can have one) stays a placeholder, as does a namespace nothing
- * gave.
+ * gave. Exported for the tab, which shows it for a run that threw.
  */
-function offSwitchFallback(name: string, namespace: string | undefined): string {
+export function offSwitchFallback(name: string, namespace: string | undefined): string {
   const ns =
     namespace !== undefined && KUBERNETES_NAMESPACE.test(namespace)
       ? namespace
