@@ -5,6 +5,10 @@ export const HOST_DEFAULT_TAB = 'details'
 // nothing is sent (spec R16).
 export const HOST_RELOAD_TO_SAVE_MESSAGE = 'Reload the page to save'
 
+// Header line when the page's own read of the Host failed; the failure's
+// message follows it.
+export const HOST_LOAD_ERROR_PREFIX = "Could not load this agent's details:"
+
 export const HOST_TABS = [
   'details',
   'identity',

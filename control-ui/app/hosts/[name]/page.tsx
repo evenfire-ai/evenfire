@@ -13,7 +13,12 @@ import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapabilityNotice'
 import { useToast } from '@components/Toast'
-import { HOST_DEFAULT_TAB, HOST_RELOAD_TO_SAVE_MESSAGE, HOST_TABS } from '@constants/hostDetails'
+import {
+  HOST_DEFAULT_TAB,
+  HOST_LOAD_ERROR_PREFIX,
+  HOST_RELOAD_TO_SAVE_MESSAGE,
+  HOST_TABS,
+} from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
@@ -225,6 +230,9 @@ export default function HostDetailsPage() {
   const beginBusy = () => setBusyCount(count => count + 1)
   const endBusy = () => setBusyCount(count => count - 1)
   const [error, setError] = useState('')
+  // The message of the page's own read of the Host when it failed, kept apart
+  // from `error` so the header can show it in place (see `title` below).
+  const [loadError, setLoadError] = useState('')
   // True until the first load ends; later loads (after a save) never show the
   // loading placeholders again.
   const [initialLoading, setInitialLoading] = useState(true)
@@ -248,6 +256,8 @@ export default function HostDetailsPage() {
   // before the agent's name (QA). The title shows a skeleton instead.
   // Deliberately one-way: later partial reloads (model/connectors saves call
   // loadData('model'|'none')) keep the loaded title — no re-flash.
+  // A failed page read (`loadError`) also ends the skeleton: the title falls back
+  // to the route name and the header shows the failure in place.
   const [overviewReady, setOverviewReady] = useState(false)
   const [editingDisplayName, setEditingDisplayName] = useState(false)
   const [hostDescription, setHostDescription] = useState('')
@@ -578,6 +588,7 @@ export default function HostDetailsPage() {
   async function loadData(resetDrafts: 'all' | 'overview' | 'model' | 'none' = 'all') {
     beginBusy()
     setError('')
+    setLoadError('')
     try {
       const detail = await getHostDetailBundle(routeName)
       const { host, contexts: contextsList, secrets: secretsList, agentUsers, agentTeams } = detail
@@ -702,7 +713,9 @@ export default function HostDetailsPage() {
       setAvailableLlmSecrets(secretOptions)
     } catch (e) {
       if (!mountedRef.current) return
-      setError(e instanceof Error ? e.message : 'Failed to load agent details')
+      const message = e instanceof Error ? e.message : 'Failed to load agent details'
+      setError(message)
+      setLoadError(message)
     } finally {
       if (mountedRef.current) {
         endBusy()
@@ -1413,11 +1426,17 @@ export default function HostDetailsPage() {
     <DetailPageShell<HostTab>
       activeTab={activeTab}
       backLabel="Back to agents"
-      error={editingModel ? '' : error}
+      error={
+        editingModel || (activeTab === 'approvals' && loadError && error === loadError) ? '' : error
+      }
       icon={<IconRobot />}
       onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
-      subtitle="Configuration and access for this agent."
+      subtitle={
+        loadError
+          ? `${HOST_LOAD_ERROR_PREFIX} ${loadError}`
+          : 'Configuration and access for this agent.'
+      }
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
       contentClassName={
@@ -1434,7 +1453,7 @@ export default function HostDetailsPage() {
       // (spec.host, editable on Overview). While the first Overview read is
       // in flight the title is a skeleton — never the raw slug (QA).
       title={
-        overviewReady ? (
+        overviewReady || loadError ? (
           `Agent: ${hostDisplaySaved || routeName}`
         ) : (
           <span
