@@ -169,6 +169,10 @@ describe('effectiveApproval values', () => {
     }
   })
 
+  // No mcp-host parity here: the reader is `configuredShellClassifierModel`
+  // (mcp-host/src/core/approval/shellClassifier.ts:15-17), but that file
+  // imports the logger and usage modules, which pull npm packages control-ui's
+  // CI does not install. This test restates its rule by hand (spec ruling 29).
   it('shell classifier model: absent or blank is null, otherwise the string', () => {
     expect(effectiveApproval({}).shellClassifierModel).toBeNull()
     expect(effectiveApproval({ shellClassifierModel: '  ' }).shellClassifierModel).toBeNull()
