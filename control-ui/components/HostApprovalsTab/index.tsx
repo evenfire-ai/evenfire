@@ -3,7 +3,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { HostApprovalSection } from '@components/HostApprovalSection'
 import { useToast } from '@components/Toast'
-import { IconInfoCircle } from '@components/icons'
 import { Button } from '@components/ui'
 import { type HostResource, getHostDetailBundle } from '@lib/api'
 import { approvalBlockOf, effectiveApproval } from '@lib/approvalEffective'
@@ -16,8 +15,8 @@ import {
 import type { ToolsSaveOutcome } from '@lib/hostApprovalSave'
 import { emitRootToast } from '@lib/rootToast'
 import { ApprovalModesView, WhoCanRaiseView } from './ReadViews'
+import { InheritingBanner, ManifestBanner, manifestSignal } from './banners'
 import {
-  INHERITING_BANNER_TEXT,
   LOADING_LABEL,
   NOT_THIS_AGENT_MESSAGE,
   TOOLS_SAVED_TOAST,
@@ -68,16 +67,6 @@ function LoadErrorBanner({ message, pending, onRetry }: LoadErrorBannerProps) {
       >
         Retry
       </Button>
-    </div>
-  )
-}
-
-/** Spec §6.2: the agent has no `spec.approval` of its own (absent or null; `{}` is its own). */
-function InheritingBanner() {
-  return (
-    <div className="cu-banner cu-banner--info cu-host-approvals-tab__banner">
-      <IconInfoCircle aria-hidden height={16} width={16} />
-      <span>{INHERITING_BANNER_TEXT}</span>
     </div>
   )
 }
@@ -281,6 +270,8 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
   }
 
   const block = approvalBlockOf(view.snapshot)
+  const manifest =
+    view.snapshot === null ? { managed: false as const } : manifestSignal(view.snapshot)
   return (
     <div className="cu-host-approvals-tab">
       {view.loadError !== null ? (
@@ -293,6 +284,7 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
       {view.snapshot !== null ? (
         <>
           {block === undefined ? <InheritingBanner /> : null}
+          {manifest.managed ? <ManifestBanner values={manifest.values} /> : null}
           <ApprovalModesView host={view.snapshot} />
           <WhoCanRaiseView host={view.snapshot} />
         </>

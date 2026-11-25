@@ -12,9 +12,20 @@ import {
 } from '@lib/hostApprovalSave'
 import type { ContinuationToast } from './types'
 
-/** Spec §6.2: shown while the agent has no `spec.approval` of its own (Ruling 42; Task 21b moves it). */
+/** Spec §6.2: shown while the agent has no `spec.approval` of its own (Ruling 42). */
 export const INHERITING_BANNER_TEXT =
   'This agent has no approval settings of its own. It uses the cluster default, which this page cannot show. Your first save here replaces it for this agent.'
+
+/** Spec §6.7: the values text when only the manifest's existence is known (server-side apply). */
+export const MANIFEST_VALUES_NOT_SHOWN = 'set by a manifest (values not shown)'
+
+/** The longest values text the manifest banner shows; a larger block ends in an ellipsis. */
+export const MANIFEST_VALUES_CAP = 200
+
+/** Spec §6.7's manifest banner, around `values` (see `manifestValuesText`). */
+export function manifestBannerText(values: string): string {
+  return `A deployment manifest also sets these settings. The next deploy puts back: ${values}. Change the manifest too.`
+}
 
 /** The status the tab shows while it loads an agent with nothing to show yet. */
 export const LOADING_LABEL = 'Loading approval settings'
