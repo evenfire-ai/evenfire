@@ -37,4 +37,17 @@ export const OIDC_REFUSAL_MESSAGES: Readonly<Record<OidcRefusalReason, string>> 
   not_eligible: "Your account isn't allowed to sign in to Evenfire. Contact your administrator.",
   no_account: "There's no Evenfire account for this sign-in. Ask your administrator to add you.",
   provider_configuration: "Sign-in isn't configured correctly. Contact your administrator.",
+  invitation_email_mismatch: 'This invitation was sent to another address.',
 }
+
+/** What the Desktop sign-in pages say. */
+export const DESKTOP_SIGN_IN_COPY = {
+  invalidLink: 'This sign-in link is not valid. Start again from Evenfire Desktop.',
+  unavailable: "Desktop sign-in isn't available here.",
+  failed: 'Desktop sign-in failed. Start again from Evenfire Desktop.',
+  startFailed: "Desktop sign-in couldn't start. Start again from Evenfire Desktop.",
+  cancelled: 'Sign-in was cancelled. Start again from Evenfire Desktop.',
+  handoffTitle: 'Return to Evenfire Desktop',
+  handoffMessage:
+    'Evenfire Desktop should open and finish signing in. Use the button if your browser asks first.',
+} as const

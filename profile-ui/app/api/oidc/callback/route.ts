@@ -57,6 +57,12 @@ export async function GET(request: Request): Promise<Response> {
     return noStoreText('The identity provider is temporarily unavailable. Retry this attempt.', 503)
   }
 
+  // A plain attempt answers a provider error it has no case for as it always has: an
+  // unverifiable callback, with nothing sent upstream and the cookies left to expire.
+  if (callback.kind === 'provider-error') {
+    return noStoreText('Identity proof could not be verified.', 400)
+  }
+
   if (callback.kind === 'denied') {
     try {
       const result = await postOidcProfileFlow<{ outcome: 'attempt_cancelled' }>(
@@ -120,6 +126,15 @@ export async function GET(request: Request): Promise<Response> {
     }
     if (result.kind === 'refused') {
       return refusedRedirect(PROFILE_ROUTES.oidcResult(result.reason), finishedCookies)
+    }
+    // A plain attempt never asks for a Desktop code. The attempt is consumed upstream, so this
+    // answer ends it like any other answer this attempt cannot use.
+    if (result.kind === 'desktop_code_issued') {
+      return terminalFailure(
+        'This sign-in attempt cannot be reused. Start a new sign-in attempt.',
+        503,
+        finishedCookies
+      )
     }
     return terminalFailure(
       'Identity proof was verified. Member sign-in is not enabled.',

@@ -4,8 +4,6 @@ import {
   isOidcReturnTo,
 } from '../../../constants/oidc'
 import {
-  OIDC_BROWSER_CLOCK_SKEW_SECONDS,
-  OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS,
   beginOidcAttempt,
   browserCookieName,
   getOidcProfileConfiguration,
@@ -15,7 +13,7 @@ import {
   responseForFlowError,
   returnToCookieName,
   setBrowserCookie,
-  validateAuthorizationUrl,
+  validatedAttemptRedirect,
 } from '../_flow'
 
 const FORM_CONTENT_TYPE = 'application/x-www-form-urlencoded'
@@ -88,26 +86,15 @@ export async function POST(request: Request): Promise<Response> {
     const returnTo = await requestedReturnTo(request)
     const browserBinding = newBrowserBinding()
     const attempt = await beginOidcAttempt(browserBinding, request)
-    const authorizationUrl = validateAuthorizationUrl(
-      attempt.authorizationUrl,
-      configuration.redirectUri
-    )
-    const expiresAt = new Date(attempt.expiresAt)
-    const maxAge = Math.floor((expiresAt.getTime() - Date.now()) / 1000)
-    const state = authorizationUrl?.searchParams.get('state')
-    if (
-      !authorizationUrl ||
-      !state ||
-      !Number.isFinite(expiresAt.getTime()) ||
-      maxAge <= 0 ||
-      maxAge > OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS + OIDC_BROWSER_CLOCK_SKEW_SECONDS
-    ) {
+    const redirect = validatedAttemptRedirect(attempt, configuration)
+    if (!redirect) {
       return new Response('Sign-in is unavailable.', {
         status: 503,
         headers: { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' },
       })
     }
 
+    const { authorizationUrl, state, maxAge } = redirect
     return noStoreRedirect(authorizationUrl.href, [
       setBrowserCookie(browserCookieName(state), browserBinding, maxAge),
       ...(returnTo ? [setBrowserCookie(returnToCookieName(state), returnTo, maxAge)] : []),
