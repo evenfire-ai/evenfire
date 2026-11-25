@@ -3,13 +3,20 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
 import {
+  type BrowserSignInAttempt,
   BrowserSignInAttempts,
   type BrowserSignInClock,
   createBrowserSignInSecrets,
+  mapDesktopLoginErrorLink,
+  mapRedeemAnswer,
+  parseRedeemResult,
 } from './browserSignIn.js'
 import {
+  type DesktopLoginLink,
+  type RedeemHttpAnswer,
   buildDesktopLoginPageUrl,
   buildLoginMethodsModel,
+  parseDesktopLoginLink,
   readUsableOidc,
 } from './browserSignInModel.js'
 import { bindChatStoreForUser, unbindChatStore } from './chatStoreBinding.js'
@@ -91,6 +98,7 @@ import {
   HostStatusStreamEvent,
   LoginBackendHint,
   LoginMethodsAnswer,
+  LoginResult,
   PasswordLoginResult,
   PendingWorkflowApproval,
   PrewarmHostResult,
@@ -2723,6 +2731,188 @@ export class AppService {
    */
   cancelBrowserSignIn(): BrowserSignInSnapshot {
     return this.browserSignIn.cancel()
+  }
+
+  /**
+   * A `desktop-login` link from main's handler (D8, D9). The sync pre-match parses it with PR 2's
+   * parser and matches its state against the waiting attempt, with the deadline applied; any
+   * other link is dropped with no log, push or window. A match queues the acceptance op in the
+   * auth owner before this returns `true`, so the op runs ahead of any restore that a new
+   * window's boot starts (A3-33). `true` raises the window.
+   *
+   * It never throws to the router: an unexpected error is logged with fixed text and the error's
+   * class, never the link, and the link is dropped.
+   */
+  acceptDesktopLoginLink(rawUrl: string): boolean {
+    try {
+      const link = parseDesktopLoginLink(rawUrl)
+      if (link === null) return false
+      const attempt = this.browserSignIn.matchWaiting(link.state)
+      if (attempt === null) return false
+      const attemptId = attempt.id
+      void this.completeDesktopLogin(attemptId, link).catch((error: unknown) => {
+        // R-4: an attempt left `redeeming` would never end (L1), so one more owner op ends it
+        // `failed` if it still redeems. The op cannot reject: the store's `end` only writes
+        // memory and defers its push (D6). Only the error's class is logged: a message can carry
+        // a URL or a server body (D18).
+        void this.withNativeAuthEnvironmentCommit(async () => {
+          const current = this.browserSignIn.current()
+          if (current?.id === attemptId && current.phase === 'redeeming') {
+            this.browserSignIn.end(attemptId, { outcome: 'failed' })
+          }
+        })
+        console.warn(
+          '[AppService] Browser sign-in link handling failed:',
+          error instanceof Error ? error.name : typeof error
+        )
+      })
+      return true
+    } catch (error) {
+      // The router must not see a throw (D8); the link is dropped and the attempt, if one waits,
+      // keeps waiting. Only the error's class is logged, never the link (D18).
+      console.warn(
+        '[AppService] Browser sign-in link acceptance failed:',
+        error instanceof Error ? error.name : typeof error
+      )
+      return false
+    }
+  }
+
+  /**
+   * D9 for attempt `attemptId` after its pre-match: the acceptance op, the redeem awaited outside
+   * the owner, then the install op. The code lives only in `link` and the request body (D18).
+   * The first owner op is queued before the first `await`, so the caller's `true` follows it.
+   */
+  private async completeDesktopLogin(attemptId: number, link: DesktopLoginLink): Promise<void> {
+    const dispatch = await this.withNativeAuthEnvironmentCommit(async () =>
+      this.acceptDesktopLogin(attemptId, link)
+    )
+    if (dispatch === null) return
+    const answer = await dispatch.redeem
+    // The redeem 200 is the one arm with a body; its status alone overlaps the other HTTP arm.
+    const session = 'body' in answer ? AppService.readRedeemedSession(answer.body) : null
+    await this.withNativeAuthEnvironmentCommit(async () => {
+      const attempt = this.browserSignIn.current()
+      if (attempt === null || attempt.id !== attemptId || attempt.phase !== 'redeeming') return
+      // A generation advance during the redeem (D2), or a binding change (D7): the answer is
+      // discarded, whatever it was.
+      const found = this.isBrowserSignInAttemptCurrent(attempt)
+      if (found !== 'current') {
+        this.endStaleBrowserSignIn(attemptId, found)
+        return
+      }
+      if (!('body' in answer)) {
+        this.browserSignIn.end(attemptId, mapRedeemAnswer(answer))
+        return
+      }
+      if (session === null) {
+        this.browserSignIn.end(attemptId, { outcome: 'failed' })
+        return
+      }
+      try {
+        // `installAuthenticatedLogin` asserts the attempt's generation again first.
+        await this.installAuthenticatedLogin(session, attempt.generation)
+      } catch (error) {
+        // X1: the attempt ends `failed` whatever the install left behind. The error goes on to
+        // the chain's last catch, which logs its class.
+        this.browserSignIn.end(attemptId, { outcome: 'failed' })
+        throw error
+      }
+      this.browserSignIn.end(attemptId, { outcome: 'signed_in' })
+    })
+  }
+
+  /**
+   * The acceptance op (D9), run inside the owner. It re-checks the attempt (waiting, its state
+   * and the deadline, through `matchWaiting`) and that it is current (D7). An `error` link ends
+   * it (D17); a code for another environment ends it `failed(different_environment)` with
+   * nothing redeemed. Otherwise the attempt moves to `redeeming` and the one redeem goes to its
+   * bound REST URL, never retried. Returns that request, wrapped so the owner does not await it,
+   * or null when nothing was sent.
+   */
+  private acceptDesktopLogin(
+    attemptId: number,
+    link: DesktopLoginLink
+  ): { redeem: Promise<RedeemHttpAnswer> } | null {
+    const attempt = this.browserSignIn.matchWaiting(link.state)
+    if (attempt === null || attempt.id !== attemptId) return null
+    const found = this.isBrowserSignInAttemptCurrent(attempt)
+    if (found !== 'current') {
+      this.endStaleBrowserSignIn(attemptId, found)
+      return null
+    }
+    switch (link.kind) {
+      case 'error':
+        this.browserSignIn.end(attemptId, mapDesktopLoginErrorLink(link))
+        return null
+      case 'code':
+        // C1, A3-30: the same endpoint as the attempt's, compared as discovery compares it (host
+        // case, one root dot and trailing slashes aside), never by prefix. This stops another
+        // environment from relaying a code (design §13).
+        if (!sameDesktopRestEndpoint(link.environment, attempt.binding.restBaseUrl)) {
+          this.browserSignIn.end(attemptId, { outcome: 'failed', reason: 'different_environment' })
+          return null
+        }
+        if (!this.browserSignIn.beginRedeem(attemptId)) return null
+        return {
+          redeem: this.authClient.redeemDesktopSignInAt(attempt.binding.restBaseUrl, {
+            code: link.code,
+            codeVerifier: attempt.verifier,
+          }),
+        }
+      default: {
+        // R-7: a new link kind in PR 2's type fails to compile here. At run time the parser
+        // returns only the two kinds above; anything else would still end the attempt once.
+        const unhandled: never = link
+        void unhandled
+        this.browserSignIn.end(attemptId, { outcome: 'failed' })
+        return null
+      }
+    }
+  }
+
+  /**
+   * D7: whether `attempt` still belongs to this session and environment. A moved generation is
+   * `replaced` (D2); the same generation with another binding (profile id or REST endpoint) is
+   * `environment_changed`.
+   */
+  private isBrowserSignInAttemptCurrent(
+    attempt: BrowserSignInAttempt
+  ): 'current' | 'replaced' | 'environment_changed' {
+    if (attempt.generation !== this.sessionGeneration) return 'replaced'
+    try {
+      this.assertAuthEnvironmentBinding(attempt.binding)
+    } catch (error) {
+      // The binding check's own refusal is this answer. Any other error is unexpected and goes
+      // on to the link chain's last catch.
+      if (error instanceof Error && error.message === 'stale_runtime_environment') {
+        return 'environment_changed'
+      }
+      throw error
+    }
+    return 'current'
+  }
+
+  /** Ends attempt `attemptId` as D7 found it: `replaced`, or `failed(environment_changed)`. */
+  private endStaleBrowserSignIn(attemptId: number, found: 'replaced' | 'environment_changed') {
+    this.browserSignIn.end(
+      attemptId,
+      found === 'replaced'
+        ? { outcome: 'replaced' }
+        : { outcome: 'failed', reason: 'environment_changed' }
+    )
+  }
+
+  /** A redeem 200's session, or null when Desktop cannot install it (R-4, Review Focus 4). */
+  private static readRedeemedSession(body: unknown): LoginResult | null {
+    try {
+      return parseRedeemResult(body)
+    } catch {
+      // Not rethrown: an unusable 200 is an end state, `failed`, which the install op writes
+      // after its current checks (R-4). The body is the server's and is not logged (D18).
+      console.warn('[AppService] Browser sign-in answer is not a usable session')
+      return null
+    }
   }
 
   /**

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
+import { createHash } from 'node:crypto'
+import { once } from 'node:events'
+import { type IncomingHttpHeaders, createServer } from 'node:http'
 import { format } from 'node:util'
 import {
   type BrowserSignInHarness,
@@ -10,15 +13,27 @@ import {
 } from '../../testSupport/browserSignInHarness.js'
 import {
   type EdgeContractRecord,
+  type EdgeRecordKey,
   deriveEdgeRecord,
   deriveEdgeRecordStatus,
   edgeResponse,
   readEdgeRecord,
 } from '../../testSupport/edgeContractRecords.js'
 import { AuthClient } from '../authClient.js'
-import { BROWSER_SIGN_IN_DEADLINE_MS, BrowserSignInAttempts } from '../browserSignIn.js'
-import { type LoginMethodsHttpAnswer, parseDesktopLoginPageUrl } from '../browserSignInModel.js'
-import type { BrowserSignInSnapshot, LoginMethodsModel } from '../types.js'
+import {
+  BROWSER_SIGN_IN_DEADLINE_MS,
+  BrowserSignInAttempts,
+  createBrowserSignInSecrets,
+  createDesktopLoginLinkHandler,
+} from '../browserSignIn.js'
+import {
+  type LoginMethodsHttpAnswer,
+  type RedeemHttpAnswer,
+  buildDesktopLoginCodeLink,
+  buildDesktopLoginErrorLink,
+  parseDesktopLoginPageUrl,
+} from '../browserSignInModel.js'
+import type { BrowserSignInEnd, BrowserSignInSnapshot, LoginMethodsModel } from '../types.js'
 
 // Bodies outside the feature contract (G-5) come from the harness. The discovery answer is the
 // shape of the edge's own route, `external-rest-api/src/routes/desktop.ts:11-17`, with
@@ -143,7 +158,7 @@ function modelRestUrls(real: BumpReal, model: BumpModel): string[] {
   return envs.map(env => (env === 'D' ? ENV_D_REST : real.harness.envs[env].restBaseUrl)).sort()
 }
 
-/** A boundary change away from A clears A's saved token (`appService.ts:2276`). */
+/** A boundary change away from A clears A's saved token (`appService.ts:2284`). */
 function leave(model: BumpModel, next: EnvName | null) {
   if (model.active === 'A' && next !== 'A') model.storedA = false
   model.active = next
@@ -188,7 +203,7 @@ const bumpEvents = {
     id: 'E15',
     label: 'E15 session restore (getSessionState)',
     check: () => true,
-    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:3843-3848`): it
+    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4033-4038`): it
     // never decides an expectation here. `storedA` holds while signed out on A only before the
     // first restore on A (a kept token at start), and that restore succeeds. Every later
     // `storedA` comes from a sign-in on A, and every way back to signed out (logout, or a change
@@ -1360,5 +1375,520 @@ describe('browser sign-in start, cancel and the methods read', () => {
     expect(methodsFetches(harness)).toHaveLength(1)
     expect(harness.pushes).toEqual([])
     expect(harness.opens).toEqual([])
+  })
+})
+
+const REDEEM_ROUTE = 'POST /api/v1/oidc/desktop-sign-in/redeem'
+const REDEEM_PATH = '/api/v1/oidc/desktop-sign-in/redeem'
+const REDEEM_SIGNED_IN: EdgeRecordKey = 'POST /api/v1/oidc/desktop-sign-in/redeem signed-in'
+const REDEEM_REFUSED: EdgeRecordKey =
+  'POST /api/v1/oidc/desktop-sign-in/redeem refused-account-disabled'
+const SIGNED_IN_WITHOUT_ME_ID = 'signed-in-without-me-id'
+const LINK_HANDLING_FAILED = '[AppService] Browser sign-in link handling failed:'
+const CONSOLE_LEVELS = ['log', 'info', 'warn', 'error', 'debug'] as const
+
+function redeemFetches(harness: BrowserSignInHarness) {
+  return harness.fetches.filter(
+    record => record.value.method === 'POST' && new URL(record.value.url).pathname === REDEEM_PATH
+  )
+}
+
+/** The code the edge recorded issuing, of the shape PR 2's link builder requires. */
+function recordedCode(): string {
+  const { code } = readEdgeRecord('POST /api/v1/oidc/profile-flow/complete desktop-code-issued')
+    .body as { code: string }
+  return code
+}
+
+/** The session token the edge recorded for `signed-in`. */
+function recordedSessionToken(): string {
+  return (readEdgeRecord(REDEEM_SIGNED_IN).body as { token: string }).token
+}
+
+/** The recorded 200 with `me.id` removed (Review Focus 4): the edge passes it; Desktop cannot install it. */
+function signedInWithoutMeId(): EdgeContractRecord {
+  return deriveEdgeRecord(REDEEM_SIGNED_IN, SIGNED_IN_WITHOUT_ME_ID, body => {
+    const { me, ...rest } = body as { me: Record<string, unknown> }
+    const { id: _id, ...meWithoutId } = me
+    return { ...rest, me: meWithoutId }
+  })
+}
+
+/** A code link from PR 2's builder, as the Profile UI sends it. */
+function codeLink(state: string, environment: string): string {
+  return buildDesktopLoginCodeLink({ state, code: recordedCode(), environment })
+}
+
+/** Starts an attempt and reads its state from the page URL it opened. */
+async function startAttempt(
+  harness: BrowserSignInHarness
+): Promise<{ attemptId: number; state: string }> {
+  const { attemptId } = await harness.service.startBrowserSignIn()
+  const state = openedPage(harness, harness.opens.length - 1)?.state
+  if (!state) throw new Error(`attempt ${attemptId} opened no page with a state`)
+  return { attemptId, state }
+}
+
+/** The service's own `AuthClient`, a private field, so a test sees what its transport returned. */
+function serviceAuthClient(harness: BrowserSignInHarness): AuthClient {
+  return (harness.service as unknown as { authClient: AuthClient }).authClient
+}
+
+type RedeemRecordRow = Readonly<{
+  /** The record key, or the derivation's label. */
+  label: string
+  record: () => EdgeContractRecord
+  end: BrowserSignInEnd
+}>
+
+/** What `redeemDesktopSignInAt` hands over for a record the edge answered as it is. */
+function transportAnswer(record: EdgeContractRecord): RedeemHttpAnswer {
+  return record.status === 200
+    ? { status: 200, body: record.body }
+    : { status: record.status, bodyText: JSON.stringify(record.body) }
+}
+
+function recordedRedeemRow(key: EdgeRecordKey, end: BrowserSignInEnd): RedeemRecordRow {
+  return { label: key, record: () => readEdgeRecord(key), end }
+}
+
+/**
+ * D9 through D17, end to end: each recorded redeem answer, sent by the edge as it is, with its
+ * §5.2 end state. The last row is R-4's: a 200 the edge passes and Desktop cannot install.
+ */
+const REDEEM_RECORDS: ReadonlyArray<RedeemRecordRow> = [
+  recordedRedeemRow(REDEEM_SIGNED_IN, { outcome: 'signed_in' }),
+  recordedRedeemRow('POST /api/v1/oidc/desktop-sign-in/redeem invalid', { outcome: 'failed' }),
+  recordedRedeemRow(REDEEM_REFUSED, {
+    outcome: 'refused',
+    reason: (readEdgeRecord(REDEEM_REFUSED).body as { reason: 'account_disabled' }).reason,
+  }),
+  recordedRedeemRow('POST /api/v1/oidc/desktop-sign-in/redeem unavailable', {
+    outcome: 'failed',
+    reason: 'no_longer_available',
+  }),
+  recordedRedeemRow('POST /api/v1/oidc/desktop-sign-in/redeem upgrade-required', {
+    outcome: 'failed',
+  }),
+  recordedRedeemRow('POST /api/v1/oidc/desktop-sign-in/redeem issuance-unavailable', {
+    outcome: 'failed',
+  }),
+  recordedRedeemRow('POST /api/v1/oidc/desktop-sign-in/redeem rate-limited', {
+    outcome: 'failed',
+  }),
+  { label: SIGNED_IN_WITHOUT_ME_ID, record: signedInWithoutMeId, end: { outcome: 'failed' } },
+]
+
+describe('browser sign-in link acceptance, redeem and install', () => {
+  it('G2-1 redeems a duplicated code link once', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const link = codeLink(state, envs.A.restBaseUrl)
+
+    // The handoff page fires the link on load and again from its button (design §8). Both reach
+    // the sync pre-match before the first acceptance op runs.
+    expect(service.acceptDesktopLoginLink(link)).toBe(true)
+    expect(service.acceptDesktopLoginLink(link)).toBe(true)
+    await harness.drain()
+
+    expect(redeemFetches(harness)).toHaveLength(1)
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+    expect(harness.tokenWrites.map(write => write.value)).toEqual([recordedSessionToken()])
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+    // Once the attempt has left `waiting`, the pre-match drops the same link.
+    expect(service.acceptDesktopLoginLink(link)).toBe(false)
+    await harness.drain()
+    expect(redeemFetches(harness)).toHaveLength(1)
+  })
+
+  it('G2-2 discards a redeem that a logout overtook', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const redeem = harness.hold('redeem')
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await until(harness, () => redeem.reached, 'the redeem fetch')
+    // `evenfire://logout` reaches the same `AppService.logout()` (`main.ts:110-113`).
+    await service.logout()
+    redeem.release(edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)))
+    await harness.drain()
+
+    expect(endStatesOf(harness, attemptId)).toEqual(['replaced'])
+    expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
+    expect(harness.tokenWrites).toEqual([])
+  })
+
+  it('G2-3 replaces a waiting attempt when another starts', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const first = await startAttempt(harness)
+    const second = await startAttempt(harness)
+    await harness.drain()
+
+    expect(endStatesOf(harness, first.attemptId)).toEqual(['replaced'])
+    expect(service.acceptDesktopLoginLink(codeLink(first.state, envs.A.restBaseUrl))).toBe(false)
+    await harness.drain()
+    expect(redeemFetches(harness)).toHaveLength(0)
+
+    // The attempt that replaced it redeems its own link.
+    expect(service.acceptDesktopLoginLink(codeLink(second.state, envs.A.restBaseUrl))).toBe(true)
+    await harness.drain()
+    expect(redeemFetches(harness)).toHaveLength(1)
+    expect(endStatesOf(harness, second.attemptId)).toEqual(['signed_in'])
+  })
+
+  it('G2-9a fails a code from another environment without redeeming', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.B.restBaseUrl))).toBe(true)
+    await harness.drain()
+
+    expect(snapshotsOf(harness, attemptId).at(-1)).toEqual({
+      attemptId,
+      phase: 'ended',
+      outcome: 'failed',
+      reason: 'different_environment',
+    })
+    expect(redeemFetches(harness)).toHaveLength(0)
+    expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
+  })
+
+  it('G2-9b spends nothing behind a restore commit', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true, keptToken: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const bind = harness.hold('restoreChatBind')
+
+    const restore = service.getSessionState()
+    await until(harness, () => bind.reached, "the restore's chat-store bind")
+    // The restore commit holds the owner with the session token set (`appService.ts:1996`) and
+    // its generation advance (`:2026`) still ahead.
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: false })
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await harness.drain({ owner: false })
+    bind.release()
+    await expect(restore).resolves.toMatchObject({ authenticated: true })
+    await harness.drain()
+
+    expect(redeemFetches(harness)).toHaveLength(0)
+    expect(endStatesOf(harness, attemptId)).toEqual(['replaced'])
+  })
+
+  it('G2-9c sends one redeem on ECONNRESET', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    harness.routes[REDEEM_ROUTE] = () => {
+      throw networkFailure()
+    }
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    // Real time: the transport's retry would wait 250 ms on the real `setTimeout`, which the
+    // browser sign-in clock seam does not replace. `drain` would return before it.
+    await vi.waitFor(() => expect(endStatesOf(harness, attemptId)).toEqual(['failed']), {
+      timeout: 5_000,
+      interval: 10,
+    })
+    await harness.drain()
+
+    expect(redeemFetches(harness)).toHaveLength(1)
+    expect(endStatesOf(harness, attemptId)).toEqual(['failed'])
+  })
+
+  it.each(REDEEM_RECORDS.map(row => [row.label, row] as const))(
+    "maps the edge's %s through the real transport",
+    async (_label, row) => {
+      const harness = await createBrowserSignInHarness({ linksAvailable: true })
+      const { service, envs } = harness
+      const record = row.record()
+      harness.routes[REDEEM_ROUTE] = () => edgeResponse(record)
+      const transport = vi.spyOn(serviceAuthClient(harness), 'redeemDesktopSignInAt')
+      const { attemptId, state } = await startAttempt(harness)
+
+      expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+      await harness.drain()
+
+      // D17 tier 1: the transport handed the edge's answer over as it came.
+      expect(transport).toHaveBeenCalledOnce()
+      await expect(transport.mock.results[0]?.value).resolves.toStrictEqual(transportAnswer(record))
+      expect(snapshotsOf(harness, attemptId).at(-1)).toEqual({
+        attemptId,
+        phase: 'ended',
+        ...row.end,
+      })
+      const signedIn = row.end.outcome === 'signed_in'
+      expect(harness.tokenWrites.map(write => write.value)).toEqual(
+        signedIn ? [recordedSessionToken()] : []
+      )
+      expect(service.getSessionPresence()).toEqual({ hasToken: signedIn, hasMe: signedIn })
+    }
+  )
+
+  it('sends the redeem to the bound REST URL, never to the link environment', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    // Environment A's endpoint in another spelling: host case and a root dot (A3-30).
+    const variant = 'https://EDGE-FIXTURE.example.test./'
+    expect(new URL(variant).hostname).toBe(`${new URL(envs.A.restBaseUrl).hostname}.`)
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, variant))).toBe(true)
+    await harness.drain()
+
+    expect(redeemFetches(harness).map(record => record.value.url)).toEqual([
+      `${envs.A.restBaseUrl}${REDEEM_PATH}`,
+    ])
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+  })
+
+  it('redeems with the verifier whose S256 challenge opened the page', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const page = openedPage(harness, 0)
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await harness.drain()
+
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+    const body = redeemFetches(harness)[0]?.value.body
+    expect(body).toEqual({
+      code: recordedCode(),
+      codeVerifier: expect.stringMatching(SECRET_SHAPE),
+    })
+    const { codeVerifier } = body as { codeVerifier: string }
+    // RFC 7636 S256, computed here rather than by the code under test.
+    expect(createHash('sha256').update(codeVerifier).digest('base64url')).toBe(page?.challenge)
+    // D18: neither the code, the verifier nor the state left through a log, a push or a reply.
+    const secrets = [recordedCode(), codeVerifier, state]
+    expect(
+      harness.secretsSeen.filter(text => secrets.some(secret => text.includes(secret)))
+    ).toEqual([])
+  })
+
+  it('drops an error link for the waiting state while its redeem is held', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const redeem = harness.hold('redeem')
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await until(harness, () => redeem.reached, 'the redeem fetch')
+    // A3-61: the attempt is `redeeming`, so its state no longer matches at the pre-match.
+    expect(
+      service.acceptDesktopLoginLink(buildDesktopLoginErrorLink({ state, error: 'failed' }))
+    ).toBe(false)
+    redeem.release(edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)))
+    await harness.drain()
+
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+  })
+
+  it('keeps a redeeming attempt when its browser open fails afterwards', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const open = harness.hold('open')
+
+    const start = service.startBrowserSignIn()
+    await until(harness, () => open.reached, 'the browser open')
+    const state = openedPage(harness, 0)?.state ?? ''
+    expect(state).toMatch(SECRET_SHAPE)
+    const redeem = harness.hold('redeem')
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await until(harness, () => redeem.reached, 'the redeem fetch')
+    // The open fails once the attempt is redeeming: only a waiting attempt ends `failed` (A3-66).
+    open.release(new Error('fake browser open failure'))
+    await expect(start).rejects.toThrow(/^browser_open_failed$/)
+    redeem.release(edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)))
+    await harness.drain()
+
+    expect(endStatesOf(harness, 1)).toEqual(['signed_in'])
+  })
+
+  it('ends failed when install throws after the session is set', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const write = harness.hold('installTokenWrite')
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await until(harness, () => write.reached, "the install's token write")
+    write.release(new Error('fake keychain write failure'))
+    await harness.drain()
+
+    // X1. The install ran as far as the token write.
+    expect(harness.tokenWrites.map(entry => entry.value)).toEqual([recordedSessionToken()])
+    expect(endStatesOf(harness, attemptId)).toEqual(['failed'])
+    // Logged with the error class only.
+    expect(harness.secretsSeen).toContain(`${LINK_HANDLING_FAILED} Error`)
+    expect(harness.secretsSeen.filter(text => text.includes('fake keychain write'))).toEqual([])
+  })
+
+  it(`fails a 200 whose me has no id, without installing (${SIGNED_IN_WITHOUT_ME_ID})`, async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    harness.routes[REDEEM_ROUTE] = () => edgeResponse(signedInWithoutMeId())
+    const { attemptId, state } = await startAttempt(harness)
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await harness.drain()
+
+    expect(redeemFetches(harness)).toHaveLength(1)
+    expect(snapshotsOf(harness, attemptId).at(-1)).toEqual({
+      attemptId,
+      phase: 'ended',
+      outcome: 'failed',
+    })
+    expect(harness.tokenWrites).toEqual([])
+    expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
+  })
+
+  it(`ends an unusable 200 that a logout overtook replaced (${SIGNED_IN_WITHOUT_ME_ID})`, async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const redeem = harness.hold('redeem')
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await until(harness, () => redeem.reached, 'the redeem fetch')
+    await service.logout()
+    redeem.release(edgeResponse(signedInWithoutMeId()))
+    await harness.drain()
+
+    // R-4: the install op's current checks come before the unusable answer's `failed`.
+    expect(endStatesOf(harness, attemptId)).toEqual(['replaced'])
+  })
+
+  it('ends a redeeming attempt failed when its handling throws', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    vi.spyOn(serviceAuthClient(harness), 'redeemDesktopSignInAt').mockRejectedValueOnce(
+      new Error('fake redeem failure')
+    )
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await harness.drain()
+
+    // R-4: the chain's last catch ends the attempt it left redeeming, then logs the error class.
+    expect(snapshotsOf(harness, attemptId).map(snapshot => snapshot.phase)).toEqual([
+      'waiting',
+      'redeeming',
+      'ended',
+    ])
+    expect(endStatesOf(harness, attemptId)).toEqual(['failed'])
+    expect(harness.secretsSeen).toContain(`${LINK_HANDLING_FAILED} Error`)
+    expect(harness.secretsSeen.filter(text => text.includes('fake redeem failure'))).toEqual([])
+  })
+
+  it('logs and drops a link whose acceptance throws, never throwing to the router', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const link = codeLink(state, envs.A.restBaseUrl)
+    const now = vi.spyOn(harness.clock, 'now').mockImplementationOnce(() => {
+      throw new Error('fake clock failure')
+    })
+
+    let accepted: boolean | undefined
+    expect(() => {
+      accepted = service.acceptDesktopLoginLink(link)
+    }).not.toThrow()
+    expect(accepted).toBe(false)
+    expect(now).toHaveBeenCalled()
+    await harness.drain()
+    expect(redeemFetches(harness)).toHaveLength(0)
+    // Fixed text and the error class: no link, state or code.
+    expect(harness.secretsSeen).toContain(
+      '[AppService] Browser sign-in link acceptance failed: Error'
+    )
+    const secrets = [link, state, recordedCode(), 'fake clock failure']
+    expect(
+      harness.secretsSeen.filter(text => secrets.some(secret => text.includes(secret)))
+    ).toEqual([])
+
+    // The attempt still waits, and the same link is accepted once the clock answers again.
+    expect(service.acceptDesktopLoginLink(link)).toBe(true)
+    await harness.drain()
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+  })
+
+  it('drops a link for an unknown state with no log, push or window', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    await harness.drain()
+    const requestMainWindow = vi.fn<() => void>()
+    const accepted: boolean[] = []
+    const handle = createDesktopLoginLinkHandler({
+      accept: rawUrl => {
+        const result = service.acceptDesktopLoginLink(rawUrl)
+        accepted.push(result)
+        return result
+      },
+      requestMainWindow,
+    })
+    // The harness's own spies, which record every console line.
+    const consoleSpies = CONSOLE_LEVELS.map(level => vi.spyOn(console, level))
+    const consoleCalls = () => consoleSpies.map(spy => spy.mock.calls.length)
+    const callsBefore = consoleCalls()
+    const pushesBefore = harness.pushes.length
+    const unknownState = createBrowserSignInSecrets().state
+    expect(unknownState).not.toBe(state)
+
+    handle(codeLink(unknownState, envs.A.restBaseUrl))
+    await harness.drain()
+
+    expect(accepted).toEqual([false])
+    expect(consoleCalls()).toEqual(callsBefore)
+    expect(harness.pushes).toHaveLength(pushesBefore)
+    expect(requestMainWindow).not.toHaveBeenCalled()
+    expect(redeemFetches(harness)).toHaveLength(0)
+
+    // The waiting attempt's own link raises the window once and ends it, in one push.
+    handle(buildDesktopLoginErrorLink({ state, error: 'cancelled' }))
+    await harness.drain()
+    expect(accepted).toEqual([false, true])
+    expect(requestMainWindow).toHaveBeenCalledOnce()
+    expect(harness.pushes.slice(pushesBefore).map(record => record.value)).toEqual([
+      { attemptId, phase: 'ended', outcome: 'cancelled' },
+    ])
+  })
+
+  it('pins that Node fetch sends no Origin or Sec-Fetch-Site on the redeem request', async () => {
+    // G-7, a pin and not a G2 test: the edge's redeem has no browser-origin check to pass, and
+    // Node's fetch sends neither header. A real server, bound at runtime, sees the request.
+    vi.unstubAllGlobals()
+    const record = readEdgeRecord(REDEEM_SIGNED_IN)
+    const seen: IncomingHttpHeaders[] = []
+    const server = createServer((request, response) => {
+      seen.push(request.headers)
+      request.resume()
+      response.writeHead(record.status, { 'content-type': 'application/json' })
+      response.end(JSON.stringify(record.body))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    try {
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('expected a loopback server')
+
+      const answer = await new AuthClient().redeemDesktopSignInAt(
+        `http://127.0.0.1:${address.port}`,
+        { code: recordedCode(), codeVerifier: createBrowserSignInSecrets().verifier }
+      )
+
+      expect(answer).toStrictEqual({ status: 200, body: record.body })
+      expect(seen).toHaveLength(1)
+      expect(seen[0]?.['content-type']).toBe('application/json')
+      expect(seen[0]).not.toHaveProperty('origin')
+      expect(seen[0]).not.toHaveProperty('sec-fetch-site')
+    } finally {
+      server.close()
+    }
   })
 })
