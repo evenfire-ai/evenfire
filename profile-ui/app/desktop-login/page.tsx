@@ -1,9 +1,10 @@
-import { notFound } from 'next/navigation'
+import { DesktopLoginPanel } from '@components/DesktopLoginPanel'
 
 /**
- * `PROFILE_ROUTES.desktopLogin`, which Desktop opens to sign in. It renders Profile UI's
- * not-found page until the Desktop sign-in page itself replaces this file.
+ * `PROFILE_ROUTES.desktopLogin`, which Evenfire Desktop opens as
+ * `/desktop-login#challenge=…&state=…`. The values live only in the fragment, which the panel
+ * reads in the browser, so this page reads no `searchParams`.
  */
-export default function DesktopLoginPage(): never {
-  notFound()
+export default function DesktopLoginPage() {
+  return <DesktopLoginPanel />
 }

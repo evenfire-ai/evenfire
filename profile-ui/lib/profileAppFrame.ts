@@ -3,8 +3,11 @@
  * because a signed-out browser lands on them: the result page explains a refusal, and the
  * signed-in page must release a stale logout fence before the session is read again.
  * /desktop-setup gates itself: its own AuthGate shows sign-in in place, without the shell.
+ * /desktop-login is Evenfire Desktop's sign-in page: it never uses a Profile session, so a
+ * signed-out browser must reach it as it is.
  */
 const PUBLIC_PROFILE_UI_PREFIXES = [
+  '/desktop-login',
   '/desktop-setup',
   '/forgot-password',
   '/invitations',

@@ -43,6 +43,9 @@ export const OIDC_REFUSAL_MESSAGES: Readonly<Record<OidcRefusalReason, string>> 
 
 /** What the Desktop sign-in pages say. */
 export const DESKTOP_SIGN_IN_COPY = {
+  pageTitle: 'Sign in to Evenfire Desktop',
+  pageDescription: 'This signs in the Evenfire Desktop app on this computer.',
+  continueWith: 'Continue with',
   invalidLink: 'This sign-in link is not valid. Start again from Evenfire Desktop.',
   unavailable: "Desktop sign-in isn't available here.",
   failed: 'Desktop sign-in failed. Start again from Evenfire Desktop.',

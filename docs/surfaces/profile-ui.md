@@ -49,6 +49,14 @@ GET /api/v1/invitations/token/:token` before it renders.
    (`external-rest-api POST /api/v1/invitations/desktop-authorization`, which
    takes no password) and hands it back to the installed app through the
    `evenfire://desktop-setup` deep link.
+7. **With member sign-in (OIDC) on, the Desktop App can sign in through the
+   browser instead.** It opens Profile UI's
+   `/desktop-login#challenge=…&state=…`; the values stay in the URL fragment,
+   which the browser never sends to a server. The member presses the page's
+   "Continue with …" button and signs in at the configured provider, and
+   Profile UI returns the result to the app through the
+   `evenfire://desktop-login` deep link. This sign-in neither uses an existing
+   Profile UI session nor creates one.
 
 Steps 1–4 above don't need a deployed sibling service for this: self-hosted
 control-api can send the invitation email and validate the token itself via
@@ -76,6 +84,8 @@ for what breaks without it.
 - `/invitations/[token]` and `/forgot-password` — reachable without a
   session.
 - `/desktop-setup` — the Desktop App handoff, above.
+- `/desktop-login` — the Desktop App's browser sign-in (step 7 above),
+  reachable without a session.
 
 ## Sign-out
 
