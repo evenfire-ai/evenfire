@@ -23,6 +23,7 @@ import {
   parseCallbackParameters,
   postOidcProfileFlow,
   readSingleCookie,
+  responseForFlowError,
   returnToCookieName,
 } from '../app/api/oidc/_flow'
 import { GET } from '../app/api/oidc/callback/route'
@@ -1435,5 +1436,122 @@ test('a Desktop terminal page also clears a return cookie under its state', asyn
         label
       )
     })
+  }
+})
+
+// A configuration failure as the edge forwards control-api's answer: 404 oidc_not_configured when
+// no provider is configured, and 503 oidc_configuration_unavailable when its settings are unusable
+// (configuredProvider in control-api/src/routes/external/oidcProfileFlow.ts; the edge's
+// forwardFailure keeps both). Both are outside the retryable codes, so a reload cannot pass them.
+// edge.json records only `configuration activated`, so each is a derived variant of a recorded
+// edge answer with that status and the code swapped in.
+const EDGE_NOT_FOUND = 'GET /api/v1/auth/methods not-found'
+const configurationNotConfigured = () =>
+  edgeVariant(EDGE_NOT_FOUND, { error: 'oidc_not_configured' })
+const configurationUnusable = () =>
+  edgeVariant(EDGE_STORAGE_UNAVAILABLE, { error: 'oidc_configuration_unavailable' })
+const NON_RETRYABLE_CONFIGURATION = [
+  ['oidc_not_configured 404', configurationNotConfigured, 404, 'oidc_not_configured'],
+  [
+    'oidc_configuration_unavailable 503',
+    configurationUnusable,
+    503,
+    'oidc_configuration_unavailable',
+  ],
+] as const
+
+/**
+ * Today's JSON answer for a configuration failure, byte for byte: what `responseForFlowError`
+ * answers for that failure, with no cookie and no link.
+ */
+async function assertConfigurationJson(
+  response: Response,
+  failure: OidcProfileFlowError,
+  label: string
+): Promise<void> {
+  const expected = responseForFlowError(failure)
+  const text = await response.text()
+  assert.equal(response.status, failure.status, label)
+  assert.equal(text, JSON.stringify({ error: failure.code }), label)
+  assert.equal(text, await expected.text(), label)
+  assert.deepEqual([...response.headers.entries()], [...expected.headers.entries()], label)
+  assert.deepEqual(response.headers.getSetCookie(), [], label)
+  assert.equal(text.includes('evenfire://'), false, label)
+}
+
+test("fires failed for a Desktop attempt's non-retryable configuration failure", async () => {
+  for (const [label, configuration, status] of NON_RETRYABLE_CONFIGURATION) {
+    for (const search of [SUCCESS_SEARCH, DENIED_SEARCH]) {
+      await withEdge(
+        { configuration, complete: EDGE_DESKTOP_CODE_ISSUED, cancel: EDGE_CANCELLED },
+        async calls => {
+          await assertDesktopPage(
+            await GET(callbackRequest(search, [desktopCookie, returnCookie])),
+            {
+              link: FAILED_LINK,
+              message: DESKTOP_SIGN_IN_COPY.failed,
+              status,
+              cookies: [bindingClear, clearCookie(returnToCookieName(edgeState))],
+            },
+            `${label}: ${search}`
+          )
+          assert.deepEqual(
+            calls.map(call => call.path),
+            [CONFIGURATION_PATH],
+            `${label}: ${search}`
+          )
+        }
+      )
+    }
+  }
+})
+
+test("keeps today's answer and the cookie for a Desktop attempt's retryable configuration failure", async () => {
+  // Derived: `complete rate-limited` replayed for the configuration call (the edge's per-client
+  // limiter covers every /oidc/profile-flow route), and a transport failure.
+  const unreachable = (): Response => {
+    throw new TypeError('fetch failed')
+  }
+  for (const [label, configuration, status] of [
+    ['a rate-limited configuration', EDGE_RATE_LIMITED, 429],
+    ['an unreachable configuration', unreachable, 503],
+  ] as const) {
+    await withEdge({ configuration }, async calls => {
+      await assertConfigurationJson(
+        await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie, returnCookie])),
+        new OidcProfileFlowError(status, 'oidc_unavailable', true),
+        label
+      )
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH],
+        label
+      )
+    })
+  }
+})
+
+test("keeps today's JSON for a configuration failure on a plain attempt or without a Desktop cookie", async () => {
+  const name = browserCookieName(edgeState)
+  for (const [label, configuration, status, code] of NON_RETRYABLE_CONFIGURATION) {
+    for (const [cookieLabel, cookies] of [
+      ['a plain attempt', [bindingCookie, returnCookie]],
+      ['no cookie', []],
+      ['a 42-character Desktop state', [`${name}=desktop.${BINDING}.${DESKTOP_STATE.slice(1)}`]],
+      ['a plain and a Desktop cookie', [bindingCookie, desktopCookie]],
+    ] as const) {
+      await withEdge({ configuration }, async calls => {
+        await assertConfigurationJson(
+          await GET(callbackRequest(SUCCESS_SEARCH, cookies)),
+          new OidcProfileFlowError(status, code, false),
+          `${label}, ${cookieLabel}`
+        )
+        assert.deepEqual(
+          calls.map(call => call.path),
+          [CONFIGURATION_PATH],
+          `${label}, ${cookieLabel}`
+        )
+      })
+    }
   }
 })
