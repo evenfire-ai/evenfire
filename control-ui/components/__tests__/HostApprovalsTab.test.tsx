@@ -929,13 +929,15 @@ describe('HostApprovalsTab', () => {
       tab.unmount()
     })
 
-    it('shows the cluster default for the policy and approvers of an agent without its own settings', async () => {
+    it('shows the cluster default for the policy, approvers and channels on or off of an agent without its own settings', async () => {
       const fake = tabFake(undefined)
       const tab = renderApprovalsTab({ fake, host: 'foo' })
       await approvalSettingsDriver()
 
+      // Spec §6.6: policy, approvers and `enabled`, each named (review R45(9b)).
       expect(rowValue('Policy')).toBe(CLUSTER_DEFAULT)
       expect(rowValue('Approvers')).toBe(CLUSTER_DEFAULT)
+      expect(rowValue('Channels on or off')).toBe(CLUSTER_DEFAULT)
       expect(readRow('Telegram'), 'no channel rows of its own').toBeNull()
       tab.unmount()
     })

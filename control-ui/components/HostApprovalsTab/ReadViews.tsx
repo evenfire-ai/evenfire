@@ -12,6 +12,7 @@ import {
   APPROVAL_MODES_TITLE,
   APPROVERS_LABEL,
   AUTO_DESCRIPTION,
+  CHANNELS_ENABLED_LABEL,
   CHANNEL_LABELS,
   CHANNEL_ORDER,
   CHANNEL_SWITCHES_LABEL,
@@ -148,9 +149,10 @@ export function ApprovalModesView({ host }: ReadViewProps) {
 
 /**
  * Spec §6.2 "Who can raise the mode from a channel": the policy, and each
- * channel's `enabled` and approvers (approvers match by exact string). An
- * agent with no approval settings of its own takes both from the cluster
- * default (spec §6.6).
+ * channel's `enabled` (on or off) and approvers (approvers match by exact
+ * string). An agent with no approval settings of its own takes the policy,
+ * the approvers and `enabled` from the cluster default, one row each (spec
+ * §6.6).
  */
 export function WhoCanRaiseView({ host }: ReadViewProps) {
   const titleId = useId()
@@ -166,6 +168,7 @@ export function WhoCanRaiseView({ host }: ReadViewProps) {
           <>
             <ReadRow label={POLICY_LABEL} value={CLUSTER_DEFAULT_TEXT} />
             <ReadRow label={APPROVERS_LABEL} value={CLUSTER_DEFAULT_TEXT} />
+            <ReadRow label={CHANNELS_ENABLED_LABEL} value={CLUSTER_DEFAULT_TEXT} />
           </>
         ) : (
           <>

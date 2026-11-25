@@ -96,8 +96,13 @@ export function onOff(value: boolean): string {
 
 export const WHO_CAN_RAISE_TITLE = 'Who can raise the mode from a channel'
 export const POLICY_LABEL = 'Policy'
-/** The row that stands for every channel's approvers and `enabled` on an inheriting agent (spec §6.6). */
+/** On an inheriting agent, the row that stands for every channel's approvers (spec §6.6). */
 export const APPROVERS_LABEL = 'Approvers'
+/**
+ * On an inheriting agent, the row that stands for every channel's `enabled`
+ * (spec §6.6), which the channel rows show as on or off.
+ */
+export const CHANNELS_ENABLED_LABEL = 'Channels on or off'
 export const NO_APPROVERS_TEXT = 'No approvers listed'
 /** Spec §6.2, verbatim: an email approver is matched on the From address. */
 export const EMAIL_APPROVER_NOTE = 'Anyone who can send mail as this address counts.'
