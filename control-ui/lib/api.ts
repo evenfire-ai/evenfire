@@ -639,7 +639,7 @@ export async function apiSend(
   body?: unknown,
   query: Record<string, string | undefined> = {},
   extraHeaders: Record<string, string> = {},
-  options: { timeoutMs?: number } = {}
+  options: { timeoutMs?: number; signal?: AbortSignal } = {}
 ) {
   const res = await fetchWithTimeout(
     `${API_BASE}${path}${qs(query)}`,
@@ -651,6 +651,7 @@ export async function apiSend(
         ...extraHeaders,
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal: options.signal,
     },
     options.timeoutMs
   )
@@ -1442,9 +1443,11 @@ export async function getAdminUsers(q = '') {
   return apiGet('/api/v1/admin/users', { q }) as Promise<{ items?: AdminUser[] }>
 }
 
-export async function getHostDetailBundle(name: string) {
+export async function getHostDetailBundle(name: string, options?: ApiRequestOptions) {
   return apiGet(
-    `/api/v1/admin/hosts/${encodeURIComponent(name)}/detail`
+    `/api/v1/admin/hosts/${encodeURIComponent(name)}/detail`,
+    undefined,
+    options
   ) as Promise<HostDetailBundle>
 }
 
@@ -1468,8 +1471,12 @@ export async function getHosts() {
   return apiGet('/api/v1/admin/hosts') as Promise<{ items?: HostResource[] }>
 }
 
-export async function getHost(name: string) {
-  return apiGet(`/api/v1/admin/hosts/${encodeURIComponent(name)}`) as Promise<HostResource>
+export async function getHost(name: string, options?: ApiRequestOptions) {
+  return apiGet(
+    `/api/v1/admin/hosts/${encodeURIComponent(name)}`,
+    undefined,
+    options
+  ) as Promise<HostResource>
 }
 
 export type HostPersonalization = {
