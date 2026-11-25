@@ -238,9 +238,19 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
     template move. The rules are in `deploy/base/rpc-proxy/rbac.yaml`. If your
     CD strips Roles from the overlay apply, run
     [`deploy/scripts/bootstrap-rbac.sh`](../../deploy/scripts/bootstrap-rbac.sh)
-    with an admin kubeconfig before HCC rolls out (it needs `CONFIRM=yes` for
-    any context whose name contains `clerum`). Without these rules the read is
-    refused and HCC creates and wakes no Host. Check with:
+    with an admin kubeconfig before HCC rolls out:
+
+    ```bash
+    CONTEXT="$KCTX" CONFIRM=yes bash deploy/scripts/bootstrap-rbac.sh
+    ```
+
+    The script applies every `rbac.yaml`, `clusterroles.yaml` and
+    `clusterrolebindings.yaml` under `deploy/base`, not only the RPC Proxy
+    Role. Always pass `CONTEXT`: without it the script applies to the current
+    kubeconfig context and asks for no confirmation. With `CONTEXT` set, it
+    refuses a context whose name contains `clerum` (and none of `example-dev`,
+    `clerum-test`, `minikube` or `kind`) unless `CONFIRM=yes`. Without these
+    rules the read is refused and HCC creates and wakes no Host. Check with:
 
     ```bash
     kubectl --context "$KCTX" auth can-i get deployments/rpc-proxy -n rpc-proxy \
@@ -249,14 +259,20 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
       --as=system:serviceaccount:control-plane:host-context-controller
     ```
 
-    When the barrier blocks, HCC logs `RpcProxyEdgeCohortBarrierError` with
-    one of three messages:
-    - `reading Deployment "rpc-proxy" ... failed with HTTP 403` or
-      `listing pods "app=rpc-proxy" ... failed with HTTP 403`: the rules
-      above are missing. The message names the Role, RoleBinding and
-      ServiceAccount; apply them as above.
-    - `reading Deployment "rpc-proxy" ... failed with HTTP 404`: no RPC Proxy
-      Deployment in that namespace. Check `CONTEXT_MAPPER_RPC_PROXY_NAMESPACE`.
+    When the barrier blocks, HCC logs `RpcProxyEdgeCohortBarrierError`. Its
+    message has one of two forms:
+    - `RPC Proxy edge protocol cohort cannot be read`: a read failed. The
+      message names the read (`reading Deployment "rpc-proxy"` or
+      `listing pods "app=rpc-proxy"`), the namespace, and `HTTP <status>`, or
+      `no HTTP status` when the API server returned none (timeout, network
+      error). Two statuses add a hint:
+      - `HTTP 403` on either read: the rules above are missing. The message
+        names the Role, RoleBinding and ServiceAccount; apply them as above.
+      - `HTTP 404` on the Deployment read: no RPC Proxy Deployment in that
+        namespace. Check `CONTEXT_MAPPER_RPC_PROXY_NAMESPACE`.
+
+      Any other status and `no HTTP status` add no hint.
+
     - `is not fully on signed-assertion-v1`: the RPC Proxy rollout has not
       finished. The message lists what blocks it (generation not observed,
       template label, or the unlabelled pods by name). HCC retries on the next
@@ -281,8 +297,11 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
   RPC Proxy may stop forwarding the assertion only after no Host requires it.
   A pipeline that applies the whole previous release at once, or control-api
   first, does not follow this order and cuts Desktop → Host traffic twice:
-  while control-api is old and RPC Proxy is new, every Host route answers
-  503 `authority_unavailable` because control-api returns no edge assertion
+  while control-api is old and RPC Proxy is new, every Host route request
+  that control-api authorizes under V1 authority answers 503
+  `authority_unavailable` because control-api returns no edge assertion
+  (with `CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2` unset that is every Host
+  route except session search, which is V2-only and answers 403 as before)
   (RPC Proxy logs `control-api answered the host resolve without an edge
   assertion`); while RPC Proxy is old and
   the Hosts are new, every Host answers 401 until HCC has replaced them all.
@@ -377,8 +396,8 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
   reads neither. If your cluster ran such a `dev` build, keep both until the
   rollback window closes, then delete them: an HCC rolled back to that build
   with `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=dedicated-header-v1` writes
-  Host pods that require the Secret, and that RPC Proxy build requires the
-  key in production.
+  Host pods that require the Secret, and that RPC Proxy build uses the key
+  only for V2 Host traffic (it starts without it).
 - **Key sync after every overlay apply.** From this release every Desktop →
   Host route depends on `CLERUM_AUTH_JWT_PUBLIC_KEY` in `mcp-host-config`;
   before it, only `POST /v1/runtime/compact` and session search did. An
