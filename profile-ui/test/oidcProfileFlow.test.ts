@@ -1139,13 +1139,16 @@ test('a start form without Content-Length sets only the binding cookie', async (
   assertBindingOnly(await startWithBody(FORM_TYPE, stream), 'no Content-Length')
 })
 
-test('a JSON start body carrying returnTo sets only the binding cookie', async () => {
-  const body = JSON.stringify({ returnTo: 'desktop-setup' })
+test('a urlencoded start body sent as text/plain sets only the binding cookie', async () => {
+  // The form's own bytes, so only the content type keeps returnTo from being read.
   assertBindingOnly(
     await startWithBody(
-      { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) },
-      body
+      {
+        'content-type': 'text/plain',
+        'content-length': String(Buffer.byteLength(desktopSetupForm)),
+      },
+      desktopSetupForm
     ),
-    'JSON body'
+    'text/plain body'
   )
 })
