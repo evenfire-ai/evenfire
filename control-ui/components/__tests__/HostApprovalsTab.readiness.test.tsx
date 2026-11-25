@@ -462,7 +462,7 @@ describe('approval settings readiness (spec §7 A3)', () => {
       await otherHold.arrived
     })
     await driver.save()
-    await settle()
+    await waitFor(() => expect(reads(fake, FOO).filter(entry => entry.arrived)).toHaveLength(2))
 
     expect
       .soft(
