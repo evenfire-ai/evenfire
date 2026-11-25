@@ -942,7 +942,7 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
     expect(await storedCode(minted.code)).toBeUndefined()
   })
 
-  it('logs no code, verifier, token or email across success, refusal and mismatch', async () => {
+  it('logs no code, verifier, state, subject, token or email across success, refusal and mismatch', async () => {
     const success = await seedMember('desktop-log-success')
     const mismatch = await seedMember('desktop-log-mismatch')
     const refusal = await seedMember('desktop-log-refusal')
@@ -998,6 +998,13 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
       successCode.challenge,
       mismatchCode.challenge,
       refusalCode.challenge,
+      successCode.state,
+      mismatchCode.state,
+      refusalCode.state,
+      // The raw `sub` claim the fake provider issued for each member.
+      success.claims.sub,
+      mismatch.claims.sub,
+      refusal.claims.sub,
       redeemed.body.token,
       success.email,
       mismatch.email,
