@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import {
+  type ApprovalClock,
+  __setApprovalClockForTests,
+  getApprovalClock,
+  realApprovalClock,
+} from '../../../lib/hostApprovalSave'
+import {
   openApprovalSettings,
   pageMountDefaults,
   perToolSection,
@@ -128,5 +134,18 @@ describe('approval page harness', () => {
     expect(page.toasts()).toEqual(['Agent configuration saved.'])
     expect(unanswered(fake)).toEqual([])
     page.unmount()
+  })
+
+  it('resetApprovalTestState puts the save protocol back on the real clock', () => {
+    const injected: ApprovalClock = {
+      now: () => 0,
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+    }
+    __setApprovalClockForTests(injected, () => 0.5)
+    expect(getApprovalClock().clock).toBe(injected)
+
+    resetApprovalTestState()
+    expect(getApprovalClock().clock).toBe(realApprovalClock)
   })
 })

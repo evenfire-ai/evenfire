@@ -24,6 +24,7 @@ import HostDetailsPage from '../../app/hosts/[name]/page'
 import { ToastProvider } from '../../components/Toast'
 import type { ToastTone } from '../../components/Toast/types'
 import * as api from '../../lib/api'
+import { __resetHostApprovalSaveForTests } from '../../lib/hostApprovalSave'
 import { __resetReadRequestCacheForTests } from '../../lib/readRequestCache'
 import type { FakeControlApi, FakeControlApiOptions } from './fakeControlApi'
 import { llmModelWireRow } from './llmModelRows'
@@ -117,6 +118,7 @@ export function pageMountDefaults(): NonNullable<FakeControlApiOptions['defaults
 
 export function resetApprovalTestState(): void {
   __resetReadRequestCacheForTests()
+  __resetHostApprovalSaveForTests()
 }
 
 /** Every error banner on the page, in document order. `banner()` and `message()` read the first. */

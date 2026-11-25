@@ -384,6 +384,13 @@ async function apiPublicPost<T>(path: string, body: unknown): Promise<T> {
   }
 }
 
+/**
+ * What a request ended by its client-side timeout reports: `fetchWithTimeout`'s
+ * own timeout, and callers that time requests out on their own clock
+ * (lib/hostApprovalSave.ts).
+ */
+export const REQUEST_TIMED_OUT_MESSAGE = 'Request timed out. Check that Control API is reachable.'
+
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: RequestInit = {},
@@ -405,7 +412,7 @@ async function fetchWithTimeout(
   } catch (error) {
     if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
       if (init.signal?.aborted) throw error
-      throw new Error('Request timed out. Check that Control API is reachable.')
+      throw new Error(REQUEST_TIMED_OUT_MESSAGE)
     }
     throw error
   } finally {
