@@ -17,6 +17,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import {
+  type VirtualClock,
+  createVirtualClock,
+  seededRandom,
+} from '../../test/fixtures/approvalClock'
 import { materializeHostResource } from '../../test/fixtures/contextResource'
 import {
   type FakeControlApi,
@@ -34,8 +39,6 @@ import {
 import { type LooseningItem, looseningItems } from '../approvalLoosening'
 import {
   APPROVAL_CREATED_ELSEWHERE_MESSAGE,
-  type ApprovalClock,
-  type ApprovalRandom,
   TOOLS_CHANGED_MESSAGE,
   type ToolsSaveInput,
   type ToolsSaveOutcome,
@@ -74,59 +77,6 @@ const MAYBE = 'The save may not have applied. Reload to check.'
 
 const BASE_TOOLS = { json_transform: true }
 const DRAFT_TOOLS = { json_transform: true, system_info: true }
-
-type VirtualClock = ApprovalClock & {
-  /** Runs every timer due within `ms`, in time order, then moves the time on. */
-  advance(ms: number): void
-  /** The delay of every timer set, in order. */
-  delays: number[]
-  /** Timers set and neither run nor cleared. */
-  pending(): number
-}
-
-function createVirtualClock(): VirtualClock {
-  let now = 0
-  let handles = 0
-  const timers = new Map<number, { at: number; fn: () => void }>()
-  const delays: number[] = []
-  return {
-    delays,
-    now: () => now,
-    setTimeout(fn, ms) {
-      handles += 1
-      timers.set(handles, { at: now + ms, fn })
-      delays.push(ms)
-      return handles
-    },
-    clearTimeout(handle) {
-      timers.delete(handle as number)
-    },
-    pending: () => timers.size,
-    advance(ms) {
-      const until = now + ms
-      for (;;) {
-        let due: [number, { at: number; fn: () => void }] | undefined
-        for (const timer of timers) {
-          if (timer[1].at <= until && (!due || timer[1].at < due[1].at)) due = timer
-        }
-        if (!due) break
-        timers.delete(due[0])
-        now = due[1].at
-        due[1].fn()
-      }
-      now = until
-    },
-  }
-}
-
-/** A seeded linear congruential generator in [0, 1). */
-function seededRandom(seed: number): ApprovalRandom {
-  let state = seed >>> 0
-  return () => {
-    state = (Math.imul(state, 1664525) + 1013904223) >>> 0
-    return state / 2 ** 32
-  }
-}
 
 function seedHost(name: string, spec: Record<string, unknown> = {}): HostObject {
   return materializeHostResource(
