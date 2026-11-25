@@ -2,7 +2,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { respondAuthenticationFailure } from './routes/rpc.js'
 import { respondControlApiAuthorityUnavailable } from './services/hostAccessDenial.js'
 import { UpstreamBodyReadError } from './services/upstreamBody.js'
-import { isUpstreamTimeoutError } from './services/wakeAndHold.js'
+import { describeErrorForLog, isUpstreamTimeoutError } from './services/wakeAndHold.js'
 
 /**
  * body-parser flags a request whose declared/streamed body crossed the parser's
@@ -25,7 +25,7 @@ function isEntityTooLargeError(error: unknown): boolean {
  */
 export function apiErrorHandler(
   err: unknown,
-  _req: Request,
+  req: Request,
   res: Response,
   _next: NextFunction
 ): void {
@@ -49,8 +49,16 @@ export function apiErrorHandler(
     return
   }
 
-  res.status(500).json({
-    error: 'Internal Server Error',
-    message: err instanceof Error ? err.message : 'Unknown error',
-  })
+  // An unclassified error is an rpc-proxy fault. Its message can carry an
+  // upstream body (UpstreamHostError embeds up to 300 characters of the Host
+  // answer) or a parser excerpt of the request, so it reaches neither the
+  // client nor the log: the log line names the declared route and the error by
+  // name, status and code only.
+  const route = (req.route as { path?: unknown } | undefined)?.path
+  console.error(
+    `[RPC_PROXY] unhandled route error method=${req.method} route=${
+      typeof route === 'string' ? route : 'unmatched'
+    } error=${describeErrorForLog(err)}`
+  )
+  res.status(500).json({ error: 'Internal Server Error' })
 }

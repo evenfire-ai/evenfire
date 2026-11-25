@@ -602,14 +602,30 @@ describe('authentication failures reach the client as 401', () => {
     expect(res.body).toEqual({ error: 'Unauthorized' })
   })
 
-  it('status: any other Host failure keeps the 500 answer', async () => {
-    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))
-    hostAnswer = () => jsonResponse(500, { error: 'boom' })
+  it.each(NEXT_ERROR_ROWS)('$label: a Host 500 answers 500 without the Host body', async row => {
+    const marker = 'host-internal-detail-7f3a'
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope]))
+    hostAnswer = () => jsonResponse(500, { error: marker })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
-    const res = await send(NEXT_ERROR_ROWS[0]!)
+    try {
+      const res = await send(row)
 
-    expect(hostCalls).toHaveLength(1)
-    expect(res.status).toBe(500)
+      // Witness: the Host was asked once and its failure reached the app
+      // error handler, which logged it by name and status only.
+      expect(hostCalls).toHaveLength(1)
+      expect(res.status).toBe(500)
+      expect(res.body).toEqual({ error: 'Internal Server Error' })
+      expect(res.text).not.toContain(marker)
+      const lines = logged.mock.calls
+        .map(args => String(args[0]))
+        .filter(line => line.startsWith('[RPC_PROXY] unhandled route error '))
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toContain('error=UpstreamHostError status=500')
+      expect(lines[0]).not.toContain(marker)
+    } finally {
+      logged.mockRestore()
+    }
   })
 })
 
