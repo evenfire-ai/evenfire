@@ -684,6 +684,16 @@ test('fires unavailable for a cross-origin post, a configuration failure or an u
       [CONFIGURATION_PATH],
     ],
     [
+      // Derived: `complete rate-limited` replayed for the configuration call. The edge's
+      // per-client limiter covers every /oidc/profile-flow route (router.use in
+      // external-rest-api/src/routes/oidcProfileFlow.ts) and answers each one this way.
+      'a rate-limited configuration',
+      { configuration: EDGE_RATE_LIMITED, attempts: EDGE_ATTEMPT_DESKTOP_ECHO },
+      {},
+      429,
+      [CONFIGURATION_PATH],
+    ],
+    [
       'an expired attempt',
       { configuration: EDGE_CONFIGURATION, attempts: expired },
       {},
@@ -746,6 +756,12 @@ test('fires unavailable for a malformed challenge with a valid state', async () 
   for (const [label, fields] of [
     ['no desktopChallenge', [state]],
     ['a 42-character desktopChallenge', [['desktopChallenge', CODE_CHALLENGE.slice(1)], state]],
+    // `.` is not base64url, and the route's re-encoding leaves it as it is, so only the value rule
+    // can refuse it (a `+` reaches the parser percent-encoded). The value keeps its 43 characters.
+    [
+      'a desktopChallenge outside base64url',
+      [['desktopChallenge', `.${CODE_CHALLENGE.slice(1)}`], state],
+    ],
     ['two desktopChallenge values', [...DESKTOP_FORM, ['desktopChallenge', CODE_CHALLENGE]]],
     // Strict parsing: a form with any other field is not a Desktop sign-in form.
     ['an extra returnTo field', [...DESKTOP_FORM, ['returnTo', 'desktop-setup']]],
