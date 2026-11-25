@@ -21,7 +21,7 @@ function validateCustomName(value: string, existingCustomNames: string[]): strin
     return 'Use lower snake_case (start with a letter; letters, digits, underscore).'
   }
   if (KNOWN_TOOL_NAMES.has(value)) {
-    return `"${value}" is already in the always-on list above — toggle that row instead. Custom names must not collide.`
+    return `"${value}" is already in the tool list above — toggle that row instead. Custom names must not collide.`
   }
   if (existingCustomNames.includes(value)) {
     return `"${value}" is already in your custom rows below. Edit or remove that row instead.`
@@ -267,13 +267,13 @@ function EditMode({ knownRows, draftAPI, busy }: EditModeProps) {
                 value={customName}
                 onChange={e => setCustomName(e.target.value)}
                 disabled={busy}
-                placeholder="memory_search"
+                placeholder="my_server__my_tool"
                 aria-describedby={customError ? 'custom-tool-name-error' : 'custom-tool-name-hint'}
                 aria-invalid={!!customError}
               />
               <div id="custom-tool-name-hint" className="cu-field__hint">
-                For tools that register conditionally — memory_*, desktop_*, cron_*. Match the tool
-                name as it appears in mcp-host logs.
+                For tools with no row above, such as an MCP server tool (server__tool). Match the
+                tool name as it appears in mcp-host logs.
               </div>
               {customError && (
                 <div id="custom-tool-name-error" className="cu-field__error">
