@@ -308,38 +308,41 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
 
   const settleSwitch = useCallback(
     (ranHost: string, outcome: OffSwitchOutcome): void => {
-      const current = viewRef.current
-      // Spec §6.3 step 7: an outcome shows in the tab that ran the switch
-      // while it is mounted and shows that agent. Otherwise it goes to the
-      // root toast, naming the agent, and writes nothing to the tab (C18).
-      if (!mountedRef.current || current.host !== ranHost) {
-        const toast = offSwitchContinuationToast(ranHost, outcome)
-        emitRootToast(toast.message, toast.options)
+      try {
+        const current = viewRef.current
+        // Spec §6.3 step 7: an outcome shows in the tab that ran the switch
+        // while it is mounted and shows that agent. Otherwise it goes to the
+        // root toast, naming the agent, and writes nothing to the tab (C18).
+        if (!mountedRef.current || current.host !== ranHost) {
+          const toast = offSwitchContinuationToast(ranHost, outcome)
+          emitRootToast(toast.message, toast.options)
+          return
+        }
+        // The switch's own read or write seeds the ceiling group of the
+        // display state the tab shows now (spec §6.5), which a kept instance
+        // may have made since the run started; a load that started before it
+        // does not undo it. Before any load has applied, the state records it
+        // and the snapshot stays null.
+        const seeded =
+          outcome.kind !== 'failed' && current.state.applyWrite('ceiling', outcome.stored)
+        const snapshot = current.state.snapshot()
+        setView(shown =>
+          shown.state === current.state
+            ? { ...shown, ...(seeded ? { snapshot } : {}), switchResult: outcome }
+            : shown
+        )
+        // A failure always also goes to the root toast. In this tab, which
+        // shows the failure, the toast names no agent.
+        if (outcome.kind === 'failed') {
+          const toast = offSwitchFailedToast(outcome.message)
+          showToast(toast.message, toast.options)
+        }
+      } finally {
+        // Ruling 43(b): every settled switch loads every Approvals tab of the
+        // agent again, this one included, even when showing its outcome threw
+        // (review finding 4). The caller reports that throw.
         notifyHostChanged(ranHost)
-        return
       }
-      // The switch's own read or write seeds the ceiling group of the display
-      // state the tab shows now (spec §6.5), which a kept instance may have
-      // made since the run started; a load that started before it does not
-      // undo it. Before any load has applied, the state records it and the
-      // snapshot stays null.
-      const seeded =
-        outcome.kind !== 'failed' && current.state.applyWrite('ceiling', outcome.stored)
-      const snapshot = current.state.snapshot()
-      setView(shown =>
-        shown.state === current.state
-          ? { ...shown, ...(seeded ? { snapshot } : {}), switchResult: outcome }
-          : shown
-      )
-      // A failure always also goes to the root toast. In this tab, which
-      // shows the failure, the toast names no agent.
-      if (outcome.kind === 'failed') {
-        const toast = offSwitchFailedToast(outcome.message)
-        showToast(toast.message, toast.options)
-      }
-      // Ruling 43(b): every settled switch loads every Approvals tab of the
-      // agent again, this one included.
-      notifyHostChanged(ranHost)
     },
     [showToast]
   )
@@ -354,21 +357,29 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
     // namespace, which the fallback uses when no read of the run answers.
     const namespace = namespaceOf(target.snapshot)
     setView(shown => (shown.state === target.state ? { ...shown, switchResult: null } : shown))
-    void setManualNow(target.host, { namespace }).then(
-      outcome => settleSwitch(target.host, outcome),
-      (error: unknown) => {
-        // The protocol turns every request's failure into an outcome, so a
-        // run that throws is a bug. It is shown as a failure, with the
-        // fallback, and reported to the console: control-ui has no client
-        // logger (lib/hostApprovalSave.ts reports its listeners' errors so).
-        console.error('Set to Manual now: the run threw; it is shown as a failure.', error)
-        settleSwitch(target.host, {
-          kind: 'failed',
-          message: messageOf(error),
-          fallback: offSwitchFallback(target.host, namespace),
-        })
-      }
-    )
+    void setManualNow(target.host, { namespace })
+      .then(
+        outcome => settleSwitch(target.host, outcome),
+        (error: unknown) => {
+          // The protocol turns every request's failure into an outcome, so a
+          // run that throws is a bug. It is shown as a failure, with the
+          // fallback, and reported to the console: control-ui has no client
+          // logger (lib/hostApprovalSave.ts reports its listeners' errors so).
+          console.error('Set to Manual now: the run threw; it is shown as a failure.', error)
+          settleSwitch(target.host, {
+            kind: 'failed',
+            message: messageOf(error),
+            fallback: offSwitchFallback(target.host, namespace),
+          })
+        }
+      )
+      .catch((error: unknown) => {
+        // Review finding 4: showing the outcome threw, a bug (a root-toast
+        // listener that throws, say). settleSwitch fired the notice all the
+        // same. The error goes to the console, as a run's own throw does,
+        // rather than becoming an unhandled rejection.
+        console.error('Set to Manual now: showing its outcome threw.', error)
+      })
   }, [settleSwitch])
 
   // The section calls the `onSettled` of the render where Save was pressed,

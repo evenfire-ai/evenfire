@@ -26,6 +26,7 @@ import { formatApiError, getHost, setControlUIReadPrincipal } from '../../lib/ap
 import { neverAskTools } from '../../lib/approvalToolCatalog'
 import { subscribeHostChanged } from '../../lib/hostApprovalDisplay'
 import { __setApprovalClockForTests } from '../../lib/hostApprovalSave'
+import { subscribeRootToast } from '../../lib/rootToast'
 import {
   type VirtualClock,
   createVirtualClock,
@@ -885,6 +886,45 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       expect(reads(fake), "the switch's one read").toHaveLength(1)
       expect(writes(fake), 'nothing written').toEqual([])
       expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('a throw while it reports its outcome still fires the notice and is reported (finding 4)', async () => {
+      const fake = tabFake({ modeCeiling: 'auto' })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await approvalSettingsDriver()
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      await clickSetToManual()
+      await act(async () => {
+        await put.arrived
+      })
+      const notices = vi.fn()
+      subscribeHostChanged('foo', notices)
+      const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+      // A root-toast listener that throws, subscribed after the page's own:
+      // the continuation's toast throws out of the step that reports it.
+      const failure = new Error('a toast listener failed')
+      const unsubscribe = subscribeRootToast(() => {
+        throw failure
+      })
+      try {
+        tab.leave()
+        await act(async () => {
+          put.deliverNow()
+        })
+        await waitFor(() => expect(notices, 'the Host-changed notice').toHaveBeenCalledTimes(1))
+        await waitFor(() =>
+          expect(reported, 'the error, reported').toHaveBeenCalledWith(
+            expect.stringContaining('Set to Manual now'),
+            failure
+          )
+        )
+        // The page's listener came first, so its toast still shows.
+        expect(tab.toasts('success')).toEqual([savedFor('foo')])
+        expect(fake.stored('foo').spec.approval).toEqual({ modeCeiling: 'manual' })
+      } finally {
+        unsubscribe()
+      }
       tab.unmount()
     })
 
