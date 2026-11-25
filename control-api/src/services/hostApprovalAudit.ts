@@ -143,6 +143,63 @@ export function buildHostApprovalChange(input: {
   }
 }
 
+/** The stored summary on the administrative intent event is JSON of at most this many characters. */
+export const MAX_APPROVAL_CHANGE_SUMMARY_LENGTH = 4096
+
+/**
+ * The change as the JSON text kept on the administrative intent event
+ * (`summary`, spec §6.8). The text is always valid JSON of at most
+ * `MAX_APPROVAL_CHANGE_SUMMARY_LENGTH` characters, never a JSON string cut
+ * mid-way:
+ *
+ * 1. Tool entries are dropped from the end, one by one, and counted into
+ *    `toolsTruncated`, until the text fits.
+ * 2. If it still does not fit with no tool entries (many changed fields), the
+ *    text is a counts-only object marked `truncated: true`: field, tool and
+ *    approver-channel counts, the approver totals and the two flags. Its size
+ *    is bounded, so it always fits.
+ */
+export function serializeApprovalChangeSummary(change: HostApprovalChange): string {
+  const toolKeys = Object.keys(change.tools)
+  for (let kept = toolKeys.length; kept >= 0; kept -= 1) {
+    const text = JSON.stringify({
+      ...change,
+      tools: Object.fromEntries(toolKeys.slice(0, kept).map(key => [key, change.tools[key]])),
+      toolsTruncated: change.toolsTruncated + (toolKeys.length - kept),
+    })
+    if (text.length <= MAX_APPROVAL_CHANGE_SUMMARY_LENGTH) return text
+  }
+  const counts = Object.values(change.approvers)
+  return JSON.stringify({
+    truncated: true,
+    fieldCount: Object.keys(change.fields).length,
+    toolCount: toolKeys.length + change.toolsTruncated,
+    approverChannelCount: counts.length,
+    approversAdded: counts.reduce((sum, entry) => sum + entry.added, 0),
+    approversRemoved: counts.reduce((sum, entry) => sum + entry.removed, 0),
+    blockRemoved: change.blockRemoved,
+    inheritedBefore: change.inheritedBefore,
+  })
+}
+
+/**
+ * The summary for the intent event of a Host write, or `undefined` when the
+ * `spec.approval` blocks are equal (no summary is written then). Arguments are
+ * `spec.approval` values; anything that is not an object counts as absent.
+ */
+export function buildApprovalChangeSummary(input: {
+  before: unknown
+  after: unknown
+}): string | undefined {
+  const asBlock = (value: unknown): Record<string, unknown> | undefined =>
+    isRecord(value) ? value : undefined
+  const change = buildHostApprovalChange({
+    before: asBlock(input.before),
+    after: asBlock(input.after),
+  })
+  return change ? serializeApprovalChangeSummary(change) : undefined
+}
+
 export function logHostApprovalChange(input: {
   change: HostApprovalChange
   host: string

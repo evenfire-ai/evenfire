@@ -179,6 +179,8 @@ export class ControlApiAdministrativeOperationService {
     name: string
     operatorSub: string
     requestId: string | null
+    /** The intended `spec.approval` change (JSON, at most 4096 characters), when the write changes it. */
+    summary?: string
   }): Promise<HostAdministrativeIntent> {
     const operationId = this.newOperationId()
     const intent: HostAdministrativeIntent = {
@@ -192,7 +194,7 @@ export class ControlApiAdministrativeOperationService {
     await this.events.append(
       CONTROL_API_HOST_ADMINISTRATIVE_PRINCIPAL,
       this.binding(intent, 'attempted'),
-      this.input(intent, 'intent', 'attempted')
+      this.input(intent, 'intent', 'attempted', undefined, input.summary)
     )
     return intent
   }
@@ -234,7 +236,8 @@ export class ControlApiAdministrativeOperationService {
     intent: HostAdministrativeIntent,
     kind: AdministrativeEventInputV1['kind'],
     outcome: string,
-    reasonCode = outcome
+    reasonCode = outcome,
+    summary?: string
   ): AdministrativeEventInputV1 {
     return {
       kind,
@@ -245,6 +248,7 @@ export class ControlApiAdministrativeOperationService {
       payload: {
         resource_class: 'Host',
         status: outcome,
+        ...(summary === undefined ? {} : { summary }),
       },
     }
   }

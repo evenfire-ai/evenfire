@@ -61,7 +61,7 @@ describe('GovernedEventDetailService', () => {
             resource_class: 'platform_user',
             count: 1,
             config_hash: 'a'.repeat(64),
-            summary: 'FORBIDDEN_ADMIN_SUMMARY',
+            summary: '{"fields":{},"inheritedBefore":false}',
             detail_ref: 'password=hunter2',
             arbitrary: 'forbidden',
           },
@@ -90,11 +90,13 @@ describe('GovernedEventDetailService', () => {
         resource_class: 'platform_user',
         count: 1,
         config_hash: 'a'.repeat(64),
+        // The administrative profile discloses `summary` (Host approval change, spec §6.8).
+        summary: '{"fields":{},"inheritedBefore":false}',
       },
     })
     expect(JSON.stringify(detail)).not.toContain('arbitrary')
     expect(JSON.stringify(detail)).not.toContain('forbidden')
-    expect(JSON.stringify(detail)).not.toMatch(/FORBIDDEN_ADMIN_SUMMARY|hunter2/)
+    expect(JSON.stringify(detail)).not.toMatch(/hunter2/)
     expect(String(query.mock.calls[0]?.[0])).toContain('control_admin_users')
   })
 

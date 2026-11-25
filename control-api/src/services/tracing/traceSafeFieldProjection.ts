@@ -24,6 +24,7 @@ const PROFILE_KEYS: Record<TraceSafeFieldProfile, ReadonlySet<keyof SafeEventPay
     'reason_code',
     'status',
     'resource_class',
+    'summary',
     'detail_ref',
     'target_label',
     'target_principal_kind',
@@ -66,6 +67,9 @@ const LONG_TOKEN_KEYS = new Set<keyof SafeEventPayloadV1>([
 ])
 const INTEGER_KEYS = new Set<keyof SafeEventPayloadV1>(['attempt', 'count'])
 const TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/
+const MAX_SUMMARY_LENGTH = 4096
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTER_RE = /[\u0000-\u001f\u007f]/
 const SHA256_RE = /^[0-9a-f]{64}$/
 const SENSITIVE_RE =
   /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization|bearer\s|basic\s|private[_ -]?key|^sk-|^ghp_|^xox[baprs]-|^eyJ[A-Za-z0-9_-]*\.)/i
@@ -94,6 +98,16 @@ function disclosedValue(key: keyof SafeEventPayloadV1, value: unknown): string |
       return null
     }
     return value
+  }
+  if (key === 'summary') {
+    // The administrative profile only (spec §6.8): the intended Host approval
+    // change as JSON. Free text, so it is bounded, not token-checked.
+    return typeof value === 'string' &&
+      value.length > 0 &&
+      value.length <= MAX_SUMMARY_LENGTH &&
+      !CONTROL_CHARACTER_RE.test(value)
+      ? value
+      : null
   }
   if (INTEGER_KEYS.has(key)) {
     return typeof value === 'number' &&

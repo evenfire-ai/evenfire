@@ -20,6 +20,7 @@ import { uninstallMcpServer } from '../../oauth/mcpServerUninstall.js'
 import { deleteSharedGrantsForContextExcept } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
 import { contextAllowlist } from '../../services/access/mcpInvocable.js'
+import { buildApprovalChangeSummary } from '../../services/hostApprovalAudit.js'
 import { ApprovalRequiresVersionError } from '../../services/hostApprovalRules.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
@@ -809,7 +810,12 @@ export function createAdminResourcesRouter(
             if (secretRefIssue) throw new HostSpecInvalidError(secretRefIssue)
             // K8s write INSIDE the held lock: the COMMIT that releases the lock
             // happens only after the CR is durable.
-            return gateway.createResource(plural, body, ns)
+            return gateway.createResource(plural, body, ns, {
+              approvalChangeSummary: buildApprovalChangeSummary({
+                before: undefined,
+                after: hostSpec.approval,
+              }),
+            })
           })
         } catch (err) {
           if (err instanceof HostSpecInvalidError) {
@@ -1036,7 +1042,12 @@ export function createAdminResourcesRouter(
             if (issue) throw new HostSpecInvalidError(issue)
             const secretRefIssue = await validateHostSecretRef(gateway, hostSpec)
             if (secretRefIssue) throw new HostSpecInvalidError(secretRefIssue)
-            return gateway.updateResource(plural, req.params.name, body, ns)
+            return gateway.updateResource(plural, req.params.name, body, ns, {
+              approvalChangeSummary: buildApprovalChangeSummary({
+                before: recordValue(ratchetCurrent?.spec)?.approval,
+                after: hostSpec.approval,
+              }),
+            })
           })
         } catch (err) {
           if (err instanceof HostSpecInvalidError) {

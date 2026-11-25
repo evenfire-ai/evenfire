@@ -127,6 +127,7 @@ async function persistHostIntent(input: {
   action: HostAdministrativeAction
   namespace: string
   name: string
+  summary?: string
 }): Promise<HostAdministrativeIntent | null> {
   if (!isHostResource(input.plural) || !administrativeOperationService) return null
   const requestContext = currentAdministrativeRequestContext()
@@ -137,6 +138,7 @@ async function persistHostIntent(input: {
     name: input.name,
     operatorSub: requestContext.operatorSub,
     requestId: requestContext.requestId,
+    ...(input.summary === undefined ? {} : { summary: input.summary }),
   })
 }
 
@@ -464,7 +466,11 @@ export class ResourceService {
       }
       spec: Record<string, unknown>
     },
-    namespace?: string
+    namespace?: string,
+    options?: {
+      /** The intended `spec.approval` change, kept on the intent event (spec §6.8). */
+      approvalChangeSummary?: string
+    }
   ): Promise<unknown> {
     // Namespaces are determined by the HTTP layer from server-side config; the
     // service intentionally ignores any namespace the body might carry.
@@ -474,6 +480,7 @@ export class ResourceService {
       action: 'create',
       namespace: ns,
       name: body.metadata.name,
+      summary: options?.approvalChangeSummary,
     })
     const sanitizedMetadata = stripAdministrativeIntentAnnotation(body.metadata) ?? body.metadata
     // A create is the one prediction that cannot be wrong: the apiserver's
@@ -581,10 +588,18 @@ export class ResourceService {
        * attempt 1.
        */
       preReadCurrent?: MutableResourceSnapshot
+      /** The intended `spec.approval` change, kept on the intent event (spec §6.8). */
+      approvalChangeSummary?: string
     }
   ): Promise<unknown> {
     const ns = this.resolveNamespace(plural, namespace)
-    const intent = await persistHostIntent({ plural, action: 'update', namespace: ns, name })
+    const intent = await persistHostIntent({
+      plural,
+      action: 'update',
+      namespace: ns,
+      name,
+      summary: options?.approvalChangeSummary,
+    })
     const readerUid = body.metadata?.uid || undefined
     const readerResourceVersion = body.metadata?.resourceVersion || undefined
     // A reader resourceVersion freezes the caller's edit and must not be retried:
