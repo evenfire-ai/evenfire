@@ -28,68 +28,73 @@ import {
   STILL_RUNNING_TEXT,
   offSwitchFailedText,
 } from './constants'
-import type { OffSwitchProps, OffSwitchResultProps } from './types'
+import type { FailedResultProps, OffSwitchProps, SavedResultProps } from './types'
 
 /**
- * What a run reports in the tab that ran it (spec §6.3 steps 6 and 7).
- *
- * A failure shows the last error and the how-to's kubectl command. A success
- * or "Already Manual" shows step 7's message verbatim. Its lists come from the
- * switch's own read or write (`outcome.stored`), never from the page: the Skip
- * overrides, with every stored key set to Skip whatever its name (spec §6.11),
- * and the manifest warning, worded as the manifest banner (spec §6.7, Ruling
- * 47). The cluster-default clause shows only when that Host has no approval
- * settings of its own, as the clause says (Ruling 48(a)): the test the
- * protocol's `inherited` makes, which also covers a `saved` run whose last
- * read found the block gone. The never-ask list, the producer fixture's
- * (spec §6.11), is "listed below" in the read view's disclosure, closed until
- * opened (Ruling 48(b)).
+ * Step 7's message, verbatim, for a run that stored Manual or found it. Its
+ * Skip list comes from the switch's own read or write (`outcome.stored`),
+ * never from the page, with every stored key set to Skip whatever its name
+ * (spec §6.11). The cluster-default clause shows only when that Host has no
+ * approval settings of its own, as the clause says (Ruling 48(a)): the test
+ * the protocol's `inherited` makes, which also covers a `saved` run whose
+ * last read found the block gone. The never-ask list, the producer fixture's
+ * (spec §6.11), is "listed below", in the read view's disclosure (Ruling
+ * 48(b)).
  */
-function OffSwitchResult({ outcome }: OffSwitchResultProps) {
-  if (outcome.kind === 'failed') {
-    return (
-      <div className="cu-banner cu-banner--error cu-host-approvals-tab__switch-result" role="alert">
-        <p>{offSwitchFailedText(outcome.message)}</p>
-        <p>{OFF_SWITCH_FALLBACK_INTRO}</p>
-        <pre className="cu-code-block">{outcome.fallback}</pre>
-      </div>
-    )
-  }
+function SavedMessage({ outcome }: SavedResultProps) {
   const block = approvalBlockOf(outcome.stored)
   const listed = skipOverrides(effectiveApproval(block).tools).join(', ') || NO_SKIP_TEXT
   const skip = block === undefined ? `${listed}; ${CLUSTER_DEFAULT_SKIP_CLAUSE}` : listed
-  const manifest = manifestSignal(outcome.stored)
   const lead = [
     MANUAL_SAVED_TEXT,
     ...(outcome.kind === 'already' ? [ALREADY_MANUAL_TEXT] : []),
     APPLIED_AT_NEXT_CALL_TEXT,
   ].join(' ')
   return (
-    <div className="cu-banner cu-banner--info cu-host-approvals-tab__switch-result" role="status">
-      <p>
-        {`${lead} `}
-        <a className="cu-link" href={KILL_SWITCH_HOW_TO_URL} rel="noreferrer" target="_blank">
-          {STILL_RUNNING_TEXT}
-        </a>
-        {': '}
-        <a className="cu-link" href={`#${PER_TOOL_SECTION_ID}`}>
-          {SKIP_TOOLS_TEXT}
-        </a>
-        {` (${skip}); ${NEVER_ASK_LISTED_BELOW_TEXT}; ${CHATS_ALREADY_GAVE_TEXT} ${NO_EFFECT_WHEN_OFF_TEXT}`}
-      </p>
-      <NeverAskList />
-      {manifest.managed ? (
-        <p className="cu-host-approvals-tab__switch-manifest">
-          {manifestWarningText(manifest.values)}
-        </p>
-      ) : null}
+    <p>
+      {`${lead} `}
+      <a className="cu-link" href={KILL_SWITCH_HOW_TO_URL} rel="noreferrer" target="_blank">
+        {STILL_RUNNING_TEXT}
+      </a>
+      {': '}
+      <a className="cu-link" href={`#${PER_TOOL_SECTION_ID}`}>
+        {SKIP_TOOLS_TEXT}
+      </a>
+      {` (${skip}); ${NEVER_ASK_LISTED_BELOW_TEXT}; ${CHATS_ALREADY_GAVE_TEXT} ${NO_EFFECT_WHEN_OFF_TEXT}`}
+    </p>
+  )
+}
+
+/**
+ * Step 7's manifest addition, worded as the manifest banner (spec §6.7,
+ * Ruling 47), from the switch's own read or write.
+ */
+function ManifestWarning({ outcome }: SavedResultProps) {
+  const manifest = manifestSignal(outcome.stored)
+  if (!manifest.managed) return null
+  return (
+    <p className="cu-host-approvals-tab__switch-manifest">{manifestWarningText(manifest.values)}</p>
+  )
+}
+
+/**
+ * Step 6: a failed run's last error and the how-to's kubectl command. An
+ * alert, which is announced as it appears.
+ */
+function FailedResult({ outcome }: FailedResultProps) {
+  return (
+    <div className="cu-banner cu-banner--error cu-host-approvals-tab__switch-result" role="alert">
+      <p>{offSwitchFailedText(outcome.message)}</p>
+      <p>{OFF_SWITCH_FALLBACK_INTRO}</p>
+      <pre className="cu-code-block">{outcome.fallback}</pre>
     </div>
   )
 }
 
 /**
  * "Set to Manual now" (spec §6.3), with PR A's static line and its link
- * (spec §6.2, §6.10), and the outcome of the last run this tab showed.
+ * (spec §6.2, §6.10), and the outcome of the last run this tab showed (steps
+ * 6 and 7).
  *
  * It needs no loaded data, so the tab renders it in every state, and it is
  * never disabled from the page's copy of the ceiling (C6). While a run goes
@@ -97,6 +102,14 @@ function OffSwitchResult({ outcome }: OffSwitchResultProps) {
  * agent reads "Setting Manual…" and ignores a press (step 1, R19). The button
  * then has `aria-disabled`, not `disabled`, so the admin who pressed it keeps
  * the focus, as with the tab's Retry.
+ *
+ * The message's polite live region is mounted with the switch and stays
+ * empty until a run settles here, so the message is announced as it appears
+ * (review finding 1): a polite region inserted with its text already in it is
+ * not reliably announced. It holds the message only. The never-ask disclosure
+ * and the manifest warning sit beside it, so opening the disclosure re-reads
+ * nothing. Their box takes the result's style only while it shows one. A
+ * failure is an alert of its own.
  */
 export function OffSwitch({ host, result, onSetManual }: OffSwitchProps) {
   const running = useSyncExternalStore(
@@ -104,6 +117,7 @@ export function OffSwitch({ host, result, onSetManual }: OffSwitchProps) {
     () => isSettingManual(host),
     () => false
   )
+  const saved = result !== null && result.kind !== 'failed' ? result : null
   return (
     <div className="cu-host-approvals-tab__switch">
       <div className="cu-host-approvals-tab__switch-bar">
@@ -121,7 +135,22 @@ export function OffSwitch({ host, result, onSetManual }: OffSwitchProps) {
           </a>
         </p>
       </div>
-      {result ? <OffSwitchResult outcome={result} /> : null}
+      <div
+        className={
+          saved ? 'cu-banner cu-banner--info cu-host-approvals-tab__switch-result' : undefined
+        }
+      >
+        <div aria-live="polite" role="status">
+          {saved ? <SavedMessage outcome={saved} /> : null}
+        </div>
+        {saved ? (
+          <>
+            <NeverAskList />
+            <ManifestWarning outcome={saved} />
+          </>
+        ) : null}
+      </div>
+      {result?.kind === 'failed' ? <FailedResult outcome={result} /> : null}
     </div>
   )
 }

@@ -5667,10 +5667,11 @@ td.cu-registry-description {
 }
 
 /* "Set to Manual now" (spec §6.3): the button with PR A's static line beside
-   it, and the outcome of the last run the tab showed below them. */
+   it, and the outcome of the last run the tab showed below them. No gap: the
+   box of the message's live region is in the page before any result, and
+   takes no space until it shows one; each result brings its own margin. */
 .cu-host-approvals-tab__switch {
   display: grid;
-  gap: var(--cu-space-2);
 }
 
 .cu-host-approvals-tab__switch-bar {
@@ -5696,7 +5697,7 @@ td.cu-registry-description {
 .cu-host-approvals-tab__switch-result {
   display: grid;
   gap: var(--cu-space-2);
-  margin-bottom: 0;
+  margin: var(--cu-space-2) 0 0;
 }
 
 .cu-host-approvals-tab__switch-result p {

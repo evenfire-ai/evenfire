@@ -181,6 +181,16 @@ function resultParagraphs(scope: ParentNode = document): string[] {
   return Array.from(result?.querySelectorAll('p') ?? []).map(text)
 }
 
+/**
+ * The switch's polite live region (review finding 1), found by its role inside
+ * the switch's own area: the skeleton and the toasts are status regions too.
+ */
+function switchLiveRegion(): HTMLElement {
+  const area = document.querySelector<HTMLElement>('.cu-host-approvals-tab__switch')
+  if (!area) throw new Error('the off switch is not rendered')
+  return within(area).getByRole('status')
+}
+
 /** The kubectl command the failure shows. */
 function fallbackShown(): string {
   return text(offSwitchResult()?.querySelector('pre'))
@@ -450,6 +460,38 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       expect(
         within(result).getByRole('link', { name: 'Still running without a card' })
       ).toHaveAttribute('href', `${HOW_TO}#kill-switch`)
+      tab.unmount()
+    })
+
+    it('announces the message from a live region there before the press, with the disclosure and the manifest warning outside it (finding 1)', async () => {
+      const fake = createFakeControlApi({
+        hosts: { foo: fooFrom('host-kubectl-applied') },
+        crd: 'current',
+        versionRule: true,
+      })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await approvalSettingsDriver()
+      // Mounted before any run, and empty: a polite region inserted with its
+      // text already in it is not reliably announced.
+      const live = switchLiveRegion()
+      expect(live).toHaveAttribute('aria-live', 'polite')
+      expect(live).toBeEmptyDOMElement()
+
+      await clickAndSettle()
+      expect(switchLiveRegion(), 'the same region gains the message').toBe(live)
+      expect(text(live)).toBe(manualMessage({ already: false, skip: NO_SKIP }))
+      // Only the message: opening the disclosure re-reads nothing.
+      const result = offSwitchResult() as HTMLElement
+      const details = within(result)
+        .getByText(/^Tools that never ask \(/)
+        .closest('details') as HTMLElement
+      const warning = within(result).getByText(
+        manifestWarning('Highest mode: Allow all; Policy: Any channel user')
+      )
+      expect(result).toContainElement(details)
+      expect(result).toContainElement(warning)
+      expect(live).not.toContainElement(details)
+      expect(live).not.toContainElement(warning)
       tab.unmount()
     })
 

@@ -66,8 +66,14 @@ export interface OffSwitchProps {
   onSetManual: () => void
 }
 
-export interface OffSwitchResultProps {
-  outcome: OffSwitchOutcome
+/** A run that stored Manual or found it (spec §6.3 step 7). */
+export interface SavedResultProps {
+  outcome: Extract<OffSwitchOutcome, { kind: 'saved' | 'already' }>
+}
+
+/** A run that failed (spec §6.3 step 6). */
+export interface FailedResultProps {
+  outcome: Extract<OffSwitchOutcome, { kind: 'failed' }>
 }
 
 export interface ReadViewProps {
