@@ -83,7 +83,9 @@ async function finishDesktopAttempt(
     } catch (error) {
       // The answer, not the code, says whether this attempt may be retried
       // (`OidcProfileFlowError.retryable`). Any other answer ends it, as for a plain attempt, and
-      // Desktop learns that through the link; the error carries nothing else to report.
+      // Desktop learns that through the link. Dropping the error is correct: `requestExternal`
+      // turns every transport, status and JSON failure into an OidcProfileFlowError, so only a
+      // programming error reaches the 503 fallback, and Profile UI has no logger to report it to.
       if (error instanceof OidcProfileFlowError && error.retryable) {
         return noStoreText(
           CANCEL_RETRY_TEXT,
@@ -116,7 +118,9 @@ async function finishDesktopAttempt(
     )
   } catch (error) {
     // As for /cancel above: `retryable` (the edge's retrySameAttempt) keeps the attempt, and any
-    // other answer ends it with `failed`.
+    // other answer ends it with `failed`. Only a programming error reaches the 503 fallback, since
+    // `requestExternal` wraps every transport, status and JSON failure, and Profile UI has no
+    // logger to report it to.
     if (error instanceof OidcProfileFlowError && error.retryable) {
       return noStoreText(
         error.status === 429 ? RATE_LIMITED_TEXT : PROVIDER_RETRY_TEXT,
@@ -268,6 +272,9 @@ export async function GET(request: Request): Promise<Response> {
           finishedCookies
         )
       }
+      // Any other answer ends the attempt. Dropping the error is correct: `requestExternal` turns
+      // every transport, status and JSON failure into an OidcProfileFlowError, so only a
+      // programming error reaches the 503 fallback, and Profile UI has no logger to report it to.
       return terminalFailure(
         UNVERIFIABLE_TEXT,
         error instanceof OidcProfileFlowError ? error.status : 503,
@@ -332,6 +339,10 @@ export async function GET(request: Request): Promise<Response> {
         finishedCookies
       )
     }
+    // As for /cancel above: any other answer ends the attempt, and only a programming error
+    // reaches the 503 fallback, since `requestExternal` wraps every transport, status and JSON
+    // failure and an unrecognised /complete answer is an OidcProfileFlowError too. Profile UI has
+    // no logger to report it to.
     return terminalFailure(
       UNVERIFIABLE_TEXT,
       error instanceof OidcProfileFlowError ? error.status : 503,
