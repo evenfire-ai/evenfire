@@ -109,10 +109,16 @@ function approvalOf(host: HostObject): unknown {
   return host.spec.approval
 }
 
-/** Answers the next GET of `path` with control-api's recorded 500, as it arrives. */
+/** Answers the next `count` GETs of `path` with control-api's recorded 500, each as it arrives. */
+function failReads(fake: FakeControlApi, path: string, count: number): void {
+  for (let nth = 1; nth <= count; nth += 1) {
+    const hold = fake.hold({ method: 'GET', path, nth })
+    void hold.arrived.then(() => hold.respondWith(DETAIL_500.status, DETAIL_500.body))
+  }
+}
+
 function failNextRead(fake: FakeControlApi, path: string): void {
-  const hold = fake.hold({ method: 'GET', path })
-  void hold.arrived.then(() => hold.respondWith(DETAIL_500.status, DETAIL_500.body))
+  failReads(fake, path, 1)
 }
 
 /** The value cell (`dd`) of the read-view row labelled `label`, or null. */
@@ -325,6 +331,51 @@ describe('HostApprovalsTab', () => {
       })
       await settle()
       expect(rowValue('Highest mode')).toBe('Manual')
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('a save that settles after a kept tab went to b and back seeds the state shown now, though its refresh fails (review R45(7))', async () => {
+      const fake = tabFake(
+        { tools: { json_transform: true } },
+        { b: seedHost('b', { approval: { tools: { clerum__generate_pdf: true } } }) }
+      )
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      const driver = await approvalSettingsDriver()
+      await driver.edit()
+      await driver.editTool('system_info', 'required')
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      await driver.save()
+      await act(async () => {
+        await put.arrived
+      })
+
+      tab.rerenderKept('b')
+      await waitFor(() => expect(overrides(driver.readView())).toEqual(B_VIEW))
+      tab.rerenderKept('foo')
+      // foo again, in a new display state, loaded before the write landed.
+      await waitFor(() =>
+        expect(overrides(driver.readView())).toEqual({ json_transform: 'Required' })
+      )
+      // Every load of foo from here fails: only the save's answer can show the write.
+      const loadsBefore = reads(fake, FOO_DETAIL).length
+      failReads(fake, FOO_DETAIL, 3)
+
+      await act(async () => {
+        put.deliverNow()
+      })
+      await waitFor(() => expect(tabLoadBanner()).not.toBeNull())
+
+      expect(overrides(driver.readView()), 'the saved tools, in the state shown now').toEqual(
+        SAVED_VIEW
+      )
+      expect(tab.toasts('success')).toEqual([SAVED_IN_TAB])
+      const later = reads(fake, FOO_DETAIL).slice(loadsBefore)
+      expect(later.length, 'the refresh ran').toBeGreaterThan(0)
+      expect(
+        later.map(entry => entry.response?.status),
+        'no load of foo answered after the write'
+      ).toEqual(later.map(() => 500))
       expect(unanswered(fake)).toEqual([])
       tab.unmount()
     })
