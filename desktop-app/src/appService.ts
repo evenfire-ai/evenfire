@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
+import { BrowserSignInAttempts, type BrowserSignInClock } from './browserSignIn.js'
 import { bindChatStoreForUser, unbindChatStore } from './chatStoreBinding.js'
 import {
   clearDesktopRuntimeConfigSelection,
@@ -62,6 +63,7 @@ import {
   ApprovalDecisionResult,
   ApprovalMode,
   ApprovalModeResult,
+  BrowserSignInSnapshot,
   ChatAuthorityScope,
   ContextBreakdownResult,
   DependencyHealth,
@@ -886,6 +888,17 @@ export interface AppServiceOptions {
   tokenStore?: TokenStore
   onSandboxUiSessionInvalidated?: () => void
   onSessionCleared?: () => void
+  /** Each browser sign-in snapshot change, pushed after the change (D6, D13). */
+  onBrowserSignInChanged?: (snapshot: BrowserSignInSnapshot) => void
+  /** Whether this build receives browser sign-in links. Defaults to false (decision 2). */
+  browserSignInLinksAvailable?: boolean
+  /**
+   * Test-only. Called synchronously after each generation advance, inside its own guard.
+   * main.ts never passes it.
+   */
+  onSessionGenerationAdvanced?: (value: number) => void
+  /** Test-only clock for the browser sign-in deadline. main.ts never passes it. */
+  browserSignInClock?: BrowserSignInClock
   /** Transport, clock and logging seams of the GFS watch client; tests only. */
   gfsWatch?: Pick<GfsWatchClientDeps, 'fetch' | 'requestJson' | 'clock' | 'random' | 'log'>
 }
@@ -911,6 +924,10 @@ export class AppService {
   private readonly tokenStore: TokenStore
   private readonly onSandboxUiSessionInvalidated?: () => void
   private readonly onSessionCleared?: () => void
+  private readonly onBrowserSignInChanged?: (snapshot: BrowserSignInSnapshot) => void
+  private readonly onSessionGenerationAdvanced?: (value: number) => void
+  private readonly browserSignInLinksAvailable: boolean
+  private readonly browserSignIn: BrowserSignInAttempts
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -969,7 +986,8 @@ export class AppService {
     controller: AbortController
     promise: Promise<unknown>
   }>()
-  private sessionGeneration = 0
+  // V1. Read and written only through the `sessionGeneration` accessor pair (D6).
+  private sessionGenerationValue = 0
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
@@ -1016,6 +1034,19 @@ export class AppService {
     this.tokenStore = options.tokenStore ?? new TokenStore()
     this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
     this.onSessionCleared = options.onSessionCleared
+    this.onBrowserSignInChanged = options.onBrowserSignInChanged
+    this.onSessionGenerationAdvanced = options.onSessionGenerationAdvanced
+    this.browserSignInLinksAvailable = options.browserSignInLinksAvailable ?? false
+    this.browserSignIn = new BrowserSignInAttempts({
+      push: snapshot => this.onBrowserSignInChanged?.(snapshot),
+      // Read at each call, so a console spy set up after construction still sees the line.
+      warn: (message, error) => console.warn(message, error),
+      clock: options.browserSignInClock ?? {
+        now: Date.now,
+        setTimer: setTimeout,
+        clearTimer: clearTimeout,
+      },
+    })
     this.gfsWatch = createGfsWatchClient({
       ...options.gfsWatch,
       baseUrl: () => config.externalRestApiBaseUrl,
@@ -1028,6 +1059,29 @@ export class AppService {
           )
         }),
     })
+  }
+
+  /** V1, the session generation. */
+  private get sessionGeneration(): number {
+    return this.sessionGenerationValue
+  }
+
+  /**
+   * Every generation advance comes through here, so none can skip the browser sign-in hook (D6).
+   * It writes V1, then ends a waiting attempt `replaced`, then tells the test-only observer. The
+   * hook never throws and pushes nothing before it returns; a throw from the observer is logged
+   * and never reaches the bump site, which may be the first statement of a logout.
+   */
+  private set sessionGeneration(value: number) {
+    this.sessionGenerationValue = value
+    this.browserSignIn.onGenerationAdvanced()
+    const observe = this.onSessionGenerationAdvanced
+    if (!observe) return
+    try {
+      observe(value)
+    } catch (error) {
+      console.warn('[AppService] The session generation observer failed:', error)
+    }
   }
 
   private static dedupe(values: string[]): string[] {
@@ -2117,6 +2171,28 @@ export class AppService {
 
   getSessionGeneration(): number {
     return this.sessionGeneration
+  }
+
+  /**
+   * Test seam (state model §7.3, seam 2); not exposed over IPC. Whether a session token and a
+   * principal are set, read with no side effect. Unlike `getSessionState`, it never runs a
+   * restore, and unlike `getCachedUserId`, it shows a half-written session.
+   */
+  getSessionPresence(): { hasToken: boolean; hasMe: boolean } {
+    return { hasToken: this.sessionToken !== null, hasMe: this.me !== null }
+  }
+
+  /**
+   * Test seam; not exposed over IPC. Resolves once the auth owner queue is idle: it awaits the
+   * queue's tail again while ops were queued during the wait. The tail never rejects
+   * (`withNativeAuthEnvironmentCommit`).
+   */
+  async whenAuthCommitsSettled(): Promise<void> {
+    for (;;) {
+      const tail = this.nativeAuthEnvironmentCommitQueue
+      await tail
+      if (this.nativeAuthEnvironmentCommitQueue === tail) return
+    }
   }
 
   private assertSessionGeneration(expectedSessionGeneration: number): void {

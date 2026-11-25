@@ -206,7 +206,9 @@ async function uploadReceipt(
 function assertMainGeneration(mainGeneration: number, expected: number | undefined) {
   if (expected === undefined) return
   const service = Object.create(AppService.prototype) as AppService
-  Object.assign(service, { sessionGeneration: mainGeneration })
+  // An own value shadows the prototype's generation accessor. Assigning would call its setter,
+  // whose browser sign-in hook needs the store that this constructor-less service never built.
+  Object.defineProperty(service, 'sessionGeneration', { value: mainGeneration })
   ;(
     service as unknown as { assertSessionGeneration(expected: number): void }
   ).assertSessionGeneration(expected)

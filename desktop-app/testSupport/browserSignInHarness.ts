@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { format } from 'node:util'
 import type { AppService } from '../src/appService.js'
+import type { BrowserSignInClock, BrowserSignInTimerHandle } from '../src/browserSignIn.js'
 import type { TokenStore } from '../src/tokenStore.js'
 import type { SessionMe } from '../src/types.js'
 import { testSessionMe, testTeamSwitchResult } from './authTestFixtures.js'
@@ -15,32 +16,102 @@ import { type EdgeRecordKey, readEdgeRecord } from './edgeContractRecords.js'
  * The real `AppService` for the browser sign-in model (state model §7.3): a temp `userData`
  * with stored profiles A and B and a REST-only profile C, `electron` mocked, the token store a
  * fake passed through `AppServiceOptions.tokenStore`, `bindChatStoreForUser` mocked, and HTTP
- * mocked at `fetch` only, so the real `AuthClient` and `requestJson` run.
+ * mocked at `fetch` only, so the real `AuthClient` and `requestJson` run. The service gets the
+ * test-only generation observer (feeding `bumpLog`), a `FakeBrowserSignInClock` and the links
+ * option through its constructor, as `main.ts` never does.
  *
- * Not wired yet, and so absent rather than silently empty: the snapshot pushes (Task 6), the
- * generation observer's `bumpLog` (Task 4), the sign-in clock and the links option.
+ * Not wired yet, and so absent rather than silently empty: the snapshot pushes (Task 6).
  */
 
 /** One counter is shared by every recorder, so records of different kinds can be ordered. */
 export type SeqRecord<T> = Readonly<{ seq: number; value: T }>
+
+type FakeTimer = { id: number; dueMs: number; callback: () => void }
+
+/**
+ * The browser sign-in clock for tests (R-2). The wall clock and the timers' schedule are kept
+ * apart, as in the main process: the deadline is checked on the wall clock, and its Node timer
+ * keeps its own schedule (D12).
+ * - `advance(ms, 'wallOnly')` moves the wall clock only, as a clock change or a sleep the timer
+ *   did not count would; no timer fires. `ms` may be negative (the clock set back).
+ * - `advance(ms, 'timers')` moves the wall clock and the timers' schedule together and fires
+ *   each timer that falls due, in due order, with the wall clock at its due time.
+ */
+export class FakeBrowserSignInClock implements BrowserSignInClock {
+  private wallMs: number
+  private scheduleMs = 0
+  private lastTimerId = 0
+  private readonly timers = new Map<number, FakeTimer>()
+
+  constructor(startMs: number = Date.now()) {
+    this.wallMs = startMs
+  }
+
+  now(): number {
+    return this.wallMs
+  }
+
+  setTimer(callback: () => void, ms: number): BrowserSignInTimerHandle {
+    this.lastTimerId += 1
+    const id = this.lastTimerId
+    this.timers.set(id, { id, dueMs: this.scheduleMs + Math.max(0, ms), callback })
+    // The store only hands the handle back to `clearTimer`; a number stands in for Node's.
+    return id as unknown as BrowserSignInTimerHandle
+  }
+
+  clearTimer(handle: BrowserSignInTimerHandle): void {
+    this.timers.delete(handle as unknown as number)
+  }
+
+  /** Timers set and neither fired nor cleared. */
+  pendingTimers(): number {
+    return this.timers.size
+  }
+
+  advance(ms: number, via: 'wallOnly' | 'timers'): void {
+    if (!Number.isFinite(ms)) throw new Error(`advance: ${ms} is not a finite number of ms`)
+    if (via === 'wallOnly') {
+      this.wallMs += ms
+      return
+    }
+    if (ms < 0) throw new Error('advance: the timers schedule cannot go back')
+    const targetMs = this.scheduleMs + ms
+    for (let due = this.nextDue(targetMs); due; due = this.nextDue(targetMs)) {
+      this.wallMs += due.dueMs - this.scheduleMs
+      this.scheduleMs = due.dueMs
+      this.timers.delete(due.id)
+      due.callback()
+    }
+    this.wallMs += targetMs - this.scheduleMs
+    this.scheduleMs = targetMs
+  }
+
+  private nextDue(targetMs: number): FakeTimer | undefined {
+    let next: FakeTimer | undefined
+    for (const timer of this.timers.values()) {
+      if (timer.dueMs <= targetMs && (!next || timer.dueMs < next.dueMs)) next = timer
+    }
+    return next
+  }
+}
 
 /**
  * Named by call site (N-5). Each hold applies to the next call that reaches its point.
  * - `methods`: start's methods fetch.
  * - `open`: `shell.openExternal`.
  * - `redeem`: the redeem fetch.
- * - `restoreTokenRead`: restore's `tokenStore.getSessionToken` (`appService.ts:1853`).
- * - `restoreChatBind`: restore's `bindChatStoreForUser` (`appService.ts:1925`).
+ * - `restoreTokenRead`: restore's `tokenStore.getSessionToken` (`appService.ts:1907`).
+ * - `restoreChatBind`: restore's `bindChatStoreForUser` (`appService.ts:1979`).
  * - `installChatBind`: install's `bindChatStoreForUser`, via `bindCurrentChatStore`
- *   (`appService.ts:2043`).
- * - `installTokenWrite`: install's `tokenStore.setSessionToken` (`appService.ts:2049`).
+ *   (`appService.ts:2097`).
+ * - `installTokenWrite`: install's `tokenStore.setSessionToken` (`appService.ts:2103`).
  *
  * The two chat-store holds match by user id, not by call site. `restoreChatBind` takes the next
  * bind of the restore driver's user, and `installChatBind` the next bind of the redeem answer's
  * user, wherever it comes from. So any later bind of that user consumes a pending hold: the
- * team-switch `/me` refresh in `commitSessionToken` (`appService.ts:1257`), the team-scope
- * commit after discovery in `runWithTeamContextInTeamQueue` (`:1406`), the rebind after a
- * failed hop restore (`:1509`) and `refreshAccessCatalog` (`:4199`). Set a chat-store hold only
+ * team-switch `/me` refresh in `commitSessionToken` (`appService.ts:1311`), the team-scope
+ * commit after discovery in `runWithTeamContextInTeamQueue` (`:1460`), the rebind after a
+ * failed hop restore (`:1563`) and `refreshAccessCatalog` (`:4275`). Set a chat-store hold only
  * when the bind it names is the next bind of that user.
  */
 export type HoldPoint =
@@ -79,8 +150,14 @@ export type HarnessHold = {
   readonly reached: boolean
 }
 
-/** Task 4 adds its options here. */
-export type HarnessDrainOptions = Readonly<Record<string, never>>
+export type HarnessDrainOptions = Readonly<{
+  /**
+   * Also wait for the auth owner queue to settle (`whenAuthCommitsSettled`). Defaults to true.
+   * Pass false while a hold sits under an owner op (`restoreTokenRead`, `restoreChatBind`,
+   * `installChatBind`, `installTokenWrite`): that queue cannot settle until the release.
+   */
+  owner?: boolean
+}>
 
 export type HarnessEnvironment = Readonly<{ optionId: string; restBaseUrl: string }>
 
@@ -95,8 +172,14 @@ export type BrowserSignInHarness = {
     headers: Record<string, string>
   }>[]
   tokenWrites: SeqRecord<string>[]
+  /** The environment key of each `tokenStore.getSessionToken` call, recorded when it is made. */
+  tokenReads: SeqRecord<string>[]
   /** URLs passed to `shell.openExternal`. */
   opens: SeqRecord<string>[]
+  /** Each value the generation observer was given, in order (state model §7.3, seam 1). */
+  bumpLog: SeqRecord<number>[]
+  /** The service's browser sign-in clock. */
+  clock: FakeBrowserSignInClock
   /**
    * Everything the harness can see leave the service: replies of the service's methods,
    * `console.*` lines and token-store writes (and, from Task 6, the pushes). The router queue
@@ -107,7 +190,10 @@ export type BrowserSignInHarness = {
   unrouted: string[]
   routes: HarnessRoutes
   hold(point: HoldPoint): HarnessHold
-  /** Waits until the scheduler has stayed idle for 3 `setImmediate` turns. */
+  /**
+   * Waits until 3 `setImmediate` turns in a row find the scheduler idle and, unless
+   * `{ owner: false }`, the auth owner queue settled.
+   */
   drain(options?: HarnessDrainOptions): Promise<void>
 }
 
@@ -117,6 +203,13 @@ export type BrowserSignInHarnessOptions = Readonly<{
   legacyDuplicateProfiles?: boolean
   /** Keeps a saved session token for the active environment, so a restore has one to read. */
   keptToken?: boolean
+  /** Passed as `browserSignInLinksAvailable`. Defaults to false, as the service's does. */
+  linksAvailable?: boolean
+  /**
+   * Called with each generation value after `bumpLog` records it. A throw from it reaches the
+   * service's guard around its observer.
+   */
+  onSessionGenerationAdvanced?: (value: number) => void
 }>
 
 /**
@@ -306,7 +399,10 @@ export async function createBrowserSignInHarness(
   const nextSeq = () => ++seq
   const fetches: BrowserSignInHarness['fetches'] = []
   const tokenWrites: SeqRecord<string>[] = []
+  const tokenReads: SeqRecord<string>[] = []
   const opens: SeqRecord<string>[] = []
+  const bumpLog: SeqRecord<number>[] = []
+  const clock = new FakeBrowserSignInClock()
   const secretsSeen: string[] = []
   const unrouted: string[] = []
   const holds = new Map<HoldPoint, PendingHold[]>()
@@ -534,19 +630,21 @@ export async function createBrowserSignInHarness(
   }
 
   const tokenStore = {
-    getSessionToken: (envKey: string, readOptions: { legacyEnvKeys?: readonly string[] } = {}) =>
-      passThrough('restoreTokenRead', 'tokenStore.getSessionToken', held => {
+    getSessionToken: (envKey: string, readOptions: { legacyEnvKeys?: readonly string[] } = {}) => {
+      tokenReads.push({ seq: nextSeq(), value: envKey })
+      return passThrough('restoreTokenRead', 'tokenStore.getSessionToken', held => {
         refuseResponse('restoreTokenRead')(held)
         for (const key of [envKey, ...(readOptions.legacyEnvKeys ?? [])]) {
           const token = savedTokens.get(key)
           if (token) return token
         }
         return null
-      }),
+      })
+    },
     setSessionToken: (token: string, envKey: string) => {
       tokenWrites.push({ seq: nextSeq(), value: token })
       secretsSeen.push(token)
-      // A team switch writes its token through the same method (`appService.ts:1248`).
+      // A team switch writes its token through the same method (`appService.ts:1302`).
       const point: HoldPoint | null = switchTokens.has(token) ? null : 'installTokenWrite'
       return passThrough(point, 'tokenStore.setSessionToken', held => {
         refuseResponse('installTokenWrite')(held)
@@ -559,7 +657,15 @@ export async function createBrowserSignInHarness(
       }),
   }
 
-  const rawService = new AppServiceClass({ tokenStore: tokenStore as unknown as TokenStore })
+  const rawService = new AppServiceClass({
+    tokenStore: tokenStore as unknown as TokenStore,
+    browserSignInLinksAvailable: options.linksAvailable ?? false,
+    browserSignInClock: clock,
+    onSessionGenerationAdvanced: value => {
+      bumpLog.push({ seq: nextSeq(), value })
+      options.onSessionGenerationAdvanced?.(value)
+    },
+  })
   const recordReply = (reply: unknown) => {
     const text = replyText(reply)
     if (text !== null) secretsSeen.push(text)
@@ -594,7 +700,10 @@ export async function createBrowserSignInHarness(
     envs: Object.freeze(envs),
     fetches,
     tokenWrites,
+    tokenReads,
     opens,
+    bumpLog,
+    clock,
     secretsSeen,
     unrouted,
     routes,
@@ -614,15 +723,35 @@ export async function createBrowserSignInHarness(
         },
       }
     },
-    async drain() {
+    async drain(drainOptions = {}) {
+      const owner = drainOptions.owner !== false
+      // The owner queue is awaited inside the loop, not after it: an owner op may wait on an
+      // answer that only the scheduler delivers. Each turn that found it settled asks again, so
+      // a quiet turn means an op queued since was settled too.
+      let ownerSettled = !owner
+      let ownerAsked = false
       let quietTurns = 0
       for (let turn = 0; quietTurns < DRAIN_QUIET_TURNS; turn += 1) {
         if (turn >= DRAIN_TURN_LIMIT) {
-          throw new Error(`drain: the scheduler was still busy after ${DRAIN_TURN_LIMIT} turns`)
+          throw new Error(
+            ownerSettled
+              ? `drain: the scheduler was still busy after ${DRAIN_TURN_LIMIT} turns`
+              : `drain: the auth owner queue had not settled after ${DRAIN_TURN_LIMIT} turns` +
+                  ' (a hold under an owner op needs drain({ owner: false }))'
+          )
+        }
+        if (owner && !ownerAsked) {
+          ownerAsked = true
+          ownerSettled = false
+          void rawService.whenAuthCommitsSettled().then(() => {
+            ownerSettled = true
+            ownerAsked = false
+          })
         }
         if (scheduler && scheduler.count() > 0) await scheduler.waitIdle()
         await new Promise<void>(resolve => setImmediate(resolve))
-        quietTurns = scheduler && scheduler.count() > 0 ? 0 : quietTurns + 1
+        const schedulerBusy = scheduler !== undefined && scheduler.count() > 0
+        quietTurns = schedulerBusy || !ownerSettled ? 0 : quietTurns + 1
       }
     },
   }

@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
+import { format } from 'node:util'
 import {
   type BrowserSignInHarness,
+  FakeBrowserSignInClock,
   cleanupBrowserSignInHarness,
   createBrowserSignInHarness,
   harnessDriverUsers,
 } from '../../testSupport/browserSignInHarness.js'
+import { BROWSER_SIGN_IN_DEADLINE_MS, BrowserSignInAttempts } from '../browserSignIn.js'
 
 // Bodies outside the feature contract (G-5) come from the harness. The discovery answer is the
 // shape of the edge's own route, `external-rest-api/src/routes/desktop.ts:11-17`, with
@@ -15,11 +18,17 @@ afterEach(cleanupBrowserSignInHarness)
 
 const UNTIL_TURN_LIMIT = 200
 
+/** Drains until `reached`. The owner queue is not awaited: the point may be a hold under it. */
 async function until(harness: BrowserSignInHarness, reached: () => boolean, what: string) {
   for (let turn = 0; !reached(); turn += 1) {
     if (turn >= UNTIL_TURN_LIMIT) throw new Error(`${what} was not reached`)
-    await harness.drain()
+    await harness.drain({ owner: false })
   }
+}
+
+/** The values from `from` up to `to`, both included. */
+function consecutive(from: number, to: number): number[] {
+  return Array.from({ length: Math.max(0, to - from + 1) }, (_, index) => from + index)
 }
 
 function deferred<T>() {
@@ -124,7 +133,7 @@ function modelRestUrls(real: BumpReal, model: BumpModel): string[] {
   return envs.map(env => (env === 'D' ? ENV_D_REST : real.harness.envs[env].restBaseUrl)).sort()
 }
 
-/** A boundary change away from A clears A's saved token (`appService.ts:2189`). */
+/** A boundary change away from A clears A's saved token (`appService.ts:2265`). */
 function leave(model: BumpModel, next: EnvName | null) {
   if (model.active === 'A' && next !== 'A') model.storedA = false
   model.active = next
@@ -169,7 +178,7 @@ const bumpEvents = {
     id: 'E15',
     label: 'E15 session restore (getSessionState)',
     check: () => true,
-    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:3659-3664`): it
+    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:3735-3740`): it
     // never decides an expectation here. `storedA` holds while signed out on A only before the
     // first restore on A (a kept token at start), and that restore succeeds. Every later
     // `storedA` comes from a sign-in on A, and every way back to signed out (logout, or a change
@@ -382,6 +391,7 @@ class BumpCommand implements fc.AsyncCommand<BumpModel, BumpReal> {
     const expected = this.event.expect(model)
     const service = real.harness.service
     const before = service.getSessionGeneration()
+    const loggedBefore = real.harness.bumpLog.length
     const beforeCommand: BeforeCommand = {
       optionCount: service.getRuntimeConfigState().options.length,
       discoveryFetches: fetchCount(real.harness, 'GET', DISCOVERY_PATH),
@@ -394,6 +404,10 @@ class BumpCommand implements fc.AsyncCommand<BumpModel, BumpReal> {
     const after = service.getSessionGeneration()
     expect(after).toBeGreaterThanOrEqual(before)
     expect(after > before).toBe(expected.bump)
+    // The observer saw each advance once, in order, including two in one owner op.
+    expect(real.harness.bumpLog.slice(loggedBefore).map(record => record.value)).toEqual(
+      consecutive(before + 1, after)
+    )
     this.event.next(model)
     expect(service.getCachedUserId() !== null).toBe(model.signedIn)
     // The model's environments are the real ones, so its next expectation is about the right one.
@@ -652,7 +666,176 @@ describe('tier 0 baseline', () => {
   })
 })
 
+describe('the generation hook and the test seams', () => {
+  const OBSERVER_FAILED = '[AppService] The session generation observer failed:'
+
+  it('reports every generation advance once, including two in one owner op', async () => {
+    const harness = await createBrowserSignInHarness()
+    const { service } = harness
+    await service.passwordLogin('user-b@example.test', 'fake-password')
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+    expect(harness.bumpLog.map(record => record.value)).toEqual(
+      consecutive(1, service.getSessionGeneration())
+    )
+    const before = service.getSessionGeneration()
+    const logged = harness.bumpLog.length
+
+    await service.logout()
+
+    // One owner op, two advances: logout's own, then `clearAuthenticatedSessionState`'s.
+    expect(harness.bumpLog.slice(logged).map(record => record.value)).toEqual([
+      before + 1,
+      before + 2,
+    ])
+    expect(harness.bumpLog.at(-1)?.value).toBe(service.getSessionGeneration())
+  })
+
+  it('logs and survives an observer that throws', async () => {
+    const failure = new Error('fake observer failure')
+    let failNext = false
+    const harness = await createBrowserSignInHarness({
+      onSessionGenerationAdvanced: () => {
+        if (!failNext) return
+        failNext = false
+        throw failure
+      },
+    })
+    const { service } = harness
+    await service.passwordLogin('user-b@example.test', 'fake-password')
+    const sessionToken = harness.tokenWrites.at(-1)?.value
+    expect(sessionToken).toMatch(/^fake-password-session-token-/)
+    // The harness's spy on `console.warn`: its calls from here on are logout's.
+    const warn = vi.spyOn(console, 'warn')
+    const warnedBefore = warn.mock.calls.length
+    const before = service.getSessionGeneration()
+
+    // The observer throws at logout's first advance, the first statement of its owner op.
+    failNext = true
+    await expect(service.logout()).resolves.toBe(before + 2)
+
+    expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
+    expect(harness.bumpLog.slice(-2).map(record => record.value)).toEqual([before + 1, before + 2])
+    const warnings = warn.mock.calls.slice(warnedBefore)
+    expect(warnings).toEqual([[OBSERVER_FAILED, failure]])
+    const text = format(...(warnings[0] ?? []))
+    for (const { value: token } of harness.tokenWrites) expect(text).not.toContain(token)
+  })
+
+  it('reads session presence without restoring', async () => {
+    const harness = await createBrowserSignInHarness({ keptToken: true })
+    const { service } = harness
+
+    expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
+    await harness.drain()
+    expect(harness.tokenReads).toHaveLength(0)
+    expect(fetchCount(harness, 'GET', '/api/v1/me')).toBe(0)
+
+    // The kept token was there to read: a restore reads it and signs in.
+    await expect(service.getSessionState()).resolves.toMatchObject({
+      authenticated: true,
+      me: { id: harnessDriverUsers.restore.id },
+    })
+    expect(harness.tokenReads).toHaveLength(1)
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+  })
+
+  it("shows the restore commit's half-written session at the chat-store bind", async () => {
+    const harness = await createBrowserSignInHarness({ keptToken: true })
+    const { service } = harness
+    const generation = service.getSessionGeneration()
+    const bind = harness.hold('restoreChatBind')
+
+    const restore = service.getSessionState()
+    await until(harness, () => bind.reached, "the restore's chat-store bind")
+    // The token is set and the principal is not yet: the half-state `getCachedUserId` hides.
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: false })
+    expect(service.getCachedUserId()).toBeNull()
+    expect(service.getSessionGeneration()).toBe(generation)
+    expect(harness.bumpLog).toEqual([])
+
+    bind.release()
+    await expect(restore).resolves.toMatchObject({ authenticated: true })
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+    expect(harness.bumpLog.map(record => record.value)).toEqual([generation + 1])
+  })
+
+  it('settles the owner queue, including ops queued while settling', async () => {
+    const harness = await createBrowserSignInHarness()
+    const { service } = harness
+    const before = service.getSessionGeneration()
+
+    const first = service.logout()
+    const settled = service.whenAuthCommitsSettled()
+    const second = service.logout()
+    await settled
+
+    // Both logouts ran to their end (two advances each) before the wait resolved.
+    expect(service.getSessionGeneration()).toBe(before + 4)
+    expect(harness.bumpLog.map(record => record.value)).toEqual(consecutive(before + 1, before + 4))
+    await expect(first).resolves.toBe(before + 2)
+    await expect(second).resolves.toBe(before + 4)
+  })
+})
+
 describe('the harness', () => {
+  it('moves the wall clock alone, or with the timers it fires in due order', () => {
+    const clock = new FakeBrowserSignInClock(1_000)
+    const fired: Array<[name: string, wallMs: number]> = []
+    clock.setTimer(() => fired.push(['late', clock.now()]), 200)
+    const cleared = clock.setTimer(() => fired.push(['cleared', clock.now()]), 50)
+    clock.setTimer(() => fired.push(['early', clock.now()]), 100)
+    clock.clearTimer(cleared)
+
+    // The wall clock moves, and is set back, without any timer firing.
+    clock.advance(500, 'wallOnly')
+    expect(clock.now()).toBe(1_500)
+    clock.advance(-300, 'wallOnly')
+    expect(clock.now()).toBe(1_200)
+    expect(fired).toEqual([])
+
+    // The timers keep their own schedule: 'early' is due 100 ms after it was set, whatever the
+    // wall clock did meanwhile, and fires with the wall clock moved by the same 100 ms.
+    clock.advance(150, 'timers')
+    expect(fired).toEqual([['early', 1_300]])
+    expect(clock.now()).toBe(1_350)
+    clock.advance(50, 'timers')
+    expect(fired).toEqual([
+      ['early', 1_300],
+      ['late', 1_400],
+    ])
+    expect(clock.pendingTimers()).toBe(0)
+    expect(() => clock.advance(-1, 'timers')).toThrow(/cannot go back/)
+  })
+
+  it("drives the attempt store's deadline in either mode", () => {
+    const binding = {
+      environmentKey: 'env-a',
+      profileId: null,
+      restBaseUrl: 'https://a.example.test',
+    }
+    const record = (attempts: BrowserSignInAttempts) =>
+      attempts.record({ state: 'fake-state', verifier: 'fake-verifier', binding, generation: 1 })
+    const build = (clock: FakeBrowserSignInClock) =>
+      new BrowserSignInAttempts({ push: () => undefined, warn: () => undefined, clock })
+
+    // Wall clock only: the timer has not fired, and a read applies the deadline itself.
+    const wallClock = new FakeBrowserSignInClock()
+    const byWall = build(wallClock)
+    const wallId = record(byWall)
+    wallClock.advance(BROWSER_SIGN_IN_DEADLINE_MS, 'wallOnly')
+    expect(wallClock.pendingTimers()).toBe(1)
+    expect(byWall.current()?.phase).toBe('waiting')
+    expect(byWall.snapshot()).toEqual({ attemptId: wallId, phase: 'ended', outcome: 'timed_out' })
+    expect(wallClock.pendingTimers()).toBe(0)
+
+    // Timers: the deadline timer itself ends the attempt, before any read.
+    const timerClock = new FakeBrowserSignInClock()
+    const byTimer = build(timerClock)
+    record(byTimer)
+    timerClock.advance(BROWSER_SIGN_IN_DEADLINE_MS, 'timers')
+    expect(byTimer.current()?.phase).toBe('ended')
+  })
+
   it('cleans up newest first and leaves the calling test its own stubs', async () => {
     const hubVariable = 'MEMBER_REGISTRATION_SERVICE_BASE_URL'
     const savedHub = process.env[hubVariable]
