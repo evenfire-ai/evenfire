@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { buildGfsResourceDeepLink } from '@clerum/desktop-app-links'
+import { buildDesktopLoginCodeLink, buildGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
 
 type SentMessage = {
@@ -31,7 +31,22 @@ function createWindow(id: string, sent: SentMessage[]): TestWindow {
   return window
 }
 
-function createHarness() {
+// PR 2's builder writes the link the Profile UI sends to end a Desktop sign-in. Tier 0 reads it
+// straight from the package until `browserSignInModel.ts`, which will own PR 2's names, exists.
+const DESKTOP_LOGIN_LINK = buildDesktopLoginCodeLink({
+  state: 'fake-desktop-login-state-'.padEnd(43, 's'),
+  code: 'fake-desktop-login-code-'.padEnd(43, 'c'),
+  environment: 'https://api-link.example.test',
+})
+const DESKTOP_SETUP_LINK =
+  'evenfire://desktop-setup?email=user%40example.test&authorizationToken=fake-setup-token'
+const DESKTOP_SETUP_MESSAGE = {
+  channel: 'auth:desktopSetupToken',
+  payload: { authorizationToken: 'fake-setup-token', email: 'user@example.test' },
+  window: 'initial',
+}
+
+function createHarness(options: { maxPendingUrls?: number } = {}) {
   const sent: SentMessage[] = []
   let currentWindow: TestWindow | null = createWindow('initial', sent)
   let rendererReady = false
@@ -56,6 +71,7 @@ function createHarness() {
     handleGfsResourceDeepLink,
     isRendererReady: () => rendererReady,
     logout,
+    maxPendingUrls: options.maxPendingUrls,
     requestMainWindow,
     shouldAcceptSandboxUiProtocolLink,
     shouldAcceptGfsResourceProtocolLink,
@@ -240,5 +256,41 @@ describe('evenfire deep-link router', () => {
     expect(harness.sent).toEqual([])
     expect(harness.focusWindow).not.toHaveBeenCalled()
     expect(harness.requestMainWindow).not.toHaveBeenCalled()
+  })
+
+  describe('tier 0 baseline', () => {
+    it('T0-4 sends nothing and requests no window for a desktop-login link', () => {
+      const harness = createHarness()
+
+      harness.router.handle(DESKTOP_LOGIN_LINK)
+      expect(harness.requestMainWindow).not.toHaveBeenCalled()
+      harness.setRendererReady(true)
+      harness.router.drainPending()
+      harness.router.handle(DESKTOP_LOGIN_LINK)
+      expect(harness.sent).toEqual([])
+      expect(harness.focusWindow).not.toHaveBeenCalled()
+
+      // The same router sends a desktop-setup link to the ready window.
+      harness.router.handle(DESKTOP_SETUP_LINK)
+      expect(harness.sent).toEqual([DESKTOP_SETUP_MESSAGE])
+      expect(harness.focusWindow).toHaveBeenCalledOnce()
+      expect(harness.requestMainWindow).not.toHaveBeenCalled()
+    })
+
+    // The desktop-login link evicts the queued setup link today (`evenfireDeepLinkRouter.ts:47-53`),
+    // evidence for A3-31. Task 5 turns this into `it(` as G2-8b.
+    it.fails(
+      'T0-3 keeps a queued desktop-setup link when a desktop-login link is enqueued after it',
+      () => {
+        const harness = createHarness({ maxPendingUrls: 1 })
+
+        harness.router.enqueuePending(DESKTOP_SETUP_LINK)
+        harness.router.enqueuePending(DESKTOP_LOGIN_LINK)
+        harness.setRendererReady(true)
+        harness.router.drainPending()
+
+        expect(harness.sent).toEqual([DESKTOP_SETUP_MESSAGE])
+      }
+    )
   })
 })
