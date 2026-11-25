@@ -16,14 +16,21 @@ import type { ContinuationToast } from './types'
 export const INHERITING_BANNER_TEXT =
   'This agent has no approval settings of its own. It uses the cluster default, which this page cannot show. Your first save here replaces it for this agent.'
 
-/** Spec §6.7: the values text when only the manifest's existence is known (server-side apply). */
+/** Spec §6.7: what the banner says of the values when only the manifest's existence is known (server-side apply). */
 export const MANIFEST_VALUES_NOT_SHOWN = 'set by a manifest (values not shown)'
 
 /** The longest values text the manifest banner shows; a larger block ends in an ellipsis. */
 export const MANIFEST_VALUES_CAP = 200
 
-/** Spec §6.7's manifest banner, around `values` (see `manifestValuesText`). */
-export function manifestBannerText(values: string): string {
+/**
+ * Spec §6.7's manifest banner. `values` is the manifest's approval values as
+ * text (see `manifestValuesText`), or null when the manifest left none to read
+ * (server-side apply): that sentence keeps §6.7's phrase (Ruling 47).
+ */
+export function manifestBannerText(values: string | null): string {
+  if (values === null) {
+    return `A deployment manifest also sets these settings. The next deploy puts them back; they are ${MANIFEST_VALUES_NOT_SHOWN}. Change the manifest too.`
+  }
   return `A deployment manifest also sets these settings. The next deploy puts back: ${values}. Change the manifest too.`
 }
 

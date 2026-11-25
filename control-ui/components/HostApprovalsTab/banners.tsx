@@ -9,7 +9,6 @@ import {
   CHANNEL_ORDER,
   INHERITING_BANNER_TEXT,
   MANIFEST_VALUES_CAP,
-  MANIFEST_VALUES_NOT_SHOWN,
   MODE_LABELS,
   manifestBannerText,
   onOff,
@@ -84,8 +83,7 @@ function approverCount(count: number): string {
  * count per channel; per-tool overrides show as a count. A long text is cut
  * at `MANIFEST_VALUES_CAP` characters.
  */
-export function manifestValuesText(values: Record<string, unknown> | null): string {
-  if (values === null) return MANIFEST_VALUES_NOT_SHOWN
+export function manifestValuesText(values: Record<string, unknown>): string {
   const approval = effectiveApproval(values)
   const parts: string[] = []
   if (Object.hasOwn(values, 'modeCeiling')) {
@@ -111,6 +109,14 @@ export function manifestValuesText(values: Record<string, unknown> | null): stri
   return text.length > MANIFEST_VALUES_CAP ? `${text.slice(0, MANIFEST_VALUES_CAP - 1)}…` : text
 }
 
+/**
+ * Spec §6.7: the manifest banner's text for the values `manifestSignal`
+ * found, or for none (null).
+ */
+export function manifestWarningText(values: Record<string, unknown> | null): string {
+  return manifestBannerText(values === null ? null : manifestValuesText(values))
+}
+
 /** Spec §6.2: the agent has no `spec.approval` of its own (absent or null; `{}` is its own). */
 export function InheritingBanner() {
   return (
@@ -126,7 +132,7 @@ export function ManifestBanner({ values }: { values: Record<string, unknown> | n
   return (
     <div className="cu-banner cu-banner--info cu-host-approvals-tab__banner">
       <IconInfoCircle aria-hidden height={16} width={16} />
-      <span>{manifestBannerText(manifestValuesText(values))}</span>
+      <span>{manifestWarningText(values)}</span>
     </div>
   )
 }

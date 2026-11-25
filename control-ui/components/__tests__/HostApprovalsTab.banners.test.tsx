@@ -26,6 +26,11 @@ function manifestBanner(values: string): string {
   return `A deployment manifest also sets these settings. The next deploy puts back: ${values}. Change the manifest too.`
 }
 
+// Ruling 47: the banner when the manifest left no values to read, with spec
+// §6.7's "set by a manifest (values not shown)" kept verbatim.
+const MANIFEST_BANNER_NO_VALUES =
+  'A deployment manifest also sets these settings. The next deploy puts them back; they are set by a manifest (values not shown). Change the manifest too.'
+
 const MANIFEST_BANNER_PREFIX = 'A deployment manifest also sets these settings.'
 
 type Wire = HostObject & { _source?: unknown }
@@ -84,9 +89,7 @@ describe('HostApprovalsTab banners', () => {
       const { fake, tab } = renderStored(fooFrom('host-server-side-applied'))
       await approvalSettingsDriver()
 
-      expect(
-        screen.getByText(manifestBanner('set by a manifest (values not shown)'))
-      ).toBeInTheDocument()
+      expect(screen.getByText(MANIFEST_BANNER_NO_VALUES)).toBeInTheDocument()
       expect(unanswered(fake)).toEqual([])
       tab.unmount()
     })
