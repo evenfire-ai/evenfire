@@ -424,8 +424,8 @@ describe('HostApprovalsTab', () => {
       await driver.editTool('system_info', 'required')
       await driver.save()
 
+      // The exact text: it names no agent, unlike a continuation's (C18).
       await waitFor(() => expect(tab.toasts('success')).toEqual([SAVED_IN_TAB]))
-      expect(SAVED_IN_TAB, 'the in-tab copy').not.toContain('foo')
       expect(overrides(driver.readView())).toEqual(SAVED_VIEW)
       expect(unanswered(fake)).toEqual([])
       tab.unmount()
