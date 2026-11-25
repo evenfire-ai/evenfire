@@ -643,6 +643,7 @@ const refusalReasons = [
   'not_eligible',
   'no_account',
   'provider_configuration',
+  'invitation_email_mismatch',
 ] as const
 
 test('each refusal redirects to /oidc/result?reason=<reason>', async () => {
