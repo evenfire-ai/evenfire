@@ -4,7 +4,6 @@
  * Reuses shared helpers from the parent e2e directory and adds benchmark-specific
  * functionality for live provider swapping via Host CRD patches.
  */
-import { execSync } from 'child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import {
   MCP_HOST_URL,
