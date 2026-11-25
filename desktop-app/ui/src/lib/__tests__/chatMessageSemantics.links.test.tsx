@@ -175,18 +175,23 @@ describe('chat link policy (S-9)', () => {
     expect(container.textContent).toContain('bad')
   })
 
-  it('leaves image sources on the default transform', () => {
+  it('never fetches a web image and keeps an EvenDrive image for the chat to load', () => {
     const model = buildChatMessageSemanticModel(
       assistant('![a](https://evenfire.ai/a.png) ![b](gfs://main/859df99de46b407bb0ec4b0f7cb424a5)')
     )
     const images: Element[] = []
+    const links: Element[] = []
     const collect = (node: Root | RootContent) => {
       if (node.type === 'element' && node.tagName === 'img') images.push(node)
+      if (node.type === 'element' && node.tagName === 'a') links.push(node)
       if ('children' in node) node.children.forEach(collect)
     }
     collect(model.renderTree)
 
-    expect(images.map(image => image.properties.src)).toEqual(['https://evenfire.ai/a.png', ''])
+    expect(links.map(link => link.properties.href)).toEqual(['https://evenfire.ai/a.png'])
+    expect(images.map(image => [image.properties.src, image.properties.dataGfsSrc])).toEqual([
+      [undefined, 'gfs://main/859df99de46b407bb0ec4b0f7cb424a5'],
+    ])
   })
 
   it('S2: every <a> in the chat tree carries a canonical href, for arbitrary messages', () => {

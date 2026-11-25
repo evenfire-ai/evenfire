@@ -55,7 +55,7 @@ describe('chat message Markdown semantic model', () => {
           '<button onclick="evil()">literal</button>',
           '[ref label][target]',
           '[target]: javascript:alert(1) "hidden title"',
-          '![hidden image metadata](https://example.test/image.png)',
+          '![hidden image metadata](data:image/png;base64,iVBORw0KGgo=)',
         ].join('\n\n')
       )
     )

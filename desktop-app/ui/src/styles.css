@@ -7727,6 +7727,178 @@ body.sidebar-resizing {
   color: var(--text-muted);
 }
 
+.markdown-content pre[data-language]::before {
+  content: attr(data-language);
+  display: block;
+  margin-bottom: var(--space-1);
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* Syntax colors (highlight.js classes). */
+.markdown-content .hljs-keyword,
+.markdown-content .hljs-doctag,
+.markdown-content .hljs-selector-tag,
+.markdown-content .hljs-template-tag {
+  color: var(--code-keyword);
+}
+
+.markdown-content .hljs-string,
+.markdown-content .hljs-regexp,
+.markdown-content .hljs-meta .hljs-string {
+  color: var(--code-string);
+}
+
+.markdown-content .hljs-number,
+.markdown-content .hljs-literal,
+.markdown-content .hljs-attr,
+.markdown-content .hljs-attribute,
+.markdown-content .hljs-property,
+.markdown-content .hljs-variable.language_,
+.markdown-content .hljs-selector-attr,
+.markdown-content .hljs-selector-class,
+.markdown-content .hljs-selector-id {
+  color: var(--code-number);
+}
+
+.markdown-content .hljs-comment,
+.markdown-content .hljs-quote,
+.markdown-content .hljs-meta {
+  color: var(--code-comment);
+}
+
+.markdown-content .hljs-comment {
+  font-style: italic;
+}
+
+.markdown-content .hljs-title,
+.markdown-content .hljs-title.function_,
+.markdown-content .hljs-section {
+  color: var(--code-title);
+}
+
+.markdown-content .hljs-built_in,
+.markdown-content .hljs-type,
+.markdown-content .hljs-variable,
+.markdown-content .hljs-params,
+.markdown-content .hljs-symbol,
+.markdown-content .hljs-bullet {
+  color: var(--code-type);
+}
+
+.markdown-content .hljs-tag,
+.markdown-content .hljs-name,
+.markdown-content .hljs-selector-pseudo {
+  color: var(--code-tag);
+}
+
+.markdown-content .hljs-addition {
+  color: var(--code-tag);
+  background: var(--code-added-bg);
+}
+
+.markdown-content .hljs-deletion {
+  color: var(--code-keyword);
+  background: var(--code-removed-bg);
+}
+
+.markdown-content .hljs-strong {
+  font-weight: 600;
+}
+
+.markdown-content .hljs-emphasis {
+  font-style: italic;
+}
+
+/* Overrides the app's full-width controls. */
+.markdown-content ul.contains-task-list {
+  list-style: none;
+  padding-left: var(--space-1);
+}
+
+.markdown-content li.task-list-item > input[type='checkbox'] {
+  width: auto;
+  min-height: 0;
+  margin: 0 var(--space-1-5) 0 0;
+  vertical-align: middle;
+}
+
+.markdown-content .chat-md-plain {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.markdown-content mark.chat-md-mark {
+  padding: 0 2px;
+  border-radius: var(--radius-xs);
+  background: rgba(var(--accent-rgb), 0.22);
+  color: inherit;
+}
+
+.markdown-content kbd {
+  padding: 1px 5px;
+  border: 1px solid rgba(var(--edge-rgb), 0.5);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  background: rgba(var(--panel-rgb), 0.66);
+}
+
+/* KaTeX allows negative sizes: clip each formula so it cannot paint over other messages. */
+.chat-math {
+  display: inline-block;
+  max-width: 100%;
+  overflow: clip;
+  overflow-clip-margin: 0.25em;
+  vertical-align: baseline;
+}
+
+.chat-math--display {
+  display: block;
+  margin: 0 0 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Keeps the MathML twin out of the copied text. */
+.chat-math .katex-mathml {
+  user-select: none;
+}
+
+.chat-math--display .katex-display {
+  margin: 0;
+}
+
+/* The break after a display formula would add an empty line. */
+.chat-math--display + br {
+  display: none;
+}
+
+.chat-math__note {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.chat-md-image {
+  display: block;
+  max-width: 100%;
+  max-height: 640px;
+  height: auto;
+  margin: 0 0 10px;
+  border-radius: var(--radius-sm);
+}
+
+.chat-md-image-pending {
+  display: inline-block;
+  min-width: 120px;
+  min-height: 80px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+}
+
 .markdown-content table {
   width: 100%;
   border-collapse: collapse;

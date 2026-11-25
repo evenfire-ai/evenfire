@@ -218,6 +218,19 @@
   --mcp-health-shell-surface: rgba(var(--panel-rgb), 0.6);
   --mcp-health-rows-surface: rgba(var(--overlay-rgb), 0.25);
 
+  /* Chat code highlighting and file previews */
+  --code-keyword: #ff7b72;
+  --code-string: #a5d6ff;
+  --code-number: #79c0ff;
+  --code-comment: #8b949e;
+  --code-title: #d2a8ff;
+  --code-type: #ffa657;
+  --code-tag: #7ee787;
+  --code-added-bg: rgba(46, 160, 67, 0.15);
+  --code-removed-bg: rgba(248, 81, 73, 0.15);
+  --file-paper: #ffffff;
+  --file-paper-check: #e6e8eb;
+
   /* Layering: keep overlays always above cards */
   --layer-content: 1;
   --layer-header: 40;
@@ -320,4 +333,13 @@
   --titlebar-control-border: var(--titlebar-divider-border);
   --titlebar-control-surface: rgb(var(--panel-rgb));
   --zone-border: #d3ddef;
+
+  /* Chat code highlighting */
+  --code-keyword: #cf222e;
+  --code-string: #0a3069;
+  --code-number: #0550ae;
+  --code-comment: #6e7781;
+  --code-title: #8250df;
+  --code-type: #953800;
+  --code-tag: #116329;
 }
