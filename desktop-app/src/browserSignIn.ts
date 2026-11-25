@@ -121,8 +121,15 @@ export class BrowserSignInAttempts {
 
   /**
    * Records a waiting attempt with the next id and arms its deadline timer. It replaces the
-   * current record and ends nothing: start's generation bump has already ended a waiting
-   * predecessor `replaced` (D3, D6).
+   * current record and ends nothing (decision 4): start's generation bump has already ended a
+   * waiting predecessor `replaced` (D3, D6).
+   *
+   * Precondition: never while an attempt is redeeming. Called then, it would drop that attempt
+   * without an end state. The store does not check it: L1 rests on D3's bump and on the
+   * service's refusal of a start while redeeming (D10).
+   *
+   * The timer is armed before anything is written, so a throwing `setTimer` leaves the store as
+   * it was: no waiting attempt without its timer, and no id issued.
    */
   record(
     input: Readonly<{
@@ -132,9 +139,11 @@ export class BrowserSignInAttempts {
       generation: number
     }>
   ): number {
+    const id = this.lastId + 1
+    const deadlineAtMs = this.clock.now() + BROWSER_SIGN_IN_DEADLINE_MS
+    const timer = this.clock.setTimer(() => this.onTimer(id), BROWSER_SIGN_IN_DEADLINE_MS)
     this.disarmTimer()
-    this.lastId += 1
-    const id = this.lastId
+    this.lastId = id
     const { environmentKey, profileId, restBaseUrl } = input.binding
     this.attempt = Object.freeze({
       id,
@@ -142,10 +151,10 @@ export class BrowserSignInAttempts {
       verifier: input.verifier,
       binding: Object.freeze({ environmentKey, profileId, restBaseUrl }),
       generation: input.generation,
-      deadlineAtMs: this.clock.now() + BROWSER_SIGN_IN_DEADLINE_MS,
+      deadlineAtMs,
       phase: 'waiting',
     })
-    this.timer = this.clock.setTimer(() => this.onTimer(id), BROWSER_SIGN_IN_DEADLINE_MS)
+    this.timer = timer
     this.publish({ attemptId: id, phase: 'waiting' })
     return id
   }

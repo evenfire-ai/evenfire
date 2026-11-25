@@ -663,6 +663,45 @@ describe('attempt store', () => {
     expect(store.record(attemptInput())).toBe(2)
   })
 
+  // Decision 4: `record()` ends nothing. In the service, start's generation bump has already
+  // ended a waiting predecessor `replaced` (D3, D6), so a second end here would be a second push.
+  it('records over a waiting attempt without ending it (decision 4)', async () => {
+    const { store, pushes } = newStore()
+    store.record(attemptInput())
+    store.record(attemptInput())
+    await flushPushes()
+    expect(pushes).toEqual([
+      { attemptId: 1, phase: 'waiting' },
+      { attemptId: 2, phase: 'waiting' },
+    ])
+  })
+
+  // The timer is armed before anything is written: a throwing `setTimer` leaves no waiting
+  // attempt without its timer, issues no id, and leaves a waiting predecessor's timer armed.
+  it('records nothing when the deadline timer cannot be armed', async () => {
+    const failure = new Error('no timer')
+    const clock = fakeClock()
+    let timerFails = true
+    const { store, pushes } = newStore(clock, {
+      setTimer: (callback, ms) => {
+        if (timerFails) throw failure
+        return clock.clock.setTimer(callback, ms)
+      },
+    })
+    expect(() => store.record(attemptInput())).toThrow(failure)
+    expect(store.current()).toBeNull()
+    expect(store.snapshot()).toEqual({ attemptId: null, phase: 'idle' })
+
+    timerFails = false
+    expect(store.record(attemptInput())).toBe(1)
+    timerFails = true
+    expect(() => store.record(attemptInput())).toThrow(failure)
+    expect(store.current()).toMatchObject({ id: 1, phase: 'waiting' })
+    expect(clock.liveTimers()).toBe(1)
+    await flushPushes()
+    expect(pushes).toEqual([{ attemptId: 1, phase: 'waiting' }])
+  })
+
   // Review Focus 2, the D12 ruling: the timer ends a waiting attempt when it fires, whatever the
   // wall clock then says.
   it('ends a waiting attempt at the timer even after the clock moved back', async () => {
@@ -720,6 +759,54 @@ describe('attempt store', () => {
     expect(store.acknowledge(id)).toEqual({ attemptId: id, phase: 'idle' })
     await flushPushes()
     expect(pushes.slice(2)).toEqual([{ attemptId: id, phase: 'idle' }])
+  })
+
+  // A3-66: a failed browser open ends its attempt through `endIfWaiting`; the service's other
+  // ends use `end`. Either ends a waiting attempt once, with one push.
+  it.each(['end', 'endIfWaiting'] as const)('ends a waiting attempt through %s', async method => {
+    const { store, pushes, clock } = newStore()
+    const id = store.record(attemptInput())
+    expect(store[method](id, { outcome: 'failed' })).toBe(true)
+    expect(store[method](id, { outcome: 'cancelled' })).toBe(false)
+    expect(clock.liveTimers()).toBe(0)
+    await flushPushes()
+    expect(pushes).toEqual([
+      { attemptId: id, phase: 'waiting' },
+      { attemptId: id, phase: 'ended', outcome: 'failed' },
+    ])
+  })
+
+  // `endedSnapshot` copies only the closed fields, so an end object that carries more, or an
+  // explicit `reason: undefined`, reaches neither V14 nor the push (D17, D18).
+  it.each([
+    [
+      'failed, reason undefined',
+      { outcome: 'failed', reason: undefined, extra: 'x' },
+      { outcome: 'failed' },
+    ],
+    [
+      'failed with a reason',
+      { outcome: 'failed', reason: 'unavailable', extra: 'x' },
+      { outcome: 'failed', reason: 'unavailable' },
+    ],
+    [
+      'refused',
+      { outcome: 'refused', reason: DESKTOP_LOGIN_REFUSAL_REASONS[0], extra: 'x' },
+      { outcome: 'refused', reason: DESKTOP_LOGIN_REFUSAL_REASONS[0] },
+    ],
+    [
+      'cancelled with a reason',
+      { outcome: 'cancelled', reason: 'unavailable', extra: 'x' },
+      { outcome: 'cancelled' },
+    ],
+  ] as const)('builds the ended snapshot field by field: %s', async (_label, end, expected) => {
+    const { store, pushes } = newStore()
+    const id = store.record(attemptInput())
+    expect(store.end(id, end as never)).toBe(true)
+    const ended = { attemptId: id, phase: 'ended', ...expected }
+    await flushPushes()
+    expect(pushes.at(-1)).toStrictEqual(ended)
+    expect(store.snapshot()).toStrictEqual(ended)
   })
 
   // D6: the generation hook ends a waiting attempt `replaced`. It reads no clock (a bump past the
