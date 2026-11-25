@@ -23,7 +23,12 @@
  * §6.3 step 1); its caller owns the report (step 7).
  */
 import { type HostResource, REQUEST_TIMED_OUT_MESSAGE, apiSend, getHost } from './api'
-import { type EffectiveApproval, effectiveApproval, toolsEqual } from './approvalEffective'
+import {
+  type EffectiveApproval,
+  approvalBlockOf,
+  effectiveApproval,
+  toolsEqual,
+} from './approvalEffective'
 import { type LooseningItem, looseningItems, looseningItemsConfirmed } from './approvalLoosening'
 
 export type ApprovalClock = {
@@ -186,16 +191,6 @@ function statusOf(error: unknown): number | undefined {
 function messageOf(error: unknown): string {
   const message = isPlainObject(error) ? error.message : undefined
   return typeof message === 'string' && message.length > 0 ? message : String(error)
-}
-
-/**
- * `spec.approval` as mcp-host reads it (`host.spec.approval ||
- * CLERUM_APPROVAL_CONFIG`): absent, null, or not an object is no block.
- */
-function approvalBlockOf(host: unknown): Record<string, unknown> | undefined {
-  const spec = isPlainObject(host) ? host.spec : undefined
-  const block = isPlainObject(spec) ? spec.approval : undefined
-  return isPlainObject(block) ? block : undefined
 }
 
 /** A block's stored `tools`. One that is not an object holds no override. */

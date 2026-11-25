@@ -39,6 +39,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * A Host's `spec.approval`, as mcp-host reads it (`host.spec.approval ||
+ * CLERUM_APPROVAL_CONFIG`): absent, null, or not an object is no block (the
+ * agent inherits); `{}` is a block of its own. The save protocol and the
+ * Approvals tab's display state both read the block through this, so they
+ * agree on what a block is.
+ */
+export function approvalBlockOf(host: unknown): Record<string, unknown> | undefined {
+  const spec = isPlainObject(host) ? host.spec : undefined
+  const block = isPlainObject(spec) ? spec.approval : undefined
+  return isPlainObject(block) ? block : undefined
+}
+
 function readPolicy(value: unknown): EffectiveApproval['policy'] {
   if (value === undefined || value === null || value === '' || value === 'channel_users') {
     return 'open'

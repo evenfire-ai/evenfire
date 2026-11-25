@@ -30,6 +30,7 @@
  * this Control UI through a `BroadcastChannel`, to load again.
  */
 import type { HostResource } from './api'
+import { approvalBlockOf } from './approvalEffective'
 
 export type WriteGroup = 'ceiling' | 'tools'
 
@@ -112,15 +113,6 @@ function isHost(resource: unknown, host: string): boolean {
   return (
     isPlainObject(resource) && isPlainObject(resource.metadata) && resource.metadata.name === host
   )
-}
-
-/**
- * `spec.approval` as mcp-host reads it: absent, null or not an object is no
- * block (the agent inherits); `{}` is a block of its own.
- */
-function approvalBlockOf(resource: HostResource): Record<string, unknown> | undefined {
-  const block = isPlainObject(resource.spec) ? resource.spec.approval : undefined
-  return isPlainObject(block) ? block : undefined
 }
 
 function leafOf(block: Record<string, unknown> | undefined, key: string): Leaf {
