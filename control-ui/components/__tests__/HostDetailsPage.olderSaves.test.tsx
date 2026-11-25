@@ -203,6 +203,26 @@ describe('the page’s older saves (spec R16)', () => {
     }
   )
 
+  it('keeps the guardrails section on screen while the load after a save runs (initialLoading, first load only)', async () => {
+    const { fake, page, submit } = await openSave('guardrails')
+    const reload = fake.hold({ method: 'GET', path: FOO_DETAIL })
+    await submit()
+    // The save's PUT was sent, and the load after it is out.
+    await act(async () => {
+      await reload.arrived
+    })
+    expect(writes(fake)[0]?.applied, 'the PUT was applied').toBe(true)
+
+    expect(
+      screen.queryByRole('status', { name: 'Loading guardrail hooks' }),
+      'the loading placeholder'
+    ).toBeNull()
+    await act(async () => {
+      reload.deliverNow()
+    })
+    await settle()
+    page.unmount()
+  })
   it('busy stays set while a guardrails save and another load overlap', async () => {
     const [scenarioHost] = buildGuardrailDetailScenario('sample-hook', 'foo').hosts.items
     const fake = createFakeControlApi({
