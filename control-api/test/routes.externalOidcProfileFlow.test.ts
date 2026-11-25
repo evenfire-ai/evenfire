@@ -353,6 +353,61 @@ describe('Control API OIDC member sign-in completion', () => {
     expect(loggedText()).not.toMatch(/session-token-fixture|opaque-provider-subject|member@example/)
   })
 
+  it('logs an exception account with byInvitation and no email', async () => {
+    const signInMember = vi.fn().mockResolvedValue({
+      status: 'signed_in',
+      userId: 'user-3',
+      token: 'session-token-fixture',
+      contract: 'v2',
+      created: { account: true, link: true, byInvitation: true },
+      invitationsApplied: 1,
+    })
+    // The proof carries the invitation context, so its address is there to leak.
+    const invitationContextProof = {
+      ...proof,
+      signInContext: {
+        kind: 'invitation',
+        invitationId: '4e1d2c3b-5a6f-4b7c-8d9e-0f1a2b3c4d5e',
+        invitedEmail: 'invited@example.test',
+      },
+    }
+    const app = appFor(
+      { completeIdentityProofAttempt: vi.fn().mockResolvedValue(invitationContextProof) },
+      { memberSignIn: true, signInMember }
+    )
+
+    const response = await request(app)
+      .post(COMPLETE_PATH)
+      .set('x-request-id', 'request-fixture-3')
+      .send(completeBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      outcome: 'member_signed_in',
+      memberAuthenticationActivated: true,
+      token: 'session-token-fixture',
+      sessionContract: 'v2',
+    })
+    expect(signInMember).toHaveBeenCalledWith(invitationContextProof, expect.anything())
+    const context = {
+      registrationId: provider.registrationId,
+      issuer: provider.issuer,
+      subjectFingerprint: expect.stringMatching(/^[0-9a-f]{16}$/),
+      userId: 'user-3',
+      requestId: 'request-fixture-3',
+    }
+    // Only the account-created event says how the account came about.
+    expect(flowLog.info.mock.calls.map(call => call[0])).toEqual([
+      { event: 'oidc_member_account_created', ...context, byInvitation: true },
+      { event: 'oidc_member_link_created', ...context },
+      { event: 'oidc_member_invitation_applied', ...context, count: 1 },
+      { event: 'oidc_member_signed_in', ...context, sessionContract: 'v2' },
+    ])
+    expect(loggedText()).not.toMatch(
+      /session-token-fixture|opaque-provider-subject|member@example|invited@example/
+    )
+  })
+
   it('logs only the sign-in event for an existing linked member with no invitations', async () => {
     const signInMember = vi.fn().mockResolvedValue({
       status: 'signed_in',

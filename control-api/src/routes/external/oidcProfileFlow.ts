@@ -437,8 +437,14 @@ export function createExternalOidcProfileFlowRouter(
     }
     const member = { ...audit, userId: result.userId }
     if (result.created.account) {
+      // An account the invitation created while account creation is off says
+      // so. Never the invited address or the invitation token.
       logger.info(
-        { event: 'oidc_member_account_created', ...member },
+        {
+          event: 'oidc_member_account_created',
+          ...member,
+          ...(result.created.byInvitation ? { byInvitation: true } : {}),
+        },
         'OIDC member account created'
       )
     }

@@ -1,13 +1,21 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
-import { type DbTransactionClient, initDb, pool, withTransaction } from '../src/db.js'
+import {
+  type DbClient,
+  type DbTransactionClient,
+  initDb,
+  pool,
+  withTransaction,
+} from '../src/db.js'
 import type { PinnedFetchOptions } from '../src/http/pinnedFetch.js'
 import type { OidcProviderConfiguration } from '../src/oidc/configuration.js'
 import type { VerifiedOidcIdentityProof } from '../src/oidc/protocol.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
-import type { ExternalSessionContract } from '../src/services/auth/externalSessionIssuance.js'
-import type { OidcRefusal } from '../src/services/auth/oidcAccountResolution.js'
+import {
+  OidcInvitationWithdrawnError,
+  type OidcRefusal,
+} from '../src/services/auth/oidcAccountResolution.js'
 import {
   type OidcMemberSignInResult,
   signInOidcMember,
@@ -16,6 +24,7 @@ import {
   type InvitationPurpose,
   insertInvitationForTeams,
 } from '../src/services/directory/invitationStore.js'
+import { acceptInvitationForEmailInTransaction } from '../src/services/directory/membership.js'
 import type { InviteRole } from '../src/services/directory/types.js'
 import {
   type FakeIdTokenClaims,
@@ -32,7 +41,8 @@ import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
  * OIDC sign-in from an invitation link (design §9): the attempt carries an
  * `invitation` sign-in context, and account resolution compares the
  * provider's email with the invited email before it writes any account,
- * link or membership. Every statement the app runs goes through a pool whose
+ * link or membership. With account creation off, the invitation creates the
+ * one account it was sent to (the creation exception). Every statement the app runs goes through a pool whose
  * connections start as `control_api_runtime`, so the grants are part of what
  * is proved. Fixtures and reads use the owner pool.
  */
@@ -128,6 +138,18 @@ function uniqueLabel(label: string): string {
   return `${label}-${randomBytes(4).toString('hex')}`
 }
 
+function settle<T>(promise: Promise<T>): Promise<PromiseSettledResult<T>> {
+  return promise.then(
+    value => ({ status: 'fulfilled', value }),
+    (reason: unknown) => ({ status: 'rejected', reason })
+  )
+}
+
+function valueOf<T>(outcome: PromiseSettledResult<T>): T {
+  if (outcome.status === 'rejected') throw outcome.reason
+  return outcome.value
+}
+
 function signedIn(result: OidcMemberSignInResult) {
   if (result.status === 'refused') {
     throw new Error(`expected signed_in, got refused: ${result.reason}`)
@@ -173,14 +195,14 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
   function signIn(
     fake: OidcMemberSignInFakeProvider,
     proof: VerifiedOidcIdentityProof,
-    options: { contract?: ExternalSessionContract; transaction?: TransactionRunner } = {}
+    options: { transaction?: TransactionRunner } = {}
   ): Promise<OidcMemberSignInResult> {
     return signInOidcMember(
       {
         proof,
         provider: fake.provider,
         policy: policyOf(fake),
-        completion: { kind: 'session', contract: options.contract ?? 'v2', sessionPolicy },
+        completion: { kind: 'session', contract: 'v2', sessionPolicy },
       },
       { transaction: options.transaction ?? committed }
     )
@@ -235,17 +257,18 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
   /** A pending invitation written by the directory's own invitation insert. */
   async function seedInvitation(input: {
     email: string
+    /** The primary team, as a `member`. */
     teamId: string
-    role?: InviteRole
+    /** Further teams, after the primary one. */
+    moreTeams?: ReadonlyArray<{ teamId: string; role: InviteRole }>
     purpose?: InvitationPurpose
-    status?: 'draft' | 'pending'
   }): Promise<{ id: string; token: string }> {
     const created = await insertInvitationForTeams(testPool, {
       inviteeName: 'Invited Member',
       email: input.email,
-      teamAssignments: [{ teamId: input.teamId, role: input.role ?? 'member' }],
+      teamAssignments: [{ teamId: input.teamId, role: 'member' }, ...(input.moreTeams ?? [])],
       purpose: input.purpose ?? 'member_invitation',
-      status: input.status ?? 'pending',
+      status: 'pending',
     })
     return { id: created.invitation.id, token: created.invitation.token }
   }
@@ -310,6 +333,22 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
     return result.rows[0]!.n
   }
 
+  async function profileCount(userId: string): Promise<number> {
+    const result = await testPool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM profiles WHERE user_id = $1::uuid`,
+      [userId]
+    )
+    return result.rows[0]!.n
+  }
+
+  async function connectionCount(registrationId: string): Promise<number> {
+    const result = await testPool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM oidc_connections WHERE id = $1`,
+      [registrationId]
+    )
+    return result.rows[0]!.n
+  }
+
   async function userCount(email: string): Promise<number> {
     const result = await testPool.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM users WHERE lower(email) = lower($1)`,
@@ -332,15 +371,25 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
     return snapshot
   }
 
-  /** Resolves once another backend in this database waits on a row or key lock. */
-  async function waitForLockWaiter(): Promise<void> {
+  /**
+   * Resolves true once another backend in this database waits on a row or key
+   * lock, or false once `signingIn` settles without having waited: a sign-in
+   * that never reached the lock then fails on its outcome.
+   */
+  async function waitForLockWaiter(signingIn: Promise<unknown>): Promise<boolean> {
+    let settled = false
+    const markSettled = () => {
+      settled = true
+    }
+    void signingIn.then(markSettled, markSettled)
     for (let attempt = 0; attempt < 500; attempt += 1) {
       const waiting = await adminPool.query<{ n: number }>(
         `SELECT count(*)::int AS n FROM pg_stat_activity
           WHERE datname = $1 AND wait_event_type = 'Lock'`,
         [database]
       )
-      if (waiting.rows[0]!.n > 0) return
+      if (waiting.rows[0]!.n > 0) return true
+      if (settled) return false
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     throw new Error('no transaction ever waited on a lock')
@@ -613,6 +662,378 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
     expect(await invitationState(invitation.id)).toEqual({
       status: 'pending',
       accepted_user_id: null,
+    })
+  })
+
+  describe('the creation exception', () => {
+    /** Teams sorted as membershipsOf returns them. */
+    function byTeam(rows: Array<{ team_id: string; role: string }>) {
+      return [...rows].sort((a, b) => (a.team_id < b.team_id ? -1 : a.team_id > b.team_id ? 1 : 0))
+    }
+
+    it('creates the invited account when account creation is off', async () => {
+      const alice = `${uniqueLabel('alice')}@fixture.test`
+      const subject = uniqueLabel('exception-subject')
+      const teamId = await seedTeam('exception-team')
+      const invitation = await seedInvitation({ email: alice, teamId })
+      const proof = await invitationProof(
+        defaultFake,
+        { sub: subject, email: alice, email_verified: true },
+        { invitationId: invitation.id, invitedEmail: alice }
+      )
+      expect(policyOf(defaultFake).accountCreation).toBe('disabled')
+
+      const outcome = await signIn(defaultFake, proof)
+      expect(outcome.status).toBe('signed_in')
+      const result = signedIn(outcome)
+      expect(result.created).toStrictEqual({ account: true, link: true, byInvitation: true })
+      expect(result.invitationsApplied).toBe(1)
+      expect(await userCount(alice)).toBe(1)
+      expect(await profileCount(result.userId)).toBe(1)
+      expect(await linkCount(subject)).toBe(1)
+      expect(await invitationState(invitation.id)).toEqual({
+        status: 'accepted',
+        accepted_user_id: result.userId,
+      })
+      expect(await membershipsOf(result.userId)).toEqual([{ team_id: teamId, role: 'member' }])
+    })
+
+    it('gives the created account only the invitation teams, even with a new-member team configured', async () => {
+      const newMemberTeamId = await seedTeam('exception-new-member-team')
+      const fake = createOidcMemberSignInFakeProvider({
+        memberSignInEnv: {
+          CONTROL_API_OIDC_REGISTRATION_ID: 'fake-invitation-exception-new-member-team',
+          CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: newMemberTeamId,
+        },
+      })
+      expect(policyOf(fake)).toMatchObject({ accountCreation: 'disabled', newMemberTeamId })
+      const alice = `${uniqueLabel('alice')}@fixture.test`
+      const firstTeamId = await seedTeam('exception-first-team')
+      const secondTeamId = await seedTeam('exception-second-team')
+      const invitation = await seedInvitation({
+        email: alice,
+        teamId: firstTeamId,
+        moreTeams: [{ teamId: secondTeamId, role: 'inviter' }],
+      })
+      const proof = await invitationProof(
+        fake,
+        { sub: uniqueLabel('exception-teams-subject'), email: alice, email_verified: true },
+        { invitationId: invitation.id, invitedEmail: alice }
+      )
+
+      const outcome = await signIn(fake, proof)
+      expect(outcome.status).toBe('signed_in')
+      const result = signedIn(outcome)
+      expect(result.created).toStrictEqual({ account: true, link: true, byInvitation: true })
+      // Decision 14: an inviter of these teams grants no other team.
+      expect(await membershipsOf(result.userId)).toEqual(
+        byTeam([
+          { team_id: firstTeamId, role: 'member' },
+          { team_id: secondTeamId, role: 'inviter' },
+        ])
+      )
+    })
+
+    it('does not consult the new-member team, even one that does not exist', async () => {
+      const fake = createOidcMemberSignInFakeProvider({
+        memberSignInEnv: {
+          CONTROL_API_OIDC_REGISTRATION_ID: 'fake-invitation-exception-missing-team',
+          CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: randomUUID(),
+        },
+      })
+      const alice = `${uniqueLabel('alice')}@fixture.test`
+      const teamId = await seedTeam('exception-missing-team-invited')
+      const invitation = await seedInvitation({ email: alice, teamId })
+      const proof = await invitationProof(
+        fake,
+        { sub: uniqueLabel('exception-missing-team-subject'), email: alice, email_verified: true },
+        { invitationId: invitation.id, invitedEmail: alice }
+      )
+
+      // Normal creation refuses this configuration (unknown_new_member_team).
+      const outcome = await signIn(fake, proof)
+      expect(outcome.status).toBe('signed_in')
+      const result = signedIn(outcome)
+      expect(result.created).toStrictEqual({ account: true, link: true, byInvitation: true })
+      expect(await membershipsOf(result.userId)).toEqual([{ team_id: teamId, role: 'member' }])
+    })
+
+    it.each(['enabled', 'entra'] as const)(
+      'creates by the normal policy when creation is %s',
+      async mode => {
+        const newMemberTeamId = await seedTeam(`normal-${mode}-new-member-team`)
+        const registrationId = `fake-invitation-normal-${mode}`
+        const fake =
+          mode === 'entra'
+            ? entraFake(registrationId, { CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: newMemberTeamId })
+            : createOidcMemberSignInFakeProvider({
+                memberSignInEnv: {
+                  CONTROL_API_OIDC_REGISTRATION_ID: registrationId,
+                  CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+                  CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: newMemberTeamId,
+                },
+              })
+        expect(policyOf(fake).accountCreation).toBe(mode)
+        const alice = `${uniqueLabel('alice')}@fixture.test`
+        const subject = uniqueLabel(`normal-${mode}-subject`)
+        const teamId = await seedTeam(`normal-${mode}-invited-team`)
+        const invitation = await seedInvitation({ email: alice, teamId })
+        const claims =
+          mode === 'entra'
+            ? { sub: subject, tid: ENTRA_TENANT_ID, email: alice, xms_edov: true }
+            : { sub: subject, email: alice, email_verified: true }
+        const proof = await invitationProof(fake, claims, {
+          invitationId: invitation.id,
+          invitedEmail: alice,
+        })
+
+        const result = signedIn(await signIn(fake, proof))
+        // No byInvitation key at all: toEqual would also accept an undefined one.
+        expect(result.created).toStrictEqual({ account: true, link: true })
+        expect(await invitationState(invitation.id)).toEqual({
+          status: 'accepted',
+          accepted_user_id: result.userId,
+        })
+        expect(await membershipsOf(result.userId)).toEqual(
+          byTeam([
+            { team_id: teamId, role: 'member' },
+            { team_id: newMemberTeamId, role: 'member' },
+          ])
+        )
+      }
+    )
+
+    it.each(['revoked', 'expired', 'accepted', 'admin_desktop_access'] as const)(
+      'refuses no_account when the invitation is %s at the unlocked read',
+      async row => {
+        // A connection record no other test writes: a refusal that commits keeps
+        // it, while a refusal from the locked re-check rolls it back.
+        const registrationId = `fake-invitation-unlocked-${row.replaceAll('_', '-')}`
+        const fake = createOidcMemberSignInFakeProvider({
+          memberSignInEnv: { CONTROL_API_OIDC_REGISTRATION_ID: registrationId },
+        })
+        const alice = `${uniqueLabel('alice')}@fixture.test`
+        const subject = uniqueLabel(`unlocked-${row}-subject`)
+        const teamId = await seedTeam(`unlocked-${row}-team`)
+        const invitation = await seedInvitation({
+          email: alice,
+          teamId,
+          ...(row === 'admin_desktop_access' ? { purpose: 'admin_desktop_access' as const } : {}),
+        })
+        if (row === 'revoked') {
+          await testPool.query(`UPDATE invitations SET status = 'revoked' WHERE id = $1`, [
+            invitation.id,
+          ])
+        }
+        if (row === 'expired') {
+          await testPool.query(
+            `UPDATE invitations SET expires_at = now() - interval '1 minute' WHERE id = $1`,
+            [invitation.id]
+          )
+        }
+        if (row === 'accepted') {
+          // Accepted with no account at the address, so nothing resolves by email.
+          await testPool.query(
+            `UPDATE invitations SET status = 'accepted', accepted_at = now() WHERE id = $1`,
+            [invitation.id]
+          )
+        }
+        const proof = await invitationProof(
+          fake,
+          { sub: subject, email: alice, email_verified: true },
+          { invitationId: invitation.id, invitedEmail: alice }
+        )
+        const before = await watchedTables()
+
+        expect(await signIn(fake, proof)).toEqual({ status: 'refused', reason: 'no_account' })
+        expect(await userCount(alice)).toBe(0)
+        expect(await linkCount(subject)).toBe(0)
+        expect(await watchedTables()).toEqual(before)
+        expect(await connectionCount(registrationId)).toBe(1)
+      }
+    )
+
+    it('refuses no_account and writes nothing when a revoke commits while the sign-in waits on the invitation', async () => {
+      // Never seeded, so the connection record exists only if the sign-in commits.
+      const registrationId = 'fake-invitation-revoke-race'
+      const fake = createOidcMemberSignInFakeProvider({
+        memberSignInEnv: { CONTROL_API_OIDC_REGISTRATION_ID: registrationId },
+      })
+      const alice = `${uniqueLabel('alice')}@fixture.test`
+      const subject = uniqueLabel('revoke-race-subject')
+      const teamId = await seedTeam('revoke-race-team')
+      const invitation = await seedInvitation({ email: alice, teamId })
+      const proof = await invitationProof(
+        fake,
+        { sub: subject, email: alice, email_verified: true },
+        { invitationId: invitation.id, invitedEmail: alice }
+      )
+
+      const revoke = await testPool.connect()
+      let signingIn: Promise<PromiseSettledResult<OidcMemberSignInResult>> | undefined
+      let waited = false
+      try {
+        await revoke.query('BEGIN')
+        // The statement revokePendingInvitation runs, left uncommitted.
+        const revoked = await revoke.query(
+          `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'pending'`,
+          [invitation.id]
+        )
+        expect(revoked.rowCount).toBe(1)
+        signingIn = settle(signIn(fake, proof))
+        waited = await waitForLockWaiter(signingIn)
+        await revoke.query('COMMIT')
+      } catch (error) {
+        await revoke.query('ROLLBACK')
+        throw error
+      } finally {
+        revoke.release()
+        if (signingIn) await signingIn
+      }
+
+      expect(valueOf(await signingIn!)).toEqual({ status: 'refused', reason: 'no_account' })
+      expect(await userCount(alice)).toBe(0)
+      expect(await linkCount(subject)).toBe(0)
+      // The rollback undoes the connection record too.
+      expect(await connectionCount(registrationId)).toBe(0)
+      expect(await invitationState(invitation.id)).toEqual({
+        status: 'revoked',
+        accepted_user_id: null,
+      })
+      expect(waited, 'the sign-in waited on the invitation lock').toBe(true)
+    })
+
+    it('signs in to the account a concurrent password acceptance created', async () => {
+      const alice = `${uniqueLabel('alice')}@fixture.test`
+      const subject = uniqueLabel('lost-insert-subject')
+      const teamId = await seedTeam('lost-insert-team')
+      const invitation = await seedInvitation({ email: alice, teamId })
+      const proof = await invitationProof(
+        defaultFake,
+        { sub: subject, email: alice, email_verified: true },
+        { invitationId: invitation.id, invitedEmail: alice }
+      )
+
+      const acceptance = await testPool.connect()
+      let signingIn: Promise<PromiseSettledResult<OidcMemberSignInResult>> | undefined
+      let acceptedUserId = ''
+      let waited = false
+      try {
+        await acceptance.query('BEGIN')
+        // The invitation link's own password acceptance, left uncommitted: it has
+        // created alice's user and accepted the invitation.
+        const byPassword = await acceptInvitationForEmailInTransaction(
+          acceptance as unknown as DbClient,
+          alice,
+          invitation.token
+        )
+        if (!('data' in byPassword) || !byPassword.data) {
+          throw new Error('the password acceptance was refused')
+        }
+        acceptedUserId = byPassword.data.userId
+        signingIn = settle(signIn(defaultFake, proof))
+        waited = await waitForLockWaiter(signingIn)
+        await acceptance.query('COMMIT')
+      } catch (error) {
+        await acceptance.query('ROLLBACK')
+        throw error
+      } finally {
+        acceptance.release()
+        if (signingIn) await signingIn
+      }
+
+      const result = valueOf(await signingIn!)
+      expect(result).toMatchObject({
+        status: 'signed_in',
+        userId: acceptedUserId,
+        created: { account: false, link: true },
+        invitationsApplied: 0,
+      })
+      expect(result).not.toHaveProperty('created.byInvitation')
+      expect(await userCount(alice)).toBe(1)
+      expect(await linkCount(subject)).toBe(1)
+      expect(await invitationState(invitation.id)).toEqual({
+        status: 'accepted',
+        accepted_user_id: acceptedUserId,
+      })
+      expect(await membershipsOf(acceptedUserId)).toEqual([{ team_id: teamId, role: 'member' }])
+      expect(waited, 'the sign-in waited on the users insert').toBe(true)
+    })
+
+    it('requires eligibility before the exception', async () => {
+      const fake = createOidcMemberSignInFakeProvider({
+        memberSignInEnv: {
+          CONTROL_API_OIDC_REGISTRATION_ID: 'fake-invitation-required-claim',
+          CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: 'evenfire-member',
+        },
+      })
+      expect(policyOf(fake)).toMatchObject({
+        accountCreation: 'disabled',
+        requiredClaim: { name: 'roles', value: 'evenfire-member' },
+      })
+      const alice = `${uniqueLabel('alice')}@fixture.test`
+      const subject = uniqueLabel('eligibility-subject')
+      const teamId = await seedTeam('eligibility-team')
+      const invitation = await seedInvitation({ email: alice, teamId })
+      const context = { invitationId: invitation.id, invitedEmail: alice }
+
+      // No roles claim: the invitation does not stand in for eligibility.
+      const before = await watchedTables()
+      const ineligible = await invitationProof(
+        fake,
+        { sub: subject, email: alice, email_verified: true },
+        context
+      )
+      expect(await signIn(fake, ineligible)).toEqual({ status: 'refused', reason: 'not_eligible' })
+      expect(await userCount(alice)).toBe(0)
+      expect(await watchedTables()).toEqual(before)
+
+      // Control: with the required role, the exception creates the account.
+      const eligible = await invitationProof(
+        fake,
+        { sub: subject, email: alice, email_verified: true, roles: ['evenfire-member'] },
+        context
+      )
+      const outcome = await signIn(fake, eligible)
+      expect(outcome.status).toBe('signed_in')
+      const result = signedIn(outcome)
+      expect(result.created).toStrictEqual({ account: true, link: true, byInvitation: true })
+      expect(await userCount(alice)).toBe(1)
+    })
+
+    it('maps a withdrawn invitation to no_account on the first run and on the 23505 rerun, without a retry of its own', async () => {
+      const proof = await defaultFake.signIn({
+        sub: uniqueLabel('withdrawn-subject'),
+        email: `${uniqueLabel('withdrawn')}@fixture.test`,
+        email_verified: true,
+      })
+
+      let firstRunCalls = 0
+      const withdrawnAtOnce: TransactionRunner = async () => {
+        firstRunCalls += 1
+        throw new OidcInvitationWithdrawnError()
+      }
+      await expect(signIn(defaultFake, proof, { transaction: withdrawnAtOnce })).resolves.toEqual({
+        status: 'refused',
+        reason: 'no_account',
+      })
+      expect(firstRunCalls).toBe(1)
+
+      let rerunCalls = 0
+      const withdrawnOnRerun: TransactionRunner = async () => {
+        rerunCalls += 1
+        if (rerunCalls === 1) {
+          throw Object.assign(new Error('duplicate key value violates unique constraint'), {
+            code: '23505',
+          })
+        }
+        throw new OidcInvitationWithdrawnError()
+      }
+      await expect(signIn(defaultFake, proof, { transaction: withdrawnOnRerun })).resolves.toEqual({
+        status: 'refused',
+        reason: 'no_account',
+      })
+      expect(rerunCalls).toBe(2)
     })
   })
 })

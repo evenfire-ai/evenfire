@@ -65,7 +65,8 @@ const MAX_REQUIRED_CLAIM_VALUE_LENGTH = 256
  * Whether a first sign-in with no matching account creates one. `entra`: an
  * Entra issuer pinned to one tenant always creates. `enabled`: the operator
  * attests that the non-Entra issuer signs in only the company's people.
- * `disabled`: only existing accounts sign in.
+ * `disabled`: only existing accounts sign in, except that a pending member
+ * invitation creates the one account it was sent to.
  */
 export type OidcAccountCreation = 'entra' | 'enabled' | 'disabled'
 

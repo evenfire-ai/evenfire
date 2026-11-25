@@ -310,10 +310,14 @@ Settings:
 - `CONTROL_API_OIDC_ACCOUNT_CREATION=enabled`: a first sign-in that finds no
   account creates one. Set it only when the issuer signs in only your
   company's people. Without it, a non-Entra issuer signs in only existing
-  accounts. It is refused for Entra ID, which always creates accounts for the
-  pinned tenant.
+  accounts, with one exception: a sign-in started from a pending member
+  invitation link creates the account that invitation was sent to, when the
+  verified email matches the invited address. The required claim still
+  applies, and that account joins only the invitation's teams. The setting is
+  refused for Entra ID, which always creates accounts for the pinned tenant.
 - `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID`: a team UUID that each account the
-  sign-in creates joins as a `member`.
+  sign-in creates joins as a `member`. It is not applied to an account an
+  invitation link creates while account creation is off.
 - Entra ID is an issuer on `login.microsoftonline.com`,
   `login.microsoftonline.us` or `login.partner.microsoftonline.cn`. It needs
   `CONTROL_API_OIDC_TENANT_ID` (a tenant GUID), and the issuer must be
@@ -357,10 +361,12 @@ Provider checklist:
   check `hd`, not the email domain, to restrict access to a domain.
 - **`email_verified`.** Know what your issuer's `email_verified` proves. A
   first sign-in with a verified email links to the existing account with that
-  address, or creates one where account creation is on. OpenID Connect leaves
-  how an address is verified to the issuer.
+  address, or creates one where account creation is on or where an invitation
+  link to that address started the sign-in. OpenID Connect leaves how an
+  address is verified to the issuer.
 - **New-member team.** Don't set one for an issuer that isn't bound to your
-  company: every account the sign-in creates joins that team.
+  company: every account the sign-in creates joins that team, except one an
+  invitation link creates while account creation is off.
 - **Okta groups.** Okta's org authorization server puts the groups claim in
   the ID token only when the `groups` scope is requested, and sign-in doesn't
   request it. Add the groups claim on a custom authorization server instead,
