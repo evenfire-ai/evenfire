@@ -20,8 +20,10 @@
  * The script runs once per Host CRD version. On the current CRD it also records
  * the bodies Control UI tests consume, in test/fixtures/wire/: with
  * UPDATE_WIRE_GOLDENS=1 it writes them; otherwise it asserts they are unchanged.
- * One of them is not a script step: the 500 a `/detail` read answers when the
- * Host read fails unexpectedly, recorded with NODE_ENV=production.
+ * Two of them are not script steps, and both are recorded with
+ * NODE_ENV=production: the 500 a `/detail` read answers when the Host read
+ * fails unexpectedly, and the 403 a PUT answers when the apiserver forbids the
+ * replace.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -42,6 +44,7 @@ import {
   type HarnessWrite,
   type HostRouteHarness,
   buildHostRouteHarness,
+  kubernetesStatus,
 } from './helpers/hostRouteHarness.js'
 
 const UPDATE = process.env.UPDATE_WIRE_GOLDENS === '1'
@@ -423,6 +426,12 @@ function maskCorrelationId(wire: unknown): unknown {
 const DETAIL_500_SOURCE =
   "control-api/test/routes.hostPut.fakeContract.test.ts: GET /api/v1/admin/hosts/foo/detail whose Host read throws a plain Error, answered by clerumErrorHandler's production branch (NODE_ENV=production), as deployed control-api answers"
 
+const PUT_403_SOURCE =
+  "control-api/test/routes.hostPut.fakeContract.test.ts: versioned PUT /api/v1/admin/hosts/foo whose replace the apiserver refuses with an RBAC Forbidden Status (deploy/base/cluster-wide/clusterrolebindings.yaml names control-api's service account), forwarded by clerumErrorHandler's 4xx branch (NODE_ENV=production)"
+// The apiserver's RBAC refusal of control-api's replace, in the apiserver's own wording.
+const RBAC_FORBIDDEN_MESSAGE =
+  'hosts.clerum.io "foo" is forbidden: User "system:serviceaccount:control-plane:control-api" cannot update resource "hosts" in API group "clerum.io" in the namespace "mcp-host"'
+
 // Accepted PUTs whose stored spec changes (a new generation) or stays the same,
 // per Host CRD: v0.12.1 prunes the only change CURRENT_CRD_ONLY_CHANGE makes.
 const SPEC_CHANGING_PUTS = {
@@ -604,6 +613,39 @@ describe.each(['current', 'v0.12.1'] as const)(
         pinWire(
           'host-detail-500.wire.json',
           { _source: DETAIL_500_SOURCE, status: res.status, body: res.body as unknown },
+          maskCorrelationId
+        )
+      } finally {
+        vi.unstubAllEnvs()
+      }
+    })
+
+    it("records control-api's 403 for a Host PUT the apiserver forbids", async () => {
+      vi.stubEnv('NODE_ENV', 'production')
+      try {
+        const read = await request(harness.app)
+          .get(HOST_PATH)
+          .set('x-correlation-id', CORRELATION_ID)
+        const host = read.body as HostObject
+        const replaces = harness.replaceBodies.length
+        harness.failNextReplace(kubernetesStatus(403, 'Forbidden', RBAC_FORBIDDEN_MESSAGE))
+        const res = await request(harness.app)
+          .put(HOST_PATH)
+          .send({ metadata: { resourceVersion: host.metadata.resourceVersion }, spec: host.spec })
+          .set('x-correlation-id', CORRELATION_ID)
+        // The replace was sent and refused: the 403 is the apiserver's, not a route check.
+        expect(harness.replaceBodies.slice(replaces), 'replaces sent').toHaveLength(1)
+        expect(harness.store.get('hosts', 'foo')?.metadata.resourceVersion, 'stored version').toBe(
+          host.metadata.resourceVersion
+        )
+        expect(res.status).toBe(403)
+        expect(Object.keys(res.body as object).sort(), 'the production body').toEqual([
+          'correlationId',
+          'error',
+        ])
+        pinWire(
+          'host-put-403.wire.json',
+          { _source: PUT_403_SOURCE, status: res.status, body: res.body as unknown },
           maskCorrelationId
         )
       } finally {

@@ -46,7 +46,9 @@
  * - errors are `@kubernetes/client-node` `ApiException`s carrying a metav1
  *   Status body, as the real client throws them. `failNextRead` makes the next
  *   object read throw a given error instead, for a failure the routes do not
- *   expect.
+ *   expect. `failNextReplace` does the same for the next replace, after its
+ *   body is recorded, for an apiserver refusal this model has no rule for
+ *   (an RBAC 403, for example).
  * There is no delete.
  */
 import { type MockInstance, vi } from 'vitest'
@@ -163,6 +165,11 @@ export interface HostRouteHarness {
   adminOperations: AdministrativeOperationCall[]
   /** Makes the apiserver's next object read (`getNamespacedCustomObject`) throw `error`. */
   failNextRead(error: Error): void
+  /**
+   * Makes the apiserver's next replace (`replaceNamespacedCustomObject`) throw
+   * `error` after recording its body in `replaceBodies`; nothing is stored.
+   */
+  failNextReplace(error: Error): void
   /** Restores the Postgres spies and clears the administrative-operation service. */
   dispose(): void
 }
@@ -238,7 +245,12 @@ function deterministicId(variant: string, n: number): string {
   return `00000000-0000-4000-${variant}-${String(n).padStart(12, '0')}`
 }
 
-function kubernetesStatus(code: number, reason: string, message: string): ApiException<unknown> {
+/** An apiserver refusal as `@kubernetes/client-node` throws it: an ApiException carrying a metav1 Status. */
+export function kubernetesStatus(
+  code: number,
+  reason: string,
+  message: string
+): ApiException<unknown> {
   return new ApiException(
     code,
     message,
@@ -255,6 +267,7 @@ function createApiserver(crd: HostCrdApprovalVersion) {
   let revision = 0
   let uids = 0
   let readFailure: Error | undefined
+  let replaceFailure: Error | undefined
   const nextVersion = () => String((revision += 1))
   const keyOf = (namespace: string, plural: string, name: string) =>
     `${namespace}/${plural}/${name}`
@@ -366,6 +379,11 @@ function createApiserver(crd: HostCrdApprovalVersion) {
       body,
     }: Target & { body: HarnessObject }) {
       replaceBodies.push({ plural, namespace, name, body: copy(body) })
+      if (replaceFailure) {
+        const failure = replaceFailure
+        replaceFailure = undefined
+        throw failure
+      }
       const current = requireCurrent(namespace, plural, name)
       const precondition = body.metadata?.resourceVersion
       if (!precondition) {
@@ -435,8 +453,11 @@ function createApiserver(crd: HostCrdApprovalVersion) {
   const failNextRead = (error: Error) => {
     readFailure = error
   }
+  const failNextReplace = (error: Error) => {
+    replaceFailure = error
+  }
 
-  return { customApi, store, replaceBodies, patchBodies, failNextRead }
+  return { customApi, store, replaceBodies, patchBodies, failNextRead, failNextReplace }
 }
 
 function createAdministrativeOperations(calls: AdministrativeOperationCall[]) {
@@ -547,6 +568,7 @@ export function buildHostRouteHarness(options: HostRouteHarnessOptions = {}): Ho
     patchBodies: apiserver.patchBodies,
     adminOperations,
     failNextRead: apiserver.failNextRead,
+    failNextReplace: apiserver.failNextReplace,
     dispose() {
       for (const spy of spies) spy.mockRestore()
       setAdministrativeOperationService(null)
