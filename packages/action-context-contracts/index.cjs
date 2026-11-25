@@ -176,6 +176,14 @@ function isWholeSeconds(value) {
   return Number.isSafeInteger(value) && value > 0
 }
 
+// A clock in seconds stays below this bound until the year 5138. `Date.now()`, which is in
+// milliseconds, has been above it since 1973, so a millisecond clock is refused.
+const VERIFIER_CLOCK_MAX_SECONDS = 99_999_999_999
+
+function isVerifierClockSeconds(value) {
+  return isWholeSeconds(value) && value <= VERIFIER_CLOCK_MAX_SECONDS
+}
+
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0
 }
@@ -194,7 +202,8 @@ function sameJsonValue(left, right) {
  *
  * expected: { v, iss, host, sub } plus, for v 1, { teamId, requiredScope } and, for v 2, every
  * bound V2 claim (operationId ... checkedAt).
- * nowSeconds: the verifier clock in whole seconds since the epoch; required.
+ * nowSeconds: the verifier clock in whole seconds since the epoch; required. A millisecond clock
+ * such as Date.now() is refused.
  */
 function validateHostEdgeAssertionClaims(payload, expected, nowSeconds) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -203,7 +212,7 @@ function validateHostEdgeAssertionClaims(payload, expected, nowSeconds) {
   if (!expected || (expected.v !== 1 && expected.v !== 2)) {
     return edgeAssertionFailure('expected version must be 1 or 2')
   }
-  if (!isWholeSeconds(nowSeconds)) {
+  if (!isVerifierClockSeconds(nowSeconds)) {
     return edgeAssertionFailure('verifier clock must be whole seconds')
   }
   if (payload.v !== expected.v) return edgeAssertionFailure('version mismatch')

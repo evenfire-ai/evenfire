@@ -863,3 +863,38 @@ test('validator requires the verifier clock in whole seconds', () => {
     ok: true,
   })
 })
+
+test('validator refuses a verifier clock that is not in seconds', () => {
+  // With a millisecond clock the future-iat bound could never fire: this assertion a year
+  // ahead of the verifier must not be accepted.
+  const yearAhead = EDGE_NOW + 31_536_000
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ iat: yearAhead, exp: yearAhead + 300 }),
+      V1_EXPECTED,
+      EDGE_NOW * 1000
+    ),
+    { ok: false, error: 'verifier clock must be whole seconds' }
+  )
+  for (const clock of [EDGE_NOW * 1000, Date.now(), 100_000_000_000]) {
+    assert.deepEqual(
+      contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, clock),
+      { ok: false, error: 'verifier clock must be whole seconds' },
+      String(clock)
+    )
+  }
+  // Liveness witness: the same payload passes with the clock in seconds, and the largest
+  // clock the validator takes as seconds still reaches the claim checks.
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
+  const lastSecond = 99_999_999_999
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ iat: lastSecond, exp: lastSecond + 300 }),
+      V1_EXPECTED,
+      lastSecond
+    ),
+    { ok: true }
+  )
+})
