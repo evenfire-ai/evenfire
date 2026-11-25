@@ -853,6 +853,40 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
       }
     )
 
+    it('refuses no_account when the context names an invitation sent to another address', async () => {
+      // A connection record no other test writes: the refusal commits it.
+      const registrationId = 'fake-invitation-other-address'
+      const fake = createOidcMemberSignInFakeProvider({
+        memberSignInEnv: { CONTROL_API_OIDC_REGISTRATION_ID: registrationId },
+      })
+      const alice = `${uniqueLabel('alice')}@fixture.test`
+      const carol = `${uniqueLabel('carol')}@fixture.test`
+      const subject = uniqueLabel('other-address-subject')
+      const teamId = await seedTeam('other-address-team')
+      const carolInvitation = await seedInvitation({ email: carol, teamId })
+      // Alice's proof, and a context whose address is hers but whose
+      // invitation is carol's: the comparison passes, so only the
+      // invitation's own address can refuse the creation.
+      const proof = await invitationProof(
+        fake,
+        { sub: subject, email: alice, email_verified: true },
+        { invitationId: carolInvitation.id, invitedEmail: alice }
+      )
+      const before = await watchedTables()
+
+      expect(await signIn(fake, proof)).toEqual({ status: 'refused', reason: 'no_account' })
+      expect(await userCount(alice)).toBe(0)
+      expect(await userCount(carol)).toBe(0)
+      expect(await linkCount(subject)).toBe(0)
+      expect(await invitationState(carolInvitation.id)).toEqual({
+        status: 'pending',
+        accepted_user_id: null,
+      })
+      expect(await watchedTables()).toEqual(before)
+      // The sign-in ran to resolution and committed its refusal.
+      expect(await connectionCount(registrationId)).toBe(1)
+    })
+
     it('refuses no_account and writes nothing when a revoke commits while the sign-in waits on the invitation', async () => {
       // Never seeded, so the connection record exists only if the sign-in commits.
       const registrationId = 'fake-invitation-revoke-race'
