@@ -27,6 +27,11 @@ export default defineConfig({
       '@contexts': path.resolve(__dirname, 'src/contexts'),
       '@styles': path.resolve(__dirname, 'src/styles'),
       '@types': path.resolve(__dirname, 'src/types'),
+      // Its browser build needs a document, which the Markdown worker lacks.
+      'decode-named-character-reference': path.resolve(
+        __dirname,
+        '../node_modules/decode-named-character-reference/index.js'
+      ),
     },
   },
   optimizeDeps: {
@@ -41,5 +46,8 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, '../ui-dist'),
     emptyOutDir: true,
+    // The CSP blocks fonts inlined as data: URLs.
+    assetsInlineLimit: (filePath: string) =>
+      /\.(woff2?|ttf|otf)$/i.test(filePath) ? false : undefined,
   },
 })
