@@ -23,11 +23,13 @@ export interface ApprovalToolCatalogEntry {
   registeredWhen?: string
 }
 
+// The conditions texts describe the tool's default behaviour with no override.
+// What each approval mode does is stated by the Approval modes view, not here.
 export const CRON_MANAGE_CONDITIONS =
-  'Runs without a card on a stateless Host that has not allowed cron management, and in tasks fired by a schedule. Asks otherwise.'
+  'By default it runs without a card on a stateless Host that has not allowed cron management, and in tasks fired by a schedule. It asks otherwise.'
 
 export const WORKFLOW_TRIGGER_CONDITIONS =
-  'Runs without a card from Telegram, Slack and Teams tasks, and in tasks fired by a schedule. Asks in an interactive Desktop chat.'
+  'By default it runs without a card from Telegram, Slack and Teams tasks, and in tasks fired by a schedule. It asks in an interactive Desktop chat.'
 
 /**
  * Derived from `gfsDownloadStore` and `gfsScopes` only: an available store plus
@@ -37,7 +39,7 @@ export const WORKFLOW_TRIGGER_CONDITIONS =
  * absent is the safe direction for a "still running without a card" list.
  */
 export const GFS_DOWNLOAD_REGISTERED_WHEN =
-  "Only where the Host's GFS download store is available and the agent holds gfs.read; never asks there."
+  "By default it never asks, and it is registered only where the Host's GFS download store is available and the agent holds gfs.read."
 
 export const APPROVAL_TOOL_CATALOG: ReadonlyArray<ApprovalToolCatalogEntry> = [
   { name: 'browser_click', asks: 'never' },

@@ -121,6 +121,16 @@ describe('neverAskTools', () => {
     expect(entry?.conditions).toMatch(/stateless/i)
   })
 
+  it('every conditions text describes the default behaviour, with no override or mode', () => {
+    const withText = never.filter(entry => entry.conditions !== undefined)
+    expect(withText.map(entry => entry.name)).toEqual([
+      'clerum__gfs_download',
+      'cron_manage',
+      'workflow_trigger',
+    ])
+    for (const entry of withText) expect(entry.conditions, entry.name).toMatch(/^By default /)
+  })
+
   it('lists clerum__gfs_download with the store condition', () => {
     const entry = never.find(item => item.name === 'clerum__gfs_download')
     expect(entry?.conditions).toMatch(/gfs\.read/)
