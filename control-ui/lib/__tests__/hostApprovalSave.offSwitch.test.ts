@@ -967,6 +967,31 @@ describe('Set to Manual now (spec §6.3)', () => {
       expect(clock.pending(), 'timers left').toBe(0)
     })
 
+    it('a backoff timer that fires late never starts an attempt after 20 s', async () => {
+      // A throttled background tab: each backoff fires 3 s late, while the
+      // request timeouts keep time.
+      __setApprovalClockForTests(
+        {
+          ...clock,
+          setTimeout: (fn, ms) => clock.setTimeout(fn, ms === REQUEST_MS ? ms : ms + 3_000),
+        },
+        seededRandom(17)
+      )
+      const { fake, starts } = conflictingFake({ modeCeiling: 'auto' }, Infinity)
+      const outcome = await drive(setManualNow('foo'))
+
+      expect(outcome).toEqual({
+        kind: 'failed',
+        message: putMessage(HOST_PUT_409),
+        fallback: fallback('mcp-host', 'foo'),
+      })
+      expect(Math.max(...starts), 'the last attempt start').toBeLessThanOrEqual(BUDGET_MS)
+      // The last backoff fired after the 20 s mark, and the run ended there.
+      expect(clock.now()).toBeGreaterThan(BUDGET_MS)
+      expect(clock.pending(), 'timers left').toBe(0)
+      expect(writes(fake).every(entry => entry.response?.status === 409)).toBe(true)
+    })
+
     it('a 422 returns its field message and the fallback', async () => {
       // A model name with no provider: control-api validates the whole spec,
       // so a field the switch did not touch refuses it.

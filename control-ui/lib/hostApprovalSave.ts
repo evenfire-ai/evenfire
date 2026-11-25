@@ -575,6 +575,9 @@ async function runOffSwitch(
       return offSwitchFailed(run, result.message)
     }
     await sleep(clock, Math.min(result.retryAfterMs + backoffMs(retry, random), deadline - now))
+    // A timer can fire late (a throttled background tab): the next attempt
+    // still never starts after the deadline.
+    if (clock.now() > deadline) return offSwitchFailed(run, result.message)
   }
 }
 
