@@ -16,7 +16,7 @@
  *   - the ceiling, which the function receives;
  *   - `stateless` and `allowStatelessCron`, which it does not.
  * - A context counts under a ceiling only if its effectiveMode can occur under
- *   that ceiling (Ruling 1):
+ *   that ceiling (the ceiling filter, a controller dispatch note):
  *   - manual allows manual;
  *   - auto allows manual and auto;
  *   - allow_all allows all three.
@@ -33,11 +33,11 @@
  * rows are the gate's answer for the bridge name, which production never
  * consults: mcp-host rewrites a bridge call to its target before the gate
  * (resolveBridgeCall in mcp-host/src/core/orchestration/toolUseLoopToolBatch.ts).
- * The rows therefore describe a card production never shows (Ruling 4).
+ * The rows therefore describe a card production never shows.
  *
  * Paths are independent. The asks key has no field for another tool's
  * override, so a tool's answer never depends on one, and the items of a
- * multi-path save are the union of its single-path items (Ruling 6).
+ * multi-path save are the union of its single-path items (spec A6).
  *
  * One cross-tool effect is registration, not asking (Ruling 21):
  * - On a Host with a GFS download store, tools.shell_exec: false unregisters
@@ -485,7 +485,7 @@ describe('looseningItems, rule by rule', () => {
     ).toEqual([])
   })
 
-  it('treats tools.clerum__tool_call as a custom row, never laxer (Ruling 4)', () => {
+  it('treats tools.clerum__tool_call as a custom row, never laxer', () => {
     const items = (from: Override, to: Override) =>
       singlePathItems('clerum__tool_call', from, to, 'manual')
     const custom = [{ path: 'tools.clerum__tool_call', rule: 'custom_row_unknown_default' }]
@@ -590,7 +590,7 @@ describe('looseningItems, rule by rule', () => {
   })
 })
 
-describe('looseningItems, multi-path (union of single-path items, Ruling 6)', () => {
+describe('looseningItems, multi-path (union of single-path items, spec A6)', () => {
   const before = {
     tools: {
       shell_exec: true,
@@ -700,7 +700,7 @@ describe('looseningItems, multi-path (union of single-path items, Ruling 6)', ()
   })
 })
 
-describe('looseningItems, first save (Ruling 5)', () => {
+describe('looseningItems, first save (spec §6.6)', () => {
   const policyItem = { path: 'defaultPolicy', rule: 'policy_open_on_first_save' }
 
   it('a first save with an open policy yields policy_open_on_first_save', () => {
@@ -755,7 +755,7 @@ describe('looseningItems, first save (Ruling 5)', () => {
   })
 })
 
-describe('sameLooseningItems (Ruling 7)', () => {
+describe('sameLooseningItems', () => {
   const skip = { path: 'tools.shell_exec', rule: 'tool_to_skip' } as const
   const custom = { path: 'tools.my_tool', rule: 'custom_row_unknown_default' } as const
   const policy = { path: 'defaultPolicy', rule: 'policy_open_on_first_save' } as const
