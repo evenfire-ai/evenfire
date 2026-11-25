@@ -6,7 +6,11 @@ import { useAuth } from '../AuthContext'
 import { AuthGate } from '../AuthGate'
 
 vi.mock('../AuthContext', () => ({ useAuth: vi.fn() }))
-vi.mock('../LoginPanel', () => ({ LoginPanel: () => <div>login-panel</div> }))
+vi.mock('../LoginPanel', () => ({
+  LoginPanel: ({ returnTo }: { returnTo?: string }) => (
+    <div data-return-to={returnTo}>login-panel</div>
+  ),
+}))
 
 afterEach(cleanup)
 
@@ -73,4 +77,32 @@ describe('AuthGate', () => {
       }
     }
   )
+
+  it('passes returnTo to the sign-in panel when signed out', () => {
+    vi.mocked(useAuth).mockReturnValue({
+      authState: { isLoggedIn: false, isLoading: false, me: null },
+      checkAuth: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      signOutIncomplete: false,
+      signOutPending: false,
+      retrySignOut: vi.fn(),
+    })
+
+    render(
+      <AuthGate returnTo="desktop-setup">
+        <div>protected profile content</div>
+      </AuthGate>
+    )
+    expect(screen.getByText('login-panel')).toHaveAttribute('data-return-to', 'desktop-setup')
+    expect(screen.queryByText('protected profile content')).toBeNull()
+
+    cleanup()
+    render(
+      <AuthGate>
+        <div>protected profile content</div>
+      </AuthGate>
+    )
+    expect(screen.getByText('login-panel')).not.toHaveAttribute('data-return-to')
+  })
 })

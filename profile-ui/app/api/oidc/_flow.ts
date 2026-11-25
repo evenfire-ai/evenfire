@@ -3,6 +3,8 @@ import { isIP } from 'node:net'
 import {
   OIDC_SIGNED_IN_MARKER_COOKIE,
   OIDC_SIGNED_IN_MARKER_MAX_AGE_SECONDS,
+  type OidcReturnTo,
+  isOidcReturnTo,
 } from '../../constants/oidc'
 import { EXTERNAL_REST_API_INTERNAL_URL } from '../../constants/serverApi'
 import { OIDC_REFUSAL_REASONS, type OidcCompletionOutcome, type OidcRefusalReason } from './types'
@@ -246,9 +248,12 @@ export function newBrowserBinding(): string {
   return randomBytes(32).toString('base64url')
 }
 
+function stateCookieSuffix(state: string): string {
+  return createHash('sha256').update(state).digest('hex').slice(0, 24)
+}
+
 export function browserCookieName(state: string): string {
-  const suffix = createHash('sha256').update(state).digest('hex').slice(0, 24)
-  return `__Host-ef_oidc_${suffix}`
+  return `__Host-ef_oidc_${stateCookieSuffix(state)}`
 }
 
 export function validBinding(value: unknown): value is string {
@@ -272,9 +277,53 @@ export function readSingleCookie(request: Request, name: string): string | undef
   return matches[0]
 }
 
-export function setBrowserCookie(name: string, binding: string, maxAgeSeconds: number): string {
+/**
+ * Carries the page that started sign-in (a closed-set value) from `/start` to the callback.
+ * Named from the state like the binding cookie, so concurrent attempts don't collide.
+ */
+export function returnToCookieName(state: string): string {
+  return `__Host-ef_oidc_return_${stateCookieSuffix(state)}`
+}
+
+/** Every value the request's Cookie header carries under `name`, or none for an oversized header. */
+function cookieValues(request: Request, name: string): string[] {
+  const header = request.headers.get('cookie')
+  if (!header || header.length > 16_384) return []
+  const values: string[] = []
+  for (const pair of header.split(';')) {
+    const separator = pair.indexOf('=')
+    if (separator < 0) continue
+    if (pair.slice(0, separator).trim() === name) values.push(pair.slice(separator + 1).trim())
+  }
+  return values
+}
+
+/**
+ * The return value only when the cookie is present once and in the closed set. Anything else
+ * yields undefined and the callback lands on `/oidc/signed-in`: the value is a convenience,
+ * not an authority, so dropping a missing or tampered one is the correct outcome.
+ */
+export function readReturnToCookie(request: Request, state: string): OidcReturnTo | undefined {
+  const values = cookieValues(request, returnToCookieName(state))
+  return values.length === 1 && isOidcReturnTo(values[0]) ? values[0] : undefined
+}
+
+/**
+ * The cookies a finished attempt expires: the binding, and the return cookie whenever the
+ * request carries one under this state's name, valid or not.
+ */
+export function finishedAttemptCookies(request: Request, state: string): string[] {
+  const returnName = returnToCookieName(state)
+  return [
+    clearBrowserCookie(browserCookieName(state)),
+    ...(cookieValues(request, returnName).length > 0 ? [clearBrowserCookie(returnName)] : []),
+  ]
+}
+
+/** An attempt cookie (the binding or the return value) that lives as long as the attempt. */
+export function setBrowserCookie(name: string, value: string, maxAgeSeconds: number): string {
   const age = Math.max(0, Math.min(OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS, Math.floor(maxAgeSeconds)))
-  return `${name}=${binding}; Path=/; Max-Age=${age}; Secure; HttpOnly; SameSite=Lax`
+  return `${name}=${value}; Path=/; Max-Age=${age}; Secure; HttpOnly; SameSite=Lax`
 }
 
 export function clearBrowserCookie(name: string): string {
@@ -346,15 +395,18 @@ function redirectHeaders(location: string): Headers {
   })
 }
 
-/** The session, the binding clear and a marker that tells `/oidc/signed-in` the session is new. */
+/**
+ * The session, the finished attempt's cookie clears and a marker that tells `/oidc/signed-in`
+ * the session is new.
+ */
 export function memberSignedInRedirect(
   location: string,
   sessionCookie: string,
-  clearBindingCookie: string
+  clearCookies: readonly string[]
 ): Response {
   const headers = redirectHeaders(location)
   headers.append('set-cookie', sessionCookie)
-  headers.append('set-cookie', clearBindingCookie)
+  for (const cookie of clearCookies) headers.append('set-cookie', cookie)
   headers.append(
     'set-cookie',
     `${OIDC_SIGNED_IN_MARKER_COOKIE}=1; Path=/; Max-Age=${OIDC_SIGNED_IN_MARKER_MAX_AGE_SECONDS}; Secure; SameSite=Lax`
@@ -362,10 +414,10 @@ export function memberSignedInRedirect(
   return new Response(null, { status: 303, headers })
 }
 
-/** A refusal sets no session; it only releases the binding cookie. */
-export function refusedRedirect(location: string, clearBindingCookie: string): Response {
+/** A refusal sets no session; it only releases the finished attempt's cookies. */
+export function refusedRedirect(location: string, clearCookies: readonly string[]): Response {
   const headers = redirectHeaders(location)
-  headers.append('set-cookie', clearBindingCookie)
+  for (const cookie of clearCookies) headers.append('set-cookie', cookie)
   return new Response(null, { status: 303, headers })
 }
 
@@ -473,26 +525,25 @@ export function parseCallbackParameters(
   return { kind: 'invalid' }
 }
 
-export function noStoreRedirect(url: string, cookie: string): Response {
-  return new Response(null, {
-    status: 303,
-    headers: {
-      location: url,
-      'set-cookie': cookie,
-      'cache-control': 'no-store',
-      'referrer-policy': 'no-referrer',
-      'x-content-type-options': 'nosniff',
-    },
-  })
+export function noStoreRedirect(url: string, cookies: string | readonly string[]): Response {
+  const headers = redirectHeaders(url)
+  for (const cookie of typeof cookies === 'string' ? [cookies] : cookies) {
+    headers.append('set-cookie', cookie)
+  }
+  return new Response(null, { status: 303, headers })
 }
 
-export function noStoreResult(message: string, status: number, cookie?: string): Response {
+export function noStoreResult(
+  message: string,
+  status: number,
+  cookies: readonly string[] = []
+): Response {
   const headers = new Headers({
     'cache-control': 'no-store',
     'content-type': 'text/plain; charset=utf-8',
     'referrer-policy': 'no-referrer',
     'x-content-type-options': 'nosniff',
   })
-  if (cookie) headers.append('set-cookie', cookie)
+  for (const cookie of cookies) headers.append('set-cookie', cookie)
   return new Response(message, { status, headers })
 }

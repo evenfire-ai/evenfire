@@ -10,14 +10,14 @@ const subscribeToHydration = () => () => {}
 const clientHydrationSnapshot = () => true
 const serverHydrationSnapshot = () => false
 
-export function AuthGate({ children }: AuthGateProps) {
+export function AuthGate({ children, returnTo }: AuthGateProps) {
   const isInsideAuthGate = useContext(AuthGateContext)
   if (isInsideAuthGate) return <>{children}</>
 
-  return <AuthGateBoundary>{children}</AuthGateBoundary>
+  return <AuthGateBoundary returnTo={returnTo}>{children}</AuthGateBoundary>
 }
 
-function AuthGateBoundary({ children }: AuthGateProps) {
+function AuthGateBoundary({ children, returnTo }: AuthGateProps) {
   const { authState } = useAuth()
   // Auth can resolve above a deferred Suspense boundary before it hydrates.
   // Preserve the server loading shell for that first hydration render.
@@ -51,7 +51,7 @@ function AuthGateBoundary({ children }: AuthGateProps) {
   }
 
   if (!authState.isLoggedIn) {
-    return <LoginPanel />
+    return <LoginPanel returnTo={returnTo} />
   }
 
   return <AuthGateContext.Provider value>{children}</AuthGateContext.Provider>

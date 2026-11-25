@@ -1,4 +1,5 @@
 import type { OidcRefusalReason } from '../api/oidc/types'
+import type { OidcReturnTo } from './oidc'
 
 type QueryValue = boolean | number | string | null | undefined
 type ProfileRouteQuery = Record<string, QueryValue>
@@ -34,6 +35,8 @@ export const PROFILE_ROUTES = {
     `/open/apps/${segment(recipeNs)}/${segment(recipeName)}`,
   oidcStart: '/api/oidc/start',
   oidcSignedIn: '/oidc/signed-in',
+  oidcSignedInWithReturn: (returnTo: OidcReturnTo) =>
+    withQuery('/oidc/signed-in', { next: returnTo }),
   oidcResult: (reason: OidcRefusalReason) => withQuery('/oidc/result', { reason }),
   members: {
     root: '/members',
@@ -46,3 +49,8 @@ export const PROFILE_ROUTES = {
     approvalChannels: '/settings/approval-channels',
   },
 } as const
+
+/** Where `/oidc/signed-in?next=<value>` sends the member after an OIDC sign-in. */
+export const OIDC_RETURN_TO_ROUTES: Readonly<Record<OidcReturnTo, string>> = {
+  'desktop-setup': PROFILE_ROUTES.desktopSetup,
+}

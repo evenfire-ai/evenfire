@@ -7,6 +7,17 @@ import { type OidcRefusalReason } from '../api/oidc/types'
 export const OIDC_SIGNED_IN_MARKER_COOKIE = '__Host-ef_oidc_signed_in'
 export const OIDC_SIGNED_IN_MARKER_MAX_AGE_SECONDS = 60
 
+/**
+ * The pages an OIDC sign-in may return to. Only these values travel through the round trip;
+ * each maps to a route in `OIDC_RETURN_TO_ROUTES`, so no request value becomes a redirect.
+ */
+export const OIDC_RETURN_TO_VALUES = ['desktop-setup'] as const
+export type OidcReturnTo = (typeof OIDC_RETURN_TO_VALUES)[number]
+
+export function isOidcReturnTo(value: unknown): value is OidcReturnTo {
+  return typeof value === 'string' && (OIDC_RETURN_TO_VALUES as readonly string[]).includes(value)
+}
+
 export const OIDC_GENERIC_RESULT_MESSAGE = "Sign-in couldn't be completed. Start again."
 
 export const OIDC_REFUSAL_MESSAGES: Readonly<Record<OidcRefusalReason, string>> = {
