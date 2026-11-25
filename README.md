@@ -11,9 +11,9 @@
 <h3 align="center">Build your company's intelligence layer, without losing control.</h3>
 
 <p align="center">
-  Where your team and AI agents work together — a complete, fully open-source platform,
-  from a native desktop app to a secure, self-hosted backend.
-  Bring your own model keys; every risky action waits for a human "yes."
+  Give your team AI agents that can work with tools and files on your infrastructure.
+  Choose your models, share agents with your team, and configure approvals, access and budgets
+  from the Control UI. Work with your agents in Evenfire Desktop.
 </p>
 
 <p align="center">
@@ -24,14 +24,84 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
+  <a href="#see-evenfire-in-action">See it in action</a> · <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
 </p>
 
+## See Evenfire in action
+
+From a conversation to a tool action, Evenfire connects the work your team wants
+agents to do with the controls needed to run them. Use Desktop for day-to-day
+work and the Control UI to manage agents, connectors, access and usage.
+
+### Work with agents in Evenfire Desktop
+
+Start a conversation with an agent, give it a task, and follow its progress as
+it calls the tools you have enabled. Keep the request, tool activity and response
+in the same conversation.
+
+<!-- Final image: docs/assets/readme/01-desktop-conversation.png -->
 <p align="center">
-  <img src="docs/assets/control-ui-usage.webp" alt="Control UI: usage dashboard with charts of token consumption per model over time" width="82%" />
+  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
 </p>
 
-<p align="center"><sub>The Control UI's usage dashboard: token consumption per model, over time. <a href="docs/surfaces/README.md">Tour all three UIs →</a></sub></p>
+### Approve tool actions before execution
+
+Configure which tool actions require approval, then review a request before
+allowing it to proceed. In Desktop, Approve and Deny controls let you make that
+decision in the conversation.
+
+<!-- Final image: docs/assets/readme/02-human-approvals.png -->
+<p align="center">
+  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+</p>
+
+[Configure approval policies](docs/how-to/configure-approvals.md).
+
+### Configure each agent's instructions and tools
+
+Choose an agent's model and instructions in the Control UI, assign its
+connectors, and manage which teams can use it. Give each agent the capabilities
+and access it needs for its role.
+
+<!-- Final image: docs/assets/readme/03-agent-configuration.png -->
+<p align="center">
+  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+</p>
+
+### Extend agents with connectors and plugins
+
+Browse the Marketplace to discover and install connectors and plugins.
+Connectors expose tools through MCP; plugins can add workflows and their own
+interfaces. Manage installed capabilities in the Control UI.
+
+<!-- Final image: docs/assets/readme/04-marketplace.png -->
+<p align="center">
+  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+</p>
+
+### Work with shared files in EvenDrive
+
+Organize files in EvenDrive and make them available to the people and agents
+that need them. File access is checked and audited by the platform.
+
+<!-- Final image: docs/assets/readme/05-evendrive.png -->
+<p align="center">
+  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+</p>
+
+### Monitor usage, costs and budgets
+
+See token usage across agents, teams, providers and models. Configure model
+prices to track costs, and set scoped budgets to warn or block new work when
+budget enforcement is enabled.
+
+<!-- Final image: docs/assets/readme/06-cost-and-usage.png -->
+<p align="center">
+  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+</p>
+
+[Track usage and configure budgets](docs/how-to/token-budgets-and-usage.md) ·
+[Tour the platform's interfaces](docs/surfaces/README.md).
 
 ---
 
