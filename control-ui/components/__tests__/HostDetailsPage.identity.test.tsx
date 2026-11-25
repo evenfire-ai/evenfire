@@ -100,8 +100,14 @@ vi.mock('../../lib/api', () => ({
   isSilentApiError: vi.fn().mockReturnValue(false),
 }))
 
+// A Host read from the API always carries a resourceVersion; the page's saves
+// refuse to send without the one its form was built from (spec R16).
 const host = {
-  metadata: { name: 'foo', creationTimestamp: '2026-08-25T12:34:56Z' },
+  metadata: {
+    name: 'foo',
+    creationTimestamp: '2026-08-25T12:34:56Z',
+    resourceVersion: 'rv-form-load',
+  },
   spec: {
     approval: { tools: { shell_exec: true } },
     channels: ['telegram'],

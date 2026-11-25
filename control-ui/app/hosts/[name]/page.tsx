@@ -13,7 +13,7 @@ import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapabilityNotice'
 import { useToast } from '@components/Toast'
-import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
+import { HOST_DEFAULT_TAB, HOST_RELOAD_TO_SAVE_MESSAGE, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
@@ -210,8 +210,15 @@ export default function HostDetailsPage() {
   const formResourceVersionRef = useRef('')
 
   const [activeTab, setActiveTab] = useState<HostTab>(() => parseHostTab(params.tab))
-  const [busy, setBusy] = useState(false)
+  // A count, not a flag: a load and a save (or two saves) overlap, and the
+  // first to end must not clear the busy state of the one still running.
+  const [busyCount, setBusyCount] = useState(0)
+  const busy = busyCount > 0
+  const beginBusy = () => setBusyCount(count => count + 1)
+  const endBusy = () => setBusyCount(count => count - 1)
   const [error, setError] = useState('')
+  // True until the first load ends; later loads (after a save) never show the
+  // loading placeholders again.
   const [initialLoading, setInitialLoading] = useState(true)
 
   const [editingModel, setEditingModel] = useState(false)
@@ -553,16 +560,23 @@ export default function HostDetailsPage() {
     setSectionActions(actions)
   }, [])
 
+  // Aborted when the page goes away. The older saves read the Host with this
+  // signal, which also keeps that read from joining another read of the Host in
+  // flight (lib/api): a joined read can carry a spec older than the version the
+  // save sends. An agent change does not abort it (spec R16).
+  const unmountAbortRef = useRef<AbortController | null>(null)
+
   useEffect(() => {
     mountedRef.current = true
+    unmountAbortRef.current = new AbortController()
     return () => {
       mountedRef.current = false
+      unmountAbortRef.current?.abort()
     }
   }, [])
 
   async function loadData(resetDrafts: 'all' | 'overview' | 'model' | 'none' = 'all') {
-    setBusy(true)
-    setInitialLoading(true)
+    beginBusy()
     setError('')
     try {
       const detail = await getHostDetailBundle(routeName)
@@ -691,7 +705,7 @@ export default function HostDetailsPage() {
       setError(e instanceof Error ? e.message : 'Failed to load agent details')
     } finally {
       if (mountedRef.current) {
-        setBusy(false)
+        endBusy()
         setInitialLoading(false)
       }
     }
@@ -760,7 +774,7 @@ export default function HostDetailsPage() {
         ? currentSpec.contextId
         : contextName
 
-    setBusy(true)
+    beginBusy()
     setError('')
     try {
       const updated = await updateContext(
@@ -790,7 +804,7 @@ export default function HostDetailsPage() {
       setError(agentConnectorMutationError(e))
       return false
     } finally {
-      setBusy(false)
+      endBusy()
     }
   }
 
@@ -943,12 +957,20 @@ export default function HostDetailsPage() {
     const nextHostName = hostNameDraft.trim()
     if (!nextHostName) return false
 
-    setBusy(true)
+    // The version comes first: it is the version the form was built from, taken
+    // before this save's own read of the Host, so the PUT never carries a version
+    // newer than the read its spec came from (spec R16). With none, nothing is sent.
+    const formResourceVersion = formResourceVersionRef.current
+    if (!formResourceVersion) {
+      setError(HOST_RELOAD_TO_SAVE_MESSAGE)
+      return false
+    }
+    beginBusy()
     setError('')
     try {
       // Re-fetch to preserve fields that aren't editable in this form. K8s
       // replaceNamespacedCustomObject is a full replace, not a merge.
-      const currentHost = await getHost(routeName)
+      const currentHost = await getHost(routeName, { signal: unmountAbortRef.current?.signal })
       const currentWorkflowControl = currentHost.spec?.workflowControl
       // Overview owns only identity/shape fields (name, display, context,
       // channels). Model, secret, fallback policy and the per-host
@@ -966,13 +988,12 @@ export default function HostDetailsPage() {
           : {}),
       }
 
-      const formResourceVersion = formResourceVersionRef.current
       await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
         // AP-6: carry the resourceVersion captured at form load so the API
         // rejects this save with 409 {error:'conflict'} if the Host changed
         // while the operator was editing, instead of silently overwriting the
         // concurrent change with this form's stale echo.
-        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+        metadata: { resourceVersion: formResourceVersion },
         spec: nextSpec,
       })
       // Refresh server-backed state and this tab's saved values without
@@ -999,7 +1020,7 @@ export default function HostDetailsPage() {
       }
       return false
     } finally {
-      setBusy(false)
+      endBusy()
     }
   }
 
@@ -1120,10 +1141,16 @@ export default function HostDetailsPage() {
       return false
     }
 
-    setBusy(true)
+    // Version first, as in saveHost (spec R16).
+    const formResourceVersion = formResourceVersionRef.current
+    if (!formResourceVersion) {
+      setError(HOST_RELOAD_TO_SAVE_MESSAGE)
+      return false
+    }
+    beginBusy()
     setError('')
     try {
-      const currentHost = await getHost(routeName)
+      const currentHost = await getHost(routeName, { signal: unmountAbortRef.current?.signal })
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
         model: {
@@ -1157,9 +1184,8 @@ export default function HostDetailsPage() {
         nextSpec.allowedModels = effectiveAllowedModelsSpec
       }
 
-      const formResourceVersion = formResourceVersionRef.current
       await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+        metadata: { resourceVersion: formResourceVersion },
         spec: nextSpec,
       })
       await loadData('model')
@@ -1178,7 +1204,7 @@ export default function HostDetailsPage() {
       }
       return false
     } finally {
-      setBusy(false)
+      endBusy()
     }
   }
 
@@ -1319,17 +1345,25 @@ export default function HostDetailsPage() {
   // overwritten (AP-6), surfacing the same reload guidance as the other saves.
   const persistGuardrails = useCallback(
     async (next: HostGuardrails) => {
-      setBusy(true)
+      // Version first, as in saveHost (spec R16). The section needs a rejection
+      // to skip its success toast, so the refusal throws.
+      const formResourceVersion = formResourceVersionRef.current
+      if (!formResourceVersion) {
+        setError(HOST_RELOAD_TO_SAVE_MESSAGE)
+        throw new Error(HOST_RELOAD_TO_SAVE_MESSAGE)
+      }
+      beginBusy()
       setError('')
       try {
-        const currentHost = await getHost(routeName)
+        // An agent change does not abort this read: the PUT is still sent with
+        // the version taken above and refused with 409 if the Host moved on.
+        const currentHost = await getHost(routeName, { signal: unmountAbortRef.current?.signal })
         const nextSpec = {
           ...currentHost.spec,
           guardrails: next,
         }
-        const formResourceVersion = formResourceVersionRef.current
         await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-          ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+          metadata: { resourceVersion: formResourceVersion },
           spec: nextSpec,
         })
         // Reload guardrails/server state while preserving any drafts left open
@@ -1352,7 +1386,7 @@ export default function HostDetailsPage() {
         // its success toast, leaving the error/conflict banner to explain.
         throw e
       } finally {
-        setBusy(false)
+        endBusy()
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
