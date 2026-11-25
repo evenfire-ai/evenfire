@@ -71,6 +71,8 @@ const EMAIL_APPROVER_NOTE = 'Anyone who can send mail as this address counts.'
 const JUDGE_NOTE = 'Which model judges shell commands in Auto.'
 // Spec §6.6, as the per-tool section capitalises it.
 const CLUSTER_DEFAULT = 'Set by the cluster default (not shown here).'
+// Spec §6.4 step 13, verbatim.
+const MAYBE_MESSAGE = 'The save may not have applied. Reload to check.'
 
 // The success toast of a save, in the tab that ran it and as a continuation
 // (C18: only the continuation names the agent, so T7 tells them apart).
@@ -471,6 +473,77 @@ describe('HostApprovalsTab', () => {
       expect(approvalOf(fake.stored('foo')), 'nothing written').toEqual({
         tools: { json_transform: true },
       })
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('a save that may not have applied loads the tab again, and the stored tools show (review I2)', async () => {
+      const fake = tabFake({ tools: { json_transform: true } })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      const driver = await approvalSettingsDriver()
+      await driver.edit()
+      await driver.editTool('system_info', 'required')
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      await driver.save()
+      await act(async () => {
+        await put.arrived
+      })
+
+      // The PUT is applied but its answer is lost, and the re-read fails too
+      // (spec §6.4 step 13): the outcome is `maybe`.
+      const reread = fake.hold({ method: 'GET', path: FOO })
+      await act(async () => {
+        put.dropResponse()
+      })
+      await act(async () => {
+        await reread.arrived
+      })
+      const loadsBefore = reads(fake, FOO_DETAIL).length
+      await act(async () => {
+        reread.dropResponse()
+      })
+
+      await waitFor(() => expect(driver.message()).toBe(MAYBE_MESSAGE))
+      await waitFor(() => expect(overrides(driver.readView())).toEqual(SAVED_VIEW))
+      expect(reads(fake, FOO_DETAIL).length, 'a load after the outcome').toBeGreaterThan(
+        loadsBefore
+      )
+      expect(approvalOf(fake.stored('foo')), 'the write landed').toEqual({ tools: SAVED_TOOLS })
+      expect(tab.toasts(), 'no toast: the section shows the outcome').toEqual([])
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('a save that may not have applied after the tab was left warns in the root toast, naming the agent (review I2)', async () => {
+      const fake = tabFake({ tools: { json_transform: true } })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      const driver = await approvalSettingsDriver()
+      await driver.edit()
+      await driver.editTool('system_info', 'required')
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      await driver.save()
+      await act(async () => {
+        await put.arrived
+      })
+      const fooNotices = vi.fn()
+      subscribeHostChanged('foo', fooNotices)
+
+      tab.leave()
+      const reread = fake.hold({ method: 'GET', path: FOO })
+      await act(async () => {
+        put.dropResponse()
+      })
+      await act(async () => {
+        await reread.arrived
+      })
+      await act(async () => {
+        reread.dropResponse()
+      })
+      await waitFor(() => expect(tab.toasts('warning')).toHaveLength(1))
+
+      expect(tab.toasts('warning')).toEqual([`Per-tool overrides for agent foo: ${MAYBE_MESSAGE}`])
+      expect(fooNotices, "foo's Host-changed notice").toHaveBeenCalledTimes(1)
+      expect(approvalOf(fake.stored('foo')), 'the write landed').toEqual({ tools: SAVED_TOOLS })
       expect(unanswered(fake)).toEqual([])
       tab.unmount()
     })
