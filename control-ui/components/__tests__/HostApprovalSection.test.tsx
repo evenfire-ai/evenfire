@@ -10,22 +10,16 @@ import { useApprovalToolsDraft } from '../HostApprovalSection/hooks'
 const controlUiCss = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
 
 describe('HostApprovalSection — constants', () => {
-  it('contains exactly the 12 always-on native tools verified during the back-end smoke', () => {
-    const expected = [
-      'clerum__generate_docx',
-      'clerum__generate_markdown',
-      'clerum__generate_pdf',
-      'clerum__generate_xlsx',
-      'clerum__list_workflows',
-      'clerum__trigger_workflow',
-      'file_read',
-      'file_write',
-      'http_request',
-      'json_transform',
-      'shell_exec',
-      'system_info',
-    ]
-    expect(NATIVE_TOOLS.map(t => t.name)).toEqual(expected)
+  it('lists every tool chat registers except the bridge, and not the retired workflow names', () => {
+    const names = NATIVE_TOOLS.map(t => t.name)
+    // The complete list is pinned to the producer fixture by HostApprovalSection.toolParity.test.ts.
+    expect(names).toHaveLength(56)
+    expect(names).toContain('shell_exec')
+    expect(names).toContain('cron_manage')
+    expect(names).toContain('workflow_trigger')
+    expect(names).not.toContain('clerum__tool_call')
+    expect(names).not.toContain('clerum__list_workflows')
+    expect(names).not.toContain('clerum__trigger_workflow')
   })
 
   it('is sorted alphabetically', () => {
@@ -92,14 +86,14 @@ describe('HostApprovalSection — useApprovalToolsDraft', () => {
     const { result } = renderHook(() =>
       useApprovalToolsDraft({
         http_request: false,
-        memory_search: true,
-        desktop_screenshot: false,
+        custom_memory_lookup: true,
+        custom_screenshot_tool: false,
       })
     )
     expect(result.current.draft.rows).toEqual({ http_request: 'skip' })
     expect(result.current.draft.customRows).toEqual([
-      { name: 'desktop_screenshot', state: 'skip' },
-      { name: 'memory_search', state: 'required' },
+      { name: 'custom_memory_lookup', state: 'required' },
+      { name: 'custom_screenshot_tool', state: 'skip' },
     ])
   })
 
@@ -114,14 +108,16 @@ describe('HostApprovalSection — useApprovalToolsDraft', () => {
   it('flips isDirty when a custom row is added', () => {
     const { result } = renderHook(() => useApprovalToolsDraft(undefined))
     expect(result.current.isDirty).toBe(false)
-    act(() => result.current.addCustomRow('memory_search', 'skip'))
+    act(() => result.current.addCustomRow('custom_memory_lookup', 'skip'))
     expect(result.current.isDirty).toBe(true)
-    expect(result.current.draft.customRows).toEqual([{ name: 'memory_search', state: 'skip' }])
+    expect(result.current.draft.customRows).toEqual([
+      { name: 'custom_memory_lookup', state: 'skip' },
+    ])
   })
 
   it('removes custom rows by index and updates dirty', () => {
     const { result } = renderHook(() =>
-      useApprovalToolsDraft({ memory_search: true, cron_list: false })
+      useApprovalToolsDraft({ custom_memory_lookup: true, cron_list: false })
     )
     expect(result.current.draft.customRows).toHaveLength(2)
     act(() => result.current.removeCustomRow(0))
@@ -143,12 +139,12 @@ describe('HostApprovalSection — useApprovalToolsDraft', () => {
     act(() => {
       result.current.setRowState('http_request', 'skip')
       result.current.setRowState('shell_exec', 'required')
-      result.current.addCustomRow('memory_search', 'skip')
+      result.current.addCustomRow('custom_memory_lookup', 'skip')
     })
     expect(result.current.toToolsMap()).toEqual({
       http_request: false,
       shell_exec: true,
-      memory_search: false,
+      custom_memory_lookup: false,
     })
   })
 
@@ -256,7 +252,7 @@ describe('HostApprovalSection — component', () => {
   })
 
   describe('edit mode', () => {
-    it('clicking Edit reveals all 12 always-on rows alphabetically', () => {
+    it('clicking Edit reveals every native row alphabetically', () => {
       render(
         <HostApprovalSection
           initialTools={undefined}
@@ -267,10 +263,10 @@ describe('HostApprovalSection — component', () => {
       )
       fireEvent.click(screen.getByRole('button', { name: /edit/i }))
 
-      // First always-on tool alphabetically is clerum__generate_docx
-      expect(screen.getByText('clerum__generate_docx')).toBeInTheDocument()
-      // Last is system_info
-      expect(screen.getByText('system_info')).toBeInTheDocument()
+      // First tool alphabetically is browser_click
+      expect(screen.getByText('browser_click')).toBeInTheDocument()
+      // Last is workflow_trigger
+      expect(screen.getByText('workflow_trigger')).toBeInTheDocument()
       // shell_exec is in there too
       expect(screen.getByText('shell_exec')).toBeInTheDocument()
     })
@@ -478,15 +474,15 @@ describe('HostApprovalSection — component', () => {
       expect(addBtn).toBeDisabled()
 
       // Valid name accepted
-      fireEvent.change(input, { target: { value: 'memory_search' } })
+      fireEvent.change(input, { target: { value: 'custom_memory_lookup' } })
       expect(addBtn).not.toBeDisabled()
     })
 
     it('rejects a custom name that collides with an existing custom row', () => {
-      // initialTools contains a custom row "memory_search" already.
+      // initialTools contains a custom row "custom_memory_lookup" already.
       render(
         <HostApprovalSection
-          initialTools={{ memory_search: false }}
+          initialTools={{ custom_memory_lookup: false }}
           onSave={onSave}
           busy={false}
           canWrite={true}
@@ -499,7 +495,7 @@ describe('HostApprovalSection — component', () => {
       const addBtn = screen.getByRole('button', { name: /^add$/i })
 
       // Re-typing the same name as the existing custom row → rejected
-      fireEvent.change(input, { target: { value: 'memory_search' } })
+      fireEvent.change(input, { target: { value: 'custom_memory_lookup' } })
       expect(screen.getByText(/already in your custom rows/i)).toBeInTheDocument()
       expect(addBtn).toBeDisabled()
     })
