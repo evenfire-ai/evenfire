@@ -575,6 +575,25 @@ describe('Set to Manual now (spec §6.3)', () => {
       ])
       expect(writes(fake)).toHaveLength(1)
     })
+
+    it('a read answered with a Host object that has no spec is not taken as inheriting', async () => {
+      const fake = createFake({ modeCeiling: 'auto' })
+      const read = fake.hold({ method: 'GET', path: FOO })
+      const switching = setManualNow('foo')
+      await read.arrived
+      // The fake's own Host object, without its spec: read as a Host, it would
+      // have no approval block, which is inheriting, and so Already Manual.
+      read.respondWith(200, { metadata: fake.stored('foo').metadata })
+      const outcome = await drive(switching)
+
+      expect(outcome).toEqual({ kind: 'saved', stored: fake.stored('foo') })
+      expect(reads(fake).map(entry => [entry.delivered, entry.response?.status])).toEqual([
+        [true, 200],
+        [true, 200],
+      ])
+      expect(writes(fake)).toHaveLength(1)
+      expect(storedApproval(fake)).toEqual({ modeCeiling: 'manual' })
+    })
   })
 
   describe('429 (no recorded body: these routes mount no rate limiter)', () => {

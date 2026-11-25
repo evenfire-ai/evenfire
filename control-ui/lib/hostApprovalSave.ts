@@ -649,9 +649,13 @@ function ceilingIsManual(block: Record<string, unknown> | undefined): boolean {
   return effectiveApproval(block).modeCeiling === 'manual'
 }
 
-/** A read's answer is a Host object when it has `metadata`, as every Kubernetes object does. */
+/**
+ * A read's answer is a Host object when it has `metadata` and `spec` objects.
+ * Without `spec` it would have no approval block, which reads as inheriting and
+ * so as Already Manual, though nothing in it says what the ceiling is.
+ */
 function isHostObject(value: unknown): value is HostResource {
-  return isPlainObject(value) && isPlainObject(value.metadata)
+  return isPlainObject(value) && isPlainObject(value.metadata) && isPlainObject(value.spec)
 }
 
 function namespaceOf(host: HostResource): string | undefined {
