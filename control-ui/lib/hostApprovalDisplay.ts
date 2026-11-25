@@ -63,7 +63,15 @@ export type ApprovalTabState = {
 /** One key of a group, as a write stored it: present with its value, or absent. */
 type Leaf = { present: true; value: unknown } | { present: false }
 
-/** What a write stored for its group's keys. */
+/**
+ * What a write stored for its group's keys.
+ *
+ * The tools group carries `defaultPolicy` and whether the block exists on
+ * every tools write, not only on a first save. This is the controller's
+ * reading of spec §6.5's "with `defaultPolicy` and the block's existence on
+ * a first save" (Ruling 38). The reason: the write's answer holds what was
+ * stored, and the Host-changed notice the write fires starts a fresh load.
+ */
 type GroupValues =
   | { group: 'ceiling'; modeCeiling: Leaf }
   | { group: 'tools'; block: boolean; tools: Leaf; defaultPolicy: Leaf }
