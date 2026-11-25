@@ -9,6 +9,7 @@ import {
   ResourceListResponse,
   ResourcePreconditions,
 } from '../types.js'
+import { buildHostApprovalChange, logHostApprovalChange } from './hostApprovalAudit.js'
 import { ApprovalRequiresVersionError, approvalBlocksEqual } from './hostApprovalRules.js'
 import {
   addNonEmpty,
@@ -137,6 +138,52 @@ async function persistHostIntent(input: {
     operatorSub: requestContext.operatorSub,
     requestId: requestContext.requestId,
   })
+}
+
+/**
+ * Audit line for a stored Host write (spec §6.8). Called only after the write
+ * succeeded, so it never throws: the replace or create is already stored, and
+ * failing the request over a log line would tell the client the write failed
+ * when it did not.
+ */
+function auditHostApprovalChange(input: {
+  plural: ClerumResourceType
+  name: string
+  namespace: string
+  intent: HostAdministrativeIntent | null
+  before: unknown
+  after: unknown
+  via: 'host_put' | 'host_create'
+}): void {
+  if (!isHostResource(input.plural)) return
+  try {
+    const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+      typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
+    const change = buildHostApprovalChange({
+      before: asRecord(input.before),
+      after: asRecord(input.after),
+    })
+    if (!change) return
+    logHostApprovalChange({
+      change,
+      host: input.name,
+      namespace: input.namespace,
+      operatorSub:
+        input.intent?.operatorSub ?? currentAdministrativeRequestContext()?.operatorSub ?? null,
+      operationId: input.intent?.operationId ?? null,
+      via: input.via,
+    })
+  } catch (err) {
+    // Dropping the error is correct here: the write already stored, and
+    // rethrowing would answer the client that it failed when it did not. The
+    // lost audit line is reported below instead.
+    try {
+      rootLogger.warn({ err, host: input.name, via: input.via }, 'Host approval audit line failed')
+    } catch {
+      // The logger itself is down; there is no channel left to report on, and
+      // the request must still succeed.
+    }
+  }
 }
 
 async function persistHostFailure(intent: HostAdministrativeIntent | null): Promise<void> {
@@ -463,6 +510,15 @@ export class ResourceService {
       await persistHostFailure(intent)
       throw err
     }
+    auditHostApprovalChange({
+      plural,
+      name: body.metadata.name,
+      namespace: ns,
+      intent,
+      before: undefined,
+      after: created,
+      via: 'host_create',
+    })
     // Outside the try on purpose: the create already succeeded, and a failure
     // to correct the annotation must not reach `persistHostFailure`, which
     // would record a completed operation as failed.
@@ -638,6 +694,15 @@ export class ResourceService {
         await persistHostFailure(intent)
         throw err
       }
+      auditHostApprovalChange({
+        plural,
+        name,
+        namespace: ns,
+        intent,
+        before: current,
+        after: replaced,
+        via: 'host_put',
+      })
       // After the catch, not inside the try: the replace already succeeded, so
       // a failure here must not reach `persistHostFailure` and record a
       // completed operation as failed.
