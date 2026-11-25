@@ -5,6 +5,7 @@ import {
   type NotificationDeliveryMedium,
 } from './notificationDeliveryClient'
 import type { RPCClient } from './rpcClient'
+import { logCaughtError } from './safeLog'
 import type { ChannelAdapter, CommunicationChannelCRD, Message, ProviderIdentity } from './types'
 import type {
   WorkflowApprovalDecisionCallbackCommand,
@@ -183,7 +184,7 @@ export class WorkflowApprovalCoordinator {
             limit: config.notificationDeliveryPollLimit,
           })
         } catch (err) {
-          console.error(`[WorkflowApproval] Failed to fetch ${medium} notifications:`, err)
+          logCaughtError('error', 'workflow_notification_fetch_failed', err, { medium })
           continue
         }
 
@@ -239,7 +240,9 @@ export class WorkflowApprovalCoordinator {
         hostRef,
       })
     } catch (err) {
-      console.error(`[WorkflowApproval] Failed to deliver notification ${delivery.id}:`, err)
+      logCaughtError('error', 'workflow_notification_deliver_failed', err, {
+        deliveryId: delivery.id,
+      })
       try {
         await this.notificationDeliveryClient?.fail(delivery.id, {
           medium,
@@ -249,10 +252,9 @@ export class WorkflowApprovalCoordinator {
           hostRef,
         })
       } catch (failErr) {
-        console.error(
-          `[WorkflowApproval] Failed to record notification delivery failure ${delivery.id}:`,
-          failErr
-        )
+        logCaughtError('error', 'workflow_notification_fail_record_failed', failErr, {
+          deliveryId: delivery.id,
+        })
       }
     }
   }
@@ -316,10 +318,7 @@ export class WorkflowApprovalCoordinator {
           recipeName
         )
       } catch (err) {
-        console.error(
-          `[WorkflowApproval] Failed to resolve pending approval through mcp-host:`,
-          err
-        )
+        logCaughtError('error', 'workflow_approval_resolve_failed', err)
         await this.sendReply(
           msg,
           `Could not verify the pending workflow approval for ${recipeName}. Try again after the approval request is delivered.`
@@ -343,10 +342,7 @@ export class WorkflowApprovalCoordinator {
           recipeName
         )
       } catch (err) {
-        console.error(
-          `[WorkflowApproval] Failed to reconcile ambiguous pending workflow approvals through mcp-host:`,
-          err
-        )
+        logCaughtError('error', 'workflow_approval_reconcile_failed', err)
         const message = err instanceof Error ? err.message : ''
         await this.sendReply(
           msg,

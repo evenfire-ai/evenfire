@@ -129,6 +129,32 @@ describe('SlackAdapter — connect()', () => {
     const messages = await adapter.fetchMessages('general', new Set(['user1']))
     expect(messages).toEqual([])
   })
+
+  it('logs a connect failure without the request headers', async () => {
+    const marker = 'xoxb-probe-marker-not-a-secret'
+    const transportError = Object.assign(new Error('connect ECONNREFUSED'), {
+      code: 'slack_webapi_request_error',
+      original: { request: { _header: `Authorization: Bearer ${marker}\r\n` } },
+    })
+    const { WebClient } = await import('@slack/web-api')
+    vi.mocked(WebClient).mockImplementationOnce(function () {
+      const instance = {
+        auth: { test: vi.fn().mockRejectedValue(transportError) },
+        conversations: { history: vi.fn(), list: vi.fn() },
+        users: { info: vi.fn() },
+        chat: { postMessage: vi.fn() },
+      }
+      slackState.instances.push(instance as never)
+      return instance as never
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: marker })
+    const printed = errorSpy.mock.calls.map(call => call.map(String).join(' ')).join('\n')
+    expect(printed).toContain('slack_webapi_request_error')
+    expect(printed).not.toContain(marker)
+    expect(printed).not.toMatch(/authorization:\s*bearer/i)
+  })
 })
 
 describe('Slack verification command parsing', () => {

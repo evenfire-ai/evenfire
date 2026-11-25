@@ -4,6 +4,7 @@
 import { WebClient } from '@slack/web-api'
 import { config } from '../config'
 import { RPCClient } from '../rpcClient'
+import { logCaughtError } from '../safeLog'
 import {
   AdapterCredentials,
   Attachment,
@@ -260,7 +261,7 @@ export class SlackAdapter implements ChannelAdapter {
       this.teamId = typeof response.team_id === 'string' ? response.team_id : null
       console.log(`[Slack] Connected as @${response.user}`)
     } catch (error) {
-      console.error('[Slack] Failed to connect:', error)
+      logCaughtError('error', 'slack_connect_failed', error)
       this.client = null
       this.botUserId = null
       this.botToken = null
@@ -371,10 +372,7 @@ export class SlackAdapter implements ChannelAdapter {
                 }
               })
               .catch(err => {
-                console.error(
-                  '[Slack] Verification command handler failed:',
-                  err instanceof Error ? err.message : err
-                )
+                logCaughtError('error', 'slack_verification_failed', err)
               })
             console.log(
               `[Slack] Verification command received - channel: ${resolvedChannelId}, sender: ${userId}, text: "${logText.substring(0, 50)}..."`
@@ -459,7 +457,7 @@ export class SlackAdapter implements ChannelAdapter {
         }
       }
     } catch (error) {
-      console.error('[Slack] API error:', error)
+      logCaughtError('error', 'slack_history_failed', error)
     }
 
     return messages
@@ -730,7 +728,9 @@ export class SlackAdapter implements ChannelAdapter {
               title: filename,
             })
           } catch (err) {
-            console.warn(`[Slack] Failed to decode document attachment ${attachment.id}:`, err)
+            logCaughtError('warn', 'slack_attachment_decode_failed', err, {
+              attachmentId: attachment.id,
+            })
           }
         }
 
@@ -746,7 +746,7 @@ export class SlackAdapter implements ChannelAdapter {
             )
             return messageTs
           } catch (err) {
-            console.warn('[Slack] Failed to deliver document attachments:', err)
+            logCaughtError('warn', 'slack_attachment_upload_failed', err)
           }
         }
 

@@ -28,6 +28,7 @@ import {
   type ShellAction,
   type ShellCardDescriptor,
 } from './rpcClient'
+import { logCaughtError } from './safeLog'
 import { type TraceContextV1, mintChannelTraceContext } from './traceContext'
 import {
   Attachment,
@@ -1755,7 +1756,7 @@ export class ChannelReader {
         try {
           await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext)
         } catch (err) {
-          console.error(`[Main] Progress flow failed, falling back:`, err)
+          logCaughtError('error', 'progress_flow_failed', err)
           // Fall back to synchronous
           const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
           if (response.success && response.status === 'waiting_approval' && response.approval) {
@@ -2511,7 +2512,7 @@ export class ChannelReader {
                   return
                 }
               } catch (err) {
-                console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
+                logCaughtError('error', 'result_poll_failed', err, { taskId })
               }
               // Pending and waiting_approval stay up. The silence timer owns idle cancel.
               if (!finalDelivered) {
@@ -2527,7 +2528,7 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
-              console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
+              logCaughtError('error', 'result_poll_failed', err, { taskId })
             }
           }
         })()
@@ -2572,7 +2573,7 @@ export class ChannelReader {
               shellCard = readShellCard(result.approval.shellCard)
             }
           } catch (err) {
-            console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
+            logCaughtError('error', 'approval_notification_fetch_failed', err, { taskId })
           }
           await deliverApprovalPrompt({
             requestId: suspended.requestId,
@@ -2633,7 +2634,7 @@ export class ChannelReader {
             } catch (err) {
               completionAnnounced = false
               armRunTimer()
-              console.error(`[Main] terminal(completed) result fetch failed:`, err)
+              logCaughtError('error', 'terminal_result_fetch_failed', err, { taskId })
               startResultPollingFallback()
               await editStatus(
                 formatFinalMessage(streamSteps(), 'Final response is still syncing.')
@@ -2649,7 +2650,7 @@ export class ChannelReader {
           resolveOnce()
         },
         onError: async (error: string) => {
-          console.error(`[Main] Progress stream error: ${error}`)
+          logCaughtError('error', 'progress_stream_failed', error, { taskId })
           // `task_not_found_or_expired` is NOT a transport failure: mcp-host is
           // healthy. It means the reporter was never registered within the 180s
           // wait (queue saturation \u2014 task may still be processing) or was evicted
@@ -2670,10 +2671,7 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
-              console.error(
-                `[Main] reconcile after task_not_found_or_expired failed for task ${taskId}:`,
-                err
-              )
+              logCaughtError('error', 'task_reconcile_failed', err, { taskId })
             }
             // Path A: still queued/processing \u2192 keep polling for the result,
             // don't mislabel it as a connection loss.
@@ -2833,7 +2831,7 @@ export class ChannelReader {
       }
     } catch (err) {
       // Silent — cron results are best-effort, don't break poll loop
-      console.error('[Main] Failed to poll cron results:', err)
+      logCaughtError('error', 'cron_poll_failed', err)
     }
   }
 
@@ -2891,7 +2889,7 @@ export class ChannelReader {
       )
       console.log(`[Main] Reply sent successfully`)
     } catch (err) {
-      console.error(`[Main] Failed to send reply:`, err)
+      logCaughtError('error', 'reply_send_failed', err)
     }
   }
 
@@ -2994,10 +2992,7 @@ export class ChannelReader {
         try {
           await this.restart()
         } catch (err) {
-          console.error(
-            '[Main] Restart failed (will retry on next cycle if CRD watch keeps needsRestart):',
-            err instanceof Error ? err.message : err
-          )
+          logCaughtError('error', 'reader_restart_failed', err)
         }
       }
 
@@ -3062,7 +3057,7 @@ async function main(): Promise<void> {
 
 if (require.main === module) {
   main().catch(error => {
-    console.error('[Main] Fatal error:', error)
+    logCaughtError('error', 'fatal', error)
     process.exit(1)
   })
 }

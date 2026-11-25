@@ -4,6 +4,7 @@
 import { ImapFlow } from 'imapflow'
 import * as nodemailer from 'nodemailer'
 import { config } from '../config'
+import { logCaughtError } from '../safeLog'
 import { Attachment, ChannelAdapter, FetchMessagesOptions, Message } from '../types'
 import { isAllowedSender } from './base'
 
@@ -44,7 +45,7 @@ export class EmailAdapter implements ChannelAdapter {
       await this.client.connect()
       console.log(`[Email] Connected to IMAP server ${config.emailImapHost}`)
     } catch (err) {
-      console.error('[Email] IMAP connection error:', err)
+      logCaughtError('error', 'email_imap_failed', err)
       this.client = null
     }
 
@@ -153,7 +154,7 @@ export class EmailAdapter implements ChannelAdapter {
         lock.release()
       }
     } catch (err) {
-      console.error('[Email] Fetch error:', err)
+      logCaughtError('error', 'email_fetch_failed', err)
     }
 
     return messages
@@ -221,7 +222,7 @@ export class EmailAdapter implements ChannelAdapter {
       console.log(`[Email] Sent reply to ${recipientEmail}`)
       return undefined // Email cannot provide a message ID for editing
     } catch (err) {
-      console.error('[Email] Failed to send message:', err)
+      logCaughtError('error', 'email_send_failed', err)
       throw err
     }
   }

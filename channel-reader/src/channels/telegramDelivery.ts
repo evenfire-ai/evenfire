@@ -1,5 +1,6 @@
 import { Bot, InputFile } from 'grammy'
 import { config } from '../config'
+import { logCaughtError } from '../safeLog'
 import { Attachment, SendMessageOptions, TelegramInlineKeyboardButton } from '../types'
 
 const TELEGRAM_MAX_LENGTH = 4096
@@ -185,7 +186,9 @@ export async function sendTelegramMessage(
         inputFiles.push(new InputFile(buffer, attachment.filename || `${attachment.id}.jpg`))
         captions.push(attachment.caption || '')
       } catch (err) {
-        console.warn(`[Telegram] Failed to decode attachment ${attachment.id}:`, err)
+        logCaughtError('warn', 'telegram_attachment_decode_failed', err, {
+          attachmentId: attachment.id,
+        })
       }
     }
 
@@ -257,7 +260,9 @@ export async function sendTelegramMessage(
         })
         firstDocumentId ??= String(sent.message_id)
       } catch (err) {
-        console.warn(`[Telegram] Failed to deliver document attachment ${attachment.id}:`, err)
+        logCaughtError('warn', 'telegram_attachment_upload_failed', err, {
+          attachmentId: attachment.id,
+        })
       }
     }
     if (firstDocumentId) {

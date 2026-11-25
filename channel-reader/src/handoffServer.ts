@@ -1,5 +1,6 @@
 import http from 'node:http'
 import type { SlackSharedFileRef } from './channels/slack'
+import { logCaughtError } from './safeLog'
 import type { ProviderTargetIdentity } from './types'
 
 const MAX_HANDOFF_BODY_BYTES = 256 * 1024
@@ -188,7 +189,7 @@ export function createChannelReaderHandoffServer(
         writeJson(res, 400, { error: 'invalid_json' })
         return
       }
-      console.error('[Handoff] Unhandled error:', err instanceof Error ? err.message : err)
+      logCaughtError('error', 'handoff_failed', err)
       writeJson(res, 500, { error: 'internal_error' })
     }
   })

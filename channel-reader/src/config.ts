@@ -1,6 +1,7 @@
 /**
  * Configuration settings loaded from environment variables.
  */
+import { logCaughtError } from './safeLog'
 import { CommunicationChannelSpec } from './types'
 
 export interface Config {
@@ -126,10 +127,7 @@ function parseDevChannelConfig(): CommunicationChannelSpec | undefined {
     console.log('[Config]   slack:', parsed.slack ? 'configured' : 'not set')
     return parsed
   } catch (error) {
-    console.error(
-      '[Config] Failed to parse CLERUM_CHANNEL:',
-      error instanceof Error ? error.message : error
-    )
+    logCaughtError('error', 'channel_config_parse_failed', error)
     console.error('[Config] Raw value (first 50 chars):', channelJson.substring(0, 50))
     return undefined
   }
