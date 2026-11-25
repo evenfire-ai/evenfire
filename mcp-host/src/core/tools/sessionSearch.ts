@@ -5,7 +5,8 @@
  * current turn. The signature exposes `query`, `limit`, `since`, `scope` —
  * deliberately NOT `user_id`: the user identity is derived server-side from
  * the `IncomingMessage` that originated the turn (whose `sender` is already
- * pinned to `auth.sub` upstream for the `rpc` channel and to the
+ * pinned upstream to the rpc edge caller's `userId` (the `sub` the verified
+ * edge assertion binds) for the `rpc` channel and to the
  * channel-reader's authenticated bridge for telegram/email/slack).
  *
  * Security posture (mirrors `T3.1-session-search.md §5`):

@@ -8,6 +8,14 @@ export const TOKEN_LEAK_REDACT_PATHS: readonly string[] = [
   'headers.authorization',
   "headers['x-evenfire-action-delegation']",
   'headers.cookie',
+  // Host edge assertion (300 s RS256 credential): the rpc-access connection field,
+  // the action checkpoint field, and the header rpc-proxy forwards it in.
+  'edgeAssertion',
+  'hostEdgeAssertion',
+  '*.edgeAssertion',
+  '*.hostEdgeAssertion',
+  "req.headers['x-clerum-edge-assertion']",
+  "headers['x-clerum-edge-assertion']",
   'token',
   'accessToken',
   'access_token',
@@ -46,6 +54,12 @@ export const TOKEN_LEAK_REDACT_PATHS: readonly string[] = [
 /** Asserted by unit tests so redactions can grow but never shrink. */
 export const REQUIRED_REDACT_PATHS: readonly string[] = [
   'req.headers.authorization',
+  'edgeAssertion',
+  'hostEdgeAssertion',
+  '*.edgeAssertion',
+  '*.hostEdgeAssertion',
+  "req.headers['x-clerum-edge-assertion']",
+  "headers['x-clerum-edge-assertion']",
   "req.headers['x-service-token']",
   "req.headers['x-evenfire-action-delegation']",
   'headers.authorization',

@@ -1,7 +1,14 @@
 import { beforeAll, describe, expect, it } from 'vitest'
 import { execSync } from 'child_process'
 import { createRequire } from 'module'
-import { MCP_HOST_URL, fetchJson } from '../helpers.js'
+import {
+  DEFAULT_HOST_REF,
+  MCP_HOST_URL,
+  fetchJson,
+  getHostActivity,
+  getStatus as getHostStatus,
+} from '../helpers.js'
+import { issueRealRpcToken } from './runtimeAuth.js'
 
 const require = createRequire(import.meta.url)
 const jwt = require('jsonwebtoken')
@@ -16,6 +23,9 @@ type ActivitySnapshot = {
 }
 
 let authToken: string
+// Status and activity admit only rpc-proxy at the Host, so they are read through
+// rpc-proxy with a real user's RPC token.
+let readToken: string
 
 function generateClusterJwt(): string {
   const keyB64 = execSync(
@@ -62,12 +72,7 @@ async function authedFetchJson(
 }
 
 async function getActivitySnapshot(sinceEventId?: string): Promise<ActivitySnapshot> {
-  const params = new URLSearchParams({ limit: '50' })
-  if (sinceEventId) {
-    params.set('sinceEventId', sinceEventId)
-  }
-
-  const res = await authedFetchJson(`${MCP_HOST_URL}/v1/runtime/activity?${params.toString()}`)
+  const res = await getHostActivity(readToken, { limit: 50, sinceEventId })
   expect(res.status).toBe(200)
   return res.data as ActivitySnapshot
 }
@@ -91,8 +96,7 @@ async function sendMessage(
 }
 
 async function getStatus(): Promise<any> {
-  const { data } = await authedFetchJson(`${MCP_HOST_URL}/v1/runtime/status`)
-  return data
+  return getHostStatus(readToken)
 }
 
 async function waitForIdle(timeoutMs = 30_000): Promise<any> {
@@ -189,8 +193,12 @@ async function waitForActivitySnapshot(
 }
 
 describe('Antagonistic safety E2E', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     authToken = generateClusterJwt()
+    readToken = await issueRealRpcToken(
+      ['host:status:read', 'host:activity:read'],
+      [DEFAULT_HOST_REF]
+    )
   })
 
   it('rejects cluster-internal http_request targets before approval', async () => {

@@ -1,12 +1,11 @@
 import { execFileSync } from 'child_process'
 import { createRequire } from 'module'
-import { MCP_HOST_URL, fetchJson, kubectl } from '../helpers.js'
+import { MCP_HOST_URL, RPC_PROXY_URL, fetchJson, kubectl } from '../helpers.js'
 import { E2E_TEST_EMAIL, getE2ETestCandidateEmails } from '../testUser.js'
 
 const require = createRequire(import.meta.url)
 const jwt = require('jsonwebtoken')
 const EXTERNAL_REST_API_URL = process.env.EXTERNAL_REST_API_URL || 'http://localhost:8091'
-const RPC_PROXY_URL = process.env.RPC_PROXY_URL || 'http://localhost:8094'
 const KUBECTL_CONTEXT = process.env.KUBECTL_CONTEXT || process.env.CONTEXT || 'clerum-test'
 const E2E_TEST_PASSWORD =
   process.env.E2E_DESKTOP_PASSWORD || process.env.ADMIN_PASSWORD || 'changeme123!'

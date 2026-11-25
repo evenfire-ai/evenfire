@@ -1,5 +1,5 @@
 import { CRON_EXEC_PROBE_INSTRUCTION } from '../../../tests/e2e/fixtures/cronExecProbeInstruction.js'
-import { getStatus, mcpHostExec } from '../../../tests/e2e/helpers.js'
+import { DEFAULT_HOST_REF, getStatus, mcpHostExec } from '../../../tests/e2e/helpers.js'
 import { expect, test } from './fixtures.js'
 import {
   enterChatllmChat,
@@ -21,6 +21,16 @@ test.describe.serial('Desktop cron execution regression for issue #529', () => {
   )
   test.setTimeout(900_000)
 
+  // The Host status route admits only rpc-proxy, so the cron job count is
+  // read through rpc-proxy with a real user's RPC token. The token helper is
+  // imported here rather than at the top so that loading this opt-in spec
+  // does not require the tests/e2e packages when the journey is skipped.
+  let statusToken: string
+  test.beforeAll(async () => {
+    const { issueRealRpcToken } = await import('../../../tests/e2e/mcp-host/runtimeAuth.js')
+    statusToken = await issueRealRpcToken(['host:status:read'], [DEFAULT_HOST_REF])
+  })
+
   test('user creates and executes the canonical cron probe through Agent Chat', async ({
     appPage,
   }) => {
@@ -38,7 +48,7 @@ test.describe.serial('Desktop cron execution regression for issue #529', () => {
     expect(instruction).toContain('CRON_EXEC_VERIFIED')
 
     mcpHostExec(`rm -f ${proofPath}`)
-    const baselineCronJobs = Number((await getStatus()).cronJobs ?? 0)
+    const baselineCronJobs = Number((await getStatus(statusToken)).cronJobs ?? 0)
     await enterChatllmChat(appPage)
     await startFreshThread(appPage)
     let cronMutationAttempted = false
@@ -105,7 +115,7 @@ test.describe.serial('Desktop cron execution regression for issue #529', () => {
 
       await test.step('the runtime confirms the unique schedule exists', async () => {
         await expect
-          .poll(() => getStatus().then(status => Number(status.cronJobs ?? 0)), {
+          .poll(() => getStatus(statusToken).then(status => Number(status.cronJobs ?? 0)), {
             timeout: 30_000,
             intervals: [500, 1_000, 2_000],
             message: `cron job count should increase after creating ${jobName}`,
@@ -146,7 +156,7 @@ test.describe.serial('Desktop cron execution regression for issue #529', () => {
           )
           await expect(cleanupResponse).toContainText(jobName)
           await expect
-            .poll(() => getStatus().then(status => Number(status.cronJobs ?? 0)), {
+            .poll(() => getStatus(statusToken).then(status => Number(status.cronJobs ?? 0)), {
               timeout: 30_000,
               intervals: [500, 1_000, 2_000],
               message: `cron job count should return to baseline after deleting ${jobName}`,

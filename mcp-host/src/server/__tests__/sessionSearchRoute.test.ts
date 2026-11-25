@@ -6,7 +6,7 @@
  *
  *   401  missing trusted edge identity
  *   400  `q` missing
- *   200  results returned with auth.sub as the canonical user
+ *   200  results returned with the rpc edge caller's userId as the canonical user
  *   501  handler not wired (memory mode / feature OFF)
  *   500  handler raised
  *
@@ -72,7 +72,7 @@ function makeReq(query: Record<string, string> = {}, userId?: string): Request {
 }
 
 describe('handleSessionSearchRoute', () => {
-  it('#19 returns 401 when auth.sub is missing', async () => {
+  it('#19 returns 401 when the rpc edge caller has no userId', async () => {
     const sessionSearchHandler: SessionSearchHandler = vi.fn()
     const captured = makeRes()
     await handleSessionSearchRoute(
