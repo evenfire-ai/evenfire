@@ -27,7 +27,13 @@ import {
   type HostObject,
   createFakeControlApi,
 } from '../../test/fixtures/fakeControlApi'
-import { REQUEST_TIMED_OUT_MESSAGE, formatApiError, getHost } from '../api'
+import {
+  AuthExpiredError,
+  REQUEST_TIMED_OUT_MESSAGE,
+  formatApiError,
+  getHost,
+  setGlobalAuthErrorHandler,
+} from '../api'
 import {
   type ApprovalClock,
   type ApprovalRandom,
@@ -356,6 +362,7 @@ beforeEach(() => {
 afterEach(() => {
   __resetHostApprovalSaveForTests()
   __resetReadRequestCacheForTests()
+  setGlobalAuthErrorHandler(() => {})
   vi.unstubAllGlobals()
 })
 
@@ -509,17 +516,24 @@ describe('Set to Manual now (spec §6.3)', () => {
       expect(clock.pending(), 'timers left').toBe(0)
     })
 
-    it('a failed read is retried', async () => {
+    it.each([
+      ["control-api's 500", CONTROL_API_500],
+      ["the proxy's 502", PROXY_502],
+      ["the proxy's 504", PROXY_504],
+      // control-api's 409 envelope, recorded on a PUT: no read answers one today.
+      ["control-api's 409", HOST_PUT_409],
+    ])('a read answered by %s is retried and saves', async (_name, answer) => {
       const fake = createFake({ modeCeiling: 'auto' })
       const read = fake.hold({ method: 'GET', path: FOO })
       const switching = setManualNow('foo')
       await read.arrived
-      read.respondWith(CONTROL_API_500.status, CONTROL_API_500.body)
+      read.respondWith(answer.status, answer.body)
       const outcome = await drive(switching)
 
       expect(outcome).toEqual({ kind: 'saved', stored: fake.stored('foo') })
-      expect(reads(fake).map(entry => entry.response?.status)).toEqual([500, 200])
+      expect(reads(fake).map(entry => entry.response?.status)).toEqual([answer.status, 200])
       expect(writes(fake)).toHaveLength(1)
+      expect(backoffs(), 'one backoff between the reads').toHaveLength(1)
     })
 
     it('a read answered with no Host is retried, never taken as Already Manual', async () => {
@@ -925,6 +939,88 @@ describe('Set to Manual now (spec §6.3)', () => {
       expect(writes(fake), 'PUTs').toHaveLength(1)
       expect(reads(fake), 'reads').toHaveLength(1)
       expect(storedApproval(fake)).toEqual({ modeCeiling: 'auto' })
+    })
+
+    describe('a 4xx on the read ends the run, as on the PUT (ruling 35)', () => {
+      it('a 403 on the read ends the run at once with the fallback, with no PUT', async () => {
+        const fake = createFake({ modeCeiling: 'auto' })
+        const read = fake.hold({ method: 'GET', path: FOO })
+        const switching = setManualNow('foo', { namespace: 'from-the-page' })
+        await read.arrived
+        // control-api's 403 envelope, recorded on a PUT.
+        read.respondWith(HOST_PUT_403.status, HOST_PUT_403.body)
+        const outcome = await drive(switching)
+        const logged = fake.log.map(entry => [entry.kind, entry.response?.status])
+        const waited = clock.now()
+
+        // The message the real client gives the same read.
+        const oracle = fake.hold({ method: 'GET', path: FOO })
+        const message = getHost('foo', { signal: new AbortController().signal }).then(
+          () => 'no error',
+          (error: unknown) => (error as Error).message
+        )
+        await oracle.arrived
+        oracle.respondWith(HOST_PUT_403.status, HOST_PUT_403.body)
+        expect(logged, 'one read, no PUT').toEqual([['read', 403]])
+        expect(waited, 'no wait').toBe(0)
+        expect(backoffs()).toEqual([])
+        expect(await message).not.toBe('no error')
+        // No read succeeded, so the fallback names the caller's namespace.
+        expect(outcome).toEqual({
+          kind: 'failed',
+          message: await message,
+          fallback: fallback('from-the-page', 'foo'),
+        })
+      })
+
+      it('a 404 on the read ends the run at once with the fallback, with no PUT', async () => {
+        // The fake's own 404 for a missing Host, pinned to the real route by
+        // the contract test's missing-Host step.
+        const fake = createFake({ modeCeiling: 'auto' })
+        const outcome = await drive(setManualNow('gone'))
+        const logged = fake.log.map(entry => [entry.kind, entry.response?.status])
+        const waited = clock.now()
+
+        // The message the real client gives the same read.
+        const message = await getHost('gone', { signal: new AbortController().signal }).then(
+          () => 'no error',
+          (error: unknown) => (error as Error).message
+        )
+        expect(logged, 'one read, no PUT').toEqual([['read', 404]])
+        expect(waited, 'no wait').toBe(0)
+        expect(backoffs()).toEqual([])
+        expect(message).not.toBe('no error')
+        expect(outcome).toEqual({
+          kind: 'failed',
+          message,
+          fallback: FALLBACK.replace('<name>', 'gone'),
+        })
+      })
+
+      it('a 401 on the read goes through the session path once and ends the run, with no PUT', async () => {
+        const onSessionExpired = vi.fn()
+        setGlobalAuthErrorHandler(onSessionExpired)
+        const fake = createFake({ modeCeiling: 'auto' })
+        const read = fake.hold({ method: 'GET', path: FOO })
+        const switching = setManualNow('foo')
+        await read.arrived
+        // The session path reads the status only, so the answer carries no body.
+        read.respondWith(401, undefined)
+        const outcome = await drive(switching)
+
+        expect(
+          fake.log.map(entry => [entry.kind, entry.response?.status]),
+          'one read, no PUT'
+        ).toEqual([['read', 401]])
+        expect(clock.now(), 'no wait').toBe(0)
+        expect(backoffs()).toEqual([])
+        expect(onSessionExpired).toHaveBeenCalledTimes(1)
+        expect(outcome).toEqual({
+          kind: 'failed',
+          message: new AuthExpiredError().message,
+          fallback: FALLBACK.replace('<name>', 'foo'),
+        })
+      })
     })
 
     it('a read without a resourceVersion is never followed by a PUT', async () => {

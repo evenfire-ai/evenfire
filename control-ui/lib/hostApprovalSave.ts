@@ -572,11 +572,15 @@ async function offSwitchAttempt(run: OffSwitchRun): Promise<OffSwitchOutcome | O
     getHost(host, { signal })
   )
   if (read.state === 'failed') {
-    return {
-      kind: 'retry',
-      message: read.timedOut ? REQUEST_TIMED_OUT_MESSAGE : messageOf(read.error),
-      retryAfterMs: retryAfterMsOf(read.error),
+    const status = read.timedOut ? undefined : statusOf(read.error)
+    const message = read.timedOut ? REQUEST_TIMED_OUT_MESSAGE : messageOf(read.error)
+    // Step 6 (ruling 35): a 4xx other than 409 and 429 ends the run, as on the
+    // PUT. apiGet has already sent a 401 down the session path, once.
+    if (status !== undefined && status < 500 && status !== 409 && status !== 429) {
+      return offSwitchFailed(run, message)
     }
+    // Step 4: no answer, an abort, a 5xx (502 and 504 included), a 409 or a 429.
+    return { kind: 'retry', message, retryAfterMs: retryAfterMsOf(read.error) }
   }
   const fresh = read.value
   // An answer that is no Host says nothing about the ceiling.
