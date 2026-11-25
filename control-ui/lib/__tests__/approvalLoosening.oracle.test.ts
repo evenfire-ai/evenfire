@@ -251,10 +251,13 @@ function sweep(): Outcome[] {
  * the two lists differ.
  */
 const EXCEPTION_SCOPE: Record<string, (c: Case) => boolean> = {
-  // custom_tool stands for a custom row. Ruling 32(c): removing a Required `__`
-  // row that does not resolve (server__tool, true → absent) is covered here too.
+  // custom_tool stands for a custom row. Removing a Required row and setting
+  // a row to Skip are items (spec §6.6); removing a Skip row is not. Ruling
+  // 32(c): removing a Required `__` row that does not resolve (server__tool,
+  // true → absent) is covered here too.
   custom_row_unknown_default: c =>
-    c.tool === CUSTOM_PROBE || (c.tool === MCP_PROBE && c.to !== 'false'),
+    (c.tool === CUSTOM_PROBE && (c.from === 'true' || c.to === 'false')) ||
+    (c.tool === MCP_PROBE && c.from === 'true' && c.to === 'absent'),
   // The function does not see `stateless` or `allowStatelessCron`. So it lists
   // a cron_manage change wherever some Host with the same ceiling loosens.
   cron_manage_stateless_host: c =>
