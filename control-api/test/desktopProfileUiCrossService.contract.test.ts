@@ -111,16 +111,16 @@ describe('Profile UI origin cross-service compatibility', () => {
       rpcProxyBaseUrl: 'http://127.0.0.1:8092',
       appName: 'Compatibility fixture',
     })
-    const identity = desktopConfig.getActiveRuntimeConfigProfileIdentity()
-    if (!identity) throw new Error('Desktop runtime profile identity was not created')
+    const identity = desktopConfig.captureProfileOriginBinding()
+    if (!identity.profileId) throw new Error('Desktop runtime profile binding was not created')
 
     const discovered = await new AuthClient().getDesktopEnvironmentForEndpoint(externalRestBaseUrl)
     expect(discovered.profileUiBaseUrl).toBe(profileUiBaseUrl)
     const validated = desktopConfig.validateProfileUiOrigin(
       discovered.profileUiBaseUrl,
-      identity.externalRestApiBaseUrl
+      identity.restBaseUrl
     )
-    await desktopConfig.persistProfileUiOrigin(identity, validated)
+    await desktopConfig.persistProfileOriginForBinding(identity, validated)
     const option = desktopConfig
       .getDesktopRuntimeConfigState()
       .options.find(candidate => candidate.id === identity.profileId)
