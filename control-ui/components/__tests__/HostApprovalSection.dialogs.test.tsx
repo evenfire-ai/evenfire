@@ -208,8 +208,9 @@ describe('HostApprovalSection dialogs (spec §6.6)', () => {
     fireEvent.click(within(section()).getByRole('button', { name: 'Add' }))
     await clickSave()
 
+    // Ruling 41, item 6: a custom row is a row in the list; what is missing is its default.
     const unknownDefault =
-      'This tool has no row in the list, so its default is not known here: calls may run without an approval card.'
+      'As for every custom row, its default is not known here: calls may run without an approval card.'
     expect(listedItems(dialogByName('alertdialog', LOOSENING_DIALOG_TITLE))).toEqual([
       ['added_tool', `Set to Skip. ${unknownDefault}`],
       [
@@ -223,6 +224,36 @@ describe('HostApprovalSection dialogs (spec §6.6)', () => {
         'shell_exec',
         'Back to Default: in Auto, shell commands can run after a model check instead of asking every time.',
       ],
+    ])
+    expect(fake.log).toEqual([])
+  })
+
+  it('a custom row named like an MCP server tool says, as the hint does, that a row has no effect on one (ruling 41, item 6)', async () => {
+    // A Required row written with kubectl, removed here, and a Skip row added here.
+    const fake = createSectionFake({ tools: { 'my-server__lookup': true } })
+    renderSection(fake)
+    clickEdit()
+    fireEvent.click(within(section()).getByRole('button', { name: 'Remove my-server__lookup' }))
+    fireEvent.click(within(section()).getByRole('button', { name: 'Add a tool by name' }))
+    expect(
+      within(section()).getByText(
+        'For a tool with no row above. A row here has no effect on MCP server tools (names with __).'
+      )
+    ).toBeInTheDocument()
+    fireEvent.change(within(section()).getByLabelText('Tool name'), {
+      target: { value: 'other_server__search' },
+    })
+    fireEvent.change(within(section()).getByLabelText('Approval state for the new custom tool'), {
+      target: { value: 'skip' },
+    })
+    fireEvent.click(within(section()).getByRole('button', { name: 'Add' }))
+    await clickSave()
+
+    const mcpName =
+      'A row has no effect on an MCP server tool (names with __). If this names another tool, its default is not known here, as for every custom row: calls may run without an approval card.'
+    expect(listedItems(dialogByName('alertdialog', LOOSENING_DIALOG_TITLE))).toEqual([
+      ['my-server__lookup', `Required removed. ${mcpName}`],
+      ['other_server__search', `Set to Skip. ${mcpName}`],
     ])
     expect(fake.log).toEqual([])
   })

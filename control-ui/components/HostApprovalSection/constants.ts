@@ -408,8 +408,17 @@ export const LOOSENING_CANCEL_LABEL = 'Back to editing'
 /** A loosening item's label when its path is the first save's policy. */
 export const POLICY_ITEM_LABEL = 'Policy'
 
+/** Spec §6.6: a custom row's tool has no known default here. */
 const UNKNOWN_DEFAULT_TEXT =
-  'This tool has no row in the list, so its default is not known here: calls may run without an approval card.'
+  'As for every custom row, its default is not known here: calls may run without an approval card.'
+
+/**
+ * The same for a custom row named like an MCP server tool, in the words of
+ * `CUSTOM_TOOL_HINT`: mcp-host decides an MCP server tool before it reads
+ * overrides, and the section cannot tell whether the name is one.
+ */
+const MCP_NAME_UNKNOWN_DEFAULT_TEXT =
+  'A row has no effect on an MCP server tool (names with __). If this names another tool, its default is not known here, as for every custom row: calls may run without an approval card.'
 
 /** In Auto, what a tool's default does that its explicit Required did not. */
 const DEFAULT_IN_AUTO_TEXT: Readonly<Record<string, string>> = {
@@ -436,8 +445,12 @@ export const LOOSENING_RULE_TEXT: Readonly<
     conditions
       ? `Back to Default, which does not always ask. ${conditions}`
       : 'Back to Default, which does not always ask.',
-  custom_row_unknown_default: ({ removed }) =>
-    removed ? `Required removed. ${UNKNOWN_DEFAULT_TEXT}` : `Set to Skip. ${UNKNOWN_DEFAULT_TEXT}`,
+  // Only custom rows fall under this rule, so a name with `__` here is no
+  // native tool: mcp-host's MCP naming (`isMcpToolName`).
+  custom_row_unknown_default: ({ name, removed }) =>
+    `${removed ? 'Required removed.' : 'Set to Skip.'} ${
+      name.includes('__') ? MCP_NAME_UNKNOWN_DEFAULT_TEXT : UNKNOWN_DEFAULT_TEXT
+    }`,
   policy_open_on_first_save: () =>
     'Any channel user can approve tool calls from a channel, and raise the mode where the channel allows it. The cluster default this replaces may have been stricter.',
 }
