@@ -250,27 +250,7 @@ describe('HostDetailsPage AP-6 save conflict handling', () => {
     expect(payload.metadata?.resourceVersion).toBe('rv-form-load')
   })
 
-  it('does not PUT and asks to reload when the form-load read carried no resourceVersion', async () => {
-    setupApiMocks({ metadata: { name: 'foo' }, spec: { ...baseSpec } })
-    render(<HostDetailsPage />)
-    await openOverviewEdit()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
-
-    expect(await screen.findByText('Reload the page to save')).toBeInTheDocument()
-    // The refusal is the save's own: it ran, and it sent nothing.
-    expect(
-      (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
-        args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
-      ),
-      'a Host PUT was sent'
-    ).toBe(false)
-    expect(screen.queryByText('Agent configuration saved.')).not.toBeInTheDocument()
-    // The edit form stays open so the operator's draft is kept.
-    expect(screen.getByRole('button', { name: 'Save agent name' })).toBeInTheDocument()
-  })
-
-  it('PUTs once, with the form-load version, when the form-load read carried one', async () => {
+  it('PUTs once, with the form-load version, when the form-load read carried one (Overview partner)', async () => {
     setupApiMocks(formLoadHost, refetchedHost)
     render(<HostDetailsPage />)
     await openOverviewEdit()
@@ -282,53 +262,80 @@ describe('HostDetailsPage AP-6 save conflict handling', () => {
       args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
     )
     expect(puts).toHaveLength(1)
+    expect(
+      (puts[0][2] as { metadata?: { resourceVersion?: string } }).metadata?.resourceVersion
+    ).toBe('rv-form-load')
     expect(screen.queryByText('Reload the page to save')).not.toBeInTheDocument()
   })
 
-  it('does not PUT a model save and asks to reload when the form-load read carried no resourceVersion', async () => {
-    configureModelCatalog()
-    setupApiMocks({ metadata: { name: 'foo' }, spec: { ...baseSpec } })
-    const view = render(<HostDetailsPage />)
-    navigateToTab(view, 'model')
-    await screen.findByText('Current model')
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    fireEvent.click(screen.getByLabelText('Current model', { selector: '#llm-primary-model' }))
-    fireEvent.click(await screen.findByRole('option', { name: 'gpt-5.4' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+  // Each older save, given a form-load read with no resourceVersion (M4). The
+  // fake control-api never produces one, so this file's mocked api does; the
+  // real failed-first-load path is in HostDetailsPage.olderSaves.test.tsx.
+  const NO_VERSION_SAVES = [
+    {
+      kind: 'Overview',
+      press: async () => {
+        setupApiMocks({ metadata: { name: 'foo' }, spec: { ...baseSpec } })
+        render(<HostDetailsPage />)
+        await openOverviewEdit()
+        fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
+      },
+      savedText: 'Agent configuration saved.',
+      stillOpen: () => screen.getByRole('button', { name: 'Save agent name' }),
+    },
+    {
+      kind: 'Model',
+      press: async () => {
+        configureModelCatalog()
+        setupApiMocks({ metadata: { name: 'foo' }, spec: { ...baseSpec } })
+        const view = render(<HostDetailsPage />)
+        navigateToTab(view, 'model')
+        await screen.findByText('Current model')
+        fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+        fireEvent.click(screen.getByLabelText('Current model', { selector: '#llm-primary-model' }))
+        fireEvent.click(await screen.findByRole('option', { name: 'gpt-5.4' }))
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+      },
+      savedText: 'Model configuration saved.',
+      stillOpen: () => screen.getByRole('button', { name: 'Save' }),
+    },
+    {
+      kind: 'Guardrails',
+      press: async () => {
+        const [scenarioHost] = buildGuardrailDetailScenario('sample-hook', 'foo').hosts.items
+        setupApiMocks({
+          metadata: { name: 'foo' },
+          spec: { ...baseSpec, guardrails: scenarioHost.spec?.guardrails },
+        })
+        mockParams = { name: 'foo', tab: 'advanced' }
+        render(<HostDetailsPage />)
+        fireEvent.click(await screen.findByRole('button', { name: 'Actions for sample-hook' }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Remove from Pre-call' }))
+        fireEvent.click(await screen.findByRole('button', { name: 'Remove' }))
+      },
+      savedText: null,
+      stillOpen: null,
+    },
+  ]
 
-    expect(await screen.findByText('Reload the page to save')).toBeInTheDocument()
-    expect(
-      (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
-        args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
-      ),
-      'a Host PUT was sent'
-    ).toBe(false)
-    expect(screen.queryByText('Model configuration saved.')).not.toBeInTheDocument()
-    // The editor stays open so the draft survives.
-    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
-  })
+  it.each(NO_VERSION_SAVES)(
+    'a $kind save does not PUT and asks to reload when the form-load read carried no resourceVersion',
+    async ({ press, savedText, stillOpen }) => {
+      await press()
 
-  it('does not PUT a guardrails save and asks to reload when the form-load read carried no resourceVersion', async () => {
-    const [scenarioHost] = buildGuardrailDetailScenario('sample-hook', 'foo').hosts.items
-    const unversioned: TestHost = {
-      metadata: { name: 'foo' },
-      spec: { ...baseSpec, guardrails: scenarioHost.spec?.guardrails },
+      // The refusal is the save's own: it ran, and it sent nothing.
+      expect(await screen.findByText('Reload the page to save')).toBeInTheDocument()
+      expect(
+        (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
+          args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
+        ),
+        'a Host PUT was sent'
+      ).toBe(false)
+      if (savedText) expect(screen.queryByText(savedText)).not.toBeInTheDocument()
+      // The form stays open so the operator's draft is kept.
+      if (stillOpen) expect(stillOpen()).toBeInTheDocument()
     }
-    setupApiMocks(unversioned)
-    mockParams = { name: 'foo', tab: 'advanced' }
-    render(<HostDetailsPage />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Actions for sample-hook' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove from Pre-call' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }))
-
-    expect(await screen.findByText('Reload the page to save')).toBeInTheDocument()
-    expect(
-      (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
-        args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
-      ),
-      'a Host PUT was sent'
-    ).toBe(false)
-  })
+  )
 
   it('renders the both-causes conflict banner on 409, keeps the edit form open, and shows no success toast', async () => {
     setupApiMocks(formLoadHost, refetchedHost)

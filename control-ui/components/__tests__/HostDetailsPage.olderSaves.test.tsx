@@ -12,6 +12,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { getHost } from '../../lib/api'
 import {
   pageMountDefaults,
@@ -28,6 +30,14 @@ import { buildGuardrailDetailScenario } from '../../test/fixtures/guardrailProdu
 const FOO = '/api/v1/admin/hosts/foo'
 const FOO_DETAIL = `${FOO}/detail`
 const B_DETAIL = '/api/v1/admin/hosts/b/detail'
+
+// control-api's production 500 for a /detail read that fails unexpectedly.
+const DETAIL_500 = JSON.parse(
+  readFileSync(
+    resolve(__dirname, '../../../control-api/test/fixtures/wire/host-detail-500.wire.json'),
+    'utf8'
+  )
+) as { status: number; body: unknown }
 
 const SAVE_KINDS = ['overview', 'model', 'guardrails'] as const
 type SaveKind = (typeof SAVE_KINDS)[number]
@@ -223,6 +233,58 @@ describe('the page’s older saves (spec R16)', () => {
     await settle()
     page.unmount()
   })
+  // The real path to "no version" (M4): the page's first read of the Host fails
+  // with control-api's recorded 500, then the admin tries to save. Neither
+  // reachable save gets as far as the version guard, and the guardrails save is
+  // not reachable at all (no Host read, so no hook to remove). The guard itself
+  // is tested per save with a mocked read in HostDetailsPage.conflict.test.tsx.
+  async function openAfterFailedFirstRead(kind: 'overview' | 'model') {
+    const fake = createFake()
+    // The page's read is the first /detail read on Overview and the second
+    // (after the Overview mount) on the Models tab.
+    const pageRead = fake.hold({
+      method: 'GET',
+      path: FOO_DETAIL,
+      nth: kind === 'overview' ? 1 : 2,
+    })
+    void pageRead.arrived.then(() => pageRead.respondWith(DETAIL_500.status, DETAIL_500.body))
+    const page = renderHostPage({ fake, name: 'foo' })
+    await screen.findByRole('tab', { name: 'Approvals' })
+    await settle()
+    if (kind === 'model') {
+      await page.navigate('Models & creds')
+      await settle()
+    }
+    expect(
+      reads(fake, FOO_DETAIL).map(entry => entry.response?.status),
+      'the page’s read failed'
+    ).toContain(500)
+    expect(screen.getAllByRole('alert').length, 'the failure is shown').toBeGreaterThan(0)
+    return { fake, page }
+  }
+
+  it('an Overview save is not reachable after a failed first page read', async () => {
+    const { fake, page } = await openAfterFailedFirstRead('overview')
+
+    expect(screen.queryByRole('button', { name: 'Edit agent name' }), 'Edit').toBeNull()
+    expect(writes(fake), 'PUTs sent').toHaveLength(0)
+    page.unmount()
+  })
+
+  it('a model save after a failed first page read sends no PUT', async () => {
+    const { fake, page } = await openAfterFailedFirstRead('model')
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    const save = within(dialog).getByRole('button', { name: 'Save' })
+    expect(save, 'Save is pressed').toBeEnabled()
+    fireEvent.click(save)
+    await settle()
+
+    expect(writes(fake), 'PUTs sent').toHaveLength(0)
+    expect(screen.getByRole('dialog', { name: 'Edit model & credentials' })).toBeInTheDocument()
+    page.unmount()
+  })
+
   // No UI path overlaps two saves on one kept page: every control that starts one
   // is disabled while busy, and the model editor ignores dismissal while it saves.
   // The one overlap a test can drive is a save with another agent's load on a
