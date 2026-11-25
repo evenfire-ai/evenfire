@@ -494,6 +494,8 @@ describe('HostDetailsPage identity integration', () => {
     mockParams = { name: 'foo', tab: 'approval-settings' }
     const { container } = render(<HostDetailsPage />)
 
+    // The section opens in its read view; Edit opens the editor.
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
     expect(await screen.findByLabelText('http_request')).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: 'Save' }).closest('.cu-host-approval-section__actions')

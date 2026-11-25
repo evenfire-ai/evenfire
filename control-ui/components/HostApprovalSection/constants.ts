@@ -1,4 +1,6 @@
+import type { LooseningItem, LooseningRule } from '@/lib/approvalLoosening'
 import { CRON_MANAGE_CONDITIONS, WORKFLOW_TRIGGER_CONDITIONS } from '@/lib/approvalToolCatalog'
+import type { ApprovalToolsDraft, FirstSavePolicy, LooseningItemSubject } from './types'
 
 export type CodeDefault = 'required' | 'skip'
 
@@ -11,17 +13,20 @@ export interface NativeToolMeta {
    *     browser_navigate, and cron_manage / workflow_trigger, which vary
    *     (see `conditional`) and are true in their usual case.
    *   - `'skip'` (false): every other registered tool.
-   * The `isRisky` warning predicate fires only when the operator overrides
-   * a `'required'`-default tool to Skip — that is the only direction that
-   * actually loosens approval. Setting any tool to "Required" tightens
-   * (or no-ops if the default is already required).
+   * Whether a change loosens approval is not read from this field alone:
+   * `lib/approvalLoosening` decides it (spec §6.6). Required → Default on a
+   * Skip-default tool loosens too, and so does any change toward Skip on a
+   * tool that asks by default, conditional ones included.
    */
   codeDefault: CodeDefault
   description: string
   /**
-   * Operator-facing tooltip shown next to the warning icon when the override
-   * loosens approval (state === 'skip' && codeDefault === 'required').
-   * Only meaningful for tools whose code default is `'required'`.
+   * Operator-facing note on a Skip override of this tool: the title of the
+   * read view's loosening mark. The mark and the dialog come from
+   * `lib/approvalLoosening`, so a Required-default tool with no hint
+   * (browser_open, browser_navigate, cron_manage, workflow_trigger) is still
+   * marked and still confirmed. Only tools whose code default is `'required'`
+   * carry one.
    */
   riskHint?: string
   /**
@@ -347,3 +352,109 @@ export const TOOL_PARITY_EXCLUSIONS: ReadonlyArray<{ name: string; reason: strin
       "mcp-host's tool-use loop rewrites a bridge call to its target tool before the approval gate (resolveBridgeCall in mcp-host/src/core/orchestration/toolUseLoopToolBatch.ts), so an override on this name never takes effect.",
   },
 ]
+
+/** Spec §6.4: shown while the draft differs from the base. */
+export const UNSAVED_CHANGES_TEXT = 'Unsaved changes'
+
+/** Spec §6.6: the per-tool rows of an agent that has no approval settings of its own. */
+export const CLUSTER_DEFAULT_TEXT = 'Set by the cluster default (not shown here).'
+
+export const NO_OVERRIDES_TEXT =
+  'No per-tool overrides configured. All tools use their built-in approval defaults.'
+
+/**
+ * Spec §6.2: what an explicit Required adds over the tool's own default. In
+ * Auto, an admin's Required shows a card for every call of these tools
+ * (`decideApproval`'s `admin_forced` cause), where their default lets
+ * http_request run and sends shell commands to the model check.
+ */
+export const EXPLICIT_REQUIRED_NOTES: Readonly<Record<string, string>> = {
+  shell_exec: 'Auto asks on every shell command',
+  http_request: 'Auto asks on every HTTP request',
+}
+
+/** Spec §6.6, decision 4: the first save on an agent with no approval settings of its own. */
+export const FIRST_SAVE_DIALOG_TITLE = 'Give this agent its own approval settings'
+export const FIRST_SAVE_DIALOG_DESCRIPTION =
+  'This agent has no approval settings of its own. This save gives it its own, with the policy you choose here.'
+/** Spec §6.6's two sentences. */
+export const FIRST_SAVE_NOTES: readonly string[] = [
+  'The cluster rules stop applying for this agent and may have been stricter than the values shown.',
+  'Channel approval cards may change their wording (with no approval settings anywhere, cards tell people to approve through the CLI).',
+]
+export const FIRST_SAVE_POLICY_LABEL = 'Who can approve from a channel'
+/** PR A offers two; "Listed approvers only" arrives with PR B, which can add approvers. */
+export const FIRST_SAVE_POLICY_OPTIONS: ReadonlyArray<{ value: FirstSavePolicy; label: string }> = [
+  { value: 'channel_users', label: 'Any channel user' },
+  { value: 'cli_only', label: 'Nobody (Desktop only)' },
+]
+
+export const LOOSENING_DIALOG_TITLE = 'Confirm looser approval'
+export const LOOSENING_DIALOG_DESCRIPTION =
+  'This save loosens approval on this agent. Check each change before you save.'
+export const LOOSENING_CONFIRM_LABEL = 'Save these changes'
+export const LOOSENING_CANCEL_LABEL = 'Back to editing'
+
+/** A loosening item's label when its path is the first save's policy. */
+export const POLICY_ITEM_LABEL = 'Policy'
+
+const UNKNOWN_DEFAULT_TEXT =
+  'This tool has no row in the list, so its default is not known here: calls may run without an approval card.'
+
+/** In Auto, what a tool's default does that its explicit Required did not. */
+const DEFAULT_IN_AUTO_TEXT: Readonly<Record<string, string>> = {
+  shell_exec:
+    'Back to Default: in Auto, shell commands can run after a model check instead of asking every time.',
+  http_request:
+    'Back to Default: in Auto, HTTP requests run with no card instead of asking every time.',
+}
+
+/**
+ * What each loosening rule (lib/approvalLoosening) lets happen without a
+ * person, as the loosening dialog and the read view's mark say it.
+ */
+export const LOOSENING_RULE_TEXT: Readonly<
+  Record<LooseningRule, (subject: LooseningItemSubject) => string>
+> = {
+  tool_to_skip: () => 'Set to Skip: calls can run without an approval card.',
+  required_to_default: () =>
+    'Back to Default, which never asks: calls can run without an approval card.',
+  explicit_required_to_default_above_manual: ({ name }) =>
+    DEFAULT_IN_AUTO_TEXT[name] ??
+    'Back to Default: in Auto, calls can run without an approval card.',
+  conditional_default_change: ({ conditions }) =>
+    conditions
+      ? `Back to Default, which does not always ask. ${conditions}`
+      : 'Back to Default, which does not always ask.',
+  custom_row_unknown_default: ({ removed }) =>
+    removed ? `Required removed. ${UNKNOWN_DEFAULT_TEXT}` : `Set to Skip. ${UNKNOWN_DEFAULT_TEXT}`,
+  policy_open_on_first_save: () =>
+    'Any channel user can approve tool calls from a channel, and raise the mode where the channel allows it. The cluster default this replaces may have been stricter.',
+}
+
+const TOOLS_PATH_PREFIX = 'tools.'
+
+/** A loosening item's label: the tool's name, or "Policy" for the first save's policy. */
+export function looseningItemLabel(item: LooseningItem): string {
+  return item.path.startsWith(TOOLS_PATH_PREFIX)
+    ? item.path.slice(TOOLS_PATH_PREFIX.length)
+    : POLICY_ITEM_LABEL
+}
+
+/** A loosening item's text, for the draft that holds the change. */
+export function looseningItemText(item: LooseningItem, draft: ApprovalToolsDraft): string {
+  const name = looseningItemLabel(item)
+  return LOOSENING_RULE_TEXT[item.rule]({
+    name,
+    removed: !Object.hasOwn(draft, name),
+    conditions: NATIVE_TOOLS.find(tool => tool.name === name)?.conditional?.conditions,
+  })
+}
+
+/**
+ * The hint under "Tool name" when adding a row for a tool with none in the
+ * list. mcp-host decides an MCP server tool before it reads overrides
+ * (`mcpApprovalGateController.ts`), so a row for one never takes effect.
+ */
+export const CUSTOM_TOOL_HINT =
+  'For a tool with no row above. A row here has no effect on MCP server tools (names with __).'

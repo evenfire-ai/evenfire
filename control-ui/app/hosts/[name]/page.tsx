@@ -36,8 +36,14 @@ import {
   getMcpServers,
   updateContext,
 } from '../../../lib/api'
-import type { ContextResource, ContextSpec, HostSecretResource } from '../../../lib/api'
+import type {
+  ContextResource,
+  ContextSpec,
+  HostResource,
+  HostSecretResource,
+} from '../../../lib/api'
 import type { ApiRequestError } from '../../../lib/api.types'
+import { approvalBlockOf, effectiveApproval } from '../../../lib/approvalEffective'
 import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexSubscriptionConnectionView,
@@ -54,6 +60,7 @@ import {
   listGrokSubscriptionConnections,
 } from '../../../lib/grokSubscription'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
+import type { ToolsSaveOutcome } from '../../../lib/hostApprovalSave'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
   GROK_SUBSCRIPTION_PROVIDER,
@@ -228,6 +235,8 @@ export default function HostDetailsPage() {
 
   const routeName = decodeURIComponent(params.name || '')
   const mountedRef = useRef(true)
+  // The agent the page shows now, for continuations that started on another.
+  const shownRouteNameRef = useRef(routeName)
 
   // AP-6 — resourceVersion of the READ THE EDIT FORM WAS BUILT FROM.
   // Captured at form load (loadData), NOT from the pre-save re-fetch inside
@@ -355,9 +364,9 @@ export default function HostDetailsPage() {
   // dropdown can offer extra keys (e.g. `claude-api-key-fb1`) — never free text.
   const [secretKeysByName, setSecretKeysByName] = useState<Record<string, string[]>>({})
   const [channelsDraft, setChannelsDraft] = useState<string[]>([])
-  const [approvalToolsData, setApprovalToolsData] = useState<Record<string, boolean> | undefined>(
-    undefined
-  )
+  // The Host the Approvals tab's per-tool section shows: the last loaded one,
+  // or a save's answer. Temporary until Task 21a's tab owns its own loads.
+  const [approvalHost, setApprovalHost] = useState<HostResource | null>(null)
   const [guardrailsData, setGuardrailsData] = useState<HostGuardrails | undefined>(undefined)
   // Overview tab — read-only summary. Kept in sync with the host spec by loadData.
   const [contextMcpServers, setContextMcpServers] = useState<string[]>([])
@@ -592,6 +601,10 @@ export default function HostDetailsPage() {
     }
   }, [])
 
+  useEffect(() => {
+    shownRouteNameRef.current = routeName
+  }, [routeName])
+
   async function loadData(resetDrafts: 'all' | 'overview' | 'model' | 'none' = 'all') {
     setBusy(true)
     setInitialLoading(true)
@@ -699,8 +712,7 @@ export default function HostDetailsPage() {
         // → [] = unrestricted (offers the full global allowlist per provider).
         setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
       }
-      const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
-      setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
+      setApprovalHost(host)
       const rawGuardrails = spec.guardrails as HostGuardrails | undefined
       setGuardrailsData(
         rawGuardrails && typeof rawGuardrails === 'object' ? rawGuardrails : undefined
@@ -1346,35 +1358,16 @@ export default function HostDetailsPage() {
     )
   }
 
-  const persistApprovalTools = useCallback(
-    async (tools: Record<string, boolean>) => {
-      setBusy(true)
-      setError('')
-      try {
-        const currentHost = await getHost(routeName)
-        const currentApproval = (currentHost.spec?.approval as Record<string, unknown>) ?? {}
-        const nextSpec = {
-          ...currentHost.spec,
-          approval: { ...currentApproval, tools },
-        }
-        await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-          spec: nextSpec,
-        })
-        // Reload approval/server state while preserving any drafts left open
-        // in the Overview or Model tabs.
-        await loadData('none')
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to save approval tools')
-        // Re-throw so HostApprovalSection.handleSave does NOT exit edit mode
-        // and the operator's draft is preserved alongside the error banner.
-        throw e
-      } finally {
-        setBusy(false)
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [routeName]
-  )
+  // Temporary until Task 21a's Approvals tab, which owns its loads, the toast
+  // and the Host-changed notice: a settled per-tool save shows a saved answer
+  // at once and reloads. The section calls the callback it was rendered with
+  // when Save was pressed, so `routeName` is the save's agent; once the page
+  // has unmounted or moved to another agent, nothing here runs.
+  function handleApprovalSettled(outcome: ToolsSaveOutcome) {
+    if (!mountedRef.current || shownRouteNameRef.current !== routeName) return
+    if (outcome.kind === 'saved') setApprovalHost(outcome.stored)
+    void loadData('none')
+  }
 
   // Persist Host.spec.guardrails (hook references + built-ins). Owns only the
   // guardrails object — every other spec field is preserved via the
@@ -1438,6 +1431,10 @@ export default function HostDetailsPage() {
       setDeletingAgent(false)
     }
   }
+
+  // The per-tool section gets a Host only when it is the route's agent: a
+  // kept page that moved to another agent shows none until that agent loads.
+  const approvalShown = approvalHost?.metadata?.name === routeName ? approvalHost : null
 
   return (
     <DetailPageShell<HostTab>
@@ -1664,18 +1661,20 @@ export default function HostDetailsPage() {
         )}
 
         {activeTab === 'approvals' &&
-          (initialLoading ? (
-            <ApprovalToolsSkeleton />
-          ) : (
-            // Today's section with today's props; the Approvals tab replaces it.
+          (approvalHost ? (
+            // Temporary render with the section's props (Ruling 5); Task 21a
+            // replaces it with the Approvals tab. After the first load the
+            // section stays mounted through reloads and agent changes.
             <HostApprovalSection
-              busy={busy}
-              canWrite
-              defaultEditing
-              initialTools={approvalToolsData}
-              onSave={persistApprovalTools}
+              ceiling={effectiveApproval(approvalBlockOf(approvalShown)).modeCeiling}
+              host={routeName}
+              inherited={approvalBlockOf(approvalShown) === undefined}
+              stored={approvalShown}
+              onSettled={handleApprovalSettled}
             />
-          ))}
+          ) : initialLoading ? (
+            <ApprovalToolsSkeleton />
+          ) : null)}
 
         {activeTab === 'advanced' && (
           <HostAdvancedTab

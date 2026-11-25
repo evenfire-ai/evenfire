@@ -47,7 +47,7 @@ describe('approval page harness', () => {
   beforeEach(() => resetApprovalTestState())
   afterEach(() => vi.unstubAllGlobals())
 
-  it("harness renders today's per-tool section from the fake's stored tools", async () => {
+  it("harness renders the per-tool section from the fake's stored tools", async () => {
     const fake = seedFake({ http_request: false })
     const page = renderHostPage({ fake, name: 'foo', tab: 'advanced' })
     const driver = await openApprovalSettings(page)
@@ -59,13 +59,25 @@ describe('approval page harness', () => {
   })
 
   it('the driver saves an edited tool through the page and the fake', async () => {
+    // An agent with no approval block: the save is a first save, which the
+    // driver answers with "Nobody (Desktop only)". Skip on http_request
+    // loosens, so the loosening dialog asks before anything is written.
     const fake = seedFake()
     const page = renderHostPage({ fake, name: 'foo', tab: 'advanced' })
     const driver = await openApprovalSettings(page)
+    await driver.edit()
     await driver.editTool('http_request', 'skip')
     await driver.save()
+    expect(
+      fake.log.filter(entry => entry.kind === 'write'),
+      'writes before confirming'
+    ).toEqual([])
+    await driver.confirmDialog()
     await waitFor(() => expect(fake.log.filter(entry => entry.applied)).toHaveLength(1))
-    expect(fake.stored('foo').spec.approval).toMatchObject({ tools: { http_request: false } })
+    expect(fake.stored('foo').spec.approval).toEqual({
+      defaultPolicy: 'cli_only',
+      tools: { http_request: false },
+    })
     await waitFor(() => expect(driver.readView().http_request).toBe('Skip'))
     expect(page.banner()).toBeNull()
     expect(unanswered(fake)).toEqual([])

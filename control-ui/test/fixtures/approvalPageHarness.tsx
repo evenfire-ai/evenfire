@@ -21,6 +21,12 @@ import React from 'react'
 import { expect, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
+import {
+  FIRST_SAVE_DIALOG_TITLE,
+  FIRST_SAVE_POLICY_LABEL,
+  LOOSENING_CONFIRM_LABEL,
+  LOOSENING_DIALOG_TITLE,
+} from '../../components/HostApprovalSection/constants'
 import { ToastProvider } from '../../components/Toast'
 import type { ToastTone } from '../../components/Toast/types'
 import * as api from '../../lib/api'
@@ -206,8 +212,15 @@ function button(name: string): HTMLElement {
 }
 
 const unavailable = (what: string) => async () => {
-  throw new Error(`${what} does not exist in today's per-tool approval section`)
+  throw new Error(`${what} does not exist in the Approvals tab yet`)
 }
+
+/**
+ * The policy the driver gives a first save: "Nobody (Desktop only)" loosens
+ * nothing, so the readiness scenarios' saves reach the write with no
+ * loosening dialog to confirm.
+ */
+const DRIVER_FIRST_SAVE_POLICY = 'cli_only'
 
 /**
  * Goes to where the approval settings live, the Approvals tab, without
@@ -218,15 +231,28 @@ export async function showApprovalSettings(page: HostPageHandle): Promise<void> 
   if (!tab || tab.getAttribute('aria-selected') !== 'true') await page.navigate('Approvals')
 }
 
-/** Opens the per-tool section once it has loaded. Always in edit view today. */
+/**
+ * Opens the per-tool section once it has loaded, in its read view.
+ *
+ * - `edit` presses Edit; in the edit view it does nothing.
+ * - `save` presses Save and, on a first save, answers the policy dialog with
+ *   "Nobody (Desktop only)". A loosening dialog stays open for `confirmDialog`.
+ * - `readView` reads every row the section shows, either view, by its state
+ *   (`data-tool-state`), not its text.
+ */
 export async function openApprovalSettings(page: HostPageHandle): Promise<ApprovalSettingsDriver> {
   await showApprovalSettings(page)
   await waitFor(() => section())
   await waitFor(() => expect(screen.queryByRole('status', { name: /Loading approval/ })).toBeNull())
 
   return {
-    // The section is always in edit view today, so there is nothing to open.
-    async edit() {},
+    async edit() {
+      const edit = within(section()).queryByRole('button', { name: 'Edit' })
+      if (!edit) return
+      await act(async () => {
+        fireEvent.click(edit)
+      })
+    },
     async cancel() {
       fireEvent.click(button('Cancel'))
     },
@@ -238,22 +264,28 @@ export async function openApprovalSettings(page: HostPageHandle): Promise<Approv
       await act(async () => {
         fireEvent.click(button('Save'))
       })
+      // The dialogs render outside the section.
+      const firstSave = screen.queryByRole('dialog', { name: FIRST_SAVE_DIALOG_TITLE })
+      if (!firstSave) return
+      fireEvent.change(within(firstSave).getByLabelText(FIRST_SAVE_POLICY_LABEL), {
+        target: { value: DRIVER_FIRST_SAVE_POLICY },
+      })
+      await act(async () => {
+        fireEvent.click(within(firstSave).getByRole('button', { name: 'Save' }))
+      })
     },
-    confirmDialog: unavailable('A confirmation dialog'),
-    clickSetToManual: unavailable('"Set to manual"'),
+    async confirmDialog() {
+      const dialog = screen.getByRole('alertdialog', { name: LOOSENING_DIALOG_TITLE })
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: LOOSENING_CONFIRM_LABEL }))
+      })
+    },
+    clickSetToManual: unavailable('"Set to Manual now"'),
     readView() {
       const view: Record<string, string> = {}
-      for (const row of section().querySelectorAll('.cu-access-row')) {
-        const select = row.querySelector('select[id^="approval-"]') as HTMLSelectElement | null
-        if (select) {
-          view[select.id.replace(/^approval-/, '')] =
-            STATE_LABELS[select.value as ApprovalToolState]
-          continue
-        }
-        const [name, state] = Array.from(row.querySelectorAll(':scope > span')).map(
-          node => node.textContent ?? ''
-        )
-        if (name) view[name] = state ?? ''
+      for (const row of section().querySelectorAll<HTMLElement>('[data-tool-row]')) {
+        const state = row.dataset.toolState as ApprovalToolState
+        view[row.dataset.toolRow ?? ''] = STATE_LABELS[state] ?? state
       }
       return view
     },

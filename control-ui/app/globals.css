@@ -5554,11 +5554,140 @@ td.cu-registry-description {
   min-height: 0;
 }
 
+.cu-host-approval-section__header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-3);
+  padding-bottom: var(--cu-space-2);
+}
+
+.cu-host-approval-section__title {
+  margin: 0;
+  font-size: var(--cu-font-size-xl);
+  font-weight: var(--cu-font-weight-semibold);
+  line-height: var(--cu-line-height-tight);
+}
+
 .cu-host-approval-section__description {
   flex: 0 0 auto;
   margin: 0;
   padding-bottom: var(--cu-space-3);
-  font-size: 0.8125rem;
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-host-approval-section__message {
+  flex: 0 0 auto;
+  display: grid;
+  gap: var(--cu-space-2);
+  justify-items: start;
+}
+
+.cu-host-approval-section__message:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
+.cu-host-approval-section__message-text {
+  margin: 0;
+}
+
+.cu-host-approval-section__message-list {
+  margin: 0;
+  padding-left: var(--cu-space-5);
+}
+
+.cu-host-approval-section__dirty {
+  margin-right: auto;
+  color: var(--cu-warning);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-host-approval-section__custom {
+  margin-top: var(--cu-space-3);
+}
+
+.cu-host-approval-section__add {
+  display: grid;
+  gap: var(--cu-space-2);
+  justify-items: start;
+  margin-top: var(--cu-space-4);
+}
+
+.cu-host-approval-section__add-form {
+  display: grid;
+  gap: var(--cu-space-2);
+  width: 100%;
+}
+
+.cu-host-approval-section__add-row {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approval-row__copy {
+  display: grid;
+  flex: 1;
+  gap: var(--cu-space-05);
+  min-width: 0;
+}
+
+.cu-host-approval-row__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approval-row__name {
+  font-weight: var(--cu-font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.cu-host-approval-row__description {
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-sm);
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-host-approval-row__state {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approval-row__mark {
+  display: inline-flex;
+  color: var(--cu-warning);
+}
+
+.cu-host-approval-row__select {
+  flex: none;
+}
+
+.cu-host-approval-dialog__note {
+  margin: 0 0 var(--cu-space-3);
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-host-approval-dialog__items {
+  display: grid;
+  gap: var(--cu-space-2);
+  margin: 0;
+  padding-left: var(--cu-space-5);
+}
+
+.cu-host-approval-dialog__item {
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-host-approval-dialog__item-name {
+  margin-right: var(--cu-space-2);
+  font-family: var(--cu-font-mono);
+  font-weight: var(--cu-font-weight-medium);
 }
 
 .cu-host-approval-section__content {
