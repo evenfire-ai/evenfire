@@ -97,7 +97,10 @@ export interface HostPageHandle {
   unmount(): void
   /** The texts of the toasts on screen, only those of `tone` when it is given. */
   toasts(tone?: ToastTone): string[]
-  /** The first error banner on the page, wherever it is: the page's, the tab's or the section's. */
+  /**
+   * The first error banner on the page, wherever it is: the page's, the tab's
+   * load banner, a failed "Set to Manual now" or the section's save message.
+   */
   banner(): string | null
 }
 
@@ -166,8 +169,9 @@ export function overrides(view: Record<string, string>): Record<string, string> 
 
 /**
  * Every error banner on the page, in document order: the page's own, the
- * Approvals tab's load banner and the per-tool section's save message.
- * `banner()` reads the first.
+ * Approvals tab's load banner, the failure of "Set to Manual now" (above the
+ * section) and the per-tool section's save message. `banner()` reads the
+ * first.
  */
 export function errorBanners(): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>('.cu-banner--error'))
