@@ -879,7 +879,10 @@ function clearCookie(name: string): string {
 }
 
 /** Runs /api/oidc/start as LoginPanel's form posts it, with the edge's recorded answers. */
-async function startFromForm(fields: Array<[string, string]>): Promise<Response> {
+async function startWithBody(
+  headers: Record<string, string>,
+  body: string | ReadableStream<Uint8Array>
+): Promise<Response> {
   const paths: string[] = []
   const restore = mockExternalApi(url => {
     paths.push(url.pathname)
@@ -889,13 +892,15 @@ async function startFromForm(fields: Array<[string, string]>): Promise<Response>
   })
   try {
     const origin = new URL(edgeCallbackUri).origin
-    const response = await POST(
-      new Request(new URL(PROFILE_ROUTES.oidcStart, origin), {
-        method: 'POST',
-        headers: { origin, 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams(fields).toString(),
-      })
-    )
+    const init: RequestInit & { duplex?: 'half' } = {
+      method: 'POST',
+      headers: { origin, ...headers },
+      body,
+      // A stream body carries no Content-Length, like a chunked upload.
+      ...(typeof body === 'string' ? {} : { duplex: 'half' }),
+    }
+    const response = await POST(new Request(new URL(PROFILE_ROUTES.oidcStart, origin), init))
+    // Whatever the body, the attempt itself always starts.
     assert.deepEqual(paths, [
       '/api/v1/oidc/profile-flow/configuration',
       '/api/v1/oidc/profile-flow/attempts',
@@ -904,6 +909,18 @@ async function startFromForm(fields: Array<[string, string]>): Promise<Response>
   } finally {
     restore()
   }
+}
+
+/** Posts the form as a browser does, with its Content-Length. */
+async function startFromForm(fields: Array<[string, string]>): Promise<Response> {
+  const body = new URLSearchParams(fields).toString()
+  return startWithBody(
+    {
+      'content-type': 'application/x-www-form-urlencoded',
+      'content-length': String(Buffer.byteLength(body)),
+    },
+    body
+  )
 }
 
 /** The binding and return cookies a desktop-setup start sets, as the browser stores them. */
@@ -1065,4 +1082,70 @@ test('clears the return cookie wherever the binding cookie is cleared, and keeps
       restore()
     }
   }
+})
+
+// /api/oidc/start is unauthenticated, so the form read has its own byte cap (1 KiB).
+const FORM_TYPE = { 'content-type': 'application/x-www-form-urlencoded' }
+const desktopSetupForm = new URLSearchParams([['returnTo', 'desktop-setup']]).toString()
+const oversizedForm = new URLSearchParams([
+  ['returnTo', 'desktop-setup'],
+  ['pad', 'x'.repeat(2048)],
+]).toString()
+
+function assertBindingOnly(response: Response, label: string): void {
+  const cookies = response.headers.getSetCookie()
+  assert.equal(response.status, 303, label)
+  assert.equal(cookies.length, 1, label)
+  assert.equal(cookieParts(cookies[0] ?? '').name, browserCookieName(edgeState), label)
+}
+
+test('a start form within the length cap sets the return cookie', async () => {
+  const response = await startWithBody(
+    { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(desktopSetupForm)) },
+    desktopSetupForm
+  )
+  const cookies = response.headers.getSetCookie()
+  assert.equal(response.status, 303)
+  assert.equal(cookies.length, 2)
+  assert.match(cookies[1] ?? '', RETURN_COOKIE)
+  assert.equal(cookieParts(cookies[1] ?? '').value, 'desktop-setup')
+})
+
+test('a start form above the length cap sets only the binding cookie', async () => {
+  assertBindingOnly(
+    await startWithBody(
+      { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(oversizedForm)) },
+      oversizedForm
+    ),
+    'declared above the cap'
+  )
+  // The read itself stops at the cap, whatever Content-Length claims.
+  assertBindingOnly(
+    await startWithBody(
+      { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(desktopSetupForm)) },
+      oversizedForm
+    ),
+    'longer than declared'
+  )
+})
+
+test('a start form without Content-Length sets only the binding cookie', async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(desktopSetupForm))
+      controller.close()
+    },
+  })
+  assertBindingOnly(await startWithBody(FORM_TYPE, stream), 'no Content-Length')
+})
+
+test('a JSON start body carrying returnTo sets only the binding cookie', async () => {
+  const body = JSON.stringify({ returnTo: 'desktop-setup' })
+  assertBindingOnly(
+    await startWithBody(
+      { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) },
+      body
+    ),
+    'JSON body'
+  )
 })

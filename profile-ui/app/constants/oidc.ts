@@ -18,6 +18,12 @@ export function isOidcReturnTo(value: unknown): value is OidcReturnTo {
   return typeof value === 'string' && (OIDC_RETURN_TO_VALUES as readonly string[]).includes(value)
 }
 
+/**
+ * Most bytes `/api/oidc/start` reads from its unauthenticated form body to find `returnTo`.
+ * LoginPanel's real body, `returnTo=desktop-setup`, is 22 bytes.
+ */
+export const OIDC_START_FORM_MAX_BYTES = 1024
+
 export const OIDC_GENERIC_RESULT_MESSAGE = "Sign-in couldn't be completed. Start again."
 
 export const OIDC_REFUSAL_MESSAGES: Readonly<Record<OidcRefusalReason, string>> = {
