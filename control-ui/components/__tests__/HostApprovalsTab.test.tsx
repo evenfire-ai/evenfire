@@ -428,6 +428,53 @@ describe('HostApprovalsTab', () => {
       tab.unmount()
     })
 
+    it('a stop that settles after a kept tab dropped the section that ran it goes to the root toast, naming the agent (review I1)', async () => {
+      const fake = tabFake(
+        { tools: { json_transform: true } },
+        { b: seedHost('b', { approval: { tools: { clerum__generate_pdf: true } } }) }
+      )
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      const driver = await approvalSettingsDriver()
+      await driver.edit()
+      await driver.editTool('system_info', 'required')
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      await driver.save()
+      await act(async () => {
+        await put.arrived
+      })
+
+      // b's first load fails, so the tab drops the section running foo's save (C13).
+      failNextRead(fake, B_DETAIL)
+      tab.rerenderKept('b')
+      await waitFor(() => expect(tabLoadBanner()).not.toBeNull())
+      expect(perToolSection(), 'no section after b failed').toBeNull()
+      // Back on foo, a new section shows foo, and knows nothing of the save.
+      tab.rerenderKept('foo')
+      const again = await approvalSettingsDriver()
+      expect(overrides(again.readView()), "foo's tools before the write").toEqual({
+        json_transform: 'Required',
+      })
+      const fooNotices = vi.fn()
+      subscribeHostChanged('foo', fooNotices)
+
+      await act(async () => {
+        put.respondWith(PUT_403.status, PUT_403.body)
+      })
+      await waitFor(() => expect(writes(fake)[0].delivered).toBe(true))
+      await waitFor(() => expect(tab.toasts('error')).toHaveLength(1))
+
+      const [toast] = tab.toasts('error')
+      expect(toast).toMatch(/^Per-tool overrides for agent foo were not saved\. /)
+      expect(toast, "control-api's refusal").toContain('is forbidden')
+      expect(fooNotices, "foo's Host-changed notice").toHaveBeenCalledTimes(1)
+      expect(again.message(), 'the new section shows no message of it').toBeNull()
+      expect(approvalOf(fake.stored('foo')), 'nothing written').toEqual({
+        tools: { json_transform: true },
+      })
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
     it('T8r a remounted tab reloads on the Host-changed notice', async () => {
       const fake = pageFake({
         foo: seedHost('foo', { approval: { tools: { json_transform: true } } }),

@@ -99,12 +99,15 @@ function ReadViewsSkeleton() {
  *
  * **Saves.** The per-tool section reports every save that ends through
  * `onSettled`, with the callback of the render where Save was pressed. While
- * the tab is mounted and shows that agent, a saved answer seeds the tools group
- * of the display state it shows now, and the tab shows the success toast.
- * Otherwise the save writes nothing to the tab and reports through the root
- * toast, naming the agent (spec §6.5 "After unmount"). Every save that ends
- * fires the Host-changed notice, which loads again every Approvals tab of that
- * agent, this one included.
+ * the tab is mounted, shows that agent and still shows the section that ran
+ * the save, a saved answer seeds the tools group of the display state it shows
+ * now, and the tab shows the success toast; the section shows every other
+ * outcome. Otherwise the save writes nothing to the tab and reports through
+ * the root toast, naming the agent (spec §6.5 "After unmount"). That includes
+ * a save whose section the tab dropped meanwhile (a kept page whose next
+ * agent's first load failed): a section shown again is a new one, which knows
+ * nothing of the save. Every save that ends fires the Host-changed notice,
+ * which loads again every Approvals tab of that agent, this one included.
  *
  * **Another agent.** A kept instance given another agent starts a new view in
  * the same render, so nothing of the previous agent shows; the section ends its
@@ -119,14 +122,30 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
   const [shownOnce, setShownOnce] = useState(false)
   if (view.host !== host) setView(viewOf(host))
 
+  // The tab drops the section while the agent it shows has nothing to show and
+  // its newest load failed (C13). Each time it shows the section again, the
+  // section is a new instance, with a new generation.
+  const failedWithNothingShown = view.snapshot === null && view.loadError !== null
+  const showSection = shownOnce && !failedWithNothingShown
+  const [section, setSection] = useState({ shown: false, generation: 0 })
+  if (section.shown !== showSection) {
+    setSection({
+      shown: showSection,
+      generation: showSection ? section.generation + 1 : section.generation,
+    })
+  }
+
   const mountedRef = useRef(false)
   const controllersRef = useRef(new Set<AbortController>())
-  // What continuations check: the view the tab shows. Written when a render
-  // commits, so a render React never commits does not move it (Ruling 41(1)).
+  // What continuations check: the view the tab shows, and the generation of
+  // the section it shows (null while none). Written when a render commits, so
+  // a render React never commits does not move them (Ruling 41(1)).
   const viewRef = useRef(view)
+  const shownSectionRef = useRef<number | null>(null)
   useLayoutEffect(() => {
     viewRef.current = view
-  }, [view])
+    shownSectionRef.current = section.shown ? section.generation : null
+  }, [view, section])
 
   useEffect(() => {
     mountedRef.current = true
@@ -209,12 +228,17 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
   }, [view.state, load])
 
   const settleSave = useCallback(
-    (savedHost: string, outcome: ToolsSaveOutcome): void => {
+    (savedHost: string, savedSection: number, outcome: ToolsSaveOutcome): void => {
       const current = viewRef.current
       // Spec §6.5 "After unmount": a save whose tab is gone, or now shows
       // another agent, writes nothing to the tab and reports through the root
-      // toast, naming the agent.
-      if (!mountedRef.current || current.host !== savedHost) {
+      // toast, naming the agent. So does a save whose section the tab dropped
+      // meanwhile (review I1): no section on screen can show its outcome.
+      if (
+        !mountedRef.current ||
+        current.host !== savedHost ||
+        shownSectionRef.current !== savedSection
+      ) {
         const toast = continuationToast(savedHost, outcome)
         emitRootToast(toast.message, toast.options)
         notifyHostChanged(savedHost)
@@ -231,21 +255,22 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
         }
         showToast(TOOLS_SAVED_TOAST, { tone: 'success' })
       }
-      // The section shows every other outcome itself. The notice loads this
-      // tab again too, in this same call, so Save waits for that load.
+      // The section that ran the save shows every other outcome itself. The
+      // notice loads this tab again too, in this same call, so Save waits for
+      // that load.
       notifyHostChanged(savedHost)
     },
     [showToast]
   )
 
   // The section calls the `onSettled` of the render where Save was pressed,
-  // so `host` here is the save's agent.
+  // so `host` and `generation` here are the save's agent and section.
+  const { generation } = section
   function handleSettled(outcome: ToolsSaveOutcome): void {
-    settleSave(host, outcome)
+    settleSave(host, generation, outcome)
   }
 
   const block = approvalBlockOf(view.snapshot)
-  const failedWithNothingShown = view.snapshot === null && view.loadError !== null
   return (
     <div className="cu-host-approvals-tab">
       {view.loadError !== null ? (
@@ -260,7 +285,7 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
       ) : failedWithNothingShown ? null : (
         <ReadViewsSkeleton />
       )}
-      {shownOnce && !failedWithNothingShown ? (
+      {showSection ? (
         <HostApprovalSection
           ceiling={effectiveApproval(block).modeCeiling}
           host={host}
