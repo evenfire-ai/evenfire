@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
 import {
   DESKTOP_EDGE_RECORD_KEYS,
@@ -18,6 +18,7 @@ import {
   type BrowserSignInClock,
   type BrowserSignInTimerHandle,
   createBrowserSignInSecrets,
+  createDesktopLoginLinkHandler,
   mapDesktopLoginErrorLink,
   mapRedeemAnswer,
   parseRedeemResult,
@@ -27,6 +28,7 @@ import {
   DESKTOP_LOGIN_REFUSAL_REASONS,
   type DesktopLoginRefusalReason,
   type RedeemHttpAnswer,
+  buildDesktopLoginCodeLink,
   buildDesktopLoginErrorLink,
   buildLoginMethodsModel,
   compareBrowserSignInSnapshots,
@@ -1032,6 +1034,33 @@ describe('attempt store', () => {
         PROPERTY_RUNS
       )
     })
+  })
+})
+
+describe('desktop-login link handler', () => {
+  // D8, A3-33: only a link the service matched raises the window, which on macOS also cancels a
+  // deferred quit (A3-70). The handler only forwards the raw link; acceptance parses it.
+  it('G2-8c raises the window only for a matched link', () => {
+    const { state } = createBrowserSignInSecrets()
+    const matched = buildDesktopLoginCodeLink({
+      state,
+      code: 'fake-desktop-login-code-'.padEnd(43, 'c'),
+      environment: 'https://api-link.example.test',
+    })
+    const unmatched = buildDesktopLoginErrorLink({ state, error: 'cancelled' })
+    const accept = vi.fn<(rawUrl: string) => boolean>()
+    const requestMainWindow = vi.fn<() => void>()
+    const handle = createDesktopLoginLinkHandler({ accept, requestMainWindow })
+
+    accept.mockReturnValueOnce(true)
+    handle(matched)
+    expect(accept.mock.calls).toEqual([[matched]])
+    expect(requestMainWindow).toHaveBeenCalledOnce()
+
+    accept.mockReturnValueOnce(false)
+    handle(unmatched)
+    expect(accept.mock.calls).toEqual([[matched], [unmatched]])
+    expect(requestMainWindow).toHaveBeenCalledOnce()
   })
 })
 

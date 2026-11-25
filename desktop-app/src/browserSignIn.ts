@@ -1,7 +1,7 @@
 /**
  * Desktop's browser sign-in in the main process, without its network calls: the one attempt, its
- * snapshot and its deadline (state model V13 to V16; D1, D12, D13), the PKCE secrets, and the
- * end-state mapping (state model §5.2, D17).
+ * snapshot and its deadline (state model V13 to V16; D1, D12, D13), the PKCE secrets, the
+ * end-state mapping (state model §5.2, D17), and main's `desktop-login` link handler (D8).
  *
  * It imports neither Electron nor `httpClient.ts` nor `config.ts`. `AppService` owns the requests
  * and the auth owner queue, and passes the clock in, so tests drive the deadline themselves.
@@ -288,6 +288,23 @@ export class BrowserSignInAttempts {
         this.warn('[AppService] Browser sign-in state push failed', error)
       }
     })
+  }
+}
+
+/**
+ * Main's `desktop-login` link handler, which the deep-link router calls (D8). `accept` is the
+ * service's acceptance: it reads the link and says whether it matched the waiting attempt. Only a
+ * matched link raises the window (A3-33); on macOS that request also cancels a deferred quit
+ * (A3-70). An unmatched link requests nothing. The link is never logged (D18).
+ */
+export function createDesktopLoginLinkHandler(
+  deps: Readonly<{
+    accept: (rawUrl: string) => boolean
+    requestMainWindow: () => void
+  }>
+): (rawUrl: string) => void {
+  return rawUrl => {
+    if (deps.accept(rawUrl)) deps.requestMainWindow()
   }
 }
 
