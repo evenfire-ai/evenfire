@@ -504,7 +504,8 @@ function AddCustomTool({ customNames, disabled, onAdd }: AddCustomToolProps) {
   return (
     <div className="cu-host-approval-section__add">
       <Button
-        aria-controls={contentId}
+        // The form exists only while open; aria-controls names it only then.
+        aria-controls={open ? contentId : undefined}
         aria-expanded={open}
         disabled={disabled}
         size="sm"

@@ -455,6 +455,24 @@ describe('HostApprovalSection — edit view', () => {
     expect(input, 'the error is gone').toHaveAccessibleDescription(CUSTOM_TOOL_HINT)
   })
 
+  it('"Add a tool by name" controls only an element that exists (ruling 41, item 5)', () => {
+    renderSection(createSectionFake({ tools: {} }))
+    clickEdit()
+    const toggle = sectionButton('Add a tool by name')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(toggle, 'collapsed: no form to control').not.toHaveAttribute('aria-controls')
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    const controlled = document.getElementById(toggle.getAttribute('aria-controls') ?? '')
+    expect(controlled, 'expanded: the form it shows').not.toBeNull()
+    expect(within(controlled!).getByLabelText('Tool name')).toBeInTheDocument()
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(toggle, 'collapsed again').not.toHaveAttribute('aria-controls')
+  })
+
   it('Review Focus 3: renders and removes a stored off-pattern tool key', async () => {
     // Keys the editor would refuse, written with kubectl.
     const fake = createSectionFake({
