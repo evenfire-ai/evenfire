@@ -44,6 +44,10 @@ add_producer() {
 # sibling package that owns each real fixture/tool instead of maintaining a
 # second service matrix in the workflow.
 contains_executable_reference 'control-api/test/fixtures/' && add_producer control-api
+# A test that executes Profile UI source resolves that source's package imports
+# (for example `@clerum/desktop-app-links`) from profile-ui/node_modules.
+contains_executable_reference 'profile-ui/app/' && add_producer profile-ui
+contains_executable_reference 'profile-ui/lib/' && add_producer profile-ui
 contains_executable_reference 'rpc-proxy/node_modules/.bin/tsx' && add_producer rpc-proxy
 contains_executable_reference 'workflow-recipes/src/' && add_producer workflow-recipes
 

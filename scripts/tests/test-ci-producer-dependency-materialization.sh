@@ -35,9 +35,9 @@ grep -Fq \
 
 assert_packages rpc-proxy control-api
 assert_packages workflow-recipes control-api rpc-proxy
-assert_packages external-rest-api control-api
+assert_packages external-rest-api control-api profile-ui
 assert_packages mcp-host control-api rpc-proxy
-assert_packages control-api workflow-recipes
+assert_packages control-api profile-ui workflow-recipes
 assert_packages packages/action-context-contracts
 assert_packages control-ui
 assert_packages desktop-app
