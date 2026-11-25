@@ -181,3 +181,52 @@ describe('POST /external/invitations/desktop-authorization', () => {
     expect(flow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
   })
 })
+
+describe('GET /external/invitations/pending', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    session.claims = { ...SESSION_CLAIMS }
+    directory.listPendingInvitations.mockResolvedValue([])
+    accounts.rows = new Map([[SESSION_CLAIMS.userId, accountRow()]])
+    accounts.query.mockImplementation(async (sql: string, params: unknown[]) => {
+      if (!/FROM users\s+WHERE id = \$1/.test(sql)) throw new Error(`unexpected query: ${sql}`)
+      const row = accounts.rows.get(String(params[0]))
+      return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }
+    })
+  })
+
+  it('lists invitations for the live account email, not a stale session email', async () => {
+    // A v1 session keeps the email it was issued with; an admin has since
+    // moved the account to a new address.
+    session.claims = { ...SESSION_CLAIMS, email: 'old-address@example.invalid' }
+    accounts.rows.set(SESSION_CLAIMS.userId, accountRow({ email: 'New-Address@example.invalid' }))
+
+    const response = await request(app()).get('/external/invitations/pending')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ items: [] })
+    expect(accounts.query).toHaveBeenCalledWith(expect.stringMatching(/FROM users/), [
+      SESSION_CLAIMS.userId,
+    ])
+    expect(directory.listPendingInvitations).toHaveBeenCalledOnce()
+    expect(directory.listPendingInvitations).toHaveBeenCalledWith('new-address@example.invalid')
+    expect(directory.listPendingInvitations).not.toHaveBeenCalledWith('old-address@example.invalid')
+  })
+
+  it.each([
+    ['no row', undefined],
+    ['a retired row', accountRow({ lifecycle_state: 'retired' })],
+  ])('refuses a session whose account has %s', async (_label, row) => {
+    if (row) accounts.rows.set(SESSION_CLAIMS.userId, row)
+    else accounts.rows.delete(SESSION_CLAIMS.userId)
+
+    const response = await request(app()).get('/external/invitations/pending')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(accounts.query).toHaveBeenCalledWith(expect.stringMatching(/FROM users/), [
+      SESSION_CLAIMS.userId,
+    ])
+    expect(directory.listPendingInvitations).not.toHaveBeenCalled()
+  })
+})

@@ -57,7 +57,8 @@ vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   signExternalSessionToken: tokenSigner.sign,
 }))
 
-// The caller's live account row, as the desktop-authorization route reads it.
+// The caller's live account row, as the desktop-authorization and pending
+// routes read it.
 function callerAccount() {
   const row = {
     id: 'caller-user',
@@ -287,6 +288,7 @@ describe('external invitation routes when the hub is unavailable', () => {
   })
 
   it('lists invitations only for the authenticated email', async () => {
+    database.query.mockResolvedValue(callerAccount())
     directory.listPendingInvitations.mockResolvedValue([])
 
     const res = await request(app()).get('/external/invitations/pending?email=victim@example.com')
@@ -297,6 +299,7 @@ describe('external invitation routes when the hub is unavailable', () => {
   })
 
   it('reads owned pending invitations without an added user quota', async () => {
+    database.query.mockResolvedValue(callerAccount())
     directory.listPendingInvitations.mockResolvedValue([])
     await request(app()).get('/external/invitations/pending').expect(200)
     expect(directory.listPendingInvitations).toHaveBeenCalledWith('caller@example.com')
