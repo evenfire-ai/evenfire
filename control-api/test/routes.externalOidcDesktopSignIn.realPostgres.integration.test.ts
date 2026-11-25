@@ -4,7 +4,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
 import request from 'supertest'
-import { type DbTransactionClient, initDb, withTransaction } from '../src/db.js'
+import { type DbTransactionClient, initDb, pool, withTransaction } from '../src/db.js'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import type { PinnedFetchOptions } from '../src/http/pinnedFetch.js'
 import {
@@ -487,6 +487,16 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
     expect(role.rows).toEqual([{ current_user: 'control_api_runtime' }])
     await expect(
       runtimePool.query('UPDATE oidc_desktop_sign_in_codes SET team_id = NULL')
+    ).rejects.toMatchObject({ code: '42501' })
+    // The same, through the only two ways the app reaches the database: the
+    // mocked db.js transaction and pool. Both read holder.pool, so a suite that
+    // stopped pointing it at the runtime pool would run every row as the owner.
+    const transactionRole = await withTransaction(db => db.query('SELECT current_user'))
+    expect(transactionRole.rows).toEqual([{ current_user: 'control_api_runtime' }])
+    const poolRole = await pool.query<{ current_user: string }>('SELECT current_user')
+    expect(poolRole.rows).toEqual([{ current_user: 'control_api_runtime' }])
+    await expect(
+      withTransaction(db => db.query('UPDATE oidc_desktop_sign_in_codes SET team_id = NULL'))
     ).rejects.toMatchObject({ code: '42501' })
 
     await ownerPool.query(
