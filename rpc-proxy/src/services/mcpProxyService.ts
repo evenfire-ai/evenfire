@@ -9,7 +9,12 @@ import {
   fetchHostConnectionFromControlApi,
   fetchUserAllowedServersFromControlApi,
 } from './controlApiRestService.js'
-import { type HostAccessDenial, isHostAccessDenied } from './hostAccessDenial.js'
+import {
+  CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR,
+  type HostAccessDenial,
+  isHostAccessDenied,
+} from './hostAccessDenial.js'
+import { sanitizeHostRefForLog } from './wakeAndHold.js'
 
 export { validateRpcRequest, forwardRpcToServer } from './mcpRpcService.js'
 export {
@@ -125,9 +130,23 @@ export async function resolveHostConnectionForUser(
       attributionBindingStatus: undefined,
     }
   } else {
-    const resolved = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
-      directRunBinding: edgeContext?.directRunBinding,
-    })
+    let resolved: Awaited<ReturnType<typeof fetchHostConnectionFromControlApi>>
+    try {
+      resolved = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
+        directRunBinding: edgeContext?.directRunBinding,
+      })
+    } catch (error) {
+      // The route answers this error as 503 `authority_unavailable` without its
+      // message, so this line is where the operator sees the cause.
+      if (error instanceof Error && error.name === CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR) {
+        console.warn(
+          `[RPC_PROXY] control-api answered the host resolve without an edge assertion; upgrade control-api before RPC Proxy host=${sanitizeHostRefForLog(
+            hostRef
+          )}`
+        )
+      }
+      throw error
+    }
     if (isHostAccessDenied(resolved)) return resolved
     const { edgeAssertion, ...connection } = resolved
     host = {

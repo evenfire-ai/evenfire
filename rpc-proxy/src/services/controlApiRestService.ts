@@ -3,6 +3,7 @@ import { type AuthorizedActionV2, actionAuthorityCheckpointRequest } from '../ac
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
+  CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR,
   type HostAccessDenial,
   type HostAccessDenialCode,
   hostAccessDenialCodeForReason,
@@ -71,6 +72,19 @@ export class ControlApiHostAccessRejectedError extends Error {
     super(`Control API rejected host access (${status})`)
     this.name = 'ControlApiHostAccessRejectedError'
     this.denialCode = denialCode
+  }
+}
+
+/**
+ * control-api authorized the Host (200) but issued no edge assertion: control-api
+ * is older than rpc-proxy. The Host refuses rpc-proxy traffic without one, so the
+ * request cannot proceed; routes answer it as 503 `authority_unavailable`
+ * (`respondControlApiAuthorityUnavailable`), never with this message.
+ */
+export class ControlApiHostEdgeAssertionMissingError extends Error {
+  constructor() {
+    super('Control API MCP host response has no edge assertion')
+    this.name = CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR
   }
 }
 
@@ -288,7 +302,7 @@ export async function fetchHostConnectionFromControlApi(
   // that does not issue one cannot authorize a Host request.
   const edgeAssertion = parsed.edgeAssertion
   if (typeof edgeAssertion !== 'string' || edgeAssertion === '') {
-    throw new Error('Control API MCP host response has no edge assertion')
+    throw new ControlApiHostEdgeAssertionMissingError()
   }
 
   return {

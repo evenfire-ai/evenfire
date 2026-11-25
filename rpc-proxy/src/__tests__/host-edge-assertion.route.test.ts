@@ -318,7 +318,9 @@ function send(row: Pick<RouteRow, 'method' | 'path' | 'body'>) {
  * Host. An SSE route never completes, so it is aborted once the Host call is
  * observable.
  */
-async function sendUntilHostCall(row: RouteRow): Promise<number | null> {
+async function sendUntilHostCall(
+  row: Pick<RouteRow, 'method' | 'path' | 'body'>
+): Promise<number | null> {
   const pending = send(row)
   let status: number | null = null
   let settled = false
@@ -340,25 +342,86 @@ async function sendUntilHostCall(row: RouteRow): Promise<number | null> {
   return status
 }
 
+// Every V1 route whose first resolve asks control-api for the Host connection:
+// the route-scope rows plus wake, approval mode and health. Session search is V2
+// only and never asks control-api (the session search test below).
+// `hostPath` is null for wake, which calls control-api's wake and never the Host.
+type FirstResolveRow = Omit<RequestRow, 'hostPath'> & { hostPath: string | null }
+const FIRST_RESOLVE_ROWS: FirstResolveRow[] = [
+  ...ROUTE_SCOPE_ROWS,
+  {
+    label: 'wake',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/wake',
+    scope: 'host:wake:write',
+    hostPath: null,
+  },
+  {
+    label: 'approval mode',
+    method: 'patch',
+    path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/approval-mode',
+    body: { mode: 'auto' },
+    scope:
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode'],
+    hostPath: '/v1/runtime/sessions/agent-a/chat-1/approval-mode',
+  },
+  {
+    label: 'health',
+    method: 'get',
+    path: '/rpc/hosts/chatllm/health',
+    scope: 'host:health:read',
+    hostPath: '/v1/runtime/health',
+  },
+]
+
+const MISSING_ASSERTION_LOG_PREFIX =
+  '[RPC_PROXY] control-api answered the host resolve without an edge assertion'
+
 describe('V1 Host requests carry the control-api edge assertion', () => {
-  it('refuses with 500 and calls no Host when control-api returns no edge assertion', async () => {
-    controlApiBody = { ...OLD_SHAPE_CONNECTION }
-    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))
+  it.each(FIRST_RESOLVE_ROWS)(
+    '$label: control-api without an edge assertion answers 503 authority_unavailable and calls no Host',
+    async row => {
+      controlApiBody = { ...OLD_SHAPE_CONNECTION }
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope]))
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
-    const res = await send(ROUTE_SCOPE_ROWS[0]!)
+      const res = await send(row)
 
-    // Witness: authorization ran against control-api; the refusal then stopped
-    // the request before any Host call.
-    expect(controlApiCalls).toHaveLength(1)
-    expect(hostCalls).toEqual([])
-    expect(res.status).toBe(500)
+      // Witness: authorization ran against control-api once (and, for wake,
+      // control-api's wake was never asked); the refusal then stopped the
+      // request before any Host call.
+      expect(hostAccessCalls()).toHaveLength(1)
+      expect(controlApiCalls).toHaveLength(1)
+      expect(hostCalls).toEqual([])
+      expect(res.status).toBe(503)
+      // Exactly this body: the internal message is not echoed.
+      expect(res.body).toEqual({ error: 'authority_unavailable' })
+      // The cause is logged once, by the resolver, without the token or the user.
+      const causeLines = warn.mock.calls
+        .map(args => String(args[0]))
+        .filter(line => line.startsWith(MISSING_ASSERTION_LOG_PREFIX))
+      expect(causeLines).toHaveLength(1)
+      expect(causeLines[0]).toContain('host=chatllm')
+      expect(causeLines[0]).not.toContain(USER_ID)
+      expect(causeLines[0]).not.toContain('Bearer')
+      expect(causeLines[0]).not.toMatch(/\btok\b/)
+      warn.mockRestore()
 
-    // The same request with an assertion in the control-api answer reaches the Host.
-    controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
-    await send(ROUTE_SCOPE_ROWS[0]!)
-    expect(controlApiCalls).toHaveLength(2)
-    expect(hostCalls).toHaveLength(1)
-  })
+      // The same request with an assertion in the control-api answer goes through.
+      controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
+      if (row.hostPath === null) {
+        const woken = await send(row)
+        expect(woken.status).toBe(200)
+        expect(controlApiCalls.filter(url => url.endsWith('/wake'))).toHaveLength(1)
+        expect(hostCalls).toEqual([])
+      } else {
+        await sendUntilHostCall(row)
+        expect(hostCalls).toHaveLength(1)
+        expect(hostCalls[0]!.path).toBe(row.hostPath)
+      }
+      expect(hostAccessCalls()).toHaveLength(2)
+    }
+  )
 
   it('sends the assertion together with the clear edge headers an older Host still reads', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))

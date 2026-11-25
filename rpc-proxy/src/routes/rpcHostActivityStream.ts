@@ -9,7 +9,11 @@ import {
   requireRpcAuth,
 } from '../middleware/auth.js'
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
-import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
+import {
+  isHostAccessDenied,
+  respondControlApiAuthorityUnavailable,
+  respondHostAccessDenied,
+} from '../services/hostAccessDenial.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
 
 const activeStreamCountsByUser = new Map<string, number>()
@@ -284,6 +288,7 @@ export function createRpcHostActivityStreamRouter(): Router {
       } catch (error) {
         if (res.destroyed || res.writableEnded) return
         if (!res.headersSent) {
+          if (respondControlApiAuthorityUnavailable(res, error)) return
           res.status(500).json({ error: 'Internal Server Error' })
           return
         }

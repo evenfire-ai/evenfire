@@ -12,7 +12,11 @@ import {
   requireRpcAuth,
 } from '../middleware/auth.js'
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
-import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
+import {
+  isHostAccessDenied,
+  respondControlApiAuthorityUnavailable,
+  respondHostAccessDenied,
+} from '../services/hostAccessDenial.js'
 import {
   UpstreamHostError,
   forwardHostStatus,
@@ -246,6 +250,7 @@ export function createRpcHostStatusStreamRouter(): Router {
           }`
         )
         if (!res.headersSent) {
+          if (respondControlApiAuthorityUnavailable(res, error)) return
           res.status(500).json({ error: 'Internal Server Error' })
           return
         }
