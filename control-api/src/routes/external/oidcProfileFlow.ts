@@ -2,9 +2,15 @@ import { type Request, type Response, Router } from 'express'
 import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
-import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
+import {
+  createExternalClientRateLimiters,
+  externalClientIp,
+} from '../../middleware/externalClientIdentity.js'
 import { rootLogger } from '../../observability/logger.js'
-import { insertDesktopSignInContext } from '../../oidc/attemptSignInContextStore.js'
+import {
+  insertDesktopSignInContext,
+  insertInvitationSignInContext,
+} from '../../oidc/attemptSignInContextStore.js'
 import { loadOidcProviderConfiguration } from '../../oidc/configuration.js'
 import { memberPolicyEvidenceClaimNames } from '../../oidc/memberEligibility.js'
 import { OidcProtocolEngine, type VerifiedOidcIdentityProof } from '../../oidc/protocolEngine.js'
@@ -19,7 +25,16 @@ import {
 import { OIDC_OPERATION_DEADLINE_MS } from '../../oidc/protocolTransport.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import { selectExternalSessionRepresentation } from '../../services/auth/externalSessionIssuance.js'
-import type { OidcRefusalCause } from '../../services/auth/oidcAccountResolution.js'
+import type {
+  OidcInvitationContext,
+  OidcRefusalCause,
+} from '../../services/auth/oidcAccountResolution.js'
+import {
+  OIDC_INVITATION_TOKEN_RE,
+  type OidcInvitationCheck,
+  type OidcInvitationCheckInput,
+  createOidcInvitationAttemptCheck,
+} from '../../services/auth/oidcInvitationAttemptCheck.js'
 import {
   type OidcMemberSignInResult,
   signInOidcMember,
@@ -51,6 +66,16 @@ export type ExternalOidcProfileFlowDependencies = Readonly<{
   signInMember?: SignInMember
   /** Records a Desktop sign-in attempt's code challenge; defaults to the service pool. */
   writeDesktopSignInContext?: (attemptId: string, codeChallenge: string) => Promise<void>
+  /**
+   * Checks an invitation token with the hub; defaults to one check per route
+   * set, whose per-client bucket counts across requests.
+   */
+  checkInvitation?: (input: OidcInvitationCheckInput) => Promise<OidcInvitationCheck>
+  /** Records an invitation attempt's invitation; defaults to the service pool. */
+  writeInvitationSignInContext?: (
+    attemptId: string,
+    context: OidcInvitationContext
+  ) => Promise<void>
 }>
 
 /** The optional `desktopSignIn` field of an `/attempts` request. */
@@ -58,6 +83,12 @@ type DesktopSignInField =
   | Readonly<{ status: 'absent' }>
   | Readonly<{ status: 'invalid' }>
   | Readonly<{ status: 'present'; codeChallenge: string }>
+
+/** The optional `invitationToken` field of an `/attempts` request. */
+type InvitationTokenField =
+  | Readonly<{ status: 'absent' }>
+  | Readonly<{ status: 'invalid' }>
+  | Readonly<{ status: 'present'; invitationToken: string }>
 
 const logger = rootLogger.child({ component: 'oidc_profile_flow' })
 
@@ -237,6 +268,24 @@ function defaultWriteDesktopSignInContext(attemptId: string, codeChallenge: stri
   return insertDesktopSignInContext(pool, attemptId, codeChallenge)
 }
 
+function defaultWriteInvitationSignInContext(
+  attemptId: string,
+  context: OidcInvitationContext
+): Promise<void> {
+  return insertInvitationSignInContext(pool, attemptId, context)
+}
+
+/**
+ * `invitationToken` is either absent or a hub token: printable ASCII, at most
+ * 2048 characters. Any other value, `null` included, is invalid.
+ */
+function invitationTokenField(value: unknown): InvitationTokenField {
+  if (value === undefined) return { status: 'absent' }
+  return typeof value === 'string' && OIDC_INVITATION_TOKEN_RE.test(value)
+    ? { status: 'present', invitationToken: value }
+    : { status: 'invalid' }
+}
+
 /**
  * `desktopSignIn` is either absent or an object whose only key is a valid
  * `codeChallenge`. Any other value, `null` included, is invalid, so a
@@ -268,6 +317,10 @@ export function createExternalOidcProfileFlowRouter(
   const signInMember = dependencies.signInMember ?? defaultSignInMember
   const writeDesktopSignInContext =
     dependencies.writeDesktopSignInContext ?? defaultWriteDesktopSignInContext
+  // Built once for the route set: its bucket counts every request's check.
+  const checkInvitation = dependencies.checkInvitation ?? createOidcInvitationAttemptCheck()
+  const writeInvitationSignInContext =
+    dependencies.writeInvitationSignInContext ?? defaultWriteInvitationSignInContext
   const router = Router()
   const edgeRateLimits = createExternalClientRateLimiters(
     'oidc_profile_flow',
@@ -307,7 +360,14 @@ export function createExternalOidcProfileFlowRouter(
       return res.status(400).json({ error: 'invalid_oidc_attempt' })
     }
     const desktopSignIn = desktopSignInField(req.body.desktopSignIn)
-    if (desktopSignIn.status === 'invalid') {
+    const invitation = invitationTokenField(req.body.invitationToken)
+    // An attempt is for Desktop or from an invitation, never both, so an
+    // invitation refusal never reaches the Desktop handoff page.
+    if (
+      desktopSignIn.status === 'invalid' ||
+      invitation.status === 'invalid' ||
+      (desktopSignIn.status === 'present' && invitation.status === 'present')
+    ) {
       return res.status(400).json({ error: 'invalid_oidc_attempt' })
     }
     if (desktopSignIn.status === 'present' && !provider.memberAuthenticationActivated) {
@@ -315,12 +375,24 @@ export function createExternalOidcProfileFlowRouter(
     }
     let result: Awaited<ReturnType<Engine['beginIdentityProofAttempt']>>
     let attempt: Readonly<{ authorizationUrl: string; expiresAt: string }>
+    let invitationCheck: OidcInvitationCheck | undefined
     // The answer is built inside the try too: Express 4 does not catch an
     // async handler's throw, so any failure must reach safeFailure.
     try {
+      // Started before the hub check, so the check's time comes out of the
+      // operation's budget.
+      const signal = oidcOperationSignal(req)
+      // With member sign-in off the token is ignored and the hub is never
+      // called: the attempt is the plain one it would be without the token.
+      if (invitation.status === 'present' && provider.memberAuthenticationActivated) {
+        invitationCheck = await checkInvitation({
+          invitationToken: invitation.invitationToken,
+          clientIp: externalClientIp(req),
+        })
+      }
       result = await createEngine(provider).beginIdentityProofAttempt({
         browserBinding: req.body.browserBinding,
-        signal: oidcOperationSignal(req),
+        signal,
       })
       attempt = {
         authorizationUrl: result.authorizationUrl,
@@ -329,21 +401,37 @@ export function createExternalOidcProfileFlowRouter(
     } catch (error) {
       return safeFailure(error, res)
     }
-    if (desktopSignIn.status === 'absent') return res.status(200).json(attempt)
     // The claim reads the context in its own statement, so an attempt whose
     // context is missing would complete as a plain Profile sign-in. The
     // authorization URL therefore leaves only after the context is stored.
-    try {
-      await writeDesktopSignInContext(result.attemptId, desktopSignIn.codeChallenge)
-    } catch (error) {
-      // A database error's detail can hold the challenge: class and code only.
-      logger.error(
-        { event: 'oidc_desktop_context_write_failed', ...errorSummary(error) },
-        'OIDC Desktop sign-in context was not stored; the authorization URL was withheld'
-      )
-      return res.status(503).json({ error: 'oidc_storage_unavailable' })
+    if (desktopSignIn.status === 'present') {
+      try {
+        await writeDesktopSignInContext(result.attemptId, desktopSignIn.codeChallenge)
+      } catch (error) {
+        // A database error's detail can hold the challenge: class and code only.
+        logger.error(
+          { event: 'oidc_desktop_context_write_failed', ...errorSummary(error) },
+          'OIDC Desktop sign-in context was not stored; the authorization URL was withheld'
+        )
+        return res.status(503).json({ error: 'oidc_storage_unavailable' })
+      }
+      return res.status(200).json({ ...attempt, signInContext: 'desktop_sign_in' })
     }
-    return res.status(200).json({ ...attempt, signInContext: 'desktop_sign_in' })
+    // Only a pending member invitation the hub accepted carries a context. A
+    // check that fell back leaves the plain attempt. Nothing is echoed.
+    if (invitationCheck?.status === 'qualified') {
+      try {
+        await writeInvitationSignInContext(result.attemptId, invitationCheck.context)
+      } catch (error) {
+        // A database error's detail can hold the invited email: class and code only.
+        logger.error(
+          { event: 'oidc_invitation_context_write_failed', ...errorSummary(error) },
+          'OIDC invitation sign-in context was not stored; the authorization URL was withheld'
+        )
+        return res.status(503).json({ error: 'oidc_storage_unavailable' })
+      }
+    }
+    return res.status(200).json(attempt)
   })
 
   router.post('/external/oidc/profile-flow/complete', async (req, res) => {

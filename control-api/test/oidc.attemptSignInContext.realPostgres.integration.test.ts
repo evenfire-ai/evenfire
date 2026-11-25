@@ -3,7 +3,10 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import type { PinnedFetchOptions } from '../src/http/pinnedFetch.js'
-import { insertDesktopSignInContext } from '../src/oidc/attemptSignInContextStore.js'
+import {
+  insertDesktopSignInContext,
+  insertInvitationSignInContext,
+} from '../src/oidc/attemptSignInContextStore.js'
 import {
   type OidcProtocolAttemptBinding,
   claimOidcProtocolAttempt,
@@ -209,13 +212,21 @@ describeRealPostgres('OIDC attempt sign-in context on real PostgreSQL', () => {
     const attempt = await seedAttempt()
     const invitationId = randomUUID()
     const invitedEmail = `invitee-${randomUUID()}@fixture.test`
-    // PR 2 adds the invitation writer; until then the row is written as admin.
-    await pool!.query(
-      `INSERT INTO oidc_attempt_sign_in_contexts
-         (attempt_id, context_kind, invitation_id, invited_email)
-       VALUES ($1, 'invitation', $2, $3)`,
-      [attempt.id, invitationId, invitedEmail]
+    // Written by the route's writer, as the runtime role.
+    await insertInvitationSignInContext(runtimePool!, attempt.id, { invitationId, invitedEmail })
+    const stored = await pool!.query(
+      `SELECT context_kind, desktop_code_challenge, invitation_id, invited_email
+         FROM oidc_attempt_sign_in_contexts WHERE attempt_id = $1`,
+      [attempt.id]
     )
+    expect(stored.rows).toEqual([
+      {
+        context_kind: 'invitation',
+        desktop_code_challenge: null,
+        invitation_id: invitationId,
+        invited_email: invitedEmail,
+      },
+    ])
 
     const claimed = await claimOidcProtocolAttempt(
       runtimePool!,

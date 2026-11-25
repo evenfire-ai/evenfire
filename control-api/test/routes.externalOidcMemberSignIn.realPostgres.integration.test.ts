@@ -1,13 +1,24 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { ipKeyGenerator } from 'express-rate-limit'
 import { createHash, randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import request from 'supertest'
-import { initDb } from '../src/db.js'
+import { initDb, pool, withTransaction } from '../src/db.js'
 import type { PinnedFetchOptions } from '../src/http/pinnedFetch.js'
 import { createExternalOidcProfileFlowRouter } from '../src/routes/external/oidcProfileFlow.js'
 import { resolveEffectiveUserAccessPolicy } from '../src/services/access/userAccessRuntimePolicy.js'
 import { authenticateExternalUserSession } from '../src/services/auth/externalSessionAuthentication.js'
+import {
+  type InvitationPurpose,
+  insertInvitationForTeams,
+} from '../src/services/directory/invitationStore.js'
+import { resendInvitation } from '../src/services/directory/membership.js'
+import { createPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
+import type { InviteRole } from '../src/services/directory/types.js'
+import { MemberRegistrationUnavailableError } from '../src/services/memberRegistrationErrors.js'
+import { boundedBucketKey } from '../src/services/rateLimitBucketKey.js'
+import { currentWindowStartMs } from '../src/services/rateLimiterService.js'
 import {
   type FakeIdTokenClaims,
   OIDC_MEMBER_SIGN_IN_FAKE_PUBLIC_IP,
@@ -21,6 +32,52 @@ import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const holder = vi.hoisted(() => ({ pool: null as unknown as Pool }))
 const network = vi.hoisted(() => ({ lookup: vi.fn(), transport: vi.fn() }))
+
+/**
+ * The hub, which lives in another repository, stood in for at its in-repo
+ * adapter. Every request is recorded with its body. A registration mints a
+ * flow token for the invitation it registers, and validate answers a known
+ * flow token with that invitation's email and local token, as the hub does.
+ */
+const hub = vi.hoisted(() => ({
+  requests: [] as Array<{ path: string; body: Record<string, unknown>; flowToken?: string }>,
+  flowTokens: new Map<string, { email: string; invitationUuid: string }>(),
+  /** When set, every request throws it. */
+  failure: null as Error | null,
+}))
+
+vi.mock('../src/memberRegistrationServiceClient.js', () => ({
+  memberRegistrationServiceRequest: async (
+    method: string,
+    path: string,
+    options: { body?: Record<string, unknown> }
+  ) => {
+    const body = options.body ?? {}
+    const recorded: { path: string; body: Record<string, unknown>; flowToken?: string } = {
+      path,
+      body,
+    }
+    hub.requests.push(recorded)
+    if (hub.failure) throw hub.failure
+    if (path === '/invitations-flow/invitations') {
+      recorded.flowToken = `fixture-hub-flow-token-${hub.requests.length}`
+      hub.flowTokens.set(recorded.flowToken, {
+        email: String(body.email),
+        invitationUuid: String(body.invitationUuid),
+      })
+      return { sent: true, registered: true }
+    }
+    if (path === '/invitations-flow/validate') {
+      const invitation = hub.flowTokens.get(String(body.token))
+      // The adapter's own message for a hub 4xx.
+      if (!invitation) {
+        throw new Error(`Member registration service ${method} ${path} failed (400): invalid_token`)
+      }
+      return { valid: true, ...invitation }
+    }
+    throw new Error(`the fixture hub has no route for ${method} ${path}`)
+  },
+}))
 
 vi.mock('node:dns/promises', () => ({ lookup: () => network.lookup() }))
 
@@ -125,6 +182,8 @@ describeRealPostgres(
     const database = `oidc_member_route_${randomBytes(6).toString('hex')}`
     let adminPool: Pool
     let testPool: Pool
+    /** `control_api_runtime`, for the invitation rows: every statement the app runs there. */
+    let runtimePool: Pool | undefined
 
     async function tableCounts(): Promise<Record<string, number>> {
       const counts: Record<string, number> = {}
@@ -148,11 +207,12 @@ describeRealPostgres(
     /**
      * Begins and completes one attempt through the route with every default
      * dependency: the provider from process.env, the route's own engine and the
-     * real member sign-in.
+     * real member sign-in. `attemptBody` adds fields to the `/attempts` body.
      */
     async function completeThroughRoute(
       fake: OidcMemberSignInFakeProvider,
-      claims: FakeIdTokenClaims
+      claims: FakeIdTokenClaims,
+      attemptBody: Record<string, unknown> = {}
     ) {
       stubOidcEnvironment(fake.env)
       const app = express()
@@ -162,7 +222,7 @@ describeRealPostgres(
 
       const begun = await request(app)
         .post('/external/oidc/profile-flow/attempts')
-        .send({ browserBinding })
+        .send({ browserBinding, ...attemptBody })
       expect(begun.status).toBe(200)
       const callback = fake.authorize(begun.body.authorizationUrl, claims)
       const completed = await request(app)
@@ -192,6 +252,7 @@ describeRealPostgres(
 
     afterAll(async () => {
       try {
+        await endPoolAndWaitForClients(runtimePool)
         await endPoolAndWaitForClients(testPool)
         if (!adminPool) return
         await waitForDatabaseConnectionsToClose(adminPool, database)
@@ -408,6 +469,425 @@ describeRealPostgres(
         { ...member.claims, groups: groups(33) },
         { groups: groups(32) }
       )
+    })
+
+    /**
+     * Design §9: `/attempts` with the token of an invitation link. The hub is
+     * the only stand-in; the route, its default hub check and bucket, the
+     * context writer, the engine and member sign-in are the real ones. Every
+     * statement the app runs goes through a pool whose connections start as
+     * `control_api_runtime`, so the grants are part of what is proved.
+     * Fixtures and reads use the owner pool.
+     */
+    describe('the invitation link through OIDC', () => {
+      const ATTEMPTS_PATH = '/external/oidc/profile-flow/attempts'
+      const INVITATION_WATCHED_TABLES = [
+        'users',
+        'profiles',
+        'user_oidc_links',
+        'oidc_connections',
+        'team_members',
+        'invitations',
+        'external_user_sessions',
+      ]
+      /** The non-Entra default: account creation is off. */
+      let fake: OidcMemberSignInFakeProvider
+
+      beforeAll(async () => {
+        // The role is a startup parameter, so it is set before the first
+        // query on each connection. The suite's afterAll ends this pool.
+        runtimePool = new Pool({
+          connectionString: databaseUrl(adminUrl!, database),
+          options: '-c role=control_api_runtime',
+        })
+        fake = createOidcMemberSignInFakeProvider()
+        expect(fake.provider.memberSignIn?.accountCreation).toBe('disabled')
+        // A refusal still records the connection; seeded, so every row below
+        // can compare whole tables.
+        await testPool.query(
+          `INSERT INTO oidc_connections (id, issuer, client_id) VALUES ($1, $2, $3)
+           ON CONFLICT DO NOTHING`,
+          [fake.provider.registrationId, fake.provider.issuer, fake.provider.clientId]
+        )
+      })
+
+      beforeEach(async () => {
+        holder.pool = runtimePool!
+        // Through the only two ways the app reaches the database: the mocked
+        // db.js transaction and pool (rateLimitPool is the same proxy).
+        const transactionRole = await withTransaction(db => db.query('SELECT current_user'))
+        expect(transactionRole.rows).toEqual([{ current_user: 'control_api_runtime' }])
+        const poolRole = await pool.query<{ current_user: string }>('SELECT current_user')
+        expect(poolRole.rows).toEqual([{ current_user: 'control_api_runtime' }])
+        hub.requests.length = 0
+        hub.flowTokens.clear()
+        hub.failure = null
+      })
+
+      afterEach(() => {
+        holder.pool = testPool
+      })
+
+      function invitedAddress(label: string): string {
+        return `${uniqueLabel(label)}@invitation.fixture.test`
+      }
+
+      async function seedTeam(label: string): Promise<string> {
+        const result = await testPool.query<{ id: string }>(
+          `INSERT INTO teams (name) VALUES ($1) RETURNING id::text AS id`,
+          [uniqueLabel(label)]
+        )
+        return result.rows[0]!.id
+      }
+
+      /** A pending invitation written by the directory's own insert. */
+      async function seedInvitation(input: {
+        email: string
+        teams: ReadonlyArray<{ teamId: string; role: InviteRole }>
+        purpose?: InvitationPurpose
+      }): Promise<{ id: string; email: string; token: string }> {
+        const created = await insertInvitationForTeams(testPool, {
+          inviteeName: 'Invited Member',
+          email: input.email,
+          teamAssignments: input.teams,
+          purpose: input.purpose ?? 'member_invitation',
+          status: 'pending',
+        })
+        const { id, email, token } = created.invitation
+        return { id, email, token }
+      }
+
+      /** A flow token the hub validates for this row, as if it had sent the link. */
+      function flowTokenFor(row: { email: string; token: string }): string {
+        const flowToken = `fixture-seeded-flow-token-${randomBytes(6).toString('hex')}`
+        hub.flowTokens.set(flowToken, { email: row.email, invitationUuid: row.token })
+        return flowToken
+      }
+
+      function validateRequests() {
+        return hub.requests.filter(entry => entry.path === '/invitations-flow/validate')
+      }
+
+      function stateOf(authorizationUrl: string): string {
+        const state = new URL(authorizationUrl).searchParams.get('state')
+        if (!state) throw new Error('authorization URL has no state')
+        return state
+      }
+
+      /** Every column of the attempt's context rows (none for a plain attempt). */
+      async function contextsOf(state: string): Promise<Array<Record<string, unknown>>> {
+        const result = await testPool.query<{ context: Record<string, unknown> }>(
+          `SELECT to_jsonb(c) AS context
+             FROM oidc_attempt_sign_in_contexts c
+             JOIN oidc_protocol_attempts a ON a.id = c.attempt_id
+            WHERE a.state_hash = $1`,
+          [createHash('sha256').update(state).digest('hex')]
+        )
+        return result.rows.map(row => row.context)
+      }
+
+      async function userCount(email: string): Promise<number> {
+        const result = await testPool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM users WHERE lower(email) = lower($1)`,
+          [email]
+        )
+        return result.rows[0]!.n
+      }
+
+      async function invitationStatus(id: string): Promise<string | undefined> {
+        const result = await testPool.query<{ status: string }>(
+          `SELECT status FROM invitations WHERE id = $1`,
+          [id]
+        )
+        return result.rows[0]?.status
+      }
+
+      /** Row count and content digest of every table a refusal must leave untouched. */
+      async function watchedTables(): Promise<Record<string, string>> {
+        const snapshot: Record<string, string> = {}
+        for (const table of INVITATION_WATCHED_TABLES) {
+          const result = await testPool.query<{ n: number; digest: string }>(
+            `SELECT count(*)::int AS n,
+                    md5(coalesce(string_agg(t::text, '|' ORDER BY t::text), '')) AS digest
+               FROM ${table} t`
+          )
+          snapshot[table] = `${result.rows[0]!.n}:${result.rows[0]!.digest}`
+        }
+        return snapshot
+      }
+
+      function claimsFor(email: string) {
+        return { sub: uniqueLabel('invited-subject'), email, email_verified: true }
+      }
+
+      it('creates the invited account through the routes while creation is off', async () => {
+        const firstTeamId = await seedTeam('invited-first-team')
+        const secondTeamId = await seedTeam('invited-second-team')
+        const address = invitedAddress('invited')
+        const invitation = await seedInvitation({
+          email: address,
+          teams: [
+            { teamId: firstTeamId, role: 'member' },
+            { teamId: secondTeamId, role: 'inviter' },
+          ],
+        })
+        // The directory's insert lower-cases; a row from before that rule
+        // keeps the address as typed.
+        const mixedCase = `Invited.${address}`.replace('invitation.fixture', 'Invitation.Fixture')
+        await testPool.query(`UPDATE invitations SET email = $2 WHERE id = $1`, [
+          invitation.id,
+          mixedCase,
+        ])
+        expect(mixedCase).not.toBe(mixedCase.toLowerCase())
+        const flowToken = flowTokenFor({ email: mixedCase, token: invitation.token })
+        const claims = claimsFor(mixedCase.toLowerCase())
+
+        const { completed, state } = await completeThroughRoute(fake, claims, {
+          invitationToken: flowToken,
+        })
+
+        expect(validateRequests().map(entry => entry.body.token)).toEqual([flowToken])
+        const contexts = await contextsOf(state)
+        expect(contexts).toEqual([
+          {
+            attempt_id: expect.any(String),
+            context_kind: 'invitation',
+            desktop_code_challenge: null,
+            invitation_id: invitation.id,
+            invited_email: mixedCase.toLowerCase(),
+            created_at: expect.any(String),
+          },
+        ])
+        // The token is never stored: no column holds it.
+        expect(Object.values(contexts[0]!)).not.toContain(flowToken)
+        expect(JSON.stringify(contexts)).not.toContain(flowToken)
+
+        expect(completed.status).toBe(200)
+        expect(completed.body).toEqual({
+          outcome: 'member_signed_in',
+          memberAuthenticationActivated: true,
+          token: expect.any(String),
+          sessionContract: expect.stringMatching(/^v[12]$/),
+        })
+        const created = await testPool.query<{ id: string }>(
+          `SELECT id::text AS id FROM users WHERE email = $1`,
+          [mixedCase.toLowerCase()]
+        )
+        expect(created.rows).toHaveLength(1)
+        const memberships = await testPool.query<{ team_id: string; role: string }>(
+          `SELECT team_id::text AS team_id, role FROM team_members
+            WHERE user_id = $1::uuid AND status = 'active' ORDER BY role`,
+          [created.rows[0]!.id]
+        )
+        expect(memberships.rows).toEqual([
+          { team_id: secondTeamId, role: 'inviter' },
+          { team_id: firstTeamId, role: 'member' },
+        ])
+        expect(await invitationStatus(invitation.id)).toBe('accepted')
+      })
+
+      it('gives a resent admin_desktop_access invitation no context', async () => {
+        const teamId = await seedTeam('resent-team')
+        const adminAddress = invitedAddress('resent-admin-access')
+        const adminInvitation = await seedInvitation({
+          email: adminAddress,
+          teams: [{ teamId, role: 'member' }],
+          purpose: 'admin_desktop_access',
+        })
+
+        expect(await resendInvitation(teamId, adminInvitation.id)).toMatchObject({
+          id: adminInvitation.id,
+        })
+        // The hub registers it as a member invitation: only the local row says otherwise.
+        const registration = hub.requests.at(-1)!
+        expect(registration).toMatchObject({
+          path: '/invitations-flow/invitations',
+          body: {
+            email: adminAddress,
+            invitationUuid: adminInvitation.token,
+            purpose: 'member_invitation',
+          },
+        })
+        const { completed, state } = await completeThroughRoute(fake, claimsFor(adminAddress), {
+          invitationToken: registration.flowToken,
+        })
+
+        expect(validateRequests()).toHaveLength(1)
+        expect(await contextsOf(state)).toEqual([])
+        expect(completed.status).toBe(200)
+        expect(completed.body).toEqual({
+          outcome: 'refused',
+          memberAuthenticationActivated: true,
+          reason: 'no_account',
+        })
+        expect(await userCount(adminAddress)).toBe(0)
+
+        // Control: a member invitation resent the same way gets its context.
+        const memberAddress = invitedAddress('resent-member')
+        const memberInvitation = await seedInvitation({
+          email: memberAddress,
+          teams: [{ teamId, role: 'member' }],
+        })
+        await resendInvitation(teamId, memberInvitation.id)
+        const control = await completeThroughRoute(fake, claimsFor(memberAddress), {
+          invitationToken: hub.requests.at(-1)!.flowToken,
+        })
+        expect(await contextsOf(control.state)).toMatchObject([
+          { context_kind: 'invitation', invitation_id: memberInvitation.id },
+        ])
+      })
+
+      it('gives a password reset no context', async () => {
+        const address = invitedAddress('password-reset')
+        await testPool.query(`INSERT INTO users (email, name) VALUES ($1, 'Reset Member')`, [
+          address,
+        ])
+        // Through the directory's own reset path, which registers it with the hub.
+        const reset = await createPasswordResetInvitation({
+          email: address,
+          inviteeName: 'Reset Member',
+        })
+        const registration = hub.requests.at(-1)!
+        expect(registration).toMatchObject({
+          path: '/invitations-flow/invitations',
+          body: { invitationUuid: reset.token, purpose: 'password_reset' },
+        })
+        stubOidcEnvironment(fake.env)
+        const app = express()
+        app.use(express.json())
+        app.use(createExternalOidcProfileFlowRouter())
+
+        const begun = await request(app)
+          .post(ATTEMPTS_PATH)
+          .send({
+            browserBinding: randomBytes(32).toString('base64url'),
+            invitationToken: registration.flowToken,
+          })
+
+        expect(begun.status).toBe(200)
+        expect(begun.body).toEqual({
+          authorizationUrl: expect.any(String),
+          expiresAt: expect.any(String),
+        })
+        // The hub was asked, and accepted the token.
+        expect(validateRequests().map(entry => entry.body.token)).toEqual([registration.flowToken])
+        expect(await contextsOf(stateOf(begun.body.authorizationUrl))).toEqual([])
+        expect(await invitationStatus(reset.id)).toBe('pending')
+      })
+
+      it('falls back to a plain attempt on a hub failure, which gets no exception', async () => {
+        const teamId = await seedTeam('hub-failure-team')
+        const address = invitedAddress('hub-failure')
+        const invitation = await seedInvitation({
+          email: address,
+          teams: [{ teamId, role: 'member' }],
+        })
+        const flowToken = flowTokenFor(invitation)
+        hub.failure = new MemberRegistrationUnavailableError('fixture: hub unreachable')
+
+        const { completed, state } = await completeThroughRoute(fake, claimsFor(address), {
+          invitationToken: flowToken,
+        })
+
+        expect(validateRequests().map(entry => entry.body.token)).toEqual([flowToken])
+        expect(await contextsOf(state)).toEqual([])
+        expect(completed.status).toBe(200)
+        expect(completed.body).toEqual({
+          outcome: 'refused',
+          memberAuthenticationActivated: true,
+          reason: 'no_account',
+        })
+        expect(await userCount(address)).toBe(0)
+        expect(await invitationStatus(invitation.id)).toBe('pending')
+      })
+
+      it('gives the 31st invitation attempt in a minute from one client a plain attempt, counted in Postgres', async () => {
+        // One fixed window for all 31 requests (currentWindowStartMs).
+        const leftInWindow = 60_000 - (Date.now() % 60_000)
+        if (leftInWindow < 15_000) {
+          await new Promise(resolve => setTimeout(resolve, leftInWindow + 50))
+        }
+        const windowStart = currentWindowStartMs()
+        const teamId = await seedTeam('bucket-team')
+        const invitation = await seedInvitation({
+          email: invitedAddress('bucket'),
+          teams: [{ teamId, role: 'member' }],
+        })
+        const flowToken = flowTokenFor(invitation)
+        stubOidcEnvironment(fake.env)
+        // One route set for every request, as in the running service.
+        const app = express()
+        app.use(express.json())
+        app.use(createExternalOidcProfileFlowRouter())
+        const begin = async (clientIp: string) => {
+          const response = await request(app)
+            .post(ATTEMPTS_PATH)
+            .set('x-external-client-ip', clientIp)
+            .send({
+              browserBinding: randomBytes(32).toString('base64url'),
+              invitationToken: flowToken,
+            })
+          expect(response.status).toBe(200)
+          expect(response.body).toEqual({
+            authorizationUrl: expect.any(String),
+            expiresAt: expect.any(String),
+          })
+          return stateOf(response.body.authorizationUrl)
+        }
+
+        const states: string[] = []
+        for (let index = 0; index < 31; index += 1) states.push(await begin('198.51.100.31'))
+
+        expect(validateRequests()).toHaveLength(30)
+        for (const state of states.slice(0, 30)) {
+          expect(await contextsOf(state)).toHaveLength(1)
+        }
+        expect(await contextsOf(states[30]!)).toEqual([])
+        const bucket = await testPool.query<{ count: number }>(
+          `SELECT count FROM rate_limit_buckets WHERE bucket_key = $1 AND window_start_ms = $2`,
+          [boundedBucketKey(`oidc-invitation-hub:${ipKeyGenerator('198.51.100.31')}`), windowStart]
+        )
+        expect(bucket.rows).toEqual([{ count: 31 }])
+
+        // Positive control: another client is still checked.
+        const other = await begin('198.51.100.32')
+        expect(validateRequests()).toHaveLength(31)
+        expect(await contextsOf(other)).toHaveLength(1)
+        // Every request fell in the window the bucket was read for.
+        expect(currentWindowStartMs()).toBe(windowStart)
+      }, 60_000)
+
+      it('refuses a provider email that is not the invited one, end to end, and writes nothing', async () => {
+        const teamId = await seedTeam('mismatch-team')
+        const alice = invitedAddress('alice')
+        const bob = invitedAddress('bob')
+        const invitation = await seedInvitation({
+          email: alice,
+          teams: [{ teamId, role: 'member' }],
+        })
+        const flowToken = flowTokenFor(invitation)
+        const before = await watchedTables()
+
+        const { completed, state } = await completeThroughRoute(fake, claimsFor(bob), {
+          invitationToken: flowToken,
+        })
+
+        expect(completed.status).toBe(200)
+        expect(completed.body).toEqual({
+          outcome: 'refused',
+          memberAuthenticationActivated: true,
+          reason: 'invitation_email_mismatch',
+        })
+        // The path ran: the attempt carried the invitation, and the proof was verified.
+        expect(await contextsOf(state)).toMatchObject([
+          { context_kind: 'invitation', invitation_id: invitation.id, invited_email: alice },
+        ])
+        expect(await attemptStatus(state)).toBe('completed')
+        expect(await watchedTables()).toEqual(before)
+        expect(await userCount(alice)).toBe(0)
+        expect(await userCount(bob)).toBe(0)
+        expect(await invitationStatus(invitation.id)).toBe('pending')
+      })
     })
   }
 )

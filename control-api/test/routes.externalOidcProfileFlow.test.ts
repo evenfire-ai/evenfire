@@ -4,7 +4,11 @@ import { DatabaseError } from 'pg'
 import request from 'supertest'
 import { pool } from '../src/db.js'
 import { OidcPersistenceFailure, OidcProviderUnavailableError } from '../src/oidc/protocolResult.js'
-import { createExternalOidcProfileFlowRouter } from '../src/routes/external/oidcProfileFlow.js'
+import {
+  type ExternalOidcProfileFlowDependencies,
+  createExternalOidcProfileFlowRouter,
+} from '../src/routes/external/oidcProfileFlow.js'
+import type { OidcInvitationCheck } from '../src/services/auth/oidcInvitationAttemptCheck.js'
 import { createOidcR5ProtocolFixture } from './helpers/oidcR5ProtocolFixture.js'
 
 /** What the route's own logger (component oidc_profile_flow) is asked to write. */
@@ -33,14 +37,33 @@ vi.mock('../src/observability/logger.js', async importOriginal => {
 })
 
 /**
- * The store's context insert, seen by the route's default writer. The Desktop
- * tests inject their own writer; one test leaves the default in place.
+ * The store's context inserts, seen by the route's default writers. The
+ * Desktop and invitation tests inject their own writers; one test of each
+ * leaves the default in place.
  */
 const storeInsertDesktopSignInContext = vi.hoisted(() => vi.fn())
+const storeInsertInvitationSignInContext = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/oidc/attemptSignInContextStore.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/oidc/attemptSignInContextStore.js')>()
-  return { ...actual, insertDesktopSignInContext: storeInsertDesktopSignInContext }
+  return {
+    ...actual,
+    insertDesktopSignInContext: storeInsertDesktopSignInContext,
+    insertInvitationSignInContext: storeInsertInvitationSignInContext,
+  }
+})
+
+/**
+ * The route's default invitation check: the factory, and the check each call
+ * of it returns. The invitation tests inject their own check; one test leaves
+ * the default in place to count how often the route builds it.
+ */
+const defaultInvitationCheck = vi.hoisted(() => ({ factory: vi.fn(), check: vi.fn() }))
+
+vi.mock('../src/services/auth/oidcInvitationAttemptCheck.js', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('../src/services/auth/oidcInvitationAttemptCheck.js')>()
+  return { ...actual, createOidcInvitationAttemptCheck: defaultInvitationCheck.factory }
 })
 
 // The route's default engine is the real class, recorded on construction. Its
@@ -93,6 +116,9 @@ function appFor(
 beforeEach(() => {
   for (const method of Object.values(flowLog)) method.mockReset()
   storeInsertDesktopSignInContext.mockReset()
+  storeInsertInvitationSignInContext.mockReset()
+  defaultInvitationCheck.check.mockReset()
+  defaultInvitationCheck.factory.mockReset().mockImplementation(() => defaultInvitationCheck.check)
 })
 
 /** Every call the route made to its logger, Error objects expanded to their own properties. */
@@ -988,5 +1014,381 @@ describe('Desktop sign-in at /attempts', () => {
     expect(response.body).toMatchObject({ signInContext: 'desktop_sign_in' })
     expect(storeInsertDesktopSignInContext).toHaveBeenCalledTimes(1)
     expect(storeInsertDesktopSignInContext).toHaveBeenCalledWith(pool, ATTEMPT_ID, CODE_CHALLENGE)
+  })
+})
+
+describe('Invitation link at /attempts', () => {
+  const ATTEMPTS_PATH = '/external/oidc/profile-flow/attempts'
+  const ATTEMPT_ID = '5e2a7c41-8d3b-4f96-a0e1-7c4b9d2f6a18'
+  const INVITATION_ID = '0c4f9e2b-7a1d-4b35-9e86-2d5f1a3c7b90'
+  const INVITED_EMAIL = 'invitee.fixture@example.test'
+  /** A hub flow token: printable ASCII, made in another repository. */
+  const INVITATION_TOKEN = 'fixture-invitation-flow-token.Zq8~'
+  const CLIENT_IP = '198.51.100.7'
+  /** The S256 challenge of RFC 7636 Appendix B. */
+  const CODE_CHALLENGE = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
+  const browserBinding = 'B'.repeat(43)
+  const begun = {
+    authorizationUrl: 'https://issuer.example.test/authorize?state=opaque-state',
+    expiresAt: new Date('2026-10-30T18:00:00.000Z'),
+    attemptId: ATTEMPT_ID,
+  }
+  /** The answer for a plain attempt, and for an invitation attempt: nothing is echoed. */
+  const plainAttempt = {
+    authorizationUrl: begun.authorizationUrl,
+    expiresAt: '2026-10-30T18:00:00.000Z',
+  }
+  const invitationBody = { browserBinding, invitationToken: INVITATION_TOKEN }
+  const qualified: OidcInvitationCheck = {
+    status: 'qualified',
+    context: { invitationId: INVITATION_ID, invitedEmail: INVITED_EMAIL },
+  }
+  const fellBack: OidcInvitationCheck = { status: 'plain', fallback: 'hub_refused' }
+
+  type Dependencies = Pick<
+    ExternalOidcProfileFlowDependencies,
+    'checkInvitation' | 'writeInvitationSignInContext' | 'writeDesktopSignInContext'
+  >
+
+  /**
+   * The route with member sign-in on (unless switched off), the given engine
+   * and dependencies (an absent one keeps the route's default), and, when
+   * `events` is passed, a record of the moment the route answers.
+   */
+  function invitationApp(
+    engine: object,
+    dependencies: Dependencies,
+    options: { memberSignIn?: boolean; events?: string[] } = {}
+  ) {
+    const router = createExternalOidcProfileFlowRouter({
+      getProvider: () => ({
+        ...provider,
+        memberAuthenticationActivated: options.memberSignIn ?? true,
+      }),
+      createEngine: () => engine as never,
+      ...dependencies,
+    })
+    const app = express()
+    app.use(express.json())
+    const events = options.events
+    if (events) {
+      app.use((_req, res, next) => {
+        const json = res.json.bind(res)
+        res.json = body => {
+          events.push('response')
+          return json(body)
+        }
+        next()
+      })
+    }
+    app.use(router)
+    return app
+  }
+
+  it('answers 400 for desktopSignIn with invitationToken and begins nothing', async () => {
+    for (const memberSignIn of [true, false]) {
+      const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+      const checkInvitation = vi.fn().mockResolvedValue(qualified)
+      const writeInvitationSignInContext = vi.fn().mockResolvedValue(undefined)
+      const writeDesktopSignInContext = vi.fn().mockResolvedValue(undefined)
+      const app = invitationApp(
+        { beginIdentityProofAttempt },
+        { checkInvitation, writeInvitationSignInContext, writeDesktopSignInContext },
+        { memberSignIn }
+      )
+
+      const response = await request(app)
+        .post(ATTEMPTS_PATH)
+        .send({ ...invitationBody, desktopSignIn: { codeChallenge: CODE_CHALLENGE } })
+
+      // With member sign-in off too: the 400 comes before the Desktop 409.
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'invalid_oidc_attempt' })
+      expect(checkInvitation).not.toHaveBeenCalled()
+      expect(beginIdentityProofAttempt).not.toHaveBeenCalled()
+      expect(writeInvitationSignInContext).not.toHaveBeenCalled()
+      expect(writeDesktopSignInContext).not.toHaveBeenCalled()
+    }
+
+    // Positive control: each field alone begins an attempt on the same route.
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const checkInvitation = vi.fn().mockResolvedValue(qualified)
+    const app = invitationApp(
+      { beginIdentityProofAttempt },
+      {
+        checkInvitation,
+        writeInvitationSignInContext: vi.fn().mockResolvedValue(undefined),
+        writeDesktopSignInContext: vi.fn().mockResolvedValue(undefined),
+      }
+    )
+    expect((await request(app).post(ATTEMPTS_PATH).send(invitationBody)).status).toBe(200)
+    const desktop = await request(app)
+      .post(ATTEMPTS_PATH)
+      .send({ browserBinding, desktopSignIn: { codeChallenge: CODE_CHALLENGE } })
+    expect(desktop.status).toBe(200)
+    expect(checkInvitation).toHaveBeenCalledTimes(1)
+    expect(beginIdentityProofAttempt).toHaveBeenCalledTimes(2)
+  })
+
+  it('makes no hub call and writes no context while member sign-in is off', async () => {
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const checkInvitation = vi.fn().mockResolvedValue(qualified)
+    const writeInvitationSignInContext = vi.fn().mockResolvedValue(undefined)
+    const app = invitationApp(
+      { beginIdentityProofAttempt },
+      { checkInvitation, writeInvitationSignInContext },
+      { memberSignIn: false }
+    )
+
+    const response = await request(app)
+      .post(ATTEMPTS_PATH)
+      .set('x-external-client-ip', CLIENT_IP)
+      .send(invitationBody)
+
+    // The plain attempt it would create without the token.
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual(plainAttempt)
+    expect(beginIdentityProofAttempt).toHaveBeenCalledTimes(1)
+    expect(checkInvitation).not.toHaveBeenCalled()
+    expect(writeInvitationSignInContext).not.toHaveBeenCalled()
+  })
+
+  it('checks the hub once when member sign-in is on', async () => {
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const checkInvitation = vi.fn().mockResolvedValue(fellBack)
+    const app = invitationApp(
+      { beginIdentityProofAttempt },
+      { checkInvitation, writeInvitationSignInContext: vi.fn().mockResolvedValue(undefined) }
+    )
+
+    const response = await request(app)
+      .post(ATTEMPTS_PATH)
+      .set('x-external-client-ip', CLIENT_IP)
+      .send(invitationBody)
+
+    expect(response.status).toBe(200)
+    expect(checkInvitation).toHaveBeenCalledTimes(1)
+    expect(checkInvitation).toHaveBeenCalledWith({
+      invitationToken: INVITATION_TOKEN,
+      clientIp: CLIENT_IP,
+    })
+    expect(beginIdentityProofAttempt).toHaveBeenCalledTimes(1)
+  })
+
+  it('keys the check by the client IP externalClientIp reads', async () => {
+    const checkInvitation = vi.fn().mockResolvedValue(fellBack)
+    const app = invitationApp(
+      { beginIdentityProofAttempt: vi.fn().mockResolvedValue(begun) },
+      { checkInvitation, writeInvitationSignInContext: vi.fn().mockResolvedValue(undefined) }
+    )
+
+    // The edge's asserted address wins over a forwarded one.
+    await request(app)
+      .post(ATTEMPTS_PATH)
+      .set('x-external-client-ip', CLIENT_IP)
+      .set('x-forwarded-for', '203.0.113.50, 203.0.113.51')
+      .send(invitationBody)
+    // Without it, the first forwarded address.
+    await request(app)
+      .post(ATTEMPTS_PATH)
+      .set('x-forwarded-for', '203.0.113.50, 203.0.113.51')
+      .send(invitationBody)
+
+    expect(checkInvitation.mock.calls.map(call => call[0].clientIp)).toEqual([
+      CLIENT_IP,
+      '203.0.113.50',
+    ])
+  })
+
+  it.each([
+    ['42', 42],
+    ["''", ''],
+    ["'a b'", 'a b'],
+    ['of 2049 characters', 'x'.repeat(2049)],
+    ['null', null],
+  ])('refuses a malformed invitationToken %s with 400', async (_label, invitationToken) => {
+    // Member sign-in is on and the check would qualify: only the shape refuses.
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const checkInvitation = vi.fn().mockResolvedValue(qualified)
+    const writeInvitationSignInContext = vi.fn().mockResolvedValue(undefined)
+    const app = invitationApp(
+      { beginIdentityProofAttempt },
+      { checkInvitation, writeInvitationSignInContext }
+    )
+
+    const response = await request(app)
+      .post(ATTEMPTS_PATH)
+      .send({ browserBinding, invitationToken })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid_oidc_attempt' })
+    expect(checkInvitation).not.toHaveBeenCalled()
+    expect(beginIdentityProofAttempt).not.toHaveBeenCalled()
+    expect(writeInvitationSignInContext).not.toHaveBeenCalled()
+  })
+
+  it('begins a plain attempt and writes no context when the check falls back', async () => {
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const checkInvitation = vi.fn().mockResolvedValue(fellBack)
+    const writeInvitationSignInContext = vi.fn().mockResolvedValue(undefined)
+    const app = invitationApp(
+      { beginIdentityProofAttempt },
+      { checkInvitation, writeInvitationSignInContext }
+    )
+
+    const response = await request(app).post(ATTEMPTS_PATH).send(invitationBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual(plainAttempt)
+    expect(checkInvitation).toHaveBeenCalledTimes(1)
+    expect(beginIdentityProofAttempt).toHaveBeenCalledTimes(1)
+    expect(writeInvitationSignInContext).not.toHaveBeenCalled()
+  })
+
+  it('writes the invitation context with begin’s attemptId before answering, and echoes nothing', async () => {
+    const events: string[] = []
+    const checkInvitation = vi.fn(async () => {
+      events.push('check')
+      return qualified
+    })
+    const beginIdentityProofAttempt = vi.fn(async () => {
+      events.push('begin')
+      return begun
+    })
+    const writeInvitationSignInContext = vi.fn(async () => {
+      events.push('write started')
+      // Yield to the event loop: an answer sent without awaiting the write
+      // lands before the write finishes.
+      await new Promise(resolve => setImmediate(resolve))
+      events.push('write finished')
+    })
+    const app = invitationApp(
+      { beginIdentityProofAttempt },
+      { checkInvitation, writeInvitationSignInContext },
+      { events }
+    )
+
+    const response = await request(app).post(ATTEMPTS_PATH).send(invitationBody)
+
+    expect(response.status).toBe(200)
+    // Exact: no signInContext, and neither the invitation nor the attempt id.
+    expect(response.body).toEqual(plainAttempt)
+    expect(writeInvitationSignInContext).toHaveBeenCalledTimes(1)
+    expect(writeInvitationSignInContext).toHaveBeenCalledWith(ATTEMPT_ID, qualified.context)
+    expect(events).toEqual(['check', 'begin', 'write started', 'write finished', 'response'])
+  })
+
+  it('counts the hub check against the operation deadline', async () => {
+    const signals: Array<{ aborted: boolean }> = []
+    const beginIdentityProofAttempt = vi.fn(async (input: { signal: AbortSignal }) => {
+      signals.push({ aborted: input.signal.aborted })
+      return begun
+    })
+    // The check outlasts the whole operation budget the request asks for.
+    const checkInvitation = vi.fn(
+      () => new Promise<OidcInvitationCheck>(resolve => setTimeout(() => resolve(fellBack), 80))
+    )
+    const app = invitationApp(
+      { beginIdentityProofAttempt },
+      { checkInvitation, writeInvitationSignInContext: vi.fn().mockResolvedValue(undefined) }
+    )
+
+    await request(app)
+      .post(ATTEMPTS_PATH)
+      .set('x-oidc-operation-deadline-ms', '20')
+      .send(invitationBody)
+
+    // Begin receives the budget the check already spent: its signal has fired.
+    expect(checkInvitation).toHaveBeenCalledTimes(1)
+    expect(signals).toEqual([{ aborted: true }])
+  })
+
+  it('answers 503 with no authorizationUrl when the context write fails, and logs no token', async () => {
+    // Postgres 16's answer to a refused invitation context insert (an invited
+    // email that is not lower-case): the class, message, length, code, table,
+    // constraint and detail layout are copied from a live run; the detail's
+    // row carries this test's attempt id, invitation id and invited email.
+    const failure = Object.assign(
+      new DatabaseError(
+        'new row for relation "oidc_attempt_sign_in_contexts" violates check constraint "oidc_attempt_sign_in_contexts_invited_email_check"',
+        462,
+        'error'
+      ),
+      {
+        severity: 'ERROR',
+        code: '23514',
+        detail: `Failing row contains (${ATTEMPT_ID}, invitation, null, ${INVITATION_ID}, Invitee.Fixture@Example.test, 2026-11-25 10:31:34.334966+00).`,
+        table: 'oidc_attempt_sign_in_contexts',
+        constraint: 'oidc_attempt_sign_in_contexts_invited_email_check',
+      }
+    )
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    const checkInvitation = vi.fn().mockResolvedValue(qualified)
+    const writeInvitationSignInContext = vi.fn().mockRejectedValue(failure)
+    const app = invitationApp(
+      { beginIdentityProofAttempt },
+      { checkInvitation, writeInvitationSignInContext }
+    )
+
+    const response = await request(app).post(ATTEMPTS_PATH).send(invitationBody)
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'oidc_storage_unavailable' })
+    expect(JSON.stringify(response.body)).not.toContain('issuer.example.test')
+    expect(beginIdentityProofAttempt).toHaveBeenCalledTimes(1)
+    expect(writeInvitationSignInContext).toHaveBeenCalledWith(ATTEMPT_ID, qualified.context)
+    // The failure is logged, reduced to its class and code.
+    expect(flowLog.error).toHaveBeenCalledTimes(1)
+    expect(loggedEvents()).toEqual([
+      { event: 'oidc_invitation_context_write_failed', errorClass: 'DatabaseError', code: '23514' },
+    ])
+    const logged = loggedText()
+    expect(logged).not.toContain(INVITATION_TOKEN)
+    expect(logged.toLowerCase()).not.toContain(INVITED_EMAIL)
+    expect(logged).not.toContain('Failing row')
+    expect(logged).not.toContain('violates check constraint')
+  })
+
+  it('writes the context through the store on the service pool by default', async () => {
+    const beginIdentityProofAttempt = vi.fn().mockResolvedValue(begun)
+    storeInsertInvitationSignInContext.mockResolvedValue(undefined)
+    const app = invitationApp(
+      { beginIdentityProofAttempt },
+      { checkInvitation: vi.fn().mockResolvedValue(qualified) }
+    )
+
+    const response = await request(app).post(ATTEMPTS_PATH).send(invitationBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual(plainAttempt)
+    expect(storeInsertInvitationSignInContext).toHaveBeenCalledTimes(1)
+    expect(storeInsertInvitationSignInContext).toHaveBeenCalledWith(
+      pool,
+      ATTEMPT_ID,
+      qualified.context
+    )
+  })
+
+  it('builds its default check once per route set, not per request', async () => {
+    defaultInvitationCheck.check.mockResolvedValue(fellBack)
+    const app = invitationApp(
+      { beginIdentityProofAttempt: vi.fn().mockResolvedValue(begun) },
+      { writeInvitationSignInContext: vi.fn().mockResolvedValue(undefined) }
+    )
+    // Built with the route set, with the check's own defaults.
+    expect(defaultInvitationCheck.factory).toHaveBeenCalledTimes(1)
+    expect(defaultInvitationCheck.factory).toHaveBeenCalledWith()
+
+    for (const clientIp of [CLIENT_IP, CLIENT_IP, '198.51.100.8']) {
+      const response = await request(app)
+        .post(ATTEMPTS_PATH)
+        .set('x-external-client-ip', clientIp)
+        .send(invitationBody)
+      expect(response.status).toBe(200)
+    }
+
+    // Its bucket counts across requests: every request used the one check.
+    expect(defaultInvitationCheck.check).toHaveBeenCalledTimes(3)
+    expect(defaultInvitationCheck.factory).toHaveBeenCalledTimes(1)
   })
 })
