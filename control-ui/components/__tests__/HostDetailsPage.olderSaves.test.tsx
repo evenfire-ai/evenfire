@@ -286,11 +286,15 @@ describe('the page’s older saves (spec R16)', () => {
     page.unmount()
   })
 
-  // No UI path overlaps two saves on one kept page: every control that starts one
-  // is disabled while busy, and the model editor ignores dismissal while it saves.
-  // The one overlap a test can drive is a save with another agent's load on a
-  // page kept across an agent change (the harness's rerenderKept; the shipped
-  // build remounts, which Task 25's browser row checks).
+  // Harness-only overlap. The shipped page has none to drive on one instance:
+  // the Overview name editor stays pending (its Save reads "Saving…" and is
+  // disabled) until saveHost resolves, which is after the reload that follows the
+  // PUT, so a second save cannot start during that reload; the model editor
+  // ignores dismissal while it saves; the other controls that start a save are
+  // disabled while busy; and a tab or agent change remounts the page (Task 25's
+  // browser row). A kept instance given another agent (the harness's
+  // rerenderKept) is the one way to run a save and another load together, and
+  // that is what this test covers: the busy count must outlast the load.
   it('busy stays set while a guardrails save and another load overlap', async () => {
     const [scenarioHost] = buildGuardrailDetailScenario('sample-hook', 'foo').hosts.items
     const fake = createFakeControlApi({
