@@ -382,8 +382,10 @@ describe('Set to Manual now (spec §6.3)', () => {
       // Seven attempts, all started within 20 s on the virtual clock.
       expect(starts).toHaveLength(7)
       expect(Math.max(...starts)).toBeLessThanOrEqual(BUDGET_MS)
-      // Six backoffs on the protocol clock, and 8 s for each read and PUT.
-      expect(backoffs()).toHaveLength(6)
+      // Six backoffs on the protocol clock, drawn from the seeded source: retry
+      // n waits half of min(2 s, 250 ms · 2^(n−1)) plus a random share of the
+      // other half. And 8 s for each read and PUT.
+      expect(backoffs()).toEqual([155, 455, 729, 1297, 1714, 1332])
       expect(clock.now()).toBe(backoffs().reduce((sum, ms) => sum + ms, 0))
       expect(clock.delays.filter(ms => ms === REQUEST_MS)).toHaveLength(14)
       expect(clock.pending(), 'timers left').toBe(0)
@@ -397,7 +399,8 @@ describe('Set to Manual now (spec §6.3)', () => {
       expect(outcome).toEqual({ kind: 'saved', stored: fake.stored('foo') })
       expect(starts).toHaveLength(7)
       expect(Math.max(...starts)).toBeLessThanOrEqual(BUDGET_MS)
-      expect(backoffs()).toHaveLength(6)
+      // The largest backoffs there are: just under 250 ms doubling to the 2 s cap.
+      expect(backoffs()).toEqual([249, 499, 999, 1999, 1999, 1999])
     })
 
     it('T4 page data says Manual, the Host says Auto: it writes', async () => {
