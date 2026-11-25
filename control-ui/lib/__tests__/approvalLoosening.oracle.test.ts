@@ -356,23 +356,33 @@ describe('looseningItems against the oracle, single path', () => {
   })
 
   it('item level: the items equal the oracle per Host facts, except for the named exceptions', () => {
+    const outcomes = sweep()
     const missing: string[] = []
     const unexplained: string[] = []
     const malformed: string[] = []
-    for (const outcome of sweep()) {
+    let agreed = 0
+    let excused = 0
+    for (const outcome of outcomes) {
       const path = `tools.${outcome.tool}`
       if (outcome.items.length > 1 || outcome.items.some(item => item.path !== path)) {
         malformed.push(`${describeCase(outcome)}: ${JSON.stringify(outcome.items)}`)
       }
       const listed = outcome.items.length > 0
+      if (outcome.witness !== null && listed) agreed += 1
       if (outcome.witness !== null && !listed) missing.push(describeCase(outcome))
-      if (outcome.witness === null && listed && excusedBy(outcome).length === 0) {
-        unexplained.push(`${describeCase(outcome)}: ${outcome.items[0].rule}`)
+      if (outcome.witness === null && listed) {
+        if (excusedBy(outcome).length > 0) excused += 1
+        else unexplained.push(`${describeCase(outcome)}: ${outcome.items[0].rule}`)
       }
     }
     expect(malformed).toEqual([])
     expect(missing).toEqual([])
     expect(unexplained).toEqual([])
+    // Partners: 58 tools × 6 changes × 12 Hosts were compared; the function and
+    // the oracle agree on 1,396 loosening cases, and 60 items are excused.
+    expect(outcomes).toHaveLength(4176)
+    expect(agreed).toBe(1396)
+    expect(excused).toBe(60)
   })
 
   it('each clause of each named exception excuses at least one case, and each exception has a reason', () => {
@@ -615,18 +625,37 @@ describe('looseningItems, multi-path (union of single-path items, Ruling 6)', ()
   })
 
   it('keys stored in another order, and unchanged keys, add no item', () => {
+    const before = { tools: { my_tool: false, shell_exec: true, file_write: false } }
     expect(
       looseningItems({
-        before: { tools: { my_tool: false, shell_exec: true, file_write: false } },
+        before,
         after: { tools: { file_write: false, shell_exec: true, my_tool: false } },
         ceiling: 'allow_all',
         firstSave: false,
       })
     ).toEqual([])
+    // Partner: the same reordered blocks with one value changed give exactly that item.
+    expect(
+      looseningItems({
+        before,
+        after: { tools: { file_write: false, shell_exec: false, my_tool: false } },
+        ceiling: 'allow_all',
+        firstSave: false,
+      })
+    ).toEqual([{ path: 'tools.shell_exec', rule: 'tool_to_skip' }])
     // An absent tools map reads like an empty one.
     expect(
       looseningItems({ before: {}, after: { tools: {} }, ceiling: 'manual', firstSave: false })
     ).toEqual([])
+    // Partner: a change from an absent tools map is still listed.
+    expect(
+      looseningItems({
+        before: {},
+        after: { tools: { shell_exec: false } },
+        ceiling: 'manual',
+        firstSave: false,
+      })
+    ).toEqual([{ path: 'tools.shell_exec', rule: 'tool_to_skip' }])
   })
 
   it('property: the items are the union of single-path items and agree with the oracle', () => {
