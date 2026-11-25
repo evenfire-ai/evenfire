@@ -125,6 +125,25 @@ export function deriveEdgeRecord(
   return { ...record, body }
 }
 
+/**
+ * A labelled derivation of the status alone: the record answered with `status`, its body and
+ * headers as recorded. It stands for an answer the edge records no case for, such as an access
+ * proxy's 401 in front of it. A status equal to the recorded one throws, as `deriveEdgeRecord`
+ * does when nothing changed.
+ */
+export function deriveEdgeRecordStatus(
+  key: EdgeRecordKey,
+  label: string,
+  status: number
+): EdgeContractRecord {
+  if (!label.trim()) throw new Error(`a derivation of "${key}" needs a label`)
+  const record = readEdgeRecord(key)
+  if (record.status === status) {
+    throw new Error(`the derivation "${label}" of "${key}" changed nothing`)
+  }
+  return { ...record, status }
+}
+
 /** The record as the edge sends it: its status, its JSON body and its `retry-after`. */
 export function edgeResponse(record: EdgeContractRecord): Response {
   const headers = new Headers({ 'content-type': 'application/json' })
@@ -138,8 +157,9 @@ const METHODS_NOT_FOUND: EdgeRecordKey = 'GET /api/v1/auth/methods not-found'
 
 /**
  * A recorded methods answer as the model receives it. Only a 200 and a 404 carry an answer the
- * model reads. Turning a 503, another 5xx or a network failure into `unreachable` belongs to
- * the code that fetches the methods, so any other status throws here.
+ * model reads. Turning a 5xx, another 4xx, a network failure or a body that is not a JSON object
+ * into `unreachable` belongs to the code that fetches the methods
+ * (`AuthClient.getLoginMethodsAt`), so any other status throws here.
  */
 function loginMethodsAnswer(record: EdgeContractRecord): LoginMethodsHttpAnswer {
   if (record.status === 200) return { status: 200, body: record.body }
@@ -334,6 +354,7 @@ export const LOGIN_SCREEN_ROWS: ReadonlyArray<
     ([label, , answer]) => [label, answer, MISCONFIGURED] as const
   ),
   // No body: what the code that fetches hands over for a 503 (`GET /api/v1/auth/methods
-  // unavailable`), another 5xx or a network failure.
+  // unavailable`), another 5xx, another 4xx, a network failure or a body that is not a JSON
+  // object.
   ['unreachable', { status: 'unreachable' }, { kind: 'unreachable' }],
 ]

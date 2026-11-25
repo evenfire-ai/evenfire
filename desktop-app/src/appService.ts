@@ -2,7 +2,16 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
-import { BrowserSignInAttempts, type BrowserSignInClock } from './browserSignIn.js'
+import {
+  BrowserSignInAttempts,
+  type BrowserSignInClock,
+  createBrowserSignInSecrets,
+} from './browserSignIn.js'
+import {
+  buildDesktopLoginPageUrl,
+  buildLoginMethodsModel,
+  readUsableOidc,
+} from './browserSignInModel.js'
 import { bindChatStoreForUser, unbindChatStore } from './chatStoreBinding.js'
 import {
   clearDesktopRuntimeConfigSelection,
@@ -64,6 +73,7 @@ import {
   ApprovalMode,
   ApprovalModeResult,
   BrowserSignInSnapshot,
+  BrowserSignInStartResult,
   ChatAuthorityScope,
   ContextBreakdownResult,
   DependencyHealth,
@@ -80,6 +90,7 @@ import {
   HostRuntimeStatus,
   HostStatusStreamEvent,
   LoginBackendHint,
+  LoginMethodsAnswer,
   PasswordLoginResult,
   PendingWorkflowApproval,
   PrewarmHostResult,
@@ -2615,6 +2626,103 @@ export class AppService {
         await this.withNativeAuthEnvironmentCommit(() => this.settleInteractiveLoginAttempt())
       }
     }
+  }
+
+  /**
+   * The login screen's model for the active environment (E12; design §10.1). One owner op
+   * captures the generation and the binding and dispatches the methods read to the binding's REST
+   * URL; the read is awaited outside the owner. The answer carries the generation captured at
+   * dispatch, so the renderer drops a model read for an older binding. With no environment
+   * configured it refuses `desktop_setup_required` without fetching, so it never reads the
+   * fallback REST URL.
+   */
+  async getLoginMethods(): Promise<LoginMethodsAnswer> {
+    const dispatch = await this.withNativeAuthEnvironmentCommit(async () => {
+      hydrateDesktopRuntimeConfig()
+      if (!isDesktopRuntimeConfigured()) throw new Error('desktop_setup_required')
+      const binding = this.captureAuthEnvironmentBinding()
+      return {
+        generation: this.sessionGeneration,
+        read: this.authClient.getLoginMethodsAt(binding.restBaseUrl),
+      }
+    })
+    const answer = await dispatch.read
+    return {
+      model: buildLoginMethodsModel(answer, { linksAvailable: this.browserSignInLinksAvailable }),
+      generation: dispatch.generation,
+    }
+  }
+
+  /**
+   * Starts a browser sign-in (D3, D4, D5, D16). Refusals are thrown as `Error('<code>')`.
+   * - Op 1, in the owner: refuses `desktop_setup_required` with no environment configured,
+   *   `browser_sign_in_requires_signout` while signed in, `browser_sign_in_unavailable_here`
+   *   where links cannot arrive, and `browser_sign_in_finishing` while an attempt redeems. Then
+   *   it advances the generation, which ends a waiting predecessor `replaced` (D3, D6), captures
+   *   the binding and dispatches its own methods read to the binding's REST URL. It never takes
+   *   `signInUrl` from the renderer or from an earlier read.
+   * - The read is awaited outside the owner.
+   * - Op 2, in the owner: refuses `stale_session_generation` or `stale_runtime_environment` when
+   *   the read crossed a generation advance or a binding change, `methods_unavailable` when the
+   *   environment could not be read, and `browser_sign_in_not_offered` when its answer has no
+   *   usable `oidc`. Desktop checks the `signInUrl` shape (PR 2's parser), never its origin: the
+   *   page is served on another origin than the REST URL. Then it records the attempt.
+   * - The browser opens outside the owner, once. If it cannot, that attempt, by its id, ends
+   *   `failed` if it still waits (A3-66), and start refuses `browser_open_failed`.
+   */
+  async startBrowserSignIn(): Promise<BrowserSignInStartResult> {
+    const dispatch = await this.withNativeAuthEnvironmentCommit(async () => {
+      hydrateDesktopRuntimeConfig()
+      if (!isDesktopRuntimeConfigured()) throw new Error('desktop_setup_required')
+      if (this.sessionToken !== null || this.me !== null) {
+        throw new Error('browser_sign_in_requires_signout')
+      }
+      if (!this.browserSignInLinksAvailable) throw new Error('browser_sign_in_unavailable_here')
+      if (this.browserSignIn.current()?.phase === 'redeeming') {
+        throw new Error('browser_sign_in_finishing')
+      }
+      const generation = ++this.sessionGeneration
+      const binding = this.captureAuthEnvironmentBinding()
+      return { generation, binding, read: this.authClient.getLoginMethodsAt(binding.restBaseUrl) }
+    })
+    const answer = await dispatch.read
+    const opening = await this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(dispatch.generation)
+      this.assertAuthEnvironmentBinding(dispatch.binding)
+      // `readUsableOidc` is null for `unreachable` too, so this test comes first.
+      if (answer.status === 'unreachable') throw new Error('methods_unavailable')
+      const oidc = readUsableOidc(answer, { linksAvailable: this.browserSignInLinksAvailable })
+      if (oidc === null) throw new Error('browser_sign_in_not_offered')
+      const { verifier, state, challenge } = createBrowserSignInSecrets()
+      // Built before the record: PR 2's builder throws on a value of a bad shape, and a throw
+      // here must leave no attempt waiting for a page that never opens.
+      const pageUrl = buildDesktopLoginPageUrl(oidc.signInUrl, { challenge, state })
+      const attemptId = this.browserSignIn.record({
+        state,
+        verifier,
+        binding: dispatch.binding,
+        generation: dispatch.generation,
+      })
+      return { attemptId, pageUrl }
+    })
+    try {
+      await openExternalDataUrl(opening.pageUrl, { requireHttps: true })
+    } catch {
+      // The error is neither logged nor passed on: Electron's rejection may echo the page URL,
+      // whose fragment carries the state (D18). The fixed code tells the renderer what happened.
+      this.browserSignIn.endIfWaiting(opening.attemptId, { outcome: 'failed' })
+      console.warn('[AppService] Browser sign-in could not open the browser')
+      throw new Error('browser_open_failed')
+    }
+    return { attemptId: opening.attemptId }
+  }
+
+  /**
+   * Cancel (D10): a waiting attempt ends `cancelled`; a redeeming one is left to finish. Returns
+   * the snapshot.
+   */
+  cancelBrowserSignIn(): BrowserSignInSnapshot {
+    return this.browserSignIn.cancel()
   }
 
   /**

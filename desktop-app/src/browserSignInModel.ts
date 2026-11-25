@@ -37,8 +37,9 @@ export type {
 } from '@clerum/desktop-app-links'
 
 /**
- * `GET /api/v1/auth/methods` as main read it. A 503, another 5xx or a network failure is
- * `unreachable` (design §10.1).
+ * `GET /api/v1/auth/methods` as main read it. Every answer but a success with a JSON object body
+ * and a 404 is `unreachable`: a 5xx, another 4xx, a network failure, or a body that is not a JSON
+ * object (design §10.1; `AuthClient.getLoginMethodsAt` states the mapping).
  */
 export type LoginMethodsHttpAnswer =
   | { status: 200; body: unknown }

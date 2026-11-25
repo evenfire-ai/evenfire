@@ -1,3 +1,4 @@
+import type { LoginMethodsHttpAnswer, RedeemHttpAnswer } from './browserSignInModel.js'
 import { config } from './config.js'
 import { ApiError, requestJson } from './httpClient.js'
 import {
@@ -29,6 +30,11 @@ import { boundedErrorExcerpt } from './upstreamErrors.js'
 
 function url(path: string): string {
   return `${config.externalRestApiBaseUrl.replace(/\/+$/, '')}${path}`
+}
+
+/** `path` on an explicit REST URL, the one a read or an attempt was bound to. */
+function urlAt(restBaseUrl: string, path: string): string {
+  return `${restBaseUrl.replace(/\/+$/, '')}${path}`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -343,6 +349,66 @@ export class AuthClient {
       })
     } catch (error) {
       throw markedPasswordLoginFailure(error)
+    }
+  }
+
+  /**
+   * `GET /api/v1/auth/methods` at `restBaseUrl`, the REST URL the read was bound to, never the
+   * live `url()`. It sends no token and is not retried. The answer is a plain
+   * `LoginMethodsHttpAnswer`, never an `ApiError`:
+   * - a success whose body is a JSON object is `{ status: 200, body }`. An empty body reaches
+   *   the model as `{}`, as `requestJson` reads it, which lists no method: "isn't set up
+   *   correctly", with Retry;
+   * - a 404 is `{ status: 404 }`: a server older than the endpoint, which shows the password form
+   *   (design §10.1);
+   * - everything else is `{ status: 'unreachable' }`: "Can't reach this environment", with Retry,
+   *   no form and no guess. That is a 503 (`methods_unavailable`) or any other 5xx; any other
+   *   4xx, such as 400, 401, 403 or 429, most likely an access proxy's page, which a retry can
+   *   clear; a network failure or a timeout; and a success whose body is not JSON, or is JSON but
+   *   not an object.
+   */
+  async getLoginMethodsAt(restBaseUrl: string): Promise<LoginMethodsHttpAnswer> {
+    let body: unknown
+    try {
+      body = await requestJson<unknown>('GET', urlAt(restBaseUrl, '/api/v1/auth/methods'))
+    } catch (error) {
+      // Every failure is an answer the login screen shows, so it is returned, not thrown. It is
+      // not logged: a network error's cause can name the host (D18).
+      return error instanceof ApiError && error.status === 404
+        ? { status: 404 }
+        : { status: 'unreachable' }
+    }
+    return typeof body === 'object' && body !== null && !Array.isArray(body)
+      ? { status: 200, body }
+      : { status: 'unreachable' }
+  }
+
+  /**
+   * `POST /api/v1/oidc/desktop-sign-in/redeem` at `restBaseUrl`, the attempt's bound REST URL,
+   * never the live `url()`. It is sent once, never with `retryTransientOnce`: the code is single
+   * use. The answer is a plain `RedeemHttpAnswer`, never an `ApiError`:
+   * - a success is `{ status: 200, body }`, the parsed body, which the caller checks;
+   * - an HTTP error is `{ status, bodyText }`, which `mapRedeemAnswer` reads;
+   * - no answer is `{ status: 'unreachable' }`: a network failure, a timeout, or a success whose
+   *   body is not JSON.
+   */
+  async redeemDesktopSignInAt(
+    restBaseUrl: string,
+    body: Readonly<{ code: string; codeVerifier: string }>
+  ): Promise<RedeemHttpAnswer> {
+    try {
+      const answer = await requestJson<unknown>(
+        'POST',
+        urlAt(restBaseUrl, '/api/v1/oidc/desktop-sign-in/redeem'),
+        { body: { code: body.code, codeVerifier: body.codeVerifier } }
+      )
+      return { status: 200, body: answer }
+    } catch (error) {
+      // Every failure is an end state the caller maps (§5.2), so it is returned, not thrown. It
+      // is not logged: a body or a network error's cause can carry a token or a host (D18).
+      return error instanceof ApiError
+        ? { status: error.status, bodyText: error.bodyText }
+        : { status: 'unreachable' }
     }
   }
 

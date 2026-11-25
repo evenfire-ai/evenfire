@@ -8,7 +8,17 @@ import {
   createBrowserSignInHarness,
   harnessDriverUsers,
 } from '../../testSupport/browserSignInHarness.js'
+import {
+  type EdgeContractRecord,
+  deriveEdgeRecord,
+  deriveEdgeRecordStatus,
+  edgeResponse,
+  readEdgeRecord,
+} from '../../testSupport/edgeContractRecords.js'
+import { AuthClient } from '../authClient.js'
 import { BROWSER_SIGN_IN_DEADLINE_MS, BrowserSignInAttempts } from '../browserSignIn.js'
+import { type LoginMethodsHttpAnswer, parseDesktopLoginPageUrl } from '../browserSignInModel.js'
+import type { BrowserSignInSnapshot, LoginMethodsModel } from '../types.js'
 
 // Bodies outside the feature contract (G-5) come from the harness. The discovery answer is the
 // shape of the edge's own route, `external-rest-api/src/routes/desktop.ts:11-17`, with
@@ -861,5 +871,475 @@ describe('the harness', () => {
       if (savedHub === undefined) delete process.env[hubVariable]
       else process.env[hubVariable] = savedHub
     }
+  })
+})
+
+const METHODS_ROUTE = 'GET /api/v1/auth/methods'
+const METHODS_PATH = '/api/v1/auth/methods'
+const BOTH_METHODS = 'GET /api/v1/auth/methods password-and-oidc'
+const PASSWORD_METHOD = 'GET /api/v1/auth/methods password'
+const METHODS_UNAVAILABLE = 'GET /api/v1/auth/methods unavailable'
+const SECRET_SHAPE = /^[A-Za-z0-9_-]{43}$/
+
+type StartOutcome = 'records' | 'methods_unavailable' | 'browser_sign_in_not_offered'
+type MethodsAnswerRow = Readonly<{
+  /** The record key or the derivation's label; adversarial input says so. */
+  label: string
+  answer: () => Response
+  /** What `getLoginMethodsAt` hands over. */
+  http: LoginMethodsHttpAnswer
+  model: LoginMethodsModel
+  start: StartOutcome
+}>
+
+function recordedOidc(): { label: string; signInUrl: string } {
+  const { oidc } = readEdgeRecord(BOTH_METHODS).body as {
+    oidc: { label: string; signInUrl: string }
+  }
+  return { label: oidc.label, signInUrl: oidc.signInUrl }
+}
+
+/** A record answered as it is, with the answer the fetching code hands over for it. */
+function recordedRow(
+  label: string,
+  record: EdgeContractRecord,
+  model: LoginMethodsModel,
+  start: StartOutcome
+): MethodsAnswerRow {
+  const http: LoginMethodsHttpAnswer =
+    model.kind === 'unreachable'
+      ? { status: 'unreachable' }
+      : record.status === 404
+        ? { status: 404 }
+        : { status: 200, body: record.body }
+  return { label, answer: () => edgeResponse(record), http, model, start }
+}
+
+/** Input no producer emits, built by hand (T1's adversarial-input exception). */
+function adversarialRow(label: string, answer: () => Response): MethodsAnswerRow {
+  return {
+    label: `adversarial: ${label}`,
+    answer,
+    http: { status: 'unreachable' },
+    model: { kind: 'unreachable' },
+    start: 'methods_unavailable',
+  }
+}
+
+/** A network failure as undici reports it. */
+function networkFailure(): TypeError {
+  const cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+  return new TypeError('fetch failed', { cause })
+}
+
+const UNREACHABLE: LoginMethodsModel = { kind: 'unreachable' }
+const PASSWORD_FORM: LoginMethodsModel = { kind: 'methods', provider: null, password: true }
+
+/**
+ * Design §10.1's answers as the fetching code reads them, with what start does on each (A3-10).
+ * Every 4xx but a 404, every 5xx, a network failure and a body that is not a JSON object are
+ * `unreachable`: "Can't reach this environment", with Retry, no form and no guess.
+ */
+const METHODS_ANSWERS: ReadonlyArray<MethodsAnswerRow> = [
+  recordedRow(
+    'password-and-oidc',
+    readEdgeRecord(BOTH_METHODS),
+    { kind: 'methods', provider: { label: recordedOidc().label }, password: true },
+    'records'
+  ),
+  recordedRow(
+    'oidc-only',
+    deriveEdgeRecord(BOTH_METHODS, 'oidc-only', body => {
+      const recorded = body as { methods: string[] }
+      return { ...recorded, methods: recorded.methods.filter(method => method !== 'password') }
+    }),
+    { kind: 'methods', provider: { label: recordedOidc().label }, password: false },
+    'records'
+  ),
+  recordedRow(
+    'password',
+    readEdgeRecord(PASSWORD_METHOD),
+    PASSWORD_FORM,
+    'browser_sign_in_not_offered'
+  ),
+  // A server older than the endpoint still accepts passwords.
+  recordedRow(
+    'not-found',
+    readEdgeRecord('GET /api/v1/auth/methods not-found'),
+    PASSWORD_FORM,
+    'browser_sign_in_not_offered'
+  ),
+  recordedRow(
+    'nothing-usable:empty',
+    deriveEdgeRecord(PASSWORD_METHOD, 'nothing-usable:empty', body => ({
+      ...(body as object),
+      methods: [],
+    })),
+    { kind: 'misconfigured' },
+    'browser_sign_in_not_offered'
+  ),
+  recordedRow(
+    'unavailable',
+    readEdgeRecord(METHODS_UNAVAILABLE),
+    UNREACHABLE,
+    'methods_unavailable'
+  ),
+  recordedRow(
+    'unavailable:status-401',
+    deriveEdgeRecordStatus(METHODS_UNAVAILABLE, 'unavailable:status-401', 401),
+    UNREACHABLE,
+    'methods_unavailable'
+  ),
+  recordedRow(
+    'unavailable:status-429',
+    deriveEdgeRecordStatus(METHODS_UNAVAILABLE, 'unavailable:status-429', 429),
+    UNREACHABLE,
+    'methods_unavailable'
+  ),
+  recordedRow(
+    'not-an-object:methods-list-as-body',
+    deriveEdgeRecord(
+      BOTH_METHODS,
+      'not-an-object:methods-list-as-body',
+      body => (body as { methods: unknown }).methods
+    ),
+    UNREACHABLE,
+    'methods_unavailable'
+  ),
+  adversarialRow(
+    'a 200 whose body is not JSON',
+    () =>
+      new Response('<!doctype html><title>Sign in</title>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      })
+  ),
+  adversarialRow('a network failure (ECONNRESET)', () => {
+    throw networkFailure()
+  }),
+  adversarialRow('a timeout', () => {
+    throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+  }),
+]
+
+function methodsFetches(harness: BrowserSignInHarness) {
+  return harness.fetches.filter(
+    record => record.value.method === 'GET' && new URL(record.value.url).pathname === METHODS_PATH
+  )
+}
+
+/** Every snapshot pushed for `attemptId`, in order. */
+function snapshotsOf(harness: BrowserSignInHarness, attemptId: number): BrowserSignInSnapshot[] {
+  return harness.pushes
+    .map(record => record.value)
+    .filter(snapshot => snapshot.attemptId === attemptId)
+}
+
+/** The end states pushed for `attemptId`, in order. */
+function endStatesOf(harness: BrowserSignInHarness, attemptId: number): string[] {
+  return snapshotsOf(harness, attemptId).flatMap(snapshot =>
+    snapshot.phase === 'ended' ? [snapshot.outcome] : []
+  )
+}
+
+function openedPage(harness: BrowserSignInHarness, index: number) {
+  const opened = harness.opens[index]
+  if (!opened) throw new Error(`no browser open number ${index + 1}`)
+  return parseDesktopLoginPageUrl(opened.value)
+}
+
+describe('browser sign-in start, cancel and the methods read', () => {
+  it.each(METHODS_ANSWERS.map(row => [row.label, row] as const))(
+    'hands %s over as a plain answer',
+    async (_label, row) => {
+      const harness = await createBrowserSignInHarness()
+      harness.routes[METHODS_ROUTE] = row.answer
+
+      // A trailing slash on the bound URL does not double the path's.
+      const answer = await new AuthClient().getLoginMethodsAt(`${harness.envs.A.restBaseUrl}/`)
+
+      // Strict: a plain answer, never an `ApiError`.
+      expect(answer).toStrictEqual(row.http)
+      // Sent once, with no retry, to the URL it was given, and with no session token.
+      expect(methodsFetches(harness).map(record => record.value.url)).toEqual([
+        `${harness.envs.A.restBaseUrl}${METHODS_PATH}`,
+      ])
+      expect(methodsFetches(harness)[0]?.value.headers.authorization).toBeUndefined()
+    }
+  )
+
+  it.each(METHODS_ANSWERS.map(row => [row.label, row] as const))(
+    'reads %s as its login model',
+    async (_label, row) => {
+      const harness = await createBrowserSignInHarness({ linksAvailable: true })
+      const { service } = harness
+      harness.routes[METHODS_ROUTE] = row.answer
+      const generation = service.getSessionGeneration()
+
+      await expect(service.getLoginMethods()).resolves.toEqual({ model: row.model, generation })
+
+      // The read advances nothing and starts nothing.
+      expect(service.getSessionGeneration()).toBe(generation)
+      expect(methodsFetches(harness)).toHaveLength(1)
+      await harness.drain()
+      expect(harness.pushes).toEqual([])
+      expect(harness.opens).toEqual([])
+    }
+  )
+
+  it.each(METHODS_ANSWERS.map(row => [row.label, row] as const))(
+    'start on %s',
+    async (_label, row) => {
+      const harness = await createBrowserSignInHarness({ linksAvailable: true })
+      const { service } = harness
+      harness.routes[METHODS_ROUTE] = row.answer
+
+      const start = service.startBrowserSignIn()
+
+      if (row.start === 'records') {
+        await expect(start).resolves.toEqual({ attemptId: 1 })
+        await harness.drain()
+        expect(harness.pushes.map(record => record.value)).toEqual([
+          { attemptId: 1, phase: 'waiting' },
+        ])
+        expect(harness.opens).toHaveLength(1)
+      } else {
+        await expect(start).rejects.toThrow(new RegExp(`^${row.start}$`))
+        await harness.drain()
+        expect(harness.pushes).toEqual([])
+        expect(harness.opens).toEqual([])
+      }
+      // Either way, start made its own read, once.
+      expect(methodsFetches(harness)).toHaveLength(1)
+    }
+  )
+
+  it('opens a signInUrl on another origin than the REST URL', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { signInUrl } = recordedOidc()
+    const restOrigin = new URL(envs.A.restBaseUrl).origin
+    // As in every real deployment: the page on `profile.…`, the REST URL on another host.
+    expect(new URL(signInUrl).origin).not.toBe(restOrigin)
+
+    await expect(service.startBrowserSignIn()).resolves.toEqual({ attemptId: 1 })
+
+    expect(harness.opens).toHaveLength(1)
+    expect(openedPage(harness, 0)).toMatchObject({ signInUrl })
+    expect(new URL(harness.opens[0]?.value ?? '').origin).not.toBe(restOrigin)
+  })
+
+  it('refuses the methods read without fetching when no environment is configured', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    await service.clearRuntimeConfigSelection()
+    const generation = service.getSessionGeneration()
+
+    await expect(service.getLoginMethods()).rejects.toThrow(/^desktop_setup_required$/)
+    await expect(service.startBrowserSignIn()).rejects.toThrow(/^desktop_setup_required$/)
+
+    // Start refuses before its generation advance (D3).
+    expect(service.getSessionGeneration()).toBe(generation)
+    await harness.drain()
+    expect(methodsFetches(harness)).toEqual([])
+    expect(harness.pushes).toEqual([])
+
+    // Once an environment is selected again, the same read fetches.
+    await service.selectRuntimeConfig(envs.A.optionId)
+    await expect(service.getLoginMethods()).resolves.toMatchObject({
+      model: { kind: 'methods' },
+    })
+    expect(methodsFetches(harness)).toHaveLength(1)
+  })
+
+  it('returns the generation captured when the read was dispatched', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service } = harness
+    const methods = harness.hold('methods')
+    const generation = service.getSessionGeneration()
+
+    const read = service.getLoginMethods()
+    await until(harness, () => methods.reached, 'the methods read')
+    await service.logout()
+    expect(service.getSessionGeneration()).toBeGreaterThan(generation)
+    methods.release(edgeResponse(readEdgeRecord(BOTH_METHODS)))
+
+    await expect(read).resolves.toEqual({
+      model: { kind: 'methods', provider: { label: recordedOidc().label }, password: true },
+      generation,
+    })
+  })
+
+  it('opens a page URL whose fragment carries a 43-character challenge and state', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+
+    await expect(harness.service.startBrowserSignIn()).resolves.toEqual({ attemptId: 1 })
+
+    const page = openedPage(harness, 0)
+    expect(page).toMatchObject({
+      signInUrl: recordedOidc().signInUrl,
+      challenge: SECRET_SHAPE,
+      state: SECRET_SHAPE,
+    })
+    expect(page?.challenge).not.toBe(page?.state)
+  })
+
+  it('D3 ends a waiting attempt replaced when another starts', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service } = harness
+
+    await expect(service.startBrowserSignIn()).resolves.toEqual({ attemptId: 1 })
+    await expect(service.startBrowserSignIn()).resolves.toEqual({ attemptId: 2 })
+    await harness.drain()
+
+    expect(harness.pushes.map(record => record.value)).toEqual([
+      { attemptId: 1, phase: 'waiting' },
+      { attemptId: 1, phase: 'ended', outcome: 'replaced' },
+      { attemptId: 2, phase: 'waiting' },
+    ])
+  })
+
+  it('cancels a waiting attempt, and does nothing without one', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service } = harness
+    expect(service.cancelBrowserSignIn()).toEqual({ attemptId: null, phase: 'idle' })
+
+    await expect(service.startBrowserSignIn()).resolves.toEqual({ attemptId: 1 })
+    const cancelled = { attemptId: 1, phase: 'ended', outcome: 'cancelled' }
+    expect(service.cancelBrowserSignIn()).toEqual(cancelled)
+    // Once ended, a second cancel changes nothing.
+    expect(service.cancelBrowserSignIn()).toEqual(cancelled)
+    await harness.drain()
+    expect(endStatesOf(harness, 1)).toEqual(['cancelled'])
+  })
+
+  it('G2-4 refuses to start while signed in', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service } = harness
+    await service.passwordLogin('user-b@example.test', 'fake-password')
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+
+    await expect(service.startBrowserSignIn()).rejects.toThrow(/^browser_sign_in_requires_signout$/)
+    await harness.drain()
+    expect(methodsFetches(harness)).toHaveLength(0)
+    expect(harness.opens).toHaveLength(0)
+
+    // Signed out, the same start reads the methods and opens the browser.
+    await service.logout()
+    await expect(service.startBrowserSignIn()).resolves.toEqual({ attemptId: 1 })
+    expect(methodsFetches(harness)).toHaveLength(1)
+    expect(harness.opens).toHaveLength(1)
+  })
+
+  it('G2-5a reads methods for the binding at start', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { signInUrl } = recordedOidc()
+    const envASignInUrl = `https://profile-a.example.test${new URL(signInUrl).pathname}`
+    const envA = deriveEdgeRecord(BOTH_METHODS, 'env-a-sign-in-url', body => {
+      const recorded = body as { oidc: Record<string, unknown> }
+      return { ...recorded, oidc: { ...recorded.oidc, signInUrl: envASignInUrl } }
+    })
+    const restOriginA = new URL(envs.A.restBaseUrl).origin
+    harness.routes[METHODS_ROUTE] = request =>
+      edgeResponse(
+        new URL(request.url).origin === restOriginA ? envA : readEdgeRecord(BOTH_METHODS)
+      )
+
+    await expect(service.getLoginMethods()).resolves.toMatchObject({
+      model: { kind: 'methods', provider: { label: recordedOidc().label } },
+    })
+    expect(methodsFetches(harness).map(record => record.value.url)).toEqual([
+      `${envs.A.restBaseUrl}${METHODS_PATH}`,
+    ])
+    await service.selectRuntimeConfig(envs.B.optionId)
+
+    await expect(service.startBrowserSignIn()).resolves.toEqual({ attemptId: 1 })
+
+    expect(methodsFetches(harness)[1]?.value.url).toBe(`${envs.B.restBaseUrl}${METHODS_PATH}`)
+    expect(harness.opens[0]?.value.startsWith(`${signInUrl}#`)).toBe(true)
+  })
+
+  it.each(['an environment switch', 'a password-login start'] as const)(
+    'G2-5b rejects a start whose methods read crossed %s',
+    async event => {
+      const harness = await createBrowserSignInHarness({ linksAvailable: true })
+      const { service, envs } = harness
+      const methods = harness.hold('methods')
+
+      const start = service.startBrowserSignIn()
+      await until(harness, () => methods.reached, "start's methods read")
+      if (event === 'an environment switch') await service.selectRuntimeConfig(envs.B.optionId)
+      else await service.passwordLogin('user-b@example.test', 'fake-password')
+      methods.release(edgeResponse(readEdgeRecord(BOTH_METHODS)))
+
+      await expect(start).rejects.toThrow(/^stale_session_generation$/)
+      await harness.drain()
+      expect(methodsFetches(harness)).toHaveLength(1)
+      expect(harness.pushes).toEqual([])
+      expect(harness.opens).toEqual([])
+    }
+  )
+
+  it('G2-5c ends the attempt failed when the browser cannot open', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const open = harness.hold('open')
+
+    const start = harness.service.startBrowserSignIn()
+    await until(harness, () => open.reached, 'the browser open')
+    open.release(new Error('fake browser open failure'))
+
+    await expect(start).rejects.toThrow(/^browser_open_failed$/)
+    await harness.drain()
+    expect(harness.opens).toHaveLength(1)
+    expect(snapshotsOf(harness, 1)).toEqual([
+      { attemptId: 1, phase: 'waiting' },
+      { attemptId: 1, phase: 'ended', outcome: 'failed' },
+    ])
+    expect(endStatesOf(harness, 1)).toEqual(['failed'])
+    // The failure is logged, with neither the page URL nor its state (D18).
+    const state = openedPage(harness, 0)?.state ?? ''
+    expect(state).toMatch(SECRET_SHAPE)
+    expect(harness.secretsSeen).toContain('[AppService] Browser sign-in could not open the browser')
+    expect(harness.secretsSeen.filter(text => text.includes(state))).toEqual([])
+  })
+
+  it('G2-5d keys the open failure on its own attempt', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service } = harness
+    const firstOpen = harness.hold('open')
+
+    const first = service.startBrowserSignIn()
+    await until(harness, () => firstOpen.reached, "a1's browser open")
+    expect(service.cancelBrowserSignIn()).toEqual({
+      attemptId: 1,
+      phase: 'ended',
+      outcome: 'cancelled',
+    })
+    await expect(service.startBrowserSignIn()).resolves.toEqual({ attemptId: 2 })
+    firstOpen.release(new Error('fake browser open failure'))
+
+    await expect(first).rejects.toThrow(/^browser_open_failed$/)
+    await harness.drain()
+    expect(endStatesOf(harness, 1)).toEqual(['cancelled'])
+    expect(snapshotsOf(harness, 2)).toEqual([{ attemptId: 2, phase: 'waiting' }])
+    // One browser open per attempt (C3), each with its own state.
+    expect(harness.opens).toHaveLength(2)
+    expect(openedPage(harness, 0)?.state).not.toBe(openedPage(harness, 1)?.state)
+  })
+
+  it('G2-16 offers no browser sign-in where links cannot arrive', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: false })
+    const { service } = harness
+
+    // The answer offers both methods; only the password form shows.
+    await expect(service.getLoginMethods()).resolves.toMatchObject({ model: PASSWORD_FORM })
+    expect(methodsFetches(harness)).toHaveLength(1)
+
+    await expect(service.startBrowserSignIn()).rejects.toThrow(/^browser_sign_in_unavailable_here$/)
+    await harness.drain()
+    expect(methodsFetches(harness)).toHaveLength(1)
+    expect(harness.pushes).toEqual([])
+    expect(harness.opens).toEqual([])
   })
 })

@@ -8,9 +8,9 @@ import { format } from 'node:util'
 import type { AppService } from '../src/appService.js'
 import type { BrowserSignInClock, BrowserSignInTimerHandle } from '../src/browserSignIn.js'
 import type { TokenStore } from '../src/tokenStore.js'
-import type { SessionMe } from '../src/types.js'
+import type { BrowserSignInSnapshot, SessionMe } from '../src/types.js'
 import { testSessionMe, testTeamSwitchResult } from './authTestFixtures.js'
-import { type EdgeRecordKey, readEdgeRecord } from './edgeContractRecords.js'
+import { type EdgeRecordKey, edgeResponse, readEdgeRecord } from './edgeContractRecords.js'
 
 /**
  * The real `AppService` for the browser sign-in model (state model §7.3): a temp `userData`
@@ -18,9 +18,8 @@ import { type EdgeRecordKey, readEdgeRecord } from './edgeContractRecords.js'
  * fake passed through `AppServiceOptions.tokenStore`, `bindChatStoreForUser` mocked, and HTTP
  * mocked at `fetch` only, so the real `AuthClient` and `requestJson` run. The service gets the
  * test-only generation observer (feeding `bumpLog`), a `FakeBrowserSignInClock` and the links
- * option through its constructor, as `main.ts` never does.
- *
- * Not wired yet, and so absent rather than silently empty: the snapshot pushes (Task 6).
+ * option through its constructor, as `main.ts` never does. Each snapshot the service pushes
+ * through `onBrowserSignInChanged` lands in `pushes`.
  */
 
 /** One counter is shared by every recorder, so records of different kinds can be ordered. */
@@ -97,7 +96,7 @@ export class FakeBrowserSignInClock implements BrowserSignInClock {
 
 /**
  * Named by call site (N-5). Each hold applies to the next call that reaches its point.
- * - `methods`: start's methods fetch.
+ * - `methods`: the methods fetch, start's own read or `getLoginMethods`'s.
  * - `open`: `shell.openExternal`.
  * - `redeem`: the redeem fetch.
  * - `restoreTokenRead`: restore's `tokenStore.getSessionToken` (`appService.ts:1907`).
@@ -180,10 +179,12 @@ export type BrowserSignInHarness = {
   bumpLog: SeqRecord<number>[]
   /** The service's browser sign-in clock. */
   clock: FakeBrowserSignInClock
+  /** Each snapshot the service pushed (`onBrowserSignInChanged`), in order. */
+  pushes: SeqRecord<BrowserSignInSnapshot>[]
   /**
    * Everything the harness can see leave the service: replies of the service's methods,
-   * `console.*` lines and token-store writes (and, from Task 6, the pushes). The router queue
-   * is private to the router, and the harness builds only `AppService`, so it is not here.
+   * `console.*` lines, token-store writes and the pushes. The router queue is private to the
+   * router, and the harness builds only `AppService`, so it is not here.
    */
   secretsSeen: string[]
   /** `<METHOD> <pathname>` of each request that had no route. Cleanup fails while it is non-empty. */
@@ -402,6 +403,7 @@ export async function createBrowserSignInHarness(
   const tokenReads: SeqRecord<string>[] = []
   const opens: SeqRecord<string>[] = []
   const bumpLog: SeqRecord<number>[] = []
+  const pushes: SeqRecord<BrowserSignInSnapshot>[] = []
   const clock = new FakeBrowserSignInClock()
   const secretsSeen: string[] = []
   const unrouted: string[] = []
@@ -475,6 +477,10 @@ export async function createBrowserSignInHarness(
   }
 
   const routes: HarnessRoutes = {
+    // The edge's recorded answer with both methods. A test that needs another answer replaces
+    // this route.
+    'GET /api/v1/auth/methods': () =>
+      edgeResponse(readEdgeRecord('GET /api/v1/auth/methods password-and-oidc')),
     'POST /api/v1/auth/password-login': () =>
       json(200, { token: issueToken('password'), me: harnessDriverUsers.password }),
     'POST /api/v1/auth/google': () =>
@@ -661,6 +667,10 @@ export async function createBrowserSignInHarness(
     tokenStore: tokenStore as unknown as TokenStore,
     browserSignInLinksAvailable: options.linksAvailable ?? false,
     browserSignInClock: clock,
+    onBrowserSignInChanged: snapshot => {
+      pushes.push({ seq: nextSeq(), value: snapshot })
+      secretsSeen.push(JSON.stringify(snapshot))
+    },
     onSessionGenerationAdvanced: value => {
       bumpLog.push({ seq: nextSeq(), value })
       options.onSessionGenerationAdvanced?.(value)
@@ -704,6 +714,7 @@ export async function createBrowserSignInHarness(
     opens,
     bumpLog,
     clock,
+    pushes,
     secretsSeen,
     unrouted,
     routes,
