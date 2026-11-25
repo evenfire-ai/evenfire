@@ -110,6 +110,10 @@ export function handleRuntimeCancel(
     caller?.caller === 'channel-reader' &&
     !runtimeCallerCanReadTask(taskId, caller, 'task_cancel', deps)
   ) {
+    deps.logger.info(
+      { event: 'cancel_not_found', taskId, caller: caller.caller },
+      'Host runtime event'
+    )
     return 'not_found'
   }
   deps.logger.info(

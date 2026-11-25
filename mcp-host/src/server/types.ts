@@ -490,14 +490,13 @@ export type CancelResult = 'cancelled' | 'already_terminal' | 'not_found'
 /**
  * Handler for POST /v1/runtime/tasks/:taskId/cancel.
  *
- * Receives the taskId, an optional requesterUserId (from request body,
- * mirrors approve/deny pattern), and returns whether the task was found
- * and cancelled, was already in a terminal state, or was not found at all.
+ * Receives the taskId, the requester user id from the trusted edge caller,
+ * and the caller context. Returns whether the task was cancelled, was
+ * already terminal, or was not found.
  *
- * Ownership check: if the record carries a submittedBy identity AND
- * requesterUserId is provided AND they differ,
- * the handler returns 'not_found' (not 403 — don't leak task existence).
- * Fail-open when either side is absent for back-compat.
+ * A channel-reader caller must match the task channel type, channel id, and
+ * sender. That check fails closed when the sender is missing. Other callers
+ * keep the submittedBy comparison, which stays open when either side is absent.
  */
 export type CancelHandler = (
   taskId: string,

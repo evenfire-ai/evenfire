@@ -75,6 +75,7 @@ oauth_config:
       - im:read
       - mpim:read
       - chat:write
+      - files:read
       - files:write
       - users:read
 settings:

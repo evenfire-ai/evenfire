@@ -1116,6 +1116,79 @@ describe('SlackAdapter — inlineSharedFiles()', () => {
     }
   })
 
+  it('does not follow a redirect or inline an HTML body', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal)
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(null, { status: 302, headers: { location: 'https://files.slack.com/login' } })
+    )
+    globalThis.fetch = fetchMock as typeof fetch
+    try {
+      const redirected = await adapter.inlineSharedFiles([
+        {
+          id: 'Fredirect',
+          name: 'note.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://files.slack.com/files-pri/T/note.txt',
+        },
+      ])
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(redirected).toContain('could not be read')
+      expect(redirected).not.toContain('login')
+
+      fetchMock.mockResolvedValue(
+        new Response('<html>sign in</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        })
+      )
+      const html = await adapter.inlineSharedFiles([
+        {
+          id: 'Fhtml',
+          name: 'note.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://files.slack.com/files-pri/T/page.txt',
+        },
+      ])
+      expect(html).toContain('could not be read')
+      expect(html).not.toContain('sign in')
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
+  it('wraps a file body in a fence longer than its backtick run', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal)
+    globalThis.fetch = vi.fn(
+      async () => new Response('keep\n```\nsecret', { status: 200 })
+    ) as typeof fetch
+    try {
+      const appendix = await adapter.inlineSharedFiles([
+        {
+          id: 'Ffence',
+          name: 'note.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://files.slack.com/files-pri/T/note.txt',
+        },
+      ])
+      expect(appendix).toContain('````')
+      expect(appendix).toContain('secret')
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
   it('does not download a URL that is not https://files.slack.com', async () => {
     const adapter = new SlackAdapter()
     await adapter.connect({ slackBotToken: TEST_TOKEN })

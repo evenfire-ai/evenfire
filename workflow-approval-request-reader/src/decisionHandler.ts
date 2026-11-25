@@ -332,7 +332,7 @@ function slackMessageIdentity(payload: unknown): {
   // deletes, bot echoes) are still ignored. Dropping file_share made an upload
   // sent while another run was in flight look like a swallowed event.
   const subtype = asString(event.subtype)
-  if (asString(event.bot_id)) return null
+  if (asString(event.bot_id) || event.bot_profile) return null
   if (subtype && subtype !== 'file_share') return null
 
   const teamId = asString(body.team_id) || asString(event.team)

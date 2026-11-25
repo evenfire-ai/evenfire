@@ -137,4 +137,43 @@ describe('planSlackReply', () => {
     expect(plan.acknowledgement).not.toContain('x'.repeat(20))
     expect(plan.followUps).toEqual([{ kind: 'snippet', filename: 'reply-part-2.txt', text: fence }])
   })
+
+  it('does not close a fence on an info-string line', () => {
+    const text = '```\nexample\n```python\nprint(1)\n```\n'
+    const parts = splitSlackText(text, 20)
+    expect(parts.join('')).toBe(text)
+    const body = parts.find(part => part.includes('print(1)'))
+    expect(body?.startsWith('```')).toBe(true)
+    expect(body).toContain('```python')
+  })
+
+  it('closes a three-backtick fence with a longer fence line', () => {
+    const text = '```\ncode\n````\n'
+    const parts = splitSlackText(text, 4)
+    expect(parts.join('')).toBe(text)
+    expect(parts.filter(part => part.includes('code')).length).toBe(1)
+  })
+
+  it('does not split a surrogate pair', () => {
+    const emoji = '😀'
+    expect(emoji.length).toBe(2)
+    const text = `${'a'.repeat(3_999)}${emoji}${'b'.repeat(20)}`
+    const parts = splitSlackText(text, SLACK_CHAT_UPDATE_TEXT_LIMIT)
+    expect(parts.join('')).toBe(text)
+    expect(parts.some(part => part.includes('\uFFFD'))).toBe(false)
+    expect(parts.some(part => part.endsWith('\uD83D') && !part.endsWith(emoji))).toBe(false)
+  })
+
+  it('uploads the tail once follow-up messages pass the cap', () => {
+    const paragraph = 'a'.repeat(3_990)
+    const text = Array.from({ length: 12 }, () => paragraph).join('\n\n')
+    const plan = planSlackReply(text)
+    const messages = plan.followUps.filter(part => part.kind === 'message')
+    expect(messages.length).toBeLessThanOrEqual(8)
+    expect(
+      plan.followUps.some(part => part.kind === 'snippet' && part.filename === 'reply-rest.txt')
+    ).toBe(true)
+    const restored = [plan.acknowledgement, ...plan.followUps.map(part => part.text)].join('')
+    expect(restored).toBe(text)
+  })
 })

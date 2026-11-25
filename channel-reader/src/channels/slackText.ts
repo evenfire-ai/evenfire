@@ -12,6 +12,7 @@
 export const SLACK_CHAT_UPDATE_TEXT_LIMIT = 4_000
 export const SLACK_CHAT_POST_TEXT_LIMIT = 40_000
 export const SLACK_SECTION_TEXT_LIMIT = 3_000
+const SLACK_FOLLOWUP_MESSAGE_CAP = 8
 
 const ANSWER_CONTINUES =
   'The answer is too long for one Slack edit. The rest is in the following message.'
@@ -82,8 +83,9 @@ export function splitSlackText(text: string, limit: number): string[] {
           emit()
           continue
         }
-        chunks.push(rest.slice(0, limit))
-        rest = rest.slice(limit)
+        const cut = Math.max(1, codePointCut(rest, limit))
+        chunks.push(rest.slice(0, cut))
+        rest = rest.slice(cut)
         continue
       }
       current += rest.slice(0, splitAt)
@@ -138,14 +140,43 @@ export function planSlackReply(text: string): SlackReplyPlan {
     return {
       acknowledgement: first,
       acknowledgementIsPlaceholder: false,
-      followUps: pieces.slice(1).map((piece, index) => asFollowUp(piece, index + 1)),
+      followUps: capFollowUps(pieces.slice(1).map((piece, index) => asFollowUp(piece, index + 1))),
     }
   }
   return {
     acknowledgement: ANSWER_CONTINUES,
     acknowledgementIsPlaceholder: true,
-    followUps: pieces.map((piece, index) => asFollowUp(piece, index)),
+    followUps: capFollowUps(pieces.map((piece, index) => asFollowUp(piece, index))),
   }
+}
+
+function capFollowUps(followUps: SlackFollowUp[]): SlackFollowUp[] {
+  const kept: SlackFollowUp[] = []
+  const rest: string[] = []
+  let messages = 0
+  for (const part of followUps) {
+    if (rest.length > 0 || (part.kind === 'message' && messages >= SLACK_FOLLOWUP_MESSAGE_CAP)) {
+      rest.push(part.text)
+      continue
+    }
+    if (part.kind === 'message') messages += 1
+    kept.push(part)
+  }
+  if (rest.length > 0) {
+    kept.push({ kind: 'snippet', filename: 'reply-rest.txt', text: rest.join('') })
+  }
+  return kept
+}
+
+function codePointCut(text: string, index: number): number {
+  if (index <= 0) return Math.min(1, text.length)
+  if (index >= text.length) return text.length
+  const previous = text.charCodeAt(index - 1)
+  const next = text.charCodeAt(index)
+  if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+    return index - 1
+  }
+  return index
 }
 
 function findBoundary(text: string, windowEnd: number): number {
@@ -174,16 +205,17 @@ function tokenize(text: string): Array<{ code: boolean; text: string }> {
 function fenceSpans(text: string): Array<{ start: number; end: number }> {
   const spans: Array<{ start: number; end: number }> = []
   let offset = 0
-  let open: { marker: string; start: number } | null = null
+  let open: { char: string; length: number; start: number } | null = null
   while (offset <= text.length) {
     const nextBreak = text.indexOf('\n', offset)
     const lineEnd = nextBreak === -1 ? text.length : nextBreak
-    const marker = fenceMarker(text.slice(offset, lineEnd))
-    if (open && marker === open.marker) {
+    const line = text.slice(offset, lineEnd)
+    if (open && fenceCloses(line, open)) {
       spans.push({ start: open.start, end: nextBreak === -1 ? lineEnd : nextBreak + 1 })
       open = null
-    } else if (!open && marker) {
-      open = { marker, start: offset }
+    } else if (!open) {
+      const marker = fenceOpens(line)
+      if (marker) open = { ...marker, start: offset }
     }
     if (nextBreak === -1) break
     offset = nextBreak + 1
@@ -192,9 +224,18 @@ function fenceSpans(text: string): Array<{ start: number; end: number }> {
   return spans
 }
 
-function fenceMarker(line: string): string | null {
-  // CommonMark allows up to three leading spaces. The pair key is the fence
-  // token only, so an indented close still closes an indented open.
-  const match = /^( {0,3})(```+|~~~+)/.exec(line)
-  return match ? match[2]! : null
+function fenceOpens(line: string): { char: string; length: number } | null {
+  const match = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line)
+  if (!match) return null
+  const token = match[2]!
+  const info = match[3] ?? ''
+  if (token.startsWith('`') && info.includes('`')) return null
+  return { char: token[0]!, length: token.length }
+}
+
+function fenceCloses(line: string, open: { char: string; length: number }): boolean {
+  const match = /^( {0,3})(`{3,}|~{3,})[ \t]*$/.exec(line)
+  if (!match) return false
+  const token = match[2]!
+  return token.startsWith(open.char) && token.length >= open.length
 }

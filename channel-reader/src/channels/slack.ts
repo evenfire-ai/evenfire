@@ -252,7 +252,7 @@ export class SlackAdapter implements ChannelAdapter {
 
     this.defaultProviderTarget = credentials?.providerTarget ?? null
     this.botToken = token
-    this.client = new WebClient(token)
+    this.client = new WebClient(token, { rejectRateLimitedCalls: true })
 
     try {
       const response = await this.client.auth.test()
@@ -315,7 +315,7 @@ export class SlackAdapter implements ChannelAdapter {
 
         for (const msg of response.messages || []) {
           // Skip bot messages and non-user messages
-          if (msg.subtype || !msg.user) {
+          if ((msg.subtype && msg.subtype !== 'file_share') || !msg.user) {
             continue
           }
 
@@ -833,8 +833,8 @@ export class SlackAdapter implements ChannelAdapter {
         continue
       }
       try {
-        const body = await downloadSlackFile(file.urlPrivateDownload, this.botToken)
-        notes.push(`Attached file \`${name}\`:\n\n\`\`\`\n${body}\n\`\`\``)
+        const body = await downloadSlackFile(file.urlPrivateDownload, this.botToken, file.mimetype)
+        notes.push(fencedAttachment(name, body))
       } catch (err) {
         console.error(
           JSON.stringify({
@@ -891,9 +891,10 @@ export class SlackAdapter implements ChannelAdapter {
         return await fn()
       } catch (err) {
         const code = slackErrorCode(err)
-        if (code === 'ratelimited' && attempt < 3) {
+        const delayMs = rateLimitDelayMs(err)
+        if ((code === 'ratelimited' || delayMs !== null) && attempt < 3) {
           attempt += 1
-          await new Promise(resolve => setTimeout(resolve, slackRetryAfterMs(err)))
+          await new Promise(resolve => setTimeout(resolve, delayMs ?? slackRetryAfterMs(err)))
           continue
         }
         console.error(
@@ -929,6 +930,38 @@ export class SlackAdapter implements ChannelAdapter {
   }
 }
 
+function rateLimitDelayMs(err: unknown): number | null {
+  const candidates = [err]
+  if (err && typeof err === 'object' && 'originalError' in err) {
+    candidates.push((err as { originalError?: unknown }).originalError)
+  }
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue
+    const retryAfter = (candidate as { retryAfter?: unknown }).retryAfter
+    if (typeof retryAfter === 'number' && Number.isFinite(retryAfter)) {
+      return Math.min(5_000, Math.max(0, retryAfter * 1_000))
+    }
+    if (slackErrorCode(candidate) === 'ratelimited') return slackRetryAfterMs(candidate)
+  }
+  return null
+}
+
+function fencedAttachment(name: string, body: string): string {
+  const safeName = name.replace(/`/g, "'")
+  let longestRun = 0
+  let run = 0
+  for (const char of body) {
+    if (char === '`') {
+      run += 1
+      if (run > longestRun) longestRun = run
+    } else {
+      run = 0
+    }
+  }
+  const fence = '`'.repeat(Math.max(3, longestRun + 1))
+  return `Attached file \`${safeName}\`:\n\n${fence}\n${body}\n${fence}`
+}
+
 function slackRetryAfterMs(err: unknown): number {
   if (
     err &&
@@ -958,15 +991,46 @@ function isSlackFileDownloadUrl(value: string): boolean {
   }
 }
 
-async function downloadSlackFile(url: string, token: string): Promise<string> {
+async function downloadSlackFile(
+  url: string,
+  token: string,
+  declaredMime?: string
+): Promise<string> {
   if (!isSlackFileDownloadUrl(url)) throw new Error('slack_file_url_rejected')
   const response = await fetch(url, {
+    redirect: 'manual',
     headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(15_000),
   })
+  if (response.status >= 300 && response.status < 400) throw new Error('slack_file_redirect')
   if (!response.ok) throw new Error(`slack_file_http_${response.status}`)
-  const bytes = Buffer.from(await response.arrayBuffer())
-  if (bytes.length > SLACK_INLINE_FILE_MAX_BYTES) throw new Error('slack_file_too_large')
+  const contentType =
+    response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? ''
+  const declared = (declaredMime ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
+  if (contentType === 'text/html' && declared !== 'text/html') throw new Error('slack_file_html')
+  const bytes = await readBodyUpTo(response, SLACK_INLINE_FILE_MAX_BYTES)
   if (bytes.includes(0)) throw new Error('slack_file_binary')
   return bytes.toString('utf8')
+}
+
+async function readBodyUpTo(response: Response, maxBytes: number): Promise<Buffer> {
+  const reader = response.body?.getReader()
+  if (!reader) {
+    const bytes = Buffer.from(await response.arrayBuffer())
+    if (bytes.length > maxBytes) throw new Error('slack_file_too_large')
+    return bytes
+  }
+  const chunks: Buffer[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maxBytes) {
+      await reader.cancel()
+      throw new Error('slack_file_too_large')
+    }
+    chunks.push(Buffer.from(value))
+  }
+  return Buffer.concat(chunks)
 }

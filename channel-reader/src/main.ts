@@ -1207,7 +1207,7 @@ export class ChannelReader {
       if (request.workflowRunId) {
         await this.deliverProviderWorkflowResult(message, request.workflowRunId)
       } else {
-        await this.attachSlackFiles(message, request.slackFiles)
+        if (request.slackFiles?.length) message.slackFiles = request.slackFiles
         await this.handleMessages([message])
       }
       return { ok: true }
@@ -1691,6 +1691,10 @@ export class ChannelReader {
           }
           continue
         }
+      }
+
+      if (msg.channelType === 'slack' && msg.slackFiles?.length) {
+        await this.attachSlackFiles(msg, msg.slackFiles)
       }
 
       const traceContext = mintChannelTraceContext(msg)
@@ -2375,6 +2379,17 @@ export class ChannelReader {
                   } catch {
                     // cancelTask logs the transport failure.
                   }
+                  finalDelivered = true
+                  clearRunTimer()
+                  this.clearPendingApprovalForTask(msg, taskId)
+                  console.error(
+                    JSON.stringify({
+                      level: 'error',
+                      msg: 'slack_answer_incomplete',
+                      taskId,
+                    })
+                  )
+                  return true
                 }
               } else {
                 try {

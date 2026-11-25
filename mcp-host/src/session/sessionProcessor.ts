@@ -213,19 +213,20 @@ export class SessionProcessor extends EventEmitter {
     let released = false
     let grace: ReturnType<typeof setTimeout> | undefined
 
-    const release = (mode: 'completed' | 'suspended' | 'failed') => {
+    const release = (mode: 'completed' | 'suspended' | 'failed', error?: unknown) => {
       if (released) return
       released = true
       if (grace) clearTimeout(grace)
       this.config.lifecycle.off('transition', onTransition)
       this.activeSessions.delete(sessionKey)
-      if (mode === 'suspended') {
-        this.suspendedSessions.add(sessionKey)
-        this.emit('task:suspended', { sessionKey, task })
-      } else if (mode === 'completed') {
-        this.emit('task:completed', { sessionKey, task })
+      if (mode === 'suspended') this.suspendedSessions.add(sessionKey)
+      try {
+        if (mode === 'suspended') this.emit('task:suspended', { sessionKey, task })
+        else if (mode === 'completed') this.emit('task:completed', { sessionKey, task })
+        else this.emit('task:failed', { sessionKey, task, error })
+      } finally {
+        this.tryProcessNext()
       }
-      this.tryProcessNext()
     }
 
     // A cancel or failure should let the executor promise settle and release
@@ -269,8 +270,7 @@ export class SessionProcessor extends EventEmitter {
         }
         // TaskLifecycle is now authoritative — removed task.status === 'cancelled' band-aid (spec §4.3)
         logger.error({ taskId: task.id, err: error }, 'Session task failed')
-        this.emit('task:failed', { sessionKey, task, error })
-        release('failed')
+        release('failed', error)
       })
   }
 

@@ -24,6 +24,9 @@ data:
   CLERUM_CHANNEL_READER_HANDOFF_PORT: "8099"
   CLERUM_NAMESPACE: ""
   CLERUM_POLL_INTERVAL_SECONDS: "2"
+  # Silence cap for a Slack, Teams, or Telegram progress run. Resets while
+  # the host still reports the task pending or waiting for approval.
+  CLERUM_CHANNEL_RUN_TIMEOUT_MS: "300000"
   # OPTIONAL. Base URL of the Profile UI. When set, the notice sent to an
   # unverified Slack sender ends with this link so they can find the account
   # they need to link; when unset the notice still sends, just without a link.
