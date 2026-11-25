@@ -33,7 +33,7 @@ import {
   onOff,
   policyText,
 } from './constants'
-import type { ReadRowProps, ReadViewProps } from './types'
+import type { ApprovalModesViewProps, ReadRowProps, ReadViewProps } from './types'
 
 /** Every tool chat registers that runs without a card (the producer fixture, spec §6.11). */
 const NEVER_ASK_TOOLS = neverAskTools()
@@ -115,15 +115,16 @@ function channelSwitchesText(channels: EffectiveApproval['channels']): string {
  * judge in Auto and Allow all, and the channels whose chats may change their
  * mode. An agent with no approval settings of its own is Manual: mcp-host
  * reads the ceiling and the channel switches from the agent's own block only.
+ * Its heading, the tab's first, takes the focus from code only (Ruling 46).
  */
-export function ApprovalModesView({ host }: ReadViewProps) {
+export function ApprovalModesView({ host, headingRef }: ApprovalModesViewProps) {
   const titleId = useId()
   const block = approvalBlockOf(host)
   const approval = effectiveApproval(block)
   const ceiling = approval.modeCeiling
   return (
     <section aria-labelledby={titleId} className="cu-host-approvals-tab__group">
-      <h3 className="cu-host-approvals-tab__title" id={titleId}>
+      <h3 className="cu-host-approvals-tab__title" id={titleId} ref={headingRef} tabIndex={-1}>
         {APPROVAL_MODES_TITLE}
       </h3>
       <dl className="cu-host-approvals-tab__rows">

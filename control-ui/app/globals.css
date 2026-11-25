@@ -5597,6 +5597,12 @@ td.cu-registry-description {
   line-height: var(--cu-line-height-tight);
 }
 
+/* The Approval modes heading takes the focus after a Retry that loads (Ruling 46). */
+.cu-host-approvals-tab__title:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
 .cu-host-approvals-tab__rows {
   display: grid;
   margin: 0;

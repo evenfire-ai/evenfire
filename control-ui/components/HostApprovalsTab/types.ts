@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { ReactNode, Ref } from 'react'
 import type { ToastOptions } from '@components/Toast/types'
 import type { HostResource } from '@lib/api'
 import type { ApprovalTabState } from '@lib/hostApprovalDisplay'
@@ -73,6 +73,11 @@ export interface OffSwitchResultProps {
 export interface ReadViewProps {
   /** The Host the tab shows. */
   host: HostResource
+}
+
+export interface ApprovalModesViewProps extends ReadViewProps {
+  /** The view's heading, which the tab focuses after a Retry that loads (Ruling 46). */
+  headingRef?: Ref<HTMLHeadingElement>
 }
 
 export interface ReadRowProps {

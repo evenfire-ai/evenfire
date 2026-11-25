@@ -8,6 +8,7 @@ import { type HostResource, getHostDetailBundle } from '@lib/api'
 import { approvalBlockOf, effectiveApproval } from '@lib/approvalEffective'
 import {
   type ApprovalLoadToken,
+  type ApprovalTabState,
   createApprovalTabState,
   notifyHostChanged,
   subscribeHostChanged,
@@ -183,6 +184,23 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
       controllers.clear()
     }
   }, [])
+
+  // Ruling 46: a Retry whose load applies removes the banner, and with it the
+  // Retry that had the focus. The focus then moves to the tab's first
+  // heading, unless the admin has put it somewhere else since. `retriedRef`
+  // holds the display state whose Retry started the newest load.
+  const retriedRef = useRef<ApprovalTabState | null>(null)
+  const headingRef = useRef<HTMLHeadingElement | null>(null)
+  useEffect(() => {
+    const retried = retriedRef.current
+    if (retried === null || view.loadPending) return
+    retriedRef.current = null
+    if (retried !== view.state || view.snapshot === null || view.loadError !== null) return
+    const focused = document.activeElement
+    if (focused === null || focused === document.body || !focused.isConnected) {
+      headingRef.current?.focus()
+    }
+  }, [view])
 
   const settleLoad = useCallback((token: ApprovalLoadToken, result: LoadResult): void => {
     // The tab is gone, and it aborted its reads when it went: nothing shows an
@@ -369,7 +387,10 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
         <LoadErrorBanner
           message={view.loadError}
           pending={view.loadPending}
-          onRetry={() => load(view)}
+          onRetry={() => {
+            retriedRef.current = view.state
+            load(view)
+          }}
         />
       ) : null}
       {view.snapshot !== null ? (
@@ -383,7 +404,7 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
       <OffSwitch host={view.host} result={view.switchResult} onSetManual={setManual} />
       {view.snapshot !== null ? (
         <>
-          <ApprovalModesView host={view.snapshot} />
+          <ApprovalModesView headingRef={headingRef} host={view.snapshot} />
           <WhoCanRaiseView host={view.snapshot} />
         </>
       ) : view.loadPending ? (

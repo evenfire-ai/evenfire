@@ -222,6 +222,72 @@ describe('HostApprovalsTab', () => {
       tab.unmount()
     })
 
+    it('after a Retry whose load applies, the focus moves to the Approval modes heading (Ruling 46)', async () => {
+      const fake = tabFake({ tools: { json_transform: true } })
+      failNextRead(fake, FOO_DETAIL)
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await waitFor(() => expect(tabLoadBanner()).not.toBeNull())
+      const retry = within(tabLoadBanner() as HTMLElement).getByRole('button', { name: 'Retry' })
+      act(() => retry.focus())
+      expect(retry).toHaveFocus()
+
+      await act(async () => {
+        fireEvent.click(retry)
+      })
+      const heading = await screen.findByRole('heading', { name: 'Approval modes' })
+      await waitFor(() => expect(heading).toHaveFocus())
+      expect(heading).toHaveAttribute('tabindex', '-1')
+      expect(tabLoadBanner(), 'the banner and its Retry are gone').toBeNull()
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('a load the admin did not retry moves no focus (Ruling 46 partner)', async () => {
+      const fake = tabFake({ modeCeiling: 'auto' })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await approvalSettingsDriver()
+      // The first load applied: the heading is there, and the focus stays where it was.
+      expect(screen.getByRole('heading', { name: 'Approval modes' })).not.toHaveFocus()
+      expect(document.activeElement).toBe(document.body)
+
+      // A load the notice starts shows another admin's change, and moves no focus either.
+      fake.writeExternal('foo', spec => {
+        ;(spec.approval as Record<string, unknown>).modeCeiling = 'manual'
+      })
+      act(() => notifyHostChanged('foo'))
+      await waitFor(() => expect(rowValue('Highest mode')).toBe('Manual'))
+      expect(document.activeElement).toBe(document.body)
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('a Retry whose load applies after the admin moved the focus leaves it there (Ruling 46 partner)', async () => {
+      const fake = tabFake({ modeCeiling: 'auto' })
+      failNextRead(fake, FOO_DETAIL)
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await waitFor(() => expect(tabLoadBanner()).not.toBeNull())
+      const retry = within(tabLoadBanner() as HTMLElement).getByRole('button', { name: 'Retry' })
+      const second = fake.hold({ method: 'GET', path: FOO_DETAIL })
+      await act(async () => {
+        fireEvent.click(retry)
+      })
+      await act(async () => {
+        await second.arrived
+      })
+      // While it loads, the admin moves to "Set to Manual now".
+      const switchButton = screen.getByRole('button', { name: 'Set to Manual now' })
+      act(() => switchButton.focus())
+
+      await act(async () => {
+        second.deliverNow()
+      })
+      expect(await screen.findByRole('heading', { name: 'Approval modes' })).not.toHaveFocus()
+      await settle()
+      expect(switchButton).toHaveFocus()
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
     it('T17 through the tab: a failed refresh after a save keeps the saved tools, shows the error and releases Save', async () => {
       const fake = tabFake({ tools: { json_transform: true } })
       const tab = renderApprovalsTab({ fake, host: 'foo' })
