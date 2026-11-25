@@ -796,7 +796,9 @@ describe('AppService profile UI link authority', () => {
     config.desktopProfileUiBaseUrl = 'javascript:alert(1)'
     config.desktopProfileUiBaseUrlExplicit = true
     mockGetActiveDeploymentProfileUiBaseUrl.mockImplementation(() => {
-      throw new Error('profile_ui_origin_missing')
+      throw new Error(
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+      )
     })
     const service = makeService() as unknown as {
       me: { id: string; email: string }
@@ -815,7 +817,9 @@ describe('AppService profile UI link authority', () => {
       path: '/',
     })
 
-    await expect(service.createSandboxUiDeepLink()).rejects.toThrow('profile_ui_origin_missing')
+    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
+      'Cannot resolve a shareable Profile UI link'
+    )
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })
 
@@ -831,7 +835,9 @@ describe('AppService profile UI link authority', () => {
       getInvitationProfile: vi.fn().mockRejectedValue(new Error('network unavailable')),
     }
     mockGetActiveDeploymentProfileUiBaseUrl.mockImplementation(() => {
-      throw new Error('profile_ui_origin_missing')
+      throw new Error(
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+      )
     })
     mockGetActiveSandboxUiLocation.mockReturnValue({
       recipeNs: 'sandbox-recipes',
@@ -839,7 +845,9 @@ describe('AppService profile UI link authority', () => {
       path: '/',
     })
 
-    await expect(service.createSandboxUiDeepLink()).rejects.toThrow('profile_ui_origin_missing')
+    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
+      'Cannot resolve a shareable Profile UI link'
+    )
   })
 
   it('omits the path when the active app is still on its default route', async () => {
