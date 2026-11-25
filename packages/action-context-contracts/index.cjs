@@ -12,6 +12,7 @@ const HOST_EDGE_ASSERTION_AUDIENCE = 'evenfire-host-runtime-edge'
 const HOST_EDGE_ASSERTION_JWT_TYPE = 'host-edge-assertion+jwt'
 const HOST_EDGE_ASSERTION_CLAIM_TYPE = 'host_edge_assertion'
 const HOST_EDGE_ASSERTION_MAX_TTL_SECONDS = 300
+const HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS = 5
 const HOST_EDGE_ASSERTION_V1_CLAIM_KEYS = Object.freeze([
   'typ',
   'v',
@@ -187,17 +188,23 @@ function sameJsonValue(left, right) {
  * Checks the claims of a verified Host edge assertion. The signature, algorithm, header type,
  * issuer, audience and expiry are checked by the JWT verifier before this runs; this function
  * re-checks the registered claims it receives in the decoded payload, the exact key set of the
- * declared version, the lifetime bound and the binding to the request (`expected`).
+ * declared version, the lifetime bound, an `iat` no more than
+ * HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS ahead of the verifier clock, and the binding to the
+ * request (`expected`).
  *
  * expected: { v, iss, host, sub } plus, for v 1, { teamId, requiredScope } and, for v 2, every
  * bound V2 claim (operationId ... checkedAt).
+ * nowSeconds: the verifier clock in whole seconds since the epoch; required.
  */
-function validateHostEdgeAssertionClaims(payload, expected) {
+function validateHostEdgeAssertionClaims(payload, expected, nowSeconds) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return edgeAssertionFailure('payload must be an object')
   }
   if (!expected || (expected.v !== 1 && expected.v !== 2)) {
     return edgeAssertionFailure('expected version must be 1 or 2')
+  }
+  if (!isWholeSeconds(nowSeconds)) {
+    return edgeAssertionFailure('verifier clock must be whole seconds')
   }
   if (payload.v !== expected.v) return edgeAssertionFailure('version mismatch')
   const keys =
@@ -220,6 +227,9 @@ function validateHostEdgeAssertionClaims(payload, expected) {
   const lifetime = payload.exp - payload.iat
   if (lifetime < 1 || lifetime > HOST_EDGE_ASSERTION_MAX_TTL_SECONDS) {
     return edgeAssertionFailure('lifetime out of bounds')
+  }
+  if (payload.iat > nowSeconds + HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS) {
+    return edgeAssertionFailure('iat is in the future')
   }
   if (!isNonEmptyString(payload.host) || payload.host !== expected.host) {
     return edgeAssertionFailure('host mismatch')
@@ -1390,6 +1400,7 @@ module.exports = {
   HOST_EDGE_ASSERTION_JWT_TYPE,
   HOST_EDGE_ASSERTION_CLAIM_TYPE,
   HOST_EDGE_ASSERTION_MAX_TTL_SECONDS,
+  HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS,
   HOST_EDGE_ASSERTION_V1_CLAIM_KEYS,
   HOST_EDGE_ASSERTION_V2_CLAIM_KEYS,
   HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,

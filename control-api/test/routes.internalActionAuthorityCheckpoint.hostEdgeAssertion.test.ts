@@ -273,24 +273,28 @@ describe('V2 checkpoint issues a Host edge assertion to rpc-proxy for a Host des
     const payload = verifyAsHost(response.body.hostEdgeAssertion)
     // The Host does not accept v 2 yet; the round trip stops at the claim validator.
     expect(
-      validateHostEdgeAssertionClaims(payload, {
-        v: 2,
-        iss: config.rpcJwtIssuer,
-        host: HOST_LOGICAL_ID,
-        sub: SUBJECT,
-        operationId: 'host.status.read',
-        delegationJti: DELEGATION_JTI,
-        sid: SID,
-        sessionVersion: 3,
-        accessPathId: ACCESS_PATH_ID,
-        pathKind: 'direct',
-        effectiveTeamId: null,
-        resource: JSON.parse(JSON.stringify(resource)),
-        targetHash: sent.targetHash,
-        authorizationRevision: AUTHORIZATION_REVISION,
-        behaviorBindingHash: BEHAVIOR_BINDING_HASH,
-        checkedAt: response.body.checkedAt,
-      })
+      validateHostEdgeAssertionClaims(
+        payload,
+        {
+          v: 2,
+          iss: config.rpcJwtIssuer,
+          host: HOST_LOGICAL_ID,
+          sub: SUBJECT,
+          operationId: 'host.status.read',
+          delegationJti: DELEGATION_JTI,
+          sid: SID,
+          sessionVersion: 3,
+          accessPathId: ACCESS_PATH_ID,
+          pathKind: 'direct',
+          effectiveTeamId: null,
+          resource: JSON.parse(JSON.stringify(resource)),
+          targetHash: sent.targetHash,
+          authorizationRevision: AUTHORIZATION_REVISION,
+          behaviorBindingHash: BEHAVIOR_BINDING_HASH,
+          checkedAt: response.body.checkedAt,
+        },
+        Math.floor(Date.now() / 1000)
+      )
     ).toEqual({ ok: true })
     // rpc-proxy reads the whole response through the shared checkpoint response validator.
     expect(validateActionAuthorityCheckpointResponse(response.body)).toEqual(response.body)

@@ -162,16 +162,44 @@ describe('V1 Host access route issues a Host edge assertion', () => {
 
     const payload = verifyAsHost(response.body.edgeAssertion)
     expect(
-      validateHostEdgeAssertionClaims(payload, {
-        v: 1,
-        iss: config.rpcJwtIssuer,
-        host: `${config.hostsNamespace}/${HOST_REF}`,
-        sub: USER_ID,
-        teamId: TEAM_ID,
-        requiredScope: 'host:status:read',
-      })
+      validateHostEdgeAssertionClaims(
+        payload,
+        {
+          v: 1,
+          iss: config.rpcJwtIssuer,
+          host: `${config.hostsNamespace}/${HOST_REF}`,
+          sub: USER_ID,
+          teamId: TEAM_ID,
+          requiredScope: 'host:status:read',
+        },
+        Math.floor(Date.now() / 1000)
+      )
     ).toEqual({ ok: true })
     expect(directory.getUserAgents).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a route-issued assertion on a Host clock more than 5 seconds behind the issuer', async () => {
+    const { app } = buildApp()
+    const response = await request(app)
+      .get(hostPath())
+      .set('x-rpc-access-token', token())
+      .expect(200)
+
+    const payload = verifyAsHost(response.body.edgeAssertion)
+    const expected = {
+      v: 1 as const,
+      iss: config.rpcJwtIssuer,
+      host: `${config.hostsNamespace}/${HOST_REF}`,
+      sub: USER_ID,
+      teamId: TEAM_ID,
+      requiredScope: 'host:status:read',
+    }
+    // Liveness witness: the same payload passes on a Host clock equal to the issuer clock.
+    expect(validateHostEdgeAssertionClaims(payload, expected, payload.iat!)).toEqual({ ok: true })
+    expect(validateHostEdgeAssertionClaims(payload, expected, payload.iat! - 6)).toEqual({
+      ok: false,
+      error: 'iat is in the future',
+    })
   })
 
   it('bounds the lifetime by the RPC token expiry and otherwise by 300 seconds', async () => {

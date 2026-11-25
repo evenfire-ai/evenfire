@@ -8,6 +8,7 @@ export declare const HOST_EDGE_ASSERTION_AUDIENCE: 'evenfire-host-runtime-edge'
 export declare const HOST_EDGE_ASSERTION_JWT_TYPE: 'host-edge-assertion+jwt'
 export declare const HOST_EDGE_ASSERTION_CLAIM_TYPE: 'host_edge_assertion'
 export declare const HOST_EDGE_ASSERTION_MAX_TTL_SECONDS: 300
+export declare const HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS: 5
 export declare const HOST_EDGE_ASSERTION_V1_CLAIM_KEYS: readonly [
   'typ',
   'v',
@@ -119,7 +120,8 @@ export type HostEdgeAssertionExpectation =
   | ({ v: 2; iss: string; host: string; sub: string } & HostEdgeAssertionV2BoundClaims)
 export declare function validateHostEdgeAssertionClaims(
   payload: unknown,
-  expected: HostEdgeAssertionExpectation
+  expected: HostEdgeAssertionExpectation,
+  nowSeconds: number
 ): Readonly<{ ok: true } | { ok: false; error: string }>
 export declare const ACTION_AUTHORITY_DESTINATION_KINDS: readonly ['host', 'mcp_server']
 export declare const ACCESS_RESOURCE_TYPES: readonly [

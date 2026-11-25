@@ -72,6 +72,7 @@ test('Host edge assertion constants pin the wire contract and no static edge tok
   assert.equal(contracts.HOST_EDGE_ASSERTION_JWT_TYPE, 'host-edge-assertion+jwt')
   assert.equal(contracts.HOST_EDGE_ASSERTION_CLAIM_TYPE, 'host_edge_assertion')
   assert.equal(contracts.HOST_EDGE_ASSERTION_MAX_TTL_SECONDS, 300)
+  assert.equal(contracts.HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS, 5)
   assert.equal(Object.isFrozen(contracts.HOST_EDGE_RPC_PROXY_ROUTE_SCOPES), true)
   assert.equal(Object.keys(contracts.HOST_EDGE_RPC_PROXY_ROUTE_SCOPES).length, 19)
   assert.equal('RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER' in contracts, false)
@@ -626,6 +627,8 @@ const edgeKeys = generateKeyPairSync('rsa', { modulusLength: 2048 })
 const EDGE_ISSUER = 'fixture-control-api-issuer'
 const EDGE_HOST = 'hosts/fixture-host'
 const EDGE_IAT = 1_900_000_000
+// The verifier clock of the existing rows: the second the fixtures were issued.
+const EDGE_NOW = EDGE_IAT
 
 function v1Claims(overrides = {}) {
   return {
@@ -698,7 +701,9 @@ test('signed round trip: a V1 assertion signed by the test signer decodes to a p
     signEdgeAssertion(edgeKeys.privateKey, v1Claims())
   )
   assert.deepEqual(Object.keys(payload), [...contracts.HOST_EDGE_ASSERTION_V1_CLAIM_KEYS])
-  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V1_EXPECTED), { ok: true })
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V1_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
 })
 
 test('signed round trip: a V2 assertion signed by the test signer decodes to a payload the validator accepts', () => {
@@ -707,11 +712,15 @@ test('signed round trip: a V2 assertion signed by the test signer decodes to a p
     signEdgeAssertion(edgeKeys.privateKey, v2Claims())
   )
   assert.deepEqual(Object.keys(payload), [...contracts.HOST_EDGE_ASSERTION_V2_CLAIM_KEYS])
-  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V2_EXPECTED), { ok: true })
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V2_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
 })
 
 test('V1 claims: key set, registered claims, lifetime, binding and route scope are enforced', () => {
-  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED), { ok: true })
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
   const { teamId: _omitted, ...missingTeam } = v1Claims()
   const cases = [
     [missingTeam, 'claim keys do not match the declared version'],
@@ -735,20 +744,25 @@ test('V1 claims: key set, registered claims, lifetime, binding and route scope a
     [v1Claims({ scopes: ['host:message:invoke'] }), 'route scope missing'],
   ]
   for (const [payload, error] of cases) {
-    assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V1_EXPECTED), {
+    assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V1_EXPECTED, EDGE_NOW), {
       ok: false,
       error,
     })
   }
   assert.deepEqual(
-    contracts.validateHostEdgeAssertionClaims(v1Claims({ teamId: null }), {
-      ...V1_EXPECTED,
-      teamId: null,
-    }),
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ teamId: null }),
+      { ...V1_EXPECTED, teamId: null },
+      EDGE_NOW
+    ),
     { ok: true }
   )
   assert.deepEqual(
-    contracts.validateHostEdgeAssertionClaims(v1Claims(), { ...V1_EXPECTED, requiredScope: '' }),
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims(),
+      { ...V1_EXPECTED, requiredScope: '' },
+      EDGE_NOW
+    ),
     { ok: false, error: 'expected requiredScope is missing' }
   )
 })
@@ -757,28 +771,95 @@ test('V2 claims: every bound field must equal the expectation', () => {
   for (const key of Object.keys(V2_BOUND)) {
     const changedValue = key === 'sessionVersion' ? 4 : `${JSON.stringify(V2_BOUND[key])}-x`
     assert.deepEqual(
-      contracts.validateHostEdgeAssertionClaims(v2Claims({ [key]: changedValue }), V2_EXPECTED),
+      contracts.validateHostEdgeAssertionClaims(
+        v2Claims({ [key]: changedValue }),
+        V2_EXPECTED,
+        EDGE_NOW
+      ),
       { ok: false, error: `${key} mismatch` }
     )
   }
   const { checkedAt: _omitted, ...expectationWithoutCheckedAt } = V2_EXPECTED
   assert.deepEqual(
-    contracts.validateHostEdgeAssertionClaims(v2Claims(), expectationWithoutCheckedAt),
+    contracts.validateHostEdgeAssertionClaims(v2Claims(), expectationWithoutCheckedAt, EDGE_NOW),
     { ok: false, error: 'expected checkedAt is missing' }
   )
-  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v2Claims(), V1_EXPECTED), {
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v2Claims(), V1_EXPECTED, EDGE_NOW), {
     ok: false,
     error: 'version mismatch',
   })
 })
 
 test('validator refuses a non-object payload and an unknown expected version', () => {
-  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(null, V1_EXPECTED), {
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(null, V1_EXPECTED, EDGE_NOW), {
     ok: false,
     error: 'payload must be an object',
   })
   assert.deepEqual(
-    contracts.validateHostEdgeAssertionClaims(v1Claims(), { ...V1_EXPECTED, v: 3 }),
+    contracts.validateHostEdgeAssertionClaims(v1Claims(), { ...V1_EXPECTED, v: 3 }, EDGE_NOW),
     { ok: false, error: 'expected version must be 1 or 2' }
   )
+})
+
+test('validator refuses an iat more than the allowed skew ahead of the verifier clock', () => {
+  const yearAhead = EDGE_NOW + 31_536_000
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ iat: yearAhead, exp: yearAhead + 300 }),
+      V1_EXPECTED,
+      EDGE_NOW
+    ),
+    { ok: false, error: 'iat is in the future' }
+  )
+  // Liveness witness: the same claims issued at the verifier clock pass.
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ iat: EDGE_NOW, exp: EDGE_NOW + 300 }),
+      V1_EXPECTED,
+      EDGE_NOW
+    ),
+    { ok: true }
+  )
+})
+
+test('validator accepts an iat up to 5 seconds ahead of the verifier clock and refuses 6', () => {
+  for (const [version, claims, expected] of [
+    ['v1', v1Claims, V1_EXPECTED],
+    ['v2', v2Claims, V2_EXPECTED],
+  ]) {
+    const atSkew = EDGE_NOW + 5
+    assert.deepEqual(
+      contracts.validateHostEdgeAssertionClaims(
+        claims({ iat: atSkew, exp: atSkew + 120 }),
+        expected,
+        EDGE_NOW
+      ),
+      { ok: true },
+      version
+    )
+    const pastSkew = EDGE_NOW + 6
+    assert.deepEqual(
+      contracts.validateHostEdgeAssertionClaims(
+        claims({ iat: pastSkew, exp: pastSkew + 120 }),
+        expected,
+        EDGE_NOW
+      ),
+      { ok: false, error: 'iat is in the future' },
+      version
+    )
+  }
+})
+
+test('validator requires the verifier clock in whole seconds', () => {
+  for (const nowSeconds of [undefined, 1.5, 0]) {
+    assert.deepEqual(
+      contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, nowSeconds),
+      { ok: false, error: 'verifier clock must be whole seconds' },
+      String(nowSeconds)
+    )
+  }
+  // Liveness witness: the same payload passes with a whole-second clock.
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
 })

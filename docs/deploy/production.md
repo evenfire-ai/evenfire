@@ -342,6 +342,7 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
   | `verify-failed` with `TokenExpiredError`                  | Clock skew, or a request at the end of its assertion's life.                                                                                                                                    |
   | `typ-mismatch`                                            | Signed by the right key for the edge audience, but with another header type: control-api and Host versions differ.                                                                              |
   | `claims-rejected` with `claimError`                       | The assertion's host, user, team or scope does not match this Host or route; `claimError` names which, for example `host mismatch`, `sub mismatch`, `teamId mismatch` or `route scope missing`. |
+  | `claims-rejected` with `claimError: iat is in the future` | The assertion was issued more than 5 seconds ahead of the Host's clock: the Host's clock is behind control-api's. Fix the node's time sync; the Host refuses every RPC Proxy request until then. |
 
 - **Image tags.** Never republish a Host or RPC Proxy image tag. The HCC
   barrier checks the pod template label, not the image. A republished tag

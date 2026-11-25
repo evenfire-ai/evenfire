@@ -354,8 +354,24 @@ describe('runtimeEdgeGuard rpc-proxy edge assertion', () => {
     await expectWitness(clearHeaders())
   })
 
-  it('accepts an iat ahead of the Host clock while the lifetime bound holds', async () => {
-    const ahead = Math.floor(Date.now() / 1000) + 60
+  it('refuses an iat more than the allowed skew ahead of the Host clock', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    for (const [name, ahead] of [
+      ['60 seconds ahead', now + 60],
+      ['one year ahead', now + 31_536_000],
+    ] as const) {
+      const refused = await probe({
+        ...clearHeaders(),
+        [HOST_EDGE_ASSERTION_HEADER]: assertion({ iat: ahead, exp: ahead + 300 }),
+      })
+      expect(refused, name).toEqual({ status: 401, body: INVALID, handlerCalls: 0 })
+    }
+    await expectWitness(clearHeaders())
+  })
+
+  it('accepts an iat up to 5 seconds ahead of the Host clock', async () => {
+    // The Host reads its clock after this one, so the skew it sees is 5 seconds or less.
+    const ahead = Math.floor(Date.now() / 1000) + 5
     const accepted = await probe({
       ...clearHeaders(),
       [HOST_EDGE_ASSERTION_HEADER]: assertion({ iat: ahead, exp: ahead + 300 }),
@@ -634,6 +650,18 @@ describe('runtimeEdgeGuard logs each refused edge assertion', () => {
       }),
       body: INVALID,
       fields: { reason: 'claims-rejected', claimError: 'route scope missing' },
+    },
+    {
+      name: 'iat in the future',
+      headers: () => {
+        const ahead = Math.floor(Date.now() / 1000) + 60
+        return {
+          ...clearHeaders(),
+          [HOST_EDGE_ASSERTION_HEADER]: assertion({ iat: ahead, exp: ahead + 300 }),
+        }
+      },
+      body: INVALID,
+      fields: { reason: 'claims-rejected', claimError: 'iat is in the future' },
     },
   ]
 

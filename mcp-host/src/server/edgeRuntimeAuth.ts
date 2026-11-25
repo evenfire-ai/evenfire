@@ -333,14 +333,18 @@ function verifyRpcProxyEdgeAssertion(
     return { accepted: false, reason: 'typ-mismatch' }
   }
 
-  const claims = validateHostEdgeAssertionClaims(decoded.payload, {
-    v: 1,
-    iss: config.authJwtIssuer,
-    host: `${config.namespace}/${config.hostName}`,
-    sub: context.userId,
-    teamId: context.teamId ?? null,
-    requiredScope,
-  })
+  const claims = validateHostEdgeAssertionClaims(
+    decoded.payload,
+    {
+      v: 1,
+      iss: config.authJwtIssuer,
+      host: `${config.namespace}/${config.hostName}`,
+      sub: context.userId,
+      teamId: context.teamId ?? null,
+      requiredScope,
+    },
+    Math.floor(Date.now() / 1000)
+  )
   if (!claims.ok) return { accepted: false, reason: 'claims-rejected', claimError: claims.error }
   // The claims validator has checked that `scopes` is a non-empty array of non-empty strings.
   return {
