@@ -23,10 +23,14 @@ import {
   rowSelect,
   section,
   sectionButton,
+  sectionMessage,
+  seedHost,
   setRow,
   settle,
+  shownRows,
   writes,
 } from '../../test/fixtures/approvalSection'
+import type { FakeControlApi, FakeHold } from '../../test/fixtures/fakeControlApi'
 import { FIRST_SAVE_DIALOG_TITLE, LOOSENING_DIALOG_TITLE } from '../HostApprovalSection/constants'
 
 /** The loosening dialog's items as `label → text`, in the order shown. */
@@ -311,5 +315,111 @@ describe('HostApprovalSection dialogs (spec §6.6)', () => {
 
     expect(screen.queryByRole('dialog', { name: FIRST_SAVE_DIALOG_TITLE })).toBeNull()
     expect(fake.stored('foo').spec.approval).toEqual({ tools: { system_info: true } })
+  })
+})
+
+describe('HostApprovalSection: a reconfirm the dialog cannot ask again (review I1)', () => {
+  beforeEach(() => resetSectionTestState())
+  afterEach(() => {
+    cleanup()
+    resetSectionTestState()
+    vi.unstubAllGlobals()
+  })
+
+  // As in T21: shell_exec set to Required by an admin, at Manual, so Back to
+  // Default shows no dialog. Another writer raises the ceiling first, and the
+  // save's own read finds an item no dialog confirmed.
+  const RECONFIRM = {
+    kind: 'reconfirm',
+    items: [{ path: 'tools.shell_exec', rule: 'explicit_required_to_default_above_manual' }],
+  }
+  const NOT_SENT =
+    "The save was not sent: this agent's approval settings changed while it was saving, so its changes need confirming again. Make the changes again and save."
+
+  function fooAndB(): FakeControlApi {
+    return createSectionFake(
+      { modeCeiling: 'manual', tools: { shell_exec: true } },
+      { others: { b: seedHost('b', { approval: { tools: { file_write: true } } }) } }
+    )
+  }
+
+  /** Saves shell_exec back to Default after the ceiling was raised; returns the save's held read. */
+  async function startUnconfirmedSave(fake: FakeControlApi): Promise<FakeHold> {
+    clickEdit()
+    setRow('shell_exec', 'default')
+    fake.writeExternal('foo', spec => {
+      ;(spec.approval as Record<string, unknown>).modeCeiling = 'auto'
+    })
+    const read = fake.hold({ method: 'GET', path: FOO_PATH })
+    await clickSave()
+    await act(async () => {
+      await read.arrived
+    })
+    return read
+  }
+
+  it('(a) a reconfirm that settles after the section unmounted is reported, with nothing written', async () => {
+    const fake = fooAndB()
+    const { onSettled, unmount } = renderSection(fake)
+    const read = await startUnconfirmedSave(fake)
+
+    unmount()
+    await act(async () => {
+      read.deliverNow()
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0], 'reported to the tab').toEqual(RECONFIRM)
+    expect(
+      fake.log.map(entry => [entry.method, entry.path]),
+      "the save's read and no PUT"
+    ).toEqual([['GET', FOO_PATH]])
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+  })
+
+  it('(b) a reconfirm that settles after the section moved to another agent is reported and shown nowhere', async () => {
+    const fake = fooAndB()
+    const { onSettled, rerenderSection } = renderSection(fake)
+    const read = await startUnconfirmedSave(fake)
+
+    rerenderSection(propsFromStore(fake, 'b'))
+    await act(async () => {
+      read.deliverNow()
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0], 'reported to the tab').toEqual(RECONFIRM)
+    expect(
+      fake.log.map(entry => [entry.method, entry.path]),
+      "the save's read and no PUT"
+    ).toEqual([['GET', FOO_PATH]])
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(sectionMessage(), "on b's page").toBeNull()
+    expect(shownRows(), "b's read view").toEqual({ file_write: 'Required' })
+  })
+
+  it('(c) a reconfirm that settles after a newer edit session started is reported and shown, and keeps that session open', async () => {
+    const fake = fooAndB()
+    const { onSettled, rerenderSection } = renderSection(fake)
+    const read = await startUnconfirmedSave(fake)
+
+    // To another agent and back, then a new edit session, while the save's read is out.
+    rerenderSection(propsFromStore(fake, 'b'))
+    rerenderSection(propsFromStore(fake, 'foo'))
+    clickEdit()
+    await act(async () => {
+      read.deliverNow()
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0], 'reported to the tab').toEqual(RECONFIRM)
+    expect(sectionMessage()?.textContent, 'shown on the same agent').toBe(NOT_SENT)
+    expect(document.activeElement, 'focus moves to the message').toBe(sectionMessage())
+    expect(
+      fake.log.map(entry => [entry.method, entry.path]),
+      "the save's read and no PUT"
+    ).toEqual([['GET', FOO_PATH]])
+    expect(screen.queryByRole('alertdialog'), 'the old edit session cannot confirm').toBeNull()
+    expect(sectionButton('Cancel'), 'the newer edit session is still open').toBeEnabled()
   })
 })

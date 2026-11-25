@@ -29,13 +29,18 @@ export interface HostApprovalSectionProps {
   /** The stored ceiling, for the loosening dialog's items (spec §6.6). */
   ceiling: ApprovalCeiling
   /**
-   * Told the outcome of each save that settles: `saved`, or the outcome that
-   * stopped it. A `reconfirm` is not reported: the section shows the loosening
-   * dialog again, and the save settles after the admin confirms (or ends,
-   * unreported, if they go back). A Retry after an error is a new save. It is
-   * the callback the section was rendered with when Save was pressed, so its
-   * closure names the save's agent, and it is called even when the section
-   * has since unmounted or shows another agent.
+   * Told the outcome of each save that ends: `saved`, or the outcome that
+   * stopped it. A `reconfirm` is reported only when the loosening dialog
+   * cannot ask again: the section has unmounted, shows another agent, or the
+   * edit session that started the save is no longer the open one. That save
+   * ends with nothing written and its draft gone, so the tab can say it needs
+   * confirming again (`RECONFIRM_NOT_SENT_MESSAGE`); on the same agent the
+   * section shows that message itself. Otherwise the dialog asks again and the
+   * save goes on: it ends after the admin confirms, or ends unreported, with
+   * nothing written, if they go back. A Retry after an error is a new save. It
+   * is the callback the section was rendered with when Save was pressed, so
+   * its closure names the save's agent, and it is called even when the
+   * section has since unmounted or shows another agent.
    */
   onSettled: (outcome: ToolsSaveOutcome) => void
   /**
@@ -104,8 +109,11 @@ export type SectionDialog =
   | { kind: 'first_save'; editSession: number; report: SaveRun['report'] }
   | { kind: 'loosening'; items: LooseningItem[]; run: SaveRun }
 
-/** A save's outcome as the section shows it: the outcomes that end with a message. */
-export type SectionMessage = Exclude<ToolsSaveOutcome, { kind: 'saved' } | { kind: 'reconfirm' }>
+/**
+ * A save's outcome as the section shows it: the outcomes that end with a
+ * message, a `reconfirm` the loosening dialog could not ask again included.
+ */
+export type SectionMessage = Exclude<ToolsSaveOutcome, { kind: 'saved' }>
 
 export interface ShownMessage {
   outcome: SectionMessage

@@ -20,6 +20,7 @@ import {
   EXPLICIT_REQUIRED_NOTES,
   NATIVE_TOOLS,
   NO_OVERRIDES_TEXT,
+  RECONFIRM_NOT_SENT_MESSAGE,
   UNSAVED_CHANGES_TEXT,
   looseningItemText,
 } from './constants'
@@ -91,7 +92,7 @@ function DesktopOnlyChip() {
  * while it runs, Save, Cancel and every row are disabled. The loosening
  * dialog, and on an agent with no approval settings of its own the policy
  * dialog, come before the save (spec §6.6). Every outcome that stops the save
- * shows here, with the focus on it; the tab hears every settled save through
+ * shows here, with the focus on it; the tab hears every save that ends through
  * `onSettled`, and owns loads, the success toast and the Host-changed notice.
  */
 export function HostApprovalSection({
@@ -137,14 +138,26 @@ export function HostApprovalSection({
   }, [message])
 
   function settle(outcome: ToolsSaveOutcome, run: SaveRun): void {
-    // The tab hears every settled save, even when the section is gone or shows
-    // another agent; a reconfirm has not settled, the dialog asks again.
-    if (outcome.kind !== 'reconfirm') run.report(outcome)
     // Spec §6.5: only the instance that ran the save, still showing that agent,
     // shows its outcome.
-    if (!mountedRef.current || hostRef.current !== run.input.host) return
+    const shown = mountedRef.current && hostRef.current === run.input.host
     const current = stateRef.current
-    const sameSession = current.editing && current.editSession === run.editSession
+    const sameSession = shown && current.editing && current.editSession === run.editSession
+    // A reconfirm has not settled while the dialog can ask again, in the edit
+    // session that started the save. Otherwise nothing was written, the save
+    // ends here, and it is reported like any other end.
+    if (outcome.kind === 'reconfirm' && sameSession) {
+      setDialog({
+        kind: 'loosening',
+        items: outcome.items,
+        run: { ...run, input: { ...run.input, confirmedItems: outcome.items } },
+      })
+      return
+    }
+    // The tab hears every save that ends, even when the section is gone or
+    // shows another agent.
+    run.report(outcome)
+    if (!shown) return
     switch (outcome.kind) {
       case 'saved':
         section.close(run.editSession)
@@ -156,21 +169,14 @@ export function HostApprovalSection({
         section.close(run.editSession)
         setMessage({ outcome })
         return
-      case 'reconfirm':
-        if (sameSession) {
-          setDialog({
-            kind: 'loosening',
-            items: outcome.items,
-            run: { ...run, input: { ...run.input, confirmedItems: outcome.items } },
-          })
-        }
-        return
       case 'error':
         // Nothing was written. Retry, offered while this edit session is the
         // open one, is Save: it saves the draft as it is when pressed.
         setMessage({ outcome, retry: sameSession })
         return
       default:
+        // Every other stop, and a reconfirm whose edit session is no longer
+        // the open one: its draft is gone, so the dialog has nothing to ask.
         setMessage({ outcome })
     }
   }
@@ -557,6 +563,9 @@ function OutcomeMessage({ message, messageRef, retryDisabled, onRetry }: Outcome
       break
     case 'created_elsewhere':
       body = APPROVAL_CREATED_ELSEWHERE_MESSAGE
+      break
+    case 'reconfirm':
+      body = RECONFIRM_NOT_SENT_MESSAGE
       break
     case 'refused':
       body = (

@@ -389,6 +389,16 @@ export const FIRST_SAVE_POLICY_OPTIONS: ReadonlyArray<{ value: FirstSavePolicy; 
   { value: 'cli_only', label: 'Nobody (Desktop only)' },
 ]
 
+/**
+ * A save the write found looser than the admin confirmed (spec §6.4 step 6),
+ * when the loosening dialog cannot ask again: the section has unmounted, shows
+ * another agent, or the save's edit session is no longer the open one. Nothing
+ * was written. The section shows it on the same agent; the tab's root toast
+ * can use it elsewhere.
+ */
+export const RECONFIRM_NOT_SENT_MESSAGE =
+  "The save was not sent: this agent's approval settings changed while it was saving, so its changes need confirming again. Make the changes again and save."
+
 export const LOOSENING_DIALOG_TITLE = 'Confirm looser approval'
 export const LOOSENING_DIALOG_DESCRIPTION =
   'This save loosens approval on this agent. Check each change before you save.'
