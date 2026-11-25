@@ -551,6 +551,32 @@ describe('main approval-mode writers and approvals over HTTP', () => {
     expect(stored?.approval_mode).toBe('auto')
   })
 
+  it('GET status projects pending approvals through main to their start time only', async () => {
+    fake.primaryKeySlot = 'claude-api-key'
+    const loaded = await loadMain()
+    await loaded.main.onHostChange(host({}))
+    const harness = await startServer(loaded)
+    // Another user's approval on the same Host: status must not carry its owner,
+    // tool, parameters or request id.
+    const getPendingApprovals = vi.spyOn(loaded.agent, 'getPendingApprovals').mockReturnValue([
+      {
+        requestId: 'req-other-user',
+        userId: 'other-user-uuid',
+        toolName: 'shell_exec',
+        parameters: { command: 'cat /workspace/secret.txt' },
+        description: 'Run a shell command',
+        since: '2026-11-25T10:00:00.000Z',
+      },
+    ])
+
+    const res = await fetch(`${harness.baseUrl}/v1/runtime/status`, { headers: edgeHeaders() })
+
+    expect(res.status).toBe(200)
+    expect(getPendingApprovals).toHaveBeenCalled()
+    const body = (await res.json()) as { pendingApprovals?: unknown }
+    expect(body.pendingApprovals).toEqual([{ since: '2026-11-25T10:00:00.000Z' }])
+  })
+
   it('passes the shell answer from an approval to the agent', async () => {
     fake.primaryKeySlot = 'claude-api-key'
     const loaded = await loadMain()
