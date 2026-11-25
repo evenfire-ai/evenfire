@@ -591,8 +591,11 @@ function base64UrlJson(value) {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
 }
 
-// Signs the way the control-api producer does: RS256 compact JWS with the header typ, the issuer,
-// the audience constant, a UUID jti and an expiry bounded by the maximum lifetime.
+// A test signer that mirrors the control-api producer: RS256 compact JWS with the header typ, the
+// issuer, the audience constant, a UUID jti and an expiry bounded by the maximum lifetime. The
+// round trip through the real producer runs in control-api
+// (test/routes.rpcAccessUsers.hostEdgeAssertion.test.ts and
+// test/routes.internalActionAuthorityCheckpoint.hostEdgeAssertion.test.ts).
 function signEdgeAssertion(privateKey, claims) {
   const header = { alg: 'RS256', typ: contracts.HOST_EDGE_ASSERTION_JWT_TYPE }
   const signingInput = `${base64UrlJson(header)}.${base64UrlJson(claims)}`
@@ -689,7 +692,7 @@ const V2_EXPECTED = Object.freeze({
   ...V2_BOUND,
 })
 
-test('producer round trip: a signed V1 assertion decodes to a payload the validator accepts', () => {
+test('signed round trip: a V1 assertion signed by the test signer decodes to a payload the validator accepts', () => {
   const payload = verifyEdgeAssertion(
     edgeKeys.publicKey,
     signEdgeAssertion(edgeKeys.privateKey, v1Claims())
@@ -698,7 +701,7 @@ test('producer round trip: a signed V1 assertion decodes to a payload the valida
   assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V1_EXPECTED), { ok: true })
 })
 
-test('producer round trip: a signed V2 assertion decodes to a payload the validator accepts', () => {
+test('signed round trip: a V2 assertion signed by the test signer decodes to a payload the validator accepts', () => {
   const payload = verifyEdgeAssertion(
     edgeKeys.publicKey,
     signEdgeAssertion(edgeKeys.privateKey, v2Claims())
