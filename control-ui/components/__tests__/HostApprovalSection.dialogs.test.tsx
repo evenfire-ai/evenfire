@@ -274,6 +274,21 @@ describe('HostApprovalSection dialogs (spec §6.6)', () => {
     })
   })
 
+  it('the first-save dialog is described by what the save does and its two warnings (ruling 41, item 4)', async () => {
+    renderSection(createSectionFake(undefined))
+    clickEdit()
+    setRow('system_info', 'required')
+    await clickSave()
+
+    expect(dialogByName('dialog', FIRST_SAVE_DIALOG_TITLE)).toHaveAccessibleDescription(
+      [
+        'This agent has no approval settings of its own. This save gives it its own, with the policy you choose here.',
+        'The cluster rules stop applying for this agent and may have been stricter than the values shown.',
+        'Channel approval cards may change their wording (with no approval settings anywhere, cards tell people to approve through the CLI).',
+      ].join(' ')
+    )
+  })
+
   it('an open policy on a first save is a loosening item confirmed before the write', async () => {
     const fake = createSectionFake(undefined)
     const { onSettled } = renderSection(fake)

@@ -5668,8 +5668,10 @@ td.cu-registry-description {
   flex: none;
 }
 
+/* A warning in the first-save dialog's description, in body text rather than the description's muted tone. */
 .cu-host-approval-dialog__note {
-  margin: 0 0 var(--cu-space-3);
+  margin: var(--cu-space-2) 0 0;
+  color: var(--cu-text);
   line-height: var(--cu-line-height-normal);
 }
 

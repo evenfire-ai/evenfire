@@ -30,7 +30,18 @@ export function FirstSaveDialog({ open, onCancel, onSave }: FirstSaveDialogProps
     <SimpleEditDialog
       open={open}
       title={FIRST_SAVE_DIALOG_TITLE}
-      description={FIRST_SAVE_DIALOG_DESCRIPTION}
+      // The dialog's accessible description is this node only, so the
+      // warnings are part of it.
+      description={
+        <>
+          {FIRST_SAVE_DIALOG_DESCRIPTION}
+          {FIRST_SAVE_NOTES.map(note => (
+            <p className="cu-host-approval-dialog__note" key={note}>
+              {note}
+            </p>
+          ))}
+        </>
+      }
       isDirty={policy !== ''}
       isValid={policy !== ''}
       onCancel={onCancel}
@@ -38,11 +49,6 @@ export function FirstSaveDialog({ open, onCancel, onSave }: FirstSaveDialogProps
         if (policy !== '') onSave(policy)
       }}
     >
-      {FIRST_SAVE_NOTES.map(note => (
-        <p className="cu-host-approval-dialog__note" key={note}>
-          {note}
-        </p>
-      ))}
       <Field htmlFor={selectId} label={FIRST_SAVE_POLICY_LABEL}>
         <SelectInput
           id={selectId}
