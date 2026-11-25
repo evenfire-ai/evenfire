@@ -44,11 +44,11 @@ GET /api/v1/invitations/token/:token` before it renders.
 6. **The Desktop App completes the handoff later**, from its own sign-in
    screen: entering the invited email there makes the Desktop App look up
    the invitation profile and open Profile UI's `/desktop-setup?email=...`
-   in the system browser. The member enters their password once more;
-   Profile UI exchanges it for a short-lived authorization token
-   (`external-rest-api POST /api/v1/invitations/desktop-authorization`) and
-   hands it back to the installed app through the `evenfire://desktop-setup`
-   deep link.
+   in the system browser. The member's signed-in Profile UI session is the
+   authority: Profile UI requests a short-lived authorization token for it
+   (`external-rest-api POST /api/v1/invitations/desktop-authorization`, which
+   takes no password) and hands it back to the installed app through the
+   `evenfire://desktop-setup` deep link.
 
 Steps 1–4 above don't need a deployed sibling service for this: self-hosted
 control-api can send the invitation email and validate the token itself via

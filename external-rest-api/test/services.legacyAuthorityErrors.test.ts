@@ -305,17 +305,31 @@ describe('legacy authority adapters', () => {
     })
   }
 
-  it('does not convert desktop-authorization authority outages into bad passwords', async () => {
-    clientMock.controlApiRequest.mockRejectedValueOnce(
-      new ControlApiError('Control API rejected the password', 401, { error: 'invalid_password' })
-    )
-    await expect(createDesktopAuthorization(auth, 'wrong-password')).resolves.toEqual({
-      error: 'invalid_password',
-    })
-
+  it('keeps a desktop-authorization authority outage an outage', async () => {
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
-    await expect(createDesktopAuthorization(auth, 'correct-password')).rejects.toMatchObject({
+    await expect(createDesktopAuthorization(auth)).rejects.toMatchObject({
       status: 503,
     })
+    expect(clientMock.controlApiRequest).toHaveBeenCalledOnce()
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith(
+      'POST',
+      '/external/invitations/desktop-authorization',
+      { body: {}, userSessionToken: auth.sessionToken }
+    )
+  })
+
+  it('sends an empty body upstream', async () => {
+    // The service relays control-api's answer untouched. An opaque value stands
+    // in for it, so no hand-written control-api body enters this test.
+    const relayed = Symbol('control-api answer')
+    clientMock.controlApiRequest.mockResolvedValueOnce(relayed)
+
+    await expect(createDesktopAuthorization(auth)).resolves.toEqual({ data: relayed })
+    expect(clientMock.controlApiRequest).toHaveBeenCalledOnce()
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith(
+      'POST',
+      '/external/invitations/desktop-authorization',
+      { body: {}, userSessionToken: auth.sessionToken }
+    )
   })
 })

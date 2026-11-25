@@ -25,7 +25,6 @@ import {
   listPendingInvitations,
   setInvitationPasswordForEmail,
   setInvitationPasswordForUser,
-  verifyUserPassword,
 } from '../../services/directory/index.js'
 import {
   storeDesktopAuthorizationToken,
@@ -244,21 +243,15 @@ export function createExternalInvitationsRouter(): Router {
     rejectBodyUserTeamMismatch,
     requireAuthenticatedExternalUserRateLimitContext,
 
-    async (req, res, next) => {
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
-        const userId = String(req.body?.userId || '').trim()
-        const email = String(req.body?.email || '')
+        // The signed-in session is the only authority for /desktop-setup: no
+        // body field is read, so a request cannot name another member, and no
+        // password is asked for, so a member without one can authorize too.
+        const email = String(req.externalAuth?.email || '')
           .trim()
           .toLowerCase()
-        const password = String(req.body?.password || '')
-        if (!userId || !email || !password) {
-          return res.status(400).json({ error: 'invalid payload' })
-        }
-
-        const passwordValid = await verifyUserPassword({ userId, email, password })
-        if (!passwordValid) {
-          return res.status(401).json({ error: 'invalid_password' })
-        }
+        if (!email) return res.status(401).json({ error: 'Unauthorized' })
 
         const authorizationToken = randomBytes(24).toString('base64url')
         try {
@@ -276,7 +269,6 @@ export function createExternalInvitationsRouter(): Router {
           expiresInSeconds: 120,
         })
       } catch (error) {
-        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }

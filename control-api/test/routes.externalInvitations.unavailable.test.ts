@@ -19,7 +19,6 @@ const directory = vi.hoisted(() => ({
   listPendingInvitations: vi.fn(),
   setInvitationPasswordForEmail: vi.fn(),
   setInvitationPasswordForUser: vi.fn(),
-  verifyUserPassword: vi.fn(),
 }))
 vi.mock('../src/services/directory/index.js', () => directory)
 
@@ -306,25 +305,19 @@ describe('external invitation routes when the hub is unavailable', () => {
     // route's catch used to key off of to detect an invitation 404. Without
     // the memberRegistrationErrorResponse guard, this typed 503 gets
     // misclassified as a 404 invitation lookup failure.
-    directory.verifyUserPassword.mockResolvedValue(true)
     flow.storeDesktopAuthorizationToken.mockRejectedValue(
       new MemberRegistrationUnavailableError(
         "member-registration hub rejected enrollment for 'x.acme.com' (404)"
       )
     )
-    const res = await request(app())
-      .post('/external/invitations/desktop-authorization')
-      .send({ userId: 'u1', email: 'a@b.c', password: 'pw' })
+    const res = await request(app()).post('/external/invitations/desktop-authorization').send({})
     expect(res.status).toBe(503)
     expect(res.body.error).toBe('member_registration_unavailable')
   })
 
   it('REGRESSION: POST desktop-authorization still maps a generic upstream 404 message to 404 not_found', async () => {
-    directory.verifyUserPassword.mockResolvedValue(true)
     flow.storeDesktopAuthorizationToken.mockRejectedValue(new Error('upstream responded (404)'))
-    const res = await request(app())
-      .post('/external/invitations/desktop-authorization')
-      .send({ userId: 'u1', email: 'a@b.c', password: 'pw' })
+    const res = await request(app()).post('/external/invitations/desktop-authorization').send({})
     expect(res.status).toBe(404)
     expect(res.body.error).toBe('not_found')
   })
