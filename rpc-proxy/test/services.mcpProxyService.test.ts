@@ -330,7 +330,7 @@ describe('isHeldEdgeAssertionNearExpiry', () => {
 describe('V1 Host resolve: thrown and unavailable control-api answers', () => {
   const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
   const USER_ID = 'user-secret-id-1'
-  const TOKEN = 'rpc-token-secret-1'
+  const TOKEN = 'rpc-test-token-fixture-1'
   const LINE_PREFIX = '[RPC_PROXY] control-api host resolve unavailable'
 
   beforeEach(() => {
