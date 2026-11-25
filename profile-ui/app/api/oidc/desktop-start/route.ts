@@ -16,11 +16,20 @@ import {
 } from '../_flow'
 import { readStartForm } from '../_form'
 
+/** The fragment key each Desktop form field stands for. */
+const FRAGMENT_KEY_BY_FIELD: ReadonlyMap<string, string> = new Map([
+  ['desktopChallenge', 'challenge'],
+  ['desktopState', 'state'],
+])
+/** Any other field. It is not a fragment key, so the parser refuses the form. */
+const UNEXPECTED_FRAGMENT_KEY = 'unexpected'
+
 /**
  * The challenge and state the /desktop-login page posts, checked by the package's fragment rule:
- * exactly one of each, each a 43-character base64url value. The two fields are re-encoded under
- * the fragment's keys, so a value cannot add a key, and no other form field is read. The state is
- * returned whenever it alone is well formed.
+ * exactly one of each, each a 43-character base64url value, and no other field. Every field is
+ * re-encoded under its fragment key, and any other field under a key the parser refuses, so
+ * neither a value nor a field named `state` or `challenge` can stand in for a Desktop field. The
+ * state is returned whenever it alone is well formed.
  */
 async function postedDesktopValues(request: Request): Promise<DesktopLoginFragment> {
   let form: URLSearchParams | undefined
@@ -30,10 +39,10 @@ async function postedDesktopValues(request: Request): Promise<DesktopLoginFragme
     // A body that fails mid-read carries no state, so it gets the malformed-state answer below.
     form = undefined
   }
-  const fragment = new URLSearchParams([
-    ...(form?.getAll('desktopChallenge') ?? []).map(value => ['challenge', value]),
-    ...(form?.getAll('desktopState') ?? []).map(value => ['state', value]),
-  ])
+  const fragment = new URLSearchParams()
+  for (const [field, value] of form?.entries() ?? []) {
+    fragment.append(FRAGMENT_KEY_BY_FIELD.get(field) ?? UNEXPECTED_FRAGMENT_KEY, value)
+  }
   return parseDesktopLoginFragment(fragment.toString())
 }
 

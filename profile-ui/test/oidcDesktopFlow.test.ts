@@ -747,6 +747,10 @@ test('fires unavailable for a malformed challenge with a valid state', async () 
     ['no desktopChallenge', [state]],
     ['a 42-character desktopChallenge', [['desktopChallenge', CODE_CHALLENGE.slice(1)], state]],
     ['two desktopChallenge values', [...DESKTOP_FORM, ['desktopChallenge', CODE_CHALLENGE]]],
+    // Strict parsing: a form with any other field is not a Desktop sign-in form.
+    ['an extra returnTo field', [...DESKTOP_FORM, ['returnTo', 'desktop-setup']]],
+    // A field named like a fragment key never stands in for a Desktop field.
+    ['an extra field named state', [...DESKTOP_FORM, ['state', DESKTOP_STATE]]],
   ] as const) {
     await withEdge(
       { configuration: EDGE_CONFIGURATION, attempts: EDGE_ATTEMPT_DESKTOP_ECHO },
