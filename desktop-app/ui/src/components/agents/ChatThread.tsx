@@ -35,6 +35,8 @@ import {
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
 import type { AccessCatalog, ChatMessageAttachment } from '../../../../src/types'
 import { estimateBase64DecodedLength } from '../../lib/base64Size'
+import { generatedFilePreviewKind } from '../../lib/chatFilePreview'
+import { activateClickedChatLink } from '../../lib/chatLinkActivation'
 import { chatMessageDomId } from '../../lib/chatLocalSearch'
 import {
   getChatMessageAttachmentTypeLabel,
@@ -51,6 +53,7 @@ import {
 import { resolveTaskActionState } from '../../pages/AgentsPage.helpers'
 import type { AgentChatMessage, ProgressStep, TaskProgress } from '../../uiTypes'
 import { ProgressStepper } from '../ProgressStepper'
+import { ChatAttachmentPreviews, ChatLinkedFilePreviews } from './ChatFilePreview'
 import { ChatMarkdownContent } from './ChatMarkdownContent'
 import { ChatStateBadge } from './ChatStateBadge'
 import { InFlightAssistantPlaceholder } from './InFlightAssistantPlaceholder'
@@ -284,17 +287,7 @@ export function ChatThread({
   const { decideApproval, pushToast } = useNotificationsContext()
   const activateChatLink = useChatLinkActivation()
   const handleAssistantMarkdownClick = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      // React already retargets a click on a Text node to its parent element.
-      const anchor = (event.target as Element).closest('a')
-      if (!anchor || !event.currentTarget.contains(anchor)) return
-      // Any default navigation of the main document reloads the app and drops every tab.
-      event.preventDefault()
-      // The second click of a double click would open the external target again.
-      // Keyboard activation (Enter) dispatches a click with detail 0.
-      if (event.detail > 1) return
-      void activateChatLink(anchor.getAttribute('href') ?? '')
-    },
+    (event: ReactMouseEvent<HTMLDivElement>) => activateClickedChatLink(event, activateChatLink),
     [activateChatLink]
   )
   const {
@@ -327,6 +320,7 @@ export function ChatThread({
   } = useChatListContext()
   const {
     chatEndRef,
+    scrollChatToBottom,
     handleSelectChat: onSelectChat,
     handleRenameChat: onRenameChat,
     captureChatDeleteFence,
@@ -335,6 +329,10 @@ export function ChatThread({
     handleAddComposerReferenceAttachments: onAddComposerReferenceAttachments,
   } = useAgentChatActionsContext()
   const { cancelTask: onCancelTask } = useMcpRuntimeContext()
+  const chatEnd = useMemo(
+    () => ({ chatEndRef, scrollChatToBottom }),
+    [chatEndRef, scrollChatToBottom]
+  )
 
   const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null)
   const [showAllSessions, setShowAllSessions] = useState(false)
@@ -794,6 +792,13 @@ export function ChatThread({
                       const hasResponseFileAttachment = displayAttachments.some(
                         attachment => attachment.type === 'response_file'
                       )
+                      const showsFilePreview =
+                        message.role === 'assistant' &&
+                        !message.isError &&
+                        (semanticModel.linkedFiles.length > 0 ||
+                          displayAttachments.some(
+                            attachment => generatedFilePreviewKind(attachment) !== null
+                          ))
                       const isJson = looksLikeJson(displayContent)
                       const htmlPreview =
                         message.role === 'assistant'
@@ -843,7 +848,10 @@ export function ChatThread({
                                 : undefined
                           }
                           className={`chat-bubble ${message.role}${message.isError ? ' chat-bubble--error' : ''}${
-                            htmlPreview || hasHtmlArtifactMention || semanticModel.hasMermaidDiagram
+                            htmlPreview ||
+                            hasHtmlArtifactMention ||
+                            semanticModel.hasMermaidDiagram ||
+                            showsFilePreview
                               ? ' chat-bubble--wide'
                               : ''
                           }`}
@@ -930,6 +938,18 @@ export function ChatThread({
                               ) : null}
                             </>
                           )}
+                          {message.role === 'assistant' && !message.isError ? (
+                            <>
+                              <ChatLinkedFilePreviews
+                                files={semanticModel.linkedFiles}
+                                chatEnd={chatEnd}
+                              />
+                              <ChatAttachmentPreviews
+                                attachments={displayAttachments}
+                                chatEnd={chatEnd}
+                              />
+                            </>
+                          ) : null}
                           <MessageAttachmentList attachments={displayAttachments} />
                           {isLastAssistantMessage &&
                             prevGroup?.role === 'user' &&

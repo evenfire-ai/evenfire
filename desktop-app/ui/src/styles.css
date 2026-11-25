@@ -7899,6 +7899,100 @@ body.sidebar-resizing {
   color: var(--text-muted);
 }
 
+.chat-file-previews {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.chat-file-preview {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--panel-rgb), 0.4);
+}
+
+.chat-file-preview--pending {
+  min-height: 120px;
+  background: var(--surface-soft);
+}
+
+.chat-file-preview__caption {
+  padding: var(--space-1-5) var(--space-2);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.3);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+/* Overrides .chat-bubble pre; the size containment makes wide tables scroll here instead of widening the message. */
+.chat-file-preview .chat-file-preview__scroll {
+  contain: inline-size;
+  max-height: 420px;
+  overflow: auto;
+  padding: var(--space-2);
+}
+
+.chat-file-preview__scroll:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.6);
+  outline-offset: -2px;
+}
+
+.chat-file-preview__image {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  margin: 0 auto;
+  /* Checkerboard behind transparent images. */
+  background-color: var(--file-paper);
+  background-image: conic-gradient(
+    var(--file-paper-check) 25%,
+    var(--file-paper) 0 50%,
+    var(--file-paper-check) 0 75%,
+    var(--file-paper) 0
+  );
+  background-size: 16px 16px;
+}
+
+.chat-file-preview__request {
+  padding: var(--space-2);
+}
+
+.chat-file-preview__html {
+  display: block;
+  width: 100%;
+  height: 420px;
+  border: 0;
+  background: var(--file-paper);
+}
+
+/* Drops the border of the app's pre rule. */
+.chat-file-preview .chat-file-preview__text {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+.chat-file-preview__text-block {
+  display: block;
+}
+
+.chat-file-preview__text-block:not(:only-child) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 600px;
+}
+
+.chat-file-preview .chat-file-preview__note {
+  margin: var(--space-1-5) var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
 .markdown-content table {
   width: 100%;
   border-collapse: collapse;

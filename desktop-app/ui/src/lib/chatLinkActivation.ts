@@ -66,3 +66,23 @@ export function createChatLinkActivation(deps: ChatLinkActivationDeps): ChatLink
     }
   }
 }
+
+export type ChatLinkClick = Readonly<{
+  target: EventTarget | null
+  currentTarget: Element
+  detail: number
+  preventDefault: () => void
+}>
+
+/** Opens a clicked link through the chat's link activation. */
+export function activateClickedChatLink(event: ChatLinkClick, activate: ChatLinkActivation): void {
+  // React already retargets a click on a Text node to its parent element.
+  const anchor = (event.target as Element | null)?.closest?.('a')
+  if (!anchor || !event.currentTarget.contains(anchor)) return
+  // Any default navigation of the main document reloads the app and drops every tab.
+  event.preventDefault()
+  // The second click of a double click would open the external target again.
+  // Keyboard activation (Enter) dispatches a click with detail 0.
+  if (event.detail > 1) return
+  void activate(anchor.getAttribute('href') ?? '')
+}
