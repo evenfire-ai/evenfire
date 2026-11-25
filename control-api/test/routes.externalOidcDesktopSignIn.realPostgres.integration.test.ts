@@ -167,6 +167,7 @@ const MEMBER_NAME = 'Desktop Fixture Member'
 const TEAM_NAME = 'Desktop Sign-In Team'
 const SECOND_TEAM_NAME = 'Desktop Second Team'
 const OLDEST_TEAM_NAME = 'Desktop Oldest Team'
+const LATE_TEAM_NAME = 'Desktop Late Team'
 const ADMIN_ACTOR_ID = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f'
 /** The answers only the real chain gives, which the edge's contract test replays. */
 const CONTRACT_FILE = fileURLToPath(
@@ -830,6 +831,37 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
         teamName: null,
         role: 'member',
       },
+    })
+  })
+
+  it('gives a teamless mint the team the member joined before redeem', async () => {
+    const member = await seedMember('desktop-late-team')
+    const minted = await desktopCodeThroughRoute(member)
+    // Teamless at mint: the member had no team and no pending invitation.
+    expect(await storedCode(minted.code)).toMatchObject({ user_id: member.userId, team_id: null })
+
+    // Joined after the mint, through an accepted invitation.
+    const late = await seedTeam(LATE_TEAM_NAME)
+    await acceptInvitationAs(member, late, 'inviter')
+    expect(await firstRankedTeam(member.userId)).toBe(late)
+
+    const redeemed = await redeem(minted.code, minted.verifier)
+
+    expect(redeemed.status).toBe(200)
+    expect(redeemed.body.me).toMatchObject({
+      id: member.userId,
+      teamId: late,
+      teamName: LATE_TEAM_NAME,
+      role: 'inviter',
+    })
+    expect(
+      await authenticateExternalUserSession(redeemed.body.token, {
+        purpose: 'protected',
+        policy: SESSION_POLICY,
+      })
+    ).toMatchObject({
+      status: 'authenticated',
+      claims: { userId: member.userId, teamId: late },
     })
   })
 
