@@ -137,6 +137,8 @@ const failedText = (message: string) => `Manual was not saved. ${message}.`
 const FALLBACK_INTRO = 'To set Manual by hand, run:'
 const savedFor = (agent: string) =>
   `Manual is saved for agent ${agent}. Running chats apply it at their next tool call.`
+const alreadyFor = (agent: string) =>
+  `Manual is saved for agent ${agent}. It was already Manual. Running chats apply it at their next tool call.`
 const failedFor = (agent: string, message: string, command: string) =>
   `Manual was not saved for agent ${agent}. ${message}. To set Manual by hand, run: ${command}`
 
@@ -858,6 +860,30 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       await waitFor(() => expect(tab.toasts('success')).toEqual([savedFor('foo')]))
       expect(notices, 'the Host-changed notice').toHaveBeenCalledTimes(1)
       expect(fake.stored('foo').spec.approval).toEqual({ modeCeiling: 'manual' })
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('an Already Manual that settles after the tab was left reports in the root toast, naming the agent (finding 2)', async () => {
+      const fake = tabFake({ modeCeiling: 'manual' })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await approvalSettingsDriver()
+      const read = fake.hold({ method: 'GET', path: FOO })
+      await clickSetToManual()
+      await act(async () => {
+        await read.arrived
+      })
+      const notices = vi.fn()
+      subscribeHostChanged('foo', notices)
+
+      tab.leave()
+      await act(async () => {
+        read.deliverNow()
+      })
+      await waitFor(() => expect(tab.toasts('success')).toEqual([alreadyFor('foo')]))
+      expect(notices, 'the Host-changed notice').toHaveBeenCalledTimes(1)
+      expect(reads(fake), "the switch's one read").toHaveLength(1)
+      expect(writes(fake), 'nothing written').toEqual([])
       expect(unanswered(fake)).toEqual([])
       tab.unmount()
     })
