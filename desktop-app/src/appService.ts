@@ -2330,15 +2330,26 @@ export class AppService {
       })
     } finally {
       if (registered) {
-        await this.withNativeAuthEnvironmentCommit(async () => {
-          this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
-          if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
-            await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
-          }
-          if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
-        })
+        await this.withNativeAuthEnvironmentCommit(() => this.settleInteractiveLoginAttempt())
       }
     }
+  }
+
+  /**
+   * The settle step of an interactive login (D11). Its caller runs it inside an owner op, once
+   * per registered attempt. The last attempt to settle while signed out commits a pending
+   * discovery, and the last to settle ends a session that `/me` rejected while logins ran.
+   */
+  private async settleInteractiveLoginAttempt(): Promise<void> {
+    this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
+    if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
+      // Dropping this error is correct: a discovery whose save fails stays pending
+      // (`applyRuntimeConfigDiscovery` clears it only after the save), so the next signed-out
+      // commit site retries it. Rethrowing from the login's `finally` would replace the
+      // login's own result or error.
+      await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
+    }
+    if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
   }
 
   private async openProfileDesktopSetup(email: string): Promise<{
@@ -2525,13 +2536,7 @@ export class AppService {
       return await this.completePasswordLogin(normalizedEmail, password, loginGeneration)
     } finally {
       if (registered) {
-        await this.withNativeAuthEnvironmentCommit(async () => {
-          this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
-          if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
-            await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
-          }
-          if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
-        })
+        await this.withNativeAuthEnvironmentCommit(() => this.settleInteractiveLoginAttempt())
       }
     }
   }
