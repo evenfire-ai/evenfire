@@ -31,7 +31,7 @@ export type LooseningRule = (typeof LOOSENING_RULES)[number]
 export type LooseningItem = { path: string; rule: LooseningRule }
 
 export type ToolLooseningException = {
-  id: 'custom_row_unknown_default' | 'cron_manage_stateless_host' | 'unresolved_mcp_skip_row'
+  id: 'custom_row_unknown_default' | 'cron_manage_conditional_default' | 'unresolved_mcp_skip_row'
   reason: string
 }
 
@@ -50,11 +50,13 @@ export const TOOL_LOOSENING_EXCEPTIONS: ReadonlyArray<ToolLooseningException> = 
       "This also covers removing a Required row whose name contains `__` and does not resolve to a native tool (Ruling 32(c)): §6.6 counts it as removing a Required custom row, while mcp-host ignores an MCP name's override.",
   },
   {
-    id: 'cron_manage_stateless_host',
+    id: 'cron_manage_conditional_default',
     reason:
-      "cron_manage's default depends on whether the Host is stateless and allows stateless cron management, which this function does not receive. " +
-      'Required → Default loosens only on a stateless Host that forbids schedules, where the default never asks; there, Default → Skip changes nothing. ' +
-      'The function lists both changes on every Host.',
+      "cron_manage's default is conditional: it asks unless the Host is stateless and forbids schedules, and this function does not receive those Host facts. " +
+      'The conditional rule lists two changes on every Host, so the function is stricter wherever the Host facts make a change harmless. ' +
+      '(1) Required → Default loosens only on a stateless Host that forbids schedules; wherever the default asks, including every Host that is not stateless, it changes nothing but is listed. ' +
+      '(2) Default → Skip changes nothing on a stateless Host that forbids schedules, where the default never asks, but is listed. ' +
+      'The spec\'s "cron_manage as Required on a stateless Host" is the stateless subset of this exception.',
   },
   {
     id: 'unresolved_mcp_skip_row',

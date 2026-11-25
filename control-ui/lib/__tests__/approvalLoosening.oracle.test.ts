@@ -279,7 +279,7 @@ const EXCEPTION_CLAUSES: ReadonlyArray<{
     inScope: c => c.tool === MCP_PROBE && c.from === 'true' && c.to === 'absent',
   },
   {
-    exception: 'cron_manage_stateless_host',
+    exception: 'cron_manage_conditional_default',
     clause: 'cron_manage Required → Default, listed where its default asks',
     inScope: c =>
       c.tool === 'cron_manage' &&
@@ -288,7 +288,7 @@ const EXCEPTION_CLAUSES: ReadonlyArray<{
       someHostWithTheCeilingLoosens(c),
   },
   {
-    exception: 'cron_manage_stateless_host',
+    exception: 'cron_manage_conditional_default',
     clause: 'cron_manage Default → Skip, listed where its default never asks',
     inScope: c =>
       c.tool === 'cron_manage' &&
