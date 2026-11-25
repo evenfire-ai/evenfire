@@ -72,7 +72,8 @@ const sessionMember: Me = {
 // control-api/test/passwordRecovery.http.contract.test.ts ('authorizes desktop setup without a
 // password') pins it through the edge. The route is not in the recorded edge.json chain.
 const authorization: DesktopAuthorizationResponse = {
-  authorizationToken: 'fixture-desktop-authorization-token',
+  // A synthetic value of the pinned shape: 32 base64url characters.
+  authorizationToken: 'fixture-desktop-auth-token-00000',
   expiresInSeconds: 120,
 }
 
