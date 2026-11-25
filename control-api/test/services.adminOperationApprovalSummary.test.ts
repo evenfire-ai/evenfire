@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
+import { rootLogger } from '../src/observability/logger.js'
 import {
   type HostApprovalChange,
   MAX_APPROVAL_CHANGE_SUMMARY_LENGTH,
@@ -215,6 +216,56 @@ describe('the intent event of a Host request', () => {
     expect(summary).not.toContain(APPROVER_ONE)
     expect(summary).not.toContain(APPROVER_TWO)
     expect(summary).not.toMatch(/seeded-approver/)
+  })
+
+  it('a non-schema approval key leaves no identity in the summary or the log line, and the real change stays', async () => {
+    const info = vi.fn()
+    vi.spyOn(rootLogger, 'child').mockReturnValue({ info } as never)
+    const { spec, resourceVersion } = await readHost()
+    const approval = spec.approval as Record<string, unknown>
+
+    const res = await request(harness!.app)
+      .put(HOST_PATH)
+      .send({
+        metadata: { resourceVersion },
+        spec: {
+          ...spec,
+          approval: {
+            ...approval,
+            modeCeiling: 'allow_all',
+            approverIds: ['seeded-one@example.invalid', 'seeded-two@example.invalid'],
+          },
+        },
+      })
+
+    expect(res.status).toBe(200)
+    const summary = intents()[0].input.summary!
+    // Positive partner: the real change is there.
+    expect(JSON.parse(summary).fields.modeCeiling).toEqual({ old: 'manual', new: 'allow_all' })
+    expect(summary).not.toMatch(/seeded-|approverIds/)
+    expect(info).toHaveBeenCalled()
+    expect(JSON.stringify(info.mock.calls)).toContain('allow_all')
+    expect(JSON.stringify(info.mock.calls)).not.toMatch(/seeded-|approverIds/)
+  })
+
+  it('unknown keys with long values do not push the real change out of the summary', async () => {
+    const { spec, resourceVersion } = await readHost()
+    const approval = spec.approval as Record<string, unknown>
+    const unknown: Record<string, string> = {}
+    for (let index = 0; index < 30; index += 1) unknown[`extra${index}`] = 'v'.repeat(128)
+
+    const res = await request(harness!.app)
+      .put(HOST_PATH)
+      .send({
+        metadata: { resourceVersion },
+        spec: { ...spec, approval: { ...approval, modeCeiling: 'allow_all', ...unknown } },
+      })
+
+    expect(res.status).toBe(200)
+    const parsed = JSON.parse(intents()[0].input.summary!)
+    expect(parsed.truncated).toBeUndefined()
+    expect(parsed.fields.modeCeiling).toEqual({ old: 'manual', new: 'allow_all' })
+    expect(Object.keys(parsed.fields)).toEqual(['modeCeiling'])
   })
 
   it('no summary when approval is unchanged', async () => {

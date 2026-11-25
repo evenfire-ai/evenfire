@@ -73,13 +73,42 @@ describe('buildHostApprovalChange', () => {
     const long = 'm'.repeat(300)
     const change = buildHostApprovalChange({
       before: block({ shellClassifierModel: 'a' }),
-      after: block({ shellClassifierModel: long, extra: ['x'.repeat(300)] }),
+      after: block({ shellClassifierModel: long, defaultPolicy: ['x'.repeat(300)] }),
     })
     expect(change?.fields.shellClassifierModel?.new).toBe('m'.repeat(MAX_VALUE_LENGTH))
-    const extra = change?.fields.extra?.new
+    const extra = change?.fields.defaultPolicy?.new
     expect(typeof extra).toBe('string')
     expect((extra as string).length).toBe(MAX_VALUE_LENGTH)
     expect((extra as string).startsWith('["xxx')).toBe(true)
+  })
+
+  it('ignores every key outside the audited leaves, at any level', () => {
+    const change = buildHostApprovalChange({
+      before: block({ modeCeiling: 'manual' }),
+      after: block({
+        modeCeiling: 'allow_all',
+        approverIds: ['seeded-one@example.invalid'],
+        channels: {
+          telegram: { enabled: true, chatIds: ['seeded-two@example.invalid'] },
+          unknown: { enabled: true },
+        },
+      }),
+    })
+    expect(change?.fields).toEqual({
+      modeCeiling: { old: 'manual', new: 'allow_all' },
+      'channels.telegram.enabled': { old: null, new: true },
+    })
+    expect(change?.approvers).toEqual({})
+    expect(JSON.stringify(change)).not.toMatch(/seeded-/)
+  })
+
+  it('is null when only keys outside the audited leaves differ', () => {
+    expect(
+      buildHostApprovalChange({
+        before: block({ modeCeiling: 'manual' }),
+        after: block({ modeCeiling: 'manual', approverIds: ['seeded-one@example.invalid'] }),
+      })
+    ).toBeNull()
   })
 
   it('cuts a tool name to 64 characters', () => {

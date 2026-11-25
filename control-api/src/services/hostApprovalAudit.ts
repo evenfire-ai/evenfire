@@ -55,29 +55,42 @@ type Walk = {
   approvers: Map<string, unknown[]>
 }
 
-function walk(value: unknown, path: string, out: Walk): void {
-  if (path === 'tools' && isRecord(value)) {
-    for (const [key, entry] of Object.entries(value)) out.tools.set(key, entry)
-    return
-  }
-  if (path === 'tools') return
-  if (isRecord(value)) {
-    for (const [key, entry] of Object.entries(value)) {
-      const child = path === '' ? key : `${path}.${key}`
-      if (key === 'approvers') {
-        out.approvers.set(path === '' ? key : path, Array.isArray(entry) ? entry : [])
-      } else {
-        walk(entry, child, out)
-      }
-    }
-    return
-  }
-  if (path !== '') out.leaves.set(path, value)
-}
+/**
+ * The audited approval leaves (spec §6.8), an allowlist. Any other key, at any
+ * level, is ignored: the request body is not pruned yet when the summary is
+ * built, so a non-schema key could otherwise carry identities or crowd out the
+ * real change. They match the Host CRD approval schema
+ * (control-ui/test/fixtures/wire/host-crd-approval.current.json).
+ */
+const TOP_LEVEL_FIELDS = ['modeCeiling', 'defaultPolicy', 'shellClassifierModel'] as const
+const CHANNEL_TYPES = ['telegram', 'email', 'slack', 'teams'] as const
+const CHANNEL_FIELDS = ['enabled', 'allowModeChange'] as const
 
 function flatten(approval: unknown): Walk {
   const out: Walk = { leaves: new Map(), tools: new Map(), approvers: new Map() }
-  walk(approval, '', out)
+  if (!isRecord(approval)) return out
+  for (const key of TOP_LEVEL_FIELDS) {
+    if (Object.hasOwn(approval, key)) out.leaves.set(key, approval[key])
+  }
+  if (isRecord(approval.channels)) {
+    for (const type of CHANNEL_TYPES) {
+      const channel = approval.channels[type]
+      if (!isRecord(channel)) continue
+      for (const field of CHANNEL_FIELDS) {
+        if (Object.hasOwn(channel, field))
+          out.leaves.set(`channels.${type}.${field}`, channel[field])
+      }
+      if (Object.hasOwn(channel, 'approvers')) {
+        out.approvers.set(
+          `channels.${type}`,
+          Array.isArray(channel.approvers) ? channel.approvers : []
+        )
+      }
+    }
+  }
+  if (isRecord(approval.tools)) {
+    for (const [key, entry] of Object.entries(approval.tools)) out.tools.set(key, entry)
+  }
   return out
 }
 
@@ -89,8 +102,9 @@ function countDifference(from: unknown[], to: unknown[]): number {
 /**
  * The field-by-field difference between two `spec.approval` blocks, or `null`
  * when they are equal. `before` and `after` are the blocks themselves,
- * `undefined` when absent (`before` is undefined on create). Pure: the caller
- * logs.
+ * `undefined` when absent (`before` is undefined on create). Only the audited
+ * leaves count (see `flatten`); `null` also when only other keys differ. Pure:
+ * the caller logs.
  */
 export function buildHostApprovalChange(input: {
   before: Record<string, unknown> | undefined
@@ -131,6 +145,17 @@ export function buildHostApprovalChange(input: {
     const added = countDifference(was, now)
     const removed = countDifference(now, was)
     if (added > 0 || removed > 0) approvers[cut(key)] = { added, removed }
+  }
+
+  // Only keys outside the audited leaves differed (or the block gained or lost
+  // nothing audited): nothing to report.
+  if (
+    Object.keys(fields).length === 0 &&
+    Object.keys(tools).length === 0 &&
+    toolsTruncated === 0 &&
+    Object.keys(approvers).length === 0
+  ) {
+    return null
   }
 
   return {
