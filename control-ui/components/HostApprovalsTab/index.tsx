@@ -51,11 +51,21 @@ function messageOf(error: unknown): string {
   return typeof message === 'string' && message.length > 0 ? message : String(error)
 }
 
-function LoadErrorBanner({ message, onRetry }: LoadErrorBannerProps) {
+/**
+ * The newest load's failure, with Retry. While a load runs, the banner stays
+ * and Retry is disabled with `aria-disabled`, not `disabled`: a disabled
+ * element can lose the focus, and the admin who pressed Retry keeps it.
+ */
+function LoadErrorBanner({ message, pending, onRetry }: LoadErrorBannerProps) {
   return (
     <div className="cu-banner cu-banner--error cu-host-approvals-tab__error" role="alert">
       <span>{loadErrorText(message)}</span>
-      <Button size="sm" variant="ghost" onClick={onRetry}>
+      <Button
+        aria-disabled={pending || undefined}
+        size="sm"
+        variant="ghost"
+        onClick={pending ? undefined : onRetry}
+      >
         Retry
       </Button>
     </div>
@@ -93,7 +103,8 @@ function ReadViewsSkeleton() {
  * (lib/hostApprovalDisplay). A load applies to the display state the tab shows
  * when it lands, only if it is that state's newest load and holds that agent's
  * Host. The newest load's settling, applied or failed, releases Save; its
- * failure shows in the tab's banner with Retry. A first load that fails shows
+ * failure shows in the tab's banner with Retry, and stays there while a newer
+ * load runs, so Retry keeps the focus. A first load that fails shows
  * no section (C13); once the tab has shown an agent, the section stays mounted,
  * so a save in flight keeps its section (C10, R27).
  *
@@ -191,10 +202,9 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
       const token = target.state.startLoad()
       const controller = new AbortController()
       controllersRef.current.add(controller)
+      // The last failure stays shown until this load settles (review R45(6)).
       setView(shown =>
-        shown.state !== target.state || (shown.loadPending && shown.loadError === null)
-          ? shown
-          : { ...shown, loadPending: true, loadError: null }
+        shown.state !== target.state || shown.loadPending ? shown : { ...shown, loadPending: true }
       )
       void (async () => {
         let result: LoadResult
@@ -274,7 +284,11 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
   return (
     <div className="cu-host-approvals-tab">
       {view.loadError !== null ? (
-        <LoadErrorBanner message={view.loadError} onRetry={() => load(view)} />
+        <LoadErrorBanner
+          message={view.loadError}
+          pending={view.loadPending}
+          onRetry={() => load(view)}
+        />
       ) : null}
       {view.snapshot !== null ? (
         <>
@@ -282,9 +296,9 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
           <ApprovalModesView host={view.snapshot} />
           <WhoCanRaiseView host={view.snapshot} />
         </>
-      ) : failedWithNothingShown ? null : (
+      ) : view.loadPending ? (
         <ReadViewsSkeleton />
-      )}
+      ) : null}
       {showSection ? (
         <HostApprovalSection
           ceiling={effectiveApproval(block).modeCeiling}

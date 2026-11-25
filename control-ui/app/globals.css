@@ -5563,6 +5563,12 @@ td.cu-registry-description {
   gap: var(--cu-space-2) var(--cu-space-3);
 }
 
+/* Retry while a load runs: disabled with aria-disabled, so it keeps the focus. */
+.cu-host-approvals-tab__error .cu-btn[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .cu-host-approvals-tab__banner {
   display: flex;
   align-items: flex-start;

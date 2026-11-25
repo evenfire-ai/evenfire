@@ -177,6 +177,42 @@ describe('HostApprovalsTab', () => {
       tab.unmount()
     })
 
+    it('Retry keeps the focus while it loads: the banner stays, with Retry disabled (review R45(6))', async () => {
+      const fake = tabFake({ tools: { json_transform: true } })
+      failNextRead(fake, FOO_DETAIL)
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await waitFor(() => expect(tabLoadBanner()).not.toBeNull())
+      const retry = within(tabLoadBanner() as HTMLElement).getByRole('button', { name: 'Retry' })
+      act(() => retry.focus())
+      expect(retry).toHaveFocus()
+
+      const second = fake.hold({ method: 'GET', path: FOO_DETAIL })
+      await act(async () => {
+        fireEvent.click(retry)
+      })
+      await act(async () => {
+        await second.arrived
+      })
+      expect(tabLoadBanner(), 'the banner while Retry loads').not.toBeNull()
+      expect(retry, 'the same Retry, still on screen').toBeInTheDocument()
+      expect(retry, 'Retry while it loads').toHaveAttribute('aria-disabled', 'true')
+      expect(retry, 'the focus while Retry loads').toHaveFocus()
+      // A press while it loads starts no other load.
+      fireEvent.click(retry)
+      expect(reads(fake, FOO_DETAIL), 'reads of the agent').toHaveLength(2)
+
+      // The read fails again: the banner stays, and Retry is usable, with the focus.
+      await act(async () => {
+        second.respondWith(DETAIL_500.status, DETAIL_500.body)
+      })
+      await waitFor(() => expect(retry).not.toHaveAttribute('aria-disabled'))
+      expect(tabLoadBanner(), 'the banner after the read failed again').not.toBeNull()
+      expect(retry, 'the focus after the read failed again').toHaveFocus()
+      expect(perToolSection(), 'still no section').toBeNull()
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
     it('T17 through the tab: a failed refresh after a save keeps the saved tools, shows the error and releases Save', async () => {
       const fake = tabFake({ tools: { json_transform: true } })
       const tab = renderApprovalsTab({ fake, host: 'foo' })

@@ -30,7 +30,11 @@ export interface ApprovalsTabView {
    * release the per-tool section waits for (spec §6.4 step 10, C10, A4 L2).
    */
   loadPending: boolean
-  /** The newest load's failure, for the tab's banner; null when it did not fail. */
+  /**
+   * The failure of the last load that settled, for the tab's banner. It stays
+   * while a newer load runs, until that load settles; null once a load
+   * applied.
+   */
   loadError: string | null
 }
 
@@ -59,5 +63,7 @@ export interface ReadRowProps {
 
 export interface LoadErrorBannerProps {
   message: string
+  /** A load is running: Retry waits for it to settle. */
+  pending: boolean
   onRetry: () => void
 }
