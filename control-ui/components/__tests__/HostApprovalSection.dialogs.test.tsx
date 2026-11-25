@@ -510,4 +510,27 @@ describe('HostApprovalSection: a reconfirm the dialog cannot ask again (review I
     expect(screen.queryByRole('alertdialog'), 'the old edit session cannot confirm').toBeNull()
     expect(sectionButton('Cancel'), 'the newer edit session is still open').toBeEnabled()
   })
+
+  it('(c) with no edit session open, back on the same agent, the reconfirm is reported and shown in the read view', async () => {
+    const fake = fooAndB()
+    const { onSettled, rerenderSection } = renderSection(fake)
+    const read = await startUnconfirmedSave(fake)
+
+    // To another agent and back, with no Edit, while the save's read is out.
+    rerenderSection(propsFromStore(fake, 'b'))
+    rerenderSection(propsFromStore(fake, 'foo'))
+    await act(async () => {
+      read.deliverNow()
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0], 'reported to the tab').toEqual(RECONFIRM)
+    expect(sectionMessage()?.textContent, 'shown on the same agent').toBe(NOT_SENT)
+    expect(
+      fake.log.map(entry => [entry.method, entry.path]),
+      "the save's read and no PUT"
+    ).toEqual([['GET', FOO_PATH]])
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(sectionButton('Edit'), 'the read view').toBeEnabled()
+  })
 })
