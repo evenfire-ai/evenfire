@@ -242,7 +242,7 @@ export async function refreshV1HostConnection(
   } catch (error) {
     if (error instanceof Error && error.name === 'ControlApiHostAccessRejectedError') throw error
     console.warn(
-      `[RPC_PROXY] host connection re-resolve failed host=${hostRef} error=${
+      `[RPC_PROXY] host connection re-resolve failed host=${sanitizeHostRefForLog(hostRef)} error=${
         error instanceof Error ? error.name : typeof error
       }`
     )

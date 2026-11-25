@@ -26,6 +26,7 @@ import {
   createRpcHostStatusStreamRouter,
   resetHostStatusStreamRuntimeForTests,
 } from '../routes/rpcHostStatusStream.js'
+import { refreshV1HostConnection } from '../services/mcpProxyService.js'
 
 // The Host edge assertion through the real rpc-proxy routes. Only the RPC token
 // verifier is mocked; the real routers, resolver and control-api client run, and
@@ -904,6 +905,35 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
         expect(res.body).toEqual({ error: 'authority_unavailable' })
       }
     )
+  })
+
+  it('a failed re-resolve logs the hostRef without control characters', async () => {
+    // Called directly: every route validates hostRef against HOST_REF_RE first,
+    // so no request can carry a control character this far.
+    controlApiHostAccessAnswer = () => {
+      throw new TypeError('fetch failed')
+    }
+    const host = {
+      name: 'chatllm',
+      url: OLD_SHAPE_CONNECTION.url,
+      headers: { [HOST_EDGE_ASSERTION_HEADER]: signEdgeAssertion(nearExpSeconds(), []) },
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      await expect(
+        refreshV1HostConnection(host, USER_ID, 'chat\r\nllm\tforged', 'rpc-access-token')
+      ).rejects.toMatchObject({ status: 503 })
+
+      // Exactly one line: it is also the witness that the failure path ran.
+      const lines = warn.mock.calls
+        .map(args => String(args[0]))
+        .filter(line => line.startsWith('[RPC_PROXY] host connection re-resolve failed'))
+      expect(lines).toEqual([
+        '[RPC_PROXY] host connection re-resolve failed host=chatllmforged error=TypeError',
+      ])
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 
