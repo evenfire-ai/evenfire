@@ -32,6 +32,7 @@ import type {
   FirstSavePolicy,
   HostApprovalSectionProps,
   OutcomeMessageProps,
+  OverrideMarkProps,
   ReadRowProps,
   ReadViewProps,
   RowState,
@@ -81,6 +82,30 @@ function DesktopOnlyChip() {
   return (
     <span className="cu-chip" title="Registered only in Desktop chats.">
       Desktop only
+    </span>
+  )
+}
+
+/**
+ * The warning on an override that lets calls run without a card where the
+ * tool's own default asks: the loosening function against the code defaults
+ * (spec §6.6), so no tool that asks by default is missed. The read view marks
+ * what is stored; the edit view marks the draft as the admin changes it. The
+ * text is the tool's riskHint, or else its rule's text.
+ */
+function OverrideMark({ name, override, ceiling }: OverrideMarkProps) {
+  if (override === undefined) return null
+  const [item] = looseningItems({
+    before: undefined,
+    after: { tools: { [name]: override } },
+    ceiling,
+    firstSave: false,
+  })
+  if (!item) return null
+  const text = NATIVE_BY_NAME.get(name)?.riskHint ?? looseningItemText(item, { [name]: override })
+  return (
+    <span aria-label={text} className="cu-host-approval-row__mark" role="img" title={text}>
+      <IconAlertTriangle />
     </span>
   )
 }
@@ -293,6 +318,7 @@ export function HostApprovalSection({
           </div>
         ) : state.editing ? (
           <EditView
+            ceiling={ceiling}
             draft={state.draft}
             saving={saving}
             onAddCustom={section.addCustom}
@@ -368,15 +394,6 @@ function ReadRow({ name, required, ceiling }: ReadRowProps) {
       ? `${ROW_STATE_LABELS.required} (explicit): ${note}`
       : ROW_STATE_LABELS.required
     : ROW_STATE_LABELS.skip
-  // Whether this override lets calls run without a card where the tool's own
-  // default asks: the loosening function against the code defaults.
-  const [item] = looseningItems({
-    before: undefined,
-    after: { tools: { [name]: required } },
-    ceiling,
-    firstSave: false,
-  })
-  const mark = item ? (native?.riskHint ?? looseningItemText(item, { [name]: required })) : null
   return (
     <div
       className="cu-access-row"
@@ -389,17 +406,20 @@ function ReadRow({ name, required, ceiling }: ReadRowProps) {
       </span>
       <span className="cu-host-approval-row__state">
         {label}
-        {mark ? (
-          <span aria-label={mark} className="cu-host-approval-row__mark" role="img" title={mark}>
-            <IconAlertTriangle />
-          </span>
-        ) : null}
+        <OverrideMark ceiling={ceiling} name={name} override={required} />
       </span>
     </div>
   )
 }
 
-function EditView({ draft, saving, onSetRow, onAddCustom, onRemoveCustom }: EditViewProps) {
+function EditView({
+  draft,
+  ceiling,
+  saving,
+  onSetRow,
+  onAddCustom,
+  onRemoveCustom,
+}: EditViewProps) {
   const customNames = Object.keys(draft)
     .filter(name => !NATIVE_BY_NAME.has(name))
     .sort()
@@ -408,6 +428,7 @@ function EditView({ draft, saving, onSetRow, onAddCustom, onRemoveCustom }: Edit
       <div>
         {NATIVE_TOOLS.map(tool => (
           <EditRow
+            ceiling={ceiling}
             disabled={saving}
             key={tool.name}
             onChange={onSetRow}
@@ -428,6 +449,7 @@ function EditView({ draft, saving, onSetRow, onAddCustom, onRemoveCustom }: Edit
               <span className="cu-host-approval-row__name">{name}</span>
               <span className="cu-host-approval-row__state">
                 {draft[name] ? ROW_STATE_LABELS.required : ROW_STATE_LABELS.skip}
+                <OverrideMark ceiling={ceiling} name={name} override={draft[name]} />
                 <Button
                   aria-label={`Remove ${name}`}
                   disabled={saving}
@@ -448,7 +470,7 @@ function EditView({ draft, saving, onSetRow, onAddCustom, onRemoveCustom }: Edit
   )
 }
 
-function EditRow({ tool, state, disabled, onChange }: EditRowProps) {
+function EditRow({ tool, state, ceiling, disabled, onChange }: EditRowProps) {
   const id = `approval-${tool.name}`
   const defaultLabel = tool.conditional
     ? 'Default (varies)'
@@ -467,18 +489,25 @@ function EditRow({ tool, state, disabled, onChange }: EditRowProps) {
           <span className="cu-host-approval-row__description">{tool.conditional.conditions}</span>
         ) : null}
       </div>
-      <SelectInput
-        className="cu-host-approval-row__select"
-        compact
-        disabled={disabled}
-        id={id}
-        value={state}
-        onChange={event => onChange(tool.name, event.target.value as RowState)}
-      >
-        <option value="default">{defaultLabel}</option>
-        <option value="required">{ROW_STATE_LABELS.required}</option>
-        <option value="skip">{ROW_STATE_LABELS.skip}</option>
-      </SelectInput>
+      <span className="cu-host-approval-row__state">
+        <SelectInput
+          className="cu-host-approval-row__select"
+          compact
+          disabled={disabled}
+          id={id}
+          value={state}
+          onChange={event => onChange(tool.name, event.target.value as RowState)}
+        >
+          <option value="default">{defaultLabel}</option>
+          <option value="required">{ROW_STATE_LABELS.required}</option>
+          <option value="skip">{ROW_STATE_LABELS.skip}</option>
+        </SelectInput>
+        <OverrideMark
+          ceiling={ceiling}
+          name={tool.name}
+          override={state === 'default' ? undefined : state === 'required'}
+        />
+      </span>
     </div>
   )
 }

@@ -138,6 +138,8 @@ export interface ReadRowProps {
 
 export interface EditViewProps {
   draft: ApprovalToolsDraft
+  /** The stored ceiling, for each row's live loosening mark. */
+  ceiling: ApprovalCeiling
   saving: boolean
   onSetRow: ApprovalToolsSection['setRow']
   onAddCustom: ApprovalToolsSection['addCustom']
@@ -147,8 +149,16 @@ export interface EditViewProps {
 export interface EditRowProps {
   tool: NativeToolMeta
   state: RowState
+  ceiling: ApprovalCeiling
   disabled: boolean
   onChange: ApprovalToolsSection['setRow']
+}
+
+export interface OverrideMarkProps {
+  name: string
+  /** The row's override: true is Required, false is Skip, undefined is Default. */
+  override: boolean | undefined
+  ceiling: ApprovalCeiling
 }
 
 export interface AddCustomToolProps {

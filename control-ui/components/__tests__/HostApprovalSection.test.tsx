@@ -388,6 +388,42 @@ describe('HostApprovalSection — edit view', () => {
     expect(within(rowNode('http_request')).queryByText('Desktop only')).toBeNull()
   })
 
+  it('marks a row live while its draft lets calls run without a card where the tool asks by default (ruling 41, item 7)', () => {
+    renderSection(createSectionFake({ tools: { custom_lookup: true } }))
+    clickEdit()
+    const mark = (name: string) =>
+      within(rowNode(name)).queryByRole('img', { name: /./ })?.getAttribute('aria-label') ?? null
+    expect(mark('http_request'), 'at Default').toBeNull()
+
+    setRow('http_request', 'skip')
+    expect(mark('http_request'), 'set to Skip').toEqual(
+      expect.stringMatching(/CLERUM_HTTP_ALLOWLIST/)
+    )
+    setRow('http_request', 'default')
+    expect(mark('http_request'), 'back to Default').toBeNull()
+
+    // No riskHint: the loosening function still marks it.
+    setRow('browser_open', 'skip')
+    expect(mark('browser_open')).toBe('Set to Skip: calls can run without an approval card.')
+    setRow('file_write', 'skip')
+    expect(mark('file_write'), 'a tool that never asks by default').toBeNull()
+    setRow('shell_exec', 'required')
+    expect(mark('shell_exec'), 'Required never loosens').toBeNull()
+
+    fireEvent.click(sectionButton('Add a tool by name'))
+    fireEvent.change(within(section()).getByLabelText('Tool name'), {
+      target: { value: 'added_tool' },
+    })
+    fireEvent.change(within(section()).getByLabelText('Approval state for the new custom tool'), {
+      target: { value: 'skip' },
+    })
+    fireEvent.click(sectionButton('Add'))
+    expect(mark('added_tool'), 'a Skip custom row').toEqual(
+      expect.stringMatching(/its default is not known here/)
+    )
+    expect(mark('custom_lookup'), 'a Required custom row').toBeNull()
+  })
+
   it('shows Unsaved changes only while the draft differs from the base', () => {
     renderSection(createSectionFake({ tools: { json_transform: true } }))
     clickEdit()

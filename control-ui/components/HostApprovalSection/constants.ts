@@ -22,7 +22,7 @@ export interface NativeToolMeta {
   description: string
   /**
    * Operator-facing note on a Skip override of this tool: the title of the
-   * read view's loosening mark. The mark and the dialog come from
+   * loosening mark the read and edit views show. The mark and the dialog come from
    * `lib/approvalLoosening`, so a Required-default tool with no hint
    * (browser_open, browser_navigate, cron_manage, workflow_trigger) is still
    * marked and still confirmed. Only tools whose code default is `'required'`
@@ -430,7 +430,7 @@ const DEFAULT_IN_AUTO_TEXT: Readonly<Record<string, string>> = {
 
 /**
  * What each loosening rule (lib/approvalLoosening) lets happen without a
- * person, as the loosening dialog and the read view's mark say it.
+ * person, as the loosening dialog and the rows' marks say it.
  */
 export const LOOSENING_RULE_TEXT: Readonly<
   Record<LooseningRule, (subject: LooseningItemSubject) => string>
