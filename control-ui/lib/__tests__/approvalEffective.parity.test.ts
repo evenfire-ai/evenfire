@@ -215,8 +215,22 @@ describe('toolsEqual', () => {
     expect(toolsEqual({ x: 0 }, { x: false })).toBe(false)
   })
 
-  it('a key that changed A to B to A is unchanged', () => {
-    const base = { x: true }
-    expect(toolsEqual(base, { ...{ x: false }, ...{ x: true } })).toBe(true)
+  it('a tool toggled and restored, inserted in another key order, is unchanged', () => {
+    const base = { a: true, b: false, c: true }
+    const draft: Record<string, boolean> = { c: false }
+    draft.b = false
+    draft.c = true // toggled A -> B -> A
+    draft.a = true
+    expect(Object.keys(draft)).not.toEqual(Object.keys(base))
+    expect(draft).not.toBe(base)
+    expect(toolsEqual(base, draft)).toBe(true)
+    expect(effectiveApproval({ tools: base })).toEqual(effectiveApproval({ tools: draft }))
+  })
+
+  it('a draft that differs in one tool is not equal', () => {
+    const base = { a: true, b: false, c: true }
+    const draft: Record<string, boolean> = { c: true, b: false, a: false }
+    expect(toolsEqual(base, draft)).toBe(false)
+    expect(effectiveApproval({ tools: base })).not.toEqual(effectiveApproval({ tools: draft }))
   })
 })
