@@ -406,6 +406,11 @@ test('reads a Desktop binding only from exactly one well-formed cookie', () => {
     ['a 42-character state', `${name}=desktop.${BINDING}.${DESKTOP_STATE.slice(1)}`],
     ['a plain binding', `${name}=${BINDING}`],
     ['an oversized header', `${name}=${value}; padding=${'x'.repeat(16_384)}`],
+    // One character swapped in place, so each segment keeps its 43 characters.
+    ['a "+" in the binding', `${name}=desktop.+${BINDING.slice(1)}.${DESKTOP_STATE}`],
+    ['a "/" in the state', `${name}=desktop.${BINDING}.${DESKTOP_STATE.slice(1)}/`],
+    ['an "=" in the binding', `${name}=desktop.${BINDING.slice(1)}=.${DESKTOP_STATE}`],
+    ['an extra segment', `${name}=desktop.${BINDING}.${DESKTOP_STATE}.x`],
   ] as const) {
     assert.equal(readDesktopBindingCookie(cookieRequest(cookie), name), undefined, label)
   }

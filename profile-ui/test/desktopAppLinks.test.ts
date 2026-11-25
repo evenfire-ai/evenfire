@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
 import test from 'node:test'
-import { buildDesktopLoginCodeLink } from '@clerum/desktop-app-links'
+import { buildDesktopLoginCodeLink, parseDesktopLoginLink } from '@clerum/desktop-app-links'
 import { DESKTOP_SIGN_IN_COPY } from '../app/constants/oidc'
 import {
   buildDesktopEnvironmentLink,
@@ -278,4 +278,47 @@ test('the Desktop handoff document refuses https and evenfire://app links', () =
       label
     )
   }
+})
+
+test('a script-closing environment stays inside the Desktop handoff script', () => {
+  const { code, environment } = edgeRecord(
+    'POST /api/v1/oidc/profile-flow/complete desktop-code-issued'
+  ).body as { code: string; environment: string }
+  const state = randomBytes(32).toString('base64url')
+  // Derived from the recorded environment with a hostile path. The link is written by hand: the
+  // package's builder percent-encodes `<`, so only a hand-written link carries a literal one.
+  const hostileEnvironment = `${environment}/</script><script>alert(1)</script>`
+  const link = `evenfire://desktop-login?state=${state}&code=${code}&environment=${hostileEnvironment}`
+  assert.deepEqual(parseDesktopLoginLink(link), {
+    kind: 'code',
+    state,
+    code,
+    environment: hostileEnvironment,
+  })
+
+  const body = buildDesktopLoginHandoffDocument(link, 'dGVzdC1ub25jZQ==', HANDOFF_COPY)
+  const scripts = [...body.matchAll(/<script nonce="[^"]+">([^<]*)<\/script>/g)]
+
+  assert.equal((body.match(/<script\b/g) ?? []).length, 1)
+  assert.equal(body.includes('</script><script>'), false)
+  assert.equal(scripts.length, 1)
+  // The escaped script still fires the link exactly as given.
+  const replaced: string[] = []
+  const location = { href: 'about:blank', replace: (url: string) => void replaced.push(url) }
+  const button = { addEventListener: () => undefined }
+  new Function('window', 'document', scripts[0][1])({ location }, { getElementById: () => button })
+  assert.deepEqual(replaced, [link])
+})
+
+test('the Desktop handoff document escapes its title and message', () => {
+  const { link } = desktopCodeLink()
+  const body = buildDesktopLoginHandoffDocument(link, 'dGVzdC1ub25jZQ==', {
+    title: "Evenfire's <b>Desktop</b>",
+    message: "It isn't <img src=x> here",
+  })
+
+  assert.ok(body.includes('<title>Evenfire&#39;s &lt;b&gt;Desktop&lt;/b&gt;</title>'))
+  assert.ok(body.includes('<h1>Evenfire&#39;s &lt;b&gt;Desktop&lt;/b&gt;</h1>'))
+  assert.ok(body.includes('<p class="body-copy">It isn&#39;t &lt;img src=x&gt; here</p>'))
+  assert.equal(/<b>|<img\b/.test(body), false)
 })
