@@ -128,8 +128,10 @@ export function deriveEdgeRecord(
 /**
  * A labelled derivation of the status alone: the record answered with `status`, its body and
  * headers as recorded. It stands for an answer the edge records no case for, such as an access
- * proxy's 401 in front of it. A status equal to the recorded one throws, as `deriveEdgeRecord`
- * does when nothing changed.
+ * proxy's 401 in front of it. Only the status is meaningful: the body and headers are the
+ * recorded answer's, not what an answer of `status` would carry, so a test reads only what the
+ * status decides. A status equal to the recorded one, or an empty label, throws, as
+ * `deriveEdgeRecord` does.
  */
 export function deriveEdgeRecordStatus(
   key: EdgeRecordKey,
@@ -158,7 +160,7 @@ const METHODS_NOT_FOUND: EdgeRecordKey = 'GET /api/v1/auth/methods not-found'
 /**
  * A recorded methods answer as the model receives it. Only a 200 and a 404 carry an answer the
  * model reads. Turning a 5xx, another 4xx, a network failure or a body that is not a JSON object
- * into `unreachable` belongs to the code that fetches the methods
+ * (an empty body reads as `{}`) into `unreachable` belongs to the code that fetches the methods
  * (`AuthClient.getLoginMethodsAt`), so any other status throws here.
  */
 function loginMethodsAnswer(record: EdgeContractRecord): LoginMethodsHttpAnswer {
@@ -355,6 +357,6 @@ export const LOGIN_SCREEN_ROWS: ReadonlyArray<
   ),
   // No body: what the code that fetches hands over for a 503 (`GET /api/v1/auth/methods
   // unavailable`), another 5xx, another 4xx, a network failure or a body that is not a JSON
-  // object.
+  // object (an empty body reads as `{}`).
   ['unreachable', { status: 'unreachable' }, { kind: 'unreachable' }],
 ]

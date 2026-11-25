@@ -7,6 +7,7 @@ import {
   LOGIN_SCREEN_ROWS,
   SIGN_IN_URL_SHAPES,
   deriveEdgeRecord,
+  deriveEdgeRecordStatus,
   edgeResponse,
   readEdgeRecord,
   readEdgeRecordsWithStatus,
@@ -92,6 +93,19 @@ describe('edge records', () => {
     expect(derived.body).toEqual({ ...(recorded as object), methods: [] })
     expect(readEdgeRecord(key).body).toEqual(recorded)
     expect(() => deriveEdgeRecord(key, 'unchanged', body => body)).toThrow('changed nothing')
+  })
+
+  it('derives a status-only record and refuses an unchanged status or an empty label', () => {
+    const key = 'GET /api/v1/auth/methods unavailable'
+    const recorded = readEdgeRecord(key)
+
+    const derived = deriveEdgeRecordStatus(key, 'unavailable:status-401', 401)
+    expect(derived).toEqual({ ...recorded, status: 401 })
+    expect(() => deriveEdgeRecordStatus(key, 'unchanged', recorded.status)).toThrow(
+      'changed nothing'
+    )
+    expect(() => deriveEdgeRecordStatus(key, '', 401)).toThrow('needs a label')
+    expect(() => deriveEdgeRecordStatus(key, '  ', 401)).toThrow('needs a label')
   })
 
   it('answers a record with its status, JSON body and retry-after', async () => {

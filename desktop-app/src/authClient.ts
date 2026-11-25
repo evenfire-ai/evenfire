@@ -378,9 +378,7 @@ export class AuthClient {
         ? { status: 404 }
         : { status: 'unreachable' }
     }
-    return typeof body === 'object' && body !== null && !Array.isArray(body)
-      ? { status: 200, body }
-      : { status: 'unreachable' }
+    return isRecord(body) ? { status: 200, body } : { status: 'unreachable' }
   }
 
   /**

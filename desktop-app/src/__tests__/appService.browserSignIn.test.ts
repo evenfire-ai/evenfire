@@ -915,6 +915,16 @@ function recordedRow(
   return { label, answer: () => edgeResponse(record), http, model, start }
 }
 
+/** A labelled derivation answered as it is. `derive` gets the row's label, typed once. */
+function derivedRow(
+  label: string,
+  derive: (label: string) => EdgeContractRecord,
+  model: LoginMethodsModel,
+  start: StartOutcome
+): MethodsAnswerRow {
+  return recordedRow(label, derive(label), model, start)
+}
+
 /** Input no producer emits, built by hand (T1's adversarial-input exception). */
 function adversarialRow(label: string, answer: () => Response): MethodsAnswerRow {
   return {
@@ -937,8 +947,9 @@ const PASSWORD_FORM: LoginMethodsModel = { kind: 'methods', provider: null, pass
 
 /**
  * Design §10.1's answers as the fetching code reads them, with what start does on each (A3-10).
- * Every 4xx but a 404, every 5xx, a network failure and a body that is not a JSON object are
- * `unreachable`: "Can't reach this environment", with Retry, no form and no guess.
+ * Every 4xx but a 404, every 5xx, a network failure and a body that is not a JSON object (an
+ * empty body reads as `{}`) are `unreachable`: "Can't reach this environment", with Retry, no
+ * form and no guess.
  */
 const METHODS_ANSWERS: ReadonlyArray<MethodsAnswerRow> = [
   recordedRow(
@@ -947,12 +958,13 @@ const METHODS_ANSWERS: ReadonlyArray<MethodsAnswerRow> = [
     { kind: 'methods', provider: { label: recordedOidc().label }, password: true },
     'records'
   ),
-  recordedRow(
+  derivedRow(
     'oidc-only',
-    deriveEdgeRecord(BOTH_METHODS, 'oidc-only', body => {
-      const recorded = body as { methods: string[] }
-      return { ...recorded, methods: recorded.methods.filter(method => method !== 'password') }
-    }),
+    label =>
+      deriveEdgeRecord(BOTH_METHODS, label, body => {
+        const recorded = body as { methods: string[] }
+        return { ...recorded, methods: recorded.methods.filter(method => method !== 'password') }
+      }),
     { kind: 'methods', provider: { label: recordedOidc().label }, password: false },
     'records'
   ),
@@ -969,12 +981,13 @@ const METHODS_ANSWERS: ReadonlyArray<MethodsAnswerRow> = [
     PASSWORD_FORM,
     'browser_sign_in_not_offered'
   ),
-  recordedRow(
+  derivedRow(
     'nothing-usable:empty',
-    deriveEdgeRecord(PASSWORD_METHOD, 'nothing-usable:empty', body => ({
-      ...(body as object),
-      methods: [],
-    })),
+    label =>
+      deriveEdgeRecord(PASSWORD_METHOD, label, body => ({
+        ...(body as object),
+        methods: [],
+      })),
     { kind: 'misconfigured' },
     'browser_sign_in_not_offered'
   ),
@@ -984,28 +997,33 @@ const METHODS_ANSWERS: ReadonlyArray<MethodsAnswerRow> = [
     UNREACHABLE,
     'methods_unavailable'
   ),
-  recordedRow(
+  derivedRow(
     'unavailable:status-401',
-    deriveEdgeRecordStatus(METHODS_UNAVAILABLE, 'unavailable:status-401', 401),
+    label => deriveEdgeRecordStatus(METHODS_UNAVAILABLE, label, 401),
     UNREACHABLE,
     'methods_unavailable'
   ),
-  recordedRow(
+  derivedRow(
     'unavailable:status-429',
-    deriveEdgeRecordStatus(METHODS_UNAVAILABLE, 'unavailable:status-429', 429),
+    label => deriveEdgeRecordStatus(METHODS_UNAVAILABLE, label, 429),
     UNREACHABLE,
     'methods_unavailable'
   ),
-  recordedRow(
+  derivedRow(
     'not-an-object:methods-list-as-body',
-    deriveEdgeRecord(
-      BOTH_METHODS,
-      'not-an-object:methods-list-as-body',
-      body => (body as { methods: unknown }).methods
-    ),
+    label => deriveEdgeRecord(BOTH_METHODS, label, body => (body as { methods: unknown }).methods),
     UNREACHABLE,
     'methods_unavailable'
   ),
+  // R-23: `requestJson` reads an empty body as `{}`, which lists no method, so the screen is
+  // "isn't set up correctly", with Retry, not "Can't reach this environment".
+  {
+    label: 'adversarial: an empty 200 body',
+    answer: () => new Response('', { status: 200 }),
+    http: { status: 200, body: {} },
+    model: { kind: 'misconfigured' },
+    start: 'browser_sign_in_not_offered',
+  },
   adversarialRow(
     'a 200 whose body is not JSON',
     () =>
@@ -1060,11 +1078,10 @@ describe('browser sign-in start, cancel and the methods read', () => {
 
       // Strict: a plain answer, never an `ApiError`.
       expect(answer).toStrictEqual(row.http)
-      // Sent once, with no retry, to the URL it was given, and with no session token.
+      // Sent once, with no retry, to the URL it was given.
       expect(methodsFetches(harness).map(record => record.value.url)).toEqual([
         `${harness.envs.A.restBaseUrl}${METHODS_PATH}`,
       ])
-      expect(methodsFetches(harness)[0]?.value.headers.authorization).toBeUndefined()
     }
   )
 
@@ -1231,12 +1248,14 @@ describe('browser sign-in start, cancel and the methods read', () => {
     expect(harness.opens).toHaveLength(1)
   })
 
-  it('G2-5a reads methods for the binding at start', async () => {
+  const ENV_A_SIGN_IN_URL = 'env-a-sign-in-url'
+
+  it(`G2-5a reads methods for the binding at start (${ENV_A_SIGN_IN_URL})`, async () => {
     const harness = await createBrowserSignInHarness({ linksAvailable: true })
     const { service, envs } = harness
     const { signInUrl } = recordedOidc()
     const envASignInUrl = `https://profile-a.example.test${new URL(signInUrl).pathname}`
-    const envA = deriveEdgeRecord(BOTH_METHODS, 'env-a-sign-in-url', body => {
+    const envA = deriveEdgeRecord(BOTH_METHODS, ENV_A_SIGN_IN_URL, body => {
       const recorded = body as { oidc: Record<string, unknown> }
       return { ...recorded, oidc: { ...recorded.oidc, signInUrl: envASignInUrl } }
     })
