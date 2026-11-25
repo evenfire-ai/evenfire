@@ -4,6 +4,7 @@
  */
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
+import { pool } from '../src/db.js'
 import { rootLogger } from '../src/observability/logger.js'
 import {
   type HarnessAllowedModel,
@@ -164,5 +165,37 @@ describe('Host approval audit line', () => {
     expect(warnSpy).toHaveBeenCalled()
     const stored = harness!.store.get('hosts', 'foo')?.spec as { approval: { modeCeiling: string } }
     expect(stored.approval.modeCeiling).toBe('auto')
+  })
+
+  it('a failed commit after a stored replace still logs the line', async () => {
+    const connect = vi.mocked(pool.connect) as unknown as MockInstance
+    const prior = connect.getMockImplementation() as () => Promise<{
+      query: (text: string, values?: unknown[]) => Promise<unknown>
+    }>
+    connect.mockImplementation((async () => {
+      const client = await prior()
+      const query = client.query
+      client.query = async (text: string, values?: unknown[]) => {
+        if (text.replace(/\s+/g, ' ').trim() === 'COMMIT') throw new Error('commit failed')
+        return query(text, values)
+      }
+      return client
+    }) as never)
+    const { spec, resourceVersion } = await readHost()
+    const approval = spec.approval as Record<string, unknown>
+
+    const res = await request(harness!.app)
+      .put(HOST_PATH)
+      .send({
+        metadata: { resourceVersion },
+        spec: { ...spec, approval: { ...approval, modeCeiling: 'auto' } },
+      })
+
+    // The replace stored although the commit failed, and the line was written
+    // inside the callback, before the commit.
+    expect(res.status).toBeGreaterThanOrEqual(500)
+    const stored = harness!.store.get('hosts', 'foo')?.spec as { approval: { modeCeiling: string } }
+    expect(stored.approval.modeCeiling).toBe('auto')
+    expect(auditCalls()).toHaveLength(1)
   })
 })
