@@ -89,6 +89,11 @@ export interface IncomingMessage {
   locationReferences?: LocationReferenceV1[]
   /** Server-owned: admission's resolution of `locationReferences`; callers cannot set it. */
   locationReferenceResolutions?: LocationReferenceResolution[]
+  /**
+   * What the Desktop draws in a reply, such as `mermaid`; rpc-proxy forwards
+   * known values only. Read for the `rpc` channel only (`clientDrawsMermaid`).
+   */
+  displayCapabilities?: string[]
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'

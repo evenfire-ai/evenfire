@@ -23,6 +23,7 @@ import {
   canonicalizeDesktopRestEndpoint,
   sameDesktopRestEndpoint,
 } from './desktopEnvironmentUrl.js'
+import { DESKTOP_DISPLAY_CAPABILITIES } from './displayCapabilities.js'
 import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
@@ -4482,6 +4483,9 @@ export class AppService {
       ...(request.locationReferences === undefined
         ? {}
         : { locationReferences: request.locationReferences }),
+      // Declared by the build, never by the renderer: rpc-proxy forwards only
+      // the values it knows, and the Host tells the agent it may use them.
+      displayCapabilities: [...DESKTOP_DISPLAY_CAPABILITIES],
     }
     try {
       return await this.rpcClient.invokeHostMessage(

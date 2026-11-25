@@ -98,6 +98,7 @@ import {
   GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
   MCP_SERVER_SELECTION_TEXT,
   MEMORY_GUIDANCE_TEXT,
+  MERMAID_DIAGRAMS_GUIDANCE,
   WORKFLOW_RECIPES_TEXT,
   toolDiscoveryText,
 } from '../core/reasoning/promptBuilder'
@@ -161,6 +162,7 @@ import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkfl
 import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
+import { clientDrawsMermaid } from './displayCapabilities'
 import {
   referencedFilesForTurnContext,
   referencedFoldersForTurnContext,
@@ -1805,6 +1807,7 @@ export class TaskExecutor {
     if (this.task.sourceMessage) {
       if (this.task.sourceMessage.channelType === 'rpc') {
         metadata.channelType = 'desktop'
+        if (clientDrawsMermaid(this.task.sourceMessage)) metadata.mermaidDiagrams = true
       } else {
         metadata.channelType = this.task.sourceMessage.channelType
         metadata.sender = this.task.sourceMessage.sender
@@ -2276,6 +2279,7 @@ export class TaskExecutor {
 
     const cached = this.deps.promptCache.get(sessionKey)
     const provider = this.deps.llmProvider.getProviderType()
+    const drawsMermaid = clientDrawsMermaid(this.task.sourceMessage)
     // Only instruction-presence gates belong in the cache identity. Catalog
     // count and schemas do not: discovery guidance is constant at any scale.
     const toolGuidanceKey = JSON.stringify([
@@ -2288,6 +2292,8 @@ export class TaskExecutor {
       tools.some(t => t.name === 'clerum__tool_search'),
       // #1003 — the discovery guidance text depends on the native presentation.
       appConfig.nativeToolPresentation,
+      // A session can move to a Desktop that does not draw Mermaid.
+      drawsMermaid,
     ])
     // R2 — the system prompt embeds the model name, so a cache entry built for a
     // different (e.g. just-swapped) model is a miss: rebuild, but keep the frozen
@@ -2331,6 +2337,9 @@ export class TaskExecutor {
     const platformHints: string[] = []
     if (hasDesktopTools) {
       platformHints.push(DESKTOP_ENVIRONMENT_HINT)
+    }
+    if (drawsMermaid) {
+      platformHints.push(MERMAID_DIAGRAMS_GUIDANCE)
     }
 
     const parts = builder.buildParts({

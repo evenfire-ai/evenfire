@@ -130,6 +130,8 @@ export type HostRuntimeMessageRequest = {
   // Structured folder references (`LocationReferenceV1[]`), forwarded
   // verbatim under the same contract ownership as `fileReferences`.
   locationReferences?: unknown
+  /** Known values only (`knownDisplayCapabilities`): what the Desktop draws in a reply. */
+  displayCapabilities?: string[]
   [key: string]: unknown
 }
 

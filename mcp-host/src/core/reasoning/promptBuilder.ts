@@ -48,6 +48,29 @@ export const CAPABILITY_CONTRACT_TEXT =
   'always reference them by name and let the shell expand them.'
 
 /**
+ * Diagram guidance for a chat the Desktop app draws Mermaid in. Emitted only
+ * when the message says its client draws Mermaid (`displayCapabilities`), so a
+ * channel or an older Desktop never gets code it would show raw. Each syntax
+ * rule is one Mermaid 11 rejects in practice.
+ */
+export const MERMAID_DIAGRAMS_GUIDANCE =
+  'DIAGRAMS: The user reads this chat in a desktop app that draws Mermaid diagrams in your ' +
+  'replies. When a diagram would help, or the user asks for one (a flow or process, a sequence, an ' +
+  'org chart, an architecture, states, entities and their relations, a timeline, a Gantt chart, a ' +
+  'mind map, a Venn diagram...), put Mermaid code in your reply in a fenced code block tagged ' +
+  'mermaid and the app shows the drawing. Only chat replies are drawn: files, documents, emails and ' +
+  'messages you send through tools are not, so put no Mermaid in them unless the user asks for the ' +
+  'code. Do not draw a diagram with characters or as HTML. Write Mermaid 11: start each block with ' +
+  'the diagram type (flowchart TD, sequenceDiagram, classDiagram, stateDiagram-v2, erDiagram, ' +
+  'gantt, timeline, mindmap, pie, quadrantChart, venn-beta...) and put one diagram in each block. ' +
+  'Give nodes one-word ids with their text in a label, and wrap a label in double quotes when it ' +
+  'has parentheses, brackets or other punctuation, on nodes and on arrows: A["Sales (EMEA)"] ' +
+  '-->|"Yes (now)"| B. Never use a lowercase end as a node id, a semicolon inside text or a ' +
+  'backslash escape. Leave out %%{init}%% directives, front-matter config, colors, links and ' +
+  'images: the app sets the theme and loads nothing. Keep a diagram to about 25 shapes, split a ' +
+  'bigger one, and say in a sentence what it shows.'
+
+/**
  * Desktop environment hint. Emitted when `desktop_*` or `browser_*` tools are
  * registered. Same single-source-of-truth invariant as `CAPABILITY_CONTRACT_TEXT`.
  */
@@ -271,6 +294,11 @@ export class DefaultPromptBuilder implements PromptBuilder {
           (metadata.sender ? ` (sender: ${metadata.sender})` : '') +
           '.'
       )
+    }
+
+    // 4b. Diagrams, for a Desktop that draws Mermaid
+    if (metadata?.mermaidDiagrams === true) {
+      sections.push(MERMAID_DIAGRAMS_GUIDANCE)
     }
 
     // 5. Cron job context

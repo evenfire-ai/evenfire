@@ -4,6 +4,7 @@ import {
   DefaultPromptBuilder,
   GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
   MEMORY_GUIDANCE_TEXT,
+  MERMAID_DIAGRAMS_GUIDANCE,
 } from '../promptBuilder'
 
 function tool(name: string): ToolDefinition {
@@ -55,5 +56,30 @@ describe('DefaultPromptBuilder — governed GFS workspace files', () => {
     const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt([tool('clerum__gfs_read')])
     expect(msg.content).not.toContain(GFS_WORKSPACE_FILE_GUIDANCE_TEXT)
+  })
+})
+
+describe('DefaultPromptBuilder — Mermaid diagrams in the Desktop chat', () => {
+  it('tells the agent to write diagrams as Mermaid when the Desktop draws them', () => {
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    const msg = builder.buildSystemPrompt([], 'identity', {
+      channelType: 'desktop',
+      mermaidDiagrams: true,
+    })
+    expect(msg.content.split(MERMAID_DIAGRAMS_GUIDANCE)).toHaveLength(2)
+    expect(MERMAID_DIAGRAMS_GUIDANCE).toContain('fenced code block tagged mermaid')
+  })
+
+  it('leaves it out for a Desktop that does not draw them and for channels', () => {
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    for (const metadata of [
+      { channelType: 'desktop' },
+      { channelType: 'telegram', sender: 'user-1' },
+      { channelType: 'slack', mermaidDiagrams: 'true' },
+      undefined,
+    ]) {
+      const msg = builder.buildSystemPrompt([], 'identity', metadata)
+      expect(msg.content, JSON.stringify(metadata)).not.toContain('DIAGRAMS:')
+    }
   })
 })

@@ -7,6 +7,7 @@ import {
   authorizeActionV2,
 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
+import { knownDisplayCapabilities } from '../displayCapabilities.js'
 import { getHostRpcPreflight, safeAgentSegment, safePathSegment } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
@@ -533,6 +534,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'approvalMode must be manual, auto, or allow_all' })
           return
         }
+        const displayCapabilities = knownDisplayCapabilities(body.displayCapabilities)
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -560,6 +562,10 @@ export function createRpcRouter(): Router {
             ? { model: body.model.trim() }
             : {}),
           ...(approvalMode ? { approvalMode } : {}),
+          // What the Desktop draws in a reply. Not identity: it only lets the
+          // Host tell the agent it may write, say, a Mermaid diagram. Known
+          // values only; a list with none is omitted.
+          ...(displayCapabilities.length > 0 ? { displayCapabilities } : {}),
         }
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs

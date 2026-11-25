@@ -21,6 +21,8 @@ import {
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
+  DiagramDrawRequest,
+  DiagramDrawResult,
   ExternalChannelsSummary,
   GfsWatchEvent,
   GfsWatchSubscriptionRequest,
@@ -753,6 +755,10 @@ declare global {
       app: {
         openUrl: (url: string) => Promise<void>
         rendererReady: () => Promise<void>
+      }
+      diagrams: {
+        /** Draws a Mermaid diagram in the main process's hidden drawing window. */
+        draw: (request: DiagramDrawRequest) => Promise<DiagramDrawResult>
       }
       window: {
         getVisibility: () => Promise<{ visible: boolean; focused: boolean }>

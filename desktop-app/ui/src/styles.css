@@ -7759,6 +7759,29 @@ body.sidebar-resizing {
   padding: 0;
 }
 
+/* A fenced `mermaid` block of an agent reply, drawn as an image. */
+.chat-mermaid-diagram {
+  margin: 0 0 var(--space-2);
+}
+
+.chat-mermaid-diagram--pending {
+  min-height: 120px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  background: var(--surface-soft);
+}
+
+.chat-mermaid-diagram__image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.chat-mermaid-diagram__note {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
 .markdown-content table {
   width: 100%;
   border-collapse: collapse;

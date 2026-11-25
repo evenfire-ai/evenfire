@@ -18,6 +18,15 @@ import {
   resolveDevIsolation,
   verifyDevIsolationRuntime,
 } from './devIsolation.js'
+import {
+  DIAGRAM_DRAW_TIMEOUT_MS,
+  DIAGRAM_IDLE_CLOSE_MS,
+  DIAGRAM_MAX_WAITING,
+  DIAGRAM_START_TIMEOUT_MS,
+  DiagramRenderer,
+  createHiddenDiagramSurface,
+  diagramPageFor,
+} from './diagramRenderer.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { GFS_RESOURCE_DEEP_LINK_HOST, parseGfsResourceDeepLink } from './gfsDeepLinks.js'
 import {
@@ -277,6 +286,32 @@ ipcMain.handle('window:toggleMaximize', event => {
 ipcMain.handle('window:close', event => {
   assertTrustedSender(event)
   mainWindow?.close()
+})
+
+// Created on the chat's first diagram; its hidden window closes when idle, when
+// its process dies and with the main window, so it never keeps the app running
+// or hides it.
+let diagramRenderer: DiagramRenderer | null = null
+
+ipcMain.handle('diagram:draw', (event, request: unknown) => {
+  assertTrustedSender(event)
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    throw new Error('Untrusted IPC sender')
+  }
+  diagramRenderer ??= new DiagramRenderer({
+    createSurface: () =>
+      createHiddenDiagramSurface(
+        diagramPageFor({
+          devUrl: String(process.env.EVENFIRE_RENDERER_URL || '').trim(),
+          uiDistDir: path.join(__dirname, '../ui-dist'),
+        })
+      ),
+    startTimeoutMs: DIAGRAM_START_TIMEOUT_MS,
+    drawTimeoutMs: DIAGRAM_DRAW_TIMEOUT_MS,
+    idleCloseMs: DIAGRAM_IDLE_CLOSE_MS,
+    maxWaiting: DIAGRAM_MAX_WAITING,
+  })
+  return diagramRenderer.draw(request)
 })
 
 ipcMain.handle('app:rendererReady', event => {
@@ -620,8 +655,16 @@ async function createWindow(): Promise<void> {
     if (mainWindow === window) {
       mainWindow = null
       mainWindowRendererReady = false
+      diagramRenderer?.close()
     }
   })
+  // A reload or a crash replaces the chat's page; the diagrams the old page
+  // asked for would only keep the new one waiting.
+  const endDiagramsOfReplacedPage = () => {
+    if (mainWindow === window) diagramRenderer?.close()
+  }
+  window.webContents.on('did-navigate', endDiagramsOfReplacedPage)
+  window.webContents.on('render-process-gone', endDiagramsOfReplacedPage)
   wireMainWindowRendererReadiness({
     webContents: window.webContents,
     isCurrentWindow: () => mainWindow === window,

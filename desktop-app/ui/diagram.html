@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      The hidden page the main process draws the chat's Mermaid diagrams in.
+      It loads only the app's own scripts, and a diagram can load nothing but
+      inline images; its session also refuses every other request.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"
+    />
+    <title>Diagram renderer</title>
+  </head>
+  <body>
+    <script type="module" src="/src/diagramRenderer/index.ts"></script>
+  </body>
+</html>
