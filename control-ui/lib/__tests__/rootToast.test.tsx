@@ -2,7 +2,11 @@ import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { ToastProvider } from '../../components/Toast'
-import { emitRootToast, subscribeRootToast } from '../rootToast'
+import {
+  emitRootToast,
+  __rootToastListenerCountForTests as listenerCount,
+  subscribeRootToast,
+} from '../rootToast'
 
 afterEach(() => {
   cleanup()
@@ -38,7 +42,7 @@ describe('root toast bridge', () => {
     expect(screen.queryAllByRole('status')).toHaveLength(0)
   })
 
-  it('unmounting unsubscribes, so no test reset is needed between tests', () => {
+  it('a manual unsubscribe stops delivery to that listener only', () => {
     const listener = vi.fn()
     const unsubscribe = subscribeRootToast(listener)
     emitRootToast('one')
@@ -46,12 +50,38 @@ describe('root toast bridge', () => {
     unsubscribe()
     emitRootToast('two')
     expect(listener).toHaveBeenCalledTimes(1)
-    // A provider from an earlier test leaves nothing behind: this one shows exactly one toast.
-    render(<ToastProvider>{null}</ToastProvider>)
-    act(() => {
-      emitRootToast('three')
-    })
-    expect(screen.getAllByRole('status')).toHaveLength(1)
+    expect(listenerCount()).toBe(0)
+  })
+
+  it('a provider subscribes while mounted and unsubscribes on unmount', () => {
+    expect(listenerCount()).toBe(0)
+    const view = render(<ToastProvider>{null}</ToastProvider>)
+    expect(listenerCount()).toBe(1)
+    view.unmount()
+    expect(listenerCount()).toBe(0)
+  })
+
+  it('two providers subscribe twice and both unsubscribe on unmount', () => {
+    const view = render(
+      <>
+        <ToastProvider>{null}</ToastProvider>
+        <ToastProvider>{null}</ToastProvider>
+      </>
+    )
+    expect(listenerCount()).toBe(2)
+    view.unmount()
+    expect(listenerCount()).toBe(0)
+  })
+
+  it('a provider under StrictMode ends with one subscription and none after unmount', () => {
+    const view = render(
+      <React.StrictMode>
+        <ToastProvider>{null}</ToastProvider>
+      </React.StrictMode>
+    )
+    expect(listenerCount()).toBe(1)
+    view.unmount()
+    expect(listenerCount()).toBe(0)
   })
 
   it('every mounted provider shows the toast once', () => {

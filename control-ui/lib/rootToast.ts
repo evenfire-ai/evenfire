@@ -28,3 +28,8 @@ export function emitRootToast(message: string, options?: ToastOptions): void {
   // With no provider mounted the toast is dropped on purpose: the root toast only exists
   // while the page is loaded, and there is no other place to show it.
 }
+
+/** Test-only: how many providers are subscribed right now. Production code must not use it. */
+export function __rootToastListenerCountForTests(): number {
+  return listeners.size
+}
