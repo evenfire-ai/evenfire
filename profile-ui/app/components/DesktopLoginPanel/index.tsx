@@ -61,6 +61,18 @@ export function DesktopLoginPanel(_props: DesktopLoginPanelProps) {
     }
   }, [])
 
+  useEffect(() => {
+    // Back from the provider can restore this page from the back/forward cache exactly as it was
+    // left, Continue disabled. Pressing it again starts a new attempt, so a restore re-enables it.
+    function enableAfterRestore(event: PageTransitionEvent) {
+      if (!event.persisted) return
+      submitting.current = false
+      setSubmitted(false)
+    }
+    window.addEventListener('pageshow', enableAfterRestore)
+    return () => window.removeEventListener('pageshow', enableAfterRestore)
+  }, [])
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     if (submitting.current) {
       event.preventDefault()

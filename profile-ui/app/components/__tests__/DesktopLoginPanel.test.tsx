@@ -266,4 +266,42 @@ describe('Desktop sign-in page', () => {
       document.removeEventListener('submit', record)
     }
   })
+
+  it('enables Continue again when Back restores the page from the back/forward cache', async () => {
+    openAt(`${PROFILE_ROUTES.desktopLogin}#challenge=${CHALLENGE}&state=${STATE}`)
+    answerActivated()
+    renderPage()
+    const button = await findContinue()
+    const form = button.closest('form')
+    expect(form).not.toBeNull()
+    if (!form) return
+
+    // As in the double-click test: records whether the page let each submission through.
+    const passedThrough: boolean[] = []
+    const record = (event: Event) => {
+      passedThrough.push(!event.defaultPrevented)
+      event.preventDefault()
+    }
+    document.addEventListener('submit', record)
+    try {
+      fireEvent.click(button)
+      expect(passedThrough).toEqual([true])
+      expect(button).toBeDisabled()
+
+      // An ordinary page show is not a restore: Continue stays disabled and guarded.
+      fireEvent(window, new PageTransitionEvent('pageshow', { persisted: false }))
+      expect(button).toBeDisabled()
+      fireEvent.submit(form)
+      expect(passedThrough).toEqual([true, false])
+
+      // Back from the provider restores the page as it was left. Continue starts a new attempt.
+      fireEvent(window, new PageTransitionEvent('pageshow', { persisted: true }))
+      expect(button).toBeEnabled()
+      fireEvent.click(button)
+      expect(passedThrough).toEqual([true, false, true])
+      expect(button).toBeDisabled()
+    } finally {
+      document.removeEventListener('submit', record)
+    }
+  })
 })
