@@ -651,6 +651,25 @@ describe('looseningItems, rule by rule', () => {
     ).toEqual([{ path: 'tools.shell_exec', rule: 'explicit_required_to_default_above_manual' }])
   })
 
+  it('a tools value that is not an object reads as the code defaults', () => {
+    expect(
+      looseningItems({
+        before: { tools: { shell_exec: true } },
+        after: { tools: 'shell_exec' },
+        ceiling: 'auto',
+        firstSave: false,
+      })
+    ).toEqual([{ path: 'tools.shell_exec', rule: 'explicit_required_to_default_above_manual' }])
+    expect(
+      looseningItems({
+        before: { tools: ['shell_exec'] },
+        after: { tools: { shell_exec: false } },
+        ceiling: 'manual',
+        firstSave: false,
+      })
+    ).toEqual([{ path: 'tools.shell_exec', rule: 'tool_to_skip' }])
+  })
+
   it('PR A scope: reads tools, and defaultPolicy only on a first save', () => {
     expect(
       looseningItems({

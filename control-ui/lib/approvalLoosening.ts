@@ -90,7 +90,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * A block's stored overrides by tool name. null and undefined values read as
  * absent, as the gate's `override ?? default` does. An absent block (an
  * inheriting Host, so the first save) or an absent `tools` has none: the code
- * defaults (spec §6.6).
+ * defaults (spec §6.6). A `tools` that is not an object is outside the CRD
+ * schema, and it also reads as the code defaults. The gate reads an override
+ * only through `Object.hasOwn(tools, toolName)` (mcpApprovalGateController.ts:196),
+ * which finds no tool's override in such a value.
  */
 function storedOverrides(block: unknown): Map<string, unknown> {
   const overrides = new Map<string, unknown>()
@@ -152,7 +155,10 @@ function toolRule(
  * - `after` is the block the save writes.
  * - `ceiling` is the stored ceiling at the write. In PR A a per-tool save never
  *   changes it.
- * - `firstSave` adds the first save's policy rule.
+ * - `firstSave` adds the first save's policy rule. The save protocol keeps it
+ *   aligned with `before === undefined`: its inheritance check stops a save
+ *   whose block appeared or disappeared since the section's base (spec §6.4
+ *   step 3). The function does not check the pair.
  *
  * Paths are independent. mcp-host's answer for one tool never depends on
  * another tool's override, so the items of a multi-path save are the union of
