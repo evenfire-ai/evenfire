@@ -1,21 +1,40 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { notifyHostChanged, subscribeHostChanged } from '../../../lib/hostApprovalDisplay'
 import {
   type ApprovalClock,
+  TOOLS_CHANGED_MESSAGE,
   __setApprovalClockForTests,
   getApprovalClock,
   realApprovalClock,
 } from '../../../lib/hostApprovalSave'
 import {
+  approvalSettingsDriver,
+  errorBanners,
   openApprovalSettings,
   pageMountDefaults,
   perToolSection,
+  renderApprovalsTab,
   renderHostPage,
   resetApprovalTestState,
+  tabLoadBanner,
+  unanswered,
 } from '../approvalPageHarness'
 import { materializeHostResource } from '../contextResource'
 import { createFakeControlApi } from '../fakeControlApi'
+
+const FOO_DETAIL = '/api/v1/admin/hosts/foo/detail'
+
+// control-api's production 500 for a /detail read that fails unexpectedly,
+// recorded by control-api/test/routes.hostPut.fakeContract.test.ts.
+const DETAIL_500 = JSON.parse(
+  readFileSync(
+    resolve(__dirname, '../../../../control-api/test/fixtures/wire/host-detail-500.wire.json'),
+    'utf8'
+  )
+) as { status: number; body: unknown }
 
 function seedFake(tools?: Record<string, boolean>) {
   return createFakeControlApi({
@@ -38,14 +57,13 @@ function seedFake(tools?: Record<string, boolean>) {
   })
 }
 
-/** Reads the page made that neither the fake nor `defaults` answers. */
-function unanswered(fake: ReturnType<typeof seedFake>): string[] {
-  return fake.log.filter(entry => entry.response?.status === 404).map(entry => entry.path)
-}
-
 describe('approval page harness', () => {
   beforeEach(() => resetApprovalTestState())
-  afterEach(() => vi.unstubAllGlobals())
+  afterEach(() => {
+    // The Approvals tab subscribes to the Host-changed notice: close its channel.
+    resetApprovalTestState()
+    vi.unstubAllGlobals()
+  })
 
   it("harness renders the per-tool section from the fake's stored tools", async () => {
     const fake = seedFake({ http_request: false })
@@ -147,6 +165,79 @@ describe('approval page harness', () => {
     expect(page.toasts()).toEqual(['Agent configuration saved.'])
     expect(unanswered(fake)).toEqual([])
     page.unmount()
+  })
+
+  it("errorBanners() and perToolSection() match the Approvals tab's load banner and per-tool section", async () => {
+    // T16 and T8 read these two in negative assertions: they must find the tab's.
+    const fake = seedFake({ http_request: false })
+    // The page and the tab each read the agent on mount: both fail.
+    for (const nth of [1, 2]) {
+      const hold = fake.hold({ method: 'GET', path: FOO_DETAIL, nth })
+      void hold.arrived.then(() => hold.respondWith(DETAIL_500.status, DETAIL_500.body))
+    }
+    const page = renderHostPage({ fake, name: 'foo', tab: 'approval-settings' })
+    await waitFor(() => expect(tabLoadBanner()).not.toBeNull())
+    expect(errorBanners(), "the tab's load banner").toContain(tabLoadBanner())
+    expect(perToolSection()).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(within(tabLoadBanner() as HTMLElement).getByRole('button', { name: 'Retry' }))
+    })
+    await waitFor(() => expect(perToolSection()).not.toBeNull())
+    expect(perToolSection()?.closest('.cu-host-approvals-tab'), 'inside the tab').not.toBeNull()
+    expect(tabLoadBanner()).toBeNull()
+    expect(unanswered(fake)).toEqual([])
+    page.unmount()
+  })
+
+  it("the driver's message() reads the per-tool section's save message, not a tab banner above it", async () => {
+    const fake = seedFake({ json_transform: true })
+    const page = renderHostPage({ fake, name: 'foo', tab: 'approval-settings' })
+    const driver = await openApprovalSettings(page)
+    await driver.edit()
+    fake.writeExternal('foo', spec => {
+      ;(spec.approval as Record<string, unknown>).tools = {
+        json_transform: true,
+        shell_exec: false,
+      }
+    })
+    await driver.editTool('system_info', 'required')
+    await driver.save()
+    await waitFor(() => expect(driver.message()).toBe(TOOLS_CHANGED_MESSAGE))
+
+    // A later load of the tab fails, so the tab's banner shows above the section.
+    const reload = fake.hold({ method: 'GET', path: FOO_DETAIL })
+    act(() => notifyHostChanged('foo'))
+    await act(async () => {
+      await reload.arrived
+    })
+    await act(async () => {
+      reload.respondWith(DETAIL_500.status, DETAIL_500.body)
+    })
+    await waitFor(() => expect(tabLoadBanner()).not.toBeNull())
+
+    expect(page.banner(), "the first error banner is the tab's").toBe(tabLoadBanner()?.textContent)
+    expect(driver.message(), "the save's message").toBe(TOOLS_CHANGED_MESSAGE)
+    expect(unanswered(fake)).toEqual([])
+    page.unmount()
+  })
+
+  it('renderApprovalsTab keeps the tab instance on rerenderKept and replaces it on remount', async () => {
+    const fake = seedFake({ http_request: false })
+    const tab = renderApprovalsTab({ fake, host: 'foo' })
+    const driver = await approvalSettingsDriver()
+    const first = document.querySelector('.cu-host-approvals-tab')
+    expect(first).not.toBeNull()
+
+    tab.rerenderKept('foo')
+    expect(document.querySelector('.cu-host-approvals-tab'), 'kept').toBe(first)
+    tab.remount()
+    await waitFor(() => expect(driver.readView().http_request).toBe('Skip'))
+    expect(document.querySelector('.cu-host-approvals-tab'), 'remounted').not.toBe(first)
+    tab.leave()
+    expect(document.querySelector('.cu-host-approvals-tab'), 'left').toBeNull()
+    expect(unanswered(fake)).toEqual([])
+    tab.unmount()
   })
 
   it('resetApprovalTestState puts the save protocol back on the real clock', () => {

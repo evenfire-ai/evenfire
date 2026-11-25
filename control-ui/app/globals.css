@@ -5543,15 +5543,127 @@ td.cu-registry-description {
   margin-top: var(--cu-space-4);
 }
 
-.cu-agent-detail-scroll:has(> .cu-host-approval-section) {
-  overflow: hidden;
+/* The Approvals tab (HostApprovalsTab): the read views of the approval
+   settings above the per-tool section. The whole tab scrolls in the agent
+   page's scroll area. */
+.cu-host-approvals-tab {
+  display: grid;
+  gap: var(--cu-space-5);
+}
+
+.cu-host-approvals-tab > .cu-banner {
+  margin-bottom: 0;
+}
+
+.cu-host-approvals-tab__error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2) var(--cu-space-3);
+}
+
+.cu-host-approvals-tab__banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approvals-tab__banner > svg {
+  flex: none;
+  margin-top: var(--cu-space-0);
+}
+
+.cu-host-approvals-tab__skeleton {
+  display: grid;
+  gap: var(--cu-space-3);
+}
+
+.cu-host-approvals-tab__group {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approvals-tab__title {
+  margin: 0;
+  font-size: var(--cu-font-size-xl);
+  font-weight: var(--cu-font-weight-semibold);
+  line-height: var(--cu-line-height-tight);
+}
+
+.cu-host-approvals-tab__rows {
+  display: grid;
+  margin: 0;
+}
+
+.cu-host-approvals-tab__row {
+  display: grid;
+  grid-template-columns: minmax(11rem, 16rem) minmax(0, 1fr);
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-2) 0;
+  border-bottom: 1px solid var(--cu-border-subtle);
+}
+
+.cu-host-approvals-tab__row:last-child {
+  border-bottom: none;
+}
+
+.cu-host-approvals-tab__label {
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-host-approvals-tab__detail {
+  display: grid;
+  gap: var(--cu-space-1);
+  min-width: 0;
+  margin: 0;
+}
+
+.cu-host-approvals-tab__value {
+  font-weight: var(--cu-font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.cu-host-approvals-tab__note {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-sm);
+  line-height: var(--cu-line-height-normal);
+  overflow-wrap: anywhere;
+}
+
+.cu-host-approvals-tab__never-ask summary:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
+.cu-host-approvals-tab__tools {
+  display: grid;
+  gap: var(--cu-space-1);
+  margin: var(--cu-space-2) 0 0;
+  padding-left: var(--cu-space-5);
+}
+
+.cu-host-approvals-tab__tool {
+  margin-right: var(--cu-space-2);
+  font-family: var(--cu-font-mono);
+}
+
+.cu-host-approvals-tab__tool-conditions {
+  color: var(--cu-text-soft);
+}
+
+@media (max-width: 640px) {
+  .cu-host-approvals-tab__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--cu-space-1);
+  }
 }
 
 .cu-host-approval-section {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  min-height: 0;
 }
 
 .cu-host-approval-section__header {
@@ -5692,13 +5804,11 @@ td.cu-registry-description {
   font-weight: var(--cu-font-weight-medium);
 }
 
-.cu-host-approval-section__content {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
+/* Save and Cancel stay in view at the bottom of the scroll area while a long
+   tool list is edited. */
 .cu-host-approval-section__actions {
+  position: sticky;
+  bottom: 0;
   display: flex;
   flex: 0 0 auto;
   align-items: center;

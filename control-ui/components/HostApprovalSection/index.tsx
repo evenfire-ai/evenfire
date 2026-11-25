@@ -311,7 +311,7 @@ export function HostApprovalSection({
         />
       ) : null}
 
-      <div className="cu-host-approval-section__content">
+      <div>
         {state.stored.host === null ? (
           <div className="cu-empty" role="status" aria-label="Loading approval tools">
             Loading per-tool overrides…
