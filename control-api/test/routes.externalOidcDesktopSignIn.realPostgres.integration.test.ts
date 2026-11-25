@@ -940,6 +940,18 @@ describeRealPostgres('Desktop sign-in through the routes on real PostgreSQL', ()
     expect(tokens).toHaveLength(1)
     expect(await sessionCount(member.userId)).toBe(1)
     expect(await storedCode(minted.code)).toBeUndefined()
+    // The winning V2 token names the member and says it came from an OIDC sign-in.
+    const authentication = await authenticateExternalUserSession(tokens[0]!.token, {
+      purpose: 'protected',
+      policy: SESSION_POLICY,
+    })
+    expect(authentication).toMatchObject({
+      status: 'authenticated',
+      contract: 'v2',
+      claims: { userId: member.userId, email: member.email },
+      authorityContext: { contract: 'v2', userId: member.userId },
+    })
+    expect(authentication).toMatchObject({ tokenClaims: { sub: member.userId, amr: ['oidc'] } })
   })
 
   it('logs no code, verifier, state, subject, token or email across success, refusal and mismatch', async () => {
