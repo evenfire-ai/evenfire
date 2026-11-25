@@ -1,20 +1,32 @@
 import type { DbClient } from '../db.js'
+import { rootLogger } from '../observability/logger.js'
+import { OIDC_MEMBER_LINK_MIGRATION } from '../oidc/memberLinkSchema.js'
+import { GOVERNED_TRACE_RETENTION_MIGRATION } from './governedTraceRetention.js'
+import { GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION } from './governedTraceRetentionHardening.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
-import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
+import { hasPostSchemaWork, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0137_user_access_foundation',
   '0138_legacy_password_security_epoch_backfill',
+  '0139_llm_catalog_prune_columns',
+  '0140_llm_catalog_prune_episodes',
+  '0141_gfs_resource_changed_notify',
+  '0142_gfs_authz_grants_notify',
+  '0143_gfs_authz_shares_notify',
+  '0144_gfs_authz_operator_links_notify',
+  '0145_gfs_authz_control_admins_notify',
+  '0146_gfs_authz_team_members_notify',
+  '0147_gfs_watch_session_users_notify',
+  '0148_oidc_protocol_attempts',
+  '0149_oidc_protocol_attempt_expiry_index',
+  '0150_oidc_protocol_attempt_browser_binding',
 ] as const)
 
 // The one bound between initDb's single dev batch and this runner: every migration
 // up to and including this version runs in the dev batch (db.ts imports it), and
-// this runner owns only the PR1 versions that follow it. Until this change merges,
-// a dev merge that brings new migrations moves this bound to dev's last version and
-// renumbers PR1_MIGRATION_VERSIONS above it, and every dev merge moves the latestDev
-// producer in tests/contracts/certification-inputs.json to dev's tip. After it merges
-// the bound stays: a later migration adds its version to the list this runner
-// applies, or initDb throws "Unclassified post-dev migrations".
+// this runner owns the versions that follow it. Keep the bound stable and add
+// later migrations to RUNNER_MIGRATION_VERSIONS so initDb can classify them.
 export const LAST_DEV_MIGRATION_VERSION = '0136_llm_catalog_dismissed_backfill'
 
 // Migration names that earlier heads of this change recorded under other
@@ -52,10 +64,29 @@ const EARLIER_PR1_TABLES = Object.freeze([
 const EARLIER_PR1_HEAD_CLEANUP_REFERENCE =
   'see docs/deploy/user-access-foundation-upgrade.md#databases-that-ran-an-earlier-head-of-this-change'
 
+export const PR2_MIGRATION_VERSIONS = Object.freeze([
+  '0151_workflow_authority_bindings',
+  '0152_gfs_upload_authority_bindings',
+  '0153_pr2_readiness_evidence',
+  '0154_pr2_runtime_privileges',
+  '0155_workflow_run_failure_reason',
+  '0156_workflow_authorization_pause',
+])
+
+export const RUNNER_MIGRATION_VERSIONS = Object.freeze([
+  ...PR1_MIGRATION_VERSIONS,
+  ...PR2_MIGRATION_VERSIONS,
+  GOVERNED_TRACE_RETENTION_MIGRATION,
+  GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
+  OIDC_MEMBER_LINK_MIGRATION,
+] as const)
+
 export type MigrationDescriptor = {
   version: string
   legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
+  /** Extra attempts of the whole transaction after it lost a lock wait. */
+  lockRetries?: number
 }
 
 type ApplyPendingPr1MigrationsInput = {
@@ -63,9 +94,27 @@ type ApplyPendingPr1MigrationsInput = {
   migrations: readonly MigrationDescriptor[]
   appliedVersions: Set<string>
   recordMigration: (db: DbClient, version: string) => Promise<void>
+  /** Test seam for the pause between lock retries. */
+  sleep?: (ms: number) => Promise<void>
 }
 
-async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): Promise<void> {
+const log = rootLogger.child({ module: 'database-migration' })
+const LOCK_RETRY_DELAY_MS = 1_000
+
+const defaultSleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+const MAX_LOCK_RETRIES = 3
+
+// 55P03: lock_timeout expired. Nothing is applied after the ROLLBACK, so the
+// whole transaction is retried and holds no lock between attempts.
+function isLockWaitTimeout(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === '55P03'
+}
+
+export async function runBoundedTransaction(
+  db: DbClient,
+  work: () => Promise<void>
+): Promise<void> {
   let started = false
   try {
     await db.query('BEGIN')
@@ -160,11 +209,21 @@ export async function applyPendingPr1Migrations({
   migrations,
   appliedVersions,
   recordMigration,
+  sleep = defaultSleep,
 }: ApplyPendingPr1MigrationsInput): Promise<void> {
   const byVersion = new Map(migrations.map(migration => [migration.version, migration]))
   const canonicalVersions = new Set(byVersion.keys())
   const aliasOwners = new Map<string, string>()
   for (const migration of migrations) {
+    const { lockRetries } = migration
+    if (
+      lockRetries !== undefined &&
+      !(Number.isInteger(lockRetries) && lockRetries >= 0 && lockRetries <= MAX_LOCK_RETRIES)
+    ) {
+      throw new Error(
+        `Migration ${migration.version} lockRetries must be an integer from 0 to ${MAX_LOCK_RETRIES}`
+      )
+    }
     for (const alias of migration.legacyVersions ?? []) {
       if (canonicalVersions.has(alias)) {
         throw new Error(`Migration alias collides with canonical version: ${alias}`)
@@ -176,7 +235,7 @@ export async function applyPendingPr1Migrations({
       aliasOwners.set(alias, migration.version)
     }
   }
-  const expected = new Set<string>(PR1_MIGRATION_VERSIONS)
+  const expected = new Set<string>(RUNNER_MIGRATION_VERSIONS)
   const unclassified = migrations.filter(
     migration => migration.version > LAST_DEV_MIGRATION_VERSION && !expected.has(migration.version)
   )
@@ -191,7 +250,7 @@ export async function applyPendingPr1Migrations({
     new Set([...PR1_MIGRATION_VERSIONS, ...canonicalVersions, ...aliasOwners.keys()])
   )
 
-  for (const version of PR1_MIGRATION_VERSIONS) {
+  for (const version of RUNNER_MIGRATION_VERSIONS) {
     const migration = byVersion.get(version)
     if (!migration) throw new Error(`Missing registered PR1 migration: ${version}`)
     if (appliedVersions.has(version)) continue
@@ -204,11 +263,34 @@ export async function applyPendingPr1Migrations({
       continue
     }
 
+    if (hasPostSchemaWork(version)) {
+      await runBoundedTransaction(db, async () => migration.apply(db))
+      await preparePr1Migration(db, version, 'after-schema')
+      await runBoundedTransaction(db, async () => {
+        await recordMigration(db, version)
+      })
+      appliedVersions.add(version)
+      continue
+    }
+
     await preparePr1Migration(db, version)
-    await runBoundedTransaction(db, async () => {
-      await migration.apply(db)
-      await recordMigration(db, version)
-    })
+    const retries = migration.lockRetries ?? 0
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await runBoundedTransaction(db, async () => {
+          await migration.apply(db)
+          await recordMigration(db, version)
+        })
+        break
+      } catch (error) {
+        if (attempt >= retries || !isLockWaitTimeout(error)) throw error
+        log.warn(
+          { err: error, version, attempt: attempt + 1, retries },
+          'Migration lost a lock wait; retrying'
+        )
+        await sleep(LOCK_RETRY_DELAY_MS * (attempt + 1))
+      }
+    }
     appliedVersions.add(version)
   }
 }

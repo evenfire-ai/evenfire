@@ -13,6 +13,7 @@ import {
   COMPOSER_MAX_REQUEST_BODY_BYTES,
   COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES,
 } from '@constants/attachments'
+import { LOCATION_REFERENCE_LIMIT_REASON } from '@constants/tabReferenceSuggestion'
 import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
@@ -38,7 +39,16 @@ import {
   composerRequestBaseContent,
   mapComposerAttachmentsToHostRequest,
 } from '@lib/composerHostRequest'
+import { buildComposerLocationReferences } from '@lib/composerLocationReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import {
+  beginApprovalModeFirstSend,
+  confirmHeldApprovalModeFromSend,
+  hostApprovalModeEpoch,
+  migrateHeldApprovalMode,
+  noteHostApprovalModeFromSession,
+  snapshotFromSessionRead,
+} from '@lib/hostApprovalModeStore'
 import {
   confirmHostModelSelectionFromSend,
   dropIgnoredHostModelIntent,
@@ -47,6 +57,7 @@ import {
   readHostModelSelection,
 } from '@lib/hostModelSelectionStore'
 import { createRetainedSendStore } from '@lib/retainedSendStore'
+import { countGlobalFolderReferences } from '@lib/tabReferenceSuggestion'
 import {
   mergeAuthoritativeServerMessages,
   messageServerTurnNumber,
@@ -102,7 +113,11 @@ import {
   createSessionFsmStore,
   projectSessionState,
 } from './sessionFsm'
-import { mapTrackerStatusToProgress, readApprovalInputPreview } from './trackerToProgress'
+import {
+  mapTrackerStatusToProgress,
+  readApprovalInputPreview,
+  readShellCard,
+} from './trackerToProgress'
 import { type TranscriptMemoEntry, createTranscriptMemo, transcriptMemoKey } from './transcriptMemo'
 import type { PushNotificationInput } from './types'
 import {
@@ -156,6 +171,8 @@ const TRANSCRIPT_MEMO_LIMITS = {
 const MAX_RECONCILE_DELTA_PAGES = 5
 const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
   'The Host did not receive the selected Global Files; the message was sent without them.'
+const LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE =
+  "This agent can't use folder references yet; the message was sent without it."
 // #678 D13 — a Host that predates `kind:'file'` either rejects the attachment
 // with LLM_INVALID_ATTACHMENT or drops it and still accepts the message.
 const HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE =
@@ -550,6 +567,7 @@ export function useAgentChatController({
     readPendingSelection,
     writePendingSelection,
     clearPendingSelection,
+    dropTeamScopedPendingSelections,
     isChatDeleted,
   } = chatListCtl
   const [chatMessages, setChatMessages] = useState<AgentChatMessage[]>([])
@@ -832,8 +850,14 @@ export function useAgentChatController({
       fsm,
       loadSessionMessages: (agentRef, chatId, query, stillRelevant) =>
         reconcileBranchesRef.current!.loadSessionMessages(agentRef, chatId, query, stillRelevant),
-      attachLiveTask: (chatKey, resp, epoch, stillRelevant) =>
-        reconcileBranchesRef.current!.attachLiveTask(chatKey, resp, epoch, stillRelevant),
+      attachLiveTask: (chatKey, resp, epoch, approvalReadEpoch, stillRelevant) =>
+        reconcileBranchesRef.current!.attachLiveTask(
+          chatKey,
+          resp,
+          epoch,
+          approvalReadEpoch,
+          stillRelevant
+        ),
       settleIdle: (chatKey, resp, epoch, hint, stillRelevant) =>
         reconcileBranchesRef.current!.settleIdle(chatKey, resp, epoch, hint, stillRelevant),
       revokeAccess: chatKey => reconcileBranchesRef.current!.revokeAccess(chatKey),
@@ -914,6 +938,8 @@ export function useAgentChatController({
     handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    addSuggestedFileReference,
+    addSuggestedLocationReference,
     restoreComposerImageAttachments,
     restoreComposerReferenceAttachments,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
@@ -970,15 +996,24 @@ export function useAgentChatController({
           `${imageOutcome.dropped} of ${images.length} ${imageOutcome.dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_ATTACHMENTS}-attachment limit`
         )
       }
-      if (referenceOutcome.dropped > 0) {
+      // Folders have a cap of their own, so they are reported apart from the
+      // file limit and left out of its counts.
+      const droppedFolders = referenceOutcome.droppedFolders
+      const droppedFileReferences = referenceOutcome.dropped - droppedFolders
+      if (droppedFileReferences > 0) {
+        const fileReferenceCount = references.length - countGlobalFolderReferences(references)
         droppedParts.push(
-          `${referenceOutcome.dropped} of ${references.length} ${referenceOutcome.dropped === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
+          `${droppedFileReferences} of ${fileReferenceCount} ${droppedFileReferences === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
         )
       }
-      const totalDropped = imageOutcome.dropped + referenceOutcome.dropped
-      const message = droppedParts.length
+      const totalDropped = imageOutcome.dropped + droppedFileReferences
+      const keptMessage = droppedParts.length
         ? `Attachments kept — ${droppedParts.join('; ')} and ${totalDropped === 1 ? 'was' : 'were'} dropped.`
         : 'Attachments kept'
+      const message =
+        droppedFolders > 0
+          ? `${droppedParts.length ? keptMessage : 'Attachments kept.'} ${LOCATION_REFERENCE_LIMIT_REASON}: ${droppedFolders === 1 ? 'a folder was' : `${droppedFolders} folders were`} dropped.`
+          : keptMessage
       pushToast(message, 'info', {
         action: {
           label: 'Discard all',
@@ -1198,23 +1233,39 @@ export function useAgentChatController({
     // Fence async sends, task terminals, and reconciliation before stopping any
     // native subscriptions. Same-principal navigation and composer drafts remain
     // owned by their workspace tabs across the switch.
-    sendScopeGeneration.current += 1
-    agentSendSetupOwnerRef.current = null
-    agentSendInFlightRef.current = false
-    setAgentSending(false)
-    tracker.releaseAll()
-    fsm.reset()
-    reconcileChatRef.current?.reset()
-    resetReplyNotificationDedupe()
-    retainedSends.resetRetainedSendStore()
-    withdrawnTurnIdsRef.current.clear()
-    parkedRestorationsRef.current.clear()
-    setActivityByAgentMessage({})
-    setProgressByAgentMessage({})
-    setAgentError(null)
-    setFailedAgentSend(null)
-    await stopAllActivityStreams()
-  }, [fsm, resetReplyNotificationDedupe, retainedSends, stopAllActivityStreams, tracker])
+    try {
+      sendScopeGeneration.current += 1
+      agentSendSetupOwnerRef.current = null
+      agentSendInFlightRef.current = false
+      setAgentSending(false)
+      tracker.releaseAll()
+      fsm.reset()
+      reconcileChatRef.current?.reset()
+      resetReplyNotificationDedupe()
+      retainedSends.resetRetainedSendStore()
+      withdrawnTurnIdsRef.current.clear()
+      parkedRestorationsRef.current.clear()
+      setActivityByAgentMessage({})
+      setProgressByAgentMessage({})
+      setAgentError(null)
+      setFailedAgentSend(null)
+      await stopAllActivityStreams()
+    } finally {
+      // A concrete chat requested before the team switch belongs to the previous
+      // team's index; if it survived, the re-run triggered by the new team id
+      // would open it under the new team. `latest`/`none` name no chat and stay
+      // valid. Runs last, after the stream stop, so a request made while
+      // awaiting it is dropped too.
+      dropTeamScopedPendingSelections()
+    }
+  }, [
+    dropTeamScopedPendingSelections,
+    fsm,
+    resetReplyNotificationDedupe,
+    retainedSends,
+    stopAllActivityStreams,
+    tracker,
+  ])
 
   const resetChat = useCallback(() => {
     beginSelectionIntent()
@@ -1794,6 +1845,11 @@ export function useAgentChatController({
     tracker,
   ])
 
+  // Only chat-vs-not matters to the selection effect; keying it on the exact
+  // route would re-run (and reset the drawer's chat) when moving between two
+  // non-chat tabs such as Files and Preview.
+  const isChatRoute = navItem === DESKTOP_ROUTES.chat
+
   // Agent selection → load chats
   useEffect(() => {
     if (!selectedAgent || isHostAccessBlocked(selectedAgent)) {
@@ -1937,7 +1993,7 @@ export function useAgentChatController({
         await switchForEffect(requestedSelection.chatId)
         return
       }
-      if (navItem === DESKTOP_ROUTES.chat) {
+      if (isChatRoute) {
         const latest = merged[0]
         if (latest) {
           autoSelectedChatIdRef.current = latest.id
@@ -1956,7 +2012,7 @@ export function useAgentChatController({
     beginSelectionIntent,
     cancelOlderMessagesLoad,
     currentTeamId,
-    navItem,
+    isChatRoute,
     selectedAgent,
     isHostAccessBlocked,
     settleChatMessagesLoading,
@@ -2343,7 +2399,7 @@ export function useAgentChatController({
   )
 
   const reconcileAttachLiveTask = useCallback<ReconcileChatDeps['attachLiveTask']>(
-    async (chatKey, resp, snapshotEpoch, stillRelevant) => {
+    async (chatKey, resp, snapshotEpoch, approvalReadEpoch, stillRelevant) => {
       // Staleness guard for the TRACKER (the FSM has R2, the coordinator does not):
       // if a newer local `SEND_STARTED` bumped the epoch since this reconcile's
       // fetch began, the server's `activeTaskId` is stale — calling `attach` would
@@ -2382,6 +2438,16 @@ export function useAgentChatController({
         tokens: resp.tokens,
         snapshotEpoch,
       })
+      const approvalSnapshot = snapshotFromSessionRead(resp)
+      if (approvalSnapshot) {
+        const { agentRef: approvalAgent, chatId: approvalChatId } = parseTaskKey(chatKey)
+        noteHostApprovalModeFromSession(
+          approvalAgent,
+          approvalChatId,
+          approvalSnapshot,
+          approvalReadEpoch
+        )
+      }
       // reason:'rejoin' → the coordinator consumes the bounded re-rejoin budget
       // (P1-stall guard). Idempotent when the same task is already attached.
       const attached = tracker.attach(
@@ -2616,6 +2682,13 @@ export function useAgentChatController({
             ...(reconcileFromTurn !== undefined ? { afterTurn: reconcileFromTurn } : {}),
           }
         }
+        const approvalReadSeq = hostApprovalModeEpoch(agentRef, chatId)
+        const noteOpenedChat = (opened: Parameters<typeof snapshotFromSessionRead>[0]) => {
+          const approval = snapshotFromSessionRead(opened)
+          if (approval) {
+            noteHostApprovalModeFromSession(agentRef, chatId, approval, approvalReadSeq)
+          }
+        }
         let response = await chatStore.loadSessionMessages(
           agentRef,
           agentRef,
@@ -2623,6 +2696,7 @@ export function useAgentChatController({
           requestedQuery
         )
         if (!stillRelevant()) return undefined
+        noteOpenedChat(response)
         if (requestedQuery.afterTurn === undefined || !response.hasMoreAfter) {
           if (requestedQuery.afterTurn !== undefined) {
             return {
@@ -2683,6 +2757,7 @@ export function useAgentChatController({
           })
           if (!stillRelevant()) return undefined
           const combinedTurns = mergeUniqueSessionTurns(turns, latest.turns)
+          noteOpenedChat(latest)
           return {
             ...latest,
             turns: combinedTurns,
@@ -3277,7 +3352,12 @@ export function useAgentChatController({
             // generic Approve/Deny prompt. Absent on ordinary approval suspensions.
             reason: state.pendingApproval.reason,
             mcpServerName: state.pendingApproval.mcpServerName,
+            alwaysApproveAllowed: state.pendingApproval.alwaysApproveAllowed,
             inputPreview: readApprovalInputPreview(state.pendingApproval.inputPreview),
+            ...(() => {
+              const shellCard = readShellCard(state.pendingApproval.shellCard)
+              return shellCard ? { shellCard } : {}
+            })(),
           }
         : activeFsmApproval
           ? {
@@ -3290,7 +3370,12 @@ export function useAgentChatController({
               // branch above and InFlightAssistantPlaceholder's fallback.
               reason: activeFsmApproval.reason,
               mcpServerName: activeFsmApproval.mcpServerName,
+              alwaysApproveAllowed: activeFsmApproval.alwaysApproveAllowed,
               inputPreview: readApprovalInputPreview(activeFsmApproval.inputPreview),
+              ...(() => {
+                const shellCard = readShellCard(activeFsmApproval.shellCard)
+                return shellCard ? { shellCard } : {}
+              })(),
             }
           : undefined
       updateMessageProgress(selectedAgent, state.userMessageId, () => ({
@@ -3445,8 +3530,10 @@ export function useAgentChatController({
       // must leave the composer and its draft as the user typed them, with the
       // reason on screen, instead of failing after the send cleared the composer.
       let fileReferencesForSend: ReturnType<typeof buildComposerFileReferences>
+      let locationReferencesForSend: ReturnType<typeof buildComposerLocationReferences>
       try {
         fileReferencesForSend = buildComposerFileReferences(effectiveReferences)
+        locationReferencesForSend = buildComposerLocationReferences(effectiveReferences)
       } catch (error) {
         const blocker = error instanceof Error ? error.message : String(error)
         setAgentError(blocker)
@@ -3475,6 +3562,7 @@ export function useAgentChatController({
       const requestForBudget = {
         content: effectiveContentForRequest,
         fileReferences: fileReferencesForSend,
+        locationReferences: locationReferencesForSend,
         hostRef: sendAgent,
         files: effectiveFiles,
         images: effectiveAttachments,
@@ -3555,6 +3643,7 @@ export function useAgentChatController({
             chatStore.setPendingModel(sendAgent, chatId, preChatModel)
             chatStore.clearPreChatModel(sendAgent)
           }
+          migrateHeldApprovalMode(sendAgent, chatId)
           if (
             wasSendChatVisible &&
             sendSelectionIntentRevision !== null &&
@@ -3849,6 +3938,9 @@ export function useAgentChatController({
       // send that was handed to main and failed in another way keeps its turn,
       // and its input is retained with the failure.
       let postIssued = false
+      // Unlocks the approval-mode picker that this send locked for a chat whose
+      // session row the store has not seen. Idempotent; every exit calls it.
+      let releaseApprovalModeFirstSend: () => void = () => undefined
       const sendHeldByAnotherPath = () =>
         sendAuthScopeIsCurrent() && !sendChatWasDeleted() && isHostAccessBlocked(sendAgent)
       const endSendHeldByAnotherPath = async (detail: string, kind: FailedAgentSend['kind']) => {
@@ -3873,6 +3965,15 @@ export function useAgentChatController({
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
         const fileReferences = fileReferencesForSend
+        const locationReferences = locationReferencesForSend
+        // Reads the held mode and locks the picker in one step: a pick after
+        // this point would PATCH before the POST creates the session row, get
+        // a 404 and paint a mode the session never stores (R6-MJ1).
+        const firstSendApproval = sendChatId
+          ? beginApprovalModeFirstSend(sendAgent, sendChatId)
+          : null
+        if (firstSendApproval) releaseApprovalModeFirstSend = firstSendApproval.release
+        const heldApprovalMode = firstSendApproval?.mode ?? null
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -3887,6 +3988,8 @@ export function useAgentChatController({
             ? {}
             : { modelSelectionRevision: visualModelRevisionForSend }),
           ...(fileReferences.length > 0 ? { fileReferences } : {}),
+          ...(locationReferences.length > 0 ? { locationReferences } : {}),
+          ...(heldApprovalMode ? { approvalMode: heldApprovalMode } : {}),
         }
 
         // Handed to main from here, even if main refuses it before the POST.
@@ -3905,6 +4008,28 @@ export function useAgentChatController({
         if (!sendStillAuthorized()) return
         const responseRecord = response as Record<string, unknown>
         const ackOk = !responseRecord.error && responseRecord.success !== false
+        if (ackOk && sendChatId) confirmHeldApprovalModeFromSend(sendAgent, sendChatId)
+        releaseApprovalModeFirstSend()
+        // The label shows the held pick, which the Host stores but caps by its
+        // ceiling. The ack carries no mode, so one read of the new session
+        // shows the mode the Host runs. The epoch drops it if a pick lands
+        // first, and a scope change drops it on arrival.
+        if (ackOk && sendChatId && heldApprovalMode) {
+          const approvalReadEpoch = hostApprovalModeEpoch(sendAgent, sendChatId)
+          void chatStore
+            .loadSessionMessages(sendAgent, sendAgent, sendChatId, { limit: 1 })
+            .then(session => {
+              if (!sendAuthScopeIsCurrent()) return
+              const approval = snapshotFromSessionRead(session)
+              if (approval) {
+                noteHostApprovalModeFromSession(sendAgent, sendChatId, approval, approvalReadEpoch)
+              }
+            })
+            .catch(error => {
+              // The label keeps the pick until the next read of the chat.
+              console.warn('[approval-mode] read after the first send failed', error)
+            })
+        }
         // #654 H1 — the send IS the write. Its ack carries the revision that
         // write produced, and adopting it is what arms the NEXT conditional
         // write correctly; without it the client keeps the revision it read
@@ -3969,6 +4094,23 @@ export function useAgentChatController({
                 : `The Host did not receive ${droppedFiles.length} of the selected Global Files; the message was sent without them.`
             setAgentError(droppedMessage)
             pushToast(droppedMessage, 'error')
+          }
+        }
+        // The same rule for the folder: a Host or rpc-proxy that predates
+        // locationReferences runs the turn without it. The send stands.
+        let locationReferencesDropped = false
+        if (ackOk && !ackIsEmpty && locationReferences.length > 0) {
+          const acceptedLocationReferenceIds = new Set<string>(
+            Array.isArray(response.acceptedLocationReferenceIds)
+              ? response.acceptedLocationReferenceIds
+              : []
+          )
+          if (
+            locationReferences.some(reference => !acceptedLocationReferenceIds.has(reference.id))
+          ) {
+            locationReferencesDropped = true
+            setAgentError(LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE)
+            pushToast(LOCATION_REFERENCES_NOT_RECEIVED_MESSAGE, 'error')
           }
         }
         // #678 D13 — the same rule for documents. An ack that lists which
@@ -4096,7 +4238,9 @@ export function useAgentChatController({
             }))
             // The dropped-files error above already told the user what happened;
             // a success toast right after it would contradict it.
-            if (!fileReferencesDropped) pushToast(`Message sent to ${sendAgent}.`, 'success')
+            if (!fileReferencesDropped && !locationReferencesDropped) {
+              pushToast(`Message sent to ${sendAgent}.`, 'success')
+            }
           }
           return
         }
@@ -4162,6 +4306,7 @@ export function useAgentChatController({
         // The task owns the activity entry from here.
         activityHandedToTask = true
       } catch (error) {
+        releaseApprovalModeFirstSend()
         const message = error instanceof Error ? error.message : String(error)
         if (
           isAuthorizationError(error) &&
@@ -4239,6 +4384,7 @@ export function useAgentChatController({
         )
         await keepUndeliveredTurn()
       } finally {
+        releaseApprovalModeFirstSend()
         // A send that handed its activity entry to no task releases it here,
         // whichever exit it took.
         if (!activityHandedToTask) releaseSendActivity()
@@ -4778,6 +4924,8 @@ export function useAgentChatController({
     handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    addSuggestedFileReference,
+    addSuggestedLocationReference,
     handleClearComposerAttachments: resetComposerAttachments,
     cancelTask,
   }

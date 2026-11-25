@@ -23,6 +23,7 @@ describe('Control API shutdown', () => {
 
     expect(names.indexOf('entity-change-dispatcher')).toBeGreaterThanOrEqual(0)
     expect(corePoolIndex).toBeGreaterThan(names.indexOf('entity-change-dispatcher'))
+    expect(corePoolIndex).toBeGreaterThan(names.indexOf('pr2-runtime-evidence'))
   })
 
   it('stops the shared OAuth grant sweep before database pools close', () => {
@@ -32,6 +33,14 @@ describe('Control API shutdown', () => {
     expect(names.indexOf('core-database-pool')).toBeGreaterThan(
       names.indexOf('oauth-shared-grant-sweep')
     )
+  })
+
+  it('ends the watch pool after the streams are closed and alongside the other pools', () => {
+    const names = [...CONTROL_API_SHUTDOWN_STEP_NAMES] as string[]
+    const watchPoolIndex = names.indexOf('watch-database-pool')
+
+    expect(watchPoolIndex).toBeGreaterThan(names.indexOf('http-server-and-streams'))
+    expect(watchPoolIndex).toBeLessThan(names.indexOf('core-database-pool'))
   })
 
   it('closes every registered resource in order and continues after failures', async () => {

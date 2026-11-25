@@ -138,6 +138,7 @@ describe('ipc host status stream handlers', () => {
     getChatDeletionFenceAuthority: vi.fn(),
     loadSessionMessages: vi.fn(),
     renameSession: vi.fn(),
+    setApprovalMode: vi.fn(),
     listWorkflowRuns: vi.fn(),
     listWorkflowRunArtifacts: vi.fn(),
     downloadWorkflowRunArtifact: vi.fn(),
@@ -157,6 +158,7 @@ describe('ipc host status stream handlers', () => {
     findInActiveSandboxUi: vi.fn().mockResolvedValue(9),
     stopActiveSandboxUiFind: vi.fn().mockResolvedValue(undefined),
     focusActiveSandboxUi: vi.fn().mockResolvedValue(true),
+    approveToolCall: vi.fn(),
   }
 
   beforeEach(async () => {
@@ -384,6 +386,124 @@ describe('ipc host status stream handlers', () => {
     expect(service.renameSession).toHaveBeenCalledWith('chatllm', 'chatllm', 'c1', 'x')
   })
 
+  it('forwards a valid rpc:setApprovalMode to the service', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:setApprovalMode')
+    service.setApprovalMode.mockResolvedValue({
+      approvalMode: 'auto',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'auto',
+    })
+    await handler?.(event, {
+      hostRef: 'chatllm',
+      agent: 'chatllm',
+      chatId: 'c1',
+      mode: 'auto',
+    })
+    expect(service.setApprovalMode).toHaveBeenCalledWith('chatllm', 'chatllm', 'c1', 'auto')
+  })
+
+  it('rejects an unsafe chatId segment for rpc:setApprovalMode before calling the service', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:setApprovalMode')
+    await expect(
+      Promise.resolve(
+        handler?.(event, { hostRef: 'chatllm', agent: 'chatllm', chatId: '../evil', mode: 'auto' })
+      )
+    ).rejects.toThrow(/unsafe path segment/)
+    expect(service.setApprovalMode).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unknown mode for rpc:setApprovalMode', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:setApprovalMode')
+    await expect(
+      Promise.resolve(
+        handler?.(event, { hostRef: 'chatllm', agent: 'chatllm', chatId: 'c1', mode: 'yolo' })
+      )
+    ).rejects.toThrow('mode must be manual, auto, or allow_all')
+    expect(service.setApprovalMode).not.toHaveBeenCalled()
+  })
+
+  it('ignores a renderer-supplied hostRefs fleet for rpc:setApprovalMode', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:setApprovalMode')
+    service.setApprovalMode.mockResolvedValue({
+      approvalMode: 'manual',
+      modeCeiling: 'manual',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'manual',
+    })
+    await handler?.(event, {
+      hostRef: 'chatllm',
+      agent: 'chatllm',
+      chatId: 'c1',
+      mode: 'manual',
+      hostRefs: ['chatllm', 'other'],
+    } as never)
+    expect(service.setApprovalMode).toHaveBeenCalledWith('chatllm', 'chatllm', 'c1', 'manual')
+  })
+
+  it('forwards a shell card action to approveToolCall', async () => {
+    service.approveToolCall.mockResolvedValue({ success: true })
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:approveToolCall')
+    await Promise.resolve(
+      handler?.(event, {
+        hostRef: 'agent-x',
+        taskId: 'task-1',
+        toolCallId: 'req-1',
+        hostRefs: ['agent-x'],
+        shellAction: 'command',
+      })
+    )
+    expect(service.approveToolCall).toHaveBeenCalledWith(
+      'agent-x',
+      'task-1',
+      'req-1',
+      ['agent-x'],
+      {
+        teamId: undefined,
+        alwaysApprove: false,
+        shellAction: 'command',
+      }
+    )
+  })
+
+  it.each(['nope', null, 1])(
+    'refuses shellAction %s instead of sending a plain approve',
+    async shellAction => {
+      service.approveToolCall.mockResolvedValue({ success: true })
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:approveToolCall')
+      await expect(
+        Promise.resolve(
+          handler?.(event, {
+            hostRef: 'agent-x',
+            taskId: 'task-1',
+            toolCallId: 'req-1',
+            shellAction,
+          })
+        )
+      ).rejects.toThrow('shellAction must be once, command, or shell')
+      expect(service.approveToolCall).not.toHaveBeenCalled()
+    }
+  )
+
+  it('sends a plain approve when no shellAction is given', async () => {
+    service.approveToolCall.mockResolvedValue({ success: true })
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:approveToolCall')
+    await Promise.resolve(
+      handler?.(event, { hostRef: 'agent-x', taskId: 'task-1', toolCallId: 'req-1' })
+    )
+    expect(service.approveToolCall).toHaveBeenCalledWith('agent-x', 'task-1', 'req-1', undefined, {
+      teamId: undefined,
+      alwaysApprove: false,
+    })
+  })
+
   it('forwards sandbox UI visibility changes from the trusted renderer', async () => {
     const { event } = makeTrustedEvent()
     const handler = testState.handlers.get('sandboxUi:setVisible')
@@ -571,6 +691,57 @@ describe('ipc host status stream handlers', () => {
     expect(result).toEqual({ ok: true })
   })
 
+  it('forwards Always approve to approveToolCall as alwaysApprove:true', async () => {
+    service.approveToolCall.mockResolvedValue({ success: true })
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:approveToolCall')
+    const result = await Promise.resolve(
+      handler?.(event, {
+        hostRef: 'agent-x',
+        taskId: 'task-1',
+        toolCallId: 'req-1',
+        hostRefs: ['agent-x'],
+        teamId: 'team-a',
+        alwaysApprove: true,
+      })
+    )
+    expect(service.approveToolCall).toHaveBeenCalledWith(
+      'agent-x',
+      'task-1',
+      'req-1',
+      ['agent-x'],
+      {
+        teamId: 'team-a',
+        alwaysApprove: true,
+      }
+    )
+    expect(result).toEqual({ success: true })
+  })
+
+  it.each([[undefined], [false], ['true'], [1]])(
+    'coerces a non-true alwaysApprove (%s) to false for rpc:approveToolCall',
+    async alwaysApprove => {
+      service.approveToolCall.mockResolvedValue({ success: true })
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:approveToolCall')
+      await Promise.resolve(
+        handler?.(event, {
+          hostRef: 'agent-x',
+          taskId: 'task-1',
+          toolCallId: 'req-1',
+          alwaysApprove,
+        })
+      )
+      expect(service.approveToolCall).toHaveBeenCalledWith(
+        'agent-x',
+        'task-1',
+        'req-1',
+        undefined,
+        { teamId: undefined, alwaysApprove: false }
+      )
+    }
+  )
+
   it('routes host message submit through invokeHostMessage handler', async () => {
     service.invokeHostMessage.mockResolvedValue({ success: true, response: 'hello' })
     const { event } = makeTrustedEvent()
@@ -594,6 +765,38 @@ describe('ipc host status stream handlers', () => {
     )
     expect(result).toEqual({ success: true, response: 'hello' })
   })
+
+  it.each(['manual', 'auto', 'allow_all'])(
+    'forwards approvalMode %s on rpc:invokeHostMessage',
+    async approvalMode => {
+      service.invokeHostMessage.mockResolvedValue({ taskId: 'task-1' })
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:invokeHostMessage')
+      await Promise.resolve(
+        handler?.(event, { hostRef: 'chatllm', payload: { content: 'hello', approvalMode } })
+      )
+      expect(service.invokeHostMessage).toHaveBeenCalledWith(
+        'chatllm',
+        expect.objectContaining({ content: 'hello', approvalMode }),
+        undefined,
+        undefined
+      )
+    }
+  )
+
+  it.each(['yolo', 'allow-all', null, 2])(
+    'refuses approvalMode %s on rpc:invokeHostMessage instead of sending the message without it',
+    async approvalMode => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:invokeHostMessage')
+      await expect(
+        Promise.resolve(
+          handler?.(event, { hostRef: 'chatllm', payload: { content: 'hello', approvalMode } })
+        )
+      ).rejects.toThrow('Invalid host message request: approvalMode')
+      expect(service.invokeHostMessage).not.toHaveBeenCalled()
+    }
+  )
 
   it('routes runtime config save through the auth handler', async () => {
     service.saveRuntimeConfig.mockResolvedValue({
@@ -712,7 +915,7 @@ describe('ipc host status stream handlers', () => {
 
   it('opens the canonical Profile UI social route through the auth handler', async () => {
     service.openProfileSettings.mockResolvedValue({
-      profileUiUrl: 'http://localhost:3001/settings/social/telegram',
+      profileUiUrl: 'http://localhost:3001/channels/telegram',
     })
     const { event } = makeTrustedEvent()
     const handler = testState.handlers.get('auth:openProfileSettings')

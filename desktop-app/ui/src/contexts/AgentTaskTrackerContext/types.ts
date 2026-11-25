@@ -5,6 +5,7 @@ import type {
   ProgressStep,
   ReadyComposerFileAttachment,
 } from '@/uiTypes'
+import type { ShellCardDescriptor } from '../../../../src/types'
 import type { ChatMessageAttachment } from '../../../../src/types'
 
 /**
@@ -47,7 +48,11 @@ export interface TaskPendingApproval {
   // completion back to this task. Absent on ordinary approval suspensions.
   reason?: string
   mcpServerName?: string
+  // `false` when the host refuses to allowlist this call ("Always approve" is
+  // hidden). Absent means allowed.
+  alwaysApproveAllowed?: false
   inputPreview?: ApprovalInputPreview
+  shellCard?: ShellCardDescriptor
 }
 
 /**

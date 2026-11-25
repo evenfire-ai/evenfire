@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { useRef, useState } from 'react'
+import { StrictMode, useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { GfsActionHost } from '@components/GfsActionHost'
 import { FOLDER_HOVER_EXPAND_DELAY_MS } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
@@ -96,6 +97,7 @@ function renderTree(
         onOpenFolder={onOpenFolder}
         onOpenPreview={onOpenPreview}
         pushToast={pushToast}
+        onVisibleExpandedFoldersChange={props.onVisibleExpandedFoldersChange}
       />
     </QueryClientProvider>
   )
@@ -177,6 +179,232 @@ describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
     // Collapsing hides the children again (a container is collapsible at any level).
     fireEvent.click(screen.getByRole('button', { name: 'Collapse Reports' }))
     expect(screen.queryByRole('button', { name: 'Sub' })).toBeNull()
+  })
+})
+
+describe('FileExplorerTree — expanded folders on screen', () => {
+  it('reports the expanded, rendered folders in screen order, and none once collapsed or unmounted', async () => {
+    const listChildren = vi.fn(async (resourceId: string) =>
+      resourceId === 'alpha'
+        ? listChildrenPage([
+            childView('alpha-sub', 'Sub', 'directory', { parentResourceId: 'alpha' }),
+          ])
+        : listChildrenPage([])
+    )
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('beta', 'Beta', 'directory'),
+          accessibleResource('alpha', 'Alpha', 'directory'),
+        ])
+      ),
+      listChildren,
+    })
+    const onVisibleExpandedFoldersChange = vi.fn()
+    renderTree({ onVisibleExpandedFoldersChange })
+    const last = () => onVisibleExpandedFoldersChange.mock.calls.at(-1)?.[0]
+
+    await screen.findByRole('button', { name: 'Alpha' })
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Beta' }))
+    await waitFor(() => expect(last()).toEqual(['gfs://main/beta']))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Alpha' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Sub' }))
+    // Alpha sorts above Beta, and its expanded child sits between them.
+    await waitFor(() =>
+      expect(last()).toEqual(['gfs://main/alpha', 'gfs://main/alpha-sub', 'gfs://main/beta'])
+    )
+
+    // Collapsing Alpha hides Sub too, though Sub is still marked expanded.
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Alpha' }))
+    await waitFor(() => expect(last()).toEqual(['gfs://main/beta']))
+
+    cleanup()
+    expect(last()).toEqual([])
+  })
+})
+
+// Nested grants on /Alpha and /Alpha/Beta render Beta twice: as a root and as
+// Alpha's child. Both copies share one `expandedIds` entry, and every rendered
+// copy must keep the folder published until the LAST copy goes away.
+describe('FileExplorerTree — a folder rendered twice under nested grants', () => {
+  type Rid = 'alpha' | 'beta' | 'gamma' | 'aaron'
+  const NAMES: Record<Rid, string> = {
+    aaron: 'Aaron',
+    alpha: 'Alpha',
+    beta: 'Beta',
+    gamma: 'Gamma',
+  }
+  const PATHS: Record<Rid, string> = {
+    aaron: '/Aaron',
+    alpha: '/Alpha',
+    beta: '/Alpha/Beta',
+    gamma: '/Alpha/Beta/Gamma',
+  }
+  const PARENT: Record<Rid, Rid | null> = { aaron: null, alpha: null, beta: 'alpha', gamma: 'beta' }
+  const uri = (rid: Rid) => `gfs://main/${rid}`
+
+  function installForest(server: {
+    roots: Rid[]
+    children: Partial<Record<Rid, Rid[]>>
+    failing?: boolean
+  }) {
+    const node = (rid: Rid) => ({ parentResourceId: PARENT[rid], path: PATHS[rid] })
+    const failure = gfsRouteFailureMessage(
+      client => client.listAccessible('session', { drive: 'main' }),
+      500,
+      { code: 'internal', message: 'discovery unavailable' }
+    )
+    installClerum({
+      listAccessible: vi.fn(async () => {
+        if (server.failing) throw new Error(await failure)
+        return listAccessiblePage(
+          server.roots.map(rid => accessibleResource(rid, NAMES[rid], 'directory', node(rid)))
+        )
+      }),
+      listChildren: vi.fn(async (resourceId: string) =>
+        listChildrenPage(
+          (server.children[resourceId as Rid] ?? []).map(rid =>
+            childView(rid, NAMES[rid], 'directory', node(rid))
+          )
+        )
+      ),
+    })
+  }
+
+  function renderForest(options: { strict?: boolean } = {}) {
+    const published: string[][] = []
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const tree = (
+      <QueryClientProvider client={queryClient}>
+        <FileExplorerTree
+          onOpenFolder={vi.fn()}
+          onOpenPreview={vi.fn()}
+          pushToast={vi.fn()}
+          onVisibleExpandedFoldersChange={uris => published.push(uris)}
+        />
+      </QueryClientProvider>
+    )
+    render(options.strict ? <StrictMode>{tree}</StrictMode> : tree)
+    return { published, last: () => published.at(-1) }
+  }
+
+  function refocusWindow() {
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+  }
+
+  afterEach(() => focusManager.setFocused(undefined))
+
+  async function expandBothCopiesOfBeta(last: () => string[] | undefined) {
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Alpha' }))
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Expand Beta' })).toHaveLength(2)
+    )
+    fireEvent.click(screen.getAllByRole('button', { name: 'Expand Beta' })[0]!)
+    await waitFor(() => expect(last()).toEqual([uri('alpha'), uri('beta')]))
+  }
+
+  it('keeps the root copy published after collapsing the ancestor of the child copy', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'] } })
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Alpha' }))
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Beta' })).toHaveLength(1))
+    expect(last()).toEqual([uri('beta')])
+  })
+
+  it('keeps an expanded descendant of the surviving copy published', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'], beta: ['gamma'] } })
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Expand Gamma' })).toHaveLength(2)
+    )
+    fireEvent.click(screen.getAllByRole('button', { name: 'Expand Gamma' })[0]!)
+    await waitFor(() => expect(last()).toEqual([uri('alpha'), uri('beta'), uri('gamma')]))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Alpha' }))
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Gamma' })).toHaveLength(1))
+    expect(last()).toEqual([uri('beta'), uri('gamma')])
+  })
+
+  it('follows roots that shift position, and a root that takes over a removed root’s index', async () => {
+    const server = { roots: ['alpha', 'beta'] as Rid[], children: { alpha: ['beta'] as Rid[] } }
+    installForest(server)
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    // A new grant sorts above every expanded root and shifts their positions.
+    server.roots = ['aaron', 'alpha', 'beta']
+    refocusWindow()
+    await screen.findByRole('button', { name: 'Aaron' })
+    await waitFor(() => expect(last()).toEqual([uri('alpha'), uri('beta')]))
+
+    // Revoking Alpha unmounts Beta's child copy in the same commit that moves
+    // the root copy of Beta into Alpha's old index.
+    server.roots = ['aaron', 'beta']
+    refocusWindow()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Alpha' })).toBeNull())
+    await waitFor(() => expect(last()).toEqual([uri('beta')]))
+  })
+
+  it('publishes a folder once however many copies of it are expanded', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'] } })
+    const { published, last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    expect(last()).toEqual([uri('alpha'), uri('beta')])
+    for (const list of published) expect(new Set(list).size).toBe(list.length)
+  })
+
+  it('publishes nothing while a failed focus refetch hides the forest, and the list once it recovers', async () => {
+    const server = {
+      roots: ['alpha', 'beta'] as Rid[],
+      children: { alpha: ['beta'] as Rid[] },
+      failing: false,
+    }
+    installForest(server)
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    server.failing = true
+    refocusWindow()
+    await waitFor(() => expect(screen.queryByRole('tree', { name: 'Shared files' })).toBeNull())
+    await waitFor(() => expect(last()).toEqual([]))
+
+    server.failing = false
+    refocusWindow()
+    await screen.findByRole('tree', { name: 'Shared files' })
+    await waitFor(() => expect(last()).toEqual([uri('alpha'), uri('beta')]))
+  })
+
+  it('drops the folder once every copy of it collapses', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'] } })
+    const { last } = renderForest()
+    await expandBothCopiesOfBeta(last)
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Collapse Beta' })[1]!)
+
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Expand Beta' })).toHaveLength(2)
+    )
+    expect(last()).toEqual([uri('alpha')])
+  })
+
+  it('keeps the root copy published under StrictMode effect replays', async () => {
+    installForest({ roots: ['alpha', 'beta'], children: { alpha: ['beta'] } })
+    const { last } = renderForest({ strict: true })
+    await expandBothCopiesOfBeta(last)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Alpha' }))
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Beta' })).toHaveLength(1))
+    expect(last()).toEqual([uri('beta')])
   })
 })
 
@@ -840,14 +1068,23 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
   const onOpenPreview = props.onOpenPreview ?? vi.fn()
   const pushToast = props.pushToast ?? vi.fn()
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  let treeMounted = true
   const tree = () => (
     <QueryClientProvider client={queryClient}>
       <GfsDragSessionProvider>
-        <FileExplorerTree
-          onOpenFolder={onOpenFolder}
-          onOpenPreview={onOpenPreview}
+        <GfsActionHost
           pushToast={pushToast}
-        />
+          refreshFilesLocation={() => undefined}
+          onActionOpenChange={() => undefined}
+        >
+          {treeMounted ? (
+            <FileExplorerTree
+              onOpenFolder={onOpenFolder}
+              onOpenPreview={onOpenPreview}
+              pushToast={pushToast}
+            />
+          ) : null}
+        </GfsActionHost>
       </GfsDragSessionProvider>
     </QueryClientProvider>
   )
@@ -858,6 +1095,11 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
     pushToast,
     queryClient,
     rerender: () => rendered.rerender(tree()),
+    /** Unmounts the tree alone, as collapsing the sidebar does; the host stays. */
+    unmountTree: () => {
+      treeMounted = false
+      rendered.rerender(tree())
+    },
     unmount: rendered.unmount,
   }
 }
@@ -873,6 +1115,10 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
   async function openMoveDialog() {
     const row = await screen.findByRole('button', { name: 'report.txt' })
     fireEvent.keyDown(row, { key: 'F10', shiftKey: true })
+    const menu = await screen.findByRole('menu', { name: 'Actions for report.txt' })
+    const move = await within(menu).findByRole('menuitem', { name: 'Move to' })
+    await waitFor(() => expect((move as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(move)
     return screen.findByRole('dialog', { name: 'Move file report.txt' })
   }
 
@@ -893,6 +1139,35 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     ])
   }
 
+  /**
+   * The bits the row menu already read for the source folder, from the real
+   * producer, so the gated reads the test counts start after the menu opened Move.
+   */
+  async function seedMenuSourceParentBits(queryClient: QueryClient) {
+    const produce = appServiceAffordanceProducer(async () =>
+      heldPermissionResponse(['read', 'write', 'delete'])
+    )
+    queryClient.setQueryData(
+      desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, 'main', 7),
+      await produce(sourceParentId)
+    )
+  }
+
+  /** Every close path of a running host Move is disabled, and trying them keeps it open. */
+  async function expectMoveCloseLocked(dialog: HTMLElement) {
+    const close = within(dialog).getByRole<HTMLButtonElement>('button', {
+      name: 'Close move dialog',
+    })
+    const cancel = within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Cancel' })
+    // The host's running phase renders after the gated producer was entered.
+    await waitFor(() => expect(close.disabled).toBe(true))
+    expect(cancel.disabled).toBe(true)
+    fireEvent.click(close)
+    fireEvent.click(cancel)
+    fireEvent.mouseDown(dialog.parentElement!)
+    expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBe(dialog)
+  }
+
   async function resolveSource() {
     return resolveResource(
       resolvedFile(sourceResourceId, 'report.txt', {
@@ -902,65 +1177,85 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     )
   }
 
-  it.each(['dialog closes', 'destination changes'] as const)(
-    'does not dispatch explicit Move after its owner changes while source resolve is pending (%s)',
-    async ownerChange => {
-      let finishResolve!: () => void
-      let markResolveStarted!: () => void
-      const resolveStarted = new Promise<void>(resolve => {
-        markResolveStarted = resolve
-      })
-      const resolveGate = new Promise<void>(resolve => {
-        finishResolve = resolve
-      })
-      const resolved = await resolveSource()
-      const resolve = vi.fn(async () => {
-        markResolveStarted()
-        await resolveGate
-        return resolved
-      })
-      const moveResource = vi.fn(async () =>
-        moveResourceReceipt(sourceResourceId, destinationAId, 5)
-      )
-      installDndClerum({
-        listAccessible: vi.fn(async () => accessibleRows()),
-        affordances: appServiceAffordanceProducer(async () =>
-          heldPermissionResponse(['read', 'write', 'delete'])
-        ),
-        resolve,
-        moveResource,
-      })
-      const { queryClient } = renderTreeWithSession()
+  it.each([
+    [
+      'disables closing while the source resolve is pending and still dispatches the Move once',
+      'dialog closes',
+    ],
+    [
+      'does not dispatch explicit Move after the destination changes while source resolve is pending',
+      'destination changes',
+    ],
+  ] as const)('%s', async (_title, ownerChange) => {
+    let finishResolve!: () => void
+    let markResolveStarted!: () => void
+    const resolveStarted = new Promise<void>(resolve => {
+      markResolveStarted = resolve
+    })
+    const resolveGate = new Promise<void>(resolve => {
+      finishResolve = resolve
+    })
+    const resolved = await resolveSource()
+    const resolve = vi.fn(async () => {
+      markResolveStarted()
+      await resolveGate
+      return resolved
+    })
+    const moveResource = vi.fn(async () => moveResourceReceipt(sourceResourceId, destinationAId, 5))
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve,
+      moveResource,
+    })
+    const { pushToast, queryClient } = renderTreeWithSession()
 
-      try {
-        const dialog = await openMoveDialog()
-        await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
-        fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
-        await resolveStarted
+    try {
+      const dialog = await openMoveDialog()
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+      await resolveStarted
 
-        if (ownerChange === 'dialog closes') {
-          fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
-          expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
-        } else {
-          await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
-        }
-
-        await act(async () => {
-          finishResolve()
-          await resolveGate
-        })
-
-        await waitFor(() => expect(moveResource).not.toHaveBeenCalled())
-        if (ownerChange === 'destination changes') {
-          expect(
-            await within(dialog).findByRole('button', { name: 'Move here (Archive B)' })
-          ).toBeTruthy()
-        }
-      } finally {
-        queryClient.clear()
+      if (ownerChange === 'dialog closes') {
+        // The host already runs the Move: a close cannot recall it, so no
+        // close path is offered.
+        await expectMoveCloseLocked(dialog)
+      } else {
+        await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
       }
+
+      await act(async () => {
+        finishResolve()
+        await resolveGate
+      })
+
+      if (ownerChange === 'dialog closes') {
+        await waitFor(() =>
+          expect(pushToast).toHaveBeenCalledWith('Moved report.txt to Archive A', 'success')
+        )
+        expect(moveResource).toHaveBeenCalledTimes(1)
+        expect(moveResource).toHaveBeenCalledWith(
+          sourceResourceId,
+          destinationAId,
+          'main',
+          4,
+          undefined,
+          7
+        )
+      } else {
+        await waitFor(() => expect(moveResource).not.toHaveBeenCalled())
+      }
+      if (ownerChange === 'destination changes') {
+        expect(
+          await within(dialog).findByRole('button', { name: 'Move here (Archive B)' })
+        ).toBeTruthy()
+      }
+    } finally {
+      queryClient.clear()
     }
-  )
+  })
 
   it('preserves a changed destination and reports the captured Move result once', async () => {
     let finishMove!: () => void
@@ -1016,6 +1311,57 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
         7
       )
       expect(queryClient.getQueryState(oldScopeChildren)?.isInvalidated).toBe(true)
+    } finally {
+      queryClient.clear()
+    }
+  })
+
+  it('disables closing while the PATCH is in flight and still reports the Move', async () => {
+    let finishMove!: () => void
+    let markMoveStarted!: () => void
+    const moveStarted = new Promise<void>(resolve => {
+      markMoveStarted = resolve
+    })
+    const moveGate = new Promise<void>(resolve => {
+      finishMove = resolve
+    })
+    const resolved = await resolveSource()
+    const moveResource = vi.fn(async () => {
+      markMoveStarted()
+      await moveGate
+      return moveResourceReceipt(sourceResourceId, destinationAId, 5)
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve: vi.fn(async () => resolved),
+      moveResource,
+    })
+    const { pushToast, queryClient } = renderTreeWithSession()
+
+    try {
+      const dialog = await openMoveDialog()
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+      await moveStarted
+      await expectMoveCloseLocked(dialog)
+
+      await act(async () => {
+        finishMove()
+        await moveGate
+      })
+
+      await waitFor(() =>
+        expect(vi.mocked(pushToast).mock.calls.map(([message]) => message)).toEqual([
+          'Moved report.txt to Archive A',
+        ])
+      )
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
+      )
     } finally {
       queryClient.clear()
     }
@@ -1129,9 +1475,8 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       mockAuthContext.me = { id: 'user-1', teamId: 'team-2' }
       rerender()
       await waitFor(() => expect(queryClient.getQueryData(newScopeAccessible)).toBeDefined())
-      await waitFor(() =>
-        expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
-      )
+      // A running Move cannot be recalled: its dialog stays until it settles.
+      expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBe(dialog)
       queryClient.setQueryData(oldScopeChildren, { marker: 'old team cache' })
       queryClient.setQueryData(newScopeChildren, { marker: 'new team cache' })
       await act(async () => {
@@ -1143,6 +1488,10 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
         expect(queryClient.getQueryState(oldScopeChildren)?.isInvalidated).toBe(true)
       )
       expect(queryClient.getQueryState(newScopeChildren)?.isInvalidated).toBe(false)
+      // The settled Move belongs to the old team: it closes without a result.
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
+      )
       expect(pushToast).not.toHaveBeenCalledWith('Moved report.txt to Archive A', 'success')
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
@@ -1150,7 +1499,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     }
   })
 
-  it('keeps captured cache convergence but suppresses Move presentation after tree unmount', async () => {
+  it('keeps captured cache convergence and presents the Move after the tree unmounts', async () => {
     let finishMove!: () => void
     let markMoveStarted!: () => void
     const moveStarted = new Promise<void>(resolve => {
@@ -1173,7 +1522,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       resolve: vi.fn(async () => resolved),
       moveResource,
     })
-    const { pushToast, queryClient, unmount } = renderTreeWithSession()
+    const { pushToast, queryClient, unmountTree } = renderTreeWithSession()
     const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main', 7)
     queryClient.setQueryData(oldScopeChildren, { marker: 'captured source cache' })
 
@@ -1182,7 +1531,10 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
       await moveStarted
-      unmount()
+      unmountTree()
+      expect(screen.queryByRole('tree', { name: 'Shared files' })).toBeNull()
+      // The dialog lives in the app-level host, not in the tree.
+      expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBe(dialog)
 
       await act(async () => {
         finishMove()
@@ -1191,7 +1543,9 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       await waitFor(() =>
         expect(queryClient.getQueryState(oldScopeChildren)?.isInvalidated).toBe(true)
       )
-      expect(pushToast).not.toHaveBeenCalledWith('Moved report.txt to Archive A', 'success')
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith('Moved report.txt to Archive A', 'success')
+      )
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
       queryClient.clear()
@@ -1337,7 +1691,8 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       resolve: vi.fn(async () => resolved),
       moveResource,
     })
-    const { pushToast } = renderTreeWithSession()
+    const { pushToast, queryClient } = renderTreeWithSession()
+    await seedMenuSourceParentBits(queryClient)
 
     const dialog = await openMoveDialog()
     await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
@@ -1407,7 +1762,8 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       resolve: vi.fn(async () => resolved),
       moveResource,
     })
-    renderTreeWithSession()
+    const { queryClient } = renderTreeWithSession()
+    await seedMenuSourceParentBits(queryClient)
 
     const dialog = await openMoveDialog()
     await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
@@ -2895,10 +3251,21 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     }
   })
 
-  it('Shift+F10 opens the existing Move dialog from the tree row', async () => {
+  it.each([
+    ['Shift+F10', { key: 'F10', shiftKey: true }],
+    ['the ContextMenu key', { key: 'ContextMenu' }],
+  ] as const)('%s opens the row resource menu, with Move inside it', async (_gesture, key) => {
     installDndClerum({
       listAccessible: vi.fn(async () =>
-        listAccessiblePage([accessibleResource('folder-a', 'A', 'directory')])
+        listAccessiblePage([
+          accessibleResource('folder-a', 'A', 'directory', {
+            parentResourceId: 'parent-p',
+            permissions: ['read'],
+          }),
+        ])
+      ),
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
       ),
     })
     renderTreeWithSession()
@@ -2908,12 +3275,12 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     expect(screen.queryByRole('button', { name: 'Move A to another folder' })).toBeNull()
 
     await act(async () => {
-      fireEvent.keyDown(await screen.findByRole('button', { name: 'A' }), {
-        key: 'F10',
-        shiftKey: true,
-      })
+      fireEvent.keyDown(await screen.findByRole('button', { name: 'A' }), key)
     })
-    expect(await screen.findByRole('dialog', { name: 'Move folder A' })).toBeTruthy()
+    const menu = await screen.findByRole('menu', { name: 'Actions for A' })
+    const move = await within(menu).findByRole('menuitem', { name: 'Move to' })
+    await waitFor(() => expect((move as HTMLButtonElement).disabled).toBe(false))
+    expect(screen.queryByRole('dialog', { name: 'Move folder A' })).toBeNull()
   })
 })
 

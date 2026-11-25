@@ -1,4 +1,5 @@
 import type { ModelSelectionWriteOutcome, ReapedSession } from '../../db/worker/protocol'
+import type { ApprovalMode } from '../approval/approvalMode'
 import {
   type Conversation,
   ConversationState,
@@ -6,6 +7,7 @@ import {
   type Turn,
   type TurnToolCall,
 } from '../types'
+import { type PendingApprovalSummary, summarizePendingApproval } from './pendingApprovalView'
 import { sessionPartsFromPrefixedKey, userIdFromRpcPrefix } from './sessionKeyParts'
 
 /**
@@ -31,7 +33,8 @@ export interface SessionTokenUsage {
  * the durable store project the sessionKey into indexable columns
  * (user_id, channel_type, channel_id, thread_id, source, team_id). All
  * fields are optional — the in-memory store ignores them; the SQLite store
- * derives any missing pieces from the sessionKey itself.
+ * derives any missing pieces from the sessionKey itself, except
+ * `channel_type`, which is written only from `channelType` (null when absent).
  */
 export interface GetOrCreateOptions {
   userId?: string
@@ -41,10 +44,16 @@ export interface GetOrCreateOptions {
   source?: string
   teamId?: string | null
   model?: string
+  /**
+   * Stored approval mode for a session this call creates. Ignored when the
+   * session is loaded from the store or already cached.
+   */
+  approvalMode?: ApprovalMode
 }
 
 export interface PersistedSessionListing {
   sessionKey: string
+  channelType?: string | null
   approval: PendingApproval
   taskId: string
   sourceMessage?: Record<string, unknown>
@@ -89,7 +98,7 @@ export interface ConversationSessionSummary {
   // U5 — includes the connect_required discriminator (reason/mcpServerName)
   // so the REST rejoin snapshot lets the desktop rebuild a "Connect <server>"
   // suspension, not a generic approval. Absent reason ⇒ generic approval.
-  pendingApproval?: Pick<PendingApproval, 'request_id' | 'tool_name' | 'reason' | 'mcpServerName'>
+  pendingApproval?: PendingApprovalSummary
   turnCount: number
   messageCount: number
   lastActivityAt: Date
@@ -100,6 +109,12 @@ export interface ConversationSessionSummary {
   cacheTokensReported?: boolean
   /** Server-authoritative session title (spec 15). `undefined` until turn 1. */
   title?: string
+  /** Stored `sessions.approval_mode`. Not the ceiling, cap, or effective mode. */
+  approvalMode?: ApprovalMode
+  /** Stored `sessions.channel_type`. Absent when the column is null. */
+  channelType?: string
+  /** Stored model selections, so a listing can resolve the classifier without a provider. */
+  modelSelections?: Record<string, string>
 }
 
 // NOTE (spec 15 debt): `ConversationSessionMessages` inherits `title?` from the
@@ -174,12 +189,7 @@ function sessionMessagesFromConversation(
     state: conversation.state,
     activeTaskId: conversation.activeTaskId,
     pendingApproval: conversation.pending_approval
-      ? {
-          request_id: conversation.pending_approval.request_id,
-          tool_name: conversation.pending_approval.tool_name,
-          reason: conversation.pending_approval.reason,
-          mcpServerName: conversation.pending_approval.mcpServerName,
-        }
+      ? summarizePendingApproval(conversation.pending_approval)
       : undefined,
     turns,
     totalTurns: conversation.turns.length,
@@ -190,6 +200,11 @@ function sessionMessagesFromConversation(
     cache_read_tokens: conversation.cache_read_tokens,
     cache_write_tokens: conversation.cache_write_tokens,
     cacheTokensReported: conversation.cacheTokensReported,
+    approvalMode: conversation.approval_mode,
+    ...(conversation.channel_type !== undefined ? { channelType: conversation.channel_type } : {}),
+    ...(conversation.modelSelections !== undefined
+      ? { modelSelections: conversation.modelSelections }
+      : {}),
   }
 }
 
@@ -344,6 +359,13 @@ export interface ConversationStore {
   ): Promise<ModelSelectionWriteOutcome> | ModelSelectionWriteOutcome
 
   /**
+   * Persist `sessions.approval_mode` and then mirror it on `conv`. SQLite
+   * awaits `enqueueSync` before the mirror changes. A failed write leaves the
+   * previous mode in place.
+   */
+  persistApprovalMode(conv: Conversation, mode: ApprovalMode): Promise<void>
+
+  /**
    * Spec 15 Fase B — persist a user rename (`sessions.title` overwrite). Async
    * (enqueued via the worker), keyed by sessionKey. In-memory stores no-op (the
    * title already lives on the Conversation object). Optional so legacy stores
@@ -438,12 +460,7 @@ export class InMemoryConversationStore implements ConversationStore {
         state: conversation.state,
         activeTaskId: conversation.activeTaskId,
         pendingApproval: conversation.pending_approval
-          ? {
-              request_id: conversation.pending_approval.request_id,
-              tool_name: conversation.pending_approval.tool_name,
-              reason: conversation.pending_approval.reason,
-              mcpServerName: conversation.pending_approval.mcpServerName,
-            }
+          ? summarizePendingApproval(conversation.pending_approval)
           : undefined,
         turnCount: conversation.turns.length,
         messageCount: conversation.turns.reduce(
@@ -458,6 +475,13 @@ export class InMemoryConversationStore implements ConversationStore {
         cacheTokensReported: conversation.cacheTokensReported,
         // Auto-title (spec 15) — hot/memory projection.
         title: conversation.title,
+        approvalMode: conversation.approval_mode,
+        ...(conversation.channel_type !== undefined
+          ? { channelType: conversation.channel_type }
+          : {}),
+        ...(conversation.modelSelections !== undefined
+          ? { modelSelections: conversation.modelSelections }
+          : {}),
       })
     }
 
@@ -557,6 +581,10 @@ export class InMemoryConversationStore implements ConversationStore {
       modelSelectionRevision: current + 1,
       modelSelections: { ...conv.modelSelections },
     }
+  }
+
+  async persistApprovalMode(conv: Conversation, mode: ApprovalMode): Promise<void> {
+    conv.approval_mode = mode
   }
 
   persistTitle(_conv: Conversation): void {

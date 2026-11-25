@@ -6,6 +6,7 @@
  *     -> Channel-level permission (telegram/email/slack/teams)
  *       -> Per-user approval permission
  */
+import type { ShellAction } from '../approval/shellCard'
 
 // ─── Approval Policy ───────────────────────────────────────
 
@@ -30,6 +31,13 @@ export type ApprovalPolicy = 'cli_only' | 'channel_users' | 'designated_approver
 export interface ChannelApprovalConfig {
   enabled: boolean
   approvers?: string[]
+  /**
+   * When true, that channel's cap is allow_all; false, or a non-boolean
+   * value, caps it at manual. Absent is true for telegram, slack and teams
+   * and false for email. rpc is always allow_all; every other channel is
+   * manual.
+   */
+  allowModeChange?: boolean
 }
 
 // ─── Approval Config ───────────────────────────────────────
@@ -50,6 +58,18 @@ export interface ApprovalConfig {
    * Out of scope for v1: MCP tools (gated separately by serverName__toolName).
    */
   tools?: Record<string, boolean>
+  /**
+   * Ceiling for a stored approval mode. Readers accept only manual, auto, and
+   * allow_all; an absent or any other value is manual.
+   */
+  modeCeiling?: string
+  /**
+   * Model the dedicated shell classifier calls when this Host's model
+   * provider is OpenAI. Absent or blank means gpt-5.5. A model the classifier
+   * does not allow shows the shell card. With any other provider, auto keeps
+   * judging shell with the model serving the turn.
+   */
+  shellClassifierModel?: string
 }
 
 // ─── Approval Decision ─────────────────────────────────────
@@ -65,6 +85,8 @@ export interface ApprovalDecision {
   alwaysApprove: boolean
   channelType?: string
   channelId?: string
+  /** Present only for an approve whose body named once, command, or shell. */
+  shellAction?: ShellAction
 }
 
 // ─── Approval Request (HTTP body) ──────────────────────────
@@ -78,4 +100,5 @@ export interface ApprovalRequest {
   alwaysApprove?: boolean
   channelType?: string
   channelId?: string
+  shellAction?: ShellAction
 }

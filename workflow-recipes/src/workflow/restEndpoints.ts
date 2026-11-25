@@ -4,7 +4,9 @@
 import * as k8s from '@kubernetes/client-node'
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import {
+  MAX_REPORTED_OUTPUT_ARTIFACTS,
   MAX_STATUS_TOOL_CALLS,
+  extractOutputArtifactsForStatus,
   normalizeArtifactForStatus,
   normalizeToolArgsForStatus,
   normalizeToolResultForStatus,
@@ -15,8 +17,16 @@ import type {
   WorkflowInfrastructureTelemetryProjection,
 } from '../governedTraceReporter'
 import { createLogger } from '../observability/logger'
-import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
+import {
+  CRD_GROUP,
+  CRD_VERSION,
+  RUN_AUTHORITY_BOUND,
+  RUN_AUTHORITY_LABEL,
+  WORKFLOWRECIPE_PLURAL,
+} from '../reconciler/crdConstants'
+import type { DbRunProcessor, WorkflowRunPhase } from '../reconciler/dbRunProcessor'
 import { getErrorCode } from '../reconciler/k8sErrors'
+import { classifyWorkflowRunStoreError } from '../reconciler/workflowRunStoreErrors'
 import { JwtTokenFactory } from './jwtTokenFactory'
 import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
@@ -29,19 +39,19 @@ import {
   buildMcpHostUrl as buildWorkflowMcpHostUrl,
 } from './resourceNames'
 import { drainSignals } from './signalStore'
-import { buildStatusOutputPreview } from './statusOutputPreview'
+import { buildStatusOutputPreview, outputCutByCoordinator } from './statusOutputPreview'
 import { StepPhase, WorkflowPhase, isTerminalStepPhase, isTerminalWorkflowPhase } from './types'
 import { type AuthenticatedRequest, CONTROL_API_ISSUER } from './workflowAuth'
 import { workflowStatusMessage } from './workflowStatusMessage'
 
 const log = createLogger('wrc', 'restEndpoints')
-const MAX_CUSTOM_ARTIFACTS_PER_STEP = 20
 const ARTIFACT_READER_NOT_FOUND_RETRY_DELAYS_MS = [250, 750, 1500, 3000, 5000, 8000]
 const MODEL_INJECTION_REQUEST_SCOPE = 'model_injection_request'
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
 
 type WorkflowEndpointHandlerOptions = {
   traceReporter?: GovernedTraceReporter | null
+  dbRunProcessor?: DbRunProcessor | null
 }
 
 type JsonPatchOperation = {
@@ -98,7 +108,9 @@ function recipePhaseForWorkflowPhase(
   phase: WorkflowPhase,
   currentPhase?: unknown
 ): 'active' | 'deploying' | 'failed' {
-  if (phase === 'running' || phase === 'completed') return 'active'
+  if (phase === 'running' || phase === 'authorization_paused' || phase === 'completed') {
+    return 'active'
+  }
   // WorkflowRecipe has no cancelled phase yet; expose cancelled runs as terminal.
   if (phase === 'failed' || phase === 'cancelled') return 'failed'
   // A new run may briefly report pending/initializing/recovering; keep already-active
@@ -158,7 +170,22 @@ function extractArtifactsFromStepStatus(body: StepStatusUpdate): ArtifactStatus[
     if (parsed) artifacts.push(parsed)
   }
 
-  artifacts.push(...extractCustomArtifacts(body.output))
+  if (!outputCutByCoordinator(body.output, body)) {
+    artifacts.push(...extractOutputArtifactsForStatus(body.output))
+    return artifacts
+  }
+
+  // The coordinator cut the output, so `output` is a prefix that may parse to
+  // artifacts the whole output does not declare. The coordinator sends the
+  // artifacts the whole output declared; they are handled like the ones WRC
+  // extracts from an uncut output.
+  if (Array.isArray(body.outputArtifacts)) {
+    for (const item of body.outputArtifacts.slice(0, MAX_REPORTED_OUTPUT_ARTIFACTS)) {
+      if (!isRecord(item)) continue
+      const artifact = normalizeArtifactForStatus(item)
+      if (artifact) artifacts.push(artifact)
+    }
+  }
   return artifacts
 }
 
@@ -167,38 +194,6 @@ function parseUnknownArtifactResult(result: unknown): ArtifactStatus | null {
     const parsed = typeof result === 'object' ? result : JSON.parse(String(result ?? '{}'))
     if (!isRecord(parsed) || parsed.success !== true || !isRecord(parsed.artifact)) return null
     return normalizeArtifactForStatus(parsed.artifact)
-  } catch {
-    return null
-  }
-}
-
-function extractCustomArtifacts(output: unknown): ArtifactStatus[] {
-  const parsedOutput = parseOutputRecord(output)
-  if (!parsedOutput) return []
-
-  const artifacts: ArtifactStatus[] = []
-  if (isRecord(parsedOutput.artifact)) {
-    const artifact = normalizeArtifactForStatus(parsedOutput.artifact)
-    if (artifact) artifacts.push(artifact)
-  }
-
-  if (Array.isArray(parsedOutput.artifacts)) {
-    for (const item of parsedOutput.artifacts.slice(0, MAX_CUSTOM_ARTIFACTS_PER_STEP)) {
-      if (!isRecord(item)) continue
-      const artifact = normalizeArtifactForStatus(item)
-      if (artifact) artifacts.push(artifact)
-    }
-  }
-
-  return artifacts
-}
-
-function parseOutputRecord(output: unknown): Record<string, unknown> | null {
-  if (isRecord(output)) return output
-  if (typeof output !== 'string') return null
-  try {
-    const parsed = JSON.parse(output)
-    return isRecord(parsed) ? parsed : null
   } catch {
     return null
   }
@@ -296,6 +291,17 @@ function workflowRunIdFromRecipe(recipe: unknown): string | undefined {
   }
   const runId = recipe.metadata.labels[WORKFLOW_RUN_ID_LABEL]
   return typeof runId === 'string' && runId.trim() ? runId : undefined
+}
+
+// True only for a child whose run carries an authority binding: the DB-run
+// child creator stamps the label from the run row (dbRunChildRecipeCreator.ts).
+// Any other value, or no label, is a V1 run, whose `running` reports are
+// decided by recipe status without reading the run store, as on dev.
+function recipeCarriesRunAuthority(recipe: unknown): boolean {
+  if (!isRecord(recipe) || !isRecord(recipe.metadata) || !isRecord(recipe.metadata.labels)) {
+    return false
+  }
+  return recipe.metadata.labels[RUN_AUTHORITY_LABEL] === RUN_AUTHORITY_BOUND
 }
 
 function validateRunIdClaim(
@@ -438,6 +444,9 @@ interface StepStatusUpdate {
   stepId: string
   phase: StepPhase
   output?: unknown
+  outputLength?: unknown
+  outputTruncated?: unknown
+  outputArtifacts?: unknown
   error?: string
   failureReason?: string
   executor?: 'agentic' | 'snippet' | 'custom'
@@ -565,6 +574,7 @@ export function createWorkflowEndpointHandlers(
 ) {
   const statusOutputPreviewMaxChars = loadConfig().workflowStepOutputPreviewMaxChars
   const traceReporter = options.traceReporter ?? null
+  const dbRunProcessor = options.dbRunProcessor ?? null
 
   async function readRecipe(recipeName: string, namespace: string): Promise<unknown | null> {
     try {
@@ -578,6 +588,143 @@ export function createWorkflowEndpointHandlers(
     } catch (err) {
       if (getErrorCode(err) === 404) return null
       throw err
+    }
+  }
+
+  /**
+   * Publish the durable authorization pause to the recipe status projection.
+   * `none` sends the merge patch the running boundary has always sent;
+   * `execution_phase_unchanged` sends a JSON patch guarded by a `test` op on
+   * the whole `workflowExecution` object read in `status`, so a concurrent
+   * status writer makes the patch fail instead of being overwritten.
+   */
+  async function publishAuthorizationPauseProjection(input: {
+    recipeName: string
+    namespace: string
+    runId: string
+    status: Record<string, unknown> | undefined
+    failureReason: string | null
+    precondition: 'none' | 'execution_phase_unchanged'
+  }): Promise<void> {
+    const { recipeName, namespace, runId, status, failureReason, precondition } = input
+    const existingExecution = status?.workflowExecution as Record<string, unknown> | undefined
+    const workflowPhase = existingExecution?.phase
+    if (
+      typeof workflowPhase === 'string' &&
+      isTerminalWorkflowPhase(workflowPhase as WorkflowPhase)
+    ) {
+      log.info('Recipe status already terminal; durable authorization pause not published', {
+        recipeName,
+        runId,
+        workflowPhase,
+      })
+      return
+    }
+
+    const phase = recipePhaseForWorkflowPhase('authorization_paused', status?.phase)
+    const workflowExecution = {
+      ...(existingExecution ?? {}),
+      phase: 'authorization_paused',
+      message: workflowStatusMessage('authorization_paused', failureReason ?? undefined),
+    }
+    try {
+      if (precondition === 'none') {
+        await customApi.patchNamespacedCustomObjectStatus(
+          {
+            group: CRD_GROUP,
+            version: CRD_VERSION,
+            namespace,
+            plural: WORKFLOWRECIPE_PLURAL,
+            name: recipeName,
+            body: { status: { phase, workflowExecution } },
+          },
+          {
+            middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
+          }
+        )
+      } else {
+        const patchOps: JsonPatchOperation[] = [
+          { op: 'test', path: '/status/workflowExecution', value: existingExecution },
+          {
+            op:
+              isRecord(status) && Object.prototype.hasOwnProperty.call(status, 'phase')
+                ? 'replace'
+                : 'add',
+            path: '/status/phase',
+            value: phase,
+          },
+          { op: 'replace', path: '/status/workflowExecution', value: workflowExecution },
+        ]
+        await customApi.patchNamespacedCustomObjectStatus(
+          {
+            group: CRD_GROUP,
+            version: CRD_VERSION,
+            namespace,
+            plural: WORKFLOWRECIPE_PLURAL,
+            name: recipeName,
+            body: patchOps,
+          },
+          { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/json-patch+json')] }
+        )
+      }
+    } catch (error) {
+      // `workflow_runs` is authoritative for the pause: it is committed before
+      // this patch, and the boundary, the status GET overlay for bound runs,
+      // resume and the run read services read it. This recipe status
+      // projection only feeds displays that read the recipe, so a failed
+      // publish is logged and the caller's answer does not change. The status
+      // GET re-publishes the projection while the paused coordinator polls it.
+      log.error('Failed to publish durable workflow authorization pause to recipe status', {
+        recipeName,
+        runId,
+        statusCode: getErrorCode(error),
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  async function checkpointWorkflowRunBoundary(
+    recipeName: string,
+    claims: AuthenticatedRequest['tokenClaims'],
+    recipe: Record<string, unknown>,
+    status: Record<string, unknown> | undefined
+  ): Promise<{ status: number; body: Record<string, unknown> } | null> {
+    if (!dbRunProcessor) return null
+    const runId = workflowRunIdFromRecipe(recipe)
+    if (!runId) return null
+    if (!recipeCarriesRunAuthority(recipe)) return null
+    const boundary = await dbRunProcessor.checkpointRunningBoundary(runId)
+    switch (boundary.outcome) {
+      case 'allowed':
+        return null
+      case 'not_running':
+        return { status: 409, body: { code: 'workflow_run_not_running' } }
+      case 'run_state_unavailable':
+        // The run store could not be reached, so there is no durable answer to
+        // give. The status client retries and the runtime waits before
+        // reporting again; the retry reads whatever the store committed.
+        return { status: 503, body: { code: 'workflow_run_state_unavailable' } }
+      case 'paused':
+        // The pause is already committed. Answering anything but 423 here
+        // would make the status client retry and then report `failed`, which
+        // moves a resumable `AuthorizationPaused` run to `Failed`
+        // (`UPDATE_RUN_TERMINAL`).
+        await publishAuthorizationPauseProjection({
+          recipeName,
+          namespace: claims.recipeNamespace,
+          runId,
+          status,
+          failureReason: boundary.failureReason,
+          precondition: 'none',
+        })
+        return { status: 423, body: { code: 'workflow_authorization_paused' } }
+      default: {
+        // Not reachable through the types. Thrown (500) rather than read as
+        // "allowed", so a caller returning another shape cannot let a report
+        // through without a durable decision.
+        const exhaustive: never = boundary
+        throw new Error(`Unexpected running boundary outcome: ${JSON.stringify(exhaustive)}`)
+      }
     }
   }
 
@@ -698,6 +845,15 @@ export function createWorkflowEndpointHandlers(
           | undefined
         const existingPhase = existingExecution?.phase
         const requestedPhase = wfBody.workflowPhase as WorkflowPhase
+        if (requestedPhase === 'running') {
+          const boundary = await checkpointWorkflowRunBoundary(
+            recipeName,
+            claims,
+            recipe as Record<string, unknown>,
+            existingStatus
+          )
+          if (boundary) return boundary
+        }
         const startsFreshExecution =
           requestedPhase === 'pending' ||
           requestedPhase === 'initializing' ||
@@ -818,6 +974,24 @@ export function createWorkflowEndpointHandlers(
           }
         }
 
+        if (body.phase === 'running') {
+          const boundary = await checkpointWorkflowRunBoundary(
+            recipeName,
+            claims,
+            recipe as Record<string, unknown>,
+            status
+          )
+          if (boundary) return boundary
+        }
+        // True only when the durable boundary ran and answered `allowed`: the
+        // boundary also returns null with no run processor, no run-id label or
+        // no run authority label.
+        const durablyAllowedRunning =
+          body.phase === 'running' &&
+          dbRunProcessor !== null &&
+          workflowRunIdFromRecipe(recipe) !== undefined &&
+          recipeCarriesRunAuthority(recipe)
+
         // Normalize failureReason → error (statusReporter.ts sends failureReason)
         const resolvedError = body.error ?? body.failureReason
         const normalizedToolsCalled = normalizeToolsCalledForStatus(body.toolsCalled)
@@ -826,7 +1000,10 @@ export function createWorkflowEndpointHandlers(
         }
         const outputPreview =
           body.output != null
-            ? buildStatusOutputPreview(body.output, statusOutputPreviewMaxChars)
+            ? buildStatusOutputPreview(body.output, statusOutputPreviewMaxChars, {
+                outputLength: body.outputLength,
+                outputTruncated: body.outputTruncated,
+              })
             : undefined
         if (
           body.approvalBindingSha256 !== undefined &&
@@ -976,6 +1153,41 @@ export function createWorkflowEndpointHandlers(
             },
           })
         }
+        // After a step-level resume the runtime re-sends this step's `running`
+        // report, and the durable boundary just answered `allowed` for it, so
+        // the run is no longer paused. Clear the pause projection in the same
+        // patch, guarded by a `test` on the execution object read in this
+        // attempt: a concurrent change to `workflowExecution` fails the whole
+        // patch, which the loop retries on a fresh read.
+        if (
+          durablyAllowedRunning &&
+          workflowPhase === undefined &&
+          isRecord(autoTransitionExecution) &&
+          autoTransitionExecution.phase === 'authorization_paused'
+        ) {
+          patchOps.push({
+            op: 'test',
+            path: '/status/workflowExecution',
+            value: autoTransitionExecution,
+          })
+          patchOps.push({
+            op:
+              isRecord(status) && Object.prototype.hasOwnProperty.call(status, 'phase')
+                ? 'replace'
+                : 'add',
+            path: '/status/phase',
+            value: recipePhaseForWorkflowPhase('running', status?.phase),
+          })
+          patchOps.push({
+            op: 'replace',
+            path: '/status/workflowExecution',
+            value: {
+              ...autoTransitionExecution,
+              phase: 'running',
+              message: workflowStatusMessage('running'),
+            },
+          })
+        }
 
         try {
           await customApi.patchNamespacedCustomObjectStatus(
@@ -1037,11 +1249,74 @@ export function createWorkflowEndpointHandlers(
         | undefined
       const execution = status?.workflowExecution as Record<string, unknown> | undefined
       const steps = (status?.steps ?? []) as Array<Record<string, unknown>>
+      const labelRunId = workflowRunIdFromRecipe(recipe)
+      const runId = labelRunId ?? claims.runId?.trim()
+      let workflowPhase = execution?.phase ?? 'pending'
+      let durable: Awaited<ReturnType<DbRunProcessor['getRunStatus']>> = null
+      if (dbRunProcessor && runId && recipeCarriesRunAuthority(recipe)) {
+        try {
+          durable = await dbRunProcessor.getRunStatus(runId, claims.recipeNamespace, recipeName)
+          if (durable?.hasAuthority) workflowPhase = workflowPhaseFromRunPhase(durable.phase)
+        } catch (error) {
+          // Only `workflowPhase` is taken from `workflow_runs`; `steps`,
+          // `attempt` and `startedAt` always come from the recipe status. The
+          // built-in runtime uses this phase only in the authorization pause
+          // wait: `running` makes it re-send its `running` report, which the
+          // durable boundary re-gates for a child carrying the run-authority
+          // label (423 while paused, 503 `workflow_run_state_unavailable` while
+          // the run store is unreachable), so a stale phase here cannot
+          // authorize an effect. The run store is read only for a child
+          // carrying the run-authority label, as at the running boundary; an
+          // unlabelled child (every V1 run) is answered from the recipe status
+          // without reading it. `readCurrentStatus` does not use the phase (#1413). Custom
+          // coordinators read the same answer; what they do with it is their
+          // code. The error message is not logged: a connection error carries
+          // the database address.
+          const code =
+            typeof error === 'object' && error !== null
+              ? (error as { code?: unknown }).code
+              : undefined
+          log.error('Failed to read durable workflow phase; using recipe status projection', {
+            recipeName,
+            runId,
+            name: error instanceof Error ? error.name : typeof error,
+            code: typeof code === 'string' ? code : undefined,
+            kind: classifyWorkflowRunStoreError(error),
+          })
+        }
+      }
+
+      // Re-publish a durable pause whose recipe projection is missing (its
+      // boundary patch failed). Only for a bound run whose DB row is paused,
+      // on the child recipe that carries the run-id label, for a caller that
+      // may write status, and never over a terminal or `recovering` phase.
+      // The response body does not change.
+      const executionPhase = execution?.phase
+      if (
+        dbRunProcessor &&
+        durable?.hasAuthority === true &&
+        durable.phase === 'AuthorizationPaused' &&
+        labelRunId !== undefined &&
+        claims.scopes.includes('status_write') &&
+        typeof executionPhase === 'string' &&
+        executionPhase !== 'authorization_paused' &&
+        executionPhase !== 'recovering' &&
+        !isTerminalWorkflowPhase(executionPhase as WorkflowPhase)
+      ) {
+        await publishAuthorizationPauseProjection({
+          recipeName,
+          namespace: claims.recipeNamespace,
+          runId: labelRunId,
+          status,
+          failureReason: durable.failureReason,
+          precondition: 'execution_phase_unchanged',
+        })
+      }
 
       return {
         status: 200,
         body: {
-          workflowPhase: execution?.phase ?? 'pending',
+          workflowPhase,
           steps,
           attempt: execution?.attempt ?? 0,
           startedAt: execution?.startedAt,
@@ -1549,5 +1824,22 @@ export function createWorkflowEndpointHandlers(
     async getRecipe(recipeName: string, namespace: string): Promise<unknown | null> {
       return readRecipe(recipeName, namespace)
     },
+  }
+}
+
+function workflowPhaseFromRunPhase(phase: WorkflowRunPhase): WorkflowPhase {
+  switch (phase) {
+    case 'Pending':
+      return 'pending'
+    case 'Running':
+      return 'running'
+    case 'AuthorizationPaused':
+      return 'authorization_paused'
+    case 'Succeeded':
+      return 'completed'
+    case 'Failed':
+      return 'failed'
+    case 'Canceled':
+      return 'cancelled'
   }
 }

@@ -61,6 +61,7 @@ import {
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { unavailableNavigation } from '@/gfs/__fixtures__/navigationResolutionFixtures'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { delegationAffordances } from '../../../src/gfs/delegation.js'
 import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
@@ -415,6 +416,9 @@ vi.mock('@components/Common', async () => {
     )
   })
   return {
+    ...(await import('@components/Common/PermissionStatusIndicator')),
+    // The composer's model and approval-mode chips render the real Pill span.
+    Pill: (await import('@components/Common/Pill')).Pill,
     StatusBanner: (props: { tone: string; text?: string; children?: ReactNode }) => (
       <div role="status" data-tone={props.tone}>
         {props.text ?? props.children}
@@ -1139,6 +1143,9 @@ describe('App deep-link orchestration', () => {
           clearPendingDeepLinks: clearPendingGfsDeepLinks,
           listPendingDeepLinks: listPendingGfsDeepLinks,
           resolve: resolveGfsResource,
+          // The drawer prefetches the active tab's file as a suggested reference;
+          // these tests are not about it, so the prefetch finds nothing.
+          resolveForNavigation: vi.fn((uri: string) => unavailableNavigation(uri)),
           onDeepLink: vi.fn((callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
             emitGfsDeepLink = callback
             return vi.fn()

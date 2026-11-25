@@ -10,6 +10,8 @@ import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interacti
 import type { LlmProviderId } from '@clerum/llm-providers'
 import type { IncomingMessage as HostIncomingMessage } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
+import type { ApprovalMode } from './approval/approvalMode'
+import type { ShellCardDescriptor } from './approval/shellCard'
 import type { AttachmentReadLedgerSnapshot } from './attachments/attachmentReadBudget'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
@@ -213,6 +215,8 @@ export type ResumeSourceMessage = Pick<
   | 'threadId'
   | 'imageModel'
   | 'fileReferenceResolutions'
+  | 'locationReferenceResolutions'
+  | 'authorityV2'
 > & {
   /** Only the team scope survives; the channel's raw payload is not persisted. */
   metadata?: { teamId: string }
@@ -374,6 +378,13 @@ export interface ToolResult {
    * model call is made. Later calls of the batch are answered without running.
    */
   stopTurn?: { message: string }
+  /**
+   * Set on a result a pending approval carries from an earlier batch of its
+   * turn: the approval's `context_snapshot` already holds this result's tool
+   * message, so a resume must not append it again. Tool-call ids cannot tell
+   * the batches apart, because some drivers restart them on every response.
+   */
+  answeredInSnapshot?: true
 }
 
 export interface ToolOutput {
@@ -486,6 +497,12 @@ export interface Conversation {
   pending_approval?: PendingApproval
   auto_approved_tools: Set<string>
   /**
+   * Exact tool names denied in this conversation → the user who denied each
+   * (null when unknown). Checked before any allowlist and persisted on
+   * `sessions.denied_tools`. Read and change it only through denialPolicy.
+   */
+  denials?: Map<string, string | null>
+  /**
    * Session-scoped tools (SESSION_SCOPED_APPROVAL_TOOLS) approved without
    * "always" during the current task. Every later call of the task proceeds,
    * including after resumes; `startTurn` clears it when the next user message
@@ -591,6 +608,28 @@ export interface Conversation {
    * ⇔ the row has not been read yet; the durable default is 0.
    */
   modelSelectionRevision?: number
+  /**
+   * Stored approval mode (`sessions.approval_mode`, migration 019). Unknown
+   * or missing values read as `manual`. This is the stored choice, not the
+   * effective mode.
+   */
+  approval_mode: ApprovalMode
+  /**
+   * Channel type loaded from `sessions.channel_type`. Set at creation from
+   * the caller's `channelType`, never from the parsed session key. Absent
+   * when the column is null.
+   */
+  channel_type?: string
+  /**
+   * Last effective mode applied to this in-memory session. Unset until the
+   * first sync. Not persisted.
+   */
+  last_effective_approval_mode?: ApprovalMode
+  /**
+   * Auto-mode shell grants for this chat. Memory only: a cold reconstruct
+   * starts with `wholeTool: false` and an empty command set.
+   */
+  auto_shell_grants: { wholeTool: boolean; commands: Set<string> }
 }
 
 /**
@@ -702,9 +741,13 @@ export interface PendingApproval {
   /** Set only by reconstruction of migration-marked legacy rows. */
   legacy_budget?: boolean
   /**
-   * Consent expansion. New ordinary approvals use `turn_tools`; high-risk
-   * exact-call paths use `exact_invocation`. Legacy NULL rows are treated as
-   * exact because their original expansion cannot be proven.
+   * Durable grant scope of this request (pending_approvals.authorization_scope).
+   * `turn_tools` (the name is historical) marks an ordinary card: approving it
+   * may store the tool's exact name (Always approve) or a per-task approval for
+   * a session-scoped tool, never anything turn-wide. `exact_invocation` (forced
+   * gates, denial re-asks, guardrail and live-tool cards) authorizes only the
+   * call it shows. Legacy NULL rows are treated as exact. Every view derives
+   * "Always approve" eligibility from this field (pendingApprovalView).
    */
   authorization_scope?: 'turn_tools' | 'exact_invocation'
   /** Internal atomic replacement instruction; not persisted in the snapshot. */
@@ -747,6 +790,18 @@ export interface PendingApproval {
   reason?: 'approval_required' | 'connect_required'
   /** U5 — the oauth mcp-server to connect. Set iff reason==='connect_required'. */
   mcpServerName?: string
+  /**
+   * Why this card asks again: 'denied' = this exact tool was denied in the
+   * chat; 'denials_active' = the tool can start other tools (workflow_trigger,
+   * cron_manage create/enable/trigger) while a denial is active. Live only, not
+   * persisted.
+   */
+  reask?: 'denied' | 'denials_active'
+  /**
+   * Shell card projection. Absent after a restart; that card is answered as once.
+   * Not a database column.
+   */
+  shellCard?: ShellCardDescriptor
 }
 
 // ─── Loop Types ─────────────────────────────────────────────

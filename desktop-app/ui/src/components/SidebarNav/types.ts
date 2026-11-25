@@ -27,5 +27,9 @@ export type SidebarNavProps = {
   onOpenPreviewSection: (preview: GfsPreviewResource) => void
   /** Transient feedback for the file explorer's download fallback. */
   pushToast: (message: string, tone: Tone) => void
+  /** The file explorer's expanded, rendered folders as gfs:// URIs, in screen order. */
+  onVisibleExpandedFoldersChange?: (gfsUris: string[]) => void
+  /** Open-state report of the file explorer's resource menu (it covers the native app view). */
+  onGfsMenuOpenChange?: (open: boolean) => void
   toggleRequestId?: number
 }

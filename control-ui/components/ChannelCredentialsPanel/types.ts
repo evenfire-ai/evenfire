@@ -48,6 +48,7 @@ export type ChannelCredentialsPanelProps = {
    *  CC create call in the same request (the control-api handler atomically
    *  creates Secret + CC). */
   pending?: boolean
+  requiredKeys?: CredentialKey[]
   /** Called whenever the draft changes in `pending` mode. The parent stores
    *  the buffer and forwards it as a `credentials` block on the CC POST. */
   onPendingChange?: (creds: CredentialDraft) => void

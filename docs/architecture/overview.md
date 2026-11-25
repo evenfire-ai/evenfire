@@ -1434,11 +1434,11 @@ The chart contains:
 
 ### Docker Images
 
-All services use multi-stage builds with `node:24.22.1-alpine`:
+All services use multi-stage builds with `node:24.22.3-alpine`:
 
 ```dockerfile
 # Stage 1: Build
-FROM node:24.22.1-alpine AS builder
+FROM node:24.22.3-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -1446,7 +1446,7 @@ COPY tsconfig.json src/ ./
 RUN npm run build
 
 # Stage 2: Runtime
-FROM node:24.22.1-alpine
+FROM node:24.22.3-alpine
 WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY package*.json ./
@@ -1464,7 +1464,7 @@ Default: `your-registry.example.com/evenfire/`
 | Service                     | Requests            | Limits              |
 | --------------------------- | ------------------- | ------------------- |
 | **channel-reader**          | 50m CPU, 128Mi RAM  | 200m CPU, 256Mi RAM |
-| **mcp-host**                | 100m CPU, 128Mi RAM | 500m CPU, 512Mi RAM |
+| **mcp-host**                | 100m CPU, 128Mi RAM | 500m CPU, 2Gi RAM   |
 | **host-context-controller** | 50m CPU, 64Mi RAM   | 200m CPU, 128Mi RAM |
 | **MCP servers**             | 100m CPU, 128Mi RAM | 500m CPU, 256Mi RAM |
 
@@ -1677,28 +1677,41 @@ All three calls carry the `x-clerum-edge-*` caller headers (`x-clerum-edge-calle
 
 **CLI fallback**: Direct `POST /v1/runtime/approvals/approve` and `POST /v1/runtime/approvals/deny` to mcp-host still works for scripts and admin UIs, provided the caller supplies the same `x-clerum-edge-*` headers.
 
-### Per-Server Auto-Approval
+### Per-tool approval
 
-Approving any MCP tool automatically approves **all tools from the same MCP server** for the rest of the conversation. The MCP server prefix (e.g., `airtable-server` from `airtable-server__list_bases`) is stored in the conversation's `auto_approved_tools` set.
+The approval mode changes which of the cards below appear. `cron_manage` follows the `manual` rules below in every mode. For every other tool, the grant rules (what a plain approval and **Always approve** store, and the `turn_tools` scope of an ordinary card) apply only in `manual`: outside manual, approving a card stores no task or **Always approve** grant. The denial rules (a denied tool asks again, and while a denial is active so do tools that start other tools) apply in `manual` and `auto`. In `auto`, a denial re-ask, a tool an admin forces with `spec.approval.tools.<tool>: true`, and a guardrail `ask` each show a card for that one call. Otherwise the shell classifier judges `shell_exec` and a command it does not approve shows the shell card, `http_request` runs with no card, and every other gated tool shows its card. In `allow_all`, a call the approval gate would hold runs with no approval card, including a tool the user denied and a tool an admin forces; a guardrail `ask` still shows its card. A denial stays recorded and applies again when the mode drops. An OAuth connect card shows in every mode: it comes from the tool's result after the call runs, not from the approval gate. See [Configure approvals](../how-to/configure-approvals.md#approval-modes).
 
-| Scenario                                                  | Approvals Required                         |
-| --------------------------------------------------------- | ------------------------------------------ |
-| LLM calls 3 tools from `airtable-server`                  | 1 (first tool prompts, rest auto-approved) |
-| LLM calls tools from `airtable-server` + `mongodb-server` | 2 (one per server)                         |
-| Native tools (no `__` in name)                            | Per-tool (unchanged)                       |
-| `shell_exec` called 5 times, then `http_request`          | 2 (one per tool, for the rest of the task) |
+Approving a tool runs that call only. It does not allowlist the rest of the turn or every tool on the same MCP server. A later call, including the same tool with different arguments, asks again.
 
-`shell_exec`, `http_request` and `cron_manage` (`SESSION_SCOPED_APPROVAL_TOOLS` in `approvalController.ts`) are approved per tool. A plain approval covers that tool for the rest of the current task, including every later iteration and the resume after another tool's approval card; the next user message starts a new task and asks again. An "always" approval covers the tool in later tasks while the conversation stays in memory. Approving one stores only its own name, never the turn-wide `'*'`, and a `'*'` granted by another approval does not cover them. A Host restart or cold resume asks again. A guardrail `ask` approval authorizes only that exact call.
+`/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. It never waives a forced gate: the stateless `cron_manage` create/enable card, a denial re-ask, and an OAuth connect card run the call once and allowlist nothing. Desktop hides the button on those cards. Slack, Telegram, and Teams do the same when the Host sets `alwaysApproveAllowed` to false.
 
-On a stateless Host that allows cron management, `cron_manage` `create` and `enable` ask on every call. The card has `exact_invocation` scope: approving it runs only that call and stores nothing, and no stored approval (`'*'`, a per-task or "always" `cron_manage` approval, a server prefix) covers such a call. Other `cron_manage` actions follow the per-task rule above.
+`/deny` records that exact tool name and revokes an earlier **Always approve** for it. The denial stays in effect until the user who denied it approves that tool, including after the host restarts. An approval timeout records no denial.
+
+Denials apply to calls made in that conversation only. A workflow triggered from it does not inherit them; its steps follow the workflow's own tool scoping. So while any denial is active, tools that can start other tools out of sight ask again on every call, even when allowlisted: `workflow_trigger`, and `cron_manage` with `create`, `enable` or `trigger`. Autonomous cron runs keep their own narrow gate and do not consult chat denials.
+
+| Scenario                                                                            | Approvals required                         |
+| ----------------------------------------------------------------------------------- | ------------------------------------------ |
+| LLM calls 3 tools from `airtable-server`                                            | 3 (one card per call)                      |
+| LLM calls tools from `airtable-server` + `mongodb-server`                           | One card per call                          |
+| Same tool after **Always approve**                                                  | Later calls of that exact name proceed     |
+| Same tool after **Deny**                                                            | Asks again until that tool is approved     |
+| `shell_exec` called 5 times, then `http_request`                                    | 2 (one per tool, for the rest of the task) |
+| `workflow_trigger` / `cron_manage` create, enable, trigger while a denial is active | Asks on every call                         |
+
+`shell_exec`, `http_request` and `cron_manage` (`SESSION_SCOPED_APPROVAL_TOOLS` in `approvalController.ts`) are approved per tool. A plain approval of one of them covers that tool for the rest of the current task, including every later iteration and the resume after another tool's approval card; the next user message starts a new task and asks again. **Always approve** covers it in later tasks while the conversation stays in memory. A Host restart or cold resume asks again.
+
+Every pending approval carries a durable `authorization_scope`. An ordinary card is `turn_tools` and may store the grants above; it grants nothing turn-wide. Forced cards (stateless `cron_manage` `create`/`enable`), denial re-asks, guardrail `ask` cards, live-tool cards, and OAuth connect cards are `exact_invocation`: approving runs only that call and stores nothing, also after a Host restart. Rows written before the column existed are treated as `exact_invocation`. Desktop, Slack, Telegram, and Teams hide **Always approve** on those cards.
 
 **Channel commands:**
 
-| Command           | Behavior                                                       |
-| ----------------- | -------------------------------------------------------------- |
-| `/approve`        | Approve tool + auto-approve all tools from the same MCP server |
-| `/approve always` | Same as `/approve` + stores the individual tool name           |
-| `/deny`           | Deny the specific tool call                                    |
+| Command                | Behavior                                                                                                                               |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/approve`             | Run the approved call only                                                                                                             |
+| `/approve always`      | On an ordinary card, run the call and allowlist that exact tool name. On an exact-invocation card, run the call once and store nothing |
+| `/deny`                | Cancel the call, block that tool name until approved, and revoke its Always approve                                                    |
+| `approval-mode <mode>` | Set this conversation's approval mode to `manual`, `auto` or `allow-all`                                                               |
+
+`approval-mode <mode>` works on Telegram, Slack, Teams and email. The whole message must be the command, in any letter case; for email, the subject and body together. Lowering the mode always works. With the channel's `allowModeChange` off, the command stores `manual`. Under an explicit `defaultPolicy` of `cli_only` or `designated_approvers`, a raise from a sender the policy does not allow leaves the stored mode unchanged, and a session whose owner the policy does not allow runs as `manual` whatever it stored, including after a later change to `defaultPolicy` or `approvers`. The reply gives the stored and the effective mode.
 
 ### Architecture Components
 
@@ -1733,7 +1746,7 @@ Then in Telegram:
 1. Send a message that triggers a tool requiring approval
 2. Bot sends notification: "Tool X requires approval. Reply /approve or /deny"
 3. Reply `/approve` — bot responds with the tool execution result
-4. Subsequent tools from the same MCP server are auto-approved
+4. Later calls still ask, unless the approval was `/approve always` for that exact tool
 
 **Option 2: CLI-based approval (for scripts/debugging)**
 

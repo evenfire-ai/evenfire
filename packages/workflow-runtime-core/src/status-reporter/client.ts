@@ -1,9 +1,10 @@
 import type { StepPhase, WorkflowPhase } from '../config-loader/types'
+import { WorkflowAuthorizationPausedError, WorkflowRunStateUnavailableError } from '../errors'
 import type { RuntimeTokenProvider } from '../runtime-token-provider/provider'
 import { requireRuntimeToken } from '../runtime-token-provider/provider'
 import { sendWithAuthRetryOn401 } from './authRetry'
 import { emitLog } from './logger'
-import { boundToolsCalledForStatus } from './toolCallStatus'
+import { STATUS_REPORT_MAX_BYTES, boundStepStatusBody } from './outputStatus'
 
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY_MS = 200
@@ -30,9 +31,17 @@ export class StatusReporter {
   private async report(path: string, body: Record<string, unknown>, label: string): Promise<void> {
     const payload = JSON.stringify(body)
     const bodyBytes = Buffer.byteLength(payload)
+    if (bodyBytes > STATUS_REPORT_MAX_BYTES) {
+      // Structural fields only; WRC decides whether to accept the body.
+      emitLog('warn', 'Status report exceeds the size ceiling', { label, bodyBytes })
+    }
     let lastErr: Error | undefined
+    // True only when the latest attempt was answered 503 with the run-store code;
+    // the last attempt decides which error the caller receives.
+    let lastAttemptRunStateUnavailable = false
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      lastAttemptRunStateUnavailable = false
       try {
         const resp = await sendWithAuthRetryOn401(
           async () =>
@@ -61,6 +70,10 @@ export class StatusReporter {
           return
         }
 
+        if (resp.status === 423 && responseHasAuthorizationPauseCode(responseText)) {
+          throw new WorkflowAuthorizationPausedError()
+        }
+
         // 4xx = permanent client error, don't retry. This must be fatal because
         // otherwise the coordinator can mark a workflow completed while step status
         // patches were rejected.
@@ -77,9 +90,16 @@ export class StatusReporter {
             `WRC rejected ${label} with HTTP ${resp.status}${reason ? `: ${reason}` : ''}`
           )
         }
+        // WRC could not reach its run store to checkpoint a running boundary.
+        // Retried like any 5xx; recorded so the final error can say so.
+        if (resp.status === 503 && responseHasRunStateUnavailableCode(responseText)) {
+          lastAttemptRunStateUnavailable = true
+        }
         lastErr = new Error(`HTTP ${resp.status}`)
       } catch (err) {
+        lastAttemptRunStateUnavailable = false
         lastErr = err instanceof Error ? err : new Error(String(err))
+        if (lastErr instanceof WorkflowAuthorizationPausedError) throw lastErr
         if (lastErr.message.startsWith('WRC rejected')) throw lastErr
       }
       if (attempt < MAX_RETRIES - 1) {
@@ -94,6 +114,7 @@ export class StatusReporter {
     const detail = cause ? `${lastErr?.message} (${cause})` : lastErr?.message
     const message = `Failed to report ${label} after ${MAX_RETRIES} attempts: ${detail}`
     emitLog('warn', message, { label, bodyBytes, ...(cause && { cause }) })
+    if (lastAttemptRunStateUnavailable) throw new WorkflowRunStateUnavailableError(message)
     throw new Error(message)
   }
 
@@ -113,8 +134,7 @@ export class StatusReporter {
       approvalBindingSha256?: string
     }
   ): Promise<void> {
-    const body: Record<string, unknown> = { stepId, phase, ...meta }
-    if (meta?.toolsCalled) body.toolsCalled = boundToolsCalledForStatus(meta.toolsCalled)
+    const body = boundStepStatusBody({ stepId, phase, ...meta })
     await this.report('/status', body, 'step status')
   }
 
@@ -156,6 +176,23 @@ async function readResponseText(resp: Response): Promise<string> {
   } catch {
     return ''
   }
+}
+
+/** WRC's `{ code }` on an error answer, read from the text already consumed. */
+function responseErrorCode(responseText: string): unknown {
+  try {
+    return (JSON.parse(responseText) as { code?: unknown } | null)?.code
+  } catch {
+    return undefined
+  }
+}
+
+function responseHasAuthorizationPauseCode(responseText: string): boolean {
+  return responseErrorCode(responseText) === 'workflow_authorization_paused'
+}
+
+function responseHasRunStateUnavailableCode(responseText: string): boolean {
+  return responseErrorCode(responseText) === 'workflow_run_state_unavailable'
 }
 
 const MAX_ERROR_REASON_CHARS = 200

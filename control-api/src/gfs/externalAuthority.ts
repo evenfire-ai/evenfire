@@ -1,5 +1,10 @@
 import type { NextFunction, Request, Response } from 'express'
-import { type GfsPathBinding, type GfsScope, signGfsToken } from '../auth/gfsToken.js'
+import {
+  type FilesystemActionAuthorityV2,
+  type GfsPathBinding,
+  type GfsScope,
+  signGfsToken,
+} from '../auth/gfsToken.js'
 import { config } from '../config.js'
 import { withTransaction } from '../db.js'
 import type { ExternalSessionAuthentication } from '../services/auth/externalSessionAuthentication.js'
@@ -35,7 +40,7 @@ export type ExternalGfsLinkedAdminAuthority = {
 
 export type ExternalGfsAuthority = ExternalGfsUserAuthority | ExternalGfsLinkedAdminAuthority
 
-type AuthenticatedExternalSession = Extract<
+export type AuthenticatedExternalSession = Extract<
   ExternalSessionAuthentication,
   { status: 'authenticated' }
 >
@@ -45,6 +50,7 @@ export type ExternalGfsUserTokenInput = Readonly<{
   drive: string
   scopes: readonly GfsScope[]
   pathBindings?: readonly GfsPathBinding[]
+  actionAuthority?: FilesystemActionAuthorityV2
 }>
 
 /**
@@ -166,6 +172,9 @@ export async function signCurrentExternalGfsUserToken(
           drive: input.drive,
           scopes: input.scopes,
           ...(input.pathBindings === undefined ? {} : { pathBindings: input.pathBindings }),
+          ...(input.actionAuthority === undefined
+            ? {}
+            : { actionAuthority: input.actionAuthority }),
           authGeneration: generation,
           principalType: 'user',
         })
@@ -306,25 +315,39 @@ export type RequestWithExternalGfsAuthority = Request & {
   gfsAuthority?: ExternalGfsAuthority
 }
 
+/**
+ * The GFS authority of an authenticated session. A user-session authority
+ * carries the generation of the session itself (`authorityContext`), never one
+ * re-read from request claims: gfsc denies a user token without it. A V2
+ * session has no V1-style generation, so its authority carries none and its
+ * tokens take the generation from the row they are minted against.
+ */
+export async function resolveExternalGfsAuthorityForSession(
+  authentication: AuthenticatedExternalSession
+): Promise<ExternalGfsAuthority> {
+  const context = authentication.authorityContext
+  const authority = await resolveExternalGfsAuthority(context.userId)
+  if (authority.kind === 'user-session' && context.contract === 'v1') {
+    authority.authGeneration = context.authGeneration
+  }
+  return authority
+}
+
 export async function attachExternalGfsAuthority(
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  const desktopUserId = (req as Request & { externalAuth?: { userId?: string } }).externalAuth
-    ?.userId
-  if (!desktopUserId) {
+  const authentication = (
+    req as Request & { externalSessionAuthentication?: ExternalSessionAuthentication }
+  ).externalSessionAuthentication
+  if (authentication?.status !== 'authenticated') {
     res.status(401).json({ error: 'unauthenticated' })
     return
   }
   try {
-    const authority = await resolveExternalGfsAuthority(desktopUserId)
-    if (authority.kind === 'user-session') {
-      const generation = (req as Request & { externalAuth?: { authGeneration?: number } })
-        .externalAuth?.authGeneration
-      if (generation !== undefined) authority.authGeneration = generation
-    }
-    ;(req as RequestWithExternalGfsAuthority).gfsAuthority = authority
+    ;(req as RequestWithExternalGfsAuthority).gfsAuthority =
+      await resolveExternalGfsAuthorityForSession(authentication)
     next()
   } catch (error) {
     if (error instanceof ExternalGfsAuthorityError) {

@@ -33,7 +33,7 @@ it.each(['chat-1', 'chat-2'])(
       controller.result.current.setPendingChatSelection('agent-x', destination, {
         deferSwitch: true,
       })
-      controller.rerender({ navItem: DESKTOP_ROUTES.apps })
+      controller.rerender({ navItem: DESKTOP_ROUTES.chat })
     })
     await waitFor(() => {
       expect(controller.result.current.chatMessages).toEqual([

@@ -420,6 +420,41 @@ export function updateSlackTargetMessage(
   ) as Promise<SlackTargetMessageResult>
 }
 
+/**
+ * Posts a new plain-text Teams message through control-api. control-api decides
+ * from the channel's reply-in-threads setting whether it replies to the card
+ * (`replyToId`, in `threadConversationId`) or posts at the top level of
+ * `conversationId`.
+ */
+export function sendTeamsTargetMessage(
+  cfg: ReaderConfig,
+  params: {
+    targetId: string
+    conversationId: string
+    threadConversationId?: string | null
+    replyToId?: string | null
+    serviceUrl: string
+    text: string
+  }
+): Promise<TeamsTargetMessageResult> {
+  return postProviderTargetProxy(
+    cfg,
+    'teams',
+    `/api/v1/internal/workflow-approval-reader/teams-targets/${encodeURIComponent(
+      params.targetId
+    )}/send-message`,
+    {
+      conversationId: params.conversationId,
+      ...(params.threadConversationId
+        ? { threadConversationId: params.threadConversationId }
+        : {}),
+      ...(params.replyToId ? { replyToId: params.replyToId } : {}),
+      serviceUrl: params.serviceUrl,
+      text: params.text,
+    }
+  ) as Promise<TeamsTargetMessageResult>
+}
+
 export function updateTeamsTargetMessage(
   cfg: ReaderConfig,
   params: {

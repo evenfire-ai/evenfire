@@ -6,11 +6,17 @@ import { parseTaskExecutionBudget } from '../../../agent/taskExecutionBudget'
  * shape groups messages by `turn_number` to mirror `ConversationManager`'s
  * `Turn[]` representation.
  *
- * Anything ephemeral (`auto_approved_tools`, `compactionState`) is set to
- * empty defaults — by design (see T2.1 §11.3 and `aclaraciones/sqlite-persistence.md`).
+ * Anything ephemeral (`auto_approved_tools`, `auto_shell_grants`,
+ * `last_effective_approval_mode`, `compactionState`) is set to empty defaults —
+ * by design (see T2.1 §11.3 and `aclaraciones/sqlite-persistence.md`).
+ * `denied_tools` is durable (migration 018) and is rehydrated from the session row.
+ * `approval_mode` is durable (migration 019). An unknown stored value reads as
+ * `manual`. `channel_type` is loaded from the column.
  */
 import type { MessageRow, PendingApprovalRow, PersistedSession } from '../../../db/worker/protocol'
 import { deserializeCompletedResults } from '../../../db/worker/protocol'
+import { logger } from '../../../logger'
+import { normalizeApprovalMode } from '../../approval/approvalMode'
 import type {
   ChatMessage,
   Conversation,
@@ -21,6 +27,7 @@ import type {
   TurnToolCall,
 } from '../../types'
 import { ConversationState, isTraceContextV1 } from '../../types'
+import { parseDenials } from '../denialPolicy'
 
 function parseTraceContext(raw: string | null | undefined): TraceContextV1 | null {
   if (!raw) return null
@@ -72,6 +79,17 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     turns,
     pending_approval: pending,
     auto_approved_tools: new Set(),
+    approval_mode: normalizeApprovalMode(persisted.session.approval_mode),
+    ...(persisted.session.channel_type != null
+      ? { channel_type: persisted.session.channel_type }
+      : {}),
+    auto_shell_grants: { wholeTool: false, commands: new Set() },
+    denials: parseDenials(persisted.session.denied_tools, () =>
+      logger.error(
+        { event: 'denied_tools_unreadable', sessionId: persisted.session.id },
+        'Persisted tool denials could not be read'
+      )
+    ),
     created_at: startedAt,
     updated_at: lastActivityAt,
     // D.1 — repopulate the in-flight task from the durable column. After a pod
@@ -129,7 +147,7 @@ function normalizeModelSelectionRevision(raw: number | null | undefined): number
  * string values survive, so a corrupted row can never inject a non-string model
  * into the resolver.
  */
-function parseModelSelections(raw: string | null): Record<string, string> | undefined {
+export function parseModelSelections(raw: string | null): Record<string, string> | undefined {
   if (!raw) return undefined
   try {
     const parsed = JSON.parse(raw) as unknown
@@ -157,7 +175,7 @@ export function normalizeConnectReason(
   return raw === 'connect_required' ? 'connect_required' : undefined
 }
 
-function normalizeAuthorizationScope(
+export function normalizeAuthorizationScope(
   raw: string | null | undefined
 ): PendingApproval['authorization_scope'] {
   if (raw === null || raw === undefined) return undefined

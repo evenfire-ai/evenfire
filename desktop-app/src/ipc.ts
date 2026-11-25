@@ -11,7 +11,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import { parseFileReferenceV1, parseLocationReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { AppService } from './appService.js'
 import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
@@ -19,8 +19,10 @@ import {
   requireChatStore,
   requireChatStoreForBindingGeneration,
 } from './chatStoreBinding.js'
+import { externalUrlToOpen } from './externalUrl.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import type { GfsWatchClient, GfsWatchOwner } from './gfs/watchClient.js'
 import {
   abortZipJob,
   appendZipEntry,
@@ -41,7 +43,6 @@ import {
   type ChatDeleteFence,
   type DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfig,
-  EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
   HostActivityStreamEvent,
   HostMessageAttachment,
@@ -390,23 +391,49 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   if (parsed.attachments != null) {
     parsed.attachments = parseHostMessageAttachments(parsed.attachments)
   }
-  if (parsed.fileReferences !== undefined) {
-    // Checks shape only; mcp-host enforces the count limit and resolves each reference.
-    if (!Array.isArray(parsed.fileReferences)) {
-      throw new Error('Invalid host message request: fileReferences')
-    }
-    const fileReferences = parsed.fileReferences.map((entry, index) => {
-      const result = parseFileReferenceV1(entry)
-      if (!result.ok) {
-        throw new Error(
-          `Invalid host message request: fileReferences[${index}] ${result.code}: ${result.message}`
-        )
-      }
-      return result.value
-    })
-    return { ...parsed, fileReferences }
+  if (
+    parsed.approvalMode !== undefined &&
+    parsed.approvalMode !== 'manual' &&
+    parsed.approvalMode !== 'auto' &&
+    parsed.approvalMode !== 'allow_all'
+  ) {
+    throw new Error('Invalid host message request: approvalMode')
   }
-  return parsed
+  // Both reference lists are checked for shape only; mcp-host enforces the count
+  // limits and resolves each reference.
+  const fileReferences = parseReferenceList(
+    parsed.fileReferences,
+    'fileReferences',
+    parseFileReferenceV1
+  )
+  const locationReferences = parseReferenceList(
+    parsed.locationReferences,
+    'locationReferences',
+    parseLocationReferenceV1
+  )
+  return {
+    ...parsed,
+    ...(fileReferences === undefined ? {} : { fileReferences }),
+    ...(locationReferences === undefined ? {} : { locationReferences }),
+  }
+}
+
+function parseReferenceList<T>(
+  value: unknown,
+  field: string,
+  parse: (entry: unknown) => { ok: true; value: T } | { ok: false; code: string; message: string }
+): T[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new Error(`Invalid host message request: ${field}`)
+  return value.map((entry, index) => {
+    const result = parse(entry)
+    if (!result.ok) {
+      throw new Error(
+        `Invalid host message request: ${field}[${index}] ${result.code}: ${result.message}`
+      )
+    }
+    return result.value
+  })
 }
 
 export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {
@@ -417,6 +444,85 @@ export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): v
   if (!isFileSender && !isDevSender) {
     throw new Error('Untrusted IPC sender')
   }
+}
+
+/**
+ * Electron throws while a frame is being disposed (e.g. inside
+ * `render-process-gone`), so every read of a frame token goes through here.
+ */
+function frameTokenOf(webContents: Electron.WebContents): string | null {
+  try {
+    const token = webContents.mainFrame.frameToken
+    return typeof token === 'string' ? token : null
+  } catch {
+    return null
+  }
+}
+
+function senderFrameTokenOf(event: IpcMainInvokeEvent): string | null {
+  try {
+    const token = event.senderFrame?.frameToken
+    return typeof token === 'string' ? token : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The GFS watch IPC. The owner is the sending `webContents`, never a value of
+ * the payload; the document inside it is identified by Electron's main-frame
+ * token, which changes on every navigation, so a late IPC of a previous
+ * document or one from a subframe is dropped by the client.
+ */
+export function registerGfsWatchIpcHandlers(client: GfsWatchClient): void {
+  const lifecycleInstalled = new Set<number>()
+
+  const ownerOf = (webContents: Electron.WebContents): GfsWatchOwner => ({
+    id: webContents.id,
+    isDestroyed: () => webContents.isDestroyed(),
+    mainFrameToken: () => frameTokenOf(webContents),
+    send: event => webContents.send('gfsWatch:event', event),
+  })
+
+  // Installed once per webContents and removed only when it is destroyed: the
+  // owner outlives navigations, so removing them on the first navigation would
+  // leave a dead owner holding its keys after the window closes.
+  const installLifecycle = (webContents: Electron.WebContents) => {
+    const id = webContents.id
+    if (lifecycleInstalled.has(id)) return
+    lifecycleInstalled.add(id)
+    // `did-navigate` fires only for a committed main-frame navigation, which is
+    // exactly when the document (and its frame token) is replaced.
+    const onNavigated = () => client.ownerNavigated(id, frameTokenOf(webContents))
+    const onProcessGone = () => client.ownerProcessGone(id)
+    const onDestroyed = () => {
+      lifecycleInstalled.delete(id)
+      webContents.removeListener('did-navigate', onNavigated)
+      webContents.removeListener('render-process-gone', onProcessGone)
+      client.ownerDestroyed(id)
+    }
+    webContents.on('did-navigate', onNavigated)
+    webContents.on('render-process-gone', onProcessGone)
+    webContents.once('destroyed', onDestroyed)
+  }
+
+  ipcMain.handle('gfsWatch:setSubscriptions', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    const webContents = event.sender
+    const result = client.setSubscriptions(
+      ownerOf(webContents),
+      payload && typeof payload === 'object' ? payload : null,
+      senderFrameTokenOf(event)
+    )
+    if (client.hasOwner(webContents.id)) installLifecycle(webContents)
+    return { sessionExpired: result.sessionExpired === true }
+  })
+
+  ipcMain.handle('gfsWatch:stop', event => {
+    assertTrustedSender(event)
+    client.stopOwner(ownerOf(event.sender), senderFrameTokenOf(event))
+    return { ok: true }
+  })
 }
 
 /** Register the trusted renderer's read-only snapshot of the native GFS inbox. */
@@ -471,8 +577,8 @@ function sanitizeDesktopNotificationActions(
 
 export function registerIpcHandlers(service: AppService, logout: () => Promise<number>): void {
   const streamOwnerCleanupRegistered = new Set<number>()
-  const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
+  registerGfsWatchIpcHandlers(service.gfsWatch)
 
   // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
   // R1-M1): the renderer attaches a requestId to an invoke and fires
@@ -726,6 +832,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
+  })
+  ipcMain.handle('gfs:resolveForNavigation', async (event, payload: { uri: string }) => {
+    assertTrustedSender(event)
+    return service.resolveGfsUriForNavigation(sanitizeString(payload?.uri))
   })
   ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
@@ -1262,57 +1372,6 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     return { streamId }
   })
 
-  ipcMain.handle('entityChanges:streamStart', async event => {
-    assertTrustedSender(event)
-    const streamId = randomUUID()
-    const ownerId = event.sender.id
-    service.startEntityChangeStream(streamId, ownerId, (streamEvent: EntityChangeStreamEvent) => {
-      try {
-        event.sender.send('entityChanges:streamEvent', { streamId, event: streamEvent })
-      } catch {
-        /* sender destroyed */
-      }
-    })
-    if (!entityChangeOwnerCleanupRegistered.has(ownerId)) {
-      entityChangeOwnerCleanupRegistered.add(ownerId)
-      let cleanedUp = false
-      const cleanup = () => {
-        if (cleanedUp) return
-        cleanedUp = true
-        service.stopEntityChangeStreamsForOwner(ownerId)
-        entityChangeOwnerCleanupRegistered.delete(ownerId)
-        event.sender.removeListener('did-navigate', onMainFrameNavigation)
-        event.sender.removeListener('render-process-gone', onRendererProcessGone)
-        event.sender.removeListener('destroyed', cleanup)
-      }
-      const onMainFrameNavigation = (
-        _navigationEvent: Electron.Event,
-        _navigationUrl: string,
-        _httpResponseCode: number,
-        _httpStatusText: string
-      ) => {
-        cleanup()
-      }
-      const onRendererProcessGone = (_event: Electron.Event) => cleanup()
-      // `did-navigate` is emitted after a committed main-frame navigation.
-      // `did-start-navigation` also fires for cancelled and in-place changes,
-      // which do not replace this renderer's stream owner.
-      event.sender.on('did-navigate', onMainFrameNavigation)
-      event.sender.on('render-process-gone', onRendererProcessGone)
-      event.sender.once('destroyed', cleanup)
-    }
-    return { streamId }
-  })
-
-  ipcMain.handle('entityChanges:streamStop', async (event, payload: { streamId: string }) => {
-    assertTrustedSender(event)
-    const streamId = sanitizeString(payload?.streamId)
-    if (!streamId) return { ok: true }
-    const stopped = service.stopEntityChangeStream(streamId, event.sender.id)
-    if (!stopped) throw new Error('Forbidden: cannot stop entity-change subscription')
-    return { ok: true }
-  })
-
   ipcMain.handle('notifications:streamStop', async (event, payload: { streamId: string }) => {
     assertTrustedSender(event)
     const streamId = sanitizeString(payload?.streamId)
@@ -1651,7 +1710,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
 
   ipcMain.handle(
     'rpc:approveToolCall',
-    async (event, { hostRef, taskId, toolCallId, hostRefs, teamId }) => {
+    async (
+      event,
+      { hostRef, taskId, toolCallId, hostRefs, teamId, alwaysApprove, shellAction }
+    ) => {
       assertTrustedSender(event)
       const targetHostRef = sanitizeString(hostRef)
       const targetTaskId = sanitizeString(taskId)
@@ -1659,12 +1721,24 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       const targetHostRefs = Array.isArray(hostRefs)
         ? hostRefs.map(v => String(v).trim()).filter(Boolean)
         : undefined
+      if (
+        shellAction !== undefined &&
+        shellAction !== 'once' &&
+        shellAction !== 'command' &&
+        shellAction !== 'shell'
+      ) {
+        throw new Error('shellAction must be once, command, or shell')
+      }
       return service.approveToolCall(
         targetHostRef,
         targetTaskId,
         targetToolCallId,
         targetHostRefs,
-        { teamId: sanitizeString(teamId) || undefined }
+        {
+          teamId: sanitizeString(teamId) || undefined,
+          alwaysApprove: alwaysApprove === true,
+          ...(shellAction ? { shellAction } : {}),
+        }
       )
     }
   )
@@ -1890,6 +1964,34 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
       assertSafeRouteSegment('chatId', chatId)
       return service.renameSession(hostRef, agent, chatId, title)
+    }
+  )
+
+  // Session approval mode. Same route-segment checks as rename, and the same
+  // refusal of a renderer-supplied hostRefs fleet. The mode itself is one of
+  // the three stored values; anything else is rejected before a token is minted.
+  ipcMain.handle(
+    'rpc:setApprovalMode',
+    async (event, payload: { hostRef: string; agent: string; chatId: string; mode: string }) => {
+      assertTrustedSender(event)
+      const hostRef = sanitizeString(payload?.hostRef)
+      const agent = sanitizeString(payload?.agent)
+      const chatId = sanitizeString(payload?.chatId)
+      const requestedMode = sanitizeString(payload?.mode)
+      const mode =
+        requestedMode === 'manual' || requestedMode === 'auto' || requestedMode === 'allow_all'
+          ? requestedMode
+          : undefined
+      if (!hostRef || !agent || !chatId) {
+        throw new Error('hostRef, agent, and chatId are required')
+      }
+      if (!mode) {
+        throw new Error('mode must be manual, auto, or allow_all')
+      }
+      assertSafeRouteSegment('hostRef', hostRef)
+      assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+      assertSafeRouteSegment('chatId', chatId)
+      return service.setApprovalMode(hostRef, agent, chatId, mode)
     }
   )
 
@@ -2288,11 +2390,9 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
 
   ipcMain.handle('app:openUrl', async (event, { url }: { url: string }) => {
     assertTrustedSender(event)
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      throw new Error('Only HTTP(S) URLs are allowed')
-    }
+    const target = externalUrlToOpen(url)
     const { shell } = await import('electron')
-    await shell.openExternal(url)
+    await shell.openExternal(target)
   })
 
   ipcMain.handle('desktop:openWindow', async (event, { hostRef }: { hostRef: string }) => {

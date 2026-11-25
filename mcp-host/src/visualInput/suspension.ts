@@ -33,6 +33,7 @@ function projectResult(result: ToolResult): ToolResult {
     is_error: result.is_error,
     ...(result.metadata ? { metadata: result.metadata } : {}),
     attachments: attachments?.length ? attachments : undefined,
+    ...(result.answeredInSnapshot ? { answeredInSnapshot: true as const } : {}),
   }
 }
 
@@ -67,5 +68,7 @@ export function projectGfsApproval(approval: PendingApproval): PendingApproval {
     ...(approval.reason ? { reason: approval.reason } : {}),
     ...(approval.authorization_scope ? { authorization_scope: approval.authorization_scope } : {}),
     ...(approval.mcpServerName ? { mcpServerName: approval.mcpServerName } : {}),
+    ...(approval.reask ? { reask: approval.reask } : {}),
+    ...(approval.shellCard ? { shellCard: approval.shellCard } : {}),
   }
 }

@@ -27,7 +27,7 @@ function PersistentProfileShell({ children }: ProfileShellProps) {
 
   function handleLogout() {
     logout()
-    router.replace(PROFILE_ROUTES.home)
+    router.replace(PROFILE_ROUTES.root)
   }
 
   return (

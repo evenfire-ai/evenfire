@@ -12,7 +12,7 @@ const CHILD_RECIPE = 'risk-review-22222222'
 describe('workflow approval authoritative run binding', () => {
   it('binds only an exact running WRC workflow run and step', async () => {
     const query = vi.fn().mockResolvedValue({
-      rows: [{ runId: RUN_ID, stepId: 'approval-gated-step' }],
+      rows: [{ runId: RUN_ID, stepId: 'approval-gated-step', authorityBindingId: null }],
       rowCount: 1,
     })
 
@@ -26,7 +26,11 @@ describe('workflow approval authoritative run binding', () => {
         },
         runBindingProof: PROOF,
       })
-    ).resolves.toEqual({ runId: RUN_ID, stepId: 'approval-gated-step' })
+    ).resolves.toEqual({
+      runId: RUN_ID,
+      stepId: 'approval-gated-step',
+      authorityBindingId: null,
+    })
     const sql = String(query.mock.calls[0]![0])
     expect(sql).toContain("step.phase = 'Running'")
     expect(sql).toContain("root.source_kind = 'wrc_internal_control'")

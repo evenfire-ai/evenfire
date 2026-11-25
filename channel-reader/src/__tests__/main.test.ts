@@ -82,6 +82,26 @@ describe('ChannelReader provider event idempotency', () => {
     expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
 
+  it('drops a Telegram event refused with an authorization error and ignores its redelivery', async () => {
+    const rpc = rpcClient()
+    rpc.authorizeProviderMessage = vi
+      .fn()
+      .mockResolvedValueOnce({ authorized: false, reason: 'error' })
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map(),
+    })
+    const message = telegramMessage()
+
+    await reader.handleMessages([message, message])
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
+    await reader.handleMessages([message])
+
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
+    expect(rpc.sendMessage).not.toHaveBeenCalled()
+  })
+
   it('records denied provider events so duplicate redelivery does not reauthorize', async () => {
     const rpc = rpcClient()
     rpc.authorizeProviderMessage = vi
@@ -1339,10 +1359,10 @@ describe('ChannelReader pollCycle provider guards', () => {
 describe('profileSocialChannelUrl', () => {
   it('appends the provider tab path', () => {
     expect(profileSocialChannelUrl('https://profile.example.com', 'teams')).toBe(
-      'https://profile.example.com/settings/social/teams'
+      'https://profile.example.com/channels/teams'
     )
     expect(profileSocialChannelUrl('https://profile.example.com', 'slack')).toBe(
-      'https://profile.example.com/settings/social/slack'
+      'https://profile.example.com/channels/slack'
     )
   })
 
@@ -1359,16 +1379,293 @@ describe('profileSocialChannelUrl', () => {
   // only slowly. The linearity lives in the implementation, not in this test.
   it('strips a run of trailing slashes, however long', () => {
     expect(profileSocialChannelUrl('https://profile.example.com' + '/'.repeat(500), 'teams')).toBe(
-      'https://profile.example.com/settings/social/teams'
+      'https://profile.example.com/channels/teams'
     )
     expect(profileSocialChannelUrl('  https://profile.example.com//  ', 'teams')).toBe(
-      'https://profile.example.com/settings/social/teams'
+      'https://profile.example.com/channels/teams'
     )
   })
 
   it('leaves a URL with no trailing slash untouched', () => {
     expect(profileSocialChannelUrl('https://p.example.com/base', 'teams')).toBe(
-      'https://p.example.com/base/settings/social/teams'
+      'https://p.example.com/base/channels/teams'
     )
+  })
+})
+
+describe('ChannelReader shell card choices', () => {
+  const shellNotification =
+    'Tool `shell_exec` requires approval. Parameters: {"command":"ls"}. Reply /approve or /deny to this message.'
+
+  function buttonValues(options: Parameters<ChannelAdapter['sendMessage']>[4]): string[] {
+    const values: string[] = []
+    for (const row of options?.telegramInlineKeyboard ?? []) {
+      for (const button of row) values.push(button.callbackData)
+    }
+    for (const block of options?.slackBlocks ?? []) {
+      if (block.type !== 'actions') continue
+      for (const element of block.elements) values.push(element.value)
+    }
+    for (const action of options?.teamsActions ?? []) values.push(action.value)
+    return values
+  }
+
+  function adapterFor(channelType: ChannelAdapter['channelType']) {
+    const sent: Array<{ content: string; options?: Parameters<ChannelAdapter['sendMessage']>[4] }> =
+      []
+    const adapter: ChannelAdapter = {
+      channelType,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async (_channelId, content, _replyTo, _attachments, options) => {
+        sent.push({ content, options })
+        return `sent-${sent.length}`
+      }),
+      editMessage: vi.fn(),
+    }
+    return { adapter, sent }
+  }
+
+  function waitingApproval(shellCard?: {
+    channelCommandOffered: boolean
+    desktopCommandOffered: boolean
+  }) {
+    return {
+      success: true as const,
+      status: 'waiting_approval' as const,
+      approval: {
+        taskId: 'task-shell',
+        requestId: 'approval-shell',
+        userId: '123456',
+        notification: shellNotification,
+        ...(shellCard ? { shellCard } : {}),
+      },
+    }
+  }
+
+  it('offers command only when the channel flag is true and keeps every callback within 64 bytes', async () => {
+    const rpc = rpcClient()
+    rpc.sendMessage = vi.fn(async () =>
+      waitingApproval({ channelCommandOffered: true, desktopCommandOffered: false })
+    )
+    const { adapter, sent } = adapterFor('telegram')
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      adapters: new Map([['telegram', adapter]]),
+    })
+
+    await reader.handleMessages([telegramMessage({ content: 'ls', messageId: 'shell-offer' })])
+
+    const prompt = sent.find(message => message.content.includes('shell_exec'))
+    const values = buttonValues(prompt?.options)
+    expect(prompt?.content).toContain('/approve allows this command once.')
+    expect(values.some(value => value.startsWith('tool:c:'))).toBe(true)
+    expect(values.some(value => value.startsWith('tool:s:'))).toBe(true)
+    expect(values.some(value => value.startsWith('tool:l:'))).toBe(false)
+    for (const value of values) expect(Buffer.byteLength(value, 'utf8')).toBeLessThanOrEqual(64)
+  })
+
+  it('omits c when channelCommandOffered is false', async () => {
+    const rpc = rpcClient()
+    rpc.sendMessage = vi.fn(async () =>
+      waitingApproval({ channelCommandOffered: false, desktopCommandOffered: true })
+    )
+    const { adapter, sent } = adapterFor('telegram')
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      adapters: new Map([['telegram', adapter]]),
+    })
+
+    await reader.handleMessages([telegramMessage({ content: 'ls', messageId: 'shell-no-c' })])
+
+    const prompt = sent.find(message => message.content.includes('shell_exec'))
+    const values = buttonValues(prompt?.options)
+    expect(values.some(value => value.startsWith('tool:c:'))).toBe(false)
+    expect(values.some(value => value.startsWith('tool:s:'))).toBe(true)
+    expect(values.some(value => value.startsWith('tool:a:'))).toBe(true)
+    expect(values.some(value => value.startsWith('tool:d:'))).toBe(true)
+  })
+
+  it('shows email no buttons on a shell card', async () => {
+    const rpc = rpcClient()
+    rpc.sendMessage = vi.fn(async () =>
+      waitingApproval({ channelCommandOffered: true, desktopCommandOffered: false })
+    )
+    const { adapter, sent } = adapterFor('email')
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      adapters: new Map([['email', adapter]]),
+    })
+
+    await reader.handleMessages([
+      telegramMessage({
+        channelType: 'email',
+        channelId: 'inbox@example.com',
+        sender: 'person@example.com',
+        content: 'ls',
+        messageId: 'email-shell',
+        providerIdentity: undefined,
+      }),
+    ])
+
+    const prompt = sent.find(message => message.content.includes('shell_exec'))
+    expect(prompt?.content).toContain('/approve allows this command once.')
+    expect(prompt?.options).toBeUndefined()
+    expect(buttonValues(prompt?.options)).toEqual([])
+  })
+
+  it.each([
+    ['c', 'command'],
+    ['s', 'shell'],
+  ] as const)('sends Telegram tool:%s as shellAction %s', async (code, shellAction) => {
+    const rpc = rpcClient()
+    rpc.sendMessage = vi.fn(async () =>
+      waitingApproval({ channelCommandOffered: true, desktopCommandOffered: false })
+    )
+    rpc.sendApproval = vi.fn(async () => ({ success: true }))
+    const { adapter, sent } = adapterFor('telegram')
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      adapters: new Map([['telegram', adapter]]),
+    })
+    const source = telegramMessage({ content: 'ls', messageId: `shell-${code}` })
+
+    await reader.handleMessages([source])
+    const action = buttonValues(sent.at(-1)?.options).find(value =>
+      value.startsWith(`tool:${code}:`)
+    )
+    expect(action).toBeDefined()
+
+    await reader.handleMessages([
+      telegramMessage({
+        content: action!,
+        messageId: `choice-${code}`,
+        providerIdentity: {
+          medium: 'telegram',
+          providerUserId: '123456',
+          providerChannelId: '424242',
+          providerEventId: `telegram:424242:choice-${code}`,
+        },
+      }),
+    ])
+
+    expect(rpc.sendApproval).toHaveBeenCalledWith(
+      '123456',
+      'approval-shell',
+      false,
+      'telegram',
+      '424242',
+      { shellAction }
+    )
+    expect(rpc.sendDenial).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unknown tool code without sendDenial', async () => {
+    const rpc = rpcClient()
+    rpc.authorizeProviderMessage = vi.fn(async () => ({ authorized: true }))
+    const { adapter, sent } = adapterFor('telegram')
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      adapters: new Map([['telegram', adapter]]),
+    })
+    const source = telegramMessage({
+      content: 'tool:q:abcdefghijklmnop',
+      messageId: 'unknown-tool-code',
+      providerIdentity: {
+        medium: 'telegram',
+        providerUserId: '123456',
+        providerChannelId: '424242',
+        providerEventId: 'telegram:424242:unknown-tool-code',
+      },
+    })
+
+    await reader.handleMessages([source])
+
+    // Liveness: the message reached the provider gate, upstream of the code parse.
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledWith(source.providerIdentity)
+    expect(sent.map(message => message.content)).toEqual(['That approval choice is not supported.'])
+    expect(rpc.sendDenial).not.toHaveBeenCalled()
+    expect(rpc.sendApproval).not.toHaveBeenCalled()
+    expect(rpc.sendMessage).not.toHaveBeenCalled()
+  })
+})
+
+// After the Host accepted the async POST, a failed status message falls back to
+// one synchronous re-submit on every channel, as on dev (owner decision of
+// 2026-11-18, which overturns A16 X3).
+describe('ChannelReader progress-flow failure after an accepted POST', () => {
+  function rejectingAdapter(channelType: 'telegram' | 'slack'): {
+    adapter: ChannelAdapter
+    statusSend: ReturnType<typeof vi.fn>
+  } {
+    const statusSend = vi.fn(async () => {
+      throw new Error('status message failed')
+    })
+    const adapter: ChannelAdapter = {
+      channelType,
+      connect: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: statusSend,
+      editMessage: vi.fn(async () => undefined),
+    }
+    return { adapter, statusSend }
+  }
+
+  function acceptingRpc() {
+    const rpc = rpcClient()
+    rpc.authorizeProviderMessage = vi.fn(async () => ({ authorized: true }))
+    rpc.sendMessage = vi.fn(async () => ({
+      success: true,
+      status: 'pending' as const,
+      taskId: 'accepted-task-1',
+    }))
+    return rpc
+  }
+
+  it('falls back to one synchronous re-submit for Telegram', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const rpc = acceptingRpc()
+    const { adapter, statusSend } = rejectingAdapter('telegram')
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([['telegram', adapter]]),
+    })
+
+    await reader.handleMessages([telegramMessage()])
+
+    // The progress flow ran and its status send was rejected.
+    expect(statusSend).toHaveBeenCalledOnce()
+    await expect(statusSend.mock.results[0]?.value).rejects.toThrow('status message failed')
+    expect(
+      errorLog.mock.calls.some(([line]) => String(line).includes('Progress flow failed'))
+    ).toBe(true)
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(rpc.sendMessage).mock.calls[0]?.[1]).toMatchObject({ async: true })
+    expect(vi.mocked(rpc.sendMessage).mock.calls[1]?.[1]).not.toMatchObject({ async: true })
+    errorLog.mockRestore()
+  })
+
+  it('still falls back to one synchronous re-submit for Slack', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const rpc = acceptingRpc()
+    const { adapter, statusSend } = rejectingAdapter('slack')
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([['slack', adapter]]),
+    })
+
+    await reader.handleMessages([
+      telegramMessage({ channelType: 'slack', providerIdentity: undefined }),
+    ])
+
+    expect(statusSend).toHaveBeenCalled()
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(rpc.sendMessage).mock.calls[0]?.[1]).toMatchObject({ async: true })
+    expect(vi.mocked(rpc.sendMessage).mock.calls[1]?.[1]).not.toMatchObject({ async: true })
+    errorLog.mockRestore()
   })
 })

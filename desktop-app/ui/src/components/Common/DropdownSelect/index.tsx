@@ -3,6 +3,7 @@ import type { KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@components/Common/Button'
 import { MenuItem } from '@components/Common/MenuItem'
+import { fixedContainingBlockOrigin } from '@lib/fixedContainingBlockOrigin'
 import type { DropdownSelectProps } from './types'
 
 export function DropdownSelect({
@@ -14,6 +15,7 @@ export function DropdownSelect({
   options,
   placeholder,
   portal = false,
+  portalContainer = null,
   value,
 }: DropdownSelectProps) {
   const [open, setOpen] = useState(false)
@@ -62,8 +64,13 @@ export function DropdownSelect({
       Math.max(viewportPadding, rect.left),
       Math.max(viewportPadding, window.innerWidth - width - viewportPadding)
     )
-    setPortalPosition({ left, top, width })
-  }, [options.length])
+    // A custom container can sit under a transform/filter ancestor that becomes
+    // the menu's fixed containing block; document.body has no such ancestor,
+    // so the measurement is skipped there.
+    const menu = menuRef.current
+    const origin = portalContainer && menu ? fixedContainingBlockOrigin(menu) : { left: 0, top: 0 }
+    setPortalPosition({ left: left - origin.left, top: top - origin.top, width })
+  }, [options.length, portalContainer])
 
   useLayoutEffect(() => {
     if (!portal || !open) return
@@ -177,7 +184,7 @@ export function DropdownSelect({
         </span>
         <span className="ui-dropdown-select__chevron" aria-hidden="true" />
       </Button>
-      {portal && menu ? createPortal(menu, document.body) : menu}
+      {portal && menu ? createPortal(menu, portalContainer ?? document.body) : menu}
     </div>
   )
 }

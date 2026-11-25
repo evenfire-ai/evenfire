@@ -24,12 +24,28 @@ export {
 } from './status-reporter/toolCallStatus'
 export type { StatusArtifact } from './status-reporter/toolCallStatus'
 export {
+  MAX_REPORTED_OUTPUT_ARTIFACTS,
+  STATUS_OUTPUT_MAX_CHARS,
+  STATUS_REPORT_MAX_BYTES,
+  boundOutputForStatus,
+  boundStepStatusBody,
+  extractOutputArtifactsForStatus,
+  serializeOutputForStatus,
+} from './status-reporter/outputStatus'
+export type { BoundedStatusOutput } from './status-reporter/outputStatus'
+export {
   AUTH_RETRY_DELAY_MS,
   AUTH_RETRY_MAX_ATTEMPTS,
   sendWithAuthRetryOn401,
 } from './status-reporter/authRetry'
 export { createServer, start, stop, safeEqual } from './rest-server/server'
-export { CycleDetectedError, WorkflowSDKInitError, McpHostNotConfiguredError } from './errors'
+export {
+  CycleDetectedError,
+  WorkflowSDKInitError,
+  McpHostNotConfiguredError,
+  WorkflowAuthorizationPausedError,
+  WorkflowRunStateUnavailableError,
+} from './errors'
 export {
   OWNER_RECIPE_LABEL_KEY,
   SHARED_LABEL_KEY,

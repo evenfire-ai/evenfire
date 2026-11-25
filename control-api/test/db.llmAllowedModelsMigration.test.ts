@@ -83,7 +83,9 @@ describe('0056_llm_allowed_models migration', () => {
     // Backfill of existing rows is via the DEFAULT ('manual'), not a data UPDATE.
     // The only statement that rewrites `source` is 0135's reclassification, and
     // it is bound to an explicit pair list.
-    const sourceUpdates = sqls.filter(sql => /UPDATE llm_allowed_models[\s\S]*source/.test(sql))
+    const sourceUpdates = sqls.filter(sql =>
+      /UPDATE llm_allowed_models[\s\S]*SET\s+source\b/.test(sql)
+    )
     expect(sourceUpdates).toHaveLength(1)
     expect(sourceUpdates[0]).toMatch(
       /FROM unnest\(\$1::text\[\], \$2::text\[\]\) AS s\(provider, model\)/
@@ -123,7 +125,7 @@ describe('0056_llm_allowed_models migration', () => {
     )
   })
 
-  it('0115 adds the nullable image_input capability column idempotently (#654)', async () => {
+  it('011b adds the nullable image_input capability column idempotently (#654)', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
@@ -151,7 +153,7 @@ describe('0056_llm_allowed_models migration', () => {
     expect(alter!).not.toMatch(/DROP COLUMN/)
   })
 
-  it('0115 is purely additive: it adds the column and writes no image_input data', async () => {
+  it('011b is purely additive: it adds the column and writes no image_input data', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const calls = clientQuery.mock.calls.map(([sql, params]) => ({

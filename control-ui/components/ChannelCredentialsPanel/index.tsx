@@ -71,6 +71,7 @@ const SLACK_CREDENTIAL_NOTE =
 export function ChannelCredentialsPanel({
   ccName,
   pending,
+  requiredKeys = [],
   onPendingChange,
   storedKeys,
   storedKeysError,
@@ -351,10 +352,20 @@ export function ChannelCredentialsPanel({
                 }
                 return (
                   <div key={field.key} className="cu-field cu-field--compact">
-                    <label htmlFor={`channel-cred-${field.key}`}>{field.label}</label>
+                    <label htmlFor={`channel-cred-${field.key}`}>
+                      {field.label}
+                      {requiredKeys.includes(field.key) ? (
+                        <span className="cu-field__required" aria-hidden="true">
+                          {' '}
+                          *
+                        </span>
+                      ) : null}
+                    </label>
                     <div className="cu-credential-field">
                       <input
                         id={`channel-cred-${field.key}`}
+                        aria-label={field.label}
+                        aria-required={requiredKeys.includes(field.key) || undefined}
                         type="password"
                         autoComplete="off"
                         value={

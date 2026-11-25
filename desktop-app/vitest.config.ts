@@ -24,11 +24,19 @@ export default defineConfig({
     },
   },
   test: {
-    testTimeout: 30_000,
+    // 30s is enough for one file alone. The pre-gate run executes all 494
+    // files in one process, and a UI test that polls through several waits
+    // then crosses 30s (App GFS watch T-CB30).
+    testTimeout: 60_000,
     // Absolute, because the ui/** suites run through Vite's module server,
     // which serves an out-of-root setup file under `/@fs/` and cannot resolve
     // it from a path relative to this package.
-    setupFiles: [path.resolve(__dirname, '../scripts/testing/bind-loopback-in-tests.mjs')],
+    setupFiles: [
+      path.resolve(__dirname, '../scripts/testing/bind-loopback-in-tests.mjs'),
+      // Keeps every AppService that a test builds from opening a real GFS watch.
+      path.resolve(__dirname, 'testSupport/gfsWatch/inertWatchTransport.ts'),
+      path.resolve(__dirname, 'testSupport/testingLibraryAsyncTimeout.ts'),
+    ],
     // Owns the temporary root of the renderer chat fixture's real ChatStore
     // directories and removes it once every test file has finished.
     globalSetup: ['ui/src/hooks/domain/__tests__/__fixtures__/mockClerumStoreRoot.ts'],

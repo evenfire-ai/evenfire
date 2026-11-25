@@ -1,10 +1,12 @@
 import { NextFunction, Request, Response } from 'express'
 import { createHash } from 'node:crypto'
 import { LogThrottle } from '../observability/logThrottle.js'
+import type { Logger } from '../observability/logger.js'
 import { rateLimitHitsTotal } from '../observability/metrics.js'
 import { boundedBucketKey } from '../services/rateLimitBucketKey.js'
 import {
   RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
+  type RateLimitCheck as RateLimitCount,
   checkAndIncrement,
 } from '../services/rateLimiterService.js'
 import { ProcessMemoryRateLimiter } from './processMemoryRateLimiter.js'
@@ -25,6 +27,12 @@ export type RateLimitEnforcerOptions = {
   maxPerMinute: number
   onBackendUnavailable: RateLimitBackendUnavailableMode
   onLimited?: (req: Request, res: Response, retryAfterSeconds: number) => void
+  /**
+   * The request's deadline, for a limiter inside a deadline-bound authority
+   * prefix. When it aborts before Postgres answers, the request is treated
+   * as one the backend could not count: `onBackendUnavailable` decides.
+   */
+  deadlineSignal?: (req: Request) => AbortSignal | undefined
 }
 
 /**
@@ -102,6 +110,11 @@ function writeRateLimitHeaders(
  *         per minute while Postgres is unavailable.
  *   - A 503 carries no `X-RateLimit-*` headers, including ones an earlier
  *     limiter on the same route set, because no count backs them.
+ *   - With `deadlineSignal`, a request whose deadline aborts before Postgres
+ *     answers is handled as `backendAvailable: false` (the same
+ *     `onBackendUnavailable` policy). The statement still finishes on the
+ *     limiter pool; a late count it commits is counted by both backends,
+ *     which only denies sooner.
  */
 export function rateLimitMiddleware(
   opts: RateLimitEnforcerOptions & { getBucketKey: (req: Request) => string | null }
@@ -125,6 +138,33 @@ export function rateLimitMiddleware(
   }
 }
 
+/**
+ * The limiter's answer, or `'deadline'` when `signal` aborts first. A late
+ * answer is dropped and a late rejection observed, so neither escapes.
+ */
+function countBeforeDeadline(
+  counted: Promise<RateLimitCount>,
+  signal: AbortSignal | undefined
+): Promise<RateLimitCount | 'deadline'> {
+  if (!signal) return counted
+  counted.then(undefined, () => undefined)
+  if (signal.aborted) return Promise.resolve('deadline')
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve('deadline')
+    signal.addEventListener('abort', onAbort, { once: true })
+    counted.then(
+      result => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(result)
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      }
+    )
+  })
+}
+
 /** Remove every quota family when no authoritative count may be advertised. */
 export function clearRateLimitHeaders(res: Response): void {
   res.removeHeader('X-RateLimit-Limit')
@@ -137,13 +177,33 @@ export function clearRateLimitHeaders(res: Response): void {
   res.removeHeader('RateLimit-Reset')
 }
 
+/** Outcome of charging one request to a key; carries everything a writer needs. */
+export type RateLimitDecision =
+  | { outcome: 'allowed'; limit: number; remaining: number; resetMs: number }
+  | { outcome: 'denied'; limit: number; retryAfterSeconds: number; resetMs: number }
+  | { outcome: 'unavailable'; retryAfterSeconds: number }
+
 /**
- * The limiter behind `rateLimitMiddleware`, for a route that can only derive
- * its key inside the handler (after authenticating the caller). Create it once
- * per route set, not per request: with `'process-memory'` it owns the
- * in-memory counter. Same semantics as `rateLimitMiddleware`.
+ * Charges one request to `key` and returns the decision without touching any
+ * response, so a handler that owns its response can decide when (and whether)
+ * the limiter's headers are written. Metrics and the warn lines are emitted
+ * here because they describe the decision, not the response. When
+ * `deadline` aborts before Postgres answers, the request is decided as one the
+ * backend could not count (the `onBackendUnavailable` policy).
  */
-export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLimitEnforcer {
+export type RateLimitCheck = (
+  key: string,
+  log?: Logger,
+  deadline?: AbortSignal
+) => Promise<RateLimitDecision>
+
+export type RateLimitCheckOptions = Omit<RateLimitEnforcerOptions, 'onLimited' | 'deadlineSignal'>
+
+/**
+ * Builds the pure half of the limiter. Create it once per route set, not per
+ * request: with `'process-memory'` it owns the in-memory counter.
+ */
+export function createRateLimitCheck(opts: RateLimitCheckOptions): RateLimitCheck {
   // While the backend is down every request on this bucket fails the same way,
   // so the warn line is written once per minute; the counter records each one.
   const unavailableLogThrottle = new LogThrottle(60_000)
@@ -152,35 +212,26 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
       ? new ProcessMemoryRateLimiter(opts.maxPerMinute)
       : null
 
-  function answerUnavailable(req: Request, res: Response): void {
+  function unavailable(log: Logger | undefined): RateLimitDecision {
     rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'unavailable' }, 1)
     const suppressed = unavailableLogThrottle.admit(opts.bucketType)
-    if (req.log && suppressed !== undefined) {
-      req.log.warn(
+    if (log && suppressed !== undefined) {
+      log.warn(
         { event: 'rate_limit_unavailable', bucketType: opts.bucketType, suppressed },
         'rate limit backend unavailable'
       )
     }
-    clearRateLimitHeaders(res)
-    res.setHeader('Retry-After', String(RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS))
-    res.setHeader('Cache-Control', 'no-store')
-    res.status(503).json({
-      error: 'rate_limit_unavailable',
-      retryAfterSeconds: RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
-    })
+    return { outcome: 'unavailable', retryAfterSeconds: RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS }
   }
 
-  function answerDenied(
-    req: Request,
-    res: Response,
+  function denied(
+    log: Logger | undefined,
     key: string,
     denial: { count: number; resetMs: number; source?: 'process-memory' }
-  ): void {
-    const retryAfterSec = Math.max(1, Math.ceil((denial.resetMs - Date.now()) / 1000))
-    res.setHeader('Retry-After', String(retryAfterSec))
-    writeRateLimitHeaders(res, opts.maxPerMinute, 0, denial.resetMs)
-    if (req.log) {
-      req.log.warn(
+  ): RateLimitDecision {
+    const retryAfterSeconds = Math.max(1, Math.ceil((denial.resetMs - Date.now()) / 1000))
+    if (log) {
+      log.warn(
         {
           event: 'rate_limit_denied',
           bucketType: opts.bucketType,
@@ -195,57 +246,105 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
         'rate limit exceeded'
       )
     }
-    if (opts.onLimited) {
-      opts.onLimited(req, res, retryAfterSec)
-    } else {
-      res.status(429).json({
-        error: 'Too Many Requests',
-        code: 'rate_limited',
-        message: `This request limit has been reached. Try again in ${retryAfterSec} seconds.`,
-        retryAfterSeconds: retryAfterSec,
-      })
+    return {
+      outcome: 'denied',
+      limit: opts.maxPerMinute,
+      retryAfterSeconds,
+      resetMs: denial.resetMs,
     }
   }
 
-  return async function enforce(req: Request, res: Response, rawKey: string): Promise<boolean> {
+  return async function check(
+    rawKey: string,
+    log?: Logger,
+    deadline?: AbortSignal
+  ): Promise<RateLimitDecision> {
     const key = boundedBucketKey(rawKey)
-    const result = await checkAndIncrement(key, opts.maxPerMinute)
-    if (!result.backendAvailable) {
-      if (processMemory === null) {
-        answerUnavailable(req, res)
-        return false
-      }
+    const result = await countBeforeDeadline(checkAndIncrement(key, opts.maxPerMinute), deadline)
+    if (result === 'deadline' || !result.backendAvailable) {
+      if (processMemory === null) return unavailable(log)
       const decision = await processMemory.hit(key)
-      if (decision.outcome === 'key_cap_reached') {
-        answerUnavailable(req, res)
-        return false
-      }
+      if (decision.outcome === 'key_cap_reached') return unavailable(log)
       if (decision.outcome === 'denied') {
         rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'fallback_denied' }, 1)
-        answerDenied(req, res, key, {
+        return denied(log, key, {
           count: decision.totalHits,
           resetMs: decision.resetMs,
           source: 'process-memory',
         })
-        return false
       }
       rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'fallback_allowed' }, 1)
-      writeRateLimitHeaders(
-        res,
-        opts.maxPerMinute,
-        opts.maxPerMinute - decision.totalHits,
-        decision.resetMs
-      )
-      return true
+      return {
+        outcome: 'allowed',
+        limit: opts.maxPerMinute,
+        remaining: opts.maxPerMinute - decision.totalHits,
+        resetMs: decision.resetMs,
+      }
     }
     if (!result.allowed) {
       rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'denied' }, 1)
-      answerDenied(req, res, key, { count: result.count, resetMs: result.resetMs })
+      return denied(log, key, { count: result.count, resetMs: result.resetMs })
+    }
+    rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'allowed' }, 1)
+    return {
+      outcome: 'allowed',
+      limit: opts.maxPerMinute,
+      remaining: result.remaining,
+      resetMs: result.resetMs,
+    }
+  }
+}
+
+/**
+ * Writes the headers that belong to `decision`: the quota families when
+ * allowed, `Retry-After` plus the quota families when denied, and
+ * `Retry-After` + `no-store` with every quota family removed when the backend
+ * could not count (no count backs them). It writes no status and no body.
+ */
+export function writeRateLimitDecisionHeaders(res: Response, decision: RateLimitDecision): void {
+  if (decision.outcome === 'unavailable') {
+    clearRateLimitHeaders(res)
+    res.setHeader('Retry-After', String(decision.retryAfterSeconds))
+    res.setHeader('Cache-Control', 'no-store')
+    return
+  }
+  if (decision.outcome === 'denied') {
+    res.setHeader('Retry-After', String(decision.retryAfterSeconds))
+    writeRateLimitHeaders(res, decision.limit, 0, decision.resetMs)
+    return
+  }
+  writeRateLimitHeaders(res, decision.limit, decision.remaining, decision.resetMs)
+}
+
+/**
+ * The limiter behind `rateLimitMiddleware`, for a route that can only derive
+ * its key inside the handler (after authenticating the caller). Create it once
+ * per route set, not per request: with `'process-memory'` it owns the
+ * in-memory counter. Same semantics as `rateLimitMiddleware`.
+ */
+export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLimitEnforcer {
+  const check = createRateLimitCheck(opts)
+  return async function enforce(req: Request, res: Response, rawKey: string): Promise<boolean> {
+    const decision = await check(rawKey, req.log, opts.deadlineSignal?.(req))
+    writeRateLimitDecisionHeaders(res, decision)
+    if (decision.outcome === 'allowed') return true
+    if (decision.outcome === 'unavailable') {
+      res.status(503).json({
+        error: 'rate_limit_unavailable',
+        retryAfterSeconds: decision.retryAfterSeconds,
+      })
       return false
     }
-
-    rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'allowed' }, 1)
-    writeRateLimitHeaders(res, opts.maxPerMinute, result.remaining, result.resetMs)
-    return true
+    if (opts.onLimited) {
+      opts.onLimited(req, res, decision.retryAfterSeconds)
+    } else {
+      res.status(429).json({
+        error: 'Too Many Requests',
+        code: 'rate_limited',
+        message: `This request limit has been reached. Try again in ${decision.retryAfterSeconds} seconds.`,
+        retryAfterSeconds: decision.retryAfterSeconds,
+      })
+    }
+    return false
   }
 }

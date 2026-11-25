@@ -577,10 +577,9 @@ describe('McpHostApiRateLimiter', () => {
         Boolean(entry && entry.msg === 'provider authority readiness check failed')
       )
     expect(readinessErrors).toHaveLength(1)
-    expect(readinessErrors[0].err).toEqual({
-      name: authorityError.name,
-      message: authorityError.message,
-    })
+    expect(readinessErrors[0].err).toEqual(
+      expect.objectContaining({ name: authorityError.name, message: authorityError.message })
+    )
   })
 
   it('withdraws readiness as soon as shutdown begins', async () => {
@@ -735,10 +734,9 @@ describe('ContextMapperServer desktop status authority', () => {
         Boolean(entry && entry.msg === 'host authority check failed')
       )
     expect(hostErrors).toHaveLength(1)
-    expect(hostErrors[0].err).toEqual({
-      name: authorityError.name,
-      message: authorityError.message,
-    })
+    expect(hostErrors[0].err).toEqual(
+      expect.objectContaining({ name: authorityError.name, message: authorityError.message })
+    )
   })
 })
 

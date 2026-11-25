@@ -1,4 +1,4 @@
-import type { FileClass, FileClassification, FileDetection } from './fileClassifier'
+import type { FileClass, FileClassification, FileDetection, FileReader } from './fileClassifier'
 
 export type FileReferenceSource =
   | { kind: 'attachment'; attachmentId: string; messageId: string }
@@ -29,7 +29,8 @@ export interface FileReferenceV1 {
   /** Required for attachments, optional for GFS resources. */
   digest?: FileReferenceDigest
   textReadable: boolean
-  reader: 'text' | 'none'
+  /** `pdf` / `xlsx` only on those classes; both also accept `none` from older producers. */
+  reader: FileReader
   modelImageInput: 'candidate' | 'unsupported'
 }
 
@@ -65,6 +66,9 @@ export declare function quotePromptValue(value: string): string
  * not `.` or `..`, no `/` or ASCII control characters).
  */
 export declare function resourceNameProblem(name: string): string | null
+
+/** A resource id as gfsc names it (32 lowercase hex digits, no dashes), or `null`. */
+export declare function normalizeGfsRid(value: string): string | null
 
 export declare function deriveFileReferenceId(
   source: FileReferenceSource,

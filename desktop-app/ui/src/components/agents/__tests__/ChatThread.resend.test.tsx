@@ -7,8 +7,14 @@ import {
   setComposerDraft,
 } from '@lib/composerDraftStore'
 import { mergeAuthoritativeServerMessages } from '../../../../../src/chatMessageMerge'
+import {
+  folderView,
+  suggestedFolderCandidate,
+} from '../../../hooks/__tests__/__fixtures__/tabReferenceSuggestionFixtures'
 import { turnsToChatMessages } from '../../../hooks/sessionAdapter'
+import { buildChatMessageAttachments } from '../../../lib/chatMessageAttachments'
 import { buildLoadedChatSemanticModels } from '../../../lib/chatMessageSemantics'
+import { buildComposerRequestContent } from '../../../lib/composerReferencesPrompt'
 import type { AgentChatMessage, ComposerImageAttachment } from '../../../uiTypes'
 import { ChatThread } from '../ChatThread'
 
@@ -341,6 +347,49 @@ describe('ChatThread resend action (TASK-42)', () => {
     expect(merged[1]?.attachments?.map(attachment => attachment.type)).toEqual(['plugin'])
     renderWithErrorReply(merged[0]!)
     fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
+    expect(pushToast).toHaveBeenCalledWith(
+      "1 attachment from the original message couldn't be restored.",
+      'warn'
+    )
+  })
+})
+
+describe('ChatThread resend of a message that named a folder', () => {
+  async function folderTurn() {
+    const folder = await suggestedFolderCandidate(await folderView(1, 'Reports'))
+    const incoming = turnsToChatMessages([
+      {
+        number: 12,
+        user_input: buildComposerRequestContent('Save a summary here', [folder]),
+        started_at: new Date(2).toISOString(),
+      },
+    ])
+    return { folder, incoming }
+  }
+
+  it('S-F10: puts the folder back from the identified local copy, with no warning', async () => {
+    const { folder, incoming } = await folderTurn()
+    const local: AgentChatMessage = {
+      ...incoming[0]!,
+      attachments: buildChatMessageAttachments([], [folder], []),
+    }
+    const [merged] = mergeAuthoritativeServerMessages([local], incoming)
+    renderWithErrorReply(merged!)
+    fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
+    expect(getComposerDraft('chat-1')).toBe('Save a summary here')
+    expect(addComposerReferenceAttachments).toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'global_folder', gfsUri: folder.gfsUri, label: 'Reports' }),
+    ])
+    expect(pushToast).not.toHaveBeenCalled()
+  })
+
+  it('S-F10b: without the local copy, warns that the folder could not be restored', async () => {
+    const { incoming } = await folderTurn()
+    const [merged] = mergeAuthoritativeServerMessages([], incoming)
+    renderWithErrorReply(merged!)
+    fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
+    expect(getComposerDraft('chat-1')).toBe('Save a summary here')
+    expect(addComposerReferenceAttachments).not.toHaveBeenCalled()
     expect(pushToast).toHaveBeenCalledWith(
       "1 attachment from the original message couldn't be restored.",
       'warn'

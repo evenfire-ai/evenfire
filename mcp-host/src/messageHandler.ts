@@ -1,4 +1,5 @@
 import { AgentStateMachine } from './agent'
+import type { ShellCardDescriptor } from './core/approval/shellCard'
 import { LlmErrorCode } from './core/errors'
 import type { Attachment } from './core/types'
 import type { TaskLifecycle } from './lifecycle/taskLifecycle'
@@ -52,7 +53,37 @@ export interface PendingTaskEntry {
     // generic approval (back-compat).
     reason?: 'approval_required' | 'connect_required'
     mcpServerName?: string
+    /** false when the card must not offer "Always approve". */
+    alwaysApproveAllowed?: false
+    shellCard?: ShellCardDescriptor
   }
+}
+
+export function projectTaskResultApproval(
+  taskId: string,
+  approval: NonNullable<PendingTaskEntry['approval']>
+): NonNullable<MessageResponse['approval']> {
+  return {
+    taskId,
+    requestId: approval.requestId,
+    userId: approval.userId,
+    notification: approval.notification,
+    ...(approval.reason ? { reason: approval.reason } : {}),
+    ...(approval.reason === 'connect_required' && approval.mcpServerName
+      ? { mcpServerName: approval.mcpServerName }
+      : {}),
+    ...(approval.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false as const } : {}),
+    ...(approval.shellCard ? { shellCard: approval.shellCard } : {}),
+  }
+}
+
+function isShellCard(value: unknown): value is ShellCardDescriptor {
+  if (!value || typeof value !== 'object') return false
+  const card = value as Record<string, unknown>
+  return (
+    typeof card.channelCommandOffered === 'boolean' &&
+    typeof card.desktopCommandOffered === 'boolean'
+  )
 }
 
 /**
@@ -62,13 +93,22 @@ export interface PendingTaskEntry {
  * a generic approval so the legacy wire shape stays byte-identical
  * (back-compat). Pure field propagation — the decision already happened
  * upstream (buildConnectRequiredApproval); nothing is inferred here.
+ * `shellCard` is copied only when both flags are booleans.
  */
 function connectApprovalFields(data: Record<string, unknown>): {
   reason?: 'approval_required' | 'connect_required'
   mcpServerName?: string
+  alwaysApproveAllowed?: false
+  shellCard?: ShellCardDescriptor
 } {
   const reason = data.reason as 'approval_required' | 'connect_required' | undefined
   const isConnect = reason === 'connect_required'
+  const shellCard = isShellCard(data.shellCard)
+    ? {
+        channelCommandOffered: data.shellCard.channelCommandOffered,
+        desktopCommandOffered: data.shellCard.desktopCommandOffered,
+      }
+    : undefined
   return {
     ...(reason ? { reason } : {}),
     // mcpServerName rides ONLY connect_required, matching the SSE producer.
@@ -77,6 +117,8 @@ function connectApprovalFields(data: Record<string, unknown>): {
     ...(isConnect && typeof data.mcpServerName === 'string'
       ? { mcpServerName: data.mcpServerName }
       : {}),
+    ...(data.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false as const } : {}),
+    ...(shellCard ? { shellCard } : {}),
   }
 }
 
@@ -326,16 +368,22 @@ export class IncomingMessageHandler {
       { taskId: this.task.id, reason, priorTaskId, priorStatus },
       'Duplicate delivery suppressed'
     )
-    // #666 — a success names the attachments and file references the first
-    // delivery admitted, as the first response did; without them a client reads
+    // #666 — a success names the attachments, file and location references the
+    // first delivery admitted, as the first response did; without them a client reads
     // a Host that dropped them. `prior` is the record admission read, so a TTL
     // eviction since then cannot remove them.
-    const accepted: Pick<MessageResponse, 'acceptedAttachmentIds' | 'acceptedFileReferenceIds'> = {
+    const accepted: Pick<
+      MessageResponse,
+      'acceptedAttachmentIds' | 'acceptedFileReferenceIds' | 'acceptedLocationReferenceIds'
+    > = {
       ...(prior.acceptedAttachmentIds.length
         ? { acceptedAttachmentIds: [...prior.acceptedAttachmentIds] }
         : {}),
       ...(prior.acceptedFileReferenceIds.length
         ? { acceptedFileReferenceIds: [...prior.acceptedFileReferenceIds] }
+        : {}),
+      ...(prior.acceptedLocationReferenceIds.length
+        ? { acceptedLocationReferenceIds: [...prior.acceptedLocationReferenceIds] }
         : {}),
     }
     if (priorStatus === 'completed') {

@@ -17,7 +17,6 @@ type LinkService = {
   createGfsResourceDeepLink: (uri: string) => Promise<{ url: string }>
   suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
   stopAllStreams: () => void
-  ensureEntityChangeConnection: () => void
 }
 
 const appLocation = {
@@ -32,7 +31,6 @@ async function useRealAppServiceLocation(service: LinkService): Promise<void> {
   vi.spyOn(driver, 'getActiveSandboxUiLocation').mockReturnValue(appLocation)
   service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
   service.stopAllStreams = vi.fn()
-  service.ensureEntityChangeConnection = vi.fn()
 }
 
 function authenticate(service: LinkService, suffix: string): void {

@@ -1,9 +1,12 @@
 import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
+import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
+import { type ApprovalMode, effectiveApprovalMode } from '../approval/approvalMode'
+import { approvalLogId, syncEffectiveMode } from '../approval/grantMemory'
+import { type ShellAction, resolveShellAnswer } from '../approval/shellCard'
 import { ConversationError, ConversationErrorCode } from '../errors'
 import { SESSION_SCOPED_APPROVAL_TOOLS } from '../extensions/approvalController'
-import { isMcpToolName } from '../extensions/mcpApprovalGateController'
 import {
   ChatMessage,
   ContextBreakdown,
@@ -23,6 +26,8 @@ import {
   SessionListQuery,
   SessionMessagesQuery,
 } from './conversationStore'
+import { liftDenial, recordDenial } from './denialPolicy'
+import { mayStoreGrant } from './pendingApprovalView'
 import { userIdFromRpcPrefix } from './sessionKeyParts'
 
 /**
@@ -54,7 +59,10 @@ export class ConversationManager {
    * chat share one creation; two would insert two rows with the same
    * `session_key`, and the second insert fails on its unique index.
    */
-  private readonly pendingCreates = new Map<string, Promise<Conversation>>()
+  private readonly pendingCreates = new Map<
+    string,
+    Promise<{ conversation: Conversation; created: boolean }>
+  >()
 
   constructor(store: ConversationStore = new InMemoryConversationStore()) {
     this.store = store
@@ -88,10 +96,23 @@ export class ConversationManager {
    * RPC handlers); tests must `await`.
    */
   async getOrCreate(sessionKey: string, opts?: GetOrCreateOptions): Promise<Conversation> {
+    const { conversation } = await this.getOrCreateDetailed(sessionKey, opts)
+    return conversation
+  }
+
+  /**
+   * Same lookup as `getOrCreate`. `created` is true only when the create
+   * branch ran. A cache hit and a cold load are false. `opts.approvalMode`
+   * is written only in that create branch.
+   */
+  async getOrCreateDetailed(
+    sessionKey: string,
+    opts?: GetOrCreateOptions
+  ): Promise<{ conversation: Conversation; created: boolean }> {
     const cached = this.store.get(sessionKey)
     if (cached) {
       this.assertSessionOwner(cached, opts?.userId)
-      return cached
+      return { conversation: cached, created: false }
     }
 
     let pending = this.pendingCreates.get(sessionKey)
@@ -101,14 +122,17 @@ export class ConversationManager {
       })
       this.pendingCreates.set(sessionKey, pending)
     }
-    const conv = await pending
-    this.assertSessionOwner(conv, opts?.userId)
-    return conv
+    const result = await pending
+    this.assertSessionOwner(result.conversation, opts?.userId)
+    return result
   }
 
-  private async loadOrCreate(sessionKey: string, opts?: GetOrCreateOptions): Promise<Conversation> {
+  private async loadOrCreate(
+    sessionKey: string,
+    opts?: GetOrCreateOptions
+  ): Promise<{ conversation: Conversation; created: boolean }> {
     const loaded = await this.store.getOrLoad(sessionKey)
-    if (loaded) return loaded
+    if (loaded) return { conversation: loaded, created: false }
 
     const parsed = parseSessionKey(sessionKey)
 
@@ -119,6 +143,10 @@ export class ConversationManager {
       state: ConversationState.Idle,
       turns: [],
       auto_approved_tools: new Set(),
+      denials: new Map(),
+      approval_mode: opts?.approvalMode ?? 'manual',
+      auto_shell_grants: { wholeTool: false, commands: new Set() },
+      ...(opts?.channelType !== undefined ? { channel_type: opts.channelType } : {}),
       created_at: new Date(),
       updated_at: new Date(),
       // #654 — a freshly inserted row carries the column default, so the RAM
@@ -129,7 +157,7 @@ export class ConversationManager {
     }
     this.store.set(sessionKey, conv)
     await Promise.resolve(this.store.persistSessionCreate(conv, opts ?? {}))
-    return conv
+    return { conversation: conv, created: true }
   }
 
   /**
@@ -284,8 +312,6 @@ export class ConversationManager {
     conversation.traceContext = traceContext
     conversation.updated_at = new Date()
 
-    // Clear per-turn wildcard approval — each new message requires fresh approval
-    conversation.auto_approved_tools.delete('*')
     // A new user message starts a new task: plain session-scoped approvals end here.
     conversation.task_approved_tools?.clear()
 
@@ -558,22 +584,94 @@ export class ConversationManager {
   }
 
   /**
+   * Store a mode from the route or the messaging command.
+   *
+   * The route persists the requested mode, including a choice above the ceiling.
+   * The command persists `auto` or `allow_all` only when the channel switch
+   * (`live.channelSwitch`, `readChannelSwitch`) is `allow_all`; otherwise it
+   * persists `manual`. The switch, not the cap, decides what the command
+   * stores, so a sender the approver policy caps at manual can still lower
+   * the stored mode; the command refuses that sender's raises before this
+   * call. The effective mode is min(stored, `live.ceiling`, `live.cap`), and
+   * `live.cap` is `readChannelCap`, which carries the approver policy.
+   * `persistApprovalMode` is the durability barrier and moves the in-memory
+   * mirror only after the write is acknowledged. The effective mode is then
+   * synced, and L1 is logged with hashed session and user ids. `userId` is the
+   * acting user; L1 hashes `conversation.user_id`, not this argument.
+   */
+  async setApprovalMode(
+    conversation: Conversation,
+    requested: ApprovalMode,
+    live: { ceiling: ApprovalMode; cap: ApprovalMode; channelSwitch: ApprovalMode },
+    writer: 'route' | 'command',
+    userId?: string
+  ): Promise<{
+    approvalMode: ApprovalMode
+    modeCeiling: ApprovalMode
+    channelCap: ApprovalMode
+    effectiveApprovalMode: ApprovalMode
+  }> {
+    void userId
+    const stored: ApprovalMode =
+      writer === 'command' && (live.channelSwitch !== 'allow_all' || requested === 'manual')
+        ? 'manual'
+        : requested
+    await this.store.persistApprovalMode(conversation, stored)
+    conversation.approval_mode = stored
+    const effective = effectiveApprovalMode(stored, live.ceiling, live.cap)
+    syncEffectiveMode(conversation, effective)
+    logger.info(
+      {
+        event: 'L1',
+        session: approvalLogId(conversation.id),
+        user: approvalLogId(conversation.user_id ?? ''),
+        requested,
+        ceiling: live.ceiling,
+        channelCap: live.cap,
+        effectiveApprovalMode: effective,
+        writer,
+      },
+      'Stored approval mode'
+    )
+    return {
+      approvalMode: conversation.approval_mode,
+      modeCeiling: live.ceiling,
+      channelCap: live.cap,
+      effectiveApprovalMode: effective,
+    }
+  }
+
+  /**
    * Resume after approval.
    * Transitions: AwaitingApproval → Processing
    *
-   * Proven turn-wide consent keeps the legacy expansion: all tools in this turn,
-   * plus the MCP server prefix for future turns. Exact-call and legacy unknown
-   * scopes authorize only the frozen invocation being resumed.
-   *
-   * SESSION_SCOPED_APPROVAL_TOOLS are the exception: turn-wide consent for one
-   * of them stores only that tool name, never '*' — in `task_approved_tools`
-   * for the current task, or in `auto_approved_tools` with alwaysApprove.
-   *
-   * When alwaysApprove=true, also stores the individual tool name (backwards compat).
+   * Approving one tool does not allowlist other tools, an MCP server, or the
+   * rest of the turn. Only an ordinary card (authorization_scope 'turn_tools')
+   * may store a grant: alwaysApprove stores that tool's exact name for later
+   * turns, and a plain approval of a SESSION_SCOPED_APPROVAL_TOOLS tool lasts
+   * for the current task. Exact-invocation and legacy unknown scopes (forced
+   * gates, denial re-asks, guardrail and live-tool cards) authorize only the
+   * frozen call being resumed. When `shell` is present, a non-cron name grant
+   * also requires effectiveMode manual. cron_manage may still store in every
+   * effective mode. A shell card stores a command or whole-tool grant only
+   * while the effective mode is auto and the descriptor flag for the answering
+   * surface is true; otherwise that frozen call runs once and stores nothing.
+   * Approving this tool lifts its denial only when the approver is the user who
+   * denied it (or the denier is unknown); another user's approval runs this
+   * call once, keeps the denial and grants nothing (denialPolicy).
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
-  async approve(conversation: Conversation, alwaysApprove: boolean): Promise<void> {
+  async approve(
+    conversation: Conversation,
+    alwaysApprove: boolean,
+    userId?: string,
+    shell?: {
+      shellAction?: ShellAction
+      effectiveMode: ApprovalMode
+      surface: 'desktop' | 'channel'
+    }
+  ): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot approve: conversation is ${conversation.state}`,
@@ -584,30 +682,27 @@ export class ConversationManager {
     const requestId = conversation.pending_approval?.request_id
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
-      const turnWide = conversation.pending_approval.authorization_scope === 'turn_tools'
-
-      if (turnWide && SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)) {
-        // Session-scoped consent covers this tool alone and neither grants nor
-        // revokes '*'. A plain approval lasts for the current task; "always"
-        // lasts for later tasks while the conversation is in memory.
-        if (alwaysApprove) conversation.auto_approved_tools.add(toolName)
-        else (conversation.task_approved_tools ??= new Set()).add(toolName)
+      const approval = conversation.pending_approval
+      const lifted = liftDenial(conversation, toolName, userId)
+      const shellAnswer = shell
+        ? resolveShellAnswer(approval, {
+            shellAction: shell.shellAction,
+            alwaysApprove,
+            effectiveMode: shell.effectiveMode,
+            surface: shell.surface,
+          })
+        : null
+      if (lifted === 'kept_for_denier') {
+        if (alwaysApprove) {
+          logger.info(
+            { event: 'always_approve_ignored', toolName, reason: 'denied_by_another_user' },
+            'Always approve ignored: another user denied this tool'
+          )
+        }
+      } else if (shell && shellAnswer) {
+        storeShellGrant(conversation, approval, shellAnswer)
       } else {
-        // Only proven turn-wide consent expands. Exact-call and legacy unknown
-        // scopes authorize just the frozen invocation being resumed.
-        if (turnWide) conversation.auto_approved_tools.add('*')
-        else conversation.auto_approved_tools.delete('*')
-
-        // MCP tools: also auto-approve the entire server for future turns
-        if (turnWide && isMcpToolName(toolName)) {
-          const serverPrefix = toolName.split('__')[0]
-          conversation.auto_approved_tools.add(serverPrefix)
-        }
-
-        // alwaysApprove also stores the individual tool name (for future turns)
-        if (turnWide && alwaysApprove) {
-          conversation.auto_approved_tools.add(toolName)
-        }
+        storeNameGrant(conversation, approval, alwaysApprove, shell?.effectiveMode, toolName)
       }
     }
 
@@ -622,9 +717,17 @@ export class ConversationManager {
    * Deny approval.
    * Transitions: AwaitingApproval → Idle
    *
+   * Records a denial of pending_approval.tool_name (denialPolicy) before clearing
+   * pending_approval. A user denial is persisted with the session. A shell_exec
+   * denial also resets auto shell grants. An approval timeout passes record:false
+   * and does neither.
+   *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
-  async deny(conversation: Conversation): Promise<void> {
+  async deny(
+    conversation: Conversation,
+    options?: { record?: boolean; userId?: string }
+  ): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot deny: conversation is ${conversation.state}`,
@@ -633,6 +736,17 @@ export class ConversationManager {
     }
 
     const requestId = conversation.pending_approval?.request_id
+    const deniedTool = conversation.pending_approval?.tool_name
+    const record = options?.record !== false
+    if (deniedTool && record) {
+      // The deny is the latest explicit decision: recordDenial also revokes an
+      // earlier "Always approve" for this exact tool.
+      recordDenial(conversation, deniedTool, options?.userId)
+      logger.info(
+        { event: 'approval_denial_recorded', toolName: deniedTool },
+        'Recorded a tool denial'
+      )
+    }
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — deny is terminal (→ Idle), no task in flight
@@ -755,5 +869,59 @@ export class ConversationManager {
     }
 
     return messages
+  }
+}
+
+function storeShellGrant(
+  conversation: Conversation,
+  approval: PendingApproval,
+  action: ShellAction
+): void {
+  if (action === 'shell') {
+    conversation.auto_shell_grants.wholeTool = true
+    return
+  }
+  if (action !== 'command') return
+  const command = approval.parameters.command
+  if (typeof command !== 'string') return
+  conversation.auto_shell_grants.commands.add(command)
+}
+
+function storeNameGrant(
+  conversation: Conversation,
+  approval: PendingApproval,
+  alwaysApprove: boolean,
+  effectiveMode: ApprovalMode | undefined,
+  toolName: string
+): void {
+  const grantable = mayStoreGrant(approval)
+  // Callers that do not pass an answer-time mode keep dev plus #726.
+  const modeAllows =
+    effectiveMode === undefined || effectiveMode === 'manual' || toolName === 'cron_manage'
+  if (!grantable) {
+    if (alwaysApprove) {
+      logger.info(
+        { event: 'always_approve_ignored', toolName, reason: 'exact_invocation' },
+        'Always approve ignored: this card authorizes only its own call'
+      )
+    }
+    return
+  }
+  if (!modeAllows) {
+    // The call still runs once. Only an Always answer was asked to store.
+    if (alwaysApprove) {
+      logger.info(
+        { event: 'always_approve_ignored', toolName, reason: 'mode_not_manual', effectiveMode },
+        'Always approve ignored: grants are stored only in manual'
+      )
+    }
+    return
+  }
+  if (alwaysApprove) {
+    conversation.auto_approved_tools.add(toolName)
+    return
+  }
+  if (SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)) {
+    ;(conversation.task_approved_tools ??= new Set()).add(toolName)
   }
 }

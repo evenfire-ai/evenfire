@@ -9,6 +9,7 @@ import { useChatListContext } from '@contexts/ChatListContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { Button, IconButton, MenuItem, NavItem as NavItemControl } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
+import { useGfsActionHost } from '@components/GfsActionHost/context'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/navigation'
 import { useClickOutside } from '@hooks/useClickOutside'
@@ -47,6 +48,8 @@ export function SidebarNav({
   onSettingsMenuOpenChange,
   onSelect,
   onOpenFilesSection,
+  onVisibleExpandedFoldersChange,
+  onGfsMenuOpenChange,
   onOpenPreviewSection,
   pushToast,
   toggleRequestId = 0,
@@ -61,6 +64,7 @@ export function SidebarNav({
     handleDeleteChatForAgent: onDeleteChatForAgent,
   } = useAgentChatActionsContext()
   const { selectedAgent, handleSelectChatAgent: onSelectChatAgent } = useNavigationContext()
+  const gfsDialogShown = useGfsActionHost()?.dialogShown ?? false
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
   const [chatSessionsOpen, setChatSessionsOpen] = useState(true)
   const [appsOpen, setAppsOpen] = useState(true)
@@ -184,7 +188,9 @@ export function SidebarNav({
   }, [compactMenuOpen])
 
   useEffect(() => {
-    if (!compactMenuOpen) return undefined
+    // The host's dialogs listen on window, after this document listener: while
+    // one is shown, or its action runs, the drawer must not take Escape from it.
+    if (!compactMenuOpen || gfsDialogShown) return undefined
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
@@ -193,7 +199,7 @@ export function SidebarNav({
     }
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [closeCompactMenu, compactMenuOpen])
+  }, [closeCompactMenu, compactMenuOpen, gfsDialogShown])
 
   const primaryItems: Array<{ id: NavItem; label: string; testId: string; icon: React.ReactNode }> =
     useMemo(
@@ -692,6 +698,8 @@ export function SidebarNav({
                     closeCompactMenu()
                   }}
                   pushToast={pushToast}
+                  onVisibleExpandedFoldersChange={onVisibleExpandedFoldersChange}
+                  onGfsMenuOpenChange={onGfsMenuOpenChange}
                 />
               </div>
             )}

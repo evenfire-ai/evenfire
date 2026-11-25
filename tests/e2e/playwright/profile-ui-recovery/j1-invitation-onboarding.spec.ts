@@ -85,12 +85,9 @@ test('J1 invitation onboarding ends in guided sign-in and a real login', async (
   await expect(page.getByLabel('Email', { exact: true })).toHaveValue(ONBOARDING_MEMBER.email)
   await signInThroughUi(page, ONBOARDING_MEMBER.email, ONBOARDING_MEMBER.password)
 
-  await expectBrowserRoute(page, {
-    pathname: '/',
-    query: { email: ONBOARDING_MEMBER.email },
-  })
-  await expect(page.getByRole('heading', { name: 'Welcome, Synthetic Member' })).toBeVisible()
-  await expect(page.getByText('onboarding-member@example.invalid')).toBeVisible()
+  await expect(page).toHaveURL(/\/channels\/telegram$/)
+  await expectBrowserRoute(page, { pathname: '/channels/telegram' })
+  await expect(page.getByRole('heading', { name: 'Social channels', exact: true })).toBeVisible()
 
   const afterLogin = await readControlApiMetrics(page)
   expect(afterLogin.loginSuccesses).toContainEqual({ userId: ONBOARDING_MEMBER.id })

@@ -12,6 +12,7 @@ import type {
   ToolDefinition,
 } from '../../../core/types'
 import type { LlmProvider } from '../../registryCore'
+import type { ReasoningEffortOption } from '../../types'
 import type { ResolvedModelParams } from '../modelParamPolicy'
 
 export type WireProtocolId = 'openai-chat' | 'openai-responses'
@@ -38,6 +39,7 @@ export interface EncodeTextInput {
   readonly messages: readonly CoreChatMessage[]
   readonly max_tokens?: number
   readonly temperature?: number
+  readonly reasoning_effort?: ReasoningEffortOption
 }
 
 export interface EncodeToolsInput extends EncodeTextInput {

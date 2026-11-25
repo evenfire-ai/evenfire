@@ -5,7 +5,7 @@ import { filterByIncludeWhen } from './includeWhenFilter'
 function makeWorkload(overrides: Partial<WorkloadDef> & { id: string }): WorkloadDef {
   return {
     type: 'deployment',
-    image: 'nginx:1.30.6-alpine',
+    image: 'nginx:1.30.7-alpine',
     ...overrides,
   } as WorkloadDef
 }

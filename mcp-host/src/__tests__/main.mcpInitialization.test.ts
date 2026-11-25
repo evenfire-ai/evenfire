@@ -7,6 +7,7 @@ import {
   createMcpAuthorityPollFailureOptions,
   createMcpAuthorityStalenessDeadline,
   isMcpAuthorityStale,
+  runContextMapperPoll,
   startContextMapperPolling,
   stopContextMapperPolling,
 } from '../main'
@@ -659,9 +660,10 @@ describe('context-mapper polling lifecycle', () => {
 
 /**
  * Issue #1350: compose the real coalesced poll runner on setInterval(I), the
- * absolute staleness deadline and the poll-failure classifier. The stub poll
- * mirrors pollContextMapper: the first N calls fail at the request timeout T
- * and are classified; call N + 1 answers at exactly T and records success.
+ * absolute staleness deadline, the poll-failure classifier and the real poll
+ * body (runContextMapperPoll, #1491) with fake I/O: the first N fetches fail
+ * at the request timeout T and are classified; fetch N + 1 answers at exactly
+ * T, and the body records success only while the manager is still current.
  * The last good answer is at t = 0 (latency 0, the worst case), so polls start
  * on the ticks I, 2I, ... or, when T > I, on the trailing run that starts at the
  * previous poll's timeout.
@@ -707,6 +709,9 @@ describe('staleness deadline survives N missed polls', () => {
     let successAt: number | null = null
     let recoveryAnsweredAt: number | null = null
     let calls = 0
+    let initializations = 0
+    // The published manager; a revocation withdraws it.
+    const fleetManager = { fleet: 'published' }
     let pollTimer: ReturnType<typeof setInterval> | null = null
 
     // Mirrors stopContextMapperPolling: stop the runner and clear its producer.
@@ -728,15 +733,35 @@ describe('staleness deadline survives N missed polls', () => {
       () => Date.now() - deadlineLagMs
     )
 
-    const runner = createCoalescedPollRunner(async () => {
-      const call = ++calls
-      starts.push(elapsed())
-      await new Promise<void>(resolve => setTimeout(resolve, timeoutMs))
-      if (call <= missedPolls) {
-        dispositions.push(
-          handleMcpAuthorityPollFailure(
-            new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
-            {
+    const runner = createCoalescedPollRunner(() =>
+      runContextMapperPoll({
+        getManager: () => (revoked ? null : fleetManager),
+        isShuttingDown: () => false,
+        initialize: async () => {
+          initializations += 1
+        },
+        pollServers: async () => {
+          const call = ++calls
+          starts.push(elapsed())
+          await new Promise<void>(resolve => setTimeout(resolve, timeoutMs))
+          if (call <= missedPolls) {
+            throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+          }
+          recoveryAnsweredAt = elapsed()
+          // Stop before resolving so the runner's trailing re-trigger sees
+          // `stopped` and no later poll re-arms the deadline.
+          stopPolling()
+          return { servers: [] }
+        },
+        reconcile: async () => {},
+        recordSuccess: () => {
+          lastSuccessAt = Date.now()
+          successAt = elapsed()
+          deadline.recordSuccess(lastSuccessAt)
+        },
+        onFailure: error => {
+          dispositions.push(
+            handleMcpAuthorityPollFailure(error, {
               hasPublishedManager: () => !revoked,
               lastSuccessAt: () => lastSuccessAt,
               now: () => Date.now(),
@@ -750,23 +775,11 @@ describe('staleness deadline survives N missed polls', () => {
               onCallerAuthorizationRejected: () => {},
               onInventoryAuthorityRevoked: () => {},
               onUnavailable: () => {},
-            }
+            })
           )
-        )
-        return
-      }
-      recoveryAnsweredAt = elapsed()
-      // main.ts discards an answer that arrives after a revocation
-      // (mcpManager === manager); only a current answer records success.
-      if (!revoked) {
-        lastSuccessAt = Date.now()
-        successAt = elapsed()
-        deadline.recordSuccess(lastSuccessAt)
-      }
-      // Stop before resolving so the runner's trailing re-trigger sees
-      // `stopped` and no later poll re-arms the deadline.
-      stopPolling()
-    })
+        },
+      })
+    )
 
     lastSuccessAt = ORIGIN_MS
     deadline.recordSuccess(ORIGIN_MS)
@@ -788,6 +801,9 @@ describe('staleness deadline survives N missed polls', () => {
       },
       get calls() {
         return calls
+      },
+      get initializations() {
+        return initializations
       },
       dispose: () => {
         stopPolling()
@@ -918,6 +934,26 @@ describe('staleness deadline survives N missed polls', () => {
     }
   })
 
+  it('T8.1 an answer that arrives after the deadline revoked records no success', async () => {
+    const run = startMissedPollScenario({
+      intervalMs: 30_000,
+      timeoutMs: 10_000,
+      stalenessMs: 99_999,
+      missedPolls: 2,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(100_000)
+
+      expect(run.expiries).toEqual([99_999])
+      // Witness: the recovery fetch answered, so the poll body ran to its end.
+      expect(run.recoveryAnsweredAt).toBe(100_000)
+      expect(run.successAt).toBeNull()
+      expect(run.initializations).toBe(0)
+    } finally {
+      run.dispose()
+    }
+  })
+
   // The witness for the `classifierRevocations` assertions above: the
   // classifier revokes a failure that completes at or after S, here because
   // the deadline timer observes the clock 5 s late.
@@ -945,6 +981,50 @@ describe('staleness deadline survives N missed polls', () => {
     } finally {
       run.dispose()
     }
+  })
+})
+
+describe('runContextMapperPoll (#1491)', () => {
+  it('T8.2 a cold start calls initialize and nothing else', async () => {
+    const calls: string[] = []
+    await runContextMapperPoll({
+      getManager: () => null,
+      isShuttingDown: () => false,
+      initialize: async () => {
+        calls.push('initialize')
+      },
+      pollServers: async () => {
+        calls.push('pollServers')
+        return { servers: [] }
+      },
+      reconcile: async () => {
+        calls.push('reconcile')
+      },
+      recordSuccess: () => calls.push('recordSuccess'),
+      onFailure: () => calls.push('onFailure'),
+    })
+
+    expect(calls).toEqual(['initialize'])
+  })
+
+  it('a current answer is reconciled into the manager the poll started with, then recorded', async () => {
+    const manager = { fleet: 'current' }
+    const calls: unknown[] = []
+    await runContextMapperPoll({
+      getManager: () => manager,
+      isShuttingDown: () => false,
+      initialize: async () => {
+        calls.push('initialize')
+      },
+      pollServers: async () => ({ servers: [] }),
+      reconcile: async (_servers, target) => {
+        calls.push(target)
+      },
+      recordSuccess: () => calls.push('recordSuccess'),
+      onFailure: () => calls.push('onFailure'),
+    })
+
+    expect(calls).toEqual([manager, 'recordSuccess'])
   })
 })
 

@@ -124,8 +124,8 @@ test('optional QA recorder: Desktop model selector lists models without capabili
     const composer = ui.getByRole('textbox', { name: 'Agent message composer' })
     await expect(composer).toBeVisible({ timeout: 20_000 })
 
-    // The selection this journey must hand back. Broker-backed hosts invent no
-    // default, so an absent value is legitimate and only disables the restore.
+    // The selection this journey must hand back (the Host default when the
+    // chat has none). An absent value only disables the restore.
     const originalModel = await modelChip(ui).getAttribute('data-model-id')
 
     let rowCount = 0
@@ -188,8 +188,8 @@ test('optional QA recorder: Desktop model selector lists models without capabili
 
     await test.step('restore the original selection', async () => {
       if (!originalModel || originalModel === otherModel) {
-        // Broker-backed host with no prior selection, or the pick was already
-        // the original. Nothing to hand back.
+        // The chip named no model (the Host reports an empty default), or the
+        // pick was already the original. Nothing to hand back.
         await ui.keyboard.press('Escape')
         await expect(modelMenu(ui)).toBeHidden({ timeout: 20_000 })
         return

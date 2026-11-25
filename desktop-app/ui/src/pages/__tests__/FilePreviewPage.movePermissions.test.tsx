@@ -241,6 +241,11 @@ describe('FilePreviewPage move permission contract', () => {
         expect(resourceReads).toBe(2)
         expect(sourceReads).toBe(2)
       })
+      const progress = await screen.findByRole('status', { name: 'Checking file permissions' })
+      expect(progress.closest('.da-gfs-preview-title-row')).toBeTruthy()
+      expect(screen.queryByRole('status', { name: 'Checking move permissions' })).toBeNull()
+      expect(screen.queryByText('Checking file permissions…')).toBeNull()
+      expect(screen.queryByText('Checking move permissions…')).toBeNull()
 
       const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
       expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
@@ -992,6 +997,30 @@ describe('FilePreviewPage move permission contract', () => {
     )
     expect(pushToast).toHaveBeenCalledWith('Moved diagram.png to Archive', 'success')
     expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+  })
+
+  it('closes the Move dialog on an Escape pressed from the page and moves nothing', async () => {
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({ listAccessible: async () => destinationPage })
+    installController()
+    renderPreview(vi.fn())
+
+    await screen.findByAltText('Preview of diagram.png')
+    const menu = await openPreviewActions()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+    await within(dialog).findByRole('button', { name: 'Archive' })
+
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+    )
+    expect(moveResource).not.toHaveBeenCalled()
   })
 
   it('closes a Preview Retry owned by a previous session scope', async () => {

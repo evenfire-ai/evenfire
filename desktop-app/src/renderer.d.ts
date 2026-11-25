@@ -21,8 +21,10 @@ import {
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
-  EntityChangeStreamEvent,
   ExternalChannelsSummary,
+  GfsWatchEvent,
+  GfsWatchSubscriptionRequest,
+  GfsWatchSubscriptionResult,
   HostActivitySnapshot,
   HostActivityStreamEvent,
   HostMessageRequest,
@@ -161,6 +163,18 @@ declare global {
           bytes?: number
           updatedAt?: string
         }>
+        /**
+         * Never rejects. `superseded`: the session the call started under is gone
+         * (drop silently). `unavailable`: nothing to open (tell the user).
+         */
+        resolveForNavigation: (uri: string) => Promise<
+          | {
+              status: 'resolved'
+              resource: Awaited<ReturnType<Window['clerum']['gfs']['resolve']>>
+            }
+          | { status: 'superseded' }
+          | { status: 'unavailable' }
+        >
         download: (
           uri: string,
           options?: { maxBytes?: number; signal?: AbortSignal }
@@ -515,10 +529,18 @@ declare global {
         onFailed: (callback: (payload: { id: string; error: string }) => void) => () => void
         ack: (notificationId: string) => Promise<{ ok: boolean; status: string }>
       }
-      entityChanges: {
-        subscribe: (
-          onEvent: (event: EntityChangeStreamEvent) => void
-        ) => Promise<() => Promise<void>>
+      gfsWatch: {
+        open: (
+          onEvent: (event: GfsWatchEvent) => void,
+          initial: GfsWatchSubscriptionRequest
+        ) => Promise<{
+          sessionExpired: boolean
+          setSubscriptions: (
+            request: GfsWatchSubscriptionRequest
+          ) => Promise<GfsWatchSubscriptionResult>
+          /** Empties this window's list and stops listening; the window stays registered. */
+          close: () => Promise<void>
+        }>
       }
       notificationPreferences: {
         get: () => Promise<import('./types').UserNotificationPreferences>
@@ -606,7 +628,11 @@ declare global {
           taskId: string,
           toolCallId: string,
           hostRefs?: string[],
-          options?: { teamId?: string | null }
+          options?: {
+            teamId?: string | null
+            alwaysApprove?: boolean
+            shellAction?: 'once' | 'command' | 'shell'
+          }
         ) => Promise<ApprovalDecisionResult>
         denyToolCall: (
           hostRef: string,
@@ -683,6 +709,21 @@ declare global {
           chatId: string,
           title: string
         ) => Promise<{ title: string }>
+        /**
+         * Stores the session approval mode. A 400, 401 or 404 leaves the mode
+         * unchanged. Any other failure is not proof of what the server stored.
+         */
+        setApprovalMode: (
+          hostRef: string,
+          agent: string,
+          chatId: string,
+          mode: 'manual' | 'auto' | 'allow_all'
+        ) => Promise<{
+          approvalMode: 'manual' | 'auto' | 'allow_all'
+          modeCeiling: 'manual' | 'auto' | 'allow_all'
+          channelCap: 'manual' | 'auto' | 'allow_all'
+          effectiveApprovalMode: 'manual' | 'auto' | 'allow_all'
+        }>
         getTokenMetadata: () => Promise<TokenMetadata>
         // U5 (mcp-oauth reactive consent): "Connect <server>" for a task
         // suspended with `connect_required`. Host-bound to that conversation.

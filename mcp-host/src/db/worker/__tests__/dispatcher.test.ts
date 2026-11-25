@@ -651,6 +651,108 @@ describe('dbWorker dispatcher', () => {
     expect(rows[0].session_key).toBe('u-3:rpc:agent:default')
   })
 
+  describe('resolving a pending approval with update_session_state', () => {
+    async function seedAwaitingApproval(deps: ReturnType<typeof createDispatcher>) {
+      await dispatch(
+        {
+          kind: 'insert_session',
+          payload: {
+            ...makeSession('conv-deny', 'u-deny:rpc:agent:default'),
+            state: 'awaiting_approval',
+            active_task_id: 'task-deny',
+          },
+        },
+        deps
+      )
+      await dispatch(
+        {
+          kind: 'insert_pending_approval',
+          payload: {
+            request_id: 'req-deny',
+            session_id: 'conv-deny',
+            task_id: 'task-deny',
+            tool_name: 'review-server__write',
+            tool_call_id: 'tc-1',
+            parameters: '{}',
+            description: 'test',
+            context_snapshot: '[]',
+            completed_results: null,
+            intent_summary: null,
+            source_message: null,
+            registered_at: Date.now() / 1000,
+            expires_at: Date.now() / 1000 + 3600,
+            trace_context: null,
+            reason: null,
+            mcp_server_name: null,
+          },
+        },
+        deps
+      )
+    }
+
+    const denyOp = {
+      kind: 'update_session_state' as const,
+      sessionId: 'conv-deny',
+      state: 'idle',
+      activeTaskId: null,
+      activeTraceContext: null,
+      deniedToolsJson: JSON.stringify([{ tool: 'review-server__write', userId: 'u-deny' }]),
+      deletePendingRequestId: 'req-deny',
+    }
+
+    function pendingCount() {
+      return (
+        db
+          .prepare('SELECT COUNT(*) AS n FROM pending_approvals WHERE request_id = ?')
+          .get('req-deny') as { n: number }
+      ).n
+    }
+
+    function sessionRow() {
+      return db
+        .prepare('SELECT state, denied_tools FROM sessions WHERE id = ?')
+        .get('conv-deny') as { state: string; denied_tools: string | null }
+    }
+
+    it('consumes the pending row and records the denial together', async () => {
+      const deps = createDispatcher(db)
+      await seedAwaitingApproval(deps)
+
+      await dispatch(denyOp, deps)
+
+      expect(pendingCount()).toBe(0)
+      expect(sessionRow().state).toBe('idle')
+      expect(JSON.parse(sessionRow().denied_tools!)).toEqual([
+        { tool: 'review-server__write', userId: 'u-deny' },
+      ])
+    })
+
+    it('keeps the pending row when recording the denial fails', async () => {
+      const deps = createDispatcher(db)
+      await seedAwaitingApproval(deps)
+      db.exec(`CREATE TRIGGER fail_denial BEFORE UPDATE OF denied_tools ON sessions
+               BEGIN SELECT RAISE(ABORT, 'injected denial write failure'); END`)
+
+      await expect(dispatch(denyOp, deps)).rejects.toThrow('injected denial write failure')
+
+      expect(pendingCount()).toBe(1)
+      expect(sessionRow().state).toBe('awaiting_approval')
+      expect(sessionRow().denied_tools ?? null).toBeNull()
+    })
+
+    it('rolls back the session and denial when consuming the pending row fails', async () => {
+      const deps = createDispatcher(db)
+      await seedAwaitingApproval(deps)
+      db.exec(`CREATE TRIGGER fail_consume BEFORE DELETE ON pending_approvals
+               BEGIN SELECT RAISE(ABORT, 'injected consume failure'); END`)
+
+      await expect(dispatch(denyOp, deps)).rejects.toThrow('injected consume failure')
+
+      expect(pendingCount()).toBe(1)
+      expect(sessionRow().state).toBe('awaiting_approval')
+      expect(sessionRow().denied_tools ?? null).toBeNull()
+    })
+  })
   it.each([undefined, null, 'exact_invocation', 'turn_tools'] as const)(
     'round-trips an optional authorization scope through the real dispatcher: %s',
     async scope => {
@@ -1030,6 +1132,38 @@ describe('dbWorker dispatcher', () => {
       deps
     )
     expect(Array.isArray(rows)).toBe(true)
+  })
+
+  it('update_session_approval_mode stores the mode and refuses a missing row', async () => {
+    const deps = createDispatcher(db)
+    await dispatch(
+      { kind: 'insert_session', payload: makeSession('s-mode', 'u-mode:rpc:agent:mode') },
+      deps
+    )
+
+    await expect(
+      dispatch(
+        { kind: 'update_session_approval_mode', sessionId: 's-mode', approvalMode: 'auto' },
+        deps
+      )
+    ).resolves.toEqual({ ok: true })
+    const stored = db.prepare('SELECT approval_mode FROM sessions WHERE id = ?').get('s-mode') as {
+      approval_mode: string
+    }
+    expect(stored.approval_mode).toBe('auto')
+
+    let error: (Error & { code?: string }) | undefined
+    try {
+      await dispatch(
+        { kind: 'update_session_approval_mode', sessionId: 's-missing', approvalMode: 'auto' },
+        deps
+      )
+    } catch (err) {
+      error = err as Error & { code?: string }
+    }
+    expect(error?.code).toBe('APPROVAL_MODE_SESSION_NOT_FOUND')
+    expect(error?.message).toContain('s-missing')
+    expect(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 1 })
   })
 })
 

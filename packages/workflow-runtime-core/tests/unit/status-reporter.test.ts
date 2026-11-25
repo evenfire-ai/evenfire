@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { WorkflowAuthorizationPausedError, WorkflowRunStateUnavailableError } from '../../src/errors'
 import { createStaticRuntimeTokenProvider } from '../../src/runtime-token-provider/provider'
 import { AUTH_RETRY_DELAY_MS } from '../../src/status-reporter/authRetry'
 import { StatusReporter } from '../../src/status-reporter/client'
@@ -63,7 +64,7 @@ describe('StatusReporter', () => {
     )
   })
 
-  it('bounds toolsCalled in step reports while keeping the full output', async () => {
+  it('bounds toolsCalled and output in step reports', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
     vi.stubGlobal('fetch', fetchMock)
     const toolsCalled = Array.from({ length: 22 }, (_, i) => ({
@@ -84,10 +85,118 @@ describe('StatusReporter', () => {
 
     const rawBody: string = fetchMock.mock.calls[0][1].body
     const body = JSON.parse(rawBody)
-    expect(body.output).toBe(output)
+    expect(body.output).toBe(output.slice(0, 65_536))
+    expect(body.outputLength).toBe(150_000)
+    expect(body.outputTruncated).toBe(true)
     expect(body.toolsCalled).toHaveLength(22)
     expect(body.toolsCalled[0].result).toEqual({ truncated: true, preview: expect.any(String) })
-    expect(rawBody.length - output.length).toBeLessThan(64 * 1024)
+    expect(rawBody.length - body.output.length).toBeLessThan(64 * 1024)
+  })
+
+  it('cuts a large step output to the WRC preview maximum and reports its original length', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const output = 'r'.repeat(150_000)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('review', 'completed', { output })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.output).toBe(output.slice(0, 65_536))
+    expect(body.outputLength).toBe(150_000)
+    expect(body.outputTruncated).toBe(true)
+  })
+
+  it('sends a small step output whole with its length', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('s1', 'completed', { output: 'ok' })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body).toEqual({
+      stepId: 's1',
+      phase: 'completed',
+      output: 'ok',
+      outputLength: 2,
+      outputTruncated: false,
+    })
+  })
+
+  it('warns with structural fields only when a report is over the size ceiling', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    const logSpy = vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', fetchMock)
+    const failureReason = 'secret-reason '.repeat(30_000)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportWorkflowStatus('failed', { failureReason })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const sentBytes = Buffer.byteLength(fetchMock.mock.calls[0][1].body)
+    expect(sentBytes).toBeGreaterThan(256 * 1024)
+    expect(logSpy).toHaveBeenCalledWith('warn', 'Status report exceeds the size ceiling', {
+      label: 'workflow status',
+      bodyBytes: sentBytes,
+    })
+    expect(JSON.stringify(logSpy.mock.calls)).not.toContain('secret-reason')
+    logSpy.mockRestore()
+  })
+
+  it('does not warn about the size ceiling for a bounded step report', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    const logSpy = vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('s1', 'failed', {
+      output: '\u0001'.repeat(65_536),
+      failureReason: '\u0001'.repeat(100_000),
+    })
+
+    // Witness: the report was sent, and its input was far over the ceiling.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(Buffer.byteLength(JSON.stringify('\u0001'.repeat(65_536)))).toBeGreaterThan(256 * 1024)
+    expect(Buffer.byteLength(fetchMock.mock.calls[0][1].body)).toBeLessThanOrEqual(256 * 1024)
+    expect(logSpy).not.toHaveBeenCalledWith(
+      'warn',
+      'Status report exceeds the size ceiling',
+      expect.anything()
+    )
+    logSpy.mockRestore()
+  })
+
+  it('rejects a step report whose output cannot be serialized, without sending it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    // Liveness witness for the negative assertion below: the serialization error.
+    await expect(
+      reporter.reportStepStatus('s1', 'completed', { output: { n: 1n } })
+    ).rejects.toThrow(TypeError)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('retries 5xx status reports and succeeds on a later attempt', async () => {
@@ -394,16 +503,29 @@ describe('StatusReporter with byte-heavy tool calls', () => {
 
     const rawBody: string = fetchMock.mock.calls[0][1].body
     const body = JSON.parse(rawBody)
-    // Liveness: the report went out with the full output and every call.
-    expect(body.output).toBe(output)
+    // Liveness: the report went out with the output cut to the preview maximum and every call.
+    expect(body.output).toBe(output.slice(0, 65_536))
+    expect(body.outputLength).toBe(150_000)
+    expect(body.outputTruncated).toBe(true)
     expect(body.toolsCalled).toHaveLength(100)
     expect(body.toolsCalled[0].result.preview.length).toBeGreaterThan(300)
-    const toolsCalledBytes = Buffer.byteLength(JSON.stringify(body.toolsCalled))
-    expect(toolsCalledBytes).toBeGreaterThan(200 * 1024)
-    // 150 values of at most 2 x 1,024 + 31 bytes, plus at most 80 bytes per call.
-    expect(toolsCalledBytes).toBeLessThanOrEqual(150 * (2 * 1024 + 31) + 100 * 80)
-    // With a 150 KB output the whole body fits WRC's 512 KiB request limit.
-    expect(Buffer.byteLength(rawBody)).toBeLessThan(512 * 1024)
+    // 64 KiB of output plus more than 300 KiB of bounded tool calls is over the reporter's
+    // 256 KiB ceiling, so previews are removed from the last call backwards. WRC stores previews
+    // for the first 50 calls; at least 40 of them keep theirs.
+    const kept = body.toolsCalled.filter(
+      (call: Record<string, unknown>) => 'args' in call || 'result' in call
+    )
+    expect(kept.length).toBeGreaterThanOrEqual(40)
+    expect(body.toolsCalled.slice(0, kept.length)).toEqual(kept)
+    // Every value that is sent is at most 2 x 1,024 + 31 bytes.
+    for (const call of kept) {
+      for (const value of [call.args, call.result]) {
+        expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(2 * 1024 + 31)
+      }
+    }
+    // The body is under the ceiling and close to it: only what was needed was removed.
+    expect(Buffer.byteLength(rawBody)).toBeLessThanOrEqual(256 * 1024)
+    expect(Buffer.byteLength(rawBody)).toBeGreaterThan(200 * 1024)
   })
 
   it('sends byte-bounded artifact results, previews and non-record args in the real request body', async () => {
@@ -445,5 +567,190 @@ describe('StatusReporter with byte-heavy tool calls', () => {
     expect(result.truncated).toBe(true)
     expect(result.preview.length).toBeGreaterThan(300)
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(2 * 1024 + 31)
+  })
+
+  it('does not halve the output when the last calls carry partial artifact metadata', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const previewCall = (i: number) => ({
+      serverName: 'git',
+      toolName: `read-${i}`,
+      args: { blob: '中'.repeat(1_500) },
+      result: '中'.repeat(1_500),
+    })
+    // WRC accepts this artifact, and its normalized form (`format`, `sizeBytes`
+    // and `createdAt` added) is larger than the result, so removing the result
+    // would make the call larger.
+    const partialArtifactCall = (i: number) => ({
+      serverName: 'custom',
+      toolName: 'write_file',
+      result: { success: true, artifact: { name: `p-${i}.md`, path: `/output/p-${i}.md` } },
+    })
+    const toolsCalled = [
+      ...Array.from({ length: 50 }, (_, i) => previewCall(i)),
+      ...Array.from({ length: 50 }, (_, i) => partialArtifactCall(i)),
+    ]
+    const output = '中'.repeat(50_650)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('build', 'failed', {
+      output,
+      error: '\u0001'.repeat(8_192),
+      failureReason: '\u0001'.repeat(8_192),
+      toolsCalled,
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const rawBody: string = fetchMock.mock.calls[0][1].body
+    const body = JSON.parse(rawBody)
+    // Liveness witness: the body needed the preview removal, which reached the preview calls.
+    const reducedPreviewCalls = body.toolsCalled
+      .slice(0, 50)
+      .filter((call: Record<string, unknown>) => !('args' in call))
+    expect(reducedPreviewCalls.length).toBeGreaterThan(0)
+    expect(Buffer.byteLength(rawBody)).toBeLessThanOrEqual(256 * 1024)
+    // The output is sent whole, and the partial-artifact calls are sent as they are.
+    expect(body.outputLength).toBe(50_650)
+    expect(body.outputTruncated).toBe(false)
+    expect(body.output).toBe(output)
+    expect(body.toolsCalled.slice(50)).toEqual(toolsCalled.slice(50))
+  })
+})
+
+describe('StatusReporter run-store unavailable answers', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  const runStateUnavailable = () => ({
+    status: 503,
+    ok: false,
+    text: async () => JSON.stringify({ code: 'workflow_run_state_unavailable' }),
+  })
+  const plain503 = () => ({
+    status: 503,
+    ok: false,
+    text: async () => JSON.stringify({ error: 'Service Unavailable' }),
+  })
+
+  function reporter(): StatusReporter {
+    return new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+  }
+
+  async function settle(promise: Promise<void>): Promise<unknown> {
+    return promise.then(
+      () => 'resolved',
+      (error: unknown) => error
+    )
+  }
+
+  it('throws WorkflowAuthorizationPausedError on a 423 pause answer without retrying', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 423,
+      ok: false,
+      text: async () => JSON.stringify({ code: 'workflow_authorization_paused' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(failure).toBeInstanceOf(WorkflowAuthorizationPausedError)
+  })
+
+  it('treats a 423 without the pause code as a non-retryable rejection', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 423,
+      ok: false,
+      text: async () => JSON.stringify({ error: 'Locked' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(failure).not.toBeInstanceOf(WorkflowAuthorizationPausedError)
+    expect((failure as Error).message).toBe('WRC rejected step status with HTTP 423: Locked')
+  })
+
+  it('throws WorkflowRunStateUnavailableError after three 503 run-store answers', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi.fn().mockImplementation(async () => runStateUnavailable())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(failure).toBeInstanceOf(WorkflowRunStateUnavailableError)
+    expect((failure as Error).message).toBe(
+      'Failed to report step status after 3 attempts: HTTP 503'
+    )
+  })
+
+  it('throws a plain Error after three 503 answers without the run-store code', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi.fn().mockImplementation(async () => plain503())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure).not.toBeInstanceOf(WorkflowRunStateUnavailableError)
+    expect((failure as Error).message).toBe(
+      'Failed to report step status after 3 attempts: HTTP 503'
+    )
+  })
+
+  it('resolves when a 503 run-store answer is followed by 200', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(runStateUnavailable())
+      .mockResolvedValueOnce({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(reporter().reportStepStatus('s1', 'running')).resolves.toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('lets the last attempt decide: code, code, then a plain 503 is a plain Error', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(runStateUnavailable())
+      .mockResolvedValueOnce(runStateUnavailable())
+      .mockResolvedValueOnce(plain503())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure).not.toBeInstanceOf(WorkflowRunStateUnavailableError)
+  })
+
+  it('lets the last attempt decide: plain, plain, then the code is the typed error', async () => {
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(plain503())
+      .mockResolvedValueOnce(plain503())
+      .mockResolvedValueOnce(runStateUnavailable())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const failure = await settle(reporter().reportStepStatus('s1', 'running'))
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(failure).toBeInstanceOf(WorkflowRunStateUnavailableError)
   })
 })

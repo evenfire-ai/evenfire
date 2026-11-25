@@ -44,6 +44,7 @@ invitations	legacy_dml
 llm_allowed_models	legacy_dml
 llm_allowed_models_audit	append
 llm_catalog_dismissed	append
+llm_catalog_prune_runs	append
 llm_catalog_sync_runs	append
 llm_model_prices	legacy_dml
 llm_provider_attempt_tickets	upsert
@@ -54,6 +55,9 @@ mcp_secret_rollback_permits	legacy_dml
 notification_deliveries	legacy_dml
 dynamic_clients	legacy_dml
 oauth_grants	legacy_dml
+oidc_protocol_attempts	legacy_dml
+oidc_connections	append
+user_oidc_links	append
 password_admission_rollout_state	none
 password_identifier_state	legacy_dml
 password_verification_pace	legacy_dml
@@ -66,6 +70,8 @@ plugin_workload_sdk_provider_attempts	legacy_dml
 plugin_workload_sdk_quota_counters	legacy_dml
 plugin_workload_sdk_spend_outcomes	append
 profiles	legacy_dml
+pr2_readiness_activations	upsert
+pr2_readiness_evidence	upsert
 rate_limit_buckets	legacy_dml
 registry_connection	legacy_dml
 role_changes_audit	legacy_dml
@@ -97,6 +103,7 @@ workflow_approval_trigger_intents	legacy_dml
 workflow_approval_trigger_intents_archive	legacy_dml
 workflow_approval_trigger_run_intents	legacy_dml
 workflow_approval_trigger_run_intents_archive	legacy_dml
+workflow_authority_bindings	append
 workflow_recipe_allowed_teams	legacy_dml
 workflow_recipe_allowed_teams_audit	legacy_dml
 workflow_revoked_refresh_jtis	legacy_dml

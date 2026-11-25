@@ -14,10 +14,23 @@ import type { BudgetVerdict } from '../budget/types'
 import { config as appConfig } from '../config'
 import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
+// Phase 6 imports
+import {
+  type ApprovalConfigSnapshot,
+  approvalModeConfigWarnings,
+  effectiveApprovalMode,
+  normalizeApprovalMode,
+  readChannelCap,
+  readModeCeiling,
+} from '../core/approval/approvalMode'
+import { approverPolicyIsInvalid } from '../core/approval/approverPolicy'
+import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
+import type { ShellAction } from '../core/approval/shellCard'
+import type { ShellClassifierCaller } from '../core/approval/shellClassifier'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
+import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
 import { LlmErrorCode } from '../core/errors'
-// Phase 6 imports
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { STATELESS_CRON_APPROVAL_PROMPT } from '../core/extensions/mcpApprovalGateController'
@@ -49,12 +62,14 @@ import { McpManager } from '../mcp'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
 import type { TaskError } from '../queue/types'
+import type { RuntimeActionCheckpoint } from '../runtime/actionAuthority'
 import { SessionProcessor, serializeSessionKey } from '../session'
 import { parseSessionKey } from '../session/types'
 import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClient.js'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveCallerRootBinding } from '../workspace/callerRootBinding'
 import type { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
+import { APPROVAL_NOTIFICATION_PARAMETER_LIMIT } from './approvalNotificationLimit'
 import { CronScheduler } from './cronScheduler'
 import { TaskExecutor, resolveTaskSessionKey } from './taskExecutor'
 import {
@@ -84,6 +99,9 @@ export interface PendingApprovalInfo {
   // reason==='connect_required' (oauth connect flow).
   reason?: 'approval_required' | 'connect_required'
   mcpServerName?: string
+  /** false when the card must not offer "Always approve". Omitted when allowed. */
+  alwaysApproveAllowed?: false
+  shellCard?: PendingApproval['shellCard']
 }
 
 /**
@@ -232,6 +250,7 @@ export class AgentStateMachine extends EventEmitter {
   // engine + policy + provider factory, or null when no policy is configured.
   // Null in dev/tests → no failover (byte-identical to today).
   private failoverSupportProvider: FailoverSupportProvider | null = null
+  private shellClassifierProvider: (() => ShellClassifierCaller | null) | null = null
 
   // #654 — live-catalog image-input capability resolver (provider, model →
   // evidence + policy admission). Null in dev/tests/unwired hosts → images
@@ -241,8 +260,12 @@ export class AgentStateMachine extends EventEmitter {
   // Persistent core event emitter (Gap 3 resolution: bridges agent-level events to SimpleEventEmitter)
   private coreEvents = new SimpleEventEmitter()
 
-  // Phase 6: Approval
+  // Phase 6: Approval. `approvalConfig` is the effective policy (tools,
+  // live-set, and the approver policy the channel cap reads).
+  // `approvalHostSpec` is the Host spec alone, or the dev env config, and is
+  // what the ceiling and the channel switch read.
   private approvalConfig: ApprovalConfig | undefined
+  private approvalHostSpec: ApprovalConfig | undefined
   private guardrailsConfig: GuardrailsConfig | undefined
 
   // Phase 7–8: Workspace memory & personalization
@@ -262,6 +285,7 @@ export class AgentStateMachine extends EventEmitter {
   // feature flag `CLERUM_SESSION_SEARCH_ENABLED` is false; populated from
   // main.ts and forwarded into each TaskExecutor.
   private sessionSearchService: SessionSearchService | undefined
+  private actionAuthorityCheckpoint: RuntimeActionCheckpoint | undefined
 
   // ConfigStore snapshot getter, merged into shell-tool spawn env
   private dynamicEnvProvider: (() => Record<string, string>) | undefined
@@ -349,6 +373,14 @@ export class AgentStateMachine extends EventEmitter {
   setFailoverSupport(provider: FailoverSupportProvider): void {
     this.failoverSupportProvider = provider
     logger.info({ component: 'Agent' }, 'Failover support provider set')
+  }
+
+  /**
+   * Dedicated shell classifier. Read on each shell decision, so a credential
+   * or Host setting change applies to the next call. Absent keeps the chat pair.
+   */
+  setShellClassifierProvider(provider: () => ShellClassifierCaller | null): void {
+    this.shellClassifierProvider = provider
   }
 
   /**
@@ -478,6 +510,10 @@ export class AgentStateMachine extends EventEmitter {
   setSessionSearchService(service: SessionSearchService | undefined): void {
     this.sessionSearchService = service
     logger.info({ configured: Boolean(service) }, 'Session search configured')
+  }
+
+  setActionAuthorityCheckpoint(checkpoint: RuntimeActionCheckpoint): void {
+    this.actionAuthorityCheckpoint = checkpoint
   }
 
   /**
@@ -648,9 +684,56 @@ export class AgentStateMachine extends EventEmitter {
     logger.info({ rules: config?.rules?.length ?? 0 }, 'Guardrails configured')
   }
 
-  setApprovalConfig(config: ApprovalConfig | undefined): void {
+  setApprovalConfig(config: ApprovalConfig | undefined, hostSpec?: ApprovalConfig): void {
     this.approvalConfig = config
+    this.approvalHostSpec = hostSpec
     logger.info({ defaultPolicy: config?.defaultPolicy || 'none' }, 'Approval policy configured')
+    for (const warning of approvalModeConfigWarnings(hostSpec)) {
+      logger.warn({ event: 'approval_config_invalid', field: warning.field }, warning.message)
+    }
+    if (approverPolicyIsInvalid(config)) {
+      logger.warn(
+        { event: 'approval_config_invalid', field: 'defaultPolicy' },
+        'defaultPolicy is not cli_only, channel_users or designated_approvers; every messaging-channel session runs manual'
+      )
+    }
+    this.sweepEffectiveApprovalModes()
+  }
+
+  approvalSnapshot(): ApprovalConfigSnapshot {
+    return { effective: this.approvalConfig, hostSpec: this.approvalHostSpec }
+  }
+
+  /**
+   * A new config can lower the ceiling or a channel cap for every in-memory
+   * session, including one that makes no tool call before the ceiling returns.
+   * The cap carries the approver policy, so a `defaultPolicy` or `approvers`
+   * change that no longer allows a session's owner lowers it here too.
+   * `listByPrefix('')` is the same objects the executors hold.
+   */
+  private sweepEffectiveApprovalModes(): void {
+    const snapshot = this.approvalSnapshot()
+    const ceiling = readModeCeiling(snapshot)
+    for (const { conversation } of this.conversationManager.getStore().listByPrefix('')) {
+      const stored = normalizeApprovalMode(conversation.approval_mode)
+      const effective = effectiveApprovalMode(
+        stored,
+        ceiling,
+        readChannelCap(snapshot, conversation.channel_type ?? undefined, conversation.user_id)
+      )
+      const synced = syncEffectiveMode(conversation, effective)
+      if (!synced.changed) continue
+      logger.info(
+        {
+          event: 'L2',
+          session: approvalLogId(conversation.id),
+          storedMode: stored,
+          previousEffectiveMode: synced.previous,
+          effectiveApprovalMode: effective,
+        },
+        'Effective approval mode changed'
+      )
+    }
   }
 
   /**
@@ -987,15 +1070,9 @@ export class AgentStateMachine extends EventEmitter {
           parameters: approval.parameters,
           description: approval.description,
           since: entry?.registeredAt?.toISOString() ?? new Date().toISOString(),
-          // U5 — thread the connect_required discriminator; omitted for generic
-          // approvals so the legacy shape is byte-identical (back-compat).
-          // mcpServerName rides ONLY connect_required, matching the SSE
-          // producer and the other polling projections (no stray field on a
-          // corrupt/legacy row whose reason normalized away).
-          ...(approval.reason ? { reason: approval.reason } : {}),
-          ...(approval.reason === 'connect_required' && approval.mcpServerName
-            ? { mcpServerName: approval.mcpServerName }
-            : {}),
+          // U5 connect discriminator and the grant eligibility, from the one
+          // projection every view uses (pendingApprovalView).
+          ...pendingApprovalWireFields(approval),
         })
       }
     }
@@ -1063,17 +1140,10 @@ export class AgentStateMachine extends EventEmitter {
       requestId: approval.request_id,
       userId,
       notification: notificationMsg,
-      // U5 — carry the connect_required discriminator down the polling chain
-      // (messageHandler → pendingTaskResults → handleTaskResult) so a REST poll
-      // reconstructs the connect suspension, matching the SSE `suspended` event.
-      // Omitted for generic approvals (back-compat).
-      ...(approval.reason ? { reason: approval.reason } : {}),
-      // mcpServerName rides ONLY the connect_required discriminator, matching
-      // the SSE producer (sseProgressReporter) — so corrupt/legacy rows can never emit
-      // a stray field without its reason.
-      ...(approval.reason === 'connect_required' && approval.mcpServerName
-        ? { mcpServerName: approval.mcpServerName }
-        : {}),
+      // U5 — carry the connect discriminator and the grant eligibility down the
+      // polling chain (messageHandler → pendingTaskResults → handleTaskResult),
+      // from the same projection as the SSE `suspended` event.
+      ...pendingApprovalWireFields(approval),
     })
   }
 
@@ -1114,7 +1184,7 @@ export class AgentStateMachine extends EventEmitter {
     // timeout handler returns promptly; errors are logged. Wrap in
     // Promise.resolve so legacy synchronous test doubles (which return void)
     // still flow through the same path.
-    Promise.resolve(executor.deny()).catch(err => {
+    Promise.resolve(executor.deny({ record: false })).catch(err => {
       logger.error({ err: err }, `executor.deny() raised after timeout:`)
     })
   }
@@ -1128,7 +1198,8 @@ export class AgentStateMachine extends EventEmitter {
     requestId: string,
     alwaysApprove: boolean,
     channelType?: string,
-    channelId?: string
+    channelId?: string,
+    shellAction?: ShellAction
   ): Promise<{ success: boolean; error?: string }> {
     const entry = this.approvalMap.get(requestId)
     if (!entry) {
@@ -1189,9 +1260,28 @@ export class AgentStateMachine extends EventEmitter {
 
     // Resume execution (fire and forget).
     // Session release happens in onComplete/onFail callbacks.
-    executor.resumeAfterApproval(alwaysApprove).catch(err => {
-      logger.error({ err: err }, `Resume after approval failed:`)
-    })
+    // The effective mode is the live answer-time value, not the mode that
+    // opened the card: a ceiling, switch or approver-policy change made while
+    // the card waited applies. rpc is the desktop surface; every other channel
+    // uses the channel descriptor flag.
+    const conversation = executor.sessionKey
+      ? this.conversationManager.getSessionByKey(executor.sessionKey)
+      : undefined
+    const live = this.approvalSnapshot()
+    const effectiveMode = effectiveApprovalMode(
+      normalizeApprovalMode(conversation?.approval_mode),
+      readModeCeiling(live),
+      readChannelCap(live, conversation?.channel_type, conversation?.user_id)
+    )
+    executor
+      .resumeAfterApproval(alwaysApprove, userId, {
+        ...(shellAction ? { shellAction } : {}),
+        effectiveMode,
+        surface: channelType === 'rpc' ? 'desktop' : 'channel',
+      })
+      .catch(err => {
+        logger.error({ err: err }, `Resume after approval failed:`)
+      })
 
     return { success: true }
   }
@@ -1205,7 +1295,7 @@ export class AgentStateMachine extends EventEmitter {
     requestId: string,
     channelType?: string,
     channelId?: string
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; error?: string; code?: 'denial_not_saved' }> {
     const entry = this.approvalMap.get(requestId)
     if (!entry) {
       return { success: false, error: `No pending approval for request ${requestId}` }
@@ -1257,18 +1347,32 @@ export class AgentStateMachine extends EventEmitter {
       taskId: entry.taskId,
     })
 
-    // T2.1: deny() is now async. We await so the HTTP 200 only returns once
-    // the durable pending_approval row is gone (IronClaw write-through). A
-    // future restart cannot resurrect a phantom approval. Promise.resolve()
+    // T2.1: deny() is now async. We await so a success only returns once the
+    // denial and the consumed pending_approval row are durable (IronClaw
+    // write-through). If that write fails, the store still consumes the row
+    // when it can, and this returns `denial_not_saved`. Promise.resolve()
     // wraps legacy synchronous test doubles.
+    let saved = true
     try {
-      await Promise.resolve(executor.deny())
+      await Promise.resolve(executor.deny({ userId }))
     } catch (err) {
-      logger.error({ err: err }, `executor.deny() failed:`)
+      // The executor still cancels the call and completes the task; only the
+      // durable record is missing, so never acknowledge it as a saved denial.
+      saved = false
+      logger.error({ err: err, requestId, taskId: entry.taskId }, `executor.deny() failed:`)
     }
     this.activeExecutors.delete(entry.taskId)
     this.releaseSessionForTask(executor.sourceTask)
 
+    if (!saved) {
+      // A terminal outcome, not a retryable failure: the call is cancelled and
+      // the request consumed. Clients key on `code` to stop offering a retry.
+      return {
+        success: false,
+        code: 'denial_not_saved',
+        error: 'The tool call was cancelled, but the denial could not be saved.',
+      }
+    }
     return { success: true }
   }
 
@@ -1541,6 +1645,7 @@ export class AgentStateMachine extends EventEmitter {
       modelName: effective?.model ?? this.modelName,
       contextWindowTokens: effective?.contextWindowTokens,
       approvalConfig: this.approvalConfig,
+      approvalConfigProvider: () => this.approvalSnapshot(),
       guardrailsConfig: this.guardrailsConfig,
       coreEvents: this.coreEvents,
       cronScheduler: this.cronScheduler,
@@ -1553,9 +1658,11 @@ export class AgentStateMachine extends EventEmitter {
       spilloverStorage: this.spilloverStorage,
       promptCache: this.promptCache,
       sessionSearchService: this.sessionSearchService,
+      actionAuthorityCheckpoint: this.actionAuthorityCheckpoint,
       // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
       // no failover.
       failover: this.failoverSupportProvider?.() ?? undefined,
+      shellClassifierProvider: () => this.shellClassifierProvider?.() ?? null,
       imageInput: this.imageInputResolver ?? undefined,
       onApprovalNeeded: (requestId, taskId, approval) => {
         this.registerApproval(requestId, taskId, task, approval)
@@ -1616,67 +1723,8 @@ export class AgentStateMachine extends EventEmitter {
     _userId: string,
     channelType?: string
   ): string {
-    const workflowName =
-      approval.tool_name === 'workflow_trigger' && typeof approval.parameters.name === 'string'
-        ? approval.parameters.name.trim()
-        : ''
-
-    const paramSummary =
-      Object.keys(approval.parameters).length > 0
-        ? JSON.stringify(approval.parameters).substring(0, 200)
-        : 'none'
-
-    // Check if the user's channel can approve
-    const canApproveViaChannel =
-      this.approvalConfig && this.approvalConfig.defaultPolicy !== 'cli_only'
-
-    if (workflowName && canApproveViaChannel) {
-      return [
-        `Approval needed to run workflow ${workflowName}.`,
-        channelType === 'slack'
-          ? 'Use the approval buttons to continue or cancel.'
-          : 'Reply /approve to continue or /deny to cancel.',
-      ].join(' ')
-    }
-
-    if (workflowName) {
-      return [
-        `Approval needed to run workflow ${workflowName}.`,
-        'Please approve through the configured approval channel.',
-      ].join(' ')
-    }
-
-    if (approval.description === STATELESS_CRON_APPROVAL_PROMPT) {
-      // Cron×stateless gate: the user must see the cost consequence, not
-      // the generic tool-approval line. Parameters stay visible for
-      // transparency; the approve/deny instructions mirror the generic paths.
-      return (
-        `${approval.description} ` +
-        `Parameters: ${paramSummary}. ` +
-        (canApproveViaChannel
-          ? channelType === 'slack'
-            ? 'Use the approval controls to continue or cancel.'
-            : 'Reply /approve or /deny to this message.'
-          : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`)
-      )
-    }
-
-    if (canApproveViaChannel) {
-      return (
-        `Tool \`${approval.tool_name}\` requires approval. ` +
-        `Parameters: ${paramSummary}. ` +
-        (channelType === 'slack'
-          ? `Use the approval controls to continue or cancel.`
-          : `Reply /approve or /deny to this message.`)
-      )
-    }
-
-    return (
-      `Tool \`${approval.tool_name}\` requires approval. ` +
-      `Parameters: ${paramSummary}. ` +
-      `Request ID: ${approval.request_id}. ` +
-      `Please approve via CLI: POST /v1/runtime/approvals/approve`
-    )
+    const body = approvalNotificationBody(this.approvalConfig, approval, channelType)
+    return approval.reask ? `${reaskNotice(approval.reask)} ${body}` : body
   }
 
   /**
@@ -1923,4 +1971,78 @@ export class AgentStateMachine extends EventEmitter {
       })
     }
   }
+}
+
+/** One line in front of a re-ask card's notification saying why it asks again. */
+function reaskNotice(reask: 'denied' | 'denials_active'): string {
+  return reask === 'denied'
+    ? 'You denied this tool earlier in this chat.'
+    : 'This tool can run other tools, and another tool was denied in this chat.'
+}
+
+function approvalNotificationBody(
+  approvalConfig: ApprovalConfig | null | undefined,
+  approval: PendingApproval,
+  channelType?: string
+): string {
+  const workflowName =
+    approval.tool_name === 'workflow_trigger' && typeof approval.parameters.name === 'string'
+      ? approval.parameters.name.trim()
+      : ''
+
+  const paramSummary =
+    Object.keys(approval.parameters).length > 0
+      ? JSON.stringify(approval.parameters).substring(0, APPROVAL_NOTIFICATION_PARAMETER_LIMIT)
+      : 'none'
+
+  // Check if the user's channel can approve
+  const canApproveViaChannel = approvalConfig && approvalConfig.defaultPolicy !== 'cli_only'
+
+  if (workflowName && canApproveViaChannel) {
+    return [
+      `Approval needed to run workflow ${workflowName}.`,
+      channelType === 'slack'
+        ? 'Use the approval buttons to continue or cancel.'
+        : 'Reply /approve to continue or /deny to cancel.',
+    ].join(' ')
+  }
+
+  if (workflowName) {
+    return [
+      `Approval needed to run workflow ${workflowName}.`,
+      'Please approve through the configured approval channel.',
+    ].join(' ')
+  }
+
+  if (approval.description === STATELESS_CRON_APPROVAL_PROMPT) {
+    // Cron×stateless gate: the user must see the cost consequence, not
+    // the generic tool-approval line. Parameters stay visible for
+    // transparency; the approve/deny instructions mirror the generic paths.
+    return (
+      `${approval.description} ` +
+      `Parameters: ${paramSummary}. ` +
+      (canApproveViaChannel
+        ? channelType === 'slack'
+          ? 'Use the approval controls to continue or cancel.'
+          : 'Reply /approve or /deny to this message.'
+        : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`)
+    )
+  }
+
+  if (canApproveViaChannel) {
+    return (
+      `Tool \`${approval.tool_name}\` requires approval. ` +
+      `Parameters: ${paramSummary}. ` +
+      (channelType === 'slack'
+        ? `Use the approval controls to continue or cancel.`
+        : `Reply /approve or /deny to this message.`)
+    )
+  }
+
+  return (
+    `Tool \`${approval.tool_name}\` requires approval. ` +
+    `Parameters: ${paramSummary}. ` +
+    `Request ID: ${approval.request_id}. ` +
+    `Please approve via CLI: POST /v1/runtime/approvals/approve`
+  )
 }

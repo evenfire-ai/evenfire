@@ -1,4 +1,4 @@
-import { readApprovalInputPreview } from '@hooks/domain/trackerToProgress'
+import { readApprovalInputPreview, readShellCard } from '@hooks/domain/trackerToProgress'
 import { classifyTier } from '@hooks/useTaskTier'
 import { buildResponseFileAttachments } from '@lib/chatMessageAttachments'
 import {
@@ -603,9 +603,14 @@ export class TaskTracker implements AgentTaskTracker {
                 // resume the right task. Undefined for ordinary approvals.
                 reason: sd.reason,
                 mcpServerName: sd.mcpServerName,
+                ...(sd.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false } : {}),
                 inputPreview: readApprovalInputPreview(
                   (sd as { inputPreview?: unknown }).inputPreview
                 ),
+                ...(() => {
+                  const shellCard = readShellCard((sd as { shellCard?: unknown }).shellCard)
+                  return shellCard ? { shellCard } : {}
+                })(),
               }
             : undefined
         })

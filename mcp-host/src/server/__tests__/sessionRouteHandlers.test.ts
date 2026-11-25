@@ -1,8 +1,24 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { ConversationManager } from '../../core/conversation/conversation'
-import { buildConnectRequiredApproval } from '../../core/extensions/mcpApprovalGateController'
+import {
+  type StoreHandle,
+  makeSqliteStore,
+} from '../../core/conversation/persistence/__tests__/testHelpers'
+import {
+  UnifiedApprovalGateController,
+  buildConnectRequiredApproval,
+} from '../../core/extensions/mcpApprovalGateController'
+import type { ToolRegistry } from '../../core/interfaces'
 import { BasicSafety } from '../../core/safety/safety'
 import { createSessionRouteHandlers } from '../sessionRouteHandlers'
+
+/** No Host approval config: every session reads manual. */
+const noApprovalConfig = () => ({ effective: undefined, hostSpec: undefined })
+/** No Host model, as main.ts reports it: no classifier. */
+const noHostModel = () => ({ providerType: 'unknown', modelName: 'unknown' })
 
 function makeHandlersUnderTest() {
   const convManager = new ConversationManager()
@@ -10,6 +26,8 @@ function makeHandlersUnderTest() {
     getConversationManager: () => convManager,
     redactToolError: (_toolName, rawError) => rawError,
     redactTitle: rawTitle => rawTitle,
+    approvalSnapshot: noApprovalConfig,
+    sessionModel: noHostModel,
   })
   return { convManager, handleSessionsList, handleSessionMessages }
 }
@@ -80,6 +98,27 @@ describe('createSessionRouteHandlers — U5 connect_required projection on the r
       mcpServerName: 'monday',
     })
     expect(item?.pendingApproval).not.toHaveProperty('provider')
+  })
+
+  it('a waiting shell card returns shellCard on the session read', async () => {
+    const { convManager, handleSessionMessages } = makeHandlersUnderTest()
+    const shellCard = { channelCommandOffered: false, desktopCommandOffered: true }
+    const conv = await convManager.getOrCreate('user-A:rpc:agent-x:chat-shell')
+    await convManager.startTurn(conv, 'pwd', 'task-shell')
+    await convManager.suspendForApproval(conv, {
+      request_id: 'req-shell',
+      tool_name: 'shell_exec',
+      parameters: { command: 'pwd' },
+      description: 'Shell command',
+      tool_call_id: 'tc_shell',
+      context_snapshot: [],
+      shellCard,
+    })
+
+    const page = await handleSessionMessages('user-A', 'agent-x', 'chat-shell', {})
+
+    expect(page?.state).toBe('awaiting_approval')
+    expect(page?.pendingApproval?.shellCard).toEqual(shellCard)
   })
 
   it('a generic approval projects WITHOUT the connect fields (back-compat)', async () => {
@@ -201,6 +240,8 @@ describe('createSessionRouteHandlers — handleSessionsList title projection (sp
       redactToolError: (_t, e) => e,
       redactTitle: raw =>
         safety.sanitizeFreeformContent(raw, { secretWarning: 'secret in title' }).content,
+      approvalSnapshot: noApprovalConfig,
+      sessionModel: noHostModel,
     })
 
     const conv = await convManager.getOrCreate('user-A:rpc:agent-x:chat-1')
@@ -211,5 +252,184 @@ describe('createSessionRouteHandlers — handleSessionsList title projection (sp
     const res = await handleSessionsList('user-A', {})
     expect(res.items[0]?.title).toBe('key [REDACTED:API_KEY]')
     expect(res.items[0]?.title).not.toContain(secret)
+  })
+})
+
+describe('createSessionRouteHandlers — Always approve eligibility on every view (RP726-03)', () => {
+  const BUDGET = { elapsedActiveMs: 0, iterationsUsed: 1, durationMs: 86_400_000, maxIterations: 9 }
+  let dbPath: string
+  const open: StoreHandle[] = []
+
+  beforeEach(() => {
+    process.env.CLERUM_STATELESS_ALLOW_CRON_MANAGE = 'true'
+    dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-views-')), 'state.db')
+  })
+
+  afterEach(async () => {
+    delete process.env.CLERUM_STATELESS_ALLOW_CRON_MANAGE
+    for (const handle of open.splice(0)) await handle.shutdown().catch(() => {})
+    fs.rmSync(path.dirname(dbPath), { recursive: true, force: true })
+  })
+
+  function handlersOver(handle: StoreHandle) {
+    const manager = new ConversationManager(handle.store)
+    return {
+      manager,
+      ...createSessionRouteHandlers({
+        getConversationManager: () => manager,
+        redactToolError: (_toolName, rawError) => rawError,
+        redactTitle: rawTitle => rawTitle,
+        approvalSnapshot: noApprovalConfig,
+        sessionModel: noHostModel,
+      }),
+    }
+  }
+
+  /** A forced stateless cron card from the real gate, or an ordinary one. */
+  function card(action: 'create' | 'list') {
+    const gated = { requiresApproval: () => true }
+    const gate = new UnifiedApprovalGateController(
+      {
+        get: () => gated,
+        register: () => undefined,
+        listDefinitions: () => [],
+      } as unknown as ToolRegistry,
+      { defaultPolicy: 'channel_users', channels: {}, tools: { cron_manage: true } },
+      undefined,
+      { statelessLifecycle: true }
+    )
+    const decision = gate.beforeTool('cron_manage', { action })
+    if (typeof decision !== 'object') throw new Error('expected a suspension')
+    return { ...decision.approval, tool_call_id: 'tc-1', task_budget: BUDGET }
+  }
+
+  async function views(handle: StoreHandle, chatId: string) {
+    const { handleSessionsList, handleSessionMessages } = handlersOver(handle)
+    const list = await handleSessionsList('user-A', {})
+    const page = await handleSessionMessages('user-A', 'agent-x', chatId, {})
+    return [list.items.find(i => i.chatId === chatId)?.pendingApproval, page?.pendingApproval]
+  }
+
+  it('hides Always approve for a forced card on hot and cold list/messages views', async () => {
+    const podA = makeSqliteStore({ dbPath, cacheSize: 4 })
+    open.push(podA)
+    const { manager } = handlersOver(podA)
+    const conv = await manager.getOrCreate('user-A:rpc:agent-x:chat-forced')
+    await manager.startTurn(conv, 'schedule it', 'task-1')
+    await manager.suspendForApproval(conv, card('create'))
+
+    for (const view of await views(podA, 'chat-forced')) {
+      expect(view).toMatchObject({ alwaysApproveAllowed: false })
+    }
+
+    await podA.shutdown()
+    open.splice(open.indexOf(podA), 1)
+    const podB = makeSqliteStore({ dbPath, cacheSize: 4 })
+    open.push(podB)
+    for (const view of await views(podB, 'chat-forced')) {
+      expect(view).toMatchObject({ alwaysApproveAllowed: false })
+    }
+  })
+
+  it('offers Always approve for an ordinary card on the same views', async () => {
+    const podA = makeSqliteStore({ dbPath, cacheSize: 4 })
+    open.push(podA)
+    const { manager } = handlersOver(podA)
+    const conv = await manager.getOrCreate('user-A:rpc:agent-x:chat-ordinary')
+    await manager.startTurn(conv, 'list them', 'task-1')
+    await manager.suspendForApproval(conv, card('list'))
+
+    for (const view of await views(podA, 'chat-ordinary')) {
+      expect(view).toBeDefined()
+      expect(view).not.toHaveProperty('alwaysApproveAllowed')
+    }
+
+    await podA.shutdown()
+    open.splice(open.indexOf(podA), 1)
+    const podB = makeSqliteStore({ dbPath, cacheSize: 4 })
+    open.push(podB)
+    for (const view of await views(podB, 'chat-ordinary')) {
+      expect(view).not.toHaveProperty('alwaysApproveAllowed')
+    }
+  })
+})
+
+describe('createSessionRouteHandlers — classifier pair while failover serves (R6-MJ6)', () => {
+  const KEY = 'user-1:rpc:agent-1:chat-1'
+
+  async function viewsWith(
+    served: { provider: string; model: string; fallback: boolean } | null,
+    session: { providerType: string; modelName: string }
+  ) {
+    const convManager = new ConversationManager()
+    await seed(convManager, KEY)
+    const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
+      getConversationManager: () => convManager,
+      redactToolError: (_toolName, rawError) => rawError,
+      redactTitle: rawTitle => rawTitle,
+      approvalSnapshot: noApprovalConfig,
+      sessionModel: () => session,
+      servedModel: () => served,
+    })
+    const list = await handleSessionsList('user-1', {})
+    const page = await handleSessionMessages('user-1', 'agent-1', 'chat-1', {})
+    expect(list.items).toHaveLength(1)
+    expect(page).not.toBeNull()
+    return [list.items[0]!.shellClassifierAvailable, page!.shellClassifierAvailable]
+  }
+
+  const claude = { providerType: 'claude', modelName: 'claude-sonnet-4-5' }
+  const zai = { providerType: 'zai', modelName: 'glm-4.6' }
+
+  it('reports a serving fallback the table refuses as unavailable, though the session model is eligible', async () => {
+    expect(await viewsWith({ provider: 'zai', model: 'glm-4.6', fallback: true }, claude)).toEqual([
+      false,
+      false,
+    ])
+  })
+
+  it('reports an eligible serving fallback as available, though the session model is refused', async () => {
+    expect(
+      await viewsWith({ provider: 'claude', model: 'claude-haiku-4-5', fallback: true }, zai)
+    ).toEqual([true, true])
+  })
+
+  it('reports the session model while the primary serves', async () => {
+    expect(await viewsWith({ provider: 'zai', model: 'glm-4.6', fallback: false }, claude)).toEqual(
+      [true, true]
+    )
+  })
+
+  it('reports the dedicated classifier pair instead of the chat or failover pair', async () => {
+    const convManager = new ConversationManager()
+    await seed(convManager, KEY)
+    const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
+      getConversationManager: () => convManager,
+      redactToolError: (_toolName, rawError) => rawError,
+      redactTitle: rawTitle => rawTitle,
+      approvalSnapshot: noApprovalConfig,
+      sessionModel: () => ({ providerType: 'openai', modelName: 'gpt-5.4-mini' }),
+      servedModel: () => ({ provider: 'zai', model: 'glm-4.6', fallback: true }),
+      shellClassifierPair: () => ({ providerType: 'openai', modelName: 'gpt-5.5' }),
+    })
+    const list = await handleSessionsList('user-1', {})
+    const page = await handleSessionMessages('user-1', 'agent-1', 'chat-1', {})
+    expect(list.items[0]!.shellClassifierAvailable).toBe(true)
+    expect(page!.shellClassifierAvailable).toBe(true)
+  })
+
+  it('reports a dedicated model the classifier does not call as unavailable', async () => {
+    const convManager = new ConversationManager()
+    await seed(convManager, KEY)
+    const { handleSessionsList } = createSessionRouteHandlers({
+      getConversationManager: () => convManager,
+      redactToolError: (_toolName, rawError) => rawError,
+      redactTitle: rawTitle => rawTitle,
+      approvalSnapshot: noApprovalConfig,
+      sessionModel: () => ({ providerType: 'claude', modelName: 'claude-sonnet-4-5' }),
+      shellClassifierPair: () => ({ providerType: 'openai', modelName: 'gpt-4.1-mini' }),
+    })
+    const list = await handleSessionsList('user-1', {})
+    expect(list.items[0]!.shellClassifierAvailable).toBe(false)
   })
 })

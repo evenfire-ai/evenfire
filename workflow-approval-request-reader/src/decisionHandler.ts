@@ -1,3 +1,5 @@
+import { isToolApprovalActionValue } from './toolApprovalAction.js'
+
 export type ApprovalDecision = 'approve' | 'deny'
 export type ApprovalMedium = 'telegram' | 'slack' | 'teams'
 
@@ -99,7 +101,6 @@ const COMPACT_APPROVAL_COMMAND_RE =
 const WORKFLOW_RESULT_RUN_ACTION_RE =
   /^workflow_result_run:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
 const WORKFLOW_RESULT_ACTION_RE = /^workflow_result:([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)$/i
-const TOOL_APPROVAL_ACTION_RE = /^tool:[ald]:[A-Za-z0-9_-]{16}$/
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -258,7 +259,7 @@ function teamsMessageIdentity(payload: unknown): {
     parseApprovalCommand(actionValue) ||
     WORKFLOW_RESULT_RUN_ACTION_RE.test(actionValue) ||
     WORKFLOW_RESULT_ACTION_RE.test(actionValue) ||
-    TOOL_APPROVAL_ACTION_RE.test(actionValue)
+    isToolApprovalActionValue(actionValue)
       ? actionValue
       : teamsText(payload)
   const activityId = teamsActivityId(payload)
@@ -404,7 +405,7 @@ function slackToolApprovalActionIdentity(payload: unknown): ReaderMessageCommand
   const actions = Array.isArray(body.actions) ? body.actions : []
   const action = asRecord(actions[0])
   const raw = asString(action.value ?? action.action_id)
-  if (!TOOL_APPROVAL_ACTION_RE.test(raw)) return null
+  if (!isToolApprovalActionValue(raw)) return null
 
   const user = asRecord(body.user)
   const team = asRecord(body.team)

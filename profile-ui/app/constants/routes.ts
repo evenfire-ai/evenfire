@@ -1,3 +1,5 @@
+import type { OidcRefusalReason } from '../api/oidc/types'
+
 type QueryValue = boolean | number | string | null | undefined
 type ProfileRouteQuery = Record<string, QueryValue>
 
@@ -18,15 +20,21 @@ function withQuery(path: string, query?: ProfileRouteQuery): string {
 }
 
 export const PROFILE_ROUTES = {
-  home: '/',
+  root: '/',
   login: (query?: ProfileRouteQuery) => withQuery('/', query),
-  approvalChannels: '/approval-channels',
+  channels: {
+    root: '/channels',
+    channel: (network: string) => `/channels/${segment(network)}`,
+  },
   connectedAccounts: '/connected-accounts',
   desktopSetup: '/desktop-setup',
   forgotPassword: (query?: ProfileRouteQuery) => withQuery('/forgot-password', query),
   invitation: (token: string) => `/invitations/${segment(token)}`,
   openDesktopApp: (recipeNs: string, recipeName: string) =>
     `/open/apps/${segment(recipeNs)}/${segment(recipeName)}`,
+  oidcStart: '/api/oidc/start',
+  oidcSignedIn: '/oidc/signed-in',
+  oidcResult: (reason: OidcRefusalReason) => withQuery('/oidc/result', { reason }),
   members: {
     root: '/members',
     invite: '/members/invite',
@@ -35,6 +43,6 @@ export const PROFILE_ROUTES = {
   settings: {
     root: '/settings/profile',
     profile: '/settings/profile',
-    social: (network: string) => `/settings/social/${segment(network)}`,
+    approvalChannels: '/settings/approval-channels',
   },
 } as const

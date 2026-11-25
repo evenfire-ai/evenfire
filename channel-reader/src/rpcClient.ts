@@ -42,6 +42,13 @@ export interface TaskError {
 /**
  * Response from mcp-host.
  */
+export interface ShellCardDescriptor {
+  channelCommandOffered: boolean
+  desktopCommandOffered: boolean
+}
+
+export type ShellAction = 'once' | 'command' | 'shell'
+
 export interface MessageResponse {
   success: boolean
   /** "completed" for normal responses, "waiting_approval" when a tool needs user approval, "pending" when polling for a result. */
@@ -62,6 +69,13 @@ export interface MessageResponse {
     requestId: string
     userId: string
     notification: string
+    /**
+     * Present and false when this card cannot store a lasting grant. Absent
+     * means the card may. The Host is the authority; channel buttons follow it.
+     */
+    alwaysApproveAllowed?: false
+    /** Present on an auto shell card. Absent means today's approve / always / deny buttons. */
+    shellCard?: ShellCardDescriptor
   }
 }
 
@@ -298,9 +312,15 @@ export class RPCClient {
     requestId: string,
     alwaysApprove: boolean,
     channelType: string,
-    channelId: string
+    channelId: string,
+    options?: { shellAction?: ShellAction }
   ): Promise<{ success: boolean; error?: string }> {
     console.log(`[RPC] Sending approval for request ${requestId}`)
+    const shellAction = options?.shellAction
+    const forwardedShellAction =
+      shellAction === 'once' || shellAction === 'command' || shellAction === 'shell'
+        ? shellAction
+        : undefined
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/approvals/approve`, {
         method: 'POST',
@@ -315,6 +335,7 @@ export class RPCClient {
           alwaysApprove,
           channelType,
           channelId,
+          ...(forwardedShellAction ? { shellAction: forwardedShellAction } : {}),
         }),
       })
       return (await response.json()) as { success: boolean; error?: string }
@@ -814,13 +835,12 @@ export class RPCClient {
    * Acknowledge delivery of a cron result.
    */
   async acknowledgeCronResult(taskId: string, source: ChannelReaderRuntimeSource): Promise<void> {
-    try {
-      await fetch(`${this.baseUrl}/v1/runtime/cron/results/${taskId}`, {
-        method: 'DELETE',
-        headers: this.runtimeHeaders(source),
-      })
-    } catch (error) {
-      console.error(`[RPC] Failed to acknowledge cron result ${taskId}:`, error)
+    const response = await fetch(`${this.baseUrl}/v1/runtime/cron/results/${taskId}`, {
+      method: 'DELETE',
+      headers: this.runtimeHeaders(source),
+    })
+    if (!response.ok) {
+      throw new Error(`Failed to acknowledge cron result: ${response.status}`)
     }
   }
 

@@ -19,6 +19,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'net'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 // ---------------------------------------------------------------------------
 // A. TaskLifecycle.getStats() — v2 shape (6 fields, includes `cancelled`)
@@ -103,11 +104,11 @@ vi.hoisted(() => {
 })
 
 describe('Integration contract B: GET /v1/runtime/status HTTP shape', () => {
-  const rpcEdgeHeaders = {
+  const rpcEdgeHeaders = withRpcProxyEdgeTestAuthentication({
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': 'chatllm',
     'x-clerum-edge-user-id': 'user-1',
-  }
+  })
 
   async function startServerWithStatus(
     statusPayload: Record<string, unknown>

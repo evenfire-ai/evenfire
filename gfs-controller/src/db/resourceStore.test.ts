@@ -26,6 +26,9 @@ function fakeDb(responses: Array<Record<string, unknown>[]>): Queryable & {
       const rows = responses[i++] ?? [];
       return { rows };
     },
+    // The checkout error-event surface; this fake never emits.
+    on: () => undefined,
+    removeListener: () => undefined,
     release: () => undefined,
   });
   return db;

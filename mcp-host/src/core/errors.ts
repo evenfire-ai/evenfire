@@ -136,6 +136,8 @@ export enum FileReferenceErrorCode {
   /** The file changed since the reference was taken. */
   Stale = 'FILE_REFERENCE_STALE',
   NotAFile = 'FILE_REFERENCE_NOT_A_FILE',
+  /** A location reference names a file, not a folder. */
+  NotAFolder = 'FILE_REFERENCE_NOT_A_FOLDER',
   TooLarge = 'FILE_REFERENCE_TOO_LARGE',
   /** The Host cannot serve this reference (no `gfs.read` scope, or not a GFS source). */
   Unsupported = 'FILE_REFERENCE_UNSUPPORTED',

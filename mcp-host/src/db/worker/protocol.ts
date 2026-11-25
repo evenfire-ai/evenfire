@@ -32,6 +32,15 @@ export interface SessionRow {
    *  shape because a row built before the first write (or by a fixture) has no
    *  value; readers normalize `undefined` to the column default 0. */
   model_selection_revision?: number
+  /** Migration 018 — JSON array of `{ tool, userId }` denials. NULL if none. */
+  denied_tools?: string | null
+  /**
+   * Migration 019 — stored approval mode (`manual`, `auto`, or `allow_all`).
+   * Optional on the in-memory shape so a fixture built before the column
+   * existed still typechecks; readers treat a missing or unknown value as
+   * `manual`. The worker does not interpret the ceiling or the channel cap.
+   */
+  approval_mode?: string | null
   system_prompt_stable_hash: string | null
   parent_session_id: string | null
   started_at: number
@@ -160,7 +169,7 @@ export interface PersistedSessionSummary {
   // suspension into a generic approval.
   pending_approval: Pick<
     PendingApprovalRow,
-    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name'
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'authorization_scope'
   > | null
 }
 
@@ -169,7 +178,7 @@ export interface PersistedSessionMessagePage {
   messages: MessageRow[]
   pending_approval: Pick<
     PendingApprovalRow,
-    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name'
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'authorization_scope'
   > | null
   total_turns: number
   first_turn_number: number | null
@@ -225,6 +234,13 @@ export type WorkerOp =
       activeTaskId?: string | null
       /** undefined = keep, string = set, null = clear. */
       activeTraceContext?: string | null
+      /** undefined = keep. A JSON array (including "[]") replaces the column. */
+      deniedToolsJson?: string | null
+      /**
+       * Consume this pending approval in the SAME transaction, so a resolved
+       * decision never commits without its session/denial outcome (or vice versa).
+       */
+      deletePendingRequestId?: string
     }
   | { kind: 'reap_processing_sessions'; nowEpoch: number; chunkSize?: number }
   | {
@@ -256,6 +272,12 @@ export type WorkerOp =
       provider: string
       model: string
       expectedRevision?: number
+    }
+  | {
+      /** Durable `sessions.approval_mode` write. The stored value only. */
+      kind: 'update_session_approval_mode'
+      sessionId: string
+      approvalMode: string
     }
   | {
       /** Spec 15 Fase B — overwrite the user-set session title (rename). Unlike
@@ -382,6 +404,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'update_session_counters':
     case 'update_session_prompt_stable_hash':
     case 'update_session_model_selections':
+    case 'update_session_approval_mode':
     case 'update_session_title':
     case 'insert_message':
     case 'persist_turn_boundary':

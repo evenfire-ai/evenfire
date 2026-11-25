@@ -1,6 +1,7 @@
 /**
  * Configuration settings loaded from environment variables.
  */
+import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT } from '@clerum/action-context-contracts'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
@@ -22,6 +23,15 @@ import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConf
 /** Route families projected by WRC into a recipe-bound mcp-host. */
 export const PLUGIN_WORKLOAD_SDK_CAPABILITIES = ['promptBridge', 'clientNotifications'] as const
 export type PluginWorkloadSdkCapability = (typeof PLUGIN_WORKLOAD_SDK_CAPABILITIES)[number]
+
+export function parseRpcProxyEdgeToken(raw: string | undefined, required: boolean): string {
+  const supplied = raw?.trim() ?? ''
+  const token = supplied || (required ? '' : RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT)
+  if (token && (token.length < 16 || token.length > 4096)) {
+    throw new Error('MCP_HOST_RPC_PROXY_EDGE_TOKEN is missing or invalid')
+  }
+  return token
+}
 
 /**
  * Parse the WRC capability projection without silently accepting typos. An
@@ -58,6 +68,9 @@ export interface Config {
 
   // Kubernetes namespace
   namespace: string
+
+  /** Dedicated service credential for RPC Proxy → MCP Host trusted runtime routes. */
+  rpcProxyEdgeToken: string
 
   // Namespace where installed LlmHook workloads/Services live (spec §8.2). The
   // guardrail hook resolver derives in-cluster endpoints against this namespace.
@@ -406,19 +419,28 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
   return value.toLowerCase() === 'true' || value === '1'
 }
 
-function getEnvNumber(key: string, defaultValue: number): number {
-  const value = process.env[key]
-  if (!value) return defaultValue
-  const parsed = parseInt(value, 10)
-  // Guard against NaN and non-positive values — fall back to the default.
-  // Warn only when the value was actually set but invalid, so a typo'd env var
-  // is visible in logs rather than silently ignored.
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    logger.warn(
-      { component: 'Config', configurationKey: key, defaultValue },
-      'Invalid positive integer configuration; using its default'
+/**
+ * #1493: unset or "" means the default; anything else must be plain decimal
+ * digits. Number() and parseInt() also read '3e4', '0x7530', '+30000',
+ * '030000', '30000.0', '60abc' and padded values, which the range checks
+ * cannot see. A refused value returns NaN so the caller's check throws.
+ */
+function plainPositiveIntegerOrDefault(raw: string | undefined, defaultValue: number): number {
+  if (raw === undefined || raw === '') return defaultValue
+  return /^[1-9]\d*$/.test(raw) ? Number(raw) : Number.NaN
+}
+
+/**
+ * CLERUM_DYNAMIC_TOOLS_THRESHOLD — minimum deferrable (MCP) tool count above
+ * which the dynamic-tools bridge activates. A set value that is not a positive
+ * integer in plain digits stops the Host at startup.
+ */
+export function parseDynamicToolsThreshold(raw: string | undefined): number {
+  const parsed = plainPositiveIntegerOrDefault(raw, 60)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `[Config] CLERUM_DYNAMIC_TOOLS_THRESHOLD='${raw}' is not a positive integer in plain digits`
     )
-    return defaultValue
   }
   return parsed
 }
@@ -458,17 +480,23 @@ export function resolveMcpHostRuntimeKind(input: {
 /**
  * Stage 3 (stateless-agents) — parse CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS.
  *
- * Fail loud: an explicitly-set but non-positive-integer value THROWS at
- * config load time (same posture as CLERUM_DB_BARRIER_MODE). A silent
- * getEnvNumber-style fallback would let a typo'd cadence drive HCC's
- * suspend decisions. Unset / empty returns the 30s default.
+ * Fail loud: a set value that is not a positive integer in plain digits
+ * THROWS at config load time (same posture as CLERUM_DB_BARRIER_MODE). A
+ * silent fallback to the default would let a typo'd cadence drive HCC's
+ * suspend decisions. Unset or "" returns the 30s default. The value drives a
+ * timer, so it must be at most 2147483647 ms: a larger delay makes the
+ * heartbeat fire after about 1 ms.
  */
 export function parseStatelessHeartbeatIntervalMs(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return 30_000
-  const parsed = Number(raw)
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  const parsed = plainPositiveIntegerOrDefault(raw, 30_000)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(
-      `[Config] CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS='${raw}' is not a positive integer`
+      `[Config] CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS='${raw}' is not a positive integer in plain digits`
+    )
+  }
+  if (parsed > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `[Config] CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS='${raw}' must be at most ${MAX_TIMER_DELAY_MS}`
     )
   }
   return parsed
@@ -701,7 +729,10 @@ function assertPositiveSafeIntegerMs(name: string, value: number): void {
  * - J also absorbs the setInterval drift over the N + 1 ticks (about 0.5 ms per
  *   tick measured, so about 1.5 ms at N = 2);
  * - cold start before the first success: no deadline is armed until then, so S
- *   does not govern it.
+ *   does not govern it;
+ * - a poll whose pollServers() answers and whose reconciliation then fails:
+ *   each server's getAuthToken has its own request timeout T, so that poll
+ *   lasts longer than T (R1-L11).
  *
  * Every argument must be a positive safe integer, so a value that did not come
  * through the strict parsers in this file still fails closed: setInterval(fn, NaN)
@@ -744,12 +775,19 @@ export function validateHccAuthorityTiming(
  * Parse one positive-integer knob, failing startup closed on a set-but-invalid
  * value rather than silently falling back — a mistyped probe budget must be
  * visible at boot, not degrade the shared rate-limit bucket in production.
+ * Unset or "" means the default; anything else must be plain digits, at most
+ * `maximum`. A value used as a request or wait timeout passes
+ * MAX_TIMER_DELAY_MS, so a larger one stops the Host at boot instead of
+ * failing or ending its wait at runtime.
  */
-function parseBootstrapNumber(key: string, defaultValue: number, min = 1): number {
+function parseBootstrapNumber(key: string, defaultValue: number, maximum: number): number {
   const raw = process.env[key]
-  const value = raw === undefined ? defaultValue : Number(raw)
-  if (!Number.isFinite(value) || value < min) {
-    throw new Error(`${key} must be a finite number >= ${min} (got '${raw}')`)
+  const value = plainPositiveIntegerOrDefault(raw, defaultValue)
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${key} must be a positive integer in plain digits (got '${raw}')`)
+  }
+  if (value > maximum) {
+    throw new Error(`${key} must be at most ${maximum} (got '${raw}')`)
   }
   return value
 }
@@ -770,13 +808,44 @@ const OAUTH_BROKER_SHARED_BUCKET_PER_MIN = 60
 export function buildMcpCatalogBootstrapConfig(): McpCatalogBootstrapConfig {
   const cfg: McpCatalogBootstrapConfig = {
     enabled: getEnvBool('MCP_CATALOG_BOOTSTRAP_ENABLED', true),
-    waitBudgetMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS', 4000),
-    probeTimeoutMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS', 2000),
-    connectTimeoutMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS', 8000),
-    negativeTtlMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS', 15000),
-    failureTtlMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS', 60000),
-    probesPerMin: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN', 20),
-    backoffMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_BACKOFF_MS', 30000),
+    // Timeouts: the wait budget and the probe timeout arm timers, and an MCP
+    // request rejects a connect timeout above the timer range.
+    waitBudgetMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS',
+      4000,
+      MAX_TIMER_DELAY_MS
+    ),
+    probeTimeoutMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS',
+      2000,
+      MAX_TIMER_DELAY_MS
+    ),
+    connectTimeoutMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS',
+      8000,
+      MAX_TIMER_DELAY_MS
+    ),
+    // TTLs and back-off are added to the current time, never armed as timers.
+    negativeTtlMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS',
+      15000,
+      Number.MAX_SAFE_INTEGER
+    ),
+    failureTtlMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS',
+      60000,
+      Number.MAX_SAFE_INTEGER
+    ),
+    probesPerMin: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN',
+      20,
+      Number.MAX_SAFE_INTEGER
+    ),
+    backoffMs: parseBootstrapNumber(
+      'MCP_CATALOG_BOOTSTRAP_BACKOFF_MS',
+      30000,
+      Number.MAX_SAFE_INTEGER
+    ),
   }
   if (cfg.probeTimeoutMs >= cfg.waitBudgetMs) {
     throw new Error(
@@ -934,6 +1003,11 @@ if (!devMode) {
   )
 }
 
+const rpcProxyEdgeToken = parseRpcProxyEdgeToken(
+  process.env.MCP_HOST_RPC_PROXY_EDGE_TOKEN,
+  !devMode
+)
+
 export const config: Config = {
   devMode,
   devHostConfig: getDevHostConfig(),
@@ -949,6 +1023,7 @@ export const config: Config = {
 
   // Kubernetes namespace
   namespace: getEnv('CLERUM_NAMESPACE', 'default')!,
+  rpcProxyEdgeToken,
 
   // Namespace where installed LlmHook workloads/Services live (spec §8.2).
   llmHooksNamespace: getEnv('CLERUM_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,
@@ -1154,7 +1229,7 @@ export const config: Config = {
   dynamicToolsEnabled: getEnvBool('CLERUM_DYNAMIC_TOOLS_ENABLED', false),
   // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which
   // the bridge activates when enabled; small hosts stay on passthrough.
-  dynamicToolsThreshold: getEnvNumber('CLERUM_DYNAMIC_TOOLS_THRESHOLD', 60),
+  dynamicToolsThreshold: parseDynamicToolsThreshold(process.env.CLERUM_DYNAMIC_TOOLS_THRESHOLD),
 
   // T2.1 — Conversation store backend selector.
   //

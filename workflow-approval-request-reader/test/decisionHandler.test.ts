@@ -6,8 +6,10 @@ import {
   normalizeProviderEnrollment,
   normalizeProviderMessage,
   normalizeSlackDecision,
+  normalizeSlackMessage,
   normalizeTeamsDecision,
   normalizeTeamsFileConsent,
+  normalizeTeamsMessage,
   normalizeTelegramDecision,
 } from '../src/decisionHandler.js'
 
@@ -529,6 +531,102 @@ describe('decisionHandler', () => {
       providerMessageTs: '1710000000.000002',
       threadTs: '1710000000.000001',
     })
+  })
+
+  it.each(['a', 'l', 'd', 'c', 's'])(
+    'normalizes a Slack block_actions tool:%s payload and hands it off',
+    code => {
+      const value = `tool:${code}:abcdefghijklmnop`
+      expect(
+        normalizeSlackMessage({
+          type: 'block_actions',
+          trigger_id: `trigger-tool-${code}`,
+          user: { id: 'U123' },
+          team: { id: 'T123' },
+          channel: { id: 'C123' },
+          message: { ts: '1710000000.000002', thread_ts: '1710000000.000001' },
+          actions: [{ value }],
+        })
+      ).toMatchObject({
+        medium: 'slack',
+        content: value,
+        providerUserId: 'U123',
+        providerWorkspaceId: 'T123',
+        providerChannelId: 'C123',
+        providerMessageTs: '1710000000.000002',
+        threadTs: '1710000000.000001',
+      })
+    }
+  )
+
+  it('does not normalize or hand off an unknown Slack tool action', () => {
+    expect(
+      normalizeSlackMessage({
+        type: 'block_actions',
+        trigger_id: 'trigger-tool-unknown',
+        user: { id: 'U123' },
+        team: { id: 'T123' },
+        channel: { id: 'C123' },
+        message: { ts: '1710000000.000002' },
+        actions: [{ value: 'tool:q:abcdefghijklmnop' }],
+      })
+    ).toBeNull()
+  })
+
+  it.each(['c', 's'])(
+    'normalizes a Teams tool:%s payload and hands it off',
+    async code => {
+      const { teamsIsToolApprovalAction } = await import('../src/server.js')
+      const action = `tool:${code}:abcdefghijklmnop`
+      const payload = {
+        type: 'message',
+        id: `button-activity-tool-${code}`,
+        text: '',
+        value: { action },
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        from: { id: 'teams-user-1' },
+        conversation: {
+          id: '19:channel-1@thread.tacv2',
+          conversationType: 'channel',
+          tenantId: 'tenant-1',
+        },
+        replyToId: 'root-post-1',
+        channelData: {
+          tenant: { id: 'tenant-1' },
+          channel: { id: '19:channel-1@thread.tacv2' },
+        },
+      }
+      const labeled = { ...payload, text: 'Allow this command' }
+
+      expect(teamsIsToolApprovalAction(payload)).toBe(true)
+      expect(teamsIsToolApprovalAction(labeled)).toBe(true)
+      expect(normalizeTeamsMessage(payload)?.content).toBe(action)
+      expect(normalizeTeamsMessage(labeled)?.content).toBe(action)
+    }
+  )
+
+  it.each(['a', 'l', 'd'])('still normalizes a Teams tool:%s action', code => {
+    const action = `tool:${code}:abcdefghijklmnop`
+    expect(
+      normalizeTeamsMessage({
+        type: 'message',
+        id: `button-activity-tool-${code}`,
+        text: 'Approve',
+        value: { action },
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        from: { id: 'teams-user-1' },
+        conversation: {
+          id: '19:channel-1@thread.tacv2',
+          conversationType: 'channel',
+          tenantId: 'tenant-1',
+        },
+        replyToId: 'root-post-1',
+        channelData: {
+          tenant: { id: 'tenant-1' },
+          channel: { id: '19:channel-1@thread.tacv2' },
+        },
+      })
+    ).toMatchObject({ content: action })
   })
 
   it('does not expose Discord as a Figure D provider decision path', () => {

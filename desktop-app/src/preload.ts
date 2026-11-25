@@ -4,8 +4,10 @@ import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfigHandoffSelection,
-  EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
+  GfsWatchEvent,
+  GfsWatchSubscriptionRequest,
+  GfsWatchSubscriptionResult,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
@@ -230,6 +232,7 @@ const clerum = Object.freeze({
     },
     copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
+    resolveForNavigation: (uri: string) => ipcRenderer.invoke('gfs:resolveForNavigation', { uri }),
     download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
       cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
     downloadPreview: (uri: string, maxBytes: number) =>
@@ -428,38 +431,42 @@ const clerum = Object.freeze({
         status: string
       }>,
   },
-  entityChanges: {
-    subscribe: async (onEvent: (event: EntityChangeStreamEvent) => void) => {
-      let streamId = ''
-      const pending: unknown[] = []
+  gfsWatch: {
+    /**
+     * Registers this window with the GFS watch and sends its first list. The
+     * event listener is installed before the first request, so an event main
+     * emits while it is in flight (an access change during a reopen) still
+     * arrives. `sessionExpired` tells a window that mounts after the session
+     * already expired, before any event could reach it.
+     */
+    open: async (onEvent: (event: GfsWatchEvent) => void, initial: GfsWatchSubscriptionRequest) => {
       const listener = (_event: unknown, payload: unknown) => {
-        const parsed = payload as { streamId?: string; event?: EntityChangeStreamEvent }
-        if (!streamId) {
-          if (pending.length < 100) pending.push(payload)
-          return
-        }
-        if (parsed?.streamId === streamId && parsed.event) onEvent(parsed.event)
+        if (payload && typeof payload === 'object') onEvent(payload as GfsWatchEvent)
       }
-      ipcRenderer.on('entityChanges:streamEvent', listener)
+      ipcRenderer.on('gfsWatch:event', listener)
+      const setSubscriptions = async (
+        request: GfsWatchSubscriptionRequest
+      ): Promise<GfsWatchSubscriptionResult> => {
+        const result = (await ipcRenderer.invoke('gfsWatch:setSubscriptions', {
+          keys: request.keys,
+          userId: request.userId,
+        })) as Partial<GfsWatchSubscriptionResult> | null
+        return { sessionExpired: result?.sessionExpired === true }
+      }
+      let first: GfsWatchSubscriptionResult
       try {
-        const started = (await ipcRenderer.invoke('entityChanges:streamStart')) as {
-          streamId: string
-        }
-        streamId = String(started?.streamId || '').trim()
-        if (!streamId) throw new Error('Failed to start entity-change stream')
-        for (const item of pending) {
-          const parsed = item as { streamId?: string; event?: EntityChangeStreamEvent }
-          if (parsed?.streamId === streamId && parsed.event) onEvent(parsed.event)
-        }
-        pending.length = 0
+        first = await setSubscriptions(initial)
       } catch (error) {
-        ipcRenderer.removeListener('entityChanges:streamEvent', listener)
+        ipcRenderer.removeListener('gfsWatch:event', listener)
         throw error
       }
-
-      return async () => {
-        ipcRenderer.removeListener('entityChanges:streamEvent', listener)
-        await ipcRenderer.invoke('entityChanges:streamStop', { streamId })
+      return {
+        sessionExpired: first.sessionExpired,
+        setSubscriptions,
+        close: async () => {
+          ipcRenderer.removeListener('gfsWatch:event', listener)
+          await ipcRenderer.invoke('gfsWatch:stop')
+        },
       }
     },
   },
@@ -584,7 +591,11 @@ const clerum = Object.freeze({
       taskId: string,
       toolCallId: string,
       hostRefs?: string[],
-      options?: { teamId?: string | null }
+      options?: {
+        teamId?: string | null
+        alwaysApprove?: boolean
+        shellAction?: 'once' | 'command' | 'shell'
+      }
     ) =>
       ipcRenderer.invoke('rpc:approveToolCall', {
         hostRef,
@@ -647,6 +658,12 @@ const clerum = Object.freeze({
     // process scopes the write token to this single host.
     renameSession: (hostRef: string, agent: string, chatId: string, title: string) =>
       ipcRenderer.invoke('rpc:renameSession', { hostRef, agent, chatId, title }),
+    setApprovalMode: (
+      hostRef: string,
+      agent: string,
+      chatId: string,
+      mode: 'manual' | 'auto' | 'allow_all'
+    ) => ipcRenderer.invoke('rpc:setApprovalMode', { hostRef, agent, chatId, mode }),
     getTokenMetadata: () => ipcRenderer.invoke('rpc:getTokenMetadata'),
     // U5 (mcp-oauth reactive consent): "Connect <server>" — open the provider
     // authorize-URL for a task that suspended with `connect_required`. Host-bound

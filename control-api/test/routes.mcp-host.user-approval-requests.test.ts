@@ -720,6 +720,54 @@ describe('User Approval Request Routes', () => {
       })
     })
 
+    it('returns 422 approval_target_retired for a removed allowlisted target before any request is written', async () => {
+      const { accessToken } = issueTestTokens()
+      const targetUserId = '00000000-0000-0000-0000-000000000001'
+      vi.mocked(userApprovalRequestService.isRetiredUser).mockResolvedValueOnce(true)
+      vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(true)
+
+      const res = await request(app)
+        .post('/api/v1/workflow-approvals/request')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .set('Idempotency-Key', 'retired-key')
+        .send({
+          recipeNamespace: NS,
+          recipeName: RECIPE,
+          target: { userId: targetUserId },
+          payload: { message: 'Please approve this' },
+        })
+      expect(res.status).toBe(422)
+      expect(res.body).toEqual({ error: 'approval_target_retired' })
+      expect(userApprovalRequestService.allowlistCheck).toHaveBeenCalledTimes(1)
+      expect(userApprovalRequestService.isRetiredUser).toHaveBeenCalledWith(targetUserId)
+      expect(userApprovalRequestService.createApprovalRequest).not.toHaveBeenCalled()
+      expect(
+        workflowTriggerApprovalService.createWorkflowTriggerApprovalRequest
+      ).not.toHaveBeenCalled()
+    })
+
+    it('answers 403 allowlist miss, not 422, for a removed target that is not allowlisted', async () => {
+      const { accessToken } = issueTestTokens()
+      const targetUserId = '00000000-0000-0000-0000-000000000001'
+      vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(false)
+
+      const res = await request(app)
+        .post('/api/v1/workflow-approvals/request')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .set('Idempotency-Key', 'retired-unlisted-key')
+        .send({
+          recipeNamespace: NS,
+          recipeName: RECIPE,
+          target: { userId: targetUserId },
+          payload: { message: 'Please approve this' },
+        })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ error: 'Target not in allowlist for this recipe' })
+      expect(userApprovalRequestService.allowlistCheck).toHaveBeenCalledTimes(1)
+      expect(userApprovalRequestService.isRetiredUser).not.toHaveBeenCalled()
+      expect(userApprovalRequestService.createApprovalRequest).not.toHaveBeenCalled()
+    })
+
     it('creates approval on happy path', async () => {
       const { accessToken } = issueTestTokens()
       vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(true)
@@ -728,6 +776,7 @@ describe('User Approval Request Routes', () => {
         status: 'pending' as const,
         expiresAt: '2026-01-01T00:00:00Z',
       })
+      vi.mocked(userApprovalRequestService.isRetiredUser).mockResolvedValueOnce(false)
 
       const res = await request(app)
         .post('/api/v1/workflow-approvals/request')
@@ -744,6 +793,9 @@ describe('User Approval Request Routes', () => {
         approvalRequestId: 'new-id',
         status: 'pending',
       })
+      expect(userApprovalRequestService.isRetiredUser).toHaveBeenCalledWith(
+        '00000000-0000-0000-0000-000000000001'
+      )
     })
 
     it('allows a shared mcp-host to create a sandbox recipe approval bound to its caller key', async () => {
@@ -862,6 +914,64 @@ describe('User Approval Request Routes', () => {
           }),
         })
       )
+    })
+
+    it('refuses a removed target on the workflow trigger branch and reaches it for an active one', async () => {
+      const accessToken = issueSandboxCallerToken()
+      const targetUserId = '00000000-0000-0000-0000-000000000001'
+      const body = {
+        recipeNamespace: SANDBOX_NS,
+        recipeName: RECIPE,
+        target: { userId: targetUserId },
+        payload: {
+          message: 'Please approve this',
+          metadata: {
+            workflowTrigger: { namespace: SANDBOX_NS, name: RECIPE, caller: SANDBOX_CALLER },
+          },
+        },
+        workflowTriggerRunIntent: {
+          inputs: { depth: 'standard' },
+          intermediateParameters: null,
+          outputOverrides: null,
+        },
+      }
+      vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(true)
+      vi.mocked(userApprovalRequestService.isRetiredUser).mockResolvedValueOnce(true)
+
+      const removed = await request(app)
+        .post('/api/v1/workflow-approvals/request')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .set('Idempotency-Key', 'trigger-retired-key')
+        .send(body)
+      expect(removed.status).toBe(422)
+      expect(removed.body).toEqual({ error: 'approval_target_retired' })
+      expect(userApprovalRequestService.isRetiredUser).toHaveBeenCalledWith(targetUserId)
+      expect(userApprovalRequestService.triggerGrantCheck).not.toHaveBeenCalled()
+      expect(
+        workflowTriggerApprovalService.createWorkflowTriggerApprovalRequest
+      ).not.toHaveBeenCalled()
+
+      vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(true)
+      vi.mocked(userApprovalRequestService.isRetiredUser).mockResolvedValueOnce(false)
+      vi.mocked(userApprovalRequestService.triggerGrantCheck).mockResolvedValueOnce(true)
+      vi.mocked(
+        workflowTriggerApprovalService.createWorkflowTriggerApprovalRequest
+      ).mockResolvedValueOnce({
+        kind: 'approval',
+        approvalRequestId: 'trigger-active-id',
+        status: 'pending',
+        expiresAt: '2026-01-01T00:00:00Z',
+      })
+
+      const active = await request(app)
+        .post('/api/v1/workflow-approvals/request')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .set('Idempotency-Key', 'trigger-active-key')
+        .send(body)
+      expect(active.status).toBe(200)
+      expect(
+        workflowTriggerApprovalService.createWorkflowTriggerApprovalRequest
+      ).toHaveBeenCalledTimes(1)
     })
 
     it('creates user run intent for provider chat workflow triggers', async () => {

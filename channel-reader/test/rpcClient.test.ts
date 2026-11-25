@@ -151,6 +151,27 @@ describe('RPCClient - sendMessage()', () => {
     expect(result.approval?.requestId).toBe('req-1')
   })
 
+  it('keeps alwaysApproveAllowed when the Host says the card cannot store a grant', async () => {
+    mockFetch.mockReturnValueOnce(
+      mockOkResponse({
+        success: true,
+        status: 'waiting_approval',
+        approval: {
+          taskId: 'task-1',
+          requestId: 'req-1',
+          userId: 'user-1',
+          notification: 'Tool was denied and must be approved again.',
+          alwaysApproveAllowed: false,
+        },
+      })
+    )
+
+    const client = new RPCClient('http://localhost:9999')
+    const result = await client.sendMessage(makeMessage())
+
+    expect(result.approval?.alwaysApproveAllowed).toBe(false)
+  })
+
   it('returns error response on HTTP failure', async () => {
     mockFetch.mockReturnValueOnce(mockErrorResponse(500))
 
@@ -169,6 +190,30 @@ describe('RPCClient - sendMessage()', () => {
 
     expect(result.success).toBe(false)
     expect(result.error?.message).toContain('ECONNREFUSED')
+  })
+
+  it('a 429 answer is a generic failure', async () => {
+    mockFetch.mockReturnValueOnce(
+      Promise.resolve({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({ 'retry-after': '7' }),
+        json: () =>
+          Promise.resolve({ error: 'runtime_service_admission_limited', retryAfterSeconds: 7 }),
+      })
+    )
+
+    const client = new RPCClient('http://mcp-host:8080')
+    const result = await client.sendMessage(makeMessage())
+
+    expect(mockFetch).toHaveBeenCalledOnce()
+    expect(mockFetch.mock.calls[0]?.[0]).toBe('http://mcp-host:8080/v1/runtime/messages')
+    expect(result.success).toBe(false)
+    expect(result.error?.code).toBe('LLM_API_CALL_FAILED')
+    expect(result.error?.message).toBe('HTTP 429: Too Many Requests')
+    expect(result.error).not.toHaveProperty('retryAfterSeconds')
+    expect(result.error?.code).not.toBe('RUNTIME_SERVICE_ADMISSION_LIMITED')
   })
 })
 
@@ -419,6 +464,17 @@ describe('RPCClient - sendApproval()', () => {
 
     expect(result.success).toBe(false)
     expect(result.error).toContain('Network down')
+  })
+
+  it('posts shellAction with alwaysApprove when a shell choice is sent', async () => {
+    mockFetch.mockReturnValueOnce(mockOkResponse({ success: true }))
+
+    const client = new RPCClient('http://mcp-host:8080')
+    await client.sendApproval('user-1', 'req-1', false, 'slack', 'C123', { shellAction: 'command' })
+
+    const body = JSON.parse(String((mockFetch.mock.calls[0] as [string, RequestInit])[1].body))
+    expect(body.alwaysApprove).toBe(false)
+    expect(body.shellAction).toBe('command')
   })
 })
 

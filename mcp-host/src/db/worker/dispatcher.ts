@@ -130,6 +130,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             state: row.state ?? 'idle',
             active_task_id: row.active_task_id ?? null,
             active_trace_context: row.active_trace_context ?? null,
+            approval_mode: row.approval_mode ?? 'manual',
           })
         })
         tx.immediate(op.payload)
@@ -155,6 +156,15 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           // change — no window where state=idle but active_task_id is stale).
           if (op.activeTaskId === null) {
             s.clearSessionActiveTask.run({ id: op.sessionId })
+          }
+          if (op.deniedToolsJson !== undefined) {
+            s.updateSessionDeniedTools.run({
+              id: op.sessionId,
+              denied_tools: op.deniedToolsJson,
+            })
+          }
+          if (op.deletePendingRequestId !== undefined) {
+            s.deletePendingApproval.run(op.deletePendingRequestId)
           }
         })
         tx.immediate()
@@ -482,6 +492,25 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         return tx.immediate()
       })
 
+    case 'update_session_approval_mode':
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          const result = s.updateSessionApprovalMode.run({
+            id: op.sessionId,
+            approval_mode: op.approvalMode,
+          })
+          if (result.changes !== 1) {
+            const err: Error & { code?: string } = new Error(
+              `update_session_approval_mode: no session row for id=${op.sessionId}`
+            )
+            err.code = 'APPROVAL_MODE_SESSION_NOT_FOUND'
+            throw err
+          }
+        })
+        tx.immediate()
+        return { ok: true }
+      })
+
     case 'update_session_title':
       // Spec 15 Fase B — unconditional overwrite (rename wins over the auto-title).
       return withBusyRetry(() => {
@@ -729,6 +758,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               tool_name: pendingRow.tool_name,
               reason: pendingRow.reason,
               mcp_server_name: pendingRow.mcp_server_name,
+              authorization_scope: pendingRow.authorization_scope ?? null,
             }
           : null,
         total_turns: sessionRow.turn_count ?? 0,
@@ -783,6 +813,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           pending_tool_name: string | null
           pending_reason: string | null
           pending_mcp_server_name: string | null
+          pending_authorization_scope: string | null
         }
       >
       return rows.map(row => {
@@ -793,6 +824,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           pending_tool_name,
           pending_reason,
           pending_mcp_server_name,
+          pending_authorization_scope,
           ...session
         } = row
         return {
@@ -806,6 +838,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                   tool_name: pending_tool_name,
                   reason: pending_reason,
                   mcp_server_name: pending_mcp_server_name,
+                  authorization_scope: pending_authorization_scope,
                 }
               : null,
         } satisfies PersistedSessionSummary

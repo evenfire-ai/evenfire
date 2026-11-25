@@ -1,6 +1,7 @@
 import {
   Fragment,
   type ReactElement,
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -12,6 +13,7 @@ import {
   useAgentChatActionsContext,
 } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
+import { useChatLinkActivation } from '@contexts/ChatLinkActivationContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -142,7 +144,9 @@ function extractWorkflowArtifactScopeFromProgress(
 function getChatMessageAttachmentIcon(attachment: ChatMessageAttachment) {
   if (attachment.type === 'plugin') return <IconWorkflows />
   if (attachment.type === 'connector') return <IconConnectors />
-  if (attachment.type === 'agent_file') return <IconContexts />
+  if (attachment.type === 'agent_file' || attachment.type === 'global_folder') {
+    return <IconContexts />
+  }
   return <GfsFileIcon name={attachment.filename || attachment.label} />
 }
 
@@ -280,6 +284,21 @@ export function ChatThread({
 }: ChatThreadProps) {
   const { selectedAgent, handleSelectChatAgent: onStartNewChat } = useNavigationContext()
   const { decideApproval, pushToast } = useNotificationsContext()
+  const activateChatLink = useChatLinkActivation()
+  const handleAssistantMarkdownClick = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      // React already retargets a click on a Text node to its parent element.
+      const anchor = (event.target as Element).closest('a')
+      if (!anchor || !event.currentTarget.contains(anchor)) return
+      // Any default navigation of the main document reloads the app and drops every tab.
+      event.preventDefault()
+      // The second click of a double click would open the external target again.
+      // Keyboard activation (Enter) dispatches a click with detail 0.
+      if (event.detail > 1) return
+      void activateChatLink(anchor.getAttribute('href') ?? '')
+    },
+    [activateChatLink]
+  )
   const {
     composerImageAttachments,
     composerReferenceAttachments,
@@ -606,7 +625,7 @@ export function ChatThread({
               ? () => {
                   // Surface (c), §4.7.4: the in-chat gate funnels through the
                   // central decider (optimistic FSM dispatch + RPC + resolve/toast).
-                  void decideApproval({
+                  return decideApproval({
                     agentRef: selectedAgent,
                     chatId: activeChatId,
                     taskId: taskId!,
@@ -617,10 +636,47 @@ export function ChatThread({
                 }
               : undefined
           }
+          onAlwaysApprove={
+            // The host may refuse to allowlist this call (`alwaysApproveAllowed: false`).
+            // A shell card replaces Always with the shell actions below.
+            canAct &&
+            si &&
+            !si.shellCard &&
+            si.alwaysApproveAllowed !== false &&
+            selectedAgent &&
+            activeChatId
+              ? () => {
+                  return decideApproval({
+                    agentRef: selectedAgent,
+                    chatId: activeChatId,
+                    taskId: taskId!,
+                    requestId: si.requestId,
+                    decision: 'approve',
+                    alwaysApprove: true,
+                    source: 'in_chat',
+                  })
+                }
+              : undefined
+          }
+          onShellAction={
+            canAct && si?.shellCard && selectedAgent && activeChatId
+              ? action => {
+                  return decideApproval({
+                    agentRef: selectedAgent,
+                    chatId: activeChatId,
+                    taskId: taskId!,
+                    requestId: si.requestId,
+                    decision: 'approve',
+                    shellAction: action,
+                    source: 'in_chat',
+                  })
+                }
+              : undefined
+          }
           onDeny={
             canAct && si && selectedAgent && activeChatId
               ? () => {
-                  void decideApproval({
+                  return decideApproval({
                     agentRef: selectedAgent,
                     chatId: activeChatId,
                     taskId: taskId!,
@@ -862,11 +918,16 @@ export function ChatThread({
                                 </pre>
                               ) : message.role === 'assistant' ? (
                                 <div className="message-block markdown-content">
-                                  <ChatMarkdownContent
-                                    model={semanticModel}
-                                    query={localSearchQuery}
-                                    activeOccurrence={activeSearchOccurrence}
-                                  />
+                                  <div
+                                    className="chat-md-root"
+                                    onClick={handleAssistantMarkdownClick}
+                                  >
+                                    <ChatMarkdownContent
+                                      model={semanticModel}
+                                      query={localSearchQuery}
+                                      activeOccurrence={activeSearchOccurrence}
+                                    />
+                                  </div>
                                   {selectedAgent && !hasResponseFileAttachment && (
                                     <MessageArtifactActions
                                       hostRef={selectedAgent}

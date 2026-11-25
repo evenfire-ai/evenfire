@@ -1,8 +1,17 @@
+import {
+  type ApprovalConfigSnapshot,
+  effectiveApprovalMode,
+  normalizeApprovalMode,
+  readChannelCap,
+  readModeCeiling,
+} from '../core/approval/approvalMode'
+import { classifierAvailable, classifierServingPair } from '../core/approval/shellClassifier'
 import type { ConversationManager } from '../core/conversation/conversation'
 import type {
   ConversationSessionMessages,
   ConversationSessionSummary,
 } from '../core/conversation/conversationStore'
+import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
 import { type Conversation, ConversationState } from '../core/types'
 import { projectApprovalInputPreview } from '../progress/approvalInputPreview'
 import { getDisplayName } from '../progress/intentExtraction'
@@ -34,16 +43,91 @@ export interface SessionRouteHandlerDeps {
    * over the operator secret list). Non-logging (unlike `redactToolError`).
    */
   redactTitle: (rawTitle: string) => string
+  /**
+   * Live ceiling, channel switch and approver policy. Read on each request,
+   * not captured when the handler is wired.
+   */
+  approvalSnapshot: () => ApprovalConfigSnapshot
+  /**
+   * Provider id and model name a task for this session runs with: the saved
+   * selection on the Host provider, or the boot fallback while it serves. The
+   * caller resolves it the same way as the task model; this handler does not
+   * construct a provider per session.
+   */
+  sessionModel: (selections: Record<string, string> | undefined) => {
+    providerType: string
+    modelName: string
+  }
+  /**
+   * The pair currently serving the Host when failover is active. Absent or
+   * not a fallback means the session model is the classifier pair.
+   */
+  servedModel?: () => { provider: string; model: string; fallback: boolean } | null
+  /**
+   * Dedicated shell classifier pair, when the Host can build one. When it
+   * returns a pair, shellClassifierAvailable uses that pair instead of the
+   * chat or failover pair. Null keeps the chat pair. Admission must use the
+   * same pair.
+   */
+  shellClassifierPair?: () => { providerType: string; modelName: string } | null
 }
 
 export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
-  const { getConversationManager, redactToolError, redactTitle } = deps
+  const { getConversationManager, redactToolError, redactTitle, approvalSnapshot, sessionModel } =
+    deps
+
+  // `owner` is the user the session key is built from. Every session these
+  // reads return is the caller's own `rpc` session, which the approver policy
+  // never caps; the cap still takes the owner, as every composition does.
+  const approvalView = (
+    session: Conversation | ConversationSessionSummary | ConversationSessionMessages,
+    owner: string
+  ) => {
+    const live =
+      'key' in session ? getConversationManager().getSessionByKey(session.key) : undefined
+    const stored = live
+      ? live.approval_mode
+      : 'approvalMode' in session
+        ? session.approvalMode
+        : undefined
+    const channelType = live
+      ? live.channel_type
+      : 'channelType' in session
+        ? session.channelType
+        : undefined
+    const selections = live ? live.modelSelections : session.modelSelections
+    const snapshot = approvalSnapshot()
+    const ceiling = readModeCeiling(snapshot)
+    const cap = readChannelCap(snapshot, channelType, live ? live.user_id : owner)
+    const approvalMode = normalizeApprovalMode(stored)
+    const model = sessionModel(selections)
+    const dedicated = deps.shellClassifierPair?.() ?? null
+    const classifierModel =
+      dedicated ??
+      classifierServingPair({
+        primaryProvider: model.providerType,
+        primaryModel: model.modelName,
+        served: deps.servedModel?.(),
+      })
+    return {
+      approvalMode,
+      modeCeiling: ceiling,
+      channelCap: cap,
+      effectiveApprovalMode: effectiveApprovalMode(approvalMode, ceiling, cap),
+      shellClassifierAvailable: classifierAvailable(
+        classifierModel.providerType,
+        classifierModel.modelName,
+        {}
+      ),
+    }
+  }
 
   // Common projection: state + active task + pending approval + lifetime token
   // totals, shared by the list and messages handlers (RPC token exposure
   // patch P1-1).
   const sessionStateView = (
-    session: Conversation | ConversationSessionSummary | ConversationSessionMessages
+    session: Conversation | ConversationSessionSummary | ConversationSessionMessages,
+    owner: string
   ) => {
     const state =
       session.state === ConversationState.Processing
@@ -73,12 +157,14 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
         ? {
             requestId: approval.request_id,
             displayName: getDisplayName(approval.tool_name),
-            // U5 — surface the connect_required discriminator on the REST rejoin
-            // snapshot so a reconnecting desktop rebuilds a "Connect <server>"
-            // suspension (not a generic approval) after a cold restart. Absent for
-            // the default HITL gate (reason undefined ⇒ fields omitted).
-            ...(approval.reason ? { reason: approval.reason } : {}),
-            ...(approval.mcpServerName ? { mcpServerName: approval.mcpServerName } : {}),
+            // U5 — the connect_required discriminator lets a reconnecting desktop
+            // rebuild a "Connect <server>" suspension after a cold restart, and
+            // alwaysApproveAllowed:false hides "Always approve" exactly when the
+            // Host would refuse it. One projection for every view.
+            ...pendingApprovalWireFields({
+              ...approval,
+              shellCard: previewApproval?.shellCard,
+            }),
             ...(approval.reason !== 'connect_required' && previewApproval
               ? {
                   inputPreview: projectApprovalInputPreview(
@@ -94,7 +180,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     // session has had an LLM call; cache breakdown included only when the model
     // reports it). See `projectSessionTokens`.
     const tokens = projectSessionTokens(session)
-    return { state, activeTaskId, pendingApproval, tokens }
+    return { state, activeTaskId, pendingApproval, tokens, ...approvalView(session, owner) }
   }
 
   const handleSessionsList = async (
@@ -141,7 +227,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
         lastActivityAt: summary.lastActivityAt.toISOString(),
         // spec 15 — omit when unset; re-redact on read (defense in depth §5).
         ...(summary.title !== undefined ? { title: redactTitle(summary.title) } : {}),
-        ...sessionStateView(summary),
+        ...sessionStateView(summary, userSub),
       })),
       ...(nextCursor ? { nextCursor } : {}),
     }
@@ -171,7 +257,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     return {
       agent: agentName,
       chatId,
-      ...sessionStateView(page),
+      ...sessionStateView(page, userSub),
       totalTurns: page.totalTurns,
       ...windowBounds,
       turns: turns.map(t => ({

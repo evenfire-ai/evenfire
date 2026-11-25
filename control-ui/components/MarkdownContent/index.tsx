@@ -3,6 +3,7 @@
 import React from 'react'
 import dynamic from 'next/dynamic'
 import rehypeSanitize from 'rehype-sanitize'
+import { useTheme } from '@components/ThemeContext'
 import { cn } from '@lib/cn'
 import { safeMarkdownHref } from '@lib/vanillaMarkdown'
 
@@ -59,9 +60,15 @@ export function MarkdownContent({
   emptyMessage,
   source,
 }: MarkdownContentProps): React.JSX.Element {
+  const { themeMode } = useTheme()
+
   if (!source.trim()) {
     return (
-      <article aria-label={ariaLabel} className="cu-identity-preview__document">
+      <article
+        aria-label={ariaLabel}
+        className="cu-identity-preview__document"
+        data-color-mode={themeMode}
+      >
         <div className={cn('cu-gfs-markdown-preview__content', className)}>
           <p className="cu-gfs-markdown-preview__empty">{emptyMessage}</p>
         </div>
@@ -78,7 +85,7 @@ export function MarkdownContent({
     <article
       aria-label={ariaLabel}
       className="cu-identity-preview__document"
-      data-color-mode="dark"
+      data-color-mode={themeMode}
     >
       <MarkdownPreview
         className={cn('cu-gfs-markdown-preview__content', className)}

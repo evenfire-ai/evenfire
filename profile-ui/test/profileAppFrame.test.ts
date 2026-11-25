@@ -7,13 +7,25 @@ import {
 } from '../lib/profileAppFrame'
 
 test('public profile routes stay outside the authenticated application frame', () => {
-  for (const pathname of ['/desktop-setup', '/forgot-password', '/invitations/token']) {
+  for (const pathname of [
+    '/desktop-setup',
+    '/forgot-password',
+    '/invitations/token',
+    '/oidc/result',
+    '/oidc/signed-in',
+  ]) {
     assert.equal(isPublicProfileUiPath(pathname), true, pathname)
   }
 })
 
 test('authenticated profile routes use the persistent application frame', () => {
-  for (const pathname of ['/', '/members', '/approval-channels', '/connected-accounts']) {
+  for (const pathname of [
+    '/',
+    '/members',
+    '/approval-channels',
+    '/settings/approval-channels',
+    '/connected-accounts',
+  ]) {
     assert.equal(isPublicProfileUiPath(pathname), false, pathname)
   }
 })
@@ -27,9 +39,12 @@ test('root inviteToken redirects stay public without making every root query pub
 })
 
 test('profileRouteForPathname derives the active persistent sidebar route', () => {
-  assert.equal(profileRouteForPathname('/'), 'home')
+  assert.equal(profileRouteForPathname('/'), 'socialChannels')
+  assert.equal(profileRouteForPathname('/channels'), 'socialChannels')
+  assert.equal(profileRouteForPathname('/channels/telegram'), 'socialChannels')
   assert.equal(profileRouteForPathname('/members/member-1'), 'members')
-  assert.equal(profileRouteForPathname('/approval-channels'), 'approvalChannels')
   assert.equal(profileRouteForPathname('/connected-accounts'), 'connectedAccounts')
   assert.equal(profileRouteForPathname('/settings'), 'settings')
+  assert.equal(profileRouteForPathname('/settings/profile'), 'settings')
+  assert.equal(profileRouteForPathname('/settings/approval-channels'), 'settings')
 })

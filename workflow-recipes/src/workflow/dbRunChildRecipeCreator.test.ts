@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { RUN_AUTHORITY_BOUND, RUN_AUTHORITY_LABEL } from '../reconciler/crdConstants.js'
 import type { WorkflowRecipeGfsIntentSpec } from '../types.js'
 import { createDbRunChildRecipe } from './dbRunChildRecipeCreator.js'
 import { makeExistingChild, makeParent, makeRun } from './dbRunChildRecipeCreator.testFixtures.js'
@@ -319,5 +320,76 @@ describe('createDbRunChildRecipe', () => {
     await expect(createDbRunChildRecipe(customApi, makeRun())).rejects.toThrow(
       /does not match the expected workflow run child identity/i
     )
+  })
+
+  describe('run authority label', () => {
+    const boundRun = () =>
+      makeRun({
+        authority_binding: { operationId: 'workflow.trigger' } as never,
+        authority_binding_id: 'binding-1',
+      })
+
+    function createdLabels(customApi: k8s.CustomObjectsApi): Record<string, string> | undefined {
+      return (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[0]?.body?.metadata?.labels
+    }
+
+    it.each([
+      ['a run with no binding field', makeRun(), undefined],
+      ['a run whose binding is null', makeRun({ authority_binding: null }), undefined],
+      ['a bound run', boundRun(), RUN_AUTHORITY_BOUND],
+    ])('labels the child of %s accordingly', async (_description, run, expected) => {
+      const customApi = {
+        getNamespacedCustomObject: vi.fn().mockResolvedValue(makeParent()),
+        createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+      } as unknown as k8s.CustomObjectsApi
+
+      await createDbRunChildRecipe(customApi, run)
+
+      const labels = createdLabels(customApi)
+      // Witness: the child was created with the run-id label.
+      expect(labels?.['clerum.io/workflow-run-id']).toBe('00000000-0000-0000-0000-000000000123')
+      expect(labels?.[RUN_AUTHORITY_LABEL]).toBe(expected)
+      expect(Object.prototype.hasOwnProperty.call(labels, RUN_AUTHORITY_LABEL)).toBe(
+        expected !== undefined
+      )
+    })
+
+    function collidingApi(existing: ReturnType<typeof makeExistingChild>) {
+      return {
+        getNamespacedCustomObject: vi
+          .fn()
+          .mockResolvedValueOnce(makeParent())
+          .mockResolvedValueOnce(existing),
+        createNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 409 }),
+      } as unknown as k8s.CustomObjectsApi
+    }
+
+    it('rejects a 409 collision for a bound run when the existing child lacks the label', async () => {
+      await expect(
+        createDbRunChildRecipe(collidingApi(makeExistingChild()), boundRun())
+      ).rejects.toThrow(/does not match the expected workflow run child identity/i)
+    })
+
+    it('reuses the existing child of a bound run when it carries the label', async () => {
+      const existing = makeExistingChild()
+      ;(existing.metadata.labels as Record<string, string>)[RUN_AUTHORITY_LABEL] =
+        RUN_AUTHORITY_BOUND
+
+      await expect(createDbRunChildRecipe(collidingApi(existing), boundRun())).resolves.toEqual({
+        name: 'demo-parent-00000000',
+        namespace: 'sandbox-recipes',
+      })
+    })
+
+    it('rejects a 409 collision for an unbound run when the existing child carries the label', async () => {
+      const existing = makeExistingChild()
+      ;(existing.metadata.labels as Record<string, string>)[RUN_AUTHORITY_LABEL] =
+        RUN_AUTHORITY_BOUND
+
+      await expect(createDbRunChildRecipe(collidingApi(existing), makeRun())).rejects.toThrow(
+        /does not match the expected workflow run child identity/i
+      )
+    })
   })
 })

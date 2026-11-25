@@ -4,6 +4,7 @@ export type CommunicationChannelAccessSelectorProps = {
   agentName: string
   disabled?: boolean
   inlineDropdowns?: boolean
+  showHeader?: boolean
   selectedTeamIds: string[]
   selectedUserIds: string[]
   onSelectedTeamIdsChange: (next: string[]) => void

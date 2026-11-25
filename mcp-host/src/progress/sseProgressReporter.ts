@@ -1,4 +1,5 @@
 // mcp-host/src/progress/sseProgressReporter.ts
+import type { ShellCardDescriptor } from '../core/approval/shellCard'
 import type { Safety } from '../core/interfaces.js'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle.js'
 import type { TransitionEvent } from '../lifecycle/types.js'
@@ -167,6 +168,8 @@ export class SseProgressReporter implements ProgressReporter {
     options?: {
       reason?: 'approval_required' | 'connect_required'
       mcpServerName?: string
+      alwaysApproveAllowed?: false
+      shellCard?: ShellCardDescriptor
       toolName?: string
       parameters?: Record<string, unknown>
     }
@@ -177,6 +180,8 @@ export class SseProgressReporter implements ProgressReporter {
     if (reason === 'connect_required') {
       if (options?.mcpServerName) data.mcpServerName = options.mcpServerName
     }
+    if (options?.alwaysApproveAllowed === false) data.alwaysApproveAllowed = false
+    if (options?.shellCard) data.shellCard = options.shellCard
     if (reason === 'approval_required' && options?.toolName && options.parameters) {
       const toolName = options.toolName
       const preview = projectApprovalInputPreview(

@@ -5,6 +5,10 @@ import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootRec
 import { rootLogger } from './observability/logger.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
+import {
+  bootstrapConfiguredPr2Readiness,
+  startControlApiPr2RuntimeEvidence,
+} from './services/access/pr2ReadinessEvidence.js'
 import { resolveEffectiveUserAccessPolicy } from './services/access/userAccessRuntimePolicy.js'
 import {
   startAdminRevokedTokenCleanup,
@@ -18,6 +22,8 @@ import {
   startEntityChangeDispatcher,
   stopEntityChangeDispatcher,
 } from './services/entityChangeService.js'
+import { closeGfsWatchPool } from './services/gfsWatch/process.js'
+import { catalogPruneFromGateway } from './services/llmCatalogPrune.js'
 import { syncDiscoveredModels } from './services/llmCatalogSync.js'
 import {
   startLlmCatalogBootSync,
@@ -84,6 +90,7 @@ const logger = rootLogger.child({ module: 'control-api-shutdown' })
 let activeServer: ControlApiServer | null = null
 let requestedExitCode = 0
 let shutdownRequested = false
+let stopPr2RuntimeEvidence: (() => void) | null = null
 
 const shutdown = createShutdownHandler(async () => {
   const result = await runShutdownSteps(
@@ -107,6 +114,8 @@ const shutdown = createShutdownHandler(async () => {
       'oauth-shared-grant-sweep': stopOauthSharedGrantSweepCron,
       'workflow-approval-trace-projector': stopWorkflowApprovalTraceProjector,
       'entity-change-dispatcher': stopEntityChangeDispatcher,
+      'pr2-runtime-evidence': () => stopPr2RuntimeEvidence?.(),
+      'watch-database-pool': closeGfsWatchPool,
       'core-database-pool': () => pool.end(),
       'rate-limit-database-pool': () => rateLimitPool.end(),
       'trace-database-pools': closeTracingPools,
@@ -150,6 +159,8 @@ async function main(): Promise<void> {
   await assertDbReady()
   ensureStartupActive()
   logger.info({ event: 'control_api_database_ready' }, 'Database schema ready')
+  await bootstrapConfiguredPr2Readiness()
+  ensureStartupActive()
   const userAccessPolicy = await resolveEffectiveUserAccessPolicy()
   logger.info(
     { event: 'user_access_policy_ready', policyRevision: userAccessPolicy.policyRevision },
@@ -209,13 +220,18 @@ async function main(): Promise<void> {
   // LLM_CATALOG_SYNC_CRON_ENABLED (code default off, on in the base deploy) it
   // is the cron's first tick; otherwise it runs alone unless
   // LLM_CATALOG_BOOT_SYNC_ENABLED=false. A boot sync that could not decide or
-  // failed keeps probing models.dev with backoff. The sync never changes
-  // `enabled` on an existing row. It needs the gateway's ConfigMap writer:
-  // every run publishes the allowlist when it differs from Postgres.
+  // failed keeps probing models.dev with backoff. Of the existing rows, the
+  // sync only changes `enabled` on catalog-managed ones: the prune disables
+  // stale models nobody uses, and a pruned model the catalog lists again is
+  // re-enabled. It needs the gateway's ConfigMap writer (every run publishes
+  // the allowlist when it differs from Postgres) and its Host / recipe LISTs
+  // (the prune's consumers).
+  const catalogPrune = catalogPruneFromGateway(gateway)
   const catalogSyncDeps = {
     sync: (catalog?: ModelsDevCatalogResult) =>
       syncDiscoveredModels({
         materializer: gateway.llmAllowedModelsConfigMap(),
+        prune: catalogPrune,
         ...(catalog ? { loadCatalog: async () => catalog } : {}),
       }),
   }
@@ -378,6 +394,7 @@ async function main(): Promise<void> {
 
   await server.start()
   ensureStartupActive()
+  stopPr2RuntimeEvidence = startControlApiPr2RuntimeEvidence()
   logger.info({ event: 'control_api_running' }, 'Control API running')
 
   // Hosted member-registration self-enrollment (spec §8.4): degrade, never

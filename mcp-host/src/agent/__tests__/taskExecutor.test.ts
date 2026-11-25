@@ -1,22 +1,45 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import type {
+  AuthorityBindingV2,
+  TrustedEdgeActionContextV2,
+} from '@clerum/action-context-contracts'
 import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config as appConfig } from '../../config'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
+import { AttachmentReadLedger } from '../../core/attachments/attachmentReadBudget'
 import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { PressureContextManager } from '../../core/extensions/contextManager'
+import type { RequestImageUsage, Tool } from '../../core/interfaces'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
+import { executeSingleTool as executeSingleToolDirect } from '../../core/orchestration/toolUseLoopSingleTool'
 import { TOOL_DISCOVERY_TEXT } from '../../core/reasoning/promptBuilder'
 import { registerDesktopTools } from '../../core/tools/desktopTools'
+import { DocumentReadTool } from '../../core/tools/documentRead'
+import {
+  admittedFile,
+  documentLimits,
+  imageOnlyPdf,
+  witnessCode,
+} from '../../core/tools/documentRead/__tests__/fixtures'
+import type { RunDocumentJob } from '../../core/tools/documentRead/types'
+import { runDocumentJob } from '../../core/tools/documentRead/workerRunner'
 import {
   requestEffectiveWorkflowList,
   resolveEffectiveWorkflowTarget,
 } from '../../core/tools/workflowEffectiveTargets'
-import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from '../../core/types'
+import type {
+  Attachment,
+  ChatMessage,
+  MessageContentPart,
+  ToolResult,
+  TraceContextV1,
+} from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { PNG_2X2_BASE64 } from '../../llm/__tests__/codexImageFixtures'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
 import { FailoverEngine } from '../../llm/failover/engine'
@@ -26,6 +49,9 @@ import { recordedResponse } from '../../llm/openaiFamily/__tests__/responsesFixt
 import { PromptCache } from '../../llm/promptCache'
 import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
+import { authorityBindingFromTrustedEdge } from '../../runtime/actionAuthority'
+import { resolveOfficialVisualDeliveryLimits } from '../../visualInput/deliveryLimits'
+import { VisualInputBudget } from '../../visualInput/policy'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
 
@@ -80,6 +106,15 @@ vi.mock('../../core/tools/workflowEffectiveTargets', async importOriginal => {
   }
 })
 
+let realRunToolUseLoop: typeof runToolUseLoop
+
+beforeAll(async () => {
+  const actual = await vi.importActual<typeof import('../../core/orchestration/toolUseLoop')>(
+    '../../core/orchestration/toolUseLoop'
+  )
+  realRunToolUseLoop = actual.runToolUseLoop
+})
+
 function createTask(content: string = 'Test', sender: string = 'user-1'): Task {
   return {
     id: `task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -99,6 +134,48 @@ function createTask(content: string = 'Test', sender: string = 'user-1'): Task {
     responseCallback: vi.fn(async () => {}),
     createdAt: new Date(),
   }
+}
+
+function runtimeAuthority(): AuthorityBindingV2 {
+  const context: TrustedEdgeActionContextV2 = {
+    version: 2,
+    userId: '11111111-1111-4111-8111-111111111111',
+    sid: '22222222-2222-4222-8222-222222222222',
+    sessionVersion: 3,
+    delegationJti: '33333333-3333-4333-8333-333333333333',
+    operationId: 'chat.message.invoke',
+    resource: {
+      environmentId: 'cluster.local/evenfire',
+      type: 'host',
+      canonicalId: 'host:mcp-host/chatllm',
+      logicalId: 'mcp-host/chatllm',
+      displayName: 'chatllm',
+    },
+    target: {
+      hostRef: 'mcp-host/chatllm',
+      channelType: 'rpc',
+      channelId: 'chatllm',
+      messageId: '44444444-4444-4444-8444-444444444444',
+    },
+    targetHash: `ath2_${'a'.repeat(43)}`,
+    accessPathId: `ap1_${'b'.repeat(43)}`,
+    authorizationRevision: `ar1_${'c'.repeat(43)}`,
+    pathKind: 'direct',
+    effectiveTeamId: null,
+    behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+    behavior: {
+      budget: { state: 'known', value: 'direct-budget' },
+      credentialPolicy: { state: 'known', value: null },
+      approvalPolicy: { state: 'known', value: null },
+      filesystemScope: { state: 'known', value: null },
+      runtime: { state: 'known', value: 'runtime-a' },
+      providerModelPolicy: { state: 'known', value: 'model-policy-a' },
+      audit: { state: 'known', value: 'audit-a' },
+    },
+    checkedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }
+  return authorityBindingFromTrustedEdge(context)
 }
 
 function createDeps(overrides?: Partial<TaskExecutorDeps>): TaskExecutorDeps {
@@ -132,6 +209,7 @@ function createDeps(overrides?: Partial<TaskExecutorDeps>): TaskExecutorDeps {
     },
     modelName: 'test-model',
     approvalConfig: undefined,
+    approvalConfigProvider: () => ({ effective: undefined, hostSpec: undefined }),
     coreEvents: new SimpleEventEmitter(),
     cronScheduler: null,
     taskLifecycle: new TaskLifecycle(),
@@ -162,6 +240,83 @@ function createImageAttachment(overrides: Partial<Attachment> = {}): Attachment 
     filename: 'image.jpg',
     ...overrides,
   }
+}
+
+/** The tool-result image parts of the request the resumed loop received. */
+function resumedToolImages(toolCallId: string): MessageContentPart[] {
+  const messages = vi.mocked(runToolUseLoop).mock.calls[1]![1] as ChatMessage[]
+  return messages.flatMap(message =>
+    (message.contentParts ?? []).filter(
+      part =>
+        part.type === 'image' &&
+        part.source?.kind === 'tool' &&
+        part.source.toolCallId === toolCallId
+    )
+  )
+}
+
+/** A document reader whose worker must never run: the request has no free image slot. */
+function pausingDocumentReader(file: Attachment): DocumentReadTool {
+  const runJob: RunDocumentJob = async () => {
+    throw new Error('a request at its image-slot limit must pause before the worker')
+  }
+  return new DocumentReadTool(
+    { ...createTask('Read the scan').sourceMessage!, attachments: [file] },
+    {
+      contextWindowTokens: 20_000,
+      ledger: new AttachmentReadLedger(),
+      redactor: { toolOutputRedactionRanges: () => [] },
+      runJob,
+      limits: documentLimits(),
+    }
+  )
+}
+
+/**
+ * Runs the next approved call through the real single-tool executor with only
+ * `reader` registered and the Claude image profile, recording the request
+ * image usage taskExecutor forwarded and the result.
+ */
+function resumeThroughReader(reader: DocumentReadTool): {
+  forwarded?: RequestImageUsage
+  resumed?: ToolResult
+} {
+  const observed: { forwarded?: RequestImageUsage; resumed?: ToolResult } = {}
+  vi.mocked(executeSingleTool).mockImplementationOnce(
+    async (call, config, iteration, transform, requestImages) => {
+      observed.forwarded = requestImages
+      observed.resumed = await executeSingleToolDirect(
+        call,
+        {
+          ...config,
+          toolRegistry: {
+            get: name => (name === reader.name() ? reader : null),
+            listDefinitions: () => [],
+            register: vi.fn(),
+          },
+          visualInput: {
+            budget: new VisualInputBudget(),
+            resolveCapability: async () => ({
+              status: 'supported' as const,
+              provider: 'anthropic',
+              model: 'claude-test',
+              evidence: 'unit fixture',
+              deliveryLimits: resolveOfficialVisualDeliveryLimits(
+                'claude',
+                'https://api.anthropic.com/',
+                'completeWithTools'
+              )!,
+            }),
+          },
+        },
+        iteration,
+        transform,
+        requestImages
+      )
+      return observed.resumed
+    }
+  )
+  return observed
 }
 
 const workflowEnvKeys = [
@@ -281,6 +436,223 @@ describe('TaskExecutor', () => {
     expect(task.responseCallback).toHaveBeenCalled()
   })
 
+  it('fails closed before a v2 provider call when live authority was revoked', async () => {
+    const providerCall = vi.fn().mockResolvedValue({
+      content: 'must not be returned',
+      tool_calls: null,
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'stop',
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      await config.reasoning.respondWithTools({
+        messages: [],
+        available_tools: [],
+      })
+      return {
+        type: 'response',
+        content: 'must not be returned',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }
+    })
+    const checkpoint = vi.fn().mockResolvedValue('denied' as const)
+    const task = createTask('Hello', runtimeAuthority().userId)
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: providerCall,
+        getProviderType: () => 'openai' as const,
+      } as any,
+      actionAuthorityCheckpoint: checkpoint,
+    })
+
+    await new TaskExecutor(task, deps).run()
+
+    expect(checkpoint).toHaveBeenCalledWith(runtimeAuthority())
+    expect(providerCall).not.toHaveBeenCalled()
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({
+        code: 'access_path_stale',
+        retryable: false,
+        provider: 'unknown',
+      })
+    )
+  })
+
+  it('rechecks live v2 authority before each protected tool effect', async () => {
+    const effect = vi
+      .fn()
+      .mockResolvedValue({ content: 'effect completed', duration_ms: 1, is_error: false })
+    const protectedTool: Tool = {
+      name: () => 'protected-effect',
+      description: () => 'A test effect',
+      parametersSchema: () => ({}),
+      execute: effect,
+      requiresSanitization: () => false,
+      requiresApproval: () => false,
+    }
+    vi.mocked(registerDesktopTools).mockImplementationOnce(async registry => {
+      registry.register(protectedTool)
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      const tool = config.toolRegistry.get('protected-effect')
+      if (!tool) throw new Error('test_tool_not_registered')
+      await tool.execute({})
+      await tool.execute({})
+      return {
+        type: 'response',
+        content: 'done',
+        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      }
+    })
+    const checkpoint = vi
+      .fn()
+      .mockResolvedValueOnce('allowed' as const)
+      .mockResolvedValueOnce('denied' as const)
+    const task = createTask('Hello', runtimeAuthority().userId)
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+
+    await new TaskExecutor(task, createDeps({ actionAuthorityCheckpoint: checkpoint })).run()
+
+    expect(checkpoint).toHaveBeenCalledTimes(2)
+    expect(checkpoint).toHaveBeenNthCalledWith(1, runtimeAuthority())
+    expect(checkpoint).toHaveBeenNthCalledWith(2, runtimeAuthority())
+    expect(effect).toHaveBeenCalledTimes(1)
+  })
+
+  it('rechecks v2 authority before continuing after suspended tool results', async () => {
+    const providerCall = vi.fn().mockResolvedValue({
+      content: 'provider response',
+      tool_calls: null,
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'stop',
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      await config.reasoning.respondWithTools({ messages: [], available_tools: [] })
+      await config.reasoning.continueWithToolResults({ messages: [], available_tools: [] }, [
+        {
+          tool_call_id: 'tool-1',
+          name: 'suspended-tool',
+          content: 'approved result',
+          is_error: false,
+        },
+      ])
+      return {
+        type: 'response',
+        content: 'must not be returned',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }
+    })
+    const checkpoint = vi
+      .fn()
+      .mockResolvedValueOnce('allowed' as const)
+      .mockResolvedValueOnce('denied' as const)
+    const task = createTask('Hello', runtimeAuthority().userId)
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: providerCall,
+        getProviderType: () => 'openai' as const,
+      } as any,
+      actionAuthorityCheckpoint: checkpoint,
+    })
+
+    await new TaskExecutor(task, deps).run()
+
+    expect(checkpoint).toHaveBeenCalledTimes(2)
+    expect(checkpoint).toHaveBeenNthCalledWith(1, runtimeAuthority())
+    expect(checkpoint).toHaveBeenNthCalledWith(2, runtimeAuthority())
+    expect(providerCall).toHaveBeenCalledTimes(1)
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({
+        code: 'access_path_stale',
+        retryable: false,
+      })
+    )
+  })
+
+  it('checkpoints again before a fallback provider attempt', async () => {
+    const primaryCall = vi
+      .fn()
+      .mockRejectedValue(new LlmError('rate limited', 'openai', LlmErrorCode.RateLimited, true))
+    const fallbackCall = vi.fn().mockResolvedValue({
+      content: 'must not be returned',
+      tool_calls: null,
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'stop',
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      const result = await config.reasoning.respondWithTools({ messages: [], available_tools: [] })
+      if (result.type === 'error') return result
+      return {
+        type: 'response',
+        content: 'must not be returned',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }
+    })
+    const checkpoint = vi
+      .fn()
+      .mockResolvedValueOnce('allowed' as const)
+      .mockResolvedValueOnce('denied' as const)
+    const policy: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['rate_limited'],
+      fallbacks: [{ provider: 'claude', model: 'fallback-model' }],
+    }
+    const task = createTask('Hello', runtimeAuthority().userId)
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: primaryCall,
+        getProviderType: () => 'openai' as const,
+        classifyError: () => ({
+          code: LlmErrorCode.RateLimited,
+          retryable: true,
+          message: 'rate limited',
+        }),
+      } as any,
+      actionAuthorityCheckpoint: checkpoint,
+      failover: {
+        engine: new FailoverEngine(policy, { metricInc: () => {} }),
+        policy,
+        buildProvider: () =>
+          ({
+            completeSingleTurn: vi.fn(),
+            completeSingleTurnWithTools: fallbackCall,
+            getProviderType: () => 'claude' as const,
+            classifyError: () => ({
+              code: LlmErrorCode.ApiCallFailed,
+              retryable: true,
+              message: 'fallback failed',
+            }),
+          }) as any,
+      },
+    })
+
+    await new TaskExecutor(task, deps).run()
+
+    expect(checkpoint).toHaveBeenCalledTimes(2)
+    expect(checkpoint).toHaveBeenNthCalledWith(1, runtimeAuthority())
+    expect(checkpoint).toHaveBeenNthCalledWith(2, runtimeAuthority())
+    expect(primaryCall).toHaveBeenCalledTimes(1)
+    expect(fallbackCall).not.toHaveBeenCalled()
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({
+        message: expect.stringContaining('access_path_stale'),
+        retryable: false,
+      })
+    )
+  })
+
   it('enriches channel trace context with the persisted conversation id', async () => {
     ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       type: 'response',
@@ -390,6 +762,12 @@ describe('TaskExecutor', () => {
 
     const deps = createDeps()
     const task = createTask('Run a command')
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.sender = '11111111-1111-4111-8111-111111111111'
+    task.sourceMessage!.channelId = 'chatllm'
+    task.sourceMessage!.messageId = '44444444-4444-4444-8444-444444444444'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+    const persistSuspend = vi.spyOn(deps.conversationManager.getStore(), 'persistSuspend')
     const executor = new TaskExecutor(task, deps)
 
     await executor.run()
@@ -400,6 +778,16 @@ describe('TaskExecutor', () => {
       task.id,
       expect.objectContaining({ request_id: 'req-1' })
     )
+    expect(persistSuspend).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        request_id: 'req-1',
+        sourceMessage: expect.objectContaining({
+          authorityV2: task.sourceMessage!.authorityV2,
+        }),
+      })
+    )
+    expect(persistSuspend.mock.calls[0]).toHaveLength(2)
   })
 
   it('should expose pendingApproval when awaiting', async () => {
@@ -971,6 +1359,661 @@ describe('TaskExecutor', () => {
     expect(runToolUseLoop).toHaveBeenCalledTimes(2)
     expect(executor.executorState).toBe('completed')
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it('R2-L2: a resumed visual read receives the images already in its frozen request', async () => {
+    const file = admittedFile('resume-scan', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const reader = pausingDocumentReader(file)
+    const snapshot: ChatMessage[] = [
+      {
+        role: 'user',
+        content: 'Earlier rendered pages',
+        contentParts: [
+          { type: 'text', text: 'Earlier rendered pages' },
+          ...Array.from({ length: 20 }, (_, index) => ({
+            type: 'image' as const,
+            mimeType: 'image/png' as const,
+            data: PNG_2X2_BASE64,
+            // Above the many-image dimension threshold with the model's image
+            // count already spent: this read has no free slot.
+            width: 2_048,
+            height: 2_048,
+            source: {
+              kind: 'tool' as const,
+              attachmentId: `earlier-${index}`,
+              toolCallId: 'call-earlier',
+            },
+          })),
+        ],
+      },
+    ]
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-document-resume',
+          tool_name: reader.name(),
+          parameters: { attachmentId: file.id, mode: 'visual' },
+          description: 'Read the scanned page',
+          tool_call_id: 'call-document-resume',
+          context_snapshot: snapshot,
+        },
+      } as any)
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    const observed = resumeThroughReader(reader)
+
+    const deps = createDeps()
+    const task = createTask('Read the scan')
+    const executor = new TaskExecutor(task, deps)
+
+    await executor.run()
+    expect(executor.executorState).toBe('waiting_approval')
+    expect(vi.mocked(executeSingleTool)).not.toHaveBeenCalled()
+
+    await executor.resumeAfterApproval(false)
+
+    expect(vi.mocked(executeSingleTool)).toHaveBeenCalledTimes(1)
+    // This is the datum taskExecutor must forward from the frozen snapshot.
+    expect(observed.forwarded).toEqual({
+      images: 20,
+      bytes: 20 * Buffer.from(PNG_2X2_BASE64, 'base64').length,
+      maxSide: 2_048,
+    })
+    const resumed = observed.resumed
+    expect(resumed?.is_error).toBe(false)
+    expect(JSON.parse(resumed!.rawContent ?? resumed!.content)).toMatchObject({
+      status: 'read_budget_exhausted',
+      attachmentId: file.id,
+      message: expect.stringContaining('The current request already carries as many images'),
+    })
+    // Witness: the approval resume ran to completion with the visual read's result.
+    expect(executor.executorState).toBe('completed')
+    expect(deps.onComplete).toHaveBeenCalledTimes(1)
+    expect(runToolUseLoop).toHaveBeenCalledTimes(2)
+  })
+
+  it('M19: a resumed visual read counts the images of the batch results completed before it', async () => {
+    const file = admittedFile('resume-batch', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const reader = pausingDocumentReader(file)
+    const visualCall = (id: string) => ({
+      id,
+      name: reader.name(),
+      arguments: { attachmentId: file.id, mode: 'visual' },
+    })
+    // The frozen messages carry no image. An earlier call of the same batch
+    // returned 20 large rendered pages; they reach the request only through
+    // `completed_results`, so the resumed call must count them from there.
+    const snapshot: ChatMessage[] = [
+      { role: 'user', content: 'Read the scan' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [visualCall('call-earlier'), visualCall('call-document-resume')],
+      },
+    ]
+    const earlier: ToolResult = {
+      tool_call_id: 'call-earlier',
+      name: reader.name(),
+      content: 'Rendered pages 1-20',
+      is_error: false,
+      attachments: Array.from({ length: 20 }, (_, index) =>
+        createImageAttachment({
+          id: `earlier-${index}`,
+          mimeType: 'image/png',
+          dataBase64: PNG_2X2_BASE64,
+          filename: `page-${index + 1}.png`,
+          // Above the many-image dimension threshold with the model's image
+          // count already spent: this read has no free slot.
+          width: 2_048,
+          height: 2_048,
+        })
+      ),
+    }
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-document-batch',
+          tool_name: reader.name(),
+          parameters: { attachmentId: file.id, mode: 'visual' },
+          description: 'Read the scanned page',
+          tool_call_id: 'call-document-resume',
+          context_snapshot: snapshot,
+          completed_results: [earlier],
+        },
+      } as any)
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    const observed = resumeThroughReader(reader)
+
+    const deps = createDeps()
+    const executor = new TaskExecutor(createTask('Read the scan'), deps)
+    await executor.run()
+    expect(executor.executorState).toBe('waiting_approval')
+
+    await executor.resumeAfterApproval(false)
+
+    expect(vi.mocked(executeSingleTool)).toHaveBeenCalledTimes(1)
+    // This is the datum taskExecutor must forward from the completed results.
+    expect(observed.forwarded).toEqual({
+      images: 20,
+      bytes: 20 * Buffer.from(PNG_2X2_BASE64, 'base64').length,
+      maxSide: 2_048,
+    })
+    const resumed = observed.resumed
+    expect(resumed?.is_error).toBe(false)
+    expect(JSON.parse(resumed!.rawContent ?? resumed!.content)).toMatchObject({
+      status: 'read_budget_exhausted',
+      attachmentId: file.id,
+      message: expect.stringContaining('The current request already carries as many images'),
+    })
+    // Witness: the resume rebuilt the batch and completed with both results.
+    expect(executor.executorState).toBe('completed')
+    expect(deps.onComplete).toHaveBeenCalledTimes(1)
+    expect(runToolUseLoop).toHaveBeenCalledTimes(2)
+    // The rebuilt request carries the 20 pages it counted (review M1): the
+    // count describes the request the model receives, not dropped images.
+    expect(resumedToolImages('call-earlier')).toHaveLength(20)
+  })
+
+  it('M1: the page an approved visual read renders reaches the resumed request', async () => {
+    const file = admittedFile('resume-render', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const reader = new DocumentReadTool(
+      { ...createTask('Read the scan').sourceMessage!, attachments: [file] },
+      {
+        contextWindowTokens: 100_000,
+        ledger: new AttachmentReadLedger(),
+        redactor: { toolOutputRedactionRanges: () => [] },
+        runJob: runDocumentJob,
+        limits: documentLimits(),
+      }
+    )
+    const call = {
+      id: 'call-document-render',
+      name: reader.name(),
+      arguments: { attachmentId: file.id, mode: 'visual' },
+    }
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-document-render',
+          tool_name: reader.name(),
+          parameters: call.arguments,
+          description: 'Read the scanned page',
+          tool_call_id: call.id,
+          context_snapshot: [
+            { role: 'user', content: 'Read the scan' },
+            { role: 'assistant', content: '', tool_calls: [call] },
+          ],
+          completed_results: [],
+        },
+      } as any)
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    const observed = resumeThroughReader(reader)
+
+    const deps = createDeps()
+    const executor = new TaskExecutor(createTask('Read the scan'), deps)
+    await executor.run()
+    await executor.resumeAfterApproval(false)
+
+    expect(observed.resumed?.is_error).toBe(false)
+    expect(JSON.parse(observed.resumed!.rawContent ?? observed.resumed!.content)).toMatchObject({
+      status: 'ok',
+      mode: 'visual',
+      images: [{ page: 1 }],
+    })
+    // The tool result says the model has the page; the request must carry it.
+    const parts = resumedToolImages(call.id)
+    expect(parts).toHaveLength(1)
+    expect(parts[0]).toMatchObject({
+      type: 'image',
+      mimeType: 'image/png',
+      data: observed.resumed!.attachments![0]!.dataBase64,
+    })
+    expect(executor.executorState).toBe('completed')
+  }, 30_000)
+
+  it.each([
+    ['without', false, []],
+    [
+      'with',
+      true,
+      [
+        expect.objectContaining({
+          source: { kind: 'tool', attachmentId: 'frame-again', toolCallId: 'call-repeat' },
+          sourceIdentityOnly: true,
+        }),
+      ],
+    ],
+  ] as const)(
+    'N4: a frame the turn already collected is not sent again in full on a resume %s source identity',
+    async (_label, identity, expected) => {
+      const frame = (id: string, toolCallId: string) => ({
+        attachment: createImageAttachment({
+          id,
+          mimeType: 'image/png',
+          dataBase64: PNG_2X2_BASE64,
+          filename: 'frame.png',
+          width: 2,
+          height: 2,
+        }),
+        part: {
+          type: 'image' as const,
+          mimeType: 'image/png' as const,
+          data: PNG_2X2_BASE64,
+          width: 2,
+          height: 2,
+          source: { kind: 'tool' as const, attachmentId: id, toolCallId },
+        },
+      })
+      const first = frame('frame-first', 'call-first')
+      const calls = [
+        { id: 'call-repeat', name: 'capture', arguments: {} },
+        { id: 'call-approved', name: 'shell_exec', arguments: { command: 'ls' } },
+      ]
+      // An earlier iteration collected the frame and sent it; the suspended
+      // batch's first call returned the same frame again.
+      vi.mocked(runToolUseLoop)
+        .mockResolvedValueOnce({
+          type: 'need_approval',
+          approval: {
+            request_id: 'req-repeat',
+            tool_name: 'shell_exec',
+            parameters: { command: 'ls' },
+            description: 'Shell command',
+            tool_call_id: 'call-approved',
+            context_snapshot: [
+              { role: 'user', content: 'Capture twice' },
+              {
+                role: 'assistant',
+                content: '',
+                tool_calls: [{ id: 'call-first', name: 'capture', arguments: {} }],
+              },
+              { role: 'tool', name: 'capture', tool_call_id: 'call-first', content: 'Captured' },
+              {
+                role: 'user',
+                content: 'Tool result image',
+                imageOrigin: 'tool_result',
+                contentParts: [{ type: 'text', text: 'Tool result image' }, first.part],
+              },
+              { role: 'assistant', content: '', tool_calls: calls },
+            ],
+            completed_results: [
+              {
+                tool_call_id: 'call-repeat',
+                name: 'capture',
+                content: 'Captured',
+                is_error: false,
+                attachments: [frame('frame-again', 'call-repeat').attachment],
+              },
+            ],
+            attachments: [first.attachment],
+          },
+        } as any)
+        .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+      vi.mocked(executeSingleTool).mockResolvedValueOnce({
+        tool_call_id: 'call-approved',
+        name: 'shell_exec',
+        content: 'ok',
+        is_error: false,
+      })
+      const base = createDeps()
+      const deps = createDeps({
+        llmProvider: { ...base.llmProvider, requiresImageSourceIdentity: identity },
+      })
+      const executor = new TaskExecutor(createTask('Capture twice'), deps)
+      await executor.run()
+      await executor.resumeAfterApproval(false)
+
+      expect(vi.mocked(runToolUseLoop).mock.calls[1]![0].imageSourceIdentity).toBe(identity)
+      // The loop's own rule, from the turn's collection before this batch:
+      // a repeated frame is dropped, or named by reference when the provider
+      // binds image sources (review round 2, N4).
+      expect(resumedToolImages('call-repeat')).toEqual(expected)
+      expect(resumedToolImages('call-first')).toHaveLength(1)
+      expect(executor.executorState).toBe('completed')
+    }
+  )
+
+  it('N4: the tool messages a resume rebuilds carry no spillover ref', async () => {
+    const call = { id: 'call-spilled', name: 'shell_exec', arguments: { command: 'cat big' } }
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-spilled',
+          tool_name: 'shell_exec',
+          parameters: call.arguments,
+          description: 'Shell command',
+          tool_call_id: call.id,
+          context_snapshot: [
+            { role: 'user', content: 'Print the big file' },
+            { role: 'assistant', content: '', tool_calls: [call] },
+          ],
+          completed_results: [],
+        },
+      } as any)
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    vi.mocked(executeSingleTool).mockResolvedValueOnce({
+      tool_call_id: call.id,
+      name: 'shell_exec',
+      content: 'Summary of a large output',
+      is_error: false,
+      spillover_ref: 'spillover://fixture/call-spilled',
+    })
+    const executor = new TaskExecutor(createTask('Print the big file'), createDeps())
+    await executor.run()
+    await executor.resumeAfterApproval(false)
+
+    // Pins the rebuild's existing behaviour: dev's rebuild never carried a
+    // ref, while the loop's own append does. The rebuilt messages become the
+    // snapshot of any later suspension, and a cold start expires an approval
+    // whose snapshot names a missing blob (sqliteColdStartLoader B7).
+    const messages = vi.mocked(runToolUseLoop).mock.calls[1]![1] as ChatMessage[]
+    const rebuilt = messages.find(message => message.tool_call_id === call.id)
+    expect(rebuilt).toMatchObject({ role: 'tool', content: 'Summary of a large output' })
+    expect(rebuilt!.spillover_ref).toBeUndefined()
+  })
+
+  it.each([
+    ['marked when carried', false],
+    // Unique ids. A row saved before the mark is dropped by the id check.
+    // The same row under ids that restart per response still duplicates (A-4).
+    ['unique ids, saved before the mark', true],
+  ])(
+    'P1: a second suspension in the same turn sends no answered tool result again (%s)',
+    async (_label, savedBeforeMark) => {
+      const frame = createImageAttachment({
+        id: 'frame-1',
+        mimeType: 'image/png',
+        dataBase64: PNG_2X2_BASE64,
+        filename: 'frame.png',
+        width: 2,
+        height: 2,
+      })
+      const firstBatch = [
+        { id: 'call-capture', name: 'capture', arguments: {} },
+        { id: 'call-approve-1', name: 'shell_exec', arguments: { command: 'one' } },
+      ]
+      const secondCall = { id: 'call-approve-2', name: 'shell_exec', arguments: { command: 'two' } }
+      vi.mocked(runToolUseLoop)
+        .mockResolvedValueOnce({
+          type: 'need_approval',
+          approval: {
+            request_id: 'req-first',
+            tool_name: 'shell_exec',
+            parameters: { command: 'one' },
+            description: 'Shell command',
+            tool_call_id: 'call-approve-1',
+            context_snapshot: [
+              { role: 'user', content: 'Capture, then run two commands' },
+              { role: 'assistant', content: '', tool_calls: firstBatch },
+            ],
+            completed_results: [
+              {
+                tool_call_id: 'call-capture',
+                name: 'capture',
+                content: 'Captured',
+                is_error: false,
+                attachments: [frame],
+              },
+            ],
+          },
+        } as any)
+        // The resumed loop suspends again. As toolUseLoopToolBatch does, it
+        // freezes the messages it was given plus its new tool-call message, with
+        // no result of the new batch completed before the suspended call.
+        .mockImplementationOnce(async (_config, messages) => ({
+          type: 'need_approval',
+          approval: {
+            request_id: 'req-second',
+            tool_name: 'shell_exec',
+            parameters: secondCall.arguments,
+            description: 'Shell command',
+            tool_call_id: secondCall.id,
+            context_snapshot: [
+              ...structuredClone(messages),
+              { role: 'assistant', content: '', tool_calls: [secondCall] },
+            ],
+            completed_results: [],
+          },
+        }))
+        .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+      vi.mocked(executeSingleTool)
+        .mockResolvedValueOnce({
+          tool_call_id: 'call-approve-1',
+          name: 'shell_exec',
+          content: 'one',
+          is_error: false,
+        })
+        .mockResolvedValueOnce({
+          tool_call_id: 'call-approve-2',
+          name: 'shell_exec',
+          content: 'two',
+          is_error: false,
+        })
+      const executor = new TaskExecutor(createTask('Capture, then run two commands'), createDeps())
+      await executor.run()
+      await executor.resumeAfterApproval(false)
+      expect(executor.executorState).toBe('waiting_approval')
+      const carried = executor.pendingApproval!.completed_results!
+      expect(carried.map(result => result.answeredInSnapshot)).toEqual([true, true])
+      if (savedBeforeMark) for (const result of carried) delete result.answeredInSnapshot
+      await executor.resumeAfterApproval(false)
+      expect(executor.executorState).toBe('completed')
+
+      // Every tool message answers an open call of the tool-call message before
+      // it (review round 2, P1).
+      const messages = vi.mocked(runToolUseLoop).mock.calls[2]![1] as ChatMessage[]
+      const unanswered: string[] = []
+      let open = new Set<string>()
+      for (const message of messages) {
+        if (message.role === 'assistant') open = new Set(message.tool_calls?.map(c => c.id) ?? [])
+        if (message.role !== 'tool') continue
+        if (!open.delete(message.tool_call_id!)) unanswered.push(message.tool_call_id!)
+      }
+      expect(unanswered).toEqual([])
+      expect(messages.filter(m => m.role === 'tool').map(m => m.tool_call_id)).toEqual([
+        'call-capture',
+        'call-approve-1',
+        'call-approve-2',
+      ])
+      // The frame reaches the request once, and the second approved call is
+      // charged for it once.
+      expect(
+        messages.flatMap(m => (m.contentParts ?? []).filter(part => part.type === 'image'))
+      ).toHaveLength(1)
+      expect(vi.mocked(executeSingleTool).mock.calls[1]![4]).toMatchObject({ images: 1 })
+    }
+  )
+
+  it('A-1: a second suspension sends no answered result when tool-call ids restart per response', async () => {
+    // The Gemini driver numbers tool calls from call_0 on every response
+    // (googleGenerative.ts), so an id names a call only within its own batch
+    // and the earlier batch's call_0 is not the new call_0 (independent
+    // review round 3, A-1).
+    const frame = createImageAttachment({
+      id: 'frame-1',
+      mimeType: 'image/png',
+      dataBase64: PNG_2X2_BASE64,
+      filename: 'frame.png',
+      width: 2,
+      height: 2,
+    })
+    const firstBatch = [
+      { id: 'call_0', name: 'capture', arguments: {} },
+      { id: 'call_1', name: 'shell_exec', arguments: { command: 'one' } },
+    ]
+    const secondCall = { id: 'call_0', name: 'shell_exec', arguments: { command: 'two' } }
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-first',
+          tool_name: 'shell_exec',
+          parameters: { command: 'one' },
+          description: 'Shell command',
+          tool_call_id: 'call_1',
+          context_snapshot: [
+            { role: 'user', content: 'Capture, then run two commands' },
+            { role: 'assistant', content: '', tool_calls: firstBatch },
+          ],
+          completed_results: [
+            {
+              tool_call_id: 'call_0',
+              name: 'capture',
+              content: 'Captured',
+              is_error: false,
+              attachments: [frame],
+            },
+          ],
+        },
+      } as any)
+      // Frozen the way toolUseLoopToolBatch freezes it (see the P1 test).
+      .mockImplementationOnce(async (_config, messages) => ({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-second',
+          tool_name: 'shell_exec',
+          parameters: secondCall.arguments,
+          description: 'Shell command',
+          tool_call_id: secondCall.id,
+          context_snapshot: [
+            ...structuredClone(messages),
+            { role: 'assistant', content: '', tool_calls: [secondCall] },
+          ],
+          completed_results: [],
+        },
+      }))
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    vi.mocked(executeSingleTool)
+      .mockResolvedValueOnce({
+        tool_call_id: 'call_1',
+        name: 'shell_exec',
+        content: 'one',
+        is_error: false,
+      })
+      .mockResolvedValueOnce({
+        tool_call_id: 'call_0',
+        name: 'shell_exec',
+        content: 'two',
+        is_error: false,
+      })
+    const executor = new TaskExecutor(createTask('Capture, then run two commands'), createDeps())
+    await executor.run()
+    await executor.resumeAfterApproval(false)
+    expect(executor.executorState).toBe('waiting_approval')
+    await executor.resumeAfterApproval(false)
+    expect(executor.executorState).toBe('completed')
+
+    const messages = vi.mocked(runToolUseLoop).mock.calls[2]![1] as ChatMessage[]
+    const lastCall = messages.map(message => message.role).lastIndexOf('assistant')
+    // Only the approved call answers the second tool-call message.
+    expect(messages.slice(lastCall + 1).map(message => [message.role, message.content])).toEqual([
+      ['tool', 'two'],
+    ])
+    expect(messages.filter(m => m.role === 'tool').map(m => m.content)).toEqual([
+      'Captured',
+      'one',
+      'two',
+    ])
+    expect(vi.mocked(executeSingleTool).mock.calls[1]![4]).toMatchObject({ images: 1 })
+  })
+
+  it('A-1: the approved result is not sent again when its id recurs in the next batch', async () => {
+    // As above, but the second response reuses both ids: call_0 completes
+    // before the new suspension and call_1 waits for approval. The first
+    // batch's approved call_1 result must not answer the new call_1.
+    const frame = createImageAttachment({
+      id: 'frame-1',
+      mimeType: 'image/png',
+      dataBase64: PNG_2X2_BASE64,
+      filename: 'frame.png',
+      width: 2,
+      height: 2,
+    })
+    const firstBatch = [
+      { id: 'call_0', name: 'capture', arguments: {} },
+      { id: 'call_1', name: 'shell_exec', arguments: { command: 'one' } },
+    ]
+    const secondBatch = [
+      { id: 'call_0', name: 'lookup', arguments: {} },
+      { id: 'call_1', name: 'shell_exec', arguments: { command: 'two' } },
+    ]
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-first',
+          tool_name: 'shell_exec',
+          parameters: { command: 'one' },
+          description: 'Shell command',
+          tool_call_id: 'call_1',
+          context_snapshot: [
+            { role: 'user', content: 'Capture, then run two commands' },
+            { role: 'assistant', content: '', tool_calls: firstBatch },
+          ],
+          completed_results: [
+            {
+              tool_call_id: 'call_0',
+              name: 'capture',
+              content: 'Captured',
+              is_error: false,
+              attachments: [frame],
+            },
+          ],
+        },
+      } as any)
+      .mockImplementationOnce(async (_config, messages) => ({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-second',
+          tool_name: 'shell_exec',
+          parameters: { command: 'two' },
+          description: 'Shell command',
+          tool_call_id: 'call_1',
+          context_snapshot: [
+            ...structuredClone(messages),
+            { role: 'assistant', content: '', tool_calls: secondBatch },
+          ],
+          completed_results: [
+            { tool_call_id: 'call_0', name: 'lookup', content: 'found', is_error: false },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    vi.mocked(executeSingleTool)
+      .mockResolvedValueOnce({
+        tool_call_id: 'call_1',
+        name: 'shell_exec',
+        content: 'one',
+        is_error: false,
+      })
+      .mockResolvedValueOnce({
+        tool_call_id: 'call_1',
+        name: 'shell_exec',
+        content: 'two',
+        is_error: false,
+      })
+    const executor = new TaskExecutor(createTask('Capture, then run two commands'), createDeps())
+    await executor.run()
+    await executor.resumeAfterApproval(false)
+    expect(executor.executorState).toBe('waiting_approval')
+    await executor.resumeAfterApproval(false)
+    expect(executor.executorState).toBe('completed')
+
+    const messages = vi.mocked(runToolUseLoop).mock.calls[2]![1] as ChatMessage[]
+    const lastCall = messages.map(message => message.role).lastIndexOf('assistant')
+    expect(messages.slice(lastCall + 1).map(message => [message.role, message.content])).toEqual([
+      ['tool', 'found'],
+      ['tool', 'two'],
+    ])
+    expect(messages.filter(m => m.role === 'tool').map(m => m.content)).toEqual([
+      'Captured',
+      'one',
+      'found',
+      'two',
+    ])
   })
 
   it('U5: a 401 on resume re-suspends as connect_required, then re-executes on connect (no double approval)', async () => {
@@ -2991,5 +4034,201 @@ describe('TaskExecutor hands the system prompt to the loop (R9-14)', () => {
     } finally {
       appConfig.promptCacheEnabled = previous
     }
+  })
+})
+
+describe('approval mode cancel during classify', () => {
+  const previousApproval = appConfig.enableApproval
+
+  afterEach(() => {
+    appConfig.enableApproval = previousApproval
+    vi.mocked(runToolUseLoop).mockReset()
+  })
+
+  function shellTask(content = 'printf admission-ok'): ReturnType<typeof createTask> {
+    const task = createTask(content, 'cancel-user')
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.channelId = 'cancel-channel'
+    return task
+  }
+
+  async function executorFor(
+    task: ReturnType<typeof createTask>,
+    classify: (options?: { signal?: AbortSignal }) => Promise<{ content: string }>,
+    maxTaskDuration = 30_000
+  ) {
+    appConfig.enableApproval = true
+    Object.assign(appConfig.nativeTool, {
+      workspacePath: '/tmp',
+      shellTimeout: 5000,
+      toolTimeout: 5000,
+      toolProgressInterval: 0,
+      httpAllowlist: [],
+      envAllowlist: ['PATH'],
+      memoryMaxSize: 1000,
+    })
+    const deps = createDeps({
+      llmProvider: {
+        getProviderType: () => 'claude',
+        classifyError: () => {
+          throw new Error('unused')
+        },
+        completeSingleTurn: vi.fn((_messages: unknown, options?: { signal?: AbortSignal }) =>
+          classify(options)
+        ),
+        completeSingleTurnWithTools: vi.fn(),
+      } as never,
+      approvalConfig: {
+        defaultPolicy: 'channel_users',
+        modeCeiling: 'allow_all',
+        channels: {},
+      },
+      approvalConfigProvider: () => ({
+        effective: {
+          defaultPolicy: 'channel_users',
+          modeCeiling: 'allow_all' as const,
+          channels: {},
+        },
+        hostSpec: {
+          defaultPolicy: 'channel_users',
+          modeCeiling: 'allow_all' as const,
+          channels: {},
+        },
+      }),
+      config: {
+        maxTaskDuration,
+        maxToolCallsPerTask: 4,
+        autoStart: false,
+        taskDelay: 0,
+        approvalTimeout: 0,
+      },
+    })
+    vi.mocked(runToolUseLoop).mockImplementation(realRunToolUseLoop)
+    const conversation = await deps.conversationManager.getOrCreate(
+      'cancel-user:rpc:cancel-channel:default',
+      { userId: 'cancel-user', channelType: 'rpc', approvalMode: 'auto' }
+    )
+    conversation.last_effective_approval_mode = 'auto'
+    deps.taskLifecycle.register(task)
+    deps.taskLifecycle.transition(task.id, 'processing', 'dispatched')
+    const executor = new TaskExecutor(task, deps)
+    return { executor, deps, conversation }
+  }
+
+  function hangUntilAbort(options?: { signal?: AbortSignal }): Promise<{ content: string }> {
+    return new Promise((_resolve, reject) => {
+      const signal = options?.signal
+      if (signal?.aborted) {
+        reject(signal.reason)
+        return
+      }
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+  }
+
+  it('a user cancel during classify ends the task cancelled', async () => {
+    const task = shellTask()
+    let started!: () => void
+    const classifyStarted = new Promise<void>(resolve => {
+      started = resolve
+    })
+    const { executor, deps } = await executorFor(task, options => {
+      started()
+      return hangUntilAbort(options)
+    })
+    vi.mocked(deps.llmProvider.completeSingleTurnWithTools).mockResolvedValue({
+      content: null,
+      tool_calls: [
+        { id: 'sh-cancel', name: 'shell_exec', arguments: { command: 'printf admission-ok' } },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'tool_use' as never,
+    })
+    const running = executor.run()
+    await Promise.race([
+      classifyStarted,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('classify did not start')), 500)
+      ),
+    ])
+    executor.abort()
+    await running
+    expect(deps.taskLifecycle.getStatus(task.id)).toBe('cancelled')
+    expect(deps.onFail).not.toHaveBeenCalled()
+    expect(deps.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(executor.pendingApproval).toBeUndefined()
+  })
+
+  it('a cancel during classify does not admit the rest of the batch', async () => {
+    const task = shellTask()
+    let started!: () => void
+    const classifyStarted = new Promise<void>(resolve => {
+      started = resolve
+    })
+    const { executor, deps } = await executorFor(task, options => {
+      started()
+      return hangUntilAbort(options)
+    })
+    vi.mocked(deps.llmProvider.completeSingleTurnWithTools).mockResolvedValue({
+      content: null,
+      tool_calls: [
+        { id: 'sh-batch', name: 'shell_exec', arguments: { command: 'printf admission-ok' } },
+        { id: 'mcp-batch', name: 'acme__search', arguments: { q: 'n' } },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'tool_use' as never,
+    })
+    const running = executor.run()
+    await Promise.race([
+      classifyStarted,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('classify did not start')), 500)
+      ),
+    ])
+    executor.abort()
+    await running
+    expect(deps.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(executor.pendingApproval).toBeUndefined()
+    expect(vi.mocked(deps.llmProvider.completeSingleTurnWithTools)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(deps.mcpManager!.callTool)).not.toHaveBeenCalled()
+    expect(deps.taskLifecycle.getStatus(task.id)).toBe('cancelled')
+  })
+
+  it('a duration trip during classify fails the task with TASK_DURATION_LIMIT', async () => {
+    const task = shellTask()
+    let started!: () => void
+    const classifyStarted = new Promise<void>(resolve => {
+      started = resolve
+    })
+    const { executor, deps } = await executorFor(
+      task,
+      options => {
+        started()
+        return hangUntilAbort(options)
+      },
+      200
+    )
+    vi.mocked(deps.llmProvider.completeSingleTurnWithTools).mockResolvedValue({
+      content: null,
+      tool_calls: [
+        { id: 'sh-limit', name: 'shell_exec', arguments: { command: 'printf admission-ok' } },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'tool_use' as never,
+    })
+    const running = executor.run()
+    await Promise.race([
+      classifyStarted,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('classify did not start')), 500)
+      ),
+    ])
+    await running
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({ code: 'TASK_DURATION_LIMIT' })
+    )
+    expect(deps.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(executor.pendingApproval).toBeUndefined()
   })
 })
