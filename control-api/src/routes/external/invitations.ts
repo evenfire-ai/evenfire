@@ -19,6 +19,7 @@ import {
   issueExternalUserSession,
   selectExternalSessionRepresentation,
 } from '../../services/auth/externalSessionIssuance.js'
+import { lockUserById } from '../../services/auth/oidcAccountResolution.js'
 import {
   acceptInvitationForEmailInTransaction,
   getInvitationByToken,
@@ -248,9 +249,17 @@ export function createExternalInvitationsRouter(): Router {
         // The signed-in session is the only authority for /desktop-setup: no
         // body field is read, so a request cannot name another member, and no
         // password is asked for, so a member without one can authorize too.
-        const email = String(req.externalAuth?.email || '')
-          .trim()
-          .toLowerCase()
+        // The email comes from the session's live, active account row, not
+        // its claim: a v1 session keeps the email it was issued with after an
+        // admin changes the account's address.
+        const userId = String(req.externalAuth?.userId || '').trim()
+        const account = userId ? await withTransaction(db => lockUserById(db, userId)) : undefined
+        const email =
+          account?.lifecycle_state === 'active'
+            ? String(account.email || '')
+                .trim()
+                .toLowerCase()
+            : ''
         if (!email) return res.status(401).json({ error: 'Unauthorized' })
 
         const authorizationToken = randomBytes(24).toString('base64url')

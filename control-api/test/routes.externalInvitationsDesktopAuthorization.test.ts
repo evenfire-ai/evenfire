@@ -40,12 +40,39 @@ vi.mock('../src/middleware/externalSessionAuth.js', async importOriginal => {
   }
 })
 
+// The users table as the route's account read sees it, keyed by user id. Only
+// the transaction is replaced: the route's read is the real lockUserById.
+const accounts = vi.hoisted(() => ({
+  rows: new Map<string, Record<string, unknown>>(),
+  query: vi.fn(),
+}))
+vi.mock('../src/db.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/db.js')>()
+  return {
+    ...actual,
+    withTransaction: async (work: (db: { query: typeof accounts.query }) => unknown) =>
+      work({ query: accounts.query }),
+  }
+})
+
 const SESSION_CLAIMS = {
   userId: 'session-user',
   email: 'session-member@example.invalid',
   teamId: null,
   role: 'member',
   authGeneration: 1,
+}
+
+function accountRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: SESSION_CLAIMS.userId,
+    email: SESSION_CLAIMS.email,
+    name: null,
+    picture: null,
+    lifecycle_state: 'active',
+    lifecycle_version: 1,
+    ...overrides,
+  }
 }
 
 function app(): express.Express {
@@ -60,6 +87,12 @@ describe('POST /external/invitations/desktop-authorization', () => {
     vi.clearAllMocks()
     session.claims = { ...SESSION_CLAIMS }
     flow.storeDesktopAuthorizationToken.mockResolvedValue(undefined)
+    accounts.rows = new Map([[SESSION_CLAIMS.userId, accountRow()]])
+    accounts.query.mockImplementation(async (sql: string, params: unknown[]) => {
+      if (!/FROM users\s+WHERE id = \$1/.test(sql)) throw new Error(`unexpected query: ${sql}`)
+      const row = accounts.rows.get(String(params[0]))
+      return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }
+    })
   })
 
   it('uses the session email and ignores a different body email', async () => {
@@ -104,8 +137,37 @@ describe('POST /external/invitations/desktop-authorization', () => {
     expect(directory.verifyUserPassword).not.toHaveBeenCalled()
   })
 
-  it('refuses a session that carries no email', async () => {
-    session.claims = { ...SESSION_CLAIMS, email: '' }
+  it('stores the token under the live account email, not a stale session email', async () => {
+    // A v1 session keeps the email it was issued with; an admin has since
+    // moved the account to a new address.
+    session.claims = { ...SESSION_CLAIMS, email: 'old-address@example.invalid' }
+    accounts.rows.set(SESSION_CLAIMS.userId, accountRow({ email: 'new-address@example.invalid' }))
+
+    const response = await request(app())
+      .post('/external/invitations/desktop-authorization')
+      .send({})
+
+    expect(response.status).toBe(200)
+    expect(accounts.query).toHaveBeenCalledWith(expect.stringMatching(/FROM users/), [
+      SESSION_CLAIMS.userId,
+    ])
+    expect(flow.storeDesktopAuthorizationToken).toHaveBeenCalledOnce()
+    expect(flow.storeDesktopAuthorizationToken).toHaveBeenCalledWith(
+      'new-address@example.invalid',
+      response.body.authorizationToken
+    )
+    expect(flow.storeDesktopAuthorizationToken).not.toHaveBeenCalledWith(
+      'old-address@example.invalid',
+      expect.anything()
+    )
+  })
+
+  it.each([
+    ['no row', undefined],
+    ['a retired row', accountRow({ lifecycle_state: 'retired' })],
+  ])('refuses a session whose account has %s', async (_label, row) => {
+    if (row) accounts.rows.set(SESSION_CLAIMS.userId, row)
+    else accounts.rows.delete(SESSION_CLAIMS.userId)
 
     const response = await request(app())
       .post('/external/invitations/desktop-authorization')
@@ -113,6 +175,9 @@ describe('POST /external/invitations/desktop-authorization', () => {
 
     expect(response.status).toBe(401)
     expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(accounts.query).toHaveBeenCalledWith(expect.stringMatching(/FROM users/), [
+      SESSION_CLAIMS.userId,
+    ])
     expect(flow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
   })
 })

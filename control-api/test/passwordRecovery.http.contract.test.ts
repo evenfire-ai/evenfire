@@ -69,6 +69,31 @@ vi.mock('../src/services/invitationFlowRegistrationService.js', () => ({
   ...flow,
   ...desktopFlow,
 }))
+// The session member's live account row. Desktop authorization reads it with
+// the real lockUserById inside a transaction; only the transaction is replaced.
+const liveAccount = vi.hoisted(() => ({
+  id: 'r6-user',
+  email: 'r6-member@example.invalid',
+  name: null,
+  picture: null,
+  lifecycle_state: 'active',
+  lifecycle_version: 1,
+}))
+vi.mock('../src/db.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/db.js')>()
+  return {
+    ...actual,
+    withTransaction: async (work: (db: { query: unknown }) => unknown) =>
+      work({
+        query: async (sql: string, params: unknown[]) => {
+          if (!/FROM users\s+WHERE id = \$1/.test(sql) || params[0] !== liveAccount.id) {
+            throw new Error('unexpected transaction query in the composed contract')
+          }
+          return { rows: [liveAccount], rowCount: 1 }
+        },
+      }),
+  }
+})
 vi.mock('../src/middleware/rateLimitMiddleware.js', async importOriginal => {
   const real = await importOriginal<typeof import('../src/middleware/rateLimitMiddleware.js')>()
   return {

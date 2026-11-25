@@ -57,6 +57,19 @@ vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   signExternalSessionToken: tokenSigner.sign,
 }))
 
+// The caller's live account row, as the desktop-authorization route reads it.
+function callerAccount() {
+  const row = {
+    id: 'caller-user',
+    email: 'caller@example.com',
+    name: null,
+    picture: null,
+    lifecycle_state: 'active',
+    lifecycle_version: 1,
+  }
+  return { rows: [row], rowCount: 1 }
+}
+
 // Router-level harness: proves the ROUTE GUARDS rethrow instead of swallowing.
 // The real app.ts middleware is covered separately in
 // test/app.memberRegistrationUnavailable.test.ts (Step 1b) — do not treat this
@@ -305,6 +318,7 @@ describe('external invitation routes when the hub is unavailable', () => {
     // route's catch used to key off of to detect an invitation 404. Without
     // the memberRegistrationErrorResponse guard, this typed 503 gets
     // misclassified as a 404 invitation lookup failure.
+    database.query.mockResolvedValue(callerAccount())
     flow.storeDesktopAuthorizationToken.mockRejectedValue(
       new MemberRegistrationUnavailableError(
         "member-registration hub rejected enrollment for 'x.acme.com' (404)"
@@ -316,6 +330,7 @@ describe('external invitation routes when the hub is unavailable', () => {
   })
 
   it('REGRESSION: POST desktop-authorization still maps a generic upstream 404 message to 404 not_found', async () => {
+    database.query.mockResolvedValue(callerAccount())
     flow.storeDesktopAuthorizationToken.mockRejectedValue(new Error('upstream responded (404)'))
     const res = await request(app()).post('/external/invitations/desktop-authorization').send({})
     expect(res.status).toBe(404)
