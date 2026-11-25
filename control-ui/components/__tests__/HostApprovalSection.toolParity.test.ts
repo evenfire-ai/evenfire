@@ -27,9 +27,7 @@ const WIRE = JSON.parse(
 
 const registered = Object.keys(WIRE.tools).sort()
 const excluded = new Set(TOOL_PARITY_EXCLUSIONS.map(entry => entry.name))
-// `conditional` is added to the row type by the later per-tool work; read it loosely.
-type Row = { name: string; codeDefault: string; conditional?: { conditions?: unknown } }
-const rows = NATIVE_TOOLS as unknown as Row[]
+const rows = NATIVE_TOOLS
 
 /** The true/false values a tool holds over the contexts where it is registered. */
 function valuesOf(name: string): Set<boolean> {
@@ -59,6 +57,10 @@ describe('NATIVE_TOOLS matches the tools chat registers', () => {
     expect(names.filter(name => !registered.includes(name)).sort()).toEqual([])
   })
 
+  it('no tool has both a row and an exclusion', () => {
+    expect(rows.map(row => row.name).filter(name => excluded.has(name))).toEqual([])
+  })
+
   it('every registered tool has a row or an exclusion', () => {
     const rowNames = new Set(rows.map(row => row.name))
     expect(registered.filter(name => !rowNames.has(name) && !excluded.has(name))).toEqual([])
@@ -74,8 +76,13 @@ describe('NATIVE_TOOLS matches the tools chat registers', () => {
           mismatches.push(
             `${row.name}: value varies across contexts but the row has no conditional`
           )
+        } else if (row.conditional.conditions.trim() === '') {
+          mismatches.push(`${row.name}: conditional.conditions is blank`)
         }
       } else if (values.size === 1) {
+        if (row.conditional !== undefined) {
+          mismatches.push(`${row.name}: has a conditional but the registered value never varies`)
+        }
         const expected = values.has(true) ? 'required' : 'skip'
         if (row.codeDefault !== expected) {
           mismatches.push(`${row.name}: codeDefault ${row.codeDefault}, registry ${expected}`)

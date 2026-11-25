@@ -22,6 +22,14 @@ export interface NativeToolMeta {
    * Only meaningful for tools whose code default is `'required'`.
    */
   riskHint?: string
+  /**
+   * Set where the tool's own approval value differs between contexts it is
+   * registered in; `codeDefault` is then only the usual value and the
+   * conditions say when it differs.
+   */
+  conditional?: { conditions: string }
+  /** Registered only in Desktop chats (the Desktop tool set). */
+  desktopOnly?: boolean
 }
 
 export const NATIVE_TOOLS: NativeToolMeta[] = [
