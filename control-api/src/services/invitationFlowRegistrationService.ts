@@ -36,7 +36,8 @@ export async function registerAndSendInvitation(
 
 export async function validateInvitationFlowToken(
   token: string,
-  email?: string
+  email?: string,
+  options: { signal?: AbortSignal } = {}
 ): Promise<{ email: string; invitationUuid: string }> {
   const result = await memberRegistrationServiceRequest<{
     valid: true
@@ -48,6 +49,7 @@ export async function validateInvitationFlowToken(
       token,
       email,
     },
+    signal: options.signal,
   })
   return {
     email: result.email,

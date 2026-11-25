@@ -89,10 +89,18 @@ export async function memberRegistrationServiceRequest<T>(
   options: {
     body?: unknown
     destinationBaseUrl: string
+    /**
+     * A caller's own deadline. It aborts this request alongside the
+     * SEND_TIMEOUT_MS bound, but never the hosted enrollment that
+     * resolveTarget waits on: that mint is shared by every caller for the
+     * domain, and a failed mint writes a backoff for all of them.
+     */
+    signal?: AbortSignal
   }
 ): Promise<T> {
   const { baseUrl, credential } = await resolveTarget(options.destinationBaseUrl)
   const context = { baseUrl, method, path }
+  const timeout = AbortSignal.timeout(SEND_TIMEOUT_MS)
 
   let response: Response
   try {
@@ -103,7 +111,7 @@ export async function memberRegistrationServiceRequest<T>(
         authorization: `Bearer ${signMemberRegistrationJwt(credential)}`,
       },
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+      signal: options.signal ? AbortSignal.any([timeout, options.signal]) : timeout,
     })
   } catch (cause) {
     throw unavailable(context, 'member-registration service is unreachable', cause)
