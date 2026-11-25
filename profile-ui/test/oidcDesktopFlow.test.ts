@@ -943,6 +943,7 @@ test('drops an oversize or non-printable invitationToken and still starts', asyn
     // What Next.js hands the page for a percent-encoded non-ASCII path segment.
     ['a character outside ASCII', [['invitationToken', 'fixture-invitation-tokén']]],
     ['a control character', [['invitationToken', 'fixture-invitation-token\t']]],
+    ['a DEL character', [['invitationToken', 'fixture-invitation-token\x7f']]],
     ['an empty value', [['invitationToken', '']]],
     [
       'two values',
