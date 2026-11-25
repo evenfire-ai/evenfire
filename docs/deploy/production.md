@@ -232,20 +232,55 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
 `x-clerum-edge-assertion`, and each MCP Host verifies it with the RPC public key
 (`CLERUM_AUTH_JWT_PUBLIC_KEY`). No extra secret is needed.
 
+- **Before the upgrade: RBAC and the HCC env.**
+  - HCC reads `deployment/rpc-proxy` (`get deployments`) and lists its pods
+    (`list pods`) in namespace `rpc-proxy` before every Host create or
+    template move. The rules are in `deploy/base/rpc-proxy/rbac.yaml`. If your
+    CD strips Roles from the overlay apply, run
+    [`deploy/scripts/bootstrap-rbac.sh`](../../deploy/scripts/bootstrap-rbac.sh)
+    with an admin kubeconfig before HCC rolls out (it needs `CONFIRM=yes` for
+    any context whose name contains `clerum`). Without these rules the read is
+    refused and HCC creates and wakes no Host. Check with:
+
+    ```bash
+    kubectl --context "$KCTX" auth can-i get deployments/rpc-proxy -n rpc-proxy \
+      --as=system:serviceaccount:control-plane:host-context-controller
+    kubectl --context "$KCTX" auth can-i list pods -n rpc-proxy \
+      --as=system:serviceaccount:control-plane:host-context-controller
+    ```
+
+  - HCC refuses to start unless
+    `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=signed-assertion-v1`.
+    `deploy/base/control-plane/host-context-controller.yaml` sets it. An
+    install that renders the HCC env, the RPC Proxy pod template or the Roles
+    from its own copy of the manifests must refresh that copy at a base that
+    contains this release before it ships the new HCC image.
+
 - **Upgrade order:** control-api, then RPC Proxy, then HCC and the Hosts. HCC
   creates no Host Deployment, and moves no Host pod template onto
   `clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1`, until the whole RPC
   Proxy pod cohort carries that label. A held Host Deployment that keeps its
   old pod template (only its replicas change) is updated without that wait.
+  Suspending a Host that still has its old template also moves the template,
+  so that suspension waits too; HCC retries it on its next reconcile of the
+  Host (`CONTEXT_MAPPER_HOST_RESYNC_SEC`, default 300 seconds).
 - **Rollback order:** HCC and the Hosts first, then RPC Proxy, then control-api.
   RPC Proxy may stop forwarding the assertion only after no Host requires it.
+  A pipeline that applies the whole previous release at once, or control-api
+  first, does not follow this order and cuts Desktop → Host traffic twice:
+  while control-api is old and RPC Proxy is new, every Host route fails
+  because control-api returns no edge assertion; while RPC Proxy is old and
+  the Hosts are new, every Host answers 401 until HCC has replaced them all.
+  Roll back by hand in this order: HCC, wait until the label check below
+  lists nothing, then RPC Proxy, then control-api.
   - Roll HCC back to its previous Deployment revision, which restores image,
     env and labels together:
     `kubectl --context "$KCTX" -n control-plane rollout undo deployment/host-context-controller --to-revision=<n>`.
-    An image-only rollback keeps
-    `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=signed-assertion-v1`, which
-    the older HCC refuses at start; with one replica and the `Recreate`
-    strategy, that leaves no HCC running.
+    Released HCC versions up to v0.12.1 do not read
+    `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL`. A `dev` build from before
+    this release accepts only `legacy-headers` or `dedicated-header-v1` and
+    refuses `signed-assertion-v1` at start, so an image-only rollback to such
+    a build leaves no HCC running (one replica, `Recreate` strategy).
   - Roll RPC Proxy back only after this lists nothing:
 
     ```bash
@@ -319,13 +354,15 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
   default 2, limits concurrent reconciles, not downtime), and the Host pod
   sets no `terminationGracePeriodSeconds`, so in-flight tasks are cut after
   the Kubernetes default of 30 seconds. Plan a maintenance window.
-- **Retired edge credentials.** After the rollback window closes, delete
-  Secret `rpc-proxy-edge-credentials` in `mcp-host` and the key
+- **Retired edge credentials.** No release up to v0.12.1 created or read
+  Secret `rpc-proxy-edge-credentials` (namespace `mcp-host`) or the key
   `RPC_PROXY_MCP_HOST_EDGE_TOKEN` in Secret `rpc-proxy-secrets` (namespace
-  `rpc-proxy`), if your install created them. This release reads neither. Do
-  not delete them earlier: an HCC rolled back to the previous release with
-  `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=dedicated-header-v1` writes
-  Host pods that require that Secret.
+  `rpc-proxy`); only `dev` builds from before this release did. This release
+  reads neither. If your cluster ran such a `dev` build, keep both until the
+  rollback window closes, then delete them: an HCC rolled back to that build
+  with `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=dedicated-header-v1` writes
+  Host pods that require the Secret, and that RPC Proxy build requires the
+  key in production.
 - **Key sync after every overlay apply.** From this release every Desktop →
   Host route depends on `CLERUM_AUTH_JWT_PUBLIC_KEY` in `mcp-host-config`;
   before it, only `POST /v1/runtime/compact` and session search did. An
