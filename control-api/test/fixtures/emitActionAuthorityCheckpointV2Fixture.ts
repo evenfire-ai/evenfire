@@ -95,10 +95,13 @@ async function main(): Promise<void> {
               ),
           }
         : response
-    // The route issues the assertion to rpc-proxy for an allowed Host checkpoint; this
-    // fixture stands for rpc-proxy's call, so it carries the same assertion.
+    // The route issues the assertion only to caller rpc-proxy for an allowed Host checkpoint
+    // (routes/internal/actionAuthorityCheckpoint.ts). The parser binds `domain.service` to the
+    // caller, so this fixture attaches it only when the request was built for rpc-proxy.
     const withEdgeAssertion =
-      withAdmissionReceipt.status === 'allowed' && withAdmissionReceipt.destination?.kind === 'host'
+      withAdmissionReceipt.status === 'allowed' &&
+      input.request.domain.service === 'rpc-proxy' &&
+      withAdmissionReceipt.destination?.kind === 'host'
         ? {
             ...withAdmissionReceipt,
             hostEdgeAssertion: issueCheckpointHostEdgeAssertion({
