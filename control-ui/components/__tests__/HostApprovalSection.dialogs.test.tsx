@@ -305,6 +305,48 @@ describe('HostApprovalSection dialogs (spec §6.6)', () => {
     })
   })
 
+  it('Cancel or Escape in the first-save dialog keeps the draft and sends nothing (ruling 41, item 9)', async () => {
+    const fake = createSectionFake(undefined)
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    // "Nobody (Desktop only)" loosens nothing: a dialog that went on would write at once.
+    const dismissals: Array<[string, (dialog: HTMLElement) => void]> = [
+      ['Cancel', dialog => fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))],
+      ['Escape', dialog => fireEvent.keyDown(dialog, { key: 'Escape' })],
+    ]
+
+    for (const [how, dismiss] of dismissals) {
+      await clickSave()
+      expect(policySelect().value, `no policy chosen before ${how}`).toBe('')
+      fireEvent.change(policySelect(), { target: { value: 'cli_only' } })
+      expect(firstSaveButton(), `the dialog could save before ${how}`).toBeEnabled()
+      dismiss(dialogByName('dialog', FIRST_SAVE_DIALOG_TITLE))
+      await settle()
+
+      expect(screen.queryByRole('dialog', { name: FIRST_SAVE_DIALOG_TITLE }), how).toBeNull()
+      expect(screen.queryByRole('alertdialog'), how).toBeNull()
+      expect(fake.log, `nothing sent after ${how}`).toEqual([])
+      expect(rowSelect('system_info').value, `the draft after ${how}`).toBe('required')
+      expect(sectionButton('Save'), `Save after ${how}`).toBeEnabled()
+    }
+    expect(onSettled).not.toHaveBeenCalled()
+
+    // The kept draft still saves, with a policy chosen afresh.
+    await clickSave()
+    expect(policySelect().value, 'no policy carried over').toBe('')
+    fireEvent.change(policySelect(), { target: { value: 'cli_only' } })
+    await act(async () => {
+      fireEvent.click(firstSaveButton())
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+    expect(onSettled.mock.calls[0][0]).toMatchObject({ kind: 'saved' })
+    expect(fake.stored('foo').spec.approval).toEqual({
+      defaultPolicy: 'cli_only',
+      tools: { system_info: true },
+    })
+  })
+
   it('the first-save dialog is described by what the save does and its two warnings (ruling 41, item 4)', async () => {
     renderSection(createSectionFake(undefined))
     clickEdit()
