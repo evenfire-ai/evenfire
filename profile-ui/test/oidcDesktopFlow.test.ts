@@ -1313,6 +1313,46 @@ test('sends exactly the cookie binding to /complete and /cancel, and never the s
   )
 })
 
+test("forwards the provider's issuer to /complete for a Desktop attempt", async () => {
+  // The issuer of the recorded attempt's authorization URL, returned as the callback's iss.
+  const issuer = new URL(desktopEchoUrl).origin
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, complete: EDGE_DESKTOP_CODE_ISSUED },
+    async calls => {
+      const search = `${SUCCESS_SEARCH}&iss=${encodeURIComponent(issuer)}`
+      assert.equal((await GET(callbackRequest(search, [desktopCookie]))).status, 200)
+      assert.deepEqual(calls.find(call => call.path === COMPLETE_PATH)?.body, {
+        state: edgeState,
+        code: 'provider-code',
+        browserBinding: BINDING,
+        issuer,
+      })
+    }
+  )
+})
+
+test('fires failed for a /cancel answer other than attempt_cancelled', async () => {
+  // Derived variant of `cancel cancelled` with the outcome swapped. The edge answers an outcome it
+  // does not recognise with a 503 instead, so only a misbehaving edge sends this.
+  const otherOutcome = () => edgeVariant(EDGE_CANCELLED, { outcome: 'attempt_pending' })
+  await withEdge({ configuration: EDGE_CONFIGURATION, cancel: otherOutcome }, async calls => {
+    await assertDesktopPage(
+      await GET(callbackRequest(DENIED_SEARCH, [desktopCookie])),
+      {
+        link: FAILED_LINK,
+        message: DESKTOP_SIGN_IN_COPY.failed,
+        status: 503,
+        cookies: [bindingClear],
+      },
+      'another /cancel outcome'
+    )
+    assert.deepEqual(
+      calls.map(call => call.path),
+      [CONFIGURATION_PATH, CANCEL_PATH]
+    )
+  })
+})
+
 test("fires failed when the edge's environment cannot make a code link", async () => {
   const recorded = edgeRecord(EDGE_DESKTOP_CODE_ISSUED).body as Record<string, unknown> & {
     code: string
