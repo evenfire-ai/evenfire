@@ -105,6 +105,32 @@ the reason, and while the chat search matches text inside the code, the code
 shows with the match. This exception is scoped to agent replies in the
 Desktop chat.
 
+Recorded exception — Desktop chat formats. The same pipeline renders the other
+formats agents write, since it feeds the in-chat search and already draws
+diagrams. Replies keep single line breaks; Markdown files follow CommonMark.
+Math uses `$$…$$`, `\(…\)` and `\[…\]`, never a single `$`, and only where the
+content reads as a formula: price ranges, shell variables and escaped brackets
+stay text, and anything in doubt stays as written. KaTeX runs with `trust` off,
+without macro definitions, and with limits on source, expansion, size, nesting
+and output per formula and per reply; what it cannot draw stays code with the
+reason, and each formula is clipped to its own box. Code is highlighted by its
+fence label only, for a fixed list of languages and within size limits. Raw HTML
+stays text except a bare `<br>` and bare pairs of `sub`, `sup`, `u`, `ins`,
+`del`, `s`, `mark` and `kbd`. Images are PNG, JPEG, GIF or WebP, from inline
+`data:` URLs or from EvenDrive with the user's access, and their pixel size is
+checked before decoding; web images are never fetched and become links. File
+previews (the first three PNG or Markdown files a reply generates and the first
+three EvenDrive files it links to) use the bytes of the message or the Files
+preview download, within size limits checked before decoding. Markdown and JSON
+are parsed in a worker and fall back to plain text when they are too long or too
+costly to lay out; tables are cut at fixed limits. HTML shows only on request,
+in the HTML preview's empty sandbox. The app's CSP is unchanged, and fonts are
+never inlined as `data:` URLs. Accessibility: formulas carry MathML; scrolling
+previews are labelled, focusable regions; each preview names its file; loading
+content is marked busy; and while the chat search matches text inside a formula,
+its source shows with the match. This exception is scoped to agent replies in
+the Desktop chat and the files shown with them.
+
 ## Types, constants, and imports
 
 - Do not declare exported or reusable `type` or `interface` definitions inside

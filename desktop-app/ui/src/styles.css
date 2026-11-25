@@ -7727,6 +7727,272 @@ body.sidebar-resizing {
   color: var(--text-muted);
 }
 
+.markdown-content pre[data-language]::before {
+  content: attr(data-language);
+  display: block;
+  margin-bottom: var(--space-1);
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* Syntax colors (highlight.js classes). */
+.markdown-content .hljs-keyword,
+.markdown-content .hljs-doctag,
+.markdown-content .hljs-selector-tag,
+.markdown-content .hljs-template-tag {
+  color: var(--code-keyword);
+}
+
+.markdown-content .hljs-string,
+.markdown-content .hljs-regexp,
+.markdown-content .hljs-meta .hljs-string {
+  color: var(--code-string);
+}
+
+.markdown-content .hljs-number,
+.markdown-content .hljs-literal,
+.markdown-content .hljs-attr,
+.markdown-content .hljs-attribute,
+.markdown-content .hljs-property,
+.markdown-content .hljs-variable.language_,
+.markdown-content .hljs-selector-attr,
+.markdown-content .hljs-selector-class,
+.markdown-content .hljs-selector-id {
+  color: var(--code-number);
+}
+
+.markdown-content .hljs-comment,
+.markdown-content .hljs-quote,
+.markdown-content .hljs-meta {
+  color: var(--code-comment);
+}
+
+.markdown-content .hljs-comment {
+  font-style: italic;
+}
+
+.markdown-content .hljs-title,
+.markdown-content .hljs-title.function_,
+.markdown-content .hljs-section {
+  color: var(--code-title);
+}
+
+.markdown-content .hljs-built_in,
+.markdown-content .hljs-type,
+.markdown-content .hljs-variable,
+.markdown-content .hljs-params,
+.markdown-content .hljs-symbol,
+.markdown-content .hljs-bullet {
+  color: var(--code-type);
+}
+
+.markdown-content .hljs-tag,
+.markdown-content .hljs-name,
+.markdown-content .hljs-selector-pseudo {
+  color: var(--code-tag);
+}
+
+.markdown-content .hljs-addition {
+  color: var(--code-tag);
+  background: var(--code-added-bg);
+}
+
+.markdown-content .hljs-deletion {
+  color: var(--code-keyword);
+  background: var(--code-removed-bg);
+}
+
+.markdown-content .hljs-strong {
+  font-weight: 600;
+}
+
+.markdown-content .hljs-emphasis {
+  font-style: italic;
+}
+
+/* Overrides the app's full-width controls. */
+.markdown-content ul.contains-task-list {
+  list-style: none;
+  padding-left: var(--space-1);
+}
+
+.markdown-content li.task-list-item > input[type='checkbox'] {
+  width: auto;
+  min-height: 0;
+  margin: 0 var(--space-1-5) 0 0;
+  vertical-align: middle;
+}
+
+.markdown-content .chat-md-plain {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.markdown-content mark.chat-md-mark {
+  padding: 0 2px;
+  border-radius: var(--radius-xs);
+  background: rgba(var(--accent-rgb), 0.22);
+  color: inherit;
+}
+
+.markdown-content kbd {
+  padding: 1px 5px;
+  border: 1px solid rgba(var(--edge-rgb), 0.5);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  background: rgba(var(--panel-rgb), 0.66);
+}
+
+/* KaTeX allows negative sizes: clip each formula so it cannot paint over other messages. */
+.chat-math {
+  display: inline-block;
+  max-width: 100%;
+  overflow: clip;
+  overflow-clip-margin: 0.25em;
+  vertical-align: baseline;
+}
+
+.chat-math--display {
+  display: block;
+  margin: 0 0 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Keeps the MathML twin out of the copied text. */
+.chat-math .katex-mathml {
+  user-select: none;
+}
+
+.chat-math--display .katex-display {
+  margin: 0;
+}
+
+/* The break after a display formula would add an empty line. */
+.chat-math--display + br {
+  display: none;
+}
+
+.chat-math__note {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.chat-md-image {
+  display: block;
+  max-width: 100%;
+  max-height: 640px;
+  height: auto;
+  margin: 0 0 10px;
+  border-radius: var(--radius-sm);
+}
+
+.chat-md-image-pending {
+  display: inline-block;
+  min-width: 120px;
+  min-height: 80px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+}
+
+.chat-file-previews {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.chat-file-preview {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--panel-rgb), 0.4);
+}
+
+.chat-file-preview--pending {
+  min-height: 120px;
+  background: var(--surface-soft);
+}
+
+.chat-file-preview__caption {
+  padding: var(--space-1-5) var(--space-2);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.3);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+/* Overrides .chat-bubble pre; the size containment makes wide tables scroll here instead of widening the message. */
+.chat-file-preview .chat-file-preview__scroll {
+  contain: inline-size;
+  max-height: 420px;
+  overflow: auto;
+  padding: var(--space-2);
+}
+
+.chat-file-preview__scroll:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.6);
+  outline-offset: -2px;
+}
+
+.chat-file-preview__image {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  margin: 0 auto;
+  /* Checkerboard behind transparent images. */
+  background-color: var(--file-paper);
+  background-image: conic-gradient(
+    var(--file-paper-check) 25%,
+    var(--file-paper) 0 50%,
+    var(--file-paper-check) 0 75%,
+    var(--file-paper) 0
+  );
+  background-size: 16px 16px;
+}
+
+.chat-file-preview__request {
+  padding: var(--space-2);
+}
+
+.chat-file-preview__html {
+  display: block;
+  width: 100%;
+  height: 420px;
+  border: 0;
+  background: var(--file-paper);
+}
+
+/* Drops the border of the app's pre rule. */
+.chat-file-preview .chat-file-preview__text {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+.chat-file-preview__text-block {
+  display: block;
+}
+
+.chat-file-preview__text-block:not(:only-child) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 600px;
+}
+
+.chat-file-preview .chat-file-preview__note {
+  margin: var(--space-1-5) var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
 .markdown-content table {
   width: 100%;
   border-collapse: collapse;

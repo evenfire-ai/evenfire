@@ -36,6 +36,14 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    Each message declares `displayCapabilities: ["mermaid"]`, and only then
    does the Host tell the agent to write diagrams that way; Telegram, Slack,
    Teams, email and older Desktop builds never get that instruction.
+   The chat also renders single line breaks, highlighted code, LaTeX formulas
+   (`$$…$$`, `\(…\)`, `\[…\]`; a single `$` stays text), task checkboxes, a few
+   inline HTML tags, and inline `data:` and EvenDrive images. The first three
+   PNG and Markdown files an agent generates show above their Download chips,
+   and the first three EvenDrive files a reply links to show below it: CSV and
+   TSV as tables, JSON, text, Markdown, images, and HTML in a sandboxed frame
+   on request.
+   The Desktop does all of it; the Host is unchanged.
 
    ![Evenfire Desktop App chat with the chatllm agent: the agent's answer sits above a collapsed "More details · 1 tool" summary, with thread token counts in the header](../assets/desktop-app-chat.webp)
    *Dev cluster, demo tenant.*
