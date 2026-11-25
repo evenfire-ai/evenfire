@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
 import {
   type BrowserSignInHarness,
@@ -36,6 +36,23 @@ function fetchCount(harness: BrowserSignInHarness, method: string, path: string)
   ).length
 }
 
+/**
+ * Runs `body`, then cleans the harness up. When `body` fails, its error is the one thrown, so
+ * fast-check shrinks and reports the run's own failure; a cleanup failure after it is logged
+ * beside it rather than put in its place.
+ */
+async function cleanUpAfter(body: () => Promise<void>): Promise<void> {
+  try {
+    await body()
+  } catch (error) {
+    await cleanupBrowserSignInHarness().catch((cleanupError: unknown) => {
+      console.warn('T0-1: the harness cleanup also failed after a failed run:', cleanupError)
+    })
+    throw error
+  }
+  await cleanupBrowserSignInHarness()
+}
+
 // T0-1's reference model. Its state is what decides, per state model §2.1's Bump column,
 // whether an event reaches a §2.2 site.
 type EnvName = 'A' | 'B' | 'C' | 'D'
@@ -49,12 +66,18 @@ type BumpModel = {
   signedIn: boolean
   /** A session token is saved under A's key, the only environment a kept token starts on. */
   storedA: boolean
-  /** `getSessionState`'s last restore attempt was on A's key, so its retry gate holds A shut. */
-  lastRestoreOnA: boolean
 }
-type BumpReal = { harness: BrowserSignInHarness; scheduler: fc.Scheduler }
+type RuntimeConfigModule = typeof import('../config.js')
+type BumpReal = {
+  harness: BrowserSignInHarness
+  scheduler: fc.Scheduler
+  /** The `config.js` the harness's service loaded, read after `vi.resetModules()`. */
+  runtimeConfig: RuntimeConfigModule
+}
 type Expectation = { bump: boolean; rejects?: string }
 type Outcome = { ok: true } | { ok: false; message: string }
+/** What a command saw before it ran, for the checks that compare before and after. */
+type BeforeCommand = Readonly<{ optionCount: number; discoveryFetches: number; signedIn: boolean }>
 type BumpEvent = {
   id: string
   label: string
@@ -63,13 +86,20 @@ type BumpEvent = {
   act(real: BumpReal, model: Readonly<BumpModel>): Promise<unknown>
   /** Moves the model; it runs once the real outcome matched the expectation. */
   next(model: BumpModel): void
+  /** Checks the real service after the command, beyond the generation and the environment. */
+  verify?(real: BumpReal, before: BeforeCommand): void
 }
 
 const ENV_D_REST = 'https://api-d.example.test'
 const HUB_SETUP_ROUTE = 'POST /api/v1/invitations-flow/desktop-setup/complete'
+const DISCOVERY_PATH = '/api/v1/desktop/environment'
+// What the harness's discovery route answers for `rpcProxyBaseUrl` (as T0-5 reads it).
+const DISCOVERED_RPC_BASE_URL = 'https://rpc-discovered.example.test'
 const REFUSED_SIGNED_IN = 'desktop_setup_requires_signout'
 const CONDITIONAL_EVENTS = ['E15', 'E16', 'E23', 'E29', 'E31/E32']
 const bumpOutcomesSeen = new Map<string, Set<boolean>>()
+/** E30 runs that committed a discovery while signed out (the path E30 exists to cover). */
+let discoveryCommitsSeen = 0
 
 function optionId(real: BumpReal, env: EnvName): string {
   if (env !== 'D') return real.harness.envs[env].optionId
@@ -84,6 +114,14 @@ function exists(model: BumpModel, env: EnvName): boolean {
   if (env === 'B') return model.bExists
   if (env === 'D') return model.dExists
   return true
+}
+
+/** The stored profiles' REST URLs, as the model has them. */
+function modelRestUrls(real: BumpReal, model: BumpModel): string[] {
+  const envs: EnvName[] = ['A', 'C']
+  if (model.bExists) envs.push('B')
+  if (model.dExists) envs.push('D')
+  return envs.map(env => (env === 'D' ? ENV_D_REST : real.harness.envs[env].restBaseUrl)).sort()
 }
 
 /** A boundary change away from A clears A's saved token (`appService.ts:2189`). */
@@ -131,15 +169,15 @@ const bumpEvents = {
     id: 'E15',
     label: 'E15 session restore (getSessionState)',
     check: () => true,
-    expect: model => ({
-      bump: !model.signedIn && model.active === 'A' && model.storedA && !model.lastRestoreOnA,
-    }),
+    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:3659-3664`): it
+    // never decides an expectation here. `storedA` holds while signed out on A only before the
+    // first restore on A (a kept token at start), and that restore succeeds. Every later
+    // `storedA` comes from a sign-in on A, and every way back to signed out (logout, or a change
+    // away from A) clears it.
+    expect: model => ({ bump: !model.signedIn && model.active === 'A' && model.storedA }),
     act: real => real.harness.service.getSessionState(),
     next: model => {
-      if (model.signedIn) return
-      const restored = model.active === 'A' && model.storedA && !model.lastRestoreOnA
-      model.lastRestoreOnA = model.active === 'A'
-      if (restored) model.signedIn = true
+      if (!model.signedIn && model.active === 'A' && model.storedA) model.signedIn = true
     },
   },
   switchTeam: {
@@ -225,6 +263,16 @@ const bumpEvents = {
     expect: () => ({ bump: false }),
     act: real => real.harness.service.getDependenciesHealth(),
     next: () => undefined,
+    // A discovery fetch while signed out commits the RPC URL to the active profile
+    // (`applyRuntimeConfigDiscovery`); signed in, it only sets the effective endpoint.
+    verify: (real, before) => {
+      const fetched = fetchCount(real.harness, 'GET', DISCOVERY_PATH) > before.discoveryFetches
+      if (!fetched || before.signedIn) return
+      expect(real.harness.service.getRuntimeConfigState().currentConfig?.rpcProxyBaseUrl).toBe(
+        DISCOVERED_RPC_BASE_URL
+      )
+      discoveryCommitsSeen += 1
+    },
   },
   desktopSetup: {
     id: 'E31/E32',
@@ -282,6 +330,11 @@ function deleteOtherEvent(target: 'B' | 'D'): BumpEvent {
       if (target === 'B') model.bExists = false
       else model.dExists = false
     },
+    verify: (real, before) => {
+      expect(real.harness.service.getRuntimeConfigState().options).toHaveLength(
+        before.optionCount - 1
+      )
+    },
   }
 }
 
@@ -329,6 +382,11 @@ class BumpCommand implements fc.AsyncCommand<BumpModel, BumpReal> {
     const expected = this.event.expect(model)
     const service = real.harness.service
     const before = service.getSessionGeneration()
+    const beforeCommand: BeforeCommand = {
+      optionCount: service.getRuntimeConfigState().options.length,
+      discoveryFetches: fetchCount(real.harness, 'GET', DISCOVERY_PATH),
+      signedIn: model.signedIn,
+    }
     const outcome = await settle(real, () => this.event.act(real, model))
     expect(outcome).toEqual(
       expected.rejects ? { ok: false, message: expected.rejects } : { ok: true }
@@ -338,6 +396,19 @@ class BumpCommand implements fc.AsyncCommand<BumpModel, BumpReal> {
     expect(after > before).toBe(expected.bump)
     this.event.next(model)
     expect(service.getCachedUserId() !== null).toBe(model.signedIn)
+    // The model's environments are the real ones, so its next expectation is about the right one.
+    expect(real.runtimeConfig.getActiveRuntimeConfigOptionId()).toBe(
+      model.active === null ? null : optionId(real, model.active)
+    )
+    // The built-in Localhost option (`source: 'localhost'`) is not a stored profile.
+    expect(
+      service
+        .getRuntimeConfigState()
+        .options.filter(option => option.source === 'file')
+        .map(option => option.externalRestApiBaseUrl)
+        .sort()
+    ).toEqual(modelRestUrls(real, model))
+    this.event.verify?.(real, beforeCommand)
     const seen = bumpOutcomesSeen.get(this.event.id) ?? new Set<boolean>()
     seen.add(expected.bump)
     bumpOutcomesSeen.set(this.event.id, seen)
@@ -368,6 +439,7 @@ describe('tier 0 baseline', () => {
       { maxCommands: 16, size: 'max' }
     )
     bumpOutcomesSeen.clear()
+    discoveryCommitsSeen = 0
 
     await fc.assert(
       fc.asyncProperty(
@@ -376,7 +448,8 @@ describe('tier 0 baseline', () => {
         commands,
         async (scheduler, keptToken, generated) => {
           const harness = await createBrowserSignInHarness({ scheduler, keptToken })
-          try {
+          const runtimeConfig = await import('../config.js')
+          await cleanUpAfter(async () => {
             // The hub's setup answer, with only its environment changed to D.
             const hubSetup = harness.routes[HUB_SETUP_ROUTE]
             if (!hubSetup) throw new Error('the harness has no hub setup route')
@@ -397,18 +470,22 @@ describe('tier 0 baseline', () => {
               dExists: false,
               signedIn: false,
               storedA: keptToken,
-              lastRestoreOnA: false,
             }
-            await fc.asyncModelRun(() => ({ model, real: { harness, scheduler } }), generated)
-          } finally {
-            await cleanupBrowserSignInHarness()
-          }
+            await fc.asyncModelRun(
+              () => ({ model, real: { harness, scheduler, runtimeConfig } }),
+              generated
+            )
+          })
         }
       ),
       { numRuns: 24, seed: 24112026 }
     )
 
-    // Every reachable event ran, and each conditional one was seen both bumping and not.
+    // Coverage. Every reachable event ran, each conditional one was seen both bumping and not,
+    // and E30 committed a discovery at least once. What runs depends on the seed, fast-check's
+    // version (4.9.0) and `size: 'max'`, so a failure here means the generated runs no longer
+    // reach an event: change the seed or the size, not the bump expectations. It is not a bump
+    // regression; the per-command checks above catch those.
     expect([...bumpOutcomesSeen.keys()].sort()).toEqual(
       [
         'E13',
@@ -436,6 +513,7 @@ describe('tier 0 baseline', () => {
         outcomes: [false, true],
       })
     }
+    expect(discoveryCommitsSeen).toBeGreaterThan(0)
   })
 
   it('T0-2 refuses setup and handoff, and skips restore, during a held password login', async () => {
@@ -571,5 +649,34 @@ describe('tier 0 baseline', () => {
       authenticated: true,
       me: { id: harnessDriverUsers.password.id },
     })
+  })
+})
+
+describe('the harness', () => {
+  it('cleans up newest first and leaves the calling test its own stubs', async () => {
+    const hubVariable = 'MEMBER_REGISTRATION_SERVICE_BASE_URL'
+    const savedHub = process.env[hubVariable]
+    const ownFetch = vi.fn()
+    const probe = 'browserSignInHarnessProbe'
+    vi.stubGlobal('fetch', ownFetch)
+    vi.stubGlobal(probe, 'kept')
+    process.env[hubVariable] = 'https://own-hub.example.test'
+    try {
+      await createBrowserSignInHarness()
+      await createBrowserSignInHarness()
+      // Both harnesses are live: the newest one's fetch and hub are in place.
+      expect(globalThis.fetch).not.toBe(ownFetch)
+      expect(process.env[hubVariable]).toBe('https://hub.example.test')
+
+      await cleanupBrowserSignInHarness()
+
+      expect(globalThis.fetch).toBe(ownFetch)
+      expect(Reflect.get(globalThis, probe)).toBe('kept')
+      expect(process.env[hubVariable]).toBe('https://own-hub.example.test')
+    } finally {
+      vi.unstubAllGlobals()
+      if (savedHub === undefined) delete process.env[hubVariable]
+      else process.env[hubVariable] = savedHub
+    }
   })
 })

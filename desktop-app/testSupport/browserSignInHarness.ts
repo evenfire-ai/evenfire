@@ -25,7 +25,7 @@ import { type EdgeRecordKey, readEdgeRecord } from './edgeContractRecords.js'
 export type SeqRecord<T> = Readonly<{ seq: number; value: T }>
 
 /**
- * Named by call site (N-5). Each hold applies to the next call at that site only.
+ * Named by call site (N-5). Each hold applies to the next call that reaches its point.
  * - `methods`: start's methods fetch.
  * - `open`: `shell.openExternal`.
  * - `redeem`: the redeem fetch.
@@ -34,6 +34,14 @@ export type SeqRecord<T> = Readonly<{ seq: number; value: T }>
  * - `installChatBind`: install's `bindChatStoreForUser`, via `bindCurrentChatStore`
  *   (`appService.ts:2043`).
  * - `installTokenWrite`: install's `tokenStore.setSessionToken` (`appService.ts:2049`).
+ *
+ * The two chat-store holds match by user id, not by call site. `restoreChatBind` takes the next
+ * bind of the restore driver's user, and `installChatBind` the next bind of the redeem answer's
+ * user, wherever it comes from. So any later bind of that user consumes a pending hold: the
+ * team-switch `/me` refresh in `commitSessionToken` (`appService.ts:1257`), the team-scope
+ * commit after discovery in `runWithTeamContextInTeamQueue` (`:1406`), the rebind after a
+ * failed hop restore (`:1509`) and `refreshAccessCatalog` (`:4199`). Set a chat-store hold only
+ * when the bind it names is the next bind of that user.
  */
 export type HoldPoint =
   | 'methods'
@@ -56,6 +64,11 @@ export type HarnessRequest = Readonly<{
 export type HarnessRouteAnswer = (request: HarnessRequest) => Response | Promise<Response>
 export type HarnessRoutes = Record<string, HarnessRouteAnswer>
 
+/**
+ * A hold delays the held call's effect, not only its answer: a held token write has not saved
+ * the token, and a held bind has not bound, until `release`. The scheduler, by contrast, runs a
+ * call's effect at once and delays only when its caller sees the answer (`deliver`).
+ */
 export type HarnessHold = {
   /**
    * Lets the held call go on. A `Response` answers a held fetch; an `Error` rejects the held
@@ -110,8 +123,11 @@ export type BrowserSignInHarnessOptions = Readonly<{
  * Answers outside the feature contract (G-5). Their bodies reuse the existing suites':
  * `authTestFixtures.ts` (`testSessionMe`, `testTeamSwitchResult`), the users of
  * `appService.setupRestoreRace.test.ts`, and the bare 401 of
- * `appService.devEdgeCompatibility.test.ts`. Each driver has its own user, so the chat-store
- * binder can tell the call sites apart by the user id it binds (N-5).
+ * `appService.devEdgeCompatibility.test.ts`. The password and Google login answers are
+ * `LoginResult`, `{ token, me }` (`src/types.ts:82-85`), which `AuthClient.passwordLogin` and
+ * `AuthClient.googleLogin` return as they are. The `/health` answer is `{ status: 'ok' }`, as
+ * `appService.discoveryLifecycle.test.ts:309` serves it. Each driver has its own user, so the
+ * chat-store binder can tell the call sites apart by the user id it binds (N-5).
  */
 export const harnessDriverUsers = Object.freeze({
   /** The user of the kept token's `/me`; the restore binds it. */
@@ -183,6 +199,8 @@ type ActiveHarness = {
   userDataDir: string
   savedEnvironment: Partial<Record<(typeof SAVED_ENVIRONMENT)[number], string>>
   restoreConsole: () => void
+  /** Puts back the `fetch` the harness found, so a stub the calling test made survives. */
+  restoreFetch: () => void
   unrouted: string[]
 }
 
@@ -304,15 +322,25 @@ export async function createBrowserSignInHarness(
       original(...args)
     })
   })
+  const foundFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
   const active: ActiveHarness = {
     userDataDir,
     savedEnvironment,
     restoreConsole: () => consoleSpies.forEach(spy => spy.mockRestore()),
+    restoreFetch: () => {
+      if (foundFetch) Object.defineProperty(globalThis, 'fetch', foundFetch)
+      else Reflect.deleteProperty(globalThis, 'fetch')
+    },
     unrouted,
   }
   activeHarnesses.push(active)
 
-  /** Resolves through the scheduler when there is one. A pending answer is scheduled once it exists. */
+  /**
+   * Resolves through the scheduler when there is one. A pending answer is scheduled once it
+   * exists. `produce` runs at once, so the call's effect (a token saved, a route answered) has
+   * already happened when the scheduler runs: it delays only the delivery of the answer. A hold
+   * (`passThrough`) delays the effect itself.
+   */
   const deliver = <T>(label: string, produce: () => T | Promise<T>): Promise<T> => {
     const value = Promise.resolve().then(produce)
     if (!scheduler) return value
@@ -404,7 +432,7 @@ export async function createBrowserSignInHarness(
     return answer
   }
 
-  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+  const harnessFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = requestUrl(input)
     const method = (init?.method ?? 'GET').toUpperCase()
     const headers = requestHeaders(init)
@@ -421,6 +449,14 @@ export async function createBrowserSignInHarness(
       }
       return observeAnswer(key, await route(request))
     })
+  }
+  // Not `vi.stubGlobal`: cleanup puts back only this stub (`restoreFetch`), where
+  // `vi.unstubAllGlobals()` would also undo the calling test's own stubs.
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: harnessFetch,
   })
 
   vi.resetModules()
@@ -592,10 +628,16 @@ export async function createBrowserSignInHarness(
   }
 }
 
+/**
+ * Undoes every live harness, newest first: each one saved the environment and `fetch` as the
+ * harness before it had left them, so only that order ends on what the test had. It undoes only
+ * what a harness set; the calling test's own stubs stay.
+ */
 export async function cleanupBrowserSignInHarness(): Promise<void> {
   const unrouted: string[] = []
-  for (const active of activeHarnesses.splice(0)) {
+  for (const active of activeHarnesses.splice(0).reverse()) {
     active.restoreConsole()
+    active.restoreFetch()
     for (const [name, value] of Object.entries(active.savedEnvironment)) {
       if (value === undefined) delete process.env[name]
       else process.env[name] = value
@@ -603,7 +645,6 @@ export async function cleanupBrowserSignInHarness(): Promise<void> {
     await fs.rm(active.userDataDir, { recursive: true, force: true })
     unrouted.push(...active.unrouted)
   }
-  vi.unstubAllGlobals()
   vi.doUnmock('electron')
   vi.doUnmock('../src/chatStoreBinding.js')
   vi.resetModules()
