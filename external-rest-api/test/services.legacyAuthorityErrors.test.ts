@@ -318,6 +318,21 @@ describe('legacy authority adapters', () => {
     )
   })
 
+  it.each([429, 503])(
+    "rethrows control-api's own desktop-authorization %s with its Retry-After",
+    async status => {
+      // Retry-After 23 is one the service's own fallback (a 503 with 2) never
+      // sends, so only the rethrow of this exact error passes.
+      const answer = new ControlApiError('control api failure', status, null, {
+        'retry-after': '23',
+      })
+      clientMock.controlApiRequest.mockRejectedValueOnce(answer)
+
+      await expect(createDesktopAuthorization(auth)).rejects.toBe(answer)
+      expect(clientMock.controlApiRequest).toHaveBeenCalledOnce()
+    }
+  )
+
   it('sends an empty body upstream', async () => {
     // The service relays control-api's answer untouched. An opaque value stands
     // in for it, so no hand-written control-api body enters this test.
