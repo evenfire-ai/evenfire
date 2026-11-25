@@ -304,7 +304,7 @@ test('provider outage during completion preserves the browser cookie for retry',
   }
 })
 
-test('an unknown completion outcome keeps the browser cookie', async () => {
+test('a transport failure during completion keeps the browser cookie', async () => {
   const restore = mockExternalApi(url => {
     if (url.pathname.endsWith('/configuration')) return configurationResponse()
     throw new Error('upstream outcome unavailable')
