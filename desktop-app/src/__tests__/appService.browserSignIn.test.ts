@@ -1726,6 +1726,13 @@ describe('browser sign-in link acceptance, redeem and install', () => {
     // Logged with the error class only.
     expect(harness.secretsSeen).toContain(`${LINK_HANDLING_FAILED} Error`)
     expect(harness.secretsSeen.filter(text => text.includes('fake keychain write'))).toEqual([])
+    // The install op itself ends the attempt, before the chain's last catch reports the error
+    // (R-4's catch would end it too, one owner op later).
+    const endedAt = harness.secretsSeen.indexOf(
+      JSON.stringify({ attemptId, phase: 'ended', outcome: 'failed' })
+    )
+    expect(endedAt).toBeGreaterThanOrEqual(0)
+    expect(endedAt).toBeLessThan(harness.secretsSeen.indexOf(`${LINK_HANDLING_FAILED} Error`))
   })
 
   it(`fails a 200 whose me has no id, without installing (${SIGNED_IN_WITHOUT_ME_ID})`, async () => {
