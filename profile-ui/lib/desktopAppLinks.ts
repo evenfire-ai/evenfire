@@ -26,6 +26,12 @@ export function buildDesktopEnvironmentLink(
   return `evenfire://desktop-environment?${params.toString()}`
 }
 
+/** Hands a Desktop setup authorization for `email` to the installed app. */
+export function buildDesktopSetupLink(email: string, authorizationToken: string): string {
+  const params = new URLSearchParams({ email, authorizationToken })
+  return `evenfire://desktop-setup?${params.toString()}`
+}
+
 export function navigateToDesktopApp(
   href: string,
   location: Pick<Location, 'href'> = window.location
