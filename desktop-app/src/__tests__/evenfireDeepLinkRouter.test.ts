@@ -261,14 +261,15 @@ describe('evenfire deep-link router', () => {
   describe('tier 0 baseline', () => {
     it('T0-4 sends nothing and requests no window for a desktop-login link', () => {
       const harness = createHarness()
+      expect(new URL(DESKTOP_LOGIN_LINK).hostname).toBe('desktop-login')
 
       harness.router.handle(DESKTOP_LOGIN_LINK)
       expect(harness.requestMainWindow).not.toHaveBeenCalled()
       harness.setRendererReady(true)
-      harness.router.drainPending()
       harness.router.handle(DESKTOP_LOGIN_LINK)
       expect(harness.sent).toEqual([])
       expect(harness.focusWindow).not.toHaveBeenCalled()
+      expect(harness.requestMainWindow).not.toHaveBeenCalled()
 
       // The same router sends a desktop-setup link to the ready window.
       harness.router.handle(DESKTOP_SETUP_LINK)
