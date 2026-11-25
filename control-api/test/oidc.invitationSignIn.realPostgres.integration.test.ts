@@ -7,6 +7,7 @@ import type { OidcProviderConfiguration } from '../src/oidc/configuration.js'
 import type { VerifiedOidcIdentityProof } from '../src/oidc/protocol.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import type { ExternalSessionContract } from '../src/services/auth/externalSessionIssuance.js'
+import type { OidcRefusal } from '../src/services/auth/oidcAccountResolution.js'
 import {
   type OidcMemberSignInResult,
   signInOidcMember,
@@ -84,6 +85,9 @@ afterEach(() => {
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
+const ENTRA_TENANT_ID = '6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f'
+const ENTRA_ISSUER = `https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0`
+
 const WATCHED_TABLES = [
   'users',
   'profiles',
@@ -145,6 +149,20 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
 
   // The mocked db.js transaction: it runs on holder.pool, the runtime pool.
   const committed: TransactionRunner = work => withTransaction(work)
+
+  function entraFake(
+    registrationId: string,
+    env: Record<string, string | undefined> = {}
+  ): OidcMemberSignInFakeProvider {
+    return createOidcMemberSignInFakeProvider({
+      issuer: ENTRA_ISSUER,
+      memberSignInEnv: {
+        CONTROL_API_OIDC_REGISTRATION_ID: registrationId,
+        CONTROL_API_OIDC_TENANT_ID: ENTRA_TENANT_ID,
+        ...env,
+      },
+    })
+  }
 
   function policyOf(fake: OidcMemberSignInFakeProvider) {
     const policy = fake.provider.memberSignIn
@@ -544,29 +562,53 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
     const unverifiedEmail = `${uniqueLabel('bob-unverified')}@fixture.test`
     await seedUser(unverifiedEmail)
 
-    const cases = [
+    // provider_configuration: an Entra token for bob with neither email_verified
+    // nor xms_edov, so the app registration does not send the domain claim.
+    const entra = entraFake('fake-invitation-entra-earlier-refusal')
+
+    const cases: ReadonlyArray<{
+      fake: OidcMemberSignInFakeProvider
+      claims: FakeIdTokenClaims
+      expected: OidcRefusal
+    }> = [
       {
-        reason: 'account_disabled',
+        fake: defaultFake,
         claims: { sub: retiredSubject, email: retiredEmail, email_verified: true },
+        expected: { status: 'refused', reason: 'account_disabled' },
       },
       {
-        reason: 'email_claim_missing',
+        fake: defaultFake,
         claims: { sub: uniqueLabel('earlier-no-email-subject'), email_verified: true },
+        expected: { status: 'refused', reason: 'email_claim_missing' },
       },
       {
-        reason: 'email_unverified',
+        fake: defaultFake,
         claims: {
           sub: uniqueLabel('earlier-unverified-subject'),
           email: unverifiedEmail,
           email_verified: false,
         },
+        expected: { status: 'refused', reason: 'email_unverified' },
       },
-    ] as const
-    for (const { reason, claims } of cases) {
-      const proof = await invitationProof(defaultFake, claims, context)
+      {
+        fake: entra,
+        claims: {
+          sub: uniqueLabel('earlier-entra-subject'),
+          tid: ENTRA_TENANT_ID,
+          email: `${uniqueLabel('bob-entra')}@fixture.test`,
+        },
+        expected: {
+          status: 'refused',
+          reason: 'provider_configuration',
+          cause: 'email_domain_claim_missing',
+        },
+      },
+    ]
+    for (const { fake, claims, expected } of cases) {
+      const proof = await invitationProof(fake, claims, context)
       const before = await watchedTables()
-      expect(await signIn(defaultFake, proof), reason).toEqual({ status: 'refused', reason })
-      expect(await watchedTables(), reason).toEqual(before)
+      expect(await signIn(fake, proof), expected.reason).toEqual(expected)
+      expect(await watchedTables(), expected.reason).toEqual(before)
     }
     expect(await invitationState(invitation.id)).toEqual({
       status: 'pending',
