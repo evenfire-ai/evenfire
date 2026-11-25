@@ -61,6 +61,7 @@ import {
   type LooseningItem,
   TOOL_LOOSENING_EXCEPTIONS,
   looseningItems,
+  looseningItemsConfirmed,
   sameLooseningItems,
 } from '../approvalLoosening'
 
@@ -775,5 +776,46 @@ describe('sameLooseningItems (Ruling 7)', () => {
       false
     )
     expect(sameLooseningItems([skip], [])).toBe(false)
+  })
+})
+
+describe('looseningItemsConfirmed (the check at the write, spec §6.4 step 6)', () => {
+  const skip = { path: 'tools.shell_exec', rule: 'tool_to_skip' } as const
+  const custom = { path: 'tools.my_tool', rule: 'custom_row_unknown_default' } as const
+  const policy = { path: 'defaultPolicy', rule: 'policy_open_on_first_save' } as const
+
+  it('holds when every item at the write was confirmed, in any order; an item gone by the write does not count against it', () => {
+    expect(looseningItemsConfirmed([skip, custom], [custom, skip])).toBe(true)
+    expect(looseningItemsConfirmed([skip, custom, policy], [skip])).toBe(true)
+    expect(looseningItemsConfirmed([skip], [])).toBe(true)
+    expect(looseningItemsConfirmed([], [])).toBe(true)
+  })
+
+  it('fails when the write has an item the admin did not confirm, by path or by rule', () => {
+    expect(looseningItemsConfirmed([skip], [skip, custom])).toBe(false)
+    expect(looseningItemsConfirmed([], [skip])).toBe(false)
+    expect(
+      looseningItemsConfirmed(
+        [skip],
+        [{ path: skip.path, rule: 'explicit_required_to_default_above_manual' }]
+      )
+    ).toBe(false)
+    expect(looseningItemsConfirmed([skip], [{ path: 'tools.http_request', rule: skip.rule }])).toBe(
+      false
+    )
+  })
+
+  it('a ceiling raised between the dialog and the write adds an item the admin did not confirm', () => {
+    const before = { tools: { shell_exec: true } }
+    const after = { tools: {} }
+    const confirmed = looseningItems({ before, after, ceiling: 'manual', firstSave: false })
+    const atWrite = looseningItems({ before, after, ceiling: 'auto', firstSave: false })
+    expect(confirmed).toEqual([])
+    expect(atWrite).toEqual([
+      { path: 'tools.shell_exec', rule: 'explicit_required_to_default_above_manual' },
+    ])
+    expect(looseningItemsConfirmed(confirmed, atWrite)).toBe(false)
+    // A ceiling lowered instead drops the item, and the confirmation still covers the write.
+    expect(looseningItemsConfirmed(atWrite, confirmed)).toBe(true)
   })
 })

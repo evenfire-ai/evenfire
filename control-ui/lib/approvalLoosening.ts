@@ -4,7 +4,9 @@
  * A change loosens when, after it, some tool call can happen without a person
  * where it needed one before. The per-tool save lists every item in a dialog,
  * and computes the items again at the write (§6.4 step 6).
- * `sameLooseningItems` tells whether the confirmed list still matches.
+ * `looseningItemsConfirmed` is that step's check: every item at the write must
+ * be among the items the admin confirmed. `sameLooseningItems` compares two
+ * lists as sets.
  *
  * PR A covers `tools` changes and the first save's policy. The ceiling,
  * channel switch, policy and approver rules arrive with PR B.
@@ -195,11 +197,27 @@ export function looseningItems(input: {
   return items.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
 }
 
+/** An item's identity: its path and rule. */
+function itemKey(item: LooseningItem): string {
+  return JSON.stringify([item.path, item.rule])
+}
+
+/**
+ * Whether every item at the write is among the items the admin confirmed (spec
+ * §6.4 step 6). A confirmed item that is gone by the write does not count
+ * against it.
+ */
+export function looseningItemsConfirmed(
+  confirmed: LooseningItem[],
+  atWrite: LooseningItem[]
+): boolean {
+  const keys = new Set(confirmed.map(itemKey))
+  return atWrite.every(item => keys.has(itemKey(item)))
+}
+
 /** Whether two item lists hold the same items, by path and rule, in any order. */
 export function sameLooseningItems(a: LooseningItem[], b: LooseningItem[]): boolean {
-  const keys = (items: LooseningItem[]) =>
-    new Set(items.map(item => JSON.stringify([item.path, item.rule])))
-  const left = keys(a)
-  const right = keys(b)
+  const left = new Set(a.map(itemKey))
+  const right = new Set(b.map(itemKey))
   return left.size === right.size && [...left].every(key => right.has(key))
 }
