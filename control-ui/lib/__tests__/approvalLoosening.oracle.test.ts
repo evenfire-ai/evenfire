@@ -435,6 +435,84 @@ describe('looseningItems against the oracle, single path', () => {
 })
 
 describe('looseningItems, rule by rule', () => {
+  it('pins one exact item for each rule name', () => {
+    const cases: ReadonlyArray<{
+      input: Parameters<typeof looseningItems>[0]
+      item: LooseningItem
+    }> = [
+      {
+        input: {
+          before: {},
+          after: { tools: { http_request: false } },
+          ceiling: 'manual',
+          firstSave: false,
+        },
+        item: { path: 'tools.http_request', rule: 'tool_to_skip' },
+      },
+      {
+        // memory_write is Skip by default.
+        input: {
+          before: { tools: { memory_write: true } },
+          after: {},
+          ceiling: 'manual',
+          firstSave: false,
+        },
+        item: { path: 'tools.memory_write', rule: 'required_to_default' },
+      },
+      {
+        input: {
+          before: { tools: { http_request: true } },
+          after: {},
+          ceiling: 'auto',
+          firstSave: false,
+        },
+        item: { path: 'tools.http_request', rule: 'explicit_required_to_default_above_manual' },
+      },
+      {
+        input: {
+          before: { tools: { workflow_trigger: true } },
+          after: {},
+          ceiling: 'manual',
+          firstSave: false,
+        },
+        item: { path: 'tools.workflow_trigger', rule: 'conditional_default_change' },
+      },
+      {
+        input: {
+          before: { tools: { cron_manage: true } },
+          after: {},
+          ceiling: 'allow_all',
+          firstSave: false,
+        },
+        item: { path: 'tools.cron_manage', rule: 'conditional_default_change' },
+      },
+      {
+        input: {
+          before: {},
+          after: { tools: { my_tool: false } },
+          ceiling: 'manual',
+          firstSave: false,
+        },
+        item: { path: 'tools.my_tool', rule: 'custom_row_unknown_default' },
+      },
+      {
+        input: {
+          before: undefined,
+          after: { defaultPolicy: 'channel_users' },
+          ceiling: 'manual',
+          firstSave: true,
+        },
+        item: { path: 'defaultPolicy', rule: 'policy_open_on_first_save' },
+      },
+    ]
+    expect([...new Set(cases.map(({ item }) => item.rule))].sort()).toEqual(
+      [...LOOSENING_RULES].sort()
+    )
+    for (const { input, item } of cases) {
+      expect(looseningItems(input), `${item.path} ${item.rule}`).toEqual([item])
+    }
+  })
+
   it('explicit Required → Default on shell_exec or http_request is an item only above Manual', () => {
     for (const tool of ['shell_exec', 'http_request']) {
       expect(singlePathItems(tool, 'true', 'absent', 'manual'), tool).toEqual([])
