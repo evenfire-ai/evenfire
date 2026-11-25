@@ -1,18 +1,17 @@
 'use client'
 
 import React, { useEffect, useRef, useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableViewport } from '@clerum/frontend-components'
-import { HostApprovalSection } from '@components/HostApprovalSection'
 import { HostEnvTable } from '@components/HostEnvTable'
 import { HostGuardrailsSection } from '@components/HostGuardrailsSection'
 import { GUARDRAIL_MARKETPLACE_ROUTE } from '@components/HostGuardrailsSection/constants'
 import { TabBar } from '@components/TabBar'
+import { CONTROL_ROUTES } from '@constants/routes'
 import type { AdvancedSubTab, HostAdvancedTabProps } from './types'
 
 const ADVANCED_SUB_TABS: { key: AdvancedSubTab; label: string }[] = [
   { key: 'hooks', label: 'Hooks' },
-  { key: 'approvals', label: 'Per-tool approval' },
   { key: 'env', label: 'Env vars' },
 ]
 
@@ -23,8 +22,6 @@ export function HostAdvancedTab({
   hostName,
   initialGuardrails,
   initialLoading,
-  initialTools,
-  onSaveApprovalTools,
   onSaveGuardrails,
   onActionsChange,
 }: HostAdvancedTabProps) {
@@ -58,6 +55,11 @@ export function HostAdvancedTab({
         options={ADVANCED_SUB_TABS.map(tab => ({ label: tab.label, value: tab.key }))}
       />
 
+      <p className="cu-muted">
+        Per-tool approval moved to the{' '}
+        <Link href={CONTROL_ROUTES.agents.tab(hostName, 'approval-settings')}>Approvals tab</Link>.
+      </p>
+
       <div className="cu-advanced-section">
         {subTab === 'hooks' &&
           (initialLoading ? (
@@ -76,50 +78,8 @@ export function HostAdvancedTab({
             />
           ))}
 
-        {subTab === 'approvals' &&
-          (initialLoading ? (
-            <ApprovalToolsSkeleton />
-          ) : (
-            <HostApprovalSection
-              busy={busy}
-              canWrite
-              defaultEditing
-              initialTools={initialTools}
-              onSave={onSaveApprovalTools}
-            />
-          ))}
-
         {subTab === 'env' && <HostEnvTable hostRef={hostName} onActionsChange={onActionsChange} />}
       </div>
     </section>
-  )
-}
-
-function ApprovalToolsSkeleton() {
-  return (
-    <TableViewport className="cu-table-wrap" role="status" aria-label="Loading approval tools">
-      <DataTable className="eft-table cu-table cu-table--header-band cu-table--static-rows">
-        <thead>
-          <tr>
-            <th>Tool</th>
-            <th>Default</th>
-            <th className="cu-table__col-actions">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {[1, 2, 3, 4].map(i => (
-            <tr key={i}>
-              <td>
-                <div className="cu-skeleton cu-skeleton--cell" style={{ width: '8rem' }} />
-              </td>
-              <td>
-                <div className="cu-skeleton cu-skeleton--cell" style={{ width: '6rem' }} />
-              </td>
-              <td />
-            </tr>
-          ))}
-        </tbody>
-      </DataTable>
-    </TableViewport>
   )
 }

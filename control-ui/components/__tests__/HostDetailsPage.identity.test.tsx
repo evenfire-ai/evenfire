@@ -313,11 +313,16 @@ describe('HostDetailsPage identity integration', () => {
       'Models & creds',
       'Connectors',
       'Access',
+      'Approvals',
       'Advanced',
     ])
     expect(tabs.find(tab => tab.textContent === 'Connectors')).toHaveAttribute(
       'href',
       '/agents/foo/connectors'
+    )
+    expect(tabs.find(tab => tab.textContent === 'Approvals')).toHaveAttribute(
+      'href',
+      '/agents/foo/approval-settings'
     )
   })
 
@@ -479,20 +484,15 @@ describe('HostDetailsPage identity integration', () => {
 
     const hooksTab = await screen.findByRole('tab', { name: 'Hooks' })
     expect(hooksTab).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByRole('tab', { name: 'Per-tool approval' })).toHaveAttribute(
-      'aria-selected',
-      'false'
-    )
+    expect(screen.queryByRole('tab', { name: 'Per-tool approval' })).toBeNull()
     expect(await screen.findByText('No guardrail hooks on this agent yet.')).toBeInTheDocument()
-    // The approval editor stays unmounted until its sub-tab is selected.
+    // The approval editor lives on the Approvals tab, not in Advanced.
     expect(screen.queryByLabelText('http_request')).toBeNull()
   })
 
   it('keeps Per-tool approval actions in the top toolbar without a duplicate title', async () => {
-    mockParams = { name: 'foo', tab: 'advanced' }
+    mockParams = { name: 'foo', tab: 'approval-settings' }
     const { container } = render(<HostDetailsPage />)
-
-    fireEvent.click(await screen.findByRole('tab', { name: 'Per-tool approval' }))
 
     expect(await screen.findByLabelText('http_request')).toBeInTheDocument()
     expect(

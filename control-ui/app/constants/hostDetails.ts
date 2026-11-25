@@ -6,6 +6,7 @@ export const HOST_TABS = [
   'model',
   'connectors',
   'access',
+  'approvals',
   'advanced',
 ] as const
 

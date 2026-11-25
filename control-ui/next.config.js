@@ -17,6 +17,19 @@ const nextConfig = {
   turbopack: {
     root: path.join(__dirname, '..'),
   },
+  // Control UI is never meant to be framed: forbid it on every path, with the
+  // CSP directive and the older header for browsers that only read the latter.
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          { key: 'Content-Security-Policy', value: "frame-ancestors 'none'" },
+          { key: 'X-Frame-Options', value: 'DENY' },
+        ],
+      },
+    ]
+  },
   async rewrites() {
     // NOTE: `/control-api/:path*` is intentionally NOT rewritten here. It is served by
     // the app-router handler app/control-api/[...path]/route.ts, which streams the body
@@ -122,14 +135,19 @@ const nextConfig = {
       // `access` and `advanced` parents. Send each old slug to its new
       // parent so bookmarks, shared links, and the approval-tools E2E
       // (which navigates to /hosts/<name>/approvals) still reach the
-      // section they used to.
+      // section they used to. Per-tool approval has its own top-level
+      // Approvals tab (slug `approval-settings`), so `approvals` lands there.
       {
         source: '/agents/:name/member-access',
         destination: '/agents/:name/access',
         permanent: true,
       },
       { source: '/agents/:name/team-access', destination: '/agents/:name/access', permanent: true },
-      { source: '/agents/:name/approvals', destination: '/agents/:name/advanced', permanent: true },
+      {
+        source: '/agents/:name/approvals',
+        destination: '/agents/:name/approval-settings',
+        permanent: true,
+      },
       { source: '/agents/:name/env-vars', destination: '/agents/:name/advanced', permanent: true },
       // The agent-scoped Contexts tab was renamed to Connectors. Keep old
       // bookmarks and shared links working before the /agents -> /hosts

@@ -138,8 +138,8 @@ describe('CONTROL_ROUTES App Router resolution', () => {
 
   it('preserves the old host-detail tab slugs as compatibility redirects', async () => {
     // R1-H1: the host-detail page consolidated Member access + Team access
-    // into a single Access tab, and Per-tool approval + Env vars into a
-    // single Advanced tab. The old slugs must still resolve so bookmarks,
+    // into a single Access tab, and Env vars into a single Advanced tab.
+    // The old Approvals slug now lands on the top-level Approvals tab. The old slugs must still resolve so bookmarks,
     // shared links, and the approval-tools E2E keep working.
     const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
 
@@ -157,7 +157,7 @@ describe('CONTROL_ROUTES App Router resolution', () => {
         },
         {
           source: '/agents/:name/approvals',
-          destination: '/agents/:name/advanced',
+          destination: '/agents/:name/approval-settings',
           permanent: true,
         },
         {

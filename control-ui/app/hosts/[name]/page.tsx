@@ -19,6 +19,7 @@ import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
+import { HostApprovalSection } from '../../../components/HostApprovalSection'
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { HostOverviewTab } from '../../../components/HostOverviewTab'
@@ -85,6 +86,7 @@ import type { HostTab } from './types'
 const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
   model: 'Models & creds',
+  approvals: 'Approvals',
   advanced: 'Advanced',
   connectors: 'Connectors',
   access: 'Access',
@@ -94,6 +96,7 @@ const TAB_LABELS: Record<HostTab, string> = {
 const TAB_SLUGS: Record<HostTab, string> = {
   details: 'overview',
   model: 'model',
+  approvals: 'approval-settings',
   advanced: 'advanced',
   connectors: 'connectors',
   access: 'access',
@@ -134,6 +137,35 @@ function subscriptionInventoryMessage(error: unknown, brand: string): string {
   return error instanceof Error && error.message
     ? error.message
     : `Could not load ${brand} subscriptions`
+}
+
+function ApprovalToolsSkeleton() {
+  return (
+    <TableViewport className="cu-table-wrap" role="status" aria-label="Loading approval tools">
+      <DataTable className="eft-table cu-table cu-table--header-band cu-table--static-rows">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Default</th>
+            <th className="cu-table__col-actions">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {[1, 2, 3, 4].map(i => (
+            <tr key={i}>
+              <td>
+                <div className="cu-skeleton cu-skeleton--cell" style={{ width: '8rem' }} />
+              </td>
+              <td>
+                <div className="cu-skeleton cu-skeleton--cell" style={{ width: '6rem' }} />
+              </td>
+              <td />
+            </tr>
+          ))}
+        </tbody>
+      </DataTable>
+    </TableViewport>
+  )
 }
 
 function AgentActionsMenu({ busy, onDelete }: { busy: boolean; onDelete: () => void }) {
@@ -1419,7 +1451,9 @@ export default function HostDetailsPage() {
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
       contentClassName={
-        activeTab === 'advanced' || activeTab === 'identity' ? 'cu-agent-detail-card' : undefined
+        activeTab === 'advanced' || activeTab === 'approvals' || activeTab === 'identity'
+          ? 'cu-agent-detail-card'
+          : undefined
       }
       tabs={HOST_TABS.map(tab => ({
         value: tab,
@@ -1629,14 +1663,26 @@ export default function HostDetailsPage() {
           </>
         )}
 
+        {activeTab === 'approvals' &&
+          (initialLoading ? (
+            <ApprovalToolsSkeleton />
+          ) : (
+            // Today's section with today's props; the Approvals tab replaces it.
+            <HostApprovalSection
+              busy={busy}
+              canWrite
+              defaultEditing
+              initialTools={approvalToolsData}
+              onSave={persistApprovalTools}
+            />
+          ))}
+
         {activeTab === 'advanced' && (
           <HostAdvancedTab
             busy={busy}
             hostName={routeName}
             initialGuardrails={guardrailsData}
             initialLoading={initialLoading}
-            initialTools={approvalToolsData}
-            onSaveApprovalTools={persistApprovalTools}
             onSaveGuardrails={persistGuardrails}
             onActionsChange={handleSectionActionsChange}
           />

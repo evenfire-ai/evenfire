@@ -210,12 +210,12 @@ const unavailable = (what: string) => async () => {
 }
 
 /**
- * Goes to where the approval settings live, today Advanced → "Per-tool
- * approval", without waiting for the section: a failed load renders none.
+ * Goes to where the approval settings live, the Approvals tab, without
+ * waiting for the section: a failed load renders none.
  */
 export async function showApprovalSettings(page: HostPageHandle): Promise<void> {
-  if (!screen.queryByRole('tab', { name: 'Per-tool approval' })) await page.navigate('Advanced')
-  fireEvent.click(await screen.findByRole('tab', { name: 'Per-tool approval' }))
+  const tab = screen.queryByRole('tab', { name: 'Approvals' })
+  if (!tab || tab.getAttribute('aria-selected') !== 'true') await page.navigate('Approvals')
 }
 
 /** Opens the per-tool section once it has loaded. Always in edit view today. */
