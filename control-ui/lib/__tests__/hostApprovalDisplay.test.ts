@@ -115,6 +115,9 @@ describe('approval tab display state', () => {
     const v1 = host('foo', 'rv-1', { modeCeiling: 'auto' })
     const fromBefore = before.startLoad()
     const fromAfter = after.startLoad()
+    // Each state's newest load still applies there, though another state
+    // has started a load since.
+    expect(before.applyLoad(fromBefore, v1)).toBe(true)
 
     expect(after.applyLoad(fromBefore, v1)).toBe(false)
     expect(after.snapshot()).toBeNull()
