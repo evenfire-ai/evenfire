@@ -249,6 +249,19 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
       --as=system:serviceaccount:control-plane:host-context-controller
     ```
 
+    When the barrier blocks, HCC logs `RpcProxyEdgeCohortBarrierError` with
+    one of three messages:
+    - `reading Deployment "rpc-proxy" ... failed with HTTP 403` or
+      `listing pods "app=rpc-proxy" ... failed with HTTP 403`: the rules
+      above are missing. The message names the Role, RoleBinding and
+      ServiceAccount; apply them as above.
+    - `reading Deployment "rpc-proxy" ... failed with HTTP 404`: no RPC Proxy
+      Deployment in that namespace. Check `CONTEXT_MAPPER_RPC_PROXY_NAMESPACE`.
+    - `is not fully on signed-assertion-v1`: the RPC Proxy rollout has not
+      finished. The message lists what blocks it (generation not observed,
+      template label, or the unlabelled pods by name). HCC retries on the next
+      reconcile of the Host.
+
   - HCC refuses to start unless
     `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=signed-assertion-v1`.
     `deploy/base/control-plane/host-context-controller.yaml` sets it. An
@@ -268,8 +281,10 @@ transitional mode. control-api signs a short-lived edge assertion (RS256, at mos
   RPC Proxy may stop forwarding the assertion only after no Host requires it.
   A pipeline that applies the whole previous release at once, or control-api
   first, does not follow this order and cuts Desktop → Host traffic twice:
-  while control-api is old and RPC Proxy is new, every Host route fails
-  because control-api returns no edge assertion; while RPC Proxy is old and
+  while control-api is old and RPC Proxy is new, every Host route answers
+  503 `authority_unavailable` because control-api returns no edge assertion
+  (RPC Proxy logs `control-api answered the host resolve without an edge
+  assertion`); while RPC Proxy is old and
   the Hosts are new, every Host answers 401 until HCC has replaced them all.
   Roll back by hand in this order: HCC, wait until the label check below
   lists nothing, then RPC Proxy, then control-api.
