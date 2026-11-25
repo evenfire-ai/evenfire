@@ -104,6 +104,8 @@ export const EMAIL_APPROVER_NOTE = 'Anyone who can send mail as this address cou
 export const DESIGNATED_APPROVERS_LABEL = 'Listed approvers only'
 
 function firstSavePolicyLabel(value: FirstSavePolicy): string {
+  // Both policies have an option. Were one dropped, the raw value shows: a
+  // wrong label never stands in for it.
   return FIRST_SAVE_POLICY_OPTIONS.find(option => option.value === value)?.label ?? value
 }
 

@@ -19,9 +19,10 @@ export interface HostApprovalSectionProps {
   /** The agent (Host) the section shows and saves. */
   host: string
   /**
-   * The Host the tab shows for `host`, or null while it has none (before its
-   * first load, or while a kept page moves to another agent). The section
-   * takes it as described in `useApprovalToolsSection`.
+   * The Host the tab shows for `host`, or null while it has none: the
+   * Approvals tab renders the section only once it has shown an agent, and
+   * passes null while a kept page moves to another agent, until that agent's
+   * first load. The section takes it as described in `useApprovalToolsSection`.
    */
   stored: HostResource | null
   /** Whether that Host has no `spec.approval` of its own: a save is a first save. */
