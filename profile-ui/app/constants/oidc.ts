@@ -21,9 +21,11 @@ export function isOidcReturnTo(value: unknown): value is OidcReturnTo {
 /**
  * Most bytes `/api/oidc/start` and `/api/oidc/desktop-start` read from their unauthenticated
  * form bodies (`readStartForm`). LoginPanel's real body, `returnTo=desktop-setup`, is 22 bytes;
- * the Desktop sign-in form, two 43-character values, is 117 bytes.
+ * the Desktop sign-in form, two 43-character values, is 117 bytes. The invitation page posts a
+ * token of up to 2048 printable characters, which percent-encoding can triple to 6144 bytes; with
+ * `invitationToken=`, `returnTo=desktop-setup` and the separators, a form stays under 8 KiB.
  */
-export const OIDC_START_FORM_MAX_BYTES = 1024
+export const OIDC_START_FORM_MAX_BYTES = 8192
 
 export const OIDC_GENERIC_RESULT_MESSAGE = "Sign-in couldn't be completed. Start again."
 

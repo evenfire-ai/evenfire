@@ -727,7 +727,8 @@ test('fires unavailable for a cross-origin post, a configuration failure or an u
 
 test('answers a malformed state with plain text and no link', async () => {
   const challenge = ['desktopChallenge', CODE_CHALLENGE] as const
-  const oversized = [...DESKTOP_FORM, ['pad', 'x'.repeat(2048)]] as const
+  // Past the 8 KiB form cap (OIDC_START_FORM_MAX_BYTES) on its own, whatever the other fields.
+  const oversized = [...DESKTOP_FORM, ['pad', 'x'.repeat(8192)]] as const
   for (const [label, request] of [
     ['no desktopState', desktopStartForm([challenge])],
     [
