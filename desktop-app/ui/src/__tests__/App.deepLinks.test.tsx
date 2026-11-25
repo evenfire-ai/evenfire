@@ -83,7 +83,6 @@ vi.mock(
 vi.mock('../../../src/config', async () => ({
   ...(await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).configModule,
   getActiveRuntimeConfigOptionId: () => null,
-  getActiveRuntimeConfigProfileIdentity: () => null,
 }))
 vi.mock(
   '../../../src/sandboxUiPartitionGc',

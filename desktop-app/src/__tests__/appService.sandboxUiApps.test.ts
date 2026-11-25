@@ -71,7 +71,6 @@ vi.mock('../config.js', () => ({
   }),
   getPairedProfileUiOverride: () => undefined,
   getActiveDeploymentProfileUiBaseUrl: mockGetActiveDeploymentProfileUiBaseUrl,
-  getActiveRuntimeConfigProfileIdentity: () => null,
   getActiveRuntimeConfigOptionId: mockGetActiveRuntimeConfigOptionId,
   getActiveEnvKey: () => 'test-env',
   getActiveLegacyEnvKeys: () => [],
