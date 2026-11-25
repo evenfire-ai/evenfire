@@ -1,6 +1,9 @@
 import type { DragEvent as ReactDragEvent } from 'react'
+import type { GfsHostActionTarget } from '@components/GfsActionHost/types'
+import type { GfsResourceMenuPermissionStatus } from '@components/GfsResourceMenu/types'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import type { GfsRowListing } from '@lib/gfsRowActionAvailability.types'
 import type { GfsDropVerdict } from '@/gfs/dragSession'
 import type { Tone } from '@/uiTypes'
 
@@ -22,6 +25,33 @@ export interface FileExplorerTreeProps {
    * the tree unmounts, so the owner can watch exactly what is on screen.
    */
   onVisibleExpandedFoldersChange?: (gfsUris: string[]) => void
+  /**
+   * Open-state report of a row's resource menu, for the native-view gate.
+   * Reports state only, `false` included when the tree unmounts with it open.
+   */
+  onGfsMenuOpenChange?: (open: boolean) => void
+}
+
+/** Where a row's resource menu opens: a viewport point. */
+export interface FileExplorerMenuAnchor {
+  x: number
+  y: number
+}
+
+/**
+ * The one open row menu. `token` is minted per opening and keys the menu, so
+ * bits read for an earlier opening never reach a later one.
+ */
+export interface FileExplorerRowMenu {
+  token: number
+  target: GfsHostActionTarget
+  listing: GfsRowListing
+  anchor: FileExplorerMenuAnchor
+  /** The session the menu opened under; its actions run only while it is live. */
+  authority: { scope: string | null; generation: number }
+  bits: GfsResourceMenuPermissionStatus
+  rowAffordances: { held?: readonly string[] } | null
+  parentAffordances: { held?: readonly string[] } | null
 }
 
 /** An expanded, rendered folder and its position in the tree (pre-order sibling indices). */
@@ -54,6 +84,8 @@ export interface FileExplorerNodeProps {
   /** Resource id currently being moved (freezes drag starts), when a move the
    *  tree itself initiated is in flight. */
   movingResourceId?: string | null
+  /** Resource the app-level action host is moving; that row cannot be dragged. */
+  hostMovingResourceId?: string | null
   /** Loaded ancestors of this node, NEAREST-FIRST; drives the drag structure
    *  facts (common-anchor / descendant observations). */
   ancestorIds: readonly (string | null)[]
@@ -89,6 +121,11 @@ export interface FileExplorerNodeProps {
     event: ReactDragEvent<HTMLElement>,
     ancestorIds: readonly (string | null)[]
   ) => void
-  /** Open the existing Move dialog for this node (row action / Shift+F10). */
-  onRequestMove: (node: GfsBrowserChild, ancestorCrumbs: readonly GfsCrumb[]) => void
+  /** Open this row's resource menu (right-click, the ContextMenu key, Shift+F10). */
+  onRequestMenu: (
+    node: GfsBrowserChild,
+    ancestorIds: readonly (string | null)[],
+    ancestorCrumbs: readonly GfsCrumb[],
+    anchor: FileExplorerMenuAnchor
+  ) => void
 }

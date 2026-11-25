@@ -76,7 +76,23 @@ export function buildComposerReferencesPromptSection(
     .map(formatGlobalFileReference)
     .filter(Boolean)
 
-  if (!plugins.length && !connectors.length && !agentFiles.length && !globalFiles.length) {
+  // Only the label, as for Global Files: the folder's identity reaches the model
+  // through the structured locationReferences, never through message content.
+  const globalFolders = references
+    .filter(
+      (reference): reference is Extract<ComposerReferenceAttachment, { type: 'global_folder' }> =>
+        reference.type === 'global_folder'
+    )
+    .map(reference => normalizeComposerReferenceName(reference.label))
+    .filter(Boolean)
+
+  if (
+    !plugins.length &&
+    !connectors.length &&
+    !agentFiles.length &&
+    !globalFiles.length &&
+    !globalFolders.length
+  ) {
     return null
   }
 
@@ -107,6 +123,14 @@ export function buildComposerReferencesPromptSection(
     // in the turn context with how to read them, so this line only names them.
     lines.push(
       `Global Files: ${quotedList(globalFiles)}. These files were explicitly selected by the user.`
+    )
+  }
+
+  if (globalFolders.length) {
+    // The second sentence is for a Host that drops locationReferences: the model
+    // then sees the name without the identity and must not guess the place.
+    lines.push(
+      `Folders: ${quotedList(globalFolders)}. The user pointed at this folder as the place for this request; use the referenced_folder of the turn context. If none is listed, ask the user where to work instead of choosing a place by name.`
     )
   }
 

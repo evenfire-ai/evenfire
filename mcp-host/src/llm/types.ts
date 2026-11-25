@@ -62,6 +62,13 @@ export interface ClassifiedError {
 }
 
 /**
+ * Effort on one completion. The API accepts `none` and `xhigh`. The installed
+ * SDK union is only `low` | `medium` | `high` | null, so the OpenAI encoder
+ * casts at the wire boundary.
+ */
+export type ReasoningEffortOption = 'none' | 'low' | 'medium' | 'high' | 'xhigh'
+
+/**
  * Single-turn LLM transport. No loop, no tool execution.
  */
 export interface SingleTurnProvider {
@@ -69,7 +76,12 @@ export interface SingleTurnProvider {
   readonly requiresImageSourceIdentity?: boolean
   completeSingleTurn(
     messages: CoreChatMessage[],
-    options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
+    options?: {
+      max_tokens?: number
+      temperature?: number
+      signal?: AbortSignal
+      reasoning_effort?: ReasoningEffortOption
+    }
   ): Promise<CompletionResponse>
 
   completeSingleTurnWithTools(

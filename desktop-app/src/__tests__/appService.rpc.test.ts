@@ -3,7 +3,11 @@ import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
-import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
+import {
+  buildGfsFileReference,
+  buildGfsLocationReference,
+  classifyBytes,
+} from '@clerum/gfs-interaction-policy'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests } from '../chatStoreBinding.js'
 import { ApiError } from '../httpClient.js'
@@ -341,6 +345,50 @@ describe('AppService.invokeHostMessage', () => {
       ])
       expect(issueToken).toHaveBeenCalledTimes(1)
       expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
+    })
+
+    it('forwards the folder next to the file references', async () => {
+      const service = serviceWithRpc()
+      const reference = fileReference()
+      const built = buildGfsLocationReference({
+        drive: 'main',
+        resourceId: 'abcdef1234567890abcdef1234567890',
+        gfsUri: 'gfs://main/abcdef1234567890abcdef1234567890',
+        name: 'Reports',
+      })
+      if (!built.ok) throw new Error(built.message)
+
+      await service.invokeHostMessage(
+        'chatllm',
+        {
+          content: 'Save it here',
+          fileReferences: [reference],
+          locationReferences: [built.value],
+        },
+        ['chatllm']
+      )
+
+      expect(service.rpcClient.invokeHostMessage.mock.calls[0][2]).toMatchObject({
+        content: 'Save it here',
+        fileReferences: [reference],
+        locationReferences: [built.value],
+      })
+    })
+
+    it('rejects a non-list folder value before issuing an RPC token', async () => {
+      const service = serviceWithRpc()
+      const issueToken = vi.spyOn(service, 'issueRpcTokenForHostRefs')
+      await expect(
+        service.invokeHostMessage('chatllm', { content: 'hello', locationReferences: {} }, [
+          'chatllm',
+        ])
+      ).rejects.toThrow('Location references must be a list.')
+      expect(issueToken).toHaveBeenCalledTimes(0)
+      // Positive control: without the field the message goes out.
+      await service.invokeHostMessage('chatllm', { content: 'hello' }, ['chatllm'])
+      expect(service.rpcClient.invokeHostMessage.mock.calls[0][2]).not.toHaveProperty(
+        'locationReferences'
+      )
     })
   })
 
@@ -946,5 +994,167 @@ describe('AppService.invokeHostMessage', () => {
     expect(catalog.mcpServersByAgent).toEqual({ 'allowed-agent': [], 'denied-agent': [] })
     expect(service.rpcTokenManager.clear).toHaveBeenCalledTimes(1)
     expect(service.rpcClient.getHostStatus).not.toHaveBeenCalled()
+  })
+})
+
+describe('AppService.approveToolCall shell card actions', () => {
+  function approvalService() {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = { id: 7, teamId: 'team-1' }
+    service.issueRpcTokenForHostRefs = vi
+      .fn()
+      .mockResolvedValueOnce({ token: 'rpc-test-token' })
+      .mockResolvedValueOnce({ token: 'rpc-test-token-refreshed' })
+    service.rpcTokenManager = { clear: vi.fn() }
+    const approveToolCall = vi.fn().mockResolvedValue({ decision: 'approved' })
+    service.rpcClient = { approveToolCall }
+    return { service, approveToolCall }
+  }
+
+  it.each(['once', 'command', 'shell'] as const)(
+    'forwards the %s action to the approval route',
+    async shellAction => {
+      const { service, approveToolCall } = approvalService()
+
+      await service.approveToolCall('chatllm', 'task-1', 'call-1', ['chatllm'], { shellAction })
+
+      expect(approveToolCall).toHaveBeenCalledTimes(1)
+      expect(approveToolCall).toHaveBeenCalledWith(
+        'rpc-test-token',
+        'chatllm',
+        'task-1',
+        'call-1',
+        false,
+        shellAction
+      )
+    }
+  )
+
+  it('forwards the action again on the retry after a token refresh', async () => {
+    const { service, approveToolCall } = approvalService()
+    approveToolCall.mockRejectedValueOnce(
+      new ApiError('Approve failed (401): expired', 401, '{"error":"expired"}')
+    )
+
+    await service.approveToolCall('chatllm', 'task-1', 'call-1', ['chatllm'], {
+      shellAction: 'command',
+    })
+
+    expect(service.rpcTokenManager.clear).toHaveBeenCalledTimes(1)
+    expect(approveToolCall).toHaveBeenCalledTimes(2)
+    expect(approveToolCall).toHaveBeenNthCalledWith(
+      1,
+      'rpc-test-token',
+      'chatllm',
+      'task-1',
+      'call-1',
+      false,
+      'command'
+    )
+    expect(approveToolCall).toHaveBeenNthCalledWith(
+      2,
+      'rpc-test-token-refreshed',
+      'chatllm',
+      'task-1',
+      'call-1',
+      false,
+      'command'
+    )
+  })
+})
+
+describe('AppService approval-mode token refresh', () => {
+  const APPROVAL_MODE_SCOPES = ['host:approval:write', 'host:wake:write'] as const
+
+  function refreshService() {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = { id: 7, teamId: 'team-1' }
+    service.issueRpcTokenForHostRefs = vi
+      .fn()
+      .mockResolvedValueOnce({ token: 'rpc-test-token' })
+      .mockResolvedValueOnce({ token: 'rpc-test-token-refreshed' })
+    service.rpcTokenManager = { clear: vi.fn() }
+    return service
+  }
+
+  it('reissues the first message token with host:approval:write when a held mode is refused for scope', async () => {
+    const service = refreshService()
+    const invokeHostMessage = vi
+      .fn()
+      // rpc-proxy's first-message approvalMode scope refusal (routes/rpc.ts)
+      // as requestJson raises it.
+      .mockRejectedValueOnce(
+        new ApiError(
+          '403 Forbidden: Forbidden: missing scope',
+          403,
+          '{"error":"Forbidden: missing scope"}'
+        )
+      )
+      .mockResolvedValueOnce({ success: true, response: 'ok' })
+    service.rpcClient = { invokeHostMessage }
+
+    await expect(
+      service.invokeHostMessage('chatllm', { content: 'hi', approvalMode: 'auto' })
+    ).resolves.toEqual({ success: true, response: 'ok' })
+
+    const heldModeScopes = [...MESSAGE_SCOPES, 'host:approval:write']
+    expect(service.rpcTokenManager.clear).toHaveBeenCalledTimes(1)
+    expect(service.issueRpcTokenForHostRefs).toHaveBeenCalledTimes(2)
+    expect(service.issueRpcTokenForHostRefs).toHaveBeenNthCalledWith(1, heldModeScopes, ['chatllm'])
+    expect(service.issueRpcTokenForHostRefs).toHaveBeenNthCalledWith(2, heldModeScopes, ['chatllm'])
+    expect(invokeHostMessage).toHaveBeenCalledTimes(2)
+    expect(invokeHostMessage.mock.calls[0][0]).toBe('rpc-test-token')
+    expect(invokeHostMessage.mock.calls[1][0]).toBe('rpc-test-token-refreshed')
+    expect(invokeHostMessage.mock.calls[1][2]).toMatchObject({ approvalMode: 'auto' })
+  })
+
+  it('retries the approval-mode PATCH once on a reissued token after a 401', async () => {
+    const service = refreshService()
+    const saved = {
+      approvalMode: 'auto',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'auto',
+    }
+    const setApprovalMode = vi
+      .fn()
+      // rpc-proxy's 401 (middleware/auth.ts) as rpcProxyClient.setApprovalMode raises it.
+      .mockRejectedValueOnce(
+        new ApiError('Set approval mode failed (401)', 401, '{"error":"Unauthorized"}')
+      )
+      .mockResolvedValueOnce(saved)
+    service.rpcClient = { setApprovalMode }
+
+    await expect(service.setApprovalMode('chatllm', 'chatllm', 'chat-1', 'auto')).resolves.toEqual(
+      saved
+    )
+
+    expect(service.rpcTokenManager.clear).toHaveBeenCalledTimes(1)
+    expect(service.issueRpcTokenForHostRefs).toHaveBeenCalledTimes(2)
+    expect(service.issueRpcTokenForHostRefs).toHaveBeenNthCalledWith(1, APPROVAL_MODE_SCOPES, [
+      'chatllm',
+    ])
+    expect(service.issueRpcTokenForHostRefs).toHaveBeenNthCalledWith(2, APPROVAL_MODE_SCOPES, [
+      'chatllm',
+    ])
+    expect(setApprovalMode).toHaveBeenCalledTimes(2)
+    expect(setApprovalMode).toHaveBeenNthCalledWith(
+      1,
+      'rpc-test-token',
+      'chatllm',
+      'chatllm',
+      'chat-1',
+      'auto'
+    )
+    expect(setApprovalMode).toHaveBeenNthCalledWith(
+      2,
+      'rpc-test-token-refreshed',
+      'chatllm',
+      'chatllm',
+      'chat-1',
+      'auto'
+    )
   })
 })

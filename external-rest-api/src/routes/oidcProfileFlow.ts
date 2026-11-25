@@ -1,15 +1,29 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
+import { ipKeyGenerator } from 'express-rate-limit'
 import { ControlApiError, controlApiRequestWithStatus } from '../controlApiClient.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
+import { setProfileSessionCookie } from '../sessionCookie.js'
 
 /** Matches Control API's OIDC operation budget. The fetch waits one extra second so that budget can answer first. */
 const OIDC_OPERATION_DEADLINE_MS = 12_000
 const OIDC_UPSTREAM_WAIT_MS = OIDC_OPERATION_DEADLINE_MS + 1_000
-const CLIENT_KEY_RE = /^[a-f0-9]{64}$/
 
 const BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
 const CODE_RE = /^[\x21-\x7e]{1,4096}$/
+const SESSION_TOKEN_MAX_LENGTH = 4096
+const DISPLAY_LABEL_MAX_LENGTH = 80
+/** Refusal reasons Profile UI may see. Anything else is an upstream contract break. */
+const REFUSAL_REASONS: ReadonlySet<string> = new Set([
+  'account_disabled',
+  'identity_conflict',
+  'account_needs_attention',
+  'email_claim_missing',
+  'email_unverified',
+  'not_eligible',
+  'no_account',
+  'provider_configuration',
+])
 const SAFE_ERRORS = new Set([
   'oidc_not_configured',
   'oidc_attempt_rejected',
@@ -51,10 +65,22 @@ function connectionKey(req: Request): string {
   return req.ip || req.socket.remoteAddress || 'unknown'
 }
 
+/**
+ * The directly connected peer (the Profile UI pod). Profile UI forwards the browser IP as
+ * X-Forwarded-For, so with `trust proxy 1` req.ip is client-influenced; only the socket
+ * address identifies the peer.
+ */
+function socketKey(req: Request): string {
+  return req.socket.remoteAddress || 'unknown'
+}
+
+/**
+ * One bucket per browser: the forwarded IP (`req.ip` under `trust proxy 1`), falling back to
+ * the socket address. An IPv6 address shares a bucket with the rest of its /56, so a holder
+ * of a prefix cannot rotate addresses inside it. No request header chooses the key.
+ */
 function clientRateKey(req: Request): string {
-  const key = req.get('x-oidc-client-key')
-  if (key && CLIENT_KEY_RE.test(key)) return `client:${key}`
-  return `ip:${connectionKey(req)}`
+  return `ip:${ipKeyGenerator(connectionKey(req))}`
 }
 
 function upstreamCall(req: Request): { signal: AbortSignal; extraHeaders: Record<string, string> } {
@@ -69,18 +95,31 @@ function upstreamCall(req: Request): { signal: AbortSignal; extraHeaders: Record
   }
 }
 
+/** Requests per minute for one browser (forwarded IP). */
+export const OIDC_PER_CLIENT_LIMIT = 60
+/**
+ * Requests per minute for one directly connected peer (a Profile UI pod). A capacity bound,
+ * not a fairness limit: fairness between browsers is the per-client limit. At about three
+ * requests per sign-in, 6000 is about 2000 sign-ins per minute per pod. A caller that can
+ * choose its own X-Forwarded-For (a deployment with no proxy in front that sets it) can
+ * still reach this ceiling.
+ */
+export const OIDC_PER_SOCKET_LIMIT = 6000
+
 export function createOidcProfileFlowRouter(): Router {
   const router = Router()
+  // The per-client limiter runs first, so a request it refuses never counts against the
+  // shared per-socket ceiling.
   const perClient = createRateLimiter({
     windowMs: 60_000,
-    maxRequests: 60,
+    maxRequests: OIDC_PER_CLIENT_LIMIT,
     keyFn: clientRateKey,
     errorCode: 'oidc_unavailable',
   })
   const perConnection = createRateLimiter({
     windowMs: 60_000,
-    maxRequests: 600,
-    keyFn: req => `edge:${connectionKey(req)}`,
+    maxRequests: OIDC_PER_SOCKET_LIMIT,
+    keyFn: req => `edge:${socketKey(req)}`,
     errorCode: 'oidc_unavailable',
   })
   router.use('/oidc/profile-flow', perClient, perConnection)
@@ -89,15 +128,28 @@ export function createOidcProfileFlowRouter(): Router {
     try {
       const { data } = await controlApiRequestWithStatus<{
         redirectUri: string
-        memberAuthenticationActivated: false
+        memberAuthenticationActivated: boolean
+        displayLabel?: unknown
       }>('GET', '/external/oidc/profile-flow/configuration', upstreamCall(req))
-      if (typeof data?.redirectUri !== 'string' || data.memberAuthenticationActivated !== false) {
+      if (
+        typeof data?.redirectUri !== 'string' ||
+        typeof data.memberAuthenticationActivated !== 'boolean'
+      ) {
         res.status(503).json({ error: 'oidc_unavailable' })
         return
       }
+      // An edge can deploy before control-api: a missing or invalid label means "no button",
+      // not an outage.
+      const displayLabel =
+        typeof data.displayLabel === 'string' &&
+        data.displayLabel.length >= 1 &&
+        data.displayLabel.length <= DISPLAY_LABEL_MAX_LENGTH
+          ? data.displayLabel
+          : undefined
       res.status(200).json({
         redirectUri: data.redirectUri,
-        memberAuthenticationActivated: false,
+        memberAuthenticationActivated: data.memberAuthenticationActivated,
+        ...(displayLabel !== undefined ? { displayLabel } : {}),
       })
     } catch (error) {
       forwardFailure(error, res, next)
@@ -152,24 +204,59 @@ export function createOidcProfileFlowRouter(): Router {
       return
     }
     try {
-      const { data } = await controlApiRequestWithStatus<{
-        outcome: 'identity_proof_verified'
-        memberAuthenticationActivated: false
-      }>('POST', '/external/oidc/profile-flow/complete', {
+      const { data } = await controlApiRequestWithStatus<
+        | { outcome: 'identity_proof_verified'; memberAuthenticationActivated: false }
+        | { outcome: 'refused'; memberAuthenticationActivated: true; reason: string }
+        | {
+            outcome: 'member_signed_in'
+            memberAuthenticationActivated: true
+            token: string
+            sessionContract: string
+          }
+      >('POST', '/external/oidc/profile-flow/complete', {
         body: { state, code, browserBinding, ...(issuer !== undefined ? { issuer } : {}) },
         ...upstreamCall(req),
       })
       if (
-        data?.outcome !== 'identity_proof_verified' ||
-        data.memberAuthenticationActivated !== false
+        data?.outcome === 'identity_proof_verified' &&
+        data.memberAuthenticationActivated === false
       ) {
-        res.status(503).json({ error: 'oidc_unavailable' })
+        res.status(200).json({
+          outcome: 'identity_proof_verified',
+          memberAuthenticationActivated: false,
+        })
         return
       }
-      res.status(200).json({
-        outcome: 'identity_proof_verified',
-        memberAuthenticationActivated: false,
-      })
+      if (
+        data?.outcome === 'refused' &&
+        data.memberAuthenticationActivated === true &&
+        typeof data.reason === 'string' &&
+        REFUSAL_REASONS.has(data.reason)
+      ) {
+        res.status(200).json({
+          outcome: 'refused',
+          memberAuthenticationActivated: true,
+          reason: data.reason,
+        })
+        return
+      }
+      if (
+        data?.outcome === 'member_signed_in' &&
+        data.memberAuthenticationActivated === true &&
+        typeof data.token === 'string' &&
+        data.token.length > 0 &&
+        data.token.length <= SESSION_TOKEN_MAX_LENGTH
+      ) {
+        // The same cookie password login sets. The token stays out of the body; Profile UI
+        // relays this Set-Cookie header to the browser.
+        setProfileSessionCookie(req, res, data.token)
+        res.status(200).json({
+          outcome: 'member_signed_in',
+          memberAuthenticationActivated: true,
+        })
+        return
+      }
+      res.status(503).json({ error: 'oidc_unavailable' })
     } catch (error) {
       forwardFailure(error, res, next)
     }

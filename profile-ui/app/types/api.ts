@@ -66,3 +66,12 @@ export type PasswordLoginResponse = {
     role: Role | null
   }
 }
+
+export interface OidcSignInMethod {
+  label: string
+}
+
+export interface OidcProfileFlowConfigurationResponse {
+  memberAuthenticationActivated?: boolean
+  displayLabel?: string
+}

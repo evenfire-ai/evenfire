@@ -1,4 +1,14 @@
-const PUBLIC_PROFILE_UI_PREFIXES = ['/desktop-setup', '/forgot-password', '/invitations'] as const
+/**
+ * Pages that render without a session. The OIDC pages are public because a signed-out
+ * browser lands on them: the result page explains a refusal, and the signed-in page must
+ * release a stale logout fence before the session is read again.
+ */
+const PUBLIC_PROFILE_UI_PREFIXES = [
+  '/desktop-setup',
+  '/forgot-password',
+  '/invitations',
+  '/oidc',
+] as const
 
 export function isPublicProfileUiPath(pathname: string): boolean {
   return PUBLIC_PROFILE_UI_PREFIXES.some(

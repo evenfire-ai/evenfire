@@ -2,13 +2,20 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const APPROVAL_CALLBACK_RE = /^wf:([ad]):([0-9a-f-]{36})$/i
 const RESULT_CALLBACK_RE = /^wf:r:([0-9a-f-]{36})$/i
 const LEGACY_RESULT_CALLBACK_RE = /^wf:r:([a-z0-9][a-z0-9.-]*[a-z0-9])$/i
-const TOOL_APPROVAL_CALLBACK_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
+const TOOL_APPROVAL_CALLBACK_RE = /^tool:([alcsd]):([A-Za-z0-9_-]{16})$/
 export const TELEGRAM_WORKFLOW_RESULT_CALLBACK_DATA = 'wf:r'
+
+export type TelegramToolApprovalDecision =
+  | 'approve'
+  | 'approveAlways'
+  | 'command'
+  | 'shell'
+  | 'deny'
 
 export type TelegramCallbackAction =
   | {
       kind: 'toolApprovalDecision'
-      decision: 'approve' | 'approveAlways' | 'deny'
+      decision: TelegramToolApprovalDecision
       actionToken: string
     }
   | {
@@ -21,6 +28,23 @@ export type TelegramCallbackAction =
       workflowRunId?: string
       workflowName?: string
     }
+
+function telegramToolApprovalDecision(code: string): TelegramToolApprovalDecision | null {
+  switch (code) {
+    case 'a':
+      return 'approve'
+    case 'l':
+      return 'approveAlways'
+    case 'c':
+      return 'command'
+    case 's':
+      return 'shell'
+    case 'd':
+      return 'deny'
+    default:
+      return null
+  }
+}
 
 function ensureTelegramCallbackDataSize(value: string): string {
   if (Buffer.byteLength(value, 'utf8') > 64) {
@@ -48,14 +72,11 @@ export function parseTelegramCallbackData(
   if (!data) return null
   const toolApprovalMatch = TOOL_APPROVAL_CALLBACK_RE.exec(data)
   if (toolApprovalMatch) {
+    const decision = telegramToolApprovalDecision(toolApprovalMatch[1])
+    if (!decision) return null
     return {
       kind: 'toolApprovalDecision',
-      decision:
-        toolApprovalMatch[1] === 'a'
-          ? 'approve'
-          : toolApprovalMatch[1] === 'l'
-            ? 'approveAlways'
-            : 'deny',
+      decision,
       actionToken: toolApprovalMatch[2],
     }
   }

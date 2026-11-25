@@ -1,15 +1,19 @@
+import { PROFILE_ROUTES } from '../../../constants/routes'
 import {
   type OidcProfileConfiguration,
   OidcProfileFlowError,
   browserCookieName,
   clearBrowserCookie,
+  completeOidcProfileFlow,
   getOidcProfileConfiguration,
+  memberSignedInRedirect,
   noStoreResult,
   noStoreText,
   parseCallbackParameters,
   postOidcProfileFlow,
   readSingleCookie,
-  requestMatchesCallback,
+  refusedRedirect,
+  requestPathMatchesCallback,
   responseForFlowError,
 } from '../_flow'
 
@@ -28,7 +32,7 @@ export async function GET(request: Request): Promise<Response> {
   } catch (error) {
     return responseForFlowError(error)
   }
-  if (!requestMatchesCallback(request, configuration.redirectUri)) {
+  if (!requestPathMatchesCallback(request, configuration.redirectUri)) {
     return noStoreText('Request rejected.', 403)
   }
 
@@ -90,8 +94,7 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   try {
-    const result = await postOidcProfileFlow<{ outcome: 'identity_proof_verified' }>(
-      'complete',
+    const result = await completeOidcProfileFlow(
       {
         state: callback.state,
         code: callback.code,
@@ -100,8 +103,18 @@ export async function GET(request: Request): Promise<Response> {
       },
       request
     )
-    if (result?.outcome !== 'identity_proof_verified') {
-      throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
+    if (result.kind === 'member_signed_in') {
+      return memberSignedInRedirect(
+        PROFILE_ROUTES.oidcSignedIn,
+        result.sessionCookie,
+        clearBrowserCookie(browserCookieName(callback.state))
+      )
+    }
+    if (result.kind === 'refused') {
+      return refusedRedirect(
+        PROFILE_ROUTES.oidcResult(result.reason),
+        clearBrowserCookie(browserCookieName(callback.state))
+      )
     }
     return terminalFailure(
       'Identity proof was verified. Member sign-in is not enabled.',

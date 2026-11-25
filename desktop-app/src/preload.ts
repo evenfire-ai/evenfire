@@ -592,7 +592,11 @@ const clerum = Object.freeze({
       taskId: string,
       toolCallId: string,
       hostRefs?: string[],
-      options?: { teamId?: string | null; alwaysApprove?: boolean }
+      options?: {
+        teamId?: string | null
+        alwaysApprove?: boolean
+        shellAction?: 'once' | 'command' | 'shell'
+      }
     ) =>
       ipcRenderer.invoke('rpc:approveToolCall', {
         hostRef,
@@ -655,6 +659,12 @@ const clerum = Object.freeze({
     // process scopes the write token to this single host.
     renameSession: (hostRef: string, agent: string, chatId: string, title: string) =>
       ipcRenderer.invoke('rpc:renameSession', { hostRef, agent, chatId, title }),
+    setApprovalMode: (
+      hostRef: string,
+      agent: string,
+      chatId: string,
+      mode: 'manual' | 'auto' | 'allow_all'
+    ) => ipcRenderer.invoke('rpc:setApprovalMode', { hostRef, agent, chatId, mode }),
     getTokenMetadata: () => ipcRenderer.invoke('rpc:getTokenMetadata'),
     // U5 (mcp-oauth reactive consent): "Connect <server>" — open the provider
     // authorize-URL for a task that suspended with `connect_required`. Host-bound

@@ -991,6 +991,67 @@ describe('the driver raises a token limit below the Responses minimum', () => {
   })
 })
 
+describe('reasoning effort on the Responses wire', () => {
+  function providerFor(model: string, profileId: 'openai' | 'azure' = 'openai') {
+    const raw = recorded('v1-rfc-gpt-6.1-terra')
+    const responsesCreate = vi.fn(async (_payload: Item) => structuredClone(raw))
+    const profile = {
+      ...officialOpenAIProfile(),
+      id: profileId,
+      protocol: 'openai-responses' as const,
+    }
+    const provider = new OpenAIProvider(
+      {
+        baseURL: 'https://api.openai.com/v1',
+        responses: { create: responsesCreate },
+        chat: { completions: { create: vi.fn() } },
+      } as never,
+      model,
+      profile
+    )
+    return { provider, sent: () => responsesCreate.mock.calls[0]![0] }
+  }
+
+  it('encodeText sends reasoning.effort when asked and omits it otherwise', () => {
+    const sent = responsesProtocol.encodeText(
+      deepFreeze({ messages: [USER], reasoning_effort: 'none' as const }),
+      encodeCtx()
+    )
+    expect(sent.reasoning).toEqual({ effort: 'none' })
+
+    const unset = responsesProtocol.encodeText(deepFreeze({ messages: [USER] }), encodeCtx())
+    expect(unset).not.toHaveProperty('reasoning')
+    expect(unset).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('sends reasoning.effort none for a reasoning-family OpenAI model', async () => {
+    const text = providerFor('gpt-5.5')
+    await text.provider.completeSingleTurn([USER], { reasoning_effort: 'none' })
+    expect(text.sent().reasoning).toEqual({ effort: 'none' })
+  })
+
+  it('sends no reasoning key when the caller does not ask', async () => {
+    const text = providerFor('gpt-5.5')
+    await text.provider.completeSingleTurn([USER])
+    expect(text.sent().model).toBe('gpt-5.5')
+    expect(text.sent()).not.toHaveProperty('reasoning')
+  })
+
+  it('does not send reasoning for gpt-4.1 even when asked', async () => {
+    const text = providerFor('gpt-4.1')
+    await text.provider.completeSingleTurn([USER], { reasoning_effort: 'none' })
+    expect(text.sent().model).toBe('gpt-4.1')
+    expect(text.sent()).not.toHaveProperty('reasoning')
+  })
+
+  it('does not send reasoning for a non-OpenAI profile', async () => {
+    const text = providerFor('gpt-5.5', 'azure')
+    await text.provider.completeSingleTurn([USER], { reasoning_effort: 'none' })
+    expect(text.sent().model).toBe('gpt-5.5')
+    expect(text.sent()).not.toHaveProperty('reasoning')
+  })
+})
+
 describe('the driver classifies a protocol failure as the protocol did', () => {
   const failure = (code: string | null) => {
     const raw = structuredClone(recorded('v1-rfc-gpt-6.1-terra'))

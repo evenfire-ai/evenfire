@@ -17,6 +17,8 @@ import { clientDrawsMermaid } from './displayCapabilities'
  * - file attachments (metadata) and `fileReferenceResolutions`: the version pins
  *   and attachment lines. Image attachments are dropped (their content lives in
  *   the frozen snapshot) and inline bytes (dataBase64) never persist.
+ * - `locationReferenceResolutions`: the `referenced_folder` line, when a resume
+ *   has no saved context and rebuilds the turn-context block.
  *
  * Everything else the channel delivered (the raw Slack, email or Telegram
  * payload in `metadata`, `providerIdentity`, `traceContext`, the model piggyback)
@@ -44,6 +46,9 @@ export function sourceMessageForResume(
     ...(files.length ? { attachments: files.map(fileWithoutBytes) } : {}),
     ...(message.fileReferenceResolutions
       ? { fileReferenceResolutions: message.fileReferenceResolutions }
+      : {}),
+    ...(message.locationReferenceResolutions
+      ? { locationReferenceResolutions: message.locationReferenceResolutions }
       : {}),
     ...(message.authorityV2 ? { authorityV2: message.authorityV2 } : {}),
   }

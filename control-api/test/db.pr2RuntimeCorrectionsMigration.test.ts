@@ -25,31 +25,31 @@ describe('PR2 runtime correction migrations', () => {
     // WF-14 (A6 E1): reads persist no binding, so the workflow_recipe entity
     // and its migration are gone; bindings keep 0151's closed vocabulary.
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
-    const pr2Versions = CONTROL_API_MIGRATIONS.map(candidate => candidate.version).filter(
-      version => version >= '0151_'
-    )
-    expect(pr2Versions).toEqual([
+    const pr2Versions = [
       '0151_workflow_authority_bindings',
       '0152_gfs_upload_authority_bindings',
       '0153_pr2_readiness_evidence',
       '0154_pr2_runtime_privileges',
       '0155_workflow_run_failure_reason',
       '0156_workflow_authorization_pause',
-    ])
+    ]
+    const migrations = CONTROL_API_MIGRATIONS.filter(candidate => candidate.version >= '0151_')
+    expect(migrations.slice(0, pr2Versions.length).map(candidate => candidate.version)).toEqual(
+      pr2Versions
+    )
     const sql: string[] = []
-    for (const version of pr2Versions) {
+    for (const migration of migrations) {
       const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
-      await CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)!.apply({
-        query,
-      })
+      await migration.apply({ query })
       sql.push(...query.mock.calls.map(call => String(call[0])))
     }
     // Witness: the 0151 entity vocabulary was applied and read here.
-    expect(sql.join('\n')).toContain(
+    const appliedSql = sql.join('\n')
+    expect(appliedSql).toContain(
       "'workflow_trigger', 'workflow_run', 'workflow_approval', 'workflow_artifact'"
     )
-    expect(sql.join('\n')).not.toContain("'workflow_recipe'")
-    expect(sql.join('\n')).not.toContain('workflow_authority_bindings_entity_type_check')
+    expect(appliedSql).not.toContain("'workflow_recipe'")
+    expect(appliedSql).not.toContain('workflow_authority_bindings_entity_type_check')
   })
 
   it('adds only the closed workflow authority failure vocabulary', async () => {

@@ -17,6 +17,61 @@ const ENV = {
 
 const OIDC_ENV_NAMES = new Set<string>(Object.values(ENV))
 
+/**
+ * Optional member sign-in settings, outside the all-or-none registration set.
+ * They are parsed only when the registration is configured. The switch and the
+ * release guard are not part of the configuration generation: toggling them
+ * does not invalidate attempts already in flight.
+ */
+const OPTIONAL_ENV = {
+  memberSignIn: 'CONTROL_API_OIDC_MEMBER_SIGN_IN',
+  unreleased: 'CONTROL_API_OIDC_UNRELEASED',
+  tenantId: 'CONTROL_API_OIDC_TENANT_ID',
+  requiredRole: 'CONTROL_API_OIDC_REQUIRED_ROLE',
+  allowGuests: 'CONTROL_API_OIDC_ALLOW_GUESTS',
+  newMemberTeamId: 'CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID',
+  accountCreation: 'CONTROL_API_OIDC_ACCOUNT_CREATION',
+  allowedEmailDomains: 'CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS',
+} as const
+
+const OIDC_OPTIONAL_ENV_NAMES = new Set<string>(Object.values(OPTIONAL_ENV))
+
+const ENTRA_ISSUER_HOSTS: ReadonlySet<string> = new Set([
+  'login.microsoftonline.com',
+  'login.microsoftonline.us',
+  'login.partner.microsoftonline.cn',
+])
+
+/** Authorities that accept accounts from outside one tenant, plus the Microsoft consumer tenant. */
+const ENTRA_MULTI_TENANT_AUTHORITIES: ReadonlySet<string> = new Set([
+  'common',
+  'organizations',
+  'consumers',
+  '9188040d-6c67-4c5b-b112-36a304b66dad',
+])
+
+const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const DOMAIN_LABEL_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+
+export type OidcAccountCreation = 'entra' | 'allowed_domains' | 'disabled'
+
+export type OidcMemberSignInPolicy = Readonly<{
+  /** Set only for Entra issuers. */
+  entraTenantId: string | null
+  requiredRole: string | null
+  allowGuests: boolean
+  /** UUID string. */
+  newMemberTeamId: string | null
+  accountCreation: OidcAccountCreation
+  /** Lowercased, without a leading '@'. */
+  allowedEmailDomains: readonly string[]
+}>
+
+/** True only for the Microsoft Entra ID sovereign-cloud login hosts; CIAM and B2C hosts are not Entra. */
+export function isEntraIssuerHost(host: string): boolean {
+  return ENTRA_ISSUER_HOSTS.has(host.toLowerCase())
+}
+
 const OidcPublicConfigurationSchema = z
   .object({
     [ENV.registrationId]: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/),
@@ -49,7 +104,11 @@ export type OidcProviderConfiguration = Readonly<{
   scopes: readonly ['openid', 'profile', 'email']
   trustGeneration: string
   configurationGeneration: string
-  memberAuthenticationActivated: false
+  /** Eligibility settings that are part of the configuration generation, whether or not the switch is on. */
+  memberEligibility: OidcMemberSignInPolicy
+  /** The policy when member sign-in is switched on; null when the switch is off. */
+  memberSignIn: OidcMemberSignInPolicy | null
+  memberAuthenticationActivated: boolean
 }>
 
 function invalid(field: string, detail: string): never {
@@ -112,10 +171,29 @@ function computeConfigurationGeneration(
     redirectUri: string
     responseMode: 'query'
     trustGeneration: string
+    memberEligibility: OidcMemberSignInPolicy
   },
   clientSecret: string,
   generationKey: Buffer
 ): string {
+  const eligibility = fields.memberEligibility
+  // A registration with no eligibility settings keeps its pre-policy generation.
+  const eligibilityPart =
+    eligibility.entraTenantId === null &&
+    eligibility.requiredRole === null &&
+    !eligibility.allowGuests &&
+    eligibility.accountCreation === 'disabled' &&
+    eligibility.allowedEmailDomains.length === 0
+      ? []
+      : [
+          [
+            eligibility.entraTenantId,
+            eligibility.requiredRole,
+            eligibility.allowGuests,
+            eligibility.accountCreation,
+            eligibility.allowedEmailDomains,
+          ],
+        ]
   const generationPayload = JSON.stringify([
     'oidc-registration-v1',
     fields.registrationId,
@@ -127,8 +205,120 @@ function computeConfigurationGeneration(
     fields.responseMode,
     fields.trustGeneration,
     createHmac('sha256', generationKey).update(clientSecret).digest('base64url'),
+    ...eligibilityPart,
   ])
   return `v1:${createHash('sha256').update(generationPayload).digest('hex')}`
+}
+
+function parseMemberEligibility(
+  environment: NodeJS.ProcessEnv,
+  issuerUrl: URL
+): OidcMemberSignInPolicy {
+  const bad = new Set<string>()
+  const tenantRaw = environment[OPTIONAL_ENV.tenantId]
+  const roleRaw = environment[OPTIONAL_ENV.requiredRole]
+  const guestsRaw = environment[OPTIONAL_ENV.allowGuests]
+  const teamRaw = environment[OPTIONAL_ENV.newMemberTeamId]
+  const creationRaw = environment[OPTIONAL_ENV.accountCreation]
+  const domainsRaw = environment[OPTIONAL_ENV.allowedEmailDomains]
+  const entraIssuer = isEntraIssuerHost(issuerUrl.hostname)
+
+  let tenantId: string | null = null
+  if (tenantRaw !== undefined) {
+    if (
+      GUID_PATTERN.test(tenantRaw) &&
+      !ENTRA_MULTI_TENANT_AUTHORITIES.has(tenantRaw.toLowerCase())
+    ) {
+      tenantId = tenantRaw.toLowerCase()
+    } else {
+      bad.add(OPTIONAL_ENV.tenantId)
+    }
+  }
+  if (!entraIssuer && tenantRaw !== undefined) bad.add(OPTIONAL_ENV.tenantId)
+  if (entraIssuer) {
+    if (tenantRaw === undefined) bad.add(OPTIONAL_ENV.tenantId)
+    const [authority, version, ...rest] = issuerUrl.pathname.split('/').filter(Boolean)
+    if (
+      rest.length > 0 ||
+      version !== 'v2.0' ||
+      authority === undefined ||
+      ENTRA_MULTI_TENANT_AUTHORITIES.has(authority.toLowerCase()) ||
+      (tenantId !== null && authority !== tenantId) ||
+      issuerUrl.pathname.endsWith('/')
+    ) {
+      bad.add(ENV.issuer)
+    }
+  }
+
+  let requiredRole: string | null = null
+  if (roleRaw !== undefined) {
+    if (roleRaw.length >= 1 && roleRaw.length <= 256 && !/[\u0000-\u0020\u007f]/.test(roleRaw)) {
+      requiredRole = roleRaw
+    } else {
+      bad.add(OPTIONAL_ENV.requiredRole)
+    }
+  }
+
+  let allowGuests = false
+  if (guestsRaw !== undefined) {
+    if (guestsRaw === 'true') {
+      allowGuests = true
+      if (tenantRaw === undefined || roleRaw === undefined) bad.add(OPTIONAL_ENV.allowGuests)
+    } else {
+      bad.add(OPTIONAL_ENV.allowGuests)
+    }
+  }
+
+  let newMemberTeamId: string | null = null
+  if (teamRaw !== undefined) {
+    if (GUID_PATTERN.test(teamRaw)) newMemberTeamId = teamRaw.toLowerCase()
+    else bad.add(OPTIONAL_ENV.newMemberTeamId)
+  }
+
+  let allowedEmailDomains: string[] = []
+  if (domainsRaw !== undefined) {
+    allowedEmailDomains = domainsRaw.split(',').map(entry => entry.trim().toLowerCase())
+    const valid = allowedEmailDomains.every(
+      domain =>
+        domain.length <= 253 &&
+        domain.includes('.') &&
+        domain.split('.').every(label => DOMAIN_LABEL_PATTERN.test(label))
+    )
+    if (!valid) {
+      allowedEmailDomains = []
+      bad.add(OPTIONAL_ENV.allowedEmailDomains)
+    }
+  }
+
+  // The domain list only limits allowed_domains creation. Without it (and on
+  // Entra, which creates for the pinned tenant) the list would load and be
+  // silently ignored, so an operator could believe creation is limited.
+  if (domainsRaw !== undefined && (creationRaw !== 'enabled' || entraIssuer)) {
+    bad.add(OPTIONAL_ENV.allowedEmailDomains)
+  }
+  if (creationRaw !== undefined && creationRaw !== 'enabled') bad.add(OPTIONAL_ENV.accountCreation)
+  if (creationRaw !== undefined && entraIssuer) bad.add(OPTIONAL_ENV.accountCreation)
+  if (creationRaw === 'enabled' && allowedEmailDomains.length === 0) {
+    bad.add(OPTIONAL_ENV.accountCreation)
+  }
+
+  if (bad.size > 0) {
+    throw new Error(`Invalid OIDC provider configuration field(s): ${[...bad].sort().join(', ')}`)
+  }
+
+  const accountCreation: OidcAccountCreation = entraIssuer
+    ? 'entra'
+    : creationRaw === 'enabled'
+      ? 'allowed_domains'
+      : 'disabled'
+  return Object.freeze({
+    entraTenantId: entraIssuer ? tenantId : null,
+    requiredRole,
+    allowGuests,
+    newMemberTeamId,
+    accountCreation,
+    allowedEmailDomains: Object.freeze(allowedEmailDomains),
+  })
 }
 
 /**
@@ -141,7 +331,10 @@ export function loadOidcProviderConfiguration(
   generationKey: string
 ): OidcProviderConfiguration | undefined {
   const unknownNames = Object.keys(environment).filter(
-    key => key.startsWith('CONTROL_API_OIDC_') && !OIDC_ENV_NAMES.has(key)
+    key =>
+      key.startsWith('CONTROL_API_OIDC_') &&
+      !OIDC_ENV_NAMES.has(key) &&
+      !OIDC_OPTIONAL_ENV_NAMES.has(key)
   )
   if (unknownNames.length > 0) {
     throw new Error(`Unsupported OIDC configuration field: ${unknownNames.sort().join(', ')}`)
@@ -181,7 +374,7 @@ export function loadOidcProviderConfiguration(
   if (!safeDisplayLabel(input[ENV.displayLabel])) {
     return invalid(ENV.displayLabel, 'must be printable and have no leading or trailing whitespace')
   }
-  validatePublicHttpsUrl(input[ENV.issuer], ENV.issuer, false)
+  const issuerUrl = validatePublicHttpsUrl(input[ENV.issuer], ENV.issuer, false)
   validatePublicHttpsUrl(input[ENV.redirectUri], ENV.redirectUri, true)
   if (
     input[ENV.clientId] !== input[ENV.clientId].trim() ||
@@ -192,6 +385,20 @@ export function loadOidcProviderConfiguration(
       'must be non-empty and contain no whitespace or control characters'
     )
   }
+
+  const switchRaw = environment[OPTIONAL_ENV.memberSignIn]
+  const guardRaw = environment[OPTIONAL_ENV.unreleased]
+  if (switchRaw !== undefined && switchRaw !== 'enabled') {
+    throw new Error(`Invalid OIDC provider configuration field(s): ${OPTIONAL_ENV.memberSignIn}`)
+  }
+  if (
+    (guardRaw !== undefined && guardRaw !== 'acknowledged') ||
+    (switchRaw === 'enabled' && guardRaw === undefined)
+  ) {
+    throw new Error(`Invalid OIDC provider configuration field(s): ${OPTIONAL_ENV.unreleased}`)
+  }
+  const memberEligibility = parseMemberEligibility(environment, issuerUrl)
+
   const generationKeyBytes = deriveOAuthEncryptionKey(generationKey)
 
   const configurationGeneration = computeConfigurationGeneration(
@@ -204,6 +411,7 @@ export function loadOidcProviderConfiguration(
       redirectUri: input[ENV.redirectUri],
       responseMode: input[ENV.responseMode],
       trustGeneration: input[ENV.trustGeneration],
+      memberEligibility,
     },
     clientSecret,
     generationKeyBytes
@@ -226,7 +434,9 @@ export function loadOidcProviderConfiguration(
     ],
     trustGeneration: input[ENV.trustGeneration],
     configurationGeneration,
-    memberAuthenticationActivated: false,
+    memberEligibility,
+    memberSignIn: switchRaw === 'enabled' ? memberEligibility : null,
+    memberAuthenticationActivated: switchRaw === 'enabled',
   })
 }
 

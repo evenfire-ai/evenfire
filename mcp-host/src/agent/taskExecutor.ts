@@ -16,6 +16,22 @@ import { maybeWrapHookedLlmPort } from '../core/adapters/hookedLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../core/adapters/toolRegistryAdapter'
 import {
+  type ApprovalConfigSnapshot,
+  type ApprovalMode,
+  normalizeApprovalMode,
+  readChannelCap,
+  readModeCeiling,
+} from '../core/approval/approvalMode'
+import type { ApprovalModeInputs } from '../core/approval/gateCause'
+import { approvalLogId } from '../core/approval/grantMemory'
+import type { ShellAction } from '../core/approval/shellCard'
+import {
+  type ShellClassifierCaller,
+  classifierServingPair,
+  classifyToolCall,
+  classifierAvailable as isClassifierAvailable,
+} from '../core/approval/shellClassifier'
+import {
   AttachmentReadLedger,
   mergeAttachmentReadLedgerSnapshots,
   readAttachmentReadLedgerSnapshot,
@@ -48,6 +64,7 @@ import { DefaultLoopController } from '../core/orchestration/loopConfig'
 import { NativeToolPresentationController } from '../core/orchestration/nativeToolPresentationController'
 import type { SpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { StubSpilloverResolver } from '../core/orchestration/spilloverResolver'
+import { approvedToolResultTransform } from '../core/orchestration/toolCallPolicy'
 import {
   resolveToolPresentation,
   selectDeferredNatives,
@@ -68,6 +85,7 @@ import {
 import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
   type PreparedGfsFile,
+  type TurnContextFolderTools,
   attachedFilesForTurnContext,
   attachedImagesForTurnContext,
   buildTurnContextBlock,
@@ -145,7 +163,10 @@ import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
 import { clientDrawsMermaid } from './displayCapabilities'
-import { referencedFilesForTurnContext } from './fileReferenceResolver'
+import {
+  referencedFilesForTurnContext,
+  referencedFoldersForTurnContext,
+} from './fileReferenceResolver'
 import {
   gfsManagedWorkspaceExecution,
   gfsStoreCallerIdentity,
@@ -164,6 +185,15 @@ import { sourceMessageForResume } from './sourceMessageForResume'
 import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
 import type { AgentConfig, ExecutorFailoverSupport } from './types'
+
+// The tools that take a referenced folder as `parentResourceId`.
+// clerum__gfs_copy needs gfs.write too, which always registers create_file.
+const FOLDER_WRITE_TOOLS = [
+  'clerum__gfs_create_file',
+  'clerum__gfs_create_folder',
+  GFS_SAVE_ATTACHMENT_TOOL,
+] as const
+const GFS_LIST_TOOL = 'clerum__gfs_list'
 
 export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'failed'
 
@@ -237,6 +267,11 @@ export interface TaskExecutorDeps {
    */
   contextWindowTokens?: number
   approvalConfig: ApprovalConfig | undefined
+  /**
+   * Live approval snapshot. Interactive tasks read tools, the live set, the
+   * ceiling and the channel cap (switch and approver policy) through this.
+   */
+  approvalConfigProvider: () => ApprovalConfigSnapshot
   guardrailsConfig?: GuardrailsConfig
   coreEvents: SimpleEventEmitter
   cronScheduler: CronScheduler | null
@@ -301,6 +336,13 @@ export interface TaskExecutorDeps {
    * so `usage_events` records the pair really served). Absent → no failover.
    */
   failover?: ExecutorFailoverSupport
+
+  /**
+   * Dedicated shell classifier. When it returns a caller, auto judges shell
+   * with that provider instead of the chat or failover pair. Null keeps the
+   * chat pair. The session read must use the same pair.
+   */
+  shellClassifierProvider?: () => ShellClassifierCaller | null
 
   /** Live, service-authenticated checkpoint for v2 runtime effects. */
   actionAuthorityCheckpoint?: RuntimeActionCheckpoint
@@ -692,7 +734,15 @@ export class TaskExecutor {
   /**
    * Resume execution after approval was granted.
    */
-  async resumeAfterApproval(alwaysApprove: boolean, userId?: string): Promise<void> {
+  async resumeAfterApproval(
+    alwaysApprove: boolean,
+    userId?: string,
+    shell?: {
+      shellAction?: ShellAction
+      effectiveMode: ApprovalMode
+      surface: 'desktop' | 'channel'
+    }
+  ): Promise<void> {
     if (this.state !== 'waiting_approval' || !this.conversation) {
       throw new Error(`Cannot resume: executor state is ${this.state}`)
     }
@@ -734,7 +784,7 @@ export class TaskExecutor {
         this.legacyApprovalBudget = false
         return
       }
-      await this.deps.conversationManager.approve(this.conversation, alwaysApprove, userId)
+      await this.deps.conversationManager.approve(this.conversation, alwaysApprove, userId, shell)
       if (approvalBeforeResolution?.tool_call_id) {
         this.approvedToolCorrelation = {
           toolCallId: approvalBeforeResolution.tool_call_id,
@@ -870,11 +920,12 @@ export class TaskExecutor {
         resolvedCompletedResults
       )
       // The frozen request: its messages plus the batch results before this call.
+      // The result gets the same post_tool_use redaction as a call the loop admits.
       const toolResult = await executeSingleTool(
         suspendedCall,
         loopConfig,
         undefined,
-        undefined,
+        approvedToolResultTransform(suspendedCall, loopConfig),
         requestImageUsage(approval.context_snapshot, batchResults)
       )
       collectToolAttachments([toolResult], this.completedAttachments)
@@ -1337,20 +1388,35 @@ export class TaskExecutor {
     // message of the turn. Only the first user message of the turn gets it;
     // `tool` messages keep their content untouched.
     // #666 — the block is also the only carrier of the `attached_file` and
-    // `referenced_file` lines, so a message with file attachments or resolved
-    // file references gets it with the cache off too; the attachment
-    // condition also registers `clerum__attachment_read`.
+    // `referenced_file` and `referenced_folder` lines, so a message with file
+    // attachments or resolved file or location references gets it with the
+    // cache off too; the attachment condition also registers
+    // `clerum__attachment_read`.
     const hasFileAttachments =
       this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
     const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
+    const hasLocationReferences =
+      (this.task.sourceMessage?.locationReferenceResolutions?.length ?? 0) > 0
     const promptAssemblyStart = Date.now()
     const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
     const promptAssemblyMs = Date.now() - promptAssemblyStart
     // The save instruction follows the registry that was actually built, so it
     // appears exactly when the model can call the tool.
     const saveAvailable = loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
-    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences || saveAvailable) {
-      this.prependTurnContextBlock(messages, saveAvailable)
+    // The folder instruction follows the same registry: a Host with gfs.read
+    // and no gfs.write resolves the folder but has no tool that writes into it.
+    const folderTools: TurnContextFolderTools = {
+      write: FOLDER_WRITE_TOOLS.some(name => loopConfig.toolRegistry.get(name) !== null),
+      list: loopConfig.toolRegistry.get(GFS_LIST_TOOL) !== null,
+    }
+    if (
+      appConfig.promptCacheEnabled ||
+      hasFileAttachments ||
+      hasFileReferences ||
+      hasLocationReferences ||
+      saveAvailable
+    ) {
+      this.prependTurnContextBlock(messages, saveAvailable, folderTools)
     }
     if (this.turnTiming) {
       // buildLoopConfig assembles the tool registry (MCP schemas) and the
@@ -1372,7 +1438,11 @@ export class TaskExecutor {
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[], saveAvailable: boolean): void {
+  private prependTurnContextBlock(
+    messages: ChatMessage[],
+    saveAvailable: boolean,
+    folderTools: TurnContextFolderTools
+  ): void {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
@@ -1395,6 +1465,10 @@ export class TaskExecutor {
         referencedFiles: referencedFilesForTurnContext(
           this.task.sourceMessage?.fileReferenceResolutions
         ),
+        referencedFolders: referencedFoldersForTurnContext(
+          this.task.sourceMessage?.locationReferenceResolutions
+        ),
+        folderTools,
         preparedGfsFiles: this.preparedGfsFiles,
       })
       const isCron = this.task.cronJobId !== undefined
@@ -1519,13 +1593,15 @@ export class TaskExecutor {
           // U5 — carry the reason (+ mcpServerName for connect_required)
           // so the desktop distinguishes an OAuth-consent suspension from the
           // default HITL gate. Absent reason → 'approval_required' (back-compat).
+          const wire = pendingApprovalWireFields(result.approval)
           reporter.emitSuspended(
             getDisplayName(result.approval.tool_name),
             result.approval.request_id,
             {
               reason: result.approval.reason ?? 'approval_required',
               mcpServerName: result.approval.mcpServerName,
-              alwaysApproveAllowed: pendingApprovalWireFields(result.approval).alwaysApproveAllowed,
+              alwaysApproveAllowed: wire.alwaysApproveAllowed,
+              shellCard: wire.shellCard,
               toolName: result.approval.tool_name,
               parameters: result.approval.parameters,
             }
@@ -1881,6 +1957,9 @@ export class TaskExecutor {
     loopConfig.guardrails = buildToolLaneGuardrail(this.deps.guardrailsConfig)
     // §6.3: a run with no human to answer an approval must fail safe to deny.
     loopConfig.executionMode = executionModeForSource(this.task.source)
+    if (appConfig.enableApproval && this.task.source !== 'cron') {
+      loopConfig.approvalMode = this.approvalModeInputs(conversation)
+    }
     loopConfig.skipContextManager =
       opts?.skipContextManager ?? this.conversation?.pending_approval !== undefined
     // T1.5 — pass the storage + taskId down so `executeSingleTool` can persist
@@ -2133,10 +2212,11 @@ export class TaskExecutor {
    * - task.source = 'channel'  → source_kind = 'channel', sender + channel_type from sourceMessage
    * - task.source = 'cron'     → source_kind = 'cron', cron_job_id from task.cronJobId
    * - task.source = 'internal' → source_kind = 'desktop'
+   * - any other source         → source_kind = 'unknown'
    * Workflow-recipe LLM calls go through workflowService and are tagged
    * separately at that call site.
    */
-  private buildDefaultUsageContext(): UsageContext | undefined {
+  private buildDefaultUsageContext(): UsageContext {
     const t = this.task
     if (t.source === 'channel') {
       if (t.sourceMessage?.channelType === 'rpc') {
@@ -2352,6 +2432,93 @@ export class TaskExecutor {
     }
   }
 
+  private approvalSnapshot(): ApprovalConfigSnapshot {
+    return this.deps.approvalConfigProvider()
+  }
+
+  /** Live membership for clerum__gfs_download. Undefined means the set is empty. */
+  private liveApprovalTools(gfsWorkspace: unknown): ReadonlySet<string> | undefined {
+    const tools = this.approvalSnapshot().effective?.tools
+    if (
+      !gfsWorkspace ||
+      !appConfig.enableApproval ||
+      this.task.source !== 'channel' ||
+      tools?.shell_exec === false
+    ) {
+      return undefined
+    }
+    return new Set(['clerum__gfs_download'])
+  }
+
+  /**
+   * The model serving this turn. Failover's sticky pair wins; otherwise the
+   * Host primary that this task was built with.
+   */
+  private classifierCaller(): ShellClassifierCaller {
+    const dedicated = this.deps.shellClassifierProvider?.() ?? null
+    if (dedicated) return dedicated
+    const primaryProvider = this.deps.llmProvider.getProviderType()
+    const primaryModel = this.deps.modelName
+    const served = this.deps.failover?.engine.servedBy()
+    const pair = classifierServingPair({ primaryProvider, primaryModel, served })
+    if (!served?.fallback) {
+      return {
+        provider: this.deps.llmProvider,
+        providerType: pair.providerType,
+        modelName: pair.modelName,
+      }
+    }
+    const entry = this.deps.failover!.policy.fallbacks.find(
+      item => item.provider === served.provider
+    )
+    const built = entry
+      ? this.deps.failover!.buildProvider({ ...entry, model: served.model })
+      : null
+    if (!built) {
+      return { provider: this.deps.llmProvider, providerType: 'unknown', modelName: pair.modelName }
+    }
+    return { provider: built, providerType: built.getProviderType(), modelName: pair.modelName }
+  }
+
+  private approvalModeInputs(conversation: Conversation): ApprovalModeInputs {
+    return {
+      storedMode: () => normalizeApprovalMode(conversation.approval_mode),
+      ceiling: () => readModeCeiling(this.approvalSnapshot()),
+      channelCap: () =>
+        readChannelCap(
+          this.approvalSnapshot(),
+          conversation.channel_type ?? undefined,
+          conversation.user_id
+        ),
+      classifierAvailable: args => {
+        const caller = this.classifierCaller()
+        return isClassifierAvailable(caller.providerType, caller.modelName, args)
+      },
+      classify: (call, description) => {
+        const caller = this.classifierCaller()
+        // `setUsageReporter` sets the reporter and the static context
+        // together. Without both, usage reporting is not wired, and the call
+        // reports nothing rather than billing a placeholder Host.
+        const reporter = this.deps.usageReporter
+        const staticContext = this.deps.usageStaticContext
+        return classifyToolCall({
+          toolName: call.name,
+          description,
+          args: call.arguments,
+          provider: caller.provider,
+          providerType: caller.providerType,
+          modelName: caller.modelName,
+          taskSignal: this.abortController.signal,
+          usage:
+            reporter && staticContext
+              ? { reporter, context: this.buildDefaultUsageContext(), staticContext }
+              : undefined,
+          sessionLogId: approvalLogId(conversation.id),
+        })
+      },
+    }
+  }
+
   private async createToolRegistry(): Promise<TaskToolRegistry> {
     const workflowCallerContext =
       this.workflowCallerContextOverride === undefined
@@ -2470,7 +2637,9 @@ export class TaskExecutor {
     const approvalGate = approvalApplies
       ? new UnifiedApprovalGateController(
           compositeRegistry,
-          this.deps.approvalConfig,
+          interactiveApprovalApplies
+            ? () => this.approvalSnapshot().effective
+            : this.deps.approvalConfig,
           nativeRegistry,
           // Cron×stateless: forces HITL approval for cron_manage create/enable on
           // stateless hosts regardless of the per-tool approval override.
@@ -2482,20 +2651,23 @@ export class TaskExecutor {
           }
         )
       : null
+    const liveApprovalTools = interactiveApprovalApplies
+      ? () => this.liveApprovalTools(gfsWorkspace)
+      : gfsWorkspace &&
+          appConfig.enableApproval &&
+          this.task.source === 'channel' &&
+          this.deps.approvalConfig?.tools?.shell_exec !== false
+        ? new Set(['clerum__gfs_download'])
+        : undefined
     const innerController = approvalGate
       ? new ApprovalController(this.conversation!, approvalGate, {
           honorDenials: !cronManageGateApplies,
           toolRegistry: compositeRegistry,
-          liveApprovalTools:
-            gfsWorkspace &&
-            appConfig.enableApproval &&
-            this.task.source === 'channel' &&
-            this.deps.approvalConfig?.tools?.shell_exec !== false
-              ? new Set(['clerum__gfs_download'])
-              : undefined,
+          liveApprovalTools,
           // The same gate's forced approvals (stateless cron create/enable) run
           // before any stored approval, so none of them can cover such a call.
           forcedApprovalGate: approvalGate,
+          modeAware: interactiveApprovalApplies,
         })
       : new DefaultLoopController()
 

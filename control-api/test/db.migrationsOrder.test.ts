@@ -97,7 +97,6 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + task106.length)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
-    expect(versions.at(-1)).toBe(task106.at(-1))
     // Dev's GFS watch migrations follow its catalog-prune pair, its OIDC
     // migrations follow the watch triggers, and PR2 follows dev's last OIDC
     // migration.
@@ -117,6 +116,9 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       ...watchTriggers,
       ...oidc,
       ...PR2_MIGRATION_VERSIONS,
+      '0157_governed_trace_retention_indexed',
+      '0158_governed_trace_retention_hardening',
+      '0159_oidc_member_links',
     ])
   })
 

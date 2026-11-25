@@ -194,7 +194,7 @@ describe('#666 R4-M2 — source message resume round-trip', () => {
 
     handle = makeSqliteStore()
     const manager = new ConversationManager(handle.store)
-    const conv = await manager.getOrCreate(SESSION_KEY)
+    const conv = await manager.getOrCreate(SESSION_KEY, { channelType: 'rpc' })
     await manager.startTurn(conv, 'read the notes', 'task-cold')
     const incoming = {
       content: 'read the notes',

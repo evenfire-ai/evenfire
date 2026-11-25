@@ -11,7 +11,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import { parseFileReferenceV1, parseLocationReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { AppService } from './appService.js'
 import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
@@ -392,23 +392,49 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   if (parsed.attachments != null) {
     parsed.attachments = parseHostMessageAttachments(parsed.attachments)
   }
-  if (parsed.fileReferences !== undefined) {
-    // Checks shape only; mcp-host enforces the count limit and resolves each reference.
-    if (!Array.isArray(parsed.fileReferences)) {
-      throw new Error('Invalid host message request: fileReferences')
-    }
-    const fileReferences = parsed.fileReferences.map((entry, index) => {
-      const result = parseFileReferenceV1(entry)
-      if (!result.ok) {
-        throw new Error(
-          `Invalid host message request: fileReferences[${index}] ${result.code}: ${result.message}`
-        )
-      }
-      return result.value
-    })
-    return { ...parsed, fileReferences }
+  if (
+    parsed.approvalMode !== undefined &&
+    parsed.approvalMode !== 'manual' &&
+    parsed.approvalMode !== 'auto' &&
+    parsed.approvalMode !== 'allow_all'
+  ) {
+    throw new Error('Invalid host message request: approvalMode')
   }
-  return parsed
+  // Both reference lists are checked for shape only; mcp-host enforces the count
+  // limits and resolves each reference.
+  const fileReferences = parseReferenceList(
+    parsed.fileReferences,
+    'fileReferences',
+    parseFileReferenceV1
+  )
+  const locationReferences = parseReferenceList(
+    parsed.locationReferences,
+    'locationReferences',
+    parseLocationReferenceV1
+  )
+  return {
+    ...parsed,
+    ...(fileReferences === undefined ? {} : { fileReferences }),
+    ...(locationReferences === undefined ? {} : { locationReferences }),
+  }
+}
+
+function parseReferenceList<T>(
+  value: unknown,
+  field: string,
+  parse: (entry: unknown) => { ok: true; value: T } | { ok: false; code: string; message: string }
+): T[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new Error(`Invalid host message request: ${field}`)
+  return value.map((entry, index) => {
+    const result = parse(entry)
+    if (!result.ok) {
+      throw new Error(
+        `Invalid host message request: ${field}[${index}] ${result.code}: ${result.message}`
+      )
+    }
+    return result.value
+  })
 }
 
 export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {
@@ -1686,7 +1712,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
 
   ipcMain.handle(
     'rpc:approveToolCall',
-    async (event, { hostRef, taskId, toolCallId, hostRefs, teamId, alwaysApprove }) => {
+    async (
+      event,
+      { hostRef, taskId, toolCallId, hostRefs, teamId, alwaysApprove, shellAction }
+    ) => {
       assertTrustedSender(event)
       const targetHostRef = sanitizeString(hostRef)
       const targetTaskId = sanitizeString(taskId)
@@ -1694,6 +1723,14 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       const targetHostRefs = Array.isArray(hostRefs)
         ? hostRefs.map(v => String(v).trim()).filter(Boolean)
         : undefined
+      if (
+        shellAction !== undefined &&
+        shellAction !== 'once' &&
+        shellAction !== 'command' &&
+        shellAction !== 'shell'
+      ) {
+        throw new Error('shellAction must be once, command, or shell')
+      }
       return service.approveToolCall(
         targetHostRef,
         targetTaskId,
@@ -1702,6 +1739,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
         {
           teamId: sanitizeString(teamId) || undefined,
           alwaysApprove: alwaysApprove === true,
+          ...(shellAction ? { shellAction } : {}),
         }
       )
     }
@@ -1928,6 +1966,34 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
       assertSafeRouteSegment('chatId', chatId)
       return service.renameSession(hostRef, agent, chatId, title)
+    }
+  )
+
+  // Session approval mode. Same route-segment checks as rename, and the same
+  // refusal of a renderer-supplied hostRefs fleet. The mode itself is one of
+  // the three stored values; anything else is rejected before a token is minted.
+  ipcMain.handle(
+    'rpc:setApprovalMode',
+    async (event, payload: { hostRef: string; agent: string; chatId: string; mode: string }) => {
+      assertTrustedSender(event)
+      const hostRef = sanitizeString(payload?.hostRef)
+      const agent = sanitizeString(payload?.agent)
+      const chatId = sanitizeString(payload?.chatId)
+      const requestedMode = sanitizeString(payload?.mode)
+      const mode =
+        requestedMode === 'manual' || requestedMode === 'auto' || requestedMode === 'allow_all'
+          ? requestedMode
+          : undefined
+      if (!hostRef || !agent || !chatId) {
+        throw new Error('hostRef, agent, and chatId are required')
+      }
+      if (!mode) {
+        throw new Error('mode must be manual, auto, or allow_all')
+      }
+      assertSafeRouteSegment('hostRef', hostRef)
+      assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+      assertSafeRouteSegment('chatId', chatId)
+      return service.setApprovalMode(hostRef, agent, chatId, mode)
     }
   )
 
