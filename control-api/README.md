@@ -313,8 +313,9 @@ Settings:
   accounts, with one exception: a sign-in started from a pending member
   invitation link creates the account that invitation was sent to, when the
   verified email matches the invited address. The required claim still
-  applies, and that account joins only the invitation's teams. The setting is
-  refused for Entra ID, which always creates accounts for the pinned tenant.
+  applies, and that account joins only the teams of the person's pending
+  invitations. The setting is refused for Entra ID, which always creates
+  accounts for the pinned tenant.
 - `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID`: a team UUID that each account the
   sign-in creates joins as a `member`. It is not applied to an account an
   invitation link creates while account creation is off.
