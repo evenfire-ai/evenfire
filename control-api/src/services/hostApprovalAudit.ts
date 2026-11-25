@@ -13,7 +13,7 @@ import { approvalBlocksEqual } from './hostApprovalRules.js'
 
 /** A per-tool override map may be large; the line lists at most this many changed tools. */
 export const MAX_TOOL_KEYS = 50
-/** Strings (values and keys) are cut to this many characters. */
+/** Other strings (values and field keys) are cut to this many characters. */
 export const MAX_VALUE_LENGTH = 128
 
 type Leaf = string | number | boolean | null
@@ -45,11 +45,6 @@ function toLeaf(value: unknown): Leaf {
   if (typeof value === 'string') return cut(value)
   if (typeof value === 'number' || typeof value === 'boolean') return value
   return cut(JSON.stringify(value) ?? String(value))
-}
-
-function approvalOf(host: Record<string, unknown> | undefined): unknown {
-  const spec = host?.spec
-  return isRecord(spec) ? spec.approval : undefined
 }
 
 type Walk = {
@@ -90,15 +85,17 @@ function countDifference(from: unknown[], to: unknown[]): number {
 }
 
 /**
- * The field-by-field difference between two Hosts' `spec.approval`, or `null`
- * when they are equal. `before` is undefined on create. Pure: the caller logs.
+ * The field-by-field difference between two `spec.approval` blocks, or `null`
+ * when they are equal. `before` and `after` are the blocks themselves,
+ * `undefined` when absent (`before` is undefined on create). Pure: the caller
+ * logs.
  */
 export function buildHostApprovalChange(input: {
   before: Record<string, unknown> | undefined
   after: Record<string, unknown> | undefined
 }): HostApprovalChange | null {
-  const beforeApproval = approvalOf(input.before)
-  const afterApproval = approvalOf(input.after)
+  const beforeApproval = input.before
+  const afterApproval = input.after
   if (approvalBlocksEqual(beforeApproval, afterApproval)) return null
 
   const before = flatten(beforeApproval)

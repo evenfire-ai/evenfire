@@ -157,11 +157,16 @@ function auditHostApprovalChange(input: {
 }): void {
   if (!isHostResource(input.plural)) return
   try {
-    const asRecord = (value: unknown): Record<string, unknown> | undefined =>
-      typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
+    const approvalOf = (host: unknown): Record<string, unknown> | undefined => {
+      const spec = (host as { spec?: { approval?: unknown } } | undefined)?.spec
+      const approval = spec?.approval
+      return typeof approval === 'object' && approval !== null
+        ? (approval as Record<string, unknown>)
+        : undefined
+    }
     const change = buildHostApprovalChange({
-      before: asRecord(input.before),
-      after: asRecord(input.after),
+      before: approvalOf(input.before),
+      after: approvalOf(input.after),
     })
     if (!change) return
     logHostApprovalChange({
