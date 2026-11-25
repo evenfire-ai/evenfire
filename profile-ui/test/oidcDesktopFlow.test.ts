@@ -28,7 +28,11 @@ import {
 import { GET } from '../app/api/oidc/callback/route'
 import { POST as desktopStart } from '../app/api/oidc/desktop-start/route'
 import { POST as plainStart } from '../app/api/oidc/start/route'
-import { DESKTOP_SIGN_IN_COPY, OIDC_REFUSAL_MESSAGES } from '../app/constants/oidc'
+import {
+  DESKTOP_SIGN_IN_COPY,
+  OIDC_REFUSAL_MESSAGES,
+  OIDC_SIGNED_IN_MARKER_COOKIE,
+} from '../app/constants/oidc'
 import { PROFILE_ROUTES } from '../app/constants/routes'
 import { buildEvenfireDesktopAppContentSecurityPolicy } from '../lib/desktopAppLinks'
 import { edgeRecord, edgeResponse, edgeSetCookies } from './edgeFixtures'
@@ -48,10 +52,15 @@ const EDGE_INVITATION_EMAIL_MISMATCH =
   'POST /api/v1/oidc/profile-flow/complete refused-invitation-email-mismatch'
 const EDGE_RATE_LIMITED = 'POST /api/v1/oidc/profile-flow/complete rate-limited'
 const EDGE_STORAGE_UNAVAILABLE = 'POST /api/v1/oidc/profile-flow/complete storage-unavailable'
+const EDGE_REFUSED = 'POST /api/v1/oidc/profile-flow/complete refused'
+const EDGE_IDENTITY_PROOF_VERIFIED =
+  'POST /api/v1/oidc/profile-flow/complete identity-proof-verified'
+const EDGE_CANCELLED = 'POST /api/v1/oidc/profile-flow/cancel cancelled'
 
 const CONFIGURATION_PATH = '/api/v1/oidc/profile-flow/configuration'
 const ATTEMPTS_PATH = '/api/v1/oidc/profile-flow/attempts'
 const COMPLETE_PATH = '/api/v1/oidc/profile-flow/complete'
+const CANCEL_PATH = '/api/v1/oidc/profile-flow/cancel'
 
 const TERMINAL_TEXT = 'This sign-in attempt cannot be reused. Start a new sign-in attempt.'
 const INVALID_TEXT = 'Identity proof could not be verified.'
@@ -80,7 +89,9 @@ type EdgeAnswer = string | (() => Response)
  * answer gets a 404 that no test expects.
  */
 async function withEdge(
-  answers: Readonly<Partial<Record<'configuration' | 'attempts' | 'complete', EdgeAnswer>>>,
+  answers: Readonly<
+    Partial<Record<'configuration' | 'attempts' | 'complete' | 'cancel', EdgeAnswer>>
+  >,
   run: (calls: UpstreamCall[]) => Promise<void>
 ): Promise<void> {
   const original = globalThis.fetch
@@ -835,4 +846,554 @@ test('starts a provider round trip even with a Profile session cookie present', 
       assert.equal(headersRead.includes('cookie'), false)
     }
   )
+})
+
+// /api/oidc/callback for a Desktop attempt. The provider's callback state names the binding
+// cookie; the cookie's value carries the Desktop marker, the binding and the state Evenfire
+// Desktop chose.
+const desktopCookie = `${browserCookieName(edgeState)}=${desktopBindingCookieValue(BINDING, DESKTOP_STATE)}`
+const bindingClear = clearCookie(browserCookieName(edgeState))
+const SIGNED_IN_MARKER_PREFIX = `${OIDC_SIGNED_IN_MARKER_COOKIE}=`
+const FAILED_LINK = buildDesktopLoginErrorLink({ state: DESKTOP_STATE, error: 'failed' })
+const SUCCESS_SEARCH = `state=${edgeState}&code=provider-code`
+const DENIED_SEARCH = `state=${edgeState}&error=access_denied`
+const PROVIDER_RETRY_TEXT = 'The identity provider is temporarily unavailable. Retry this attempt.'
+
+/** The copy as the handoff page writes it, with its apostrophes escaped. */
+function pageCopy(message: string): string {
+  return `<p class="body-copy">${message.replaceAll("'", '&#39;')}</p>`
+}
+
+function occurrences(text: string, part: string): number {
+  return text.split(part).length - 1
+}
+
+/**
+ * A Desktop handoff page: HTML, no-store and no-referrer, no redirect, exactly `cookies` (never a
+ * Profile session or the signed-in marker), the escaped `message`, no anchor, and one link, the
+ * one its script fires. Returns the body.
+ */
+async function assertDesktopPage(
+  response: Response,
+  expected: Readonly<{
+    link: string
+    message: string
+    status: number
+    cookies: readonly string[]
+  }>,
+  label: string
+): Promise<string> {
+  const body = await response.text()
+  const cookies = response.headers.getSetCookie()
+  assert.equal(response.status, expected.status, label)
+  assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8', label)
+  assert.equal(response.headers.get('cache-control'), 'no-store', label)
+  assert.equal(response.headers.get('referrer-policy'), 'no-referrer', label)
+  assert.equal(response.headers.get('location'), null, label)
+  assert.deepEqual(cookies, expected.cookies, label)
+  for (const cookie of cookies) {
+    assert.equal(cookie.startsWith(PROFILE_SESSION_COOKIE_PREFIX), false, label)
+    assert.equal(cookie.startsWith(SIGNED_IN_MARKER_PREFIX), false, label)
+  }
+  assert.equal(occurrences(body, 'evenfire://'), 1, label)
+  assert.equal(scriptLink(body), expected.link, label)
+  assert.equal(body.includes('<a'), false, label)
+  assert.ok(body.includes(pageCopy(expected.message)), label)
+  return body
+}
+
+/** Today's plain-text answer: no page, no link, no redirect, and exactly `cookies`. */
+async function assertNoLink(
+  response: Response,
+  expected: Readonly<{
+    text: string
+    status: number
+    cookies: readonly string[]
+    retryAfter?: string
+  }>,
+  label: string
+): Promise<void> {
+  assert.equal(response.status, expected.status, label)
+  assert.equal(await response.text(), expected.text, label)
+  assert.equal(response.headers.get('content-type'), 'text/plain; charset=utf-8', label)
+  assert.equal(response.headers.get('location'), null, label)
+  assert.equal(response.headers.get('retry-after'), expected.retryAfter ?? null, label)
+  assert.deepEqual(response.headers.getSetCookie(), expected.cookies, label)
+}
+
+test('serves the handoff page for a Desktop attempt answered desktop_code_issued', async () => {
+  const { code, environment } = edgeRecord(EDGE_DESKTOP_CODE_ISSUED).body as {
+    code: string
+    environment: string
+  }
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, complete: EDGE_DESKTOP_CODE_ISSUED },
+    async calls => {
+      const response = await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie]))
+      const csp = response.headers.get('content-security-policy') ?? ''
+      const body = await assertDesktopPage(
+        response,
+        {
+          link: buildDesktopLoginCodeLink({ state: DESKTOP_STATE, code, environment }),
+          message: DESKTOP_SIGN_IN_COPY.handoffMessage,
+          status: 200,
+          cookies: [bindingClear],
+        },
+        'desktop_code_issued'
+      )
+      const nonce = body.match(/<script nonce="([^"]+)">/)?.[1] ?? ''
+
+      assert.ok(nonce, 'expected a script nonce')
+      assert.equal(csp, buildEvenfireDesktopAppContentSecurityPolicy(nonce))
+      assert.match(csp, /frame-ancestors 'none'/)
+      assert.ok(
+        body.includes(
+          `evenfire://desktop-login?state=${DESKTOP_STATE}&code=${code}` +
+            `&environment=${encodeURIComponent(environment)}`
+        )
+      )
+      assert.equal(occurrences(body, code), 1)
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, COMPLETE_PATH]
+      )
+    }
+  )
+})
+
+for (const [label, record] of [
+  ['complete member-signed-in', EDGE_MEMBER_SIGNED_IN],
+  ['complete identity-proof-verified', EDGE_IDENTITY_PROOF_VERIFIED],
+] as const) {
+  test(`refuses ${label} for a Desktop attempt with no Profile cookie and fires failed`, async () => {
+    await withEdge({ configuration: EDGE_CONFIGURATION, complete: record }, async calls => {
+      const response = await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie]))
+      const body = await assertDesktopPage(
+        response,
+        {
+          link: FAILED_LINK,
+          message: DESKTOP_SIGN_IN_COPY.failed,
+          status: 503,
+          cookies: [bindingClear],
+        },
+        label
+      )
+      assert.ok(
+        body.includes(`evenfire://desktop-login?state=${DESKTOP_STATE}&error=failed`),
+        label
+      )
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, COMPLETE_PATH],
+        label
+      )
+    })
+  })
+}
+
+test('a plain attempt answered complete member-signed-in gets the 303 and the Profile cookie', async () => {
+  const [sessionCookie] = edgeSetCookies(EDGE_MEMBER_SIGNED_IN)
+  assert.ok(sessionCookie?.startsWith(PROFILE_SESSION_COOKIE_PREFIX))
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, complete: EDGE_MEMBER_SIGNED_IN },
+    async calls => {
+      const response = await GET(callbackRequest(SUCCESS_SEARCH, [bindingCookie]))
+      const cookies = response.headers.getSetCookie()
+      assert.equal(response.status, 303)
+      assert.equal(response.headers.get('location'), PROFILE_ROUTES.oidcSignedIn)
+      assert.equal(cookies.length, 3)
+      assert.equal(cookies[0], sessionCookie)
+      assert.equal(cookies[1], bindingClear)
+      assert.ok(cookies[2]?.startsWith(SIGNED_IN_MARKER_PREFIX))
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, COMPLETE_PATH]
+      )
+    }
+  )
+})
+
+test('fires refused with the reason', async () => {
+  const { reason } = edgeRecord(EDGE_REFUSED).body as {
+    reason: keyof typeof OIDC_REFUSAL_MESSAGES
+  }
+  // The recorded reason's copy has an apostrophe, so the page's escaping is exercised.
+  assert.ok(OIDC_REFUSAL_MESSAGES[reason].includes("'"))
+  await withEdge({ configuration: EDGE_CONFIGURATION, complete: EDGE_REFUSED }, async calls => {
+    const response = await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie]))
+    const body = await assertDesktopPage(
+      response,
+      {
+        link: buildDesktopLoginErrorLink({ state: DESKTOP_STATE, error: 'refused', reason }),
+        message: OIDC_REFUSAL_MESSAGES[reason],
+        status: 403,
+        cookies: [bindingClear],
+      },
+      'complete refused'
+    )
+    assert.ok(
+      body.includes(
+        `evenfire://desktop-login?state=${DESKTOP_STATE}&error=refused&reason=${reason}`
+      )
+    )
+    assert.deepEqual(
+      calls.map(call => call.path),
+      [CONFIGURATION_PATH, COMPLETE_PATH]
+    )
+  })
+})
+
+test('fires failed for a refusal reason the Desktop link does not carry', async () => {
+  const { reason } = edgeRecord(EDGE_INVITATION_EMAIL_MISMATCH).body as {
+    reason: keyof typeof OIDC_REFUSAL_MESSAGES
+  }
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, complete: EDGE_INVITATION_EMAIL_MISMATCH },
+    async () => {
+      const response = await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie]))
+      const body = await assertDesktopPage(
+        response,
+        {
+          link: FAILED_LINK,
+          message: OIDC_REFUSAL_MESSAGES[reason],
+          status: 403,
+          cookies: [bindingClear],
+        },
+        'complete refused-invitation-email-mismatch'
+      )
+      assert.deepEqual(parseDesktopLoginLink(scriptLink(body)), {
+        kind: 'error',
+        state: DESKTOP_STATE,
+        error: 'failed',
+      })
+      assert.equal(body.includes(reason), false)
+    }
+  )
+})
+
+test('fires cancelled once the denial is confirmed', async () => {
+  await withEdge({ configuration: EDGE_CONFIGURATION, cancel: EDGE_CANCELLED }, async calls => {
+    const response = await GET(callbackRequest(DENIED_SEARCH, [desktopCookie]))
+    await assertDesktopPage(
+      response,
+      {
+        link: buildDesktopLoginErrorLink({ state: DESKTOP_STATE, error: 'cancelled' }),
+        message: DESKTOP_SIGN_IN_COPY.cancelled,
+        status: 400,
+        cookies: [bindingClear],
+      },
+      'cancel cancelled'
+    )
+    assert.deepEqual(
+      calls.map(call => call.path),
+      [CONFIGURATION_PATH, CANCEL_PATH]
+    )
+  })
+})
+
+test('answers a retryable cancel error with text and a terminal one with failed', async () => {
+  // Derived: `complete rate-limited` and `complete storage-unavailable` replayed for /cancel. The
+  // edge's per-client limiter covers every /oidc/profile-flow route, and /cancel forwards
+  // control-api's failures through the same forwardFailure as /complete
+  // (external-rest-api/src/routes/oidcProfileFlow.ts).
+  await withEdge({ configuration: EDGE_CONFIGURATION, cancel: EDGE_RATE_LIMITED }, async calls => {
+    await assertNoLink(
+      await GET(callbackRequest(DENIED_SEARCH, [desktopCookie])),
+      {
+        text: 'The cancellation could not be confirmed. Retry this attempt.',
+        status: 429,
+        cookies: [],
+        retryAfter: '60',
+      },
+      'a rate-limited cancel'
+    )
+    assert.deepEqual(
+      calls.map(call => call.path),
+      [CONFIGURATION_PATH, CANCEL_PATH]
+    )
+  })
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, cancel: EDGE_STORAGE_UNAVAILABLE },
+    async calls => {
+      await assertDesktopPage(
+        await GET(callbackRequest(DENIED_SEARCH, [desktopCookie])),
+        {
+          link: FAILED_LINK,
+          message: DESKTOP_SIGN_IN_COPY.failed,
+          status: 503,
+          cookies: [bindingClear],
+        },
+        'a terminal cancel'
+      )
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, CANCEL_PATH]
+      )
+    }
+  )
+})
+
+test('fires failed for a terminal storage 503 and nothing for a retryable 429', async () => {
+  const { retrySameAttempt } = edgeRecord(EDGE_STORAGE_UNAVAILABLE).body as {
+    retrySameAttempt: unknown
+  }
+  assert.equal(retrySameAttempt, false)
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, complete: EDGE_STORAGE_UNAVAILABLE },
+    async calls => {
+      await assertDesktopPage(
+        await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie])),
+        {
+          link: FAILED_LINK,
+          message: DESKTOP_SIGN_IN_COPY.failed,
+          status: 503,
+          cookies: [bindingClear],
+        },
+        'complete storage-unavailable'
+      )
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, COMPLETE_PATH]
+      )
+    }
+  )
+  await withEdge(
+    { configuration: EDGE_CONFIGURATION, complete: EDGE_RATE_LIMITED },
+    async calls => {
+      await assertNoLink(
+        await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie])),
+        {
+          text: 'Too many sign-in attempts. Retry this attempt later.',
+          status: 429,
+          cookies: [],
+          retryAfter: '60',
+        },
+        'complete rate-limited'
+      )
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, COMPLETE_PATH]
+      )
+    }
+  )
+})
+
+test('keys failed on retrySameAttempt false, not on the error code', async () => {
+  // Derived variant of `complete storage-unavailable` without retrySameAttempt. control-api also
+  // sends oidc_storage_unavailable without the flag, and that answer leaves the attempt retryable.
+  const retryable = { ...(edgeRecord(EDGE_STORAGE_UNAVAILABLE).body as Record<string, unknown>) }
+  delete retryable.retrySameAttempt
+  await withEdge(
+    {
+      configuration: EDGE_CONFIGURATION,
+      complete: () => edgeVariant(EDGE_STORAGE_UNAVAILABLE, retryable),
+    },
+    async calls => {
+      await assertNoLink(
+        await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie])),
+        { text: PROVIDER_RETRY_TEXT, status: 503, cookies: [] },
+        'oidc_storage_unavailable without retrySameAttempt'
+      )
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH, COMPLETE_PATH]
+      )
+    }
+  )
+})
+
+test('fires failed for an unknown provider error on a Desktop attempt', async () => {
+  for (const search of [
+    `state=${edgeState}&error=login_required`,
+    `state=${edgeState}&error=interaction_required&error_description=ignored`,
+  ]) {
+    await withEdge({ configuration: EDGE_CONFIGURATION }, async calls => {
+      await assertDesktopPage(
+        await GET(callbackRequest(search, [desktopCookie])),
+        {
+          link: FAILED_LINK,
+          message: DESKTOP_SIGN_IN_COPY.failed,
+          status: 400,
+          cookies: [bindingClear],
+        },
+        search
+      )
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH],
+        search
+      )
+    })
+  }
+})
+
+test('fires no link for a retryable provider error on a Desktop attempt', async () => {
+  for (const error of ['server_error', 'temporarily_unavailable']) {
+    await withEdge({ configuration: EDGE_CONFIGURATION }, async calls => {
+      await assertNoLink(
+        await GET(callbackRequest(`state=${edgeState}&error=${error}`, [desktopCookie])),
+        { text: PROVIDER_RETRY_TEXT, status: 503, cookies: [] },
+        error
+      )
+      assert.deepEqual(
+        calls.map(call => call.path),
+        [CONFIGURATION_PATH],
+        error
+      )
+    })
+  }
+})
+
+test('fires no link when the Desktop cookie is missing', async () => {
+  const name = browserCookieName(edgeState)
+  for (const [label, cookies] of [
+    ['no cookie', []],
+    ['a 42-character state', [`${name}=desktop.${BINDING}.${DESKTOP_STATE.slice(1)}`]],
+    ['the Desktop cookie twice', [desktopCookie, desktopCookie]],
+    ['a plain and a Desktop cookie', [bindingCookie, desktopCookie]],
+  ] as const) {
+    for (const search of [
+      SUCCESS_SEARCH,
+      DENIED_SEARCH,
+      `state=${edgeState}&error=login_required`,
+    ]) {
+      await withEdge(
+        {
+          configuration: EDGE_CONFIGURATION,
+          complete: EDGE_DESKTOP_CODE_ISSUED,
+          cancel: EDGE_CANCELLED,
+        },
+        async calls => {
+          await assertNoLink(
+            await GET(callbackRequest(search, cookies)),
+            { text: INVALID_TEXT, status: 400, cookies: [] },
+            `${label}: ${search}`
+          )
+          assert.deepEqual(
+            calls.map(call => call.path),
+            [CONFIGURATION_PATH],
+            `${label}: ${search}`
+          )
+        }
+      )
+    }
+  }
+})
+
+test('sends exactly the cookie binding to /complete and /cancel, and never the state', async () => {
+  const cookieBinding = DESKTOP_BINDING_COOKIE_RE.exec(
+    desktopCookie.slice(desktopCookie.indexOf('=') + 1)
+  )?.[1]
+  assert.equal(cookieBinding, BINDING)
+  await withEdge(
+    {
+      configuration: EDGE_CONFIGURATION,
+      complete: EDGE_DESKTOP_CODE_ISSUED,
+      cancel: EDGE_CANCELLED,
+    },
+    async calls => {
+      assert.equal((await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie]))).status, 200)
+      assert.equal((await GET(callbackRequest(DENIED_SEARCH, [desktopCookie]))).status, 400)
+      const complete = calls.find(call => call.path === COMPLETE_PATH)?.body
+      const cancel = calls.find(call => call.path === CANCEL_PATH)?.body
+
+      assert.deepEqual(complete, {
+        state: edgeState,
+        code: 'provider-code',
+        browserBinding: cookieBinding,
+      })
+      assert.deepEqual(cancel, { state: edgeState, browserBinding: cookieBinding })
+      for (const body of [complete, cancel]) {
+        const sent = JSON.stringify(body)
+        assert.match((body as { browserBinding: string }).browserBinding, /^[A-Za-z0-9_-]{43}$/)
+        assert.equal(sent.includes(DESKTOP_STATE), false)
+        assert.equal(sent.includes('desktop.'), false)
+      }
+    }
+  )
+})
+
+test("fires failed when the edge's environment cannot make a code link", async () => {
+  const recorded = edgeRecord(EDGE_DESKTOP_CODE_ISSUED).body as Record<string, unknown> & {
+    code: string
+  }
+  // Derived variants of `complete desktop-code-issued` with a bad environment. Profile UI checks
+  // the environment only as a string; buildDesktopLoginCodeLink refuses a value that is not a
+  // URL or whose scheme is not http or https.
+  for (const [label, environment] of [
+    ['an environment that is not a URL', 'not a url'],
+    ['an ftp environment', 'ftp://edge-fixture.example.test'],
+  ] as const) {
+    await withEdge(
+      {
+        configuration: EDGE_CONFIGURATION,
+        complete: () => edgeVariant(EDGE_DESKTOP_CODE_ISSUED, { ...recorded, environment }),
+      },
+      async calls => {
+        const body = await assertDesktopPage(
+          await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie])),
+          {
+            link: FAILED_LINK,
+            message: DESKTOP_SIGN_IN_COPY.failed,
+            status: 503,
+            cookies: [bindingClear],
+          },
+          label
+        )
+        assert.equal(body.includes(recorded.code), false, label)
+        assert.deepEqual(
+          calls.map(call => call.path),
+          [CONFIGURATION_PATH, COMPLETE_PATH],
+          label
+        )
+      }
+    )
+  }
+})
+
+test('no Desktop page sets or carries profile_session or the signed-in marker', async () => {
+  // The browser already holds a Profile session, as External REST sets it, and a marker.
+  const [sessionSetCookie = ''] = edgeSetCookies(EDGE_MEMBER_SIGNED_IN)
+  const sessionCookie = sessionSetCookie.slice(0, sessionSetCookie.indexOf(';'))
+  const sessionValue = sessionCookie.slice(PROFILE_SESSION_COOKIE_PREFIX.length)
+  assert.ok(sessionCookie.startsWith(PROFILE_SESSION_COOKIE_PREFIX) && sessionValue)
+  const cookies = [sessionCookie, `${OIDC_SIGNED_IN_MARKER_COOKIE}=1`, desktopCookie]
+  for (const [label, search, answers] of [
+    ['desktop_code_issued', SUCCESS_SEARCH, { complete: EDGE_DESKTOP_CODE_ISSUED }],
+    ['refused', SUCCESS_SEARCH, { complete: EDGE_REFUSED }],
+    ['member_signed_in', SUCCESS_SEARCH, { complete: EDGE_MEMBER_SIGNED_IN }],
+    ['identity_proof_verified', SUCCESS_SEARCH, { complete: EDGE_IDENTITY_PROOF_VERIFIED }],
+    ['a terminal storage 503', SUCCESS_SEARCH, { complete: EDGE_STORAGE_UNAVAILABLE }],
+    ['cancelled', DENIED_SEARCH, { cancel: EDGE_CANCELLED }],
+    ['an unknown provider error', `state=${edgeState}&error=login_required`, {}],
+  ] as const) {
+    await withEdge({ configuration: EDGE_CONFIGURATION, ...answers }, async calls => {
+      const response = await GET(callbackRequest(search, cookies))
+      const body = await response.text()
+      assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8', label)
+      assert.deepEqual(response.headers.getSetCookie(), [bindingClear], label)
+      assert.equal(occurrences(body, 'evenfire://desktop-login?'), 1, label)
+      assert.equal(body.includes(sessionValue), false, label)
+      for (const call of calls) {
+        assert.equal(JSON.stringify(call.body ?? null).includes(sessionValue), false, label)
+      }
+    })
+  }
+})
+
+test('a Desktop terminal page also clears a return cookie under its state', async () => {
+  for (const [label, complete] of [
+    ['complete desktop-code-issued', EDGE_DESKTOP_CODE_ISSUED],
+    ['complete storage-unavailable', EDGE_STORAGE_UNAVAILABLE],
+  ] as const) {
+    await withEdge({ configuration: EDGE_CONFIGURATION, complete }, async () => {
+      const response = await GET(callbackRequest(SUCCESS_SEARCH, [desktopCookie, returnCookie]))
+      assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8', label)
+      assert.deepEqual(
+        response.headers.getSetCookie(),
+        [bindingClear, clearCookie(returnToCookieName(edgeState))],
+        label
+      )
+    })
+  }
 })
