@@ -36,6 +36,8 @@ const STAMPED_EXPIRES_AT = new Date(RECORDED_AT.getTime() + 600_000).toISOString
 
 /** Redeems per minute for one client: the 61st in one window is refused. */
 const REDEEM_PER_CLIENT_LIMIT = 60
+/** /oidc/profile-flow requests per minute for one client: the 61st in one window is refused. */
+const PROFILE_FLOW_PER_CLIENT_LIMIT = 60
 
 type EdgeClient = ReturnType<typeof request>
 type EdgeCookie = Readonly<{ name: string; value: string; attributes: string[] }>
@@ -244,6 +246,18 @@ const replays: Readonly<Record<string, Replay>> = {
     row: up => ({
       status: 200,
       body: { outcome: 'refused', memberAuthenticationActivated: true, reason: up.body.reason },
+    }),
+  },
+  // The same row for the reason PR 2 adds (design §9): 200, reason kept.
+  'POST /external/oidc/profile-flow/complete refused-invitation-email-mismatch': {
+    route: routes.complete,
+    row: () => ({
+      status: 200,
+      body: {
+        outcome: 'refused',
+        memberAuthenticationActivated: true,
+        reason: 'invitation_email_mismatch',
+      },
     }),
   },
   'POST /external/oidc/profile-flow/complete identity-proof-verified': {
@@ -498,7 +512,33 @@ describe('edge contract fixtures for Desktop sign-in', () => {
       add(key, res)
     }
 
-    expect(Object.keys(records)).toHaveLength(names.length + 2)
+    // Edge-only: the /oidc/profile-flow per-client limiter refuses the 61st /complete in one
+    // window. No control-api record is a 429, so the replay loop cannot produce this one. Its
+    // buckets belong to one limiter instance, so one fresh app starts them empty.
+    {
+      const fetchMock = controlApiAnswers(
+        controlApiRecord('POST /external/oidc/profile-flow/complete refused')
+      )
+      const edge = request(createApp())
+      for (let i = 0; i < PROFILE_FLOW_PER_CLIENT_LIMIT; i++) {
+        const ok = await routes.complete.send(edge)
+        if (ok.status !== 200) throw new Error(`complete ${i} answered ${ok.status}`)
+      }
+      const key = edgeKey(routes.complete, 'rate-limited')
+      const res = await routes.complete.send(edge)
+      // Only Date is faked and it stands still, so the whole window is left.
+      expect(res.headers['retry-after'], key).toBe('60')
+      expectRow(key, res, {
+        status: 429,
+        body: { error: 'oidc_unavailable', retryAfterSeconds: 60 },
+        retryAfter: true,
+      })
+      // The refused /complete never reached control-api.
+      expect(fetchMock, key).toHaveBeenCalledTimes(PROFILE_FLOW_PER_CLIENT_LIMIT)
+      add(key, res)
+    }
+
+    expect(Object.keys(records)).toHaveLength(names.length + 3)
     // Every relayed expiry went back to the sentinel; no run-dependent instant is recorded.
     expect(JSON.stringify(records)).not.toContain(STAMPED_EXPIRES_AT)
 

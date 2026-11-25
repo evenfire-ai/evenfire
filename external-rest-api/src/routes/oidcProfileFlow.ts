@@ -18,11 +18,18 @@ const DISPLAY_LABEL_MAX_LENGTH = 80
 export const DESKTOP_SIGN_IN_CODE_RE = /^[A-Za-z0-9_-]{43}$/
 /** An S256 PKCE challenge: a SHA-256 digest, base64url. */
 const DESKTOP_CODE_CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/
+/**
+ * An invitation token from the member registration hub. The hub makes its tokens in another
+ * repository, so only printable ASCII and a length are pinned, as control-api pins them.
+ */
+const INVITATION_TOKEN_RE = /^[\x21-\x7e]{1,2048}$/
 /** A code lives 90 s. A lifetime over 120 s is an upstream contract break. */
 const DESKTOP_SIGN_IN_CODE_MAX_TTL_SECONDS = 120
 /**
  * Refusal reasons Profile UI may see, and that Desktop sign-in redeem relays in its 403.
- * Anything else is an upstream contract break.
+ * Anything else is an upstream contract break. `invitation_email_mismatch` comes only from an
+ * invitation sign-in's /complete: an attempt is never both for Desktop and from an invitation
+ * (design §9), and redeem refuses only a disabled account.
  */
 export const REFUSAL_REASONS: ReadonlySet<string> = new Set([
   'account_disabled',
@@ -33,6 +40,7 @@ export const REFUSAL_REASONS: ReadonlySet<string> = new Set([
   'not_eligible',
   'no_account',
   'provider_configuration',
+  'invitation_email_mismatch',
 ])
 const SAFE_ERRORS = new Set([
   'oidc_not_configured',
@@ -128,6 +136,23 @@ function desktopSignInField(value: unknown): DesktopSignInField {
   return { status: 'present', codeChallenge }
 }
 
+type InvitationTokenField =
+  | Readonly<{ status: 'absent' }>
+  | Readonly<{ status: 'invalid' }>
+  | Readonly<{ status: 'present'; invitationToken: string }>
+
+/**
+ * `invitationToken` is absent, or a string matching INVITATION_TOKEN_RE. Anything else, `null`
+ * included, is invalid, so a malformed invitation request is never forwarded as a plain
+ * attempt. The token is never logged.
+ */
+function invitationTokenField(value: unknown): InvitationTokenField {
+  if (value === undefined) return { status: 'absent' }
+  return typeof value === 'string' && INVITATION_TOKEN_RE.test(value)
+    ? { status: 'present', invitationToken: value }
+    : { status: 'invalid' }
+}
+
 function upstreamCall(req: Request): { signal: AbortSignal; extraHeaders: Record<string, string> } {
   const requested = Number(req.get('x-oidc-operation-deadline-ms'))
   const budget =
@@ -204,10 +229,12 @@ export function createOidcProfileFlowRouter(): Router {
   router.post('/oidc/profile-flow/attempts', async (req, res, next) => {
     const browserBinding = req.body?.browserBinding
     const desktopSignIn = desktopSignInField(req.body?.desktopSignIn)
+    const invitation = invitationTokenField(req.body?.invitationToken)
     if (
       typeof browserBinding !== 'string' ||
       !BINDING_RE.test(browserBinding) ||
-      desktopSignIn.status === 'invalid'
+      desktopSignIn.status === 'invalid' ||
+      invitation.status === 'invalid'
     ) {
       res.status(400).json({ error: 'invalid_oidc_attempt' })
       return
@@ -218,10 +245,15 @@ export function createOidcProfileFlowRouter(): Router {
         expiresAt: string
         signInContext?: unknown
       }>('POST', '/external/oidc/profile-flow/attempts', {
+        // Both fields together are forwarded as they are: control-api owns the rule that an
+        // attempt is never both for Desktop and from an invitation, and answers its 400.
         body: {
           browserBinding,
           ...(desktopSignIn.status === 'present'
             ? { desktopSignIn: { codeChallenge: desktopSignIn.codeChallenge } }
+            : {}),
+          ...(invitation.status === 'present'
+            ? { invitationToken: invitation.invitationToken }
             : {}),
         },
         ...upstreamCall(req),
