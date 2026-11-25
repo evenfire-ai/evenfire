@@ -18,6 +18,7 @@ import { resolve } from 'node:path'
 import { FIRST_SAVE_DIALOG_TITLE } from '../../components/HostApprovalSection/constants'
 import { neverAskTools } from '../../lib/approvalToolCatalog'
 import { notifyHostChanged, subscribeHostChanged } from '../../lib/hostApprovalDisplay'
+import { subscribeRootToast } from '../../lib/rootToast'
 import {
   approvalSettingsDriver,
   errorBanners,
@@ -493,6 +494,57 @@ describe('HostApprovalsTab', () => {
       // The exact text: it names no agent, unlike a continuation's (C18).
       await waitFor(() => expect(tab.toasts('success')).toEqual([SAVED_IN_TAB]))
       expect(overrides(driver.readView())).toEqual(SAVED_VIEW)
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it('a throw while a per-tool save reports its outcome still fires the notice, is reported, and leaves no unhandled rejection (Ruling 51)', async () => {
+      const fake = tabFake({ tools: { json_transform: true } })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      const driver = await approvalSettingsDriver()
+      await driver.edit()
+      await driver.editTool('system_info', 'required')
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      await driver.save()
+      await act(async () => {
+        await put.arrived
+      })
+      const notices = vi.fn()
+      subscribeHostChanged('foo', notices)
+      const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const rejections: unknown[] = []
+      const onRejection = (reason: unknown) => {
+        rejections.push(reason)
+      }
+      process.on('unhandledRejection', onRejection)
+      // A root-toast listener that throws, subscribed after the page's own:
+      // the save's continuation toast throws out of the step that reports it.
+      const failure = new Error('a toast listener failed')
+      const unsubscribe = subscribeRootToast(() => {
+        throw failure
+      })
+      try {
+        tab.leave()
+        await act(async () => {
+          put.deliverNow()
+        })
+        await waitFor(() => expect(notices, 'the Host-changed notice').toHaveBeenCalledTimes(1))
+        await waitFor(() =>
+          expect(reported, 'the error, reported').toHaveBeenCalledWith(
+            expect.stringContaining('Per-tool save'),
+            failure
+          )
+        )
+        // Node reports an unhandled rejection once the microtasks have run.
+        await settle()
+        expect(rejections, 'unhandled rejections').toEqual([])
+        // The page's listener came first, so its toast still shows.
+        expect(tab.toasts('success')).toEqual([savedFor('foo')])
+        expect(approvalOf(fake.stored('foo')), 'the write landed').toEqual({ tools: SAVED_TOOLS })
+      } finally {
+        unsubscribe()
+        process.off('unhandledRejection', onRejection)
+      }
       expect(unanswered(fake)).toEqual([])
       tab.unmount()
     })

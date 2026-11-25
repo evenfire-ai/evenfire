@@ -272,36 +272,49 @@ export function HostApprovalsTab({ host }: HostApprovalsTabProps) {
 
   const settleSave = useCallback(
     (savedHost: string, savedSection: number, outcome: ToolsSaveOutcome): void => {
-      const current = viewRef.current
-      // Spec §6.5 "After unmount": a save whose tab is gone, or now shows
-      // another agent, writes nothing to the tab and reports through the root
-      // toast, naming the agent. So does a save whose section the tab dropped
-      // meanwhile (review I1): no section on screen can show its outcome.
-      if (
-        !mountedRef.current ||
-        current.host !== savedHost ||
-        shownSectionRef.current !== savedSection
-      ) {
-        const toast = continuationToast(savedHost, outcome)
-        emitRootToast(toast.message, toast.options)
-        notifyHostChanged(savedHost)
-        return
-      }
-      if (outcome.kind === 'saved') {
-        // The stored Host seeds the tools group of the display state the tab
-        // shows now, which a kept instance may have made since the save
-        // started. A stored Host of another name seeds nothing: the load the
-        // notice starts shows what is stored.
-        if (current.state.applyWrite('tools', outcome.stored)) {
-          const snapshot = current.state.snapshot()
-          setView(shown => (shown.state === current.state ? { ...shown, snapshot } : shown))
+      try {
+        const current = viewRef.current
+        // Spec §6.5 "After unmount": a save whose tab is gone, or now shows
+        // another agent, writes nothing to the tab and reports through the
+        // root toast, naming the agent. So does a save whose section the tab
+        // dropped meanwhile (review I1): no section on screen can show its
+        // outcome.
+        if (
+          !mountedRef.current ||
+          current.host !== savedHost ||
+          shownSectionRef.current !== savedSection
+        ) {
+          const toast = continuationToast(savedHost, outcome)
+          emitRootToast(toast.message, toast.options)
+          return
         }
-        showToast(TOOLS_SAVED_TOAST, { tone: 'success' })
+        if (outcome.kind === 'saved') {
+          // The stored Host seeds the tools group of the display state the
+          // tab shows now, which a kept instance may have made since the save
+          // started. A stored Host of another name seeds nothing: the load the
+          // notice starts shows what is stored.
+          if (current.state.applyWrite('tools', outcome.stored)) {
+            const snapshot = current.state.snapshot()
+            setView(shown => (shown.state === current.state ? { ...shown, snapshot } : shown))
+          }
+          showToast(TOOLS_SAVED_TOAST, { tone: 'success' })
+        }
+        // The section that ran the save shows every other outcome itself.
+      } catch (error) {
+        // Ruling 51 (review finding 4's sibling): showing the outcome threw,
+        // a bug (a root-toast listener that throws, say). It is reported to
+        // the console, since control-ui has no client logger
+        // (lib/hostApprovalSave.ts reports its listeners' errors so). It is
+        // not rethrown: the section calls this from its own settle step,
+        // which goes on to show the outcome it shows itself, and a rethrow
+        // would leave an unhandled rejection in its runSave.
+        console.error('Per-tool save: showing its outcome threw.', error)
+      } finally {
+        // Every save that ends fires the Host-changed notice, even when
+        // showing its outcome threw. The notice loads this tab again too, in
+        // this same call, so Save waits for that load.
+        notifyHostChanged(savedHost)
       }
-      // The section that ran the save shows every other outcome itself. The
-      // notice loads this tab again too, in this same call, so Save waits for
-      // that load.
-      notifyHostChanged(savedHost)
     },
     [showToast]
   )
