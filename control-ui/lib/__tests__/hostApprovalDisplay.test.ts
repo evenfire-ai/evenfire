@@ -60,6 +60,13 @@ function host(
   )
 }
 
+/** `resource` without `metadata.name`. */
+function withoutName(resource: HostResource): HostResource {
+  const copy = structuredClone(resource)
+  delete copy.metadata?.name
+  return copy
+}
+
 /** Another document's copy of this module: its own listeners and its own channel. */
 async function openAnotherDocument(): Promise<typeof import('../hostApprovalDisplay')> {
   vi.resetModules()
@@ -166,6 +173,25 @@ describe('approval tab display state', () => {
     const shown = tab.snapshot()
     expect(tab.applyLoad(tab.startLoad(), bar)).toBe(false)
     expect(tab.snapshot()).toBe(shown)
+  })
+
+  it('data without metadata.name is refused by applyLoad and applyWrite', () => {
+    // Nothing shows that a Host object without a name is this agent's.
+    const tab = createApprovalTabState('foo')
+    const nameless = withoutName(
+      host('foo', 'rv-2', { modeCeiling: 'manual', tools: { http_request: true } })
+    )
+    const load = tab.startLoad()
+    expect(tab.applyWrite('ceiling', nameless)).toBe(false)
+    expect(tab.applyWrite('tools', nameless)).toBe(false)
+    expect(tab.applyLoad(load, nameless)).toBe(false)
+    expect(tab.snapshot()).toBeNull()
+
+    // The same token applies the named Host. Its own values show, so the
+    // refused writes recorded nothing.
+    const named = host('foo', 'rv-1', { modeCeiling: 'auto', tools: { http_request: false } })
+    expect(tab.applyLoad(load, named)).toBe(true)
+    expect(tab.snapshot()).toEqual(named)
   })
 
   it('a write for another Host is refused and records nothing', () => {
