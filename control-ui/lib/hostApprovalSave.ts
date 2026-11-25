@@ -530,7 +530,8 @@ export function isSettingManual(host: string): boolean {
 
 /**
  * Calls `listener` whenever a switch starts or ends, for any Host; it reads
- * `isSettingManual` for its own. Returns the unsubscribe function.
+ * `isSettingManual` for its own. A listener that throws is reported to the
+ * console, and the others are still called. Returns the unsubscribe function.
  */
 export function subscribeSettingManual(listener: () => void): () => void {
   settingManualListeners.add(listener)
@@ -540,7 +541,20 @@ export function subscribeSettingManual(listener: () => void): () => void {
 }
 
 function notifySettingManual(): void {
-  for (const listener of Array.from(settingManualListeners)) listener()
+  for (const listener of Array.from(settingManualListeners)) {
+    try {
+      listener()
+    } catch (error) {
+      // A listener's bug must not change the switch's outcome, throw out of
+      // setManualNow, or keep the other listeners from hearing. control-ui has
+      // no client logger: its client code reports caught errors to the browser
+      // console, with what failed and the error (lib/api.ts, HostWizard).
+      console.error(
+        'Set to Manual now: a setting-Manual listener threw; the switch and the other listeners went on.',
+        error
+      )
+    }
+  }
 }
 
 /** Spec §6.3 steps 2–6, on the clock and random source of the call. */

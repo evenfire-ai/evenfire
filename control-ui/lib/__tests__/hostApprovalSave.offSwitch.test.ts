@@ -364,6 +364,7 @@ afterEach(() => {
   __resetReadRequestCacheForTests()
   setGlobalAuthErrorHandler(() => {})
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('Set to Manual now (spec §6.3)', () => {
@@ -820,6 +821,27 @@ describe('Set to Manual now (spec §6.3)', () => {
       expect(isSettingManual('foo')).toBe(false)
       expect(seen).toEqual([true, false])
       unsubscribe()
+    })
+
+    it('a listener that throws changes no outcome, the others still hear, and its error is reported', async () => {
+      const fake = createFake({ modeCeiling: 'auto' })
+      const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const failure = new Error('a listener failed')
+      const throwing = vi.fn(() => {
+        throw failure
+      })
+      const seen: boolean[] = []
+      subscribeSettingManual(throwing)
+      subscribeSettingManual(() => seen.push(isSettingManual('foo')))
+      const outcome = await setManualNow('foo')
+
+      expect(outcome).toEqual({ kind: 'saved', stored: fake.stored('foo') })
+      expect(throwing, 'told at the start and at the end').toHaveBeenCalledTimes(2)
+      expect(seen, 'the listener after it, told both times').toEqual([true, false])
+      expect(reported.mock.calls).toEqual([
+        [expect.stringContaining('listener'), failure],
+        [expect.stringContaining('listener'), failure],
+      ])
     })
 
     it('the test reset forgets a running switch and its listeners', async () => {
