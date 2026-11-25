@@ -1122,13 +1122,27 @@ describe('SlackAdapter — inlineSharedFiles()', () => {
     const timeout = vi
       .spyOn(AbortSignal, 'timeout')
       .mockImplementation(() => new AbortController().signal)
-    const fetchMock = vi.fn(
-      async () =>
-        new Response(null, { status: 302, headers: { location: 'https://files.slack.com/login' } })
-    )
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const href = String(input)
+      expect(init?.redirect).toBe('manual')
+      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${TEST_TOKEN}`)
+      if (href.endsWith('/note.txt')) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://files.slack.com/files-pri/T/note-2.txt' },
+        })
+      }
+      if (href.endsWith('/offsite.txt')) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://evil.example/secret.txt' },
+        })
+      }
+      return new Response('patch body', { status: 200, headers: { 'content-type': 'text/plain' } })
+    })
     globalThis.fetch = fetchMock as typeof fetch
     try {
-      const redirected = await adapter.inlineSharedFiles([
+      const followed = await adapter.inlineSharedFiles([
         {
           id: 'Fredirect',
           name: 'note.txt',
@@ -1137,9 +1151,22 @@ describe('SlackAdapter — inlineSharedFiles()', () => {
           urlPrivateDownload: 'https://files.slack.com/files-pri/T/note.txt',
         },
       ])
-      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(followed).toContain('patch body')
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+
+      const redirected = await adapter.inlineSharedFiles([
+        {
+          id: 'Foffsite',
+          name: 'offsite.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://files.slack.com/files-pri/T/offsite.txt',
+        },
+      ])
       expect(redirected).toContain('could not be read')
-      expect(redirected).not.toContain('login')
+      expect(fetchMock.mock.calls.some(call => String(call[0]).includes('evil.example'))).toBe(
+        false
+      )
 
       fetchMock.mockResolvedValue(
         new Response('<html>sign in</html>', {

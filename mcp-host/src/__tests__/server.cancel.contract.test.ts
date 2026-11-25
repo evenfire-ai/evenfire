@@ -176,9 +176,25 @@ describe('POST /v1/runtime/tasks/:taskId/cancel', () => {
   })
 
   it('lets channel-reader cancel its own task and passes the sender', async () => {
-    let captured: { taskId: string; userId?: string; caller?: string } | undefined
+    let captured:
+      | {
+          taskId: string
+          userId?: string
+          caller?: string
+          channelType?: string
+          channelId?: string
+          sender?: string
+        }
+      | undefined
     const { server, baseUrl } = await startServerWithHandler((taskId, requesterUserId, caller) => {
-      captured = { taskId, userId: requesterUserId, caller: caller?.caller }
+      captured = {
+        taskId,
+        userId: requesterUserId,
+        caller: caller?.caller,
+        channelType: caller?.channelType,
+        channelId: caller?.channelId,
+        sender: caller?.sender,
+      }
       return 'cancelled'
     })
     try {
@@ -193,7 +209,14 @@ describe('POST /v1/runtime/tasks/:taskId/cancel', () => {
         },
       })
       expect(res.status).toBe(204)
-      expect(captured).toEqual({ taskId: 'task-long', userId: 'U123', caller: 'channel-reader' })
+      expect(captured).toEqual({
+        taskId: 'task-long',
+        userId: 'U123',
+        caller: 'channel-reader',
+        channelType: 'slack',
+        channelId: 'D123',
+        sender: 'U123',
+      })
     } finally {
       await server.stop()
     }

@@ -1693,10 +1693,6 @@ export class ChannelReader {
         }
       }
 
-      if (msg.channelType === 'slack' && msg.slackFiles?.length) {
-        await this.attachSlackFiles(msg, msg.slackFiles)
-      }
-
       const traceContext = mintChannelTraceContext(msg)
       if (providerEventKey) {
         this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
@@ -1704,7 +1700,6 @@ export class ChannelReader {
 
       // Check if this is an approval/denial command
       const runtimeContent = contentWithoutAddressedBotMention(msg)
-      const runtimeMsg = runtimeContent === msg.content ? msg : { ...msg, content: runtimeContent }
       const trimmed = runtimeContent.trim().toLowerCase()
       const toolApprovalAction = parseToolApprovalAction(runtimeContent)
       if (toolApprovalAction && 'rejected' in toolApprovalAction) {
@@ -1741,6 +1736,15 @@ export class ChannelReader {
         await this.handleApprovalCommand(msg, trimmed.replace(/^\\/, '/') as ToolApprovalDecision)
         continue
       }
+
+      if (msg.channelType === 'slack' && msg.slackFiles?.length) {
+        await this.attachSlackFiles(msg, msg.slackFiles)
+      }
+      const runtimeContentAfterFiles = contentWithoutAddressedBotMention(msg)
+      const runtimeMsg =
+        runtimeContentAfterFiles === msg.content
+          ? msg
+          : { ...msg, content: runtimeContentAfterFiles }
 
       // Forward to mcp-host
       console.log('[Main] Forwarding message to mcp-host...')
@@ -2289,12 +2293,12 @@ export class ChannelReader {
       }
 
       const deliverFinalResult = async (): Promise<boolean> => {
-        if (finalDelivered || terminalDeliveryStarted) return true
         if (finalDeliveryInFlight) return finalDeliveryInFlight
+        if (finalDelivered) return true
 
         finalDeliveryInFlight = (async () => {
           const result = await this.rpcClient.getTaskResult(taskId, msg)
-          if (finalDelivered || terminalDeliveryStarted) return true
+          if (finalDelivered) return true
           if (!result || typeof result.status !== 'string') return false
           if (result.status === 'waiting_approval' && result.approval) {
             noteHostStillRunning(result.status)

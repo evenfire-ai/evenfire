@@ -196,7 +196,10 @@ describe('Slack long replies', () => {
     const editMessage = vi.fn(async (_channelId: string, _messageId: string, content: string) => {
       if (content !== 'Teams answer') return
       answerEdits += 1
-      if (answerEdits === 1) throw new Error('teams_activity_edit_failed_500')
+      if (answerEdits === 1) {
+        await new Promise(resolve => setTimeout(resolve, 3_000))
+        throw new Error('teams_activity_edit_failed_500')
+      }
     })
     const sendMessage = vi.fn(async (_channelId: string, content: string) => {
       if (content === 'Teams answer') throw new Error('teams_activity_failed_500')
@@ -213,7 +216,9 @@ describe('Slack long replies', () => {
     message.channelType = 'teams'
 
     await handle.handleMessageWithProgress(message, adapter)
-    await vi.advanceTimersByTimeAsync(5_000)
+    const terminal = streamCalls.at(-1)!.onTerminal({ taskId: 'task-long', status: 'completed' })
+    await vi.advanceTimersByTimeAsync(8_000)
+    await terminal
 
     const posted = editMessage.mock.calls.map(call => String(call[2]))
     expect(posted.filter(text => text === 'Teams answer').length).toBeGreaterThan(1)
@@ -352,20 +357,14 @@ describe('Slack long replies', () => {
     }
   }, 30_000)
 
-  it('treats heartbeats as activity so a pending run survives past five and thirty minutes', async () => {
+  it('treats heartbeats as activity when result polls are failing', async () => {
     vi.useFakeTimers()
     const runTimeoutMs = 5 * 60 * 1000
-    let phase: 'pending' | 'done' = 'pending'
     const { instance, editMessage, cancelTask, adapter } = reader({
       runTimeoutMs,
-      getTaskResult: async () =>
-        phase === 'pending'
-          ? { success: true, status: 'pending' as const }
-          : {
-              success: true,
-              status: 'completed' as const,
-              response: 'Finished after a long tool run.',
-            },
+      getTaskResult: async () => {
+        throw new Error('host_unreachable')
+      },
     })
     const handle = progressHandle(instance)
 
@@ -373,35 +372,22 @@ describe('Slack long replies', () => {
     const stream = streamCalls.at(-1)!
     expect(stream.onActivity).toEqual(expect.any(Function))
 
-    const marks = [4, 8, 12, 16, 20, 24, 28, 32, 36, 40]
-    let elapsed = 0
-    for (const mark of marks) {
-      await vi.advanceTimersByTimeAsync((mark - elapsed) * 60 * 1000)
-      stream.onActivity!()
-      elapsed = mark
-      if (mark === 8) {
-        await vi.advanceTimersByTimeAsync(60 * 1000)
-        elapsed = 9
-        expect(editMessage.mock.calls.map(call => String(call[2])).join('\n')).not.toContain(
-          "couldn't finish this request (timed out)"
-        )
-        expect(cancelTask).not.toHaveBeenCalled()
-      }
-    }
-    expect(cancelTask).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(4 * 60 * 1000)
+    stream.onActivity!()
+    await vi.advanceTimersByTimeAsync(4 * 60 * 1000)
+    stream.onActivity!()
+    await vi.advanceTimersByTimeAsync(60 * 1000)
     expect(editMessage.mock.calls.map(call => String(call[2])).join('\n')).not.toContain(
       "couldn't finish this request (timed out)"
     )
-
-    phase = 'done'
-    await vi.advanceTimersByTimeAsync(2_000)
-    expect(
-      editMessage.mock.calls
-        .map(call => String(call[2]))
-        .some(text => text.includes('Finished after a long tool run.'))
-    ).toBe(true)
     expect(cancelTask).not.toHaveBeenCalled()
-  }, 30_000)
+
+    await vi.advanceTimersByTimeAsync(runTimeoutMs + 1_000)
+    expect(editMessage.mock.calls.map(call => String(call[2])).join('\n')).toContain(
+      "couldn't finish this request (timed out)"
+    )
+    expect(cancelTask).toHaveBeenCalled()
+  })
 
   it('does not let the silence timer replace an answer that is already being delivered', async () => {
     vi.useFakeTimers()

@@ -994,7 +994,8 @@ function isSlackFileDownloadUrl(value: string): boolean {
 async function downloadSlackFile(
   url: string,
   token: string,
-  declaredMime?: string
+  declaredMime?: string,
+  redirects = 0
 ): Promise<string> {
   if (!isSlackFileDownloadUrl(url)) throw new Error('slack_file_url_rejected')
   const response = await fetch(url, {
@@ -1002,7 +1003,15 @@ async function downloadSlackFile(
     headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(15_000),
   })
-  if (response.status >= 300 && response.status < 400) throw new Error('slack_file_redirect')
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get('location')
+    if (!location || redirects >= 1) throw new Error('slack_file_redirect')
+    const next = new URL(location, url)
+    if (next.protocol !== 'https:' || next.hostname !== SLACK_FILE_HOST) {
+      throw new Error('slack_file_redirect')
+    }
+    return downloadSlackFile(next.toString(), token, declaredMime, redirects + 1)
+  }
   if (!response.ok) throw new Error(`slack_file_http_${response.status}`)
   const contentType =
     response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? ''
