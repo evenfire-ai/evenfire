@@ -7,7 +7,7 @@
       "name": "foo",
       "namespace": "mcp-host",
       "annotations": {
-        "clerum.io/administrative-intent-id": "00000000-0000-4000-8000-000000000006",
+        "clerum.io/administrative-intent-id": "00000000-0000-4000-8000-000000000007",
         "clerum.io/administrative-intent-generation": "6"
       },
       "resourceVersion": "6",

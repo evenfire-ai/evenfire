@@ -20,6 +20,7 @@ import { uninstallMcpServer } from '../../oauth/mcpServerUninstall.js'
 import { deleteSharedGrantsForContextExcept } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
 import { contextAllowlist } from '../../services/access/mcpInvocable.js'
+import { ApprovalRequiresVersionError } from '../../services/hostApprovalRules.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
@@ -1049,6 +1050,11 @@ export function createAdminResourcesRouter(
             res.status(409).json({ error: 'conflict', reason: 'resource_changed' })
             return
           }
+          // Version rule (spec §6.8): a version-less PUT may not change spec.approval.
+          if (err instanceof ApprovalRequiresVersionError) {
+            res.status(409).json({ error: 'conflict', reason: 'approval_requires_version' })
+            return
+          }
           throw err
         }
         // Host CR persisted: NOW emit any Pieza D tolerations (never before the
@@ -1175,6 +1181,11 @@ export function createAdminResourcesRouter(
         // operator to reload — never retried server-side with the stale body.
         if (err instanceof K8sConflictError) {
           res.status(409).json({ error: 'conflict', reason: 'resource_changed' })
+          return
+        }
+        // Version rule (spec §6.8): the same refusal on the ratchet-read PUT path.
+        if (err instanceof ApprovalRequiresVersionError) {
+          res.status(409).json({ error: 'conflict', reason: 'approval_requires_version' })
           return
         }
         throw err

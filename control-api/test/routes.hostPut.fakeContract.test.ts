@@ -5,8 +5,9 @@
  *
  * One script of requests is replayed into the real routes, through
  * ./helpers/hostRouteHarness.ts (the real ResourceService over an in-memory
- * apiserver), and into the fake with `versionRule: false`, the routes as they
- * are today. At every step, status, body and the stored Host must be equal once
+ * apiserver), and into the fake with `versionRule: true`, the routes as they
+ * are since a version-less PUT that changes `spec.approval` is refused (spec
+ * 2026-11-24-control-ui-approval-settings §6.8). At every step, status, body and the stored Host must be equal once
  * the server values are normalized away: `resourceVersion`, `uid`, `generation`,
  * `creationTimestamp`, `managedFields` and both administrative-intent
  * annotations. Versions are opaque and differ between the sides, so their
@@ -106,7 +107,9 @@ const READ = 'read'
 const DETAIL = 'detail'
 const NO_APPROVAL_CHANGE = 'version-less PUT without an approval change'
 const APPROVAL_CHANGE = 'version-less PUT with an approval change'
-const CURRENT_CRD_ONLY_CHANGE = 'version-less PUT of a field only the current CRD keeps'
+const VERSIONED_APPROVAL_CHANGE = 'versioned PUT with an approval change'
+const CURRENT_CRD_ONLY_CHANGE = 'versioned PUT of a field only the current CRD keeps'
+const REORDERED_APPROVAL = 'version-less PUT with the stored approval, its keys reordered'
 const RE_READ = 're-read'
 const VERSIONED = 'versioned PUT'
 const STALE_VERSION = 'versioned PUT with a stale version'
@@ -142,13 +145,32 @@ const SCRIPT: Step[] = [
     }),
   },
   {
+    // Versioned: a version-less write could not change spec.approval.
+    label: VERSIONED_APPROVAL_CHANGE,
+    method: 'PUT',
+    path: HOST_PATH,
+    body: a => ({
+      metadata: { resourceVersion: versionOf(a, NO_APPROVAL_CHANGE) },
+      spec: {
+        ...specOf(a, NO_APPROVAL_CHANGE),
+        approval: {
+          defaultPolicy: 'cli_only',
+          modeCeiling: 'manual',
+          channels: { telegram: { enabled: true } },
+          tools: { shell_exec: false },
+        },
+      },
+    }),
+  },
+  {
     // v0.12.1 prunes modeCeiling, so there this write leaves the spec unchanged.
     label: CURRENT_CRD_ONLY_CHANGE,
     method: 'PUT',
     path: HOST_PATH,
     body: a => {
-      const spec = specOf(a, APPROVAL_CHANGE)
+      const spec = specOf(a, VERSIONED_APPROVAL_CHANGE)
       return {
+        metadata: { resourceVersion: versionOf(a, VERSIONED_APPROVAL_CHANGE) },
         spec: {
           ...spec,
           approval: { ...(spec.approval as Record<string, unknown>), modeCeiling: 'allow_all' },
@@ -214,6 +236,23 @@ const SCRIPT: Step[] = [
       metadata: { resourceVersion: versionOf(a, UNCHANGED_SECOND) },
       spec: specOf(a, STALE_MODEL_ASSIGNED),
     }),
+  },
+  {
+    // Pins the key-order-insensitive compare the routes and the fake share.
+    label: REORDERED_APPROVAL,
+    method: 'PUT',
+    path: HOST_PATH,
+    body: a => {
+      const spec = specOf(a, STALE_MODEL_ASSIGNED)
+      const approval = spec.approval as Record<string, unknown>
+      return {
+        spec: {
+          ...spec,
+          contextRef: 'ctx-b2',
+          approval: Object.fromEntries(Object.entries(approval).reverse()),
+        },
+      }
+    },
   },
   { label: 'GET of a missing Host', method: 'GET', path: MISSING_HOST_PATH },
   {
@@ -389,12 +428,19 @@ const DETAIL_500_SOURCE =
 const SPEC_CHANGING_PUTS = {
   current: [
     NO_APPROVAL_CHANGE,
-    APPROVAL_CHANGE,
+    VERSIONED_APPROVAL_CHANGE,
     CURRENT_CRD_ONLY_CHANGE,
     VERSIONED,
     STALE_MODEL_ASSIGNED,
+    REORDERED_APPROVAL,
   ],
-  'v0.12.1': [NO_APPROVAL_CHANGE, APPROVAL_CHANGE, VERSIONED, STALE_MODEL_ASSIGNED],
+  'v0.12.1': [
+    NO_APPROVAL_CHANGE,
+    VERSIONED_APPROVAL_CHANGE,
+    VERSIONED,
+    STALE_MODEL_ASSIGNED,
+    REORDERED_APPROVAL,
+  ],
 }
 const SPEC_UNCHANGED_PUTS = {
   current: [UNCHANGED_FIRST, UNCHANGED_SECOND],
@@ -431,7 +477,7 @@ describe.each(['current', 'v0.12.1'] as const)(
       const fake = createFakeControlApi({
         hosts: { foo: seedRead.body as HostObject },
         crd,
-        versionRule: false,
+        versionRule: true,
         staleModels: ALLOWED_MODELS.filter(row => row.enabled && row.stale).map(
           ({ provider, model }) => ({ provider, model })
         ),
@@ -478,6 +524,11 @@ describe.each(['current', 'v0.12.1'] as const)(
         expect(observation.storedMoved, label).toBe(true)
         expect(observation.answerIsStored, label).toBe(false)
       }
+      expect(observed(APPROVAL_CHANGE)).toMatchObject({
+        status: 409,
+        body: { error: 'conflict', reason: 'approval_requires_version' },
+      })
+      expect(observed(APPROVAL_CHANGE).storedMoved).toBe(false)
       expect(observed(UNCHANGED_ANSWER_VERSION)).toMatchObject({
         status: 409,
         body: { error: 'conflict', reason: 'resource_changed' },

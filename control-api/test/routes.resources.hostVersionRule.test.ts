@@ -92,4 +92,92 @@ describe('Host PUT version rule', () => {
     expect(res.status).toBe(200)
     expect(storedSpec(harness).contextRef).toBe('ctx-b')
   })
+
+  it('the refusal records a failed outcome on the intent', async () => {
+    harness = seededHarness()
+    const read = await request(harness.app).get(HOST_PATH)
+    const spec = read.body.spec as Record<string, unknown>
+
+    const res = await request(harness.app)
+      .put(HOST_PATH)
+      .send({
+        spec: {
+          ...spec,
+          approval: { defaultPolicy: 'cli_only', channels: {}, modeCeiling: 'allow_all' },
+        },
+      })
+
+    expect(res.status).toBe(409)
+    const intents = harness.adminOperations.filter(call => call.method === 'persistHostIntent')
+    const outcomes = harness.adminOperations.filter(call => call.method === 'persistHostOutcome')
+    expect(intents).toHaveLength(1)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({ outcome: 'failed' })
+    expect(harness.replaceBodies).toHaveLength(0)
+    const approval = storedSpec(harness).approval as Record<string, unknown>
+    expect(approval.modeCeiling).toBe('manual')
+  })
+
+  it('an accepted version-less PUT records none', async () => {
+    harness = seededHarness()
+    const read = await request(harness.app).get(HOST_PATH)
+    const spec = read.body.spec as Record<string, unknown>
+
+    const res = await request(harness.app)
+      .put(HOST_PATH)
+      .send({ spec: { ...spec, contextRef: 'ctx-b' } })
+
+    expect(res.status).toBe(200)
+    expect(
+      harness.adminOperations.filter(call => call.method === 'persistHostIntent')
+    ).toHaveLength(1)
+    expect(harness.adminOperations.filter(call => call.method === 'persistHostOutcome')).toEqual([])
+    expect(harness.replaceBodies).toHaveLength(1)
+  })
+
+  it('a version-less PUT dropping the approval block is refused', async () => {
+    harness = seededHarness()
+    const read = await request(harness.app).get(HOST_PATH)
+    const { approval: _approval, ...rest } = read.body.spec as Record<string, unknown>
+
+    const res = await request(harness.app).put(HOST_PATH).send({ spec: rest })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'conflict', reason: 'approval_requires_version' })
+    expect(storedSpec(harness).approval).toBeDefined()
+  })
+
+  it('a versioned PUT that changes spec.approval is not refused by the version rule', async () => {
+    harness = seededHarness()
+    const read = await request(harness.app).get(HOST_PATH)
+    const spec = read.body.spec as Record<string, unknown>
+
+    const res = await request(harness.app)
+      .put(HOST_PATH)
+      .send({
+        metadata: { resourceVersion: read.body.metadata.resourceVersion },
+        spec: {
+          ...spec,
+          approval: { defaultPolicy: 'cli_only', channels: {}, modeCeiling: 'allow_all' },
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect((storedSpec(harness).approval as Record<string, unknown>).modeCeiling).toBe('allow_all')
+  })
+
+  it('a version-less PUT with the stored approval and its keys reordered is accepted', async () => {
+    harness = seededHarness()
+    const read = await request(harness.app).get(HOST_PATH)
+    const spec = read.body.spec as Record<string, unknown>
+    const approval = spec.approval as Record<string, unknown>
+    const reordered = Object.fromEntries(Object.entries(approval).reverse())
+
+    const res = await request(harness.app)
+      .put(HOST_PATH)
+      .send({ spec: { ...spec, approval: reordered, contextRef: 'ctx-b' } })
+
+    expect(res.status).toBe(200)
+    expect(storedSpec(harness).contextRef).toBe('ctx-b')
+  })
 })

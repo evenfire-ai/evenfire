@@ -366,4 +366,8 @@ payload; retry loops around full replaces that carry client intent; spreads
 that replace whole metadata maps a projection writer co-owns. Callers that
 legitimately want last-write-wins (API-only automation) simply omit
 `metadata.resourceVersion` — that legacy path is pinned by
-`control-api/test/services.resourceService.test.ts`.
+`control-api/test/services.resourceService.test.ts`. One exception: a
+version-less Host PUT that changes `spec.approval` is refused with
+`409 { error: 'conflict', reason: 'approval_requires_version' }`
+(`control-api/src/services/hostApprovalRules.ts`); a version-less Host PUT
+that leaves `spec.approval` unchanged is still accepted.

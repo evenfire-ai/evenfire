@@ -9,6 +9,7 @@ import {
   ResourceListResponse,
   ResourcePreconditions,
 } from '../types.js'
+import { ApprovalRequiresVersionError, approvalBlocksEqual } from './hostApprovalRules.js'
 import {
   addNonEmpty,
   extractK8sStatus,
@@ -499,7 +500,9 @@ export class ResourceService {
          * same stale payload is the lost-update bug optimistic concurrency
          * exists to prevent. When absent, legacy last-write-wins behavior is
          * preserved (server-version precondition + bounded retry) for
-         * API-only callers that intentionally replace whatever is current.
+         * API-only callers that intentionally replace whatever is current,
+         * except that a Host write may not change `spec.approval` without it
+         * (`ApprovalRequiresVersionError`).
          */
         resourceVersion?: string
       }
@@ -554,6 +557,21 @@ export class ResourceService {
         throw new K8sConflictError(
           `${plural}/${name} changed identity since it was read (stale uid ${readerUid})`
         )
+      }
+
+      // Version rule (spec §6.8): without a reader resourceVersion nothing
+      // fences this write against a stale client, so it may not change
+      // `spec.approval`. Checked on every attempt, against that attempt's read.
+      if (
+        isHostResource(plural) &&
+        !readerResourceVersion &&
+        !approvalBlocksEqual(
+          body.spec.approval,
+          (current as { spec?: { approval?: unknown } }).spec?.approval
+        )
+      ) {
+        await persistHostFailure(intent)
+        throw new ApprovalRequiresVersionError(name)
       }
 
       const sanitizedMetadata = stripAdministrativeIntentAnnotation(body.metadata)
