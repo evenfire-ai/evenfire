@@ -169,15 +169,35 @@ describe('browser sign-in IPC handlers', () => {
     expect(service.acknowledgeBrowserSignInResult.mock.calls).toEqual([[1]])
   })
 
-  it.each([0, -1, 1.5, '1', null, undefined, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
-    'refuses attempt id %s',
-    async attemptId => {
-      await expect(
-        handler('auth:acknowledgeBrowserSignInResult')(trusted, { attemptId })
-      ).rejects.toThrow('Invalid browser sign-in attempt')
-      expect(service.acknowledgeBrowserSignInResult).not.toHaveBeenCalled()
-    }
-  )
+  it.each([
+    0,
+    -1,
+    1.5,
+    '1',
+    null,
+    undefined,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+  ])('refuses attempt id %s', async attemptId => {
+    await expect(
+      handler('auth:acknowledgeBrowserSignInResult')(trusted, { attemptId })
+    ).rejects.toThrow('Invalid browser sign-in attempt')
+    expect(service.acknowledgeBrowserSignInResult).not.toHaveBeenCalled()
+  })
+
+  // The id is read from `{ attemptId }` only: a payload of another shape is refused, even one
+  // that is itself a valid id.
+  it.each([
+    ['a missing payload', []],
+    ['a null payload', [null]],
+    ['a bare number payload', [1]],
+  ] as const)('refuses %s', async (_label, payload) => {
+    await expect(
+      handler('auth:acknowledgeBrowserSignInResult')(trusted, ...payload)
+    ).rejects.toThrow('Invalid browser sign-in attempt')
+    expect(service.acknowledgeBrowserSignInResult).not.toHaveBeenCalled()
+  })
 })
 
 describe('browser sign-in preload members', () => {
