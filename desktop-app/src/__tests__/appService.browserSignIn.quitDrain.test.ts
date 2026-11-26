@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import fs from 'node:fs/promises'
 import {
   type BrowserSignInHarness,
   type HoldPoint,
@@ -293,6 +294,27 @@ describe('the harness with the real token store', () => {
     expect(keychainAccounts(store, 'getPassword').at(-1)).toBe(accountOf(store.activeEnvKey))
     hold.release()
     await expect(restore).resolves.toMatchObject({ authenticated: true })
+  })
+
+  it('unmocks keytar and gives the platform back when building the harness throws', async () => {
+    const host = Object.getOwnPropertyDescriptor(process, 'platform')
+    // The legacy profiles are copied after `keytar` is mocked; that copy fails here.
+    const copy = vi.spyOn(fs, 'cp').mockRejectedValueOnce(new Error('fake profile copy failure'))
+    const unmock = vi.spyOn(vi, 'doUnmock')
+    try {
+      await expect(
+        createBrowserSignInHarness({ realTokenStore: true, legacyDuplicateProfiles: true })
+      ).rejects.toThrow(/^fake profile copy failure$/)
+      expect(copy).toHaveBeenCalledOnce()
+      expect(process.platform).toBe('darwin')
+      await cleanupBrowserSignInHarness()
+
+      expect(unmock.mock.calls.map(([path]) => path)).toContain('keytar')
+      expect(Object.getOwnPropertyDescriptor(process, 'platform')).toEqual(host)
+    } finally {
+      copy.mockRestore()
+      unmock.mockRestore()
+    }
   })
 })
 

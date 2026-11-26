@@ -421,6 +421,11 @@ type ActiveHarness = {
   settleTokenStore?: () => Promise<void>
   /** `realTokenStore`: puts back the `process.platform` descriptor the harness found. */
   restorePlatform?: () => void
+  /**
+   * `realTokenStore`: set when `keytar` is mocked, before anything else can throw, so cleanup
+   * unmocks it even when the harness was never finished.
+   */
+  keytarMocked?: boolean
 }
 
 /**
@@ -756,6 +761,7 @@ export async function createBrowserSignInHarness(
     const recordKeychainCall = (method: KeychainCall['method'], account: string) => {
       keychainCalls.push({ seq: nextSeq(), value: { method, account } })
     }
+    active.keytarMocked = true
     vi.doMock('keytar', () => ({
       getPassword: (_service: string, account: string) => {
         recordKeychainCall('getPassword', account)
@@ -1065,8 +1071,8 @@ export async function cleanupBrowserSignInHarness(): Promise<void> {
   const settleFailures: unknown[] = []
   let keytarMocked = false
   for (const active of activeHarnesses.splice(0).reverse()) {
+    if (active.keytarMocked) keytarMocked = true
     if (active.settleTokenStore) {
-      keytarMocked = true
       await active.settleTokenStore().catch((error: unknown) => {
         // Rethrown below, once the rest of the cleanup has run.
         settleFailures.push(error)
