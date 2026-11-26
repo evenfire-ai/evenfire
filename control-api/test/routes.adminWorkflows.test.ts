@@ -1430,6 +1430,8 @@ describe('routes/admin/workflows', () => {
               last_reconciled_at: null,
               created_at: '2026-04-18T10:00:00.000Z',
               updated_at: '2026-04-18T10:00:00.000Z',
+              cancel_requested_at: null,
+              canceled_by: null,
             },
           ],
           rowCount: 1,
@@ -1474,6 +1476,8 @@ describe('routes/admin/workflows', () => {
         message: null,
         actor: { type: 'mcp-host', hostRef: `${RECIPE_NS}/test-recipe` },
         executionRef: { namespace: RECIPE_NS, name: 'test-recipe-child-1' },
+        cancelRequestedAt: null,
+        canceledBy: null,
       })
       expect(res.body.items[1]).toEqual({
         id: 'audit-run-id',
@@ -1524,6 +1528,8 @@ describe('routes/admin/workflows', () => {
             child_recipe_name: null,
             child_recipe_namespace: null,
             approval_request_id: '00000000-0000-4000-8000-000000000123',
+            cancel_requested_at: null,
+            canceled_by: null,
             created_at: '2026-04-18T10:00:00.000Z',
             started_at: '2026-04-18T10:00:01.000Z',
             completed_at: '2026-04-18T10:00:02.000Z',
@@ -1549,6 +1555,8 @@ describe('routes/admin/workflows', () => {
         message: null,
         actor: { type: 'admin-ui', adminUserId: ADMIN_CLAIMS.sub },
         executionRef: null,
+        cancelRequestedAt: null,
+        canceledBy: null,
       })
       expect(JSON.stringify(res.body)).not.toContain('prompt')
     })

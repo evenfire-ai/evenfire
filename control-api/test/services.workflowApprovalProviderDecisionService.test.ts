@@ -142,6 +142,8 @@ function workflowRunRow(): WorkflowRunRow {
     ttl_seconds_after_finished: null,
     approval_request_id: APPROVAL_ID,
     idempotency_payload_hash: 'hash-1',
+    cancel_requested_at: null,
+    canceled_by: null,
     started_at: null,
     completed_at: null,
     last_reconciled_at: null,
@@ -453,6 +455,8 @@ describe('workflowApprovalProviderDecisionService', () => {
         actor: { type: 'user-session', userId: 'user-1' },
         executionRef: null,
         approvalRequestId: APPROVAL_ID,
+        cancelRequestedAt: null,
+        canceledBy: null,
       },
     })
     expect(userApprovalRequestService.recordDecision).toHaveBeenCalledTimes(1)

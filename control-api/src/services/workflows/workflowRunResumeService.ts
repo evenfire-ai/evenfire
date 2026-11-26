@@ -68,7 +68,9 @@ const LOCK_RUN_FOR_RESUME = `
      AND run.recipe_name = $3
    FOR UPDATE OF run`
 
-const RESUME_PAUSED_RUN = `
+// A paused run with a cancel request is not resumed: the request is a latch
+// that only a terminal phase ends, so resume answers 409 for it.
+export const RESUME_PAUSED_RUN = `
   UPDATE workflow_runs
      SET phase = CASE
            WHEN started_at IS NULL AND child_recipe_name IS NULL THEN 'Pending'
@@ -85,6 +87,7 @@ const RESUME_PAUSED_RUN = `
      AND recipe_namespace = $2
      AND recipe_name = $3
      AND phase = 'AuthorizationPaused'
+     AND cancel_requested_at IS NULL
    RETURNING *`
 
 function targetMatchesRecipe(

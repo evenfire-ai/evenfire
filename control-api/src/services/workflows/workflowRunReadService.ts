@@ -15,13 +15,13 @@ import {
   isMcpHostDirectlyAuthorizedForRecipe,
 } from './workflowRecipeAccessService.js'
 
-type UserRunScope = {
+export type UserRunScope = {
   userId: string
   principalIds: readonly string[]
   teamId: string | null
 }
 
-type ApprovalScopedWorkflowRunRow = WorkflowRunRow & {
+export type ApprovalScopedWorkflowRunRow = WorkflowRunRow & {
   approval_target_user_id?: string | null
   approval_target_team_id?: string | null
   approval_target_team_member_user_id?: string | null
@@ -32,7 +32,7 @@ export type ProviderScopedWorkflowRunRow = WorkflowRunRow & {
   approval_target_team_id: string | null
 }
 
-function userRunScope(caller: WorkflowRouteCaller): UserRunScope | null {
+export function userRunScope(caller: WorkflowRouteCaller): UserRunScope | null {
   if (caller.kind !== 'user-session') return null
   const ids = new Set([caller.claims.userId, getWorkflowPrincipalId(caller)])
   return {
@@ -83,17 +83,82 @@ function approvalTargetMatchesUserScope(
   )
 }
 
-function runMatchesUserScope(row: ApprovalScopedWorkflowRunRow, scope: UserRunScope): boolean {
-  const matchesTeam =
+function runMatchesScopeTeam(
+  row: Pick<WorkflowRunRow, 'team_id' | 'usage_team_id'>,
+  scope: UserRunScope
+): boolean {
+  return (
     Boolean(scope.teamId) && (row.team_id === scope.teamId || row.usage_team_id === scope.teamId)
+  )
+}
+
+function isRunLauncher(
+  row: Pick<WorkflowRunRow, 'actor_type' | 'actor_id'>,
+  scope: UserRunScope
+): boolean {
+  if (row.actor_type !== 'user' || !row.actor_id) return false
+  return scope.principalIds.includes(row.actor_id)
+}
+
+export function runMatchesUserScope(
+  row: ApprovalScopedWorkflowRunRow,
+  scope: UserRunScope
+): boolean {
+  const matchesTeam = runMatchesScopeTeam(row, scope)
   if (row.actor_type === 'user') {
-    if (row.actor_id && scope.principalIds.includes(row.actor_id)) return true
+    if (isRunLauncher(row, scope)) return true
     return !row.actor_id && matchesTeam
   }
   if (isTeamScopedRun(row)) {
     return matchesTeam || approvalTargetMatchesUserScope(row, scope)
   }
   return false
+}
+
+/**
+ * Who may cancel a run: its launcher, or a live admin of the session's scope
+ * team for a team run that is not a teammate's own manual run (scheduled or
+ * autonomous, or a user run with no actor id). `liveAdmin` is "an active
+ * `team_members` row with role `admin` for the scope user and scope team".
+ * Every run this accepts is also accepted by `runMatchesUserScope`, so cancel
+ * never reaches a run the caller cannot already see.
+ */
+export function canCancel(
+  row: Pick<WorkflowRunRow, 'actor_type' | 'actor_id' | 'team_id' | 'usage_team_id'>,
+  scope: UserRunScope,
+  liveAdmin: boolean
+): boolean {
+  if (isRunLauncher(row, scope)) return true
+  return (
+    liveAdmin &&
+    runMatchesScopeTeam(row, scope) &&
+    (isTeamScopedRun(row) || (row.actor_type === 'user' && !row.actor_id))
+  )
+}
+
+const NON_TERMINAL_RUN_PHASES: ReadonlySet<string> = new Set([
+  'Pending',
+  'Running',
+  'AuthorizationPaused',
+])
+
+export function isNonTerminalRunPhase(phase: string): boolean {
+  return NON_TERMINAL_RUN_PHASES.has(phase)
+}
+
+/** One read per request: is the scope user a live admin of the scope team. */
+async function isLiveScopeTeamAdmin(scope: UserRunScope): Promise<boolean> {
+  if (!scope.teamId) return false
+  const result = await pool.query(
+    `SELECT 1
+       FROM team_members tm
+      WHERE tm.user_id = $1
+        AND tm.team_id = $2
+        AND tm.role = 'admin'
+        AND tm.status = 'active'`,
+    [scope.userId, scope.teamId]
+  )
+  return (result.rowCount ?? 0) > 0
 }
 
 function auditRunMatchesUserScope(row: Record<string, unknown>, scope: UserRunScope): boolean {
@@ -282,7 +347,24 @@ function toIso(value: string | null): string | null {
   return typeof value === 'string' ? value : new Date(value as unknown as string).toISOString()
 }
 
-export function mapDbRun(row: WorkflowRunRow): CanonicalRunDto {
+/**
+ * A run with its cancel request. `mapDbRun` always sets both fields for a run
+ * read from `workflow_runs`: both null, or both set once a permitted user asked
+ * to cancel the run (the request stays on the row after it reaches a terminal
+ * phase). Archived runs (`source: 'audit'`) do not carry them, which is why
+ * they are optional here: run lists and health reads mix the two sources.
+ */
+export type CancelAwareRunDto = CanonicalRunDto & {
+  cancelRequestedAt?: string | null
+  canceledBy?: string | null
+}
+
+/** A run in a user-session caller's run list, with that caller's cancel permission. */
+export type ViewerCanonicalRunDto = CancelAwareRunDto & {
+  viewerCanCancel: boolean
+}
+
+export function mapDbRun(row: WorkflowRunRow): CancelAwareRunDto {
   const executionRef: CanonicalRunExecutionRef | null =
     row.child_recipe_name && row.child_recipe_namespace
       ? { namespace: row.child_recipe_namespace, name: row.child_recipe_name }
@@ -296,6 +378,8 @@ export function mapDbRun(row: WorkflowRunRow): CanonicalRunDto {
     startedAt: toIso(row.started_at),
     completedAt: toIso(row.completed_at),
     message: row.failure_reason ?? null,
+    cancelRequestedAt: toIso(row.cancel_requested_at),
+    canceledBy: row.canceled_by,
     actor: actorFromDbRow(row),
     executionRef,
   }
@@ -430,7 +514,25 @@ export async function listCanonicalRuns(
   const liveRows = scope
     ? await listRunsByRecipeForUserScope(recipeNamespace, recipeName, limit, scope)
     : await listRunsByRecipe(recipeNamespace, recipeName, limit)
-  const liveRuns = liveRows.filter(row => !scope || runMatchesUserScope(row, scope)).map(mapDbRun)
+  let liveRuns: CancelAwareRunDto[]
+  if (scope) {
+    // A user-session list says, per live run, whether this caller may cancel it
+    // now: permitted, not finished, and not already asked to cancel.
+    const liveAdmin = await isLiveScopeTeamAdmin(scope)
+    liveRuns = liveRows
+      .filter(row => runMatchesUserScope(row, scope))
+      .map(
+        (row): ViewerCanonicalRunDto => ({
+          ...mapDbRun(row),
+          viewerCanCancel:
+            canCancel(row, scope, liveAdmin) &&
+            isNonTerminalRunPhase(row.phase) &&
+            row.cancel_requested_at === null,
+        })
+      )
+  } else {
+    liveRuns = liveRows.map(mapDbRun)
+  }
   const liveRunIds = new Set(liveRuns.map(run => run.id))
   const auditRuns = (
     await listAuditRunsByRecipe(recipeNamespace, recipeName, limit, caller)
