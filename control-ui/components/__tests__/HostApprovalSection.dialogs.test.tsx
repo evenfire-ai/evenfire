@@ -215,7 +215,7 @@ describe('HostApprovalSection dialogs (spec §6.6)', () => {
       ['added_tool', `Set to Skip. ${unknownDefault}`],
       [
         'cron_manage',
-        'Back to Default, which does not always ask. By default it runs without a card on a stateless Host that has not allowed cron management, and in tasks fired by a schedule. It asks otherwise.',
+        'Back to Default, which does not always ask. By default it runs without a card on a stateless Host that has not allowed cron management, and in tasks fired by a schedule. It asks otherwise. On a stateless Host that allows cron management, creating or enabling a schedule always asks, in tasks fired by a schedule too.',
       ],
       ['custom_lookup', `Required removed. ${unknownDefault}`],
       ['file_write', 'Back to Default, which never asks: calls can run without an approval card.'],

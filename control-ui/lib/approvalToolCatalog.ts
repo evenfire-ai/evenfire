@@ -25,8 +25,13 @@ export interface ApprovalToolCatalogEntry {
 
 // The conditions texts describe the tool's default behaviour with no override.
 // What each approval mode does is stated by the Approval modes view, not here.
+// cron_manage's last sentence is mcp-host's forced gate for create and enable
+// on a stateless Host that allows cron management, which also runs in tasks
+// fired by a schedule (mcpApprovalGateController.ts, cronManageGateOnly); it
+// agrees with spec §6.3 step 7's "on stateless agents they still ask before
+// creating or enabling another schedule".
 export const CRON_MANAGE_CONDITIONS =
-  'By default it runs without a card on a stateless Host that has not allowed cron management, and in tasks fired by a schedule. It asks otherwise.'
+  'By default it runs without a card on a stateless Host that has not allowed cron management, and in tasks fired by a schedule. It asks otherwise. On a stateless Host that allows cron management, creating or enabling a schedule always asks, in tasks fired by a schedule too.'
 
 export const WORKFLOW_TRIGGER_CONDITIONS =
   'By default it runs without a card from Telegram, Slack and Teams tasks, and in tasks fired by a schedule. It asks in an interactive Desktop chat.'
