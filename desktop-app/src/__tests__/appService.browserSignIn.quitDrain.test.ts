@@ -392,10 +392,10 @@ describe('browser sign-in under the macOS quit drain', () => {
       await harness.drain({ owner: false })
       expect(keychainAccounts(store, 'setPassword', keychainBefore), label).toEqual([account])
       expect(store.keychain.get(account), label).toBe(token)
-      expect(endStatesOf(harness, attempt.attemptId), label).toEqual(['signed_in'])
       await quit.release()
       await harness.drain()
-      // Quiescence: nothing is left queued behind admission or in flight.
+      // Quiescence (the install's tail reads a file, real I/O): signed_in, nothing unsettled.
+      expect(endStatesOf(harness, attempt.attemptId), label).toEqual(['signed_in'])
       expect(store.unsettledCalls(), label).toBe(0)
       expectSafetyAndCost(harness, attempt, recordsOf(harness), label)
       return
