@@ -1,9 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createApp } from '../app.js'
 import { apiErrorHandler } from '../errorHandler.js'
-import { ControlApiHostEdgeAssertionMissingError } from '../services/controlApiRestService.js'
 
 function appThrowing(error: unknown) {
   const app = express()
@@ -38,19 +37,21 @@ describe('apiErrorHandler', () => {
     expect(res.body).toEqual({ error: 'Payload Too Large' })
   })
 
-  it('maps a control-api answer without an edge assertion to 503 without the message', async () => {
-    const res = await request(appThrowing(new ControlApiHostEdgeAssertionMissingError())).get(
-      '/boom'
-    )
-    expect(res.status).toBe(503)
-    expect(res.body).toEqual({ error: 'authority_unavailable' })
-  })
-
-  // Pins that the generic echo of an unclassified error's message is unchanged.
-  it('maps anything else to 500 with the message', async () => {
-    const res = await request(appThrowing(new Error('kaput'))).get('/boom')
-    expect(res.status).toBe(500)
-    expect(res.body).toEqual({ error: 'Internal Server Error', message: 'kaput' })
+  it('maps anything else to 500 without the message and logs the error by name', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      const res = await request(appThrowing(new Error('kaput-detail'))).get('/boom')
+      expect(res.status).toBe(500)
+      expect(res.body).toEqual({ error: 'Internal Server Error' })
+      expect(res.text).not.toContain('kaput-detail')
+      // Witness: the generic branch ran and logged the cause once, without its message.
+      const lines = logged.mock.calls.map(args => String(args[0]))
+      expect(lines).toEqual([
+        '[RPC_PROXY] unhandled route error method=GET route=/boom error=Error',
+      ])
+    } finally {
+      logged.mockRestore()
+    }
   })
 
   it('is the terminal handler of the real app (tests and production share it)', () => {
