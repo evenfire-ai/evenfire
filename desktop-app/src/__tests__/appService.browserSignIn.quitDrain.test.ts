@@ -64,10 +64,6 @@ function methodsFetches(harness: BrowserSignInHarness) {
   return fetchesTo(harness, 'GET', METHODS_PATH)
 }
 
-function redeemFetches(harness: BrowserSignInHarness) {
-  return fetchesTo(harness, 'POST', REDEEM_PATH)
-}
-
 function snapshotsOf(harness: BrowserSignInHarness, attemptId: number): BrowserSignInSnapshot[] {
   return harness.pushes
     .map(record => record.value)
