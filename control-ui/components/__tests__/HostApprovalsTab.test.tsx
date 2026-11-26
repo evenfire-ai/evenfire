@@ -1,7 +1,7 @@
 /**
  * The Approvals tab (spec §6.2, §6.5, §6.10, §6.12), named after the spec §7
  * A3 rows it settles: R7, R8 (T8c, Ruling 14), R8r, R9s, R14 (T16), R15 (T17)
- * and R18, and the A5 changes C7, C10, C11, C13 and C18.
+ * and R18, and the A5 changes C7, C10, C11, C13, C17 and C18.
  *
  * Most tests render the tab alone over the fake control-api
  * (`renderApprovalsTab`): only `fetch` is replaced, so the real `lib/api`
@@ -14,6 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
+import { STATUS_CODES } from 'node:http'
 import { resolve } from 'node:path'
 import { FIRST_SAVE_DIALOG_TITLE } from '../../components/HostApprovalSection/constants'
 import { neverAskTools } from '../../lib/approvalToolCatalog'
@@ -59,6 +60,19 @@ function controlApiWire(name: string): WireAnswer {
 // control-api/test/routes.hostPut.fakeContract.test.ts.
 const DETAIL_500 = controlApiWire('host-detail-500.wire.json')
 const PUT_403 = controlApiWire('host-put-403.wire.json')
+// The Control UI proxy's own 502 when control-api cannot be reached
+// (app/control-api/[...path]/__tests__/route.wireBodies.test.ts records it).
+const PROXY_502 = JSON.parse(
+  readFileSync(resolve(__dirname, '../../test/fixtures/wire/proxy-502.wire.json'), 'utf8')
+) as WireAnswer
+
+/**
+ * The message the real client gives a read answered with `answer` when its
+ * body has no `message` of its own: the status and its text (lib/api.ts apiGet).
+ */
+function readFailureMessage(answer: WireAnswer): string {
+  return `${answer.status} ${STATUS_CODES[answer.status]}`
+}
 
 // Spec §6.2, verbatim.
 const INHERITING_BANNER =
@@ -894,6 +908,57 @@ describe('HostApprovalsTab', () => {
       expect(sectionButton('Cancel'), "b's edit session stays open").toBeEnabled()
       expect(unanswered(fake)).toEqual([])
       page.unmount()
+    })
+  })
+
+  describe('a save whose read fails (spec §6.4 step 14, C17)', () => {
+    it("C17 a failed read before the PUT keeps the draft in the edit view, and Retry saves it once the tab's load settles", async () => {
+      const fake = tabFake({ tools: { json_transform: true } })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      const driver = await approvalSettingsDriver()
+      await driver.edit()
+      await driver.editTool('system_info', 'required')
+      // The save's own read of the Host: the proxy could not reach control-api.
+      const read = fake.hold({ method: 'GET', path: FOO })
+      await driver.save()
+      await act(async () => {
+        await read.arrived
+      })
+      await act(async () => {
+        read.respondWith(PROXY_502.status, PROXY_502.body)
+      })
+      await waitFor(() => expect(driver.message()).toContain(readFailureMessage(PROXY_502)))
+
+      expect(writes(fake), 'nothing written').toEqual([])
+      // Still the edit session that saved: its draft, editable, with Save.
+      const draftRow = within(perToolSection() as HTMLElement).getByLabelText(
+        'system_info'
+      ) as HTMLSelectElement
+      expect(draftRow.value, 'the draft').toBe('required')
+      expect(draftRow, 'the draft row').toBeEnabled()
+      expect(overrides(driver.readView()), 'the draft').toEqual({
+        json_transform: 'Required',
+        system_info: 'Required',
+      })
+      // The stop fired the Host-changed notice; Retry is usable once that load settles.
+      const retry = () => {
+        const message = perToolSection()?.querySelector<HTMLElement>(
+          '.cu-host-approval-section__message'
+        )
+        if (!message) throw new Error('the save message is not shown')
+        return within(message).getByRole('button', { name: 'Retry' })
+      }
+      await waitFor(() => expect(retry()).toBeEnabled())
+
+      await act(async () => {
+        fireEvent.click(retry())
+      })
+      await waitFor(() => expect(writes(fake).filter(entry => entry.applied)).toHaveLength(1))
+      expect(approvalOf(fake.stored('foo')), 'the draft, saved').toEqual({
+        tools: { json_transform: true, system_info: true },
+      })
+      expect(unanswered(fake)).toEqual([])
+      tab.unmount()
     })
   })
 
