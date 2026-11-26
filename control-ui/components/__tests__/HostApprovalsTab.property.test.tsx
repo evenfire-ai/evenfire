@@ -3022,9 +3022,11 @@ const setupArb: fc.Arbitrary<Setup> = fc.record({
 /**
  * The scheduler of a fixed example: each release takes the next point the
  * script names (by label), when that point is waiting, and otherwise the
- * oldest waiting point. With no script it is first in, first out. So an
- * example runs the same way every time, and a script that no longer matches
- * the requests the page sends falls back to FIFO instead of failing.
+ * oldest waiting point. With no script it is first in, first out, so an
+ * example runs the same way every time. A script that no longer matches the
+ * requests the page sends still runs to the end on FIFO, and then fails the
+ * run as a harness error (`checkScriptFollowed`): its example would no
+ * longer reach the interleaving it pins.
  */
 function scriptedScheduler(script: readonly string[] = []): fc.Scheduler {
   type Task = { id: number; label: string; status: 'pending' | 'resolved'; release: () => void }
