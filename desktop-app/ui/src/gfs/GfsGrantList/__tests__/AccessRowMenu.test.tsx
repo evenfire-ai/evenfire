@@ -71,8 +71,8 @@ describe('AccessRowMenu', () => {
           return rect(
             (parseFloat(this.style.left) || 0) + origin.left,
             (parseFloat(this.style.top) || 0) + origin.top,
-            184,
-            52
+            200,
+            46
           )
         }
         if (this.getAttribute('aria-haspopup') === 'menu') return rect(400, 108, 32, 32)
@@ -83,9 +83,9 @@ describe('AccessRowMenu', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Actions for chatllm' }))
       const menu = await screen.findByRole('menu', { name: 'Actions for chatllm' })
       // Viewport target: below the trigger (bottom 140 + gap 6), right-aligned
-      // with it (right 432 - width 184).
+      // with it (right 432 - width 200).
       await waitFor(() => expect(menu.getBoundingClientRect().top).toBe(146))
-      expect(menu.getBoundingClientRect().left).toBe(248)
+      expect(menu.getBoundingClientRect().left).toBe(232)
 
       fireEvent.scroll(window)
       expect(menu.getBoundingClientRect().top).toBe(146)
@@ -93,7 +93,7 @@ describe('AccessRowMenu', () => {
       origin.top = -200
       fireEvent.scroll(window)
       expect(menu.getBoundingClientRect().top).toBe(146)
-      expect(menu.getBoundingClientRect().left).toBe(248)
+      expect(menu.getBoundingClientRect().left).toBe(232)
     } finally {
       geometry.mockRestore()
       container.remove()

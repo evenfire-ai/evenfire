@@ -60,8 +60,8 @@ export function AccessRowMenu({
     const menuRect = menu.getBoundingClientRect()
     const inset = 8
     const gap = 6
-    const menuWidth = menuRect.width || 184
-    const menuHeight = menuRect.height || 52
+    const menuWidth = menuRect.width || 200
+    const menuHeight = menuRect.height || 46
     const left = Math.max(
       inset,
       Math.min(triggerRect.right - menuWidth, window.innerWidth - menuWidth - inset)
