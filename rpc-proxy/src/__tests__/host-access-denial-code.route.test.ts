@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import request from 'supertest'
+import {
+  HOST_EDGE_ASSERTION_AUDIENCE,
+  HOST_EDGE_ASSERTION_CLAIM_TYPE,
+  HOST_EDGE_ASSERTION_JWT_TYPE,
+} from '@clerum/action-context-contracts'
+import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
 import { createRpcHostActivityStreamRouter } from '../routes/rpcHostActivityStream.js'
@@ -207,11 +215,38 @@ function send(route: RouteCase) {
   return route.body ? pending.send(route.body) : pending
 }
 
+// The status stream reads the assertion's `exp` before each poll, so the
+// authorized connection carries an assertion signed the way control-api signs it
+// (RS256, the assertion JWT type, the Host runtime audience), `exp` 300 s ahead.
+const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
+const NOW_SECONDS = Math.floor(Date.now() / 1000)
+const SIGNED_EDGE_ASSERTION = jwt.sign(
+  {
+    typ: HOST_EDGE_ASSERTION_CLAIM_TYPE,
+    v: 1,
+    iss: 'control-api',
+    sub: CLAIMS.sub,
+    host: `${config.hostNamespace}/chatllm`,
+    jti: randomUUID(),
+    iat: NOW_SECONDS,
+    exp: NOW_SECONDS + 300,
+    teamId: CLAIMS.teamId,
+    scopes: CLAIMS.scopes,
+  },
+  EDGE_KEYS.privateKey,
+  {
+    algorithm: 'RS256',
+    audience: HOST_EDGE_ASSERTION_AUDIENCE,
+    header: { alg: 'RS256', typ: HOST_EDGE_ASSERTION_JWT_TYPE },
+  }
+)
+
 const CONTROL_API_CONNECTION = {
   userId: CLAIMS.sub,
   hostRef: 'chatllm',
   url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
   bindingStatus: 'recorded',
+  edgeAssertion: SIGNED_EDGE_ASSERTION,
 }
 
 /**
@@ -437,6 +472,7 @@ describe('passthrough and non-authorization responses are left untouched', () =>
         userId: CLAIMS.sub,
         hostRef: 'chatllm',
         url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        edgeAssertion: 'edge-assertion-fixture',
       },
     }
   })
@@ -561,6 +597,7 @@ describe('an mcp-host 403 never reaches the client with a reserved Host-access c
         userId: CLAIMS.sub,
         hostRef: 'chatllm',
         url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        edgeAssertion: 'edge-assertion-fixture',
       },
     }
     hostAnswer = {

@@ -110,7 +110,72 @@ describe('AppService.invokeHostMessage', () => {
       threadId: undefined,
       attachments: undefined,
     })
-    expect(service.rpcClient.invokeHostMessage.mock.calls[0][3]).toEqual({ async: true })
+    expect(service.rpcClient.invokeHostMessage.mock.calls[0][3]).toEqual({
+      async: true,
+      idempotencyKey: expect.any(String),
+    })
+  })
+
+  it('the refresh retry reuses the Idempotency-Key of the first attempt', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = {
+      id: '00000000-0000-4000-8000-000000000001',
+      teamId: '00000000-0000-4000-8000-0000000000aa',
+    }
+    service.rpcTokenManager = {
+      getOrIssue: vi
+        .fn()
+        .mockResolvedValueOnce({ token: 'rpc-test-token-1' })
+        .mockResolvedValueOnce({ token: 'rpc-test-token-2' }),
+      clear: vi.fn(),
+    }
+    service.rpcClient = {
+      invokeHostMessage: vi
+        .fn()
+        .mockRejectedValueOnce(new ApiError('401 Unauthorized: bad token', 401, ''))
+        .mockResolvedValueOnce({ taskId: 'task-1', status: 'pending' }),
+    }
+
+    await service.invokeHostMessage('chatllm', { content: 'hello' }, ['chatllm'], { async: true })
+
+    const calls = service.rpcClient.invokeHostMessage.mock.calls
+    expect(calls).toHaveLength(2)
+    // Witnesses that the refresh-retry branch ran: the cached token was
+    // dropped and the retry carried the re-issued token.
+    expect(service.rpcTokenManager.clear).toHaveBeenCalledTimes(1)
+    expect(calls[0][0]).toBe('rpc-test-token-1')
+    expect(calls[1][0]).toBe('rpc-test-token-2')
+    expect(calls[0][3].idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    )
+    expect(calls[1][3]).toEqual({ async: true, idempotencyKey: calls[0][3].idempotencyKey })
+  })
+
+  it('two sends get different Idempotency-Keys', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = {
+      id: '00000000-0000-4000-8000-000000000001',
+      teamId: '00000000-0000-4000-8000-0000000000aa',
+    }
+    service.rpcTokenManager = {
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
+      clear: vi.fn(),
+    }
+    service.rpcClient = {
+      invokeHostMessage: vi.fn().mockResolvedValue({ taskId: 'task-1', status: 'pending' }),
+    }
+
+    await service.invokeHostMessage('chatllm', { content: 'same text' }, ['chatllm'])
+    await service.invokeHostMessage('chatllm', { content: 'same text' }, ['chatllm'])
+
+    const calls = service.rpcClient.invokeHostMessage.mock.calls
+    expect(calls).toHaveLength(2)
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    expect(calls[0][3].idempotencyKey).toMatch(uuid)
+    expect(calls[1][3].idempotencyKey).toMatch(uuid)
+    expect(calls[1][3].idempotencyKey).not.toBe(calls[0][3].idempotencyKey)
   })
 
   it('forwards a 5 MiB JPEG without letting the payload choose identity, host, or scopes', async () => {

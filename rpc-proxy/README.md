@@ -92,8 +92,8 @@ sequenceDiagram
   Proxy->>Gateway: GET /api/v1/rpc/access/users/:userId/mcp-hosts/:hostRef
   Gateway->>Control: Forward allowlisted path
   Control->>Control: Validate internal caller + x-rpc-access-token + claim binding
-  Control-->>Proxy: { userId, hostRef, url } or 403
-  Proxy->>Host: POST /v1/runtime/messages
+  Control-->>Proxy: { userId, hostRef, url, edgeAssertion } or 403
+  Proxy->>Host: POST /v1/runtime/messages (x-clerum-edge-assertion: edgeAssertion)
   Host-->>Proxy: runtime response
   Proxy-->>Desktop: REST response body
 ```
