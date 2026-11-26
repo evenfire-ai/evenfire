@@ -129,10 +129,15 @@ type HostRuntimeSignal = {
   error: string | null
 }
 
+// The row shows only the agent's display name, so the hostRef is addressed by
+// its `data-agent-ref` attribute.
+const statelessAgentRow = (appPage: import('@playwright/test').Page) =>
+  appPage.locator(`.agents-table-row-clickable[data-agent-ref=${JSON.stringify(HOST_REF)}]`)
+
 async function openStatelessAgent(appPage: import('@playwright/test').Page): Promise<void> {
   await openAgentsPage(appPage)
   const chatInput = appPage.getByTestId('chat-input')
-  const agentLink = appPage.locator('.agents-table-row-clickable', { hasText: HOST_REF })
+  const agentLink = statelessAgentRow(appPage)
   const emptyState = appPage.locator('text=No agents available')
   await expect(agentLink.first().or(emptyState)).toBeVisible({ timeout: 20_000 })
   if (await emptyState.isVisible()) {
@@ -238,7 +243,7 @@ test('Scenario 0 — authenticated catalog prewarms every visible agent before s
       timeout: 20_000,
     })
     await expect(
-      appPage.locator('.agents-table-row-clickable', { hasText: HOST_REF }).first(),
+      statelessAgentRow(appPage).first(),
       `[stateless-wake] Expected authorized agent row for "${HOST_REF}" before any stateless chat interaction.`
     ).toBeVisible({ timeout: 20_000 })
     const names = await visibleAgentHostRefs(appPage)
@@ -688,7 +693,9 @@ async function nameActiveChat(
 ): Promise<string> {
   const row = appPage.locator('.nav-latest-session.active')
   await expect(row).toHaveCount(1, { timeout: TURN_TIMEOUT })
-  await expect(row.locator('.nav-latest-session__agent')).toHaveText(HOST_REF)
+  // The row's visible agent label is its display name, so its identity is read
+  // from `data-agent-ref`.
+  await expect(row).toHaveAttribute('data-agent-ref', HOST_REF)
   await row.getByRole('button', { name: /^Session options for / }).click()
   await appPage.getByRole('menuitem', { name: 'Rename', exact: true }).click()
   const input = appPage.getByRole('textbox', { name: 'Rename session', exact: true })
@@ -715,7 +722,7 @@ async function expectSessionVisible(
   ).toHaveCount(1, { timeout: WAKE_VISIBLE_TIMEOUT })
   await expect(button).toBeVisible()
   const row = appPage.locator('.nav-latest-session', { has: button })
-  await expect(row.locator('.nav-latest-session__agent')).toHaveText(HOST_REF)
+  await expect(row).toHaveAttribute('data-agent-ref', HOST_REF)
 }
 
 // Click a listed session and confirm it became the active chat: its row is the

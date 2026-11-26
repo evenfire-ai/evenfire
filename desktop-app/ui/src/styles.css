@@ -3723,16 +3723,6 @@ body.sidebar-resizing {
   line-height: 1.15;
 }
 
-.agent-row-description {
-  color: var(--text-muted);
-  font-size: var(--font-size-md);
-  line-height: 1.2;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: min(48vw, 420px);
-}
-
 .agent-row-main:hover:enabled {
   transform: none;
   filter: none;

@@ -12,6 +12,7 @@ import { ConfirmDialog } from '@components/ConfirmDialog'
 import { useGfsActionHost } from '@components/GfsActionHost/context'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/navigation'
+import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import type { NavItem } from '@/uiTypes'
@@ -58,6 +59,9 @@ export function SidebarNav({
   const { busy, me, handleLogout: onLogout } = useAuthContext()
   const { activeChatId, latestChatSessions, latestChatSessionsLoading, sessionStateByChatKey } =
     useChatListContext()
+  // A session row is labelled with the catalog display name; an agent the
+  // catalog has no name for keeps its identifier, as on the other surfaces.
+  const { agentDisplayByName } = useAgentsDataController()
   const {
     captureChatDeleteFence,
     handleRenameChatForAgent: onRenameChatForAgent,
@@ -554,7 +558,7 @@ export function SidebarNav({
                                         {session.title}
                                       </span>
                                       <span className="nav-latest-session__agent">
-                                        {session.agentRef}
+                                        {agentDisplayByName[session.agentRef] ?? session.agentRef}
                                       </span>
                                     </span>
                                   </button>

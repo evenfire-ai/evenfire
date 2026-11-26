@@ -13,6 +13,7 @@ const sidebarNavChatState = vi.hoisted(() => ({
     title: string
     remote?: boolean
   }>,
+  agentDisplayByName: {} as Record<string, string>,
 }))
 
 // SidebarNav pulls from four contexts. Mock each module so we only render
@@ -46,6 +47,12 @@ vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     selectedAgent: null,
     handleSelectChatAgent: vi.fn(),
+  }),
+}))
+// The real hook reads the access catalog through TanStack Query.
+vi.mock('@hooks/domain/useAgentsDataController', () => ({
+  useAgentsDataController: () => ({
+    agentDisplayByName: sidebarNavChatState.agentDisplayByName,
   }),
 }))
 // The real tree pulls TanStack Query and GFS contexts; the sidebar tests only
@@ -108,6 +115,7 @@ describe('SidebarNav logo', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     sidebarNavChatState.latestChatSessions = []
+    sidebarNavChatState.agentDisplayByName = {}
     // jsdom does not implement matchMedia; SidebarNav reads it to detect the
     // mobile viewport. Stub it as a non-matching desktop viewport.
     if (!window.matchMedia) {
@@ -401,6 +409,26 @@ describe('SidebarNav logo', () => {
     if (producer === 'app') expect(onOpenSandboxUiApp).toHaveBeenCalledWith(app)
     if (producer === 'folder') expect(onOpenFilesSection).toHaveBeenCalledOnce()
     if (producer === 'preview') expect(onOpenPreviewSection).toHaveBeenCalledOnce()
+  })
+
+  it('labels a session row with the agent display name, falling back to its ref', () => {
+    sidebarNavChatState.latestChatSessions = [
+      { agentRef: 'product-agent', id: 'chat-1', title: 'Task Management' },
+      { agentRef: 'profits', id: 'chat-2', title: 'Slack Agents Task' },
+    ]
+    sidebarNavChatState.agentDisplayByName = { 'product-agent': 'Product Agent' }
+    render(<SidebarNav {...baseProps()} />)
+
+    const rows = screen.getAllByTestId('latest-session-row')
+    expect(rows.map(row => row.querySelector('.nav-latest-session__agent')?.textContent)).toEqual([
+      'Product Agent',
+      'profits',
+    ])
+    // The label is presentation only: the row still addresses the agent by ref.
+    expect(rows.map(row => row.getAttribute('data-agent-ref'))).toEqual([
+      'product-agent',
+      'profits',
+    ])
   })
 
   it('clears a desktop Settings submenu when compact mode begins with navigation closed', () => {

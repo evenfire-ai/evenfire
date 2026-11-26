@@ -66,11 +66,10 @@ describe('fleetRowHostRefs on rendered FleetBoard rows', () => {
   it('reads the hostRef of a row whose display name differs and of one whose display name equals it', () => {
     const { container } = render(<FleetBoard />)
     const rows = Array.from(container.querySelectorAll('.agents-table-row-clickable'))
-    // Witness: both row shapes rendered; the second has a single description.
+    // Witness: both row shapes rendered, each showing only its display name.
     expect(rows).toHaveLength(2)
-    expect(rows.map(r => r.querySelectorAll('.agent-row-description').length).sort()).toEqual([
-      1, 2,
-    ])
+    expect(rows.map(r => r.querySelector('strong')?.textContent)).toEqual(['chatLLM', 'researcher'])
+    expect(container.querySelectorAll('.agent-row-description')).toHaveLength(0)
     expect(fleetRowHostRefs(rows).sort()).toEqual(['chatllm-stateless', 'researcher'])
   })
 })

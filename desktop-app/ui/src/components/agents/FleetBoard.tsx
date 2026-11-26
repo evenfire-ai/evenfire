@@ -61,9 +61,6 @@ export function FleetBoard() {
   const [pendingCreateChatForAgent, setPendingCreateChatForAgent] = useState<string | null>(null)
   const fleetMenuRef = useRef<HTMLDivElement | null>(null)
 
-  const agentMockDescription =
-    'Workspace assistant for operations and support tasks. (Mock description; backend profile connection pending.)'
-
   // When selectedAgent catches up to the pending agent, create a chat
   useEffect(() => {
     if (!pendingCreateChatForAgent || selectedAgent !== pendingCreateChatForAgent) return
@@ -251,9 +248,12 @@ export function FleetBoard() {
                 </thead>
                 <tbody>
                   {filteredFleetRows.map(row => (
+                    // Only the display name is rendered as copy; the identifier
+                    // stays on the row for e2e (fleetRowHostRefs reads it).
                     <tr
                       key={row.agent}
                       className="da-table__row--clickable agents-table-row-clickable"
+                      data-agent-ref={row.agent}
                       {...clickableRowProps(() => onOpenAgentWorkspace(row.agent, 'mcp-servers'), {
                         ariaLabel: `Open agent ${row.display}`,
                       })}
@@ -265,14 +265,6 @@ export function FleetBoard() {
                           </span>
                           <div className="agent-row-main-copy">
                             <strong>{row.display}</strong>
-                            {row.display !== row.agent && (
-                              <span className="agent-row-description" title={row.agent}>
-                                {row.agent}
-                              </span>
-                            )}
-                            <span className="agent-row-description" title={agentMockDescription}>
-                              {agentMockDescription}
-                            </span>
                           </div>
                         </div>
                       </td>
