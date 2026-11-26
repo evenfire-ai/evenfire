@@ -32,7 +32,7 @@ import {
 import { logger } from '../logger'
 import type { TaskError } from '../queue/types'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../server/types'
-import { serializeSessionKey } from '../session/types.js'
+import { normalizeSessionChannelId, resolveCanonicalSessionKey } from '../session/types.js'
 import type { FileReferenceGfsAccess } from './fileReferenceGfsGate'
 import {
   type FileReferenceCheckFailure,
@@ -345,16 +345,14 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         let sessionLogId: string | undefined
         try {
           const manager = deps.getConversationManager!()
-          const key = serializeSessionKey({
-            userId: normalizedMessage.sender,
-            channelType: normalizedMessage.channelType,
-            channelId: normalizedMessage.channelId,
-            threadId: normalizedMessage.threadId,
-          })
+          const key = resolveCanonicalSessionKey(normalizedMessage)
           const { conversation } = await manager.getOrCreateDetailed(key, {
             userId: normalizedMessage.sender,
             channelType: normalizedMessage.channelType,
-            channelId: normalizedMessage.channelId,
+            channelId: normalizeSessionChannelId(
+              normalizedMessage.channelType,
+              normalizedMessage.channelId
+            ),
             threadId: normalizedMessage.threadId,
             source: normalizedMessage.channelType,
           })
@@ -544,12 +542,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     const runHandler = (): MessageResponse | Promise<MessageResponse> => {
       if (!hasImageAttachments) return dispatchMessage()
       return (async () => {
-        const key = serializeSessionKey({
-          userId: normalizedMessage.sender,
-          channelType: normalizedMessage.channelType,
-          channelId: normalizedMessage.channelId || 'default',
-          threadId: normalizedMessage.threadId,
-        })
+        const key = resolveCanonicalSessionKey(normalizedMessage)
         const conversation = await deps.getConversationByKey(key, normalizedMessage.sender)
         // Checked again here even after the pre-write check below: this is the
         // pair the task will actually run on, on every path into the handler.
@@ -576,8 +569,8 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       let sessionLogId: string | undefined
       try {
         const manager = deps.getConversationManager()
-        const key = serializeSessionKey({
-          userId: normalizedMessage.sender,
+        const key = resolveCanonicalSessionKey({
+          sender: normalizedMessage.sender,
           channelType: 'rpc',
           channelId: normalizedMessage.channelId,
           threadId: normalizedMessage.threadId,

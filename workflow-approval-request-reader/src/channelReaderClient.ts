@@ -98,8 +98,9 @@ export async function handoffSlackMessageToChannelReader(
   const responseThreadTs = target.replyInThreads
     ? command.threadTs || command.providerMessageTs
     : null
+  const hasAttachments = Array.isArray(command.attachments) && command.attachments.length > 0
   return postHandoff(cfg, target, '/internal/slack/handoff', {
-    kind: 'slack.message',
+    kind: hasAttachments ? 'slack.attachment-message.v1' : 'slack.message',
     content: command.content,
     ...(command.workflowRunId ? { workflowRunId: command.workflowRunId } : {}),
     providerUserId: command.providerUserId,
@@ -107,7 +108,10 @@ export async function handoffSlackMessageToChannelReader(
     providerChannelId: command.providerChannelId,
     providerEventId: command.providerEventId,
     providerMessageTs: command.providerMessageTs,
+    threadTs: command.threadTs ?? null,
     responseThreadTs,
+    ...(command.eventKind ? { eventKind: command.eventKind } : {}),
+    ...(hasAttachments ? { attachments: command.attachments } : {}),
     providerTarget: {
       hostRef: target.hostRef,
       communicationChannelNamespace: channelRef.namespace,
@@ -155,19 +159,22 @@ export async function handoffTeamsMessageToChannelReader(
 ): Promise<{ ok: true } | { ok: false; status?: number; error: string }> {
   const channelRef = splitCommunicationChannelRef(target.communicationChannelRef)
   if (!channelRef) return { ok: false, status: 400, error: 'invalid_communication_channel_ref' }
+  const hasAttachments = Array.isArray(command.attachments) && command.attachments.length > 0
   return postHandoff(cfg, target, '/internal/teams/handoff', {
-    kind: 'teams.message',
+    kind: hasAttachments ? 'teams.attachment-message.v1' : 'teams.message',
     content: command.content,
     ...(command.workflowRunId ? { workflowRunId: command.workflowRunId } : {}),
     providerUserId: command.providerUserId,
     providerWorkspaceId: command.providerWorkspaceId,
     providerChannelId: command.providerChannelId,
     providerConversationId: command.providerConversationId,
+    providerThreadRootId: command.providerThreadRootId ?? null,
     providerReplyToMessageId: command.providerReplyToMessageId ?? command.providerMessageTs,
     providerChannelType: command.providerChannelType ?? null,
     providerEventId: command.providerEventId,
     providerMessageId: command.providerMessageTs,
     serviceUrl: command.serviceUrl ?? '',
+    ...(hasAttachments ? { attachments: command.attachments } : {}),
     providerTarget: {
       hostRef: target.hostRef,
       communicationChannelNamespace: channelRef.namespace,

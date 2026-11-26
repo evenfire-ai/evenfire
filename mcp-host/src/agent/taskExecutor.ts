@@ -155,7 +155,12 @@ import {
   withRuntimeActionAuthorityForLlmPort,
   withRuntimeActionAuthorityForToolRegistry,
 } from '../runtime/actionAuthority'
-import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
+import {
+  normalizeSessionChannelId,
+  resolveCanonicalSessionKey,
+  resolveCronTaskSessionKey,
+  serializeSessionKey,
+} from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
@@ -202,16 +207,9 @@ export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'f
  * agree with the key `cronDispatch.ts` enqueued under.
  */
 export function resolveTaskSessionKey(task: Task): string {
-  const msg = task.sourceMessage
   const cronSession = task.source === 'cron' ? resolveCronTaskSessionKey(task) : undefined
-  return serializeSessionKey(
-    cronSession ?? {
-      userId: msg?.sender || 'anonymous',
-      channelType: msg?.channelType || 'internal',
-      channelId: msg?.channelId || 'default',
-      threadId: msg?.threadId,
-    }
-  )
+  if (cronSession) return serializeSessionKey(cronSession)
+  return resolveCanonicalSessionKey(task.sourceMessage)
 }
 
 /**
@@ -516,7 +514,7 @@ export class TaskExecutor {
     this.conversation = await this.deps.conversationManager.getOrCreate(sessionKey, {
       userId: message?.sender,
       channelType: message?.channelType,
-      channelId: message?.channelId,
+      channelId: normalizeSessionChannelId(message?.channelType, message?.channelId),
       threadId: message?.threadId,
       source: message?.channelType,
     })
@@ -571,7 +569,8 @@ export class TaskExecutor {
       this.conversation = await this.deps.conversationManager.getOrCreate(sessionKey, {
         userId: cronSession?.userId ?? msg?.sender,
         channelType: cronSession?.channelType ?? msg?.channelType,
-        channelId: cronSession?.channelId ?? msg?.channelId,
+        channelId:
+          cronSession?.channelId ?? normalizeSessionChannelId(msg?.channelType, msg?.channelId),
         threadId: cronSession?.threadId ?? msg?.threadId,
         source: cronSession?.channelType ?? msg?.channelType,
         // R2 — record the effective model served (resolved by the agent from the

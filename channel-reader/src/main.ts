@@ -1168,7 +1168,7 @@ export class ChannelReader {
   }
 
   async handleSlackHandoff(request: SlackHandoffRequest): Promise<SlackHandoffResponse> {
-    if (request.kind === 'slack.message') {
+    if (request.kind === 'slack.message' || request.kind === 'slack.attachment-message.v1') {
       const message = this.slackMessageFromHandoff(request)
       if (!message) return { ok: false, status: 400, error: 'invalid_slack_message_handoff' }
       if (request.workflowRunId) {
@@ -1187,7 +1187,7 @@ export class ChannelReader {
   }
 
   async handleTeamsHandoff(request: TeamsHandoffRequest): Promise<SlackHandoffResponse> {
-    if (request.kind === 'teams.message') {
+    if (request.kind === 'teams.message' || request.kind === 'teams.attachment-message.v1') {
       const message = this.teamsMessageFromHandoff(request)
       if (!message) return { ok: false, status: 400, error: 'invalid_teams_message_handoff' }
       this.rememberTeamsConversation(

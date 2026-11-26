@@ -9,7 +9,7 @@ import { MessageQueue, Task, TaskResponsePayload } from './queue'
 import type { TaskError } from './queue'
 import { ResultStore } from './resultStore'
 import type { IncomingMessage, MessageResponse } from './server'
-import { parseBackgroundPrefix, serializeSessionKey } from './session'
+import { parseBackgroundPrefix, resolveCanonicalSessionKey } from './session'
 import type { SessionProcessor } from './session'
 
 export interface PendingTaskEntry {
@@ -205,14 +205,7 @@ export class IncomingMessageHandler {
       // Dispatch to SessionProcessor if available
       if (this.deps.sessionProcessor) {
         const msg = this.message
-        const sessionKey =
-          this.backgroundSessionKey ??
-          serializeSessionKey({
-            userId: msg.sender,
-            channelType: msg.channelType,
-            channelId: msg.channelId || 'default',
-            threadId: msg.threadId,
-          })
+        const sessionKey = this.backgroundSessionKey ?? resolveCanonicalSessionKey(msg)
         this.deps.sessionProcessor.enqueue(sessionKey, this.task)
       }
 
@@ -329,14 +322,7 @@ export class IncomingMessageHandler {
     // Dispatch to SessionProcessor if available
     if (this.deps.sessionProcessor) {
       const msg = this.message
-      const sessionKey =
-        this.backgroundSessionKey ??
-        serializeSessionKey({
-          userId: msg.sender,
-          channelType: msg.channelType,
-          channelId: msg.channelId,
-          threadId: msg.threadId,
-        })
+      const sessionKey = this.backgroundSessionKey ?? resolveCanonicalSessionKey(msg)
       this.deps.sessionProcessor.enqueue(sessionKey, this.task)
     }
 

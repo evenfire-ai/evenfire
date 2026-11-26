@@ -148,6 +148,106 @@ export interface ProviderIdentity {
   providerTarget?: ProviderTargetIdentity
 }
 
+export type ProviderAttachmentDownloadRef =
+  | {
+      provider: 'telegram'
+      fileId: string
+      kindHint:
+        | 'photo'
+        | 'document'
+        | 'audio'
+        | 'video'
+        | 'voice'
+        | 'animation'
+        | 'video_note'
+        | 'sticker'
+    }
+  | {
+      provider: 'slack'
+      fileId: string
+      urlPrivateDownload?: string | null
+      urlPrivate?: string | null
+      fileAccess?: string | null
+      isExternal?: boolean
+    }
+  | {
+      provider: 'teams'
+      mode: 'file_download_info'
+      downloadUrl: string
+      uniqueId?: string | null
+    }
+  | {
+      provider: 'teams'
+      mode: 'inline_content'
+      contentUrl: string
+      serviceUrl: string
+    }
+
+export interface ProviderAttachmentDescriptorV1 {
+  providerAttachmentId: string
+  filename: string | null
+  declaredMediaType: string | null
+  reportedSizeBytes: number | null
+  downloadRef: ProviderAttachmentDownloadRef
+}
+
+export interface ChannelAttachmentIngestError {
+  filename: string | null
+  code: string
+  message: string
+}
+
+export interface ChannelAttachmentIngestMetadataV1 {
+  channelType: 'telegram' | 'slack' | 'teams'
+  channelId: string
+  sender: string
+  sessionThreadId?: string
+  messageId: string
+  providerIdentity: ProviderIdentity
+  providerAttachmentId: string
+  filename: string | null
+  declaredMediaType: string | null
+}
+
+export type ChannelAttachmentReceiptV1 =
+  | {
+      ok: true
+      attachmentId: string
+      fileReference: Record<string, unknown>
+      expiresAt: string
+      width?: number
+      height?: number
+      visualValid?: boolean
+      documentReadOverLimit?: boolean
+      deduplicated?: boolean
+    }
+  | {
+      ok: false
+      error: {
+        code: string
+        message: string
+        retryable: boolean
+      }
+    }
+
+/**
+ * Normalize channelId for per-conversation FIFO & session key derivation
+ * (mirrors mcp-host `normalizeSessionChannelId`). Raw `msg.channelId` remains
+ * intact for runtime ownership checks and provider reply delivery.
+ */
+export function normalizeSessionChannelId(
+  channelType: string | undefined,
+  channelId: string | undefined
+): string {
+  const raw = (channelId || '').trim()
+  if (!raw) return 'default'
+  if (channelType === 'teams') {
+    const stripped = raw.replace(/[;?&]messageid=[^;?&]+$/i, '').trim()
+    return stripped || 'default'
+  }
+  return raw
+}
+
 /**
  * Represents a message from any channel.
  */
@@ -159,6 +259,7 @@ export interface Message {
   timestamp: Date
   messageId: string
   threadId?: string
+  attachments?: ProviderAttachmentDescriptorV1[]
   providerIdentity?: ProviderIdentity
   rawData?: Record<string, unknown>
 }

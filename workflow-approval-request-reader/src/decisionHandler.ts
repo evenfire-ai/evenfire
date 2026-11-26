@@ -38,6 +38,36 @@ export type ReaderEnrollmentCommand = {
   serviceUrl?: string | null
 }
 
+export type ProviderAttachmentDownloadRef =
+  | {
+      provider: 'slack'
+      fileId: string
+      urlPrivateDownload?: string | null
+      urlPrivate?: string | null
+      fileAccess?: string | null
+      isExternal?: boolean
+    }
+  | {
+      provider: 'teams'
+      mode: 'file_download_info'
+      downloadUrl: string
+      uniqueId?: string | null
+    }
+  | {
+      provider: 'teams'
+      mode: 'inline_content'
+      contentUrl: string
+      serviceUrl: string
+    }
+
+export type ProviderAttachmentDescriptorV1 = {
+  providerAttachmentId: string
+  filename: string | null
+  declaredMediaType: string | null
+  reportedSizeBytes: number | null
+  downloadRef: ProviderAttachmentDownloadRef
+}
+
 export type ReaderMessageCommand = {
   content: string
   workflowRunId?: string
@@ -48,10 +78,13 @@ export type ReaderMessageCommand = {
   providerWorkspaceId: string
   providerChannelId: string
   providerConversationId?: string | null
+  providerThreadRootId?: string | null
   providerReplyToMessageId?: string | null
   providerEventId: string
   providerMessageTs: string
   threadTs?: string | null
+  eventKind?: 'event_callback' | 'block_actions'
+  attachments?: ProviderAttachmentDescriptorV1[]
   providerChannelType?: string | null
   serviceUrl?: string | null
 }

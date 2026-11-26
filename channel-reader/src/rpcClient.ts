@@ -9,7 +9,13 @@ import type {
 } from './notificationDeliveryClient'
 import type { TraceContextV1 } from './traceContext'
 import { Message, ProviderIdentity } from './types'
-import type { Attachment, ProviderTargetIdentity } from './types'
+import type {
+  Attachment,
+  ChannelAttachmentIngestError,
+  ChannelAttachmentIngestMetadataV1,
+  ChannelAttachmentReceiptV1,
+  ProviderTargetIdentity,
+} from './types'
 
 /**
  * Message payload sent to mcp-host.
@@ -23,6 +29,8 @@ export interface OutgoingMessage {
   messageId: string
   hostRef: string
   threadId?: string
+  channelAttachmentIds?: string[]
+  attachmentIngestErrors?: ChannelAttachmentIngestError[]
   metadata?: Record<string, unknown>
   providerIdentity?: ProviderIdentity
   traceContext?: TraceContextV1

@@ -63,7 +63,7 @@ import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
 import type { TaskError } from '../queue/types'
 import type { RuntimeActionCheckpoint } from '../runtime/actionAuthority'
-import { SessionProcessor, serializeSessionKey } from '../session'
+import { SessionProcessor, resolveCanonicalSessionKey } from '../session'
 import { parseSessionKey } from '../session/types'
 import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClient.js'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
@@ -1732,13 +1732,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   private releaseSessionForTask(task: Task): void {
     if (!this.sessionProcessor?.releaseSuspendedSession) return
-    const msg = task.sourceMessage
-    const sessionKey = serializeSessionKey({
-      userId: msg?.sender || 'anonymous',
-      channelType: msg?.channelType || 'internal',
-      channelId: msg?.channelId || 'default',
-      threadId: msg?.threadId,
-    })
+    const sessionKey = resolveCanonicalSessionKey(task.sourceMessage)
     this.sessionProcessor.releaseSuspendedSession(sessionKey)
   }
 
@@ -1832,13 +1826,7 @@ export class AgentStateMachine extends EventEmitter {
           if (entry?.timerId) clearTimeout(entry.timerId)
           this.approvalMap.delete(reqId)
 
-          const msg = executor.sourceTask.sourceMessage
-          const sessionKey = serializeSessionKey({
-            userId: msg?.sender || 'anonymous',
-            channelType: msg?.channelType || 'internal',
-            channelId: msg?.channelId || 'default',
-            threadId: msg?.threadId,
-          })
+          const sessionKey = resolveCanonicalSessionKey(executor.sourceTask.sourceMessage)
           this.conversationManager.cancelTurnBySessionKey(sessionKey)
           // T2.1: clearPendingApproval is async (IronClaw write-through for
           // the cancel-during-approval path). B5 — wrapped in a bounded

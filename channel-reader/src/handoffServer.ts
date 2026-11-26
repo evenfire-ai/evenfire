@@ -1,10 +1,10 @@
 import http from 'node:http'
-import type { ProviderTargetIdentity } from './types'
+import type { ProviderAttachmentDescriptorV1, ProviderTargetIdentity } from './types'
 
 const MAX_HANDOFF_BODY_BYTES = 256 * 1024
 
 export type SlackMessageHandoff = {
-  kind: 'slack.message'
+  kind: 'slack.message' | 'slack.attachment-message.v1'
   content: string
   workflowRunId?: string
   providerUserId: string
@@ -12,7 +12,10 @@ export type SlackMessageHandoff = {
   providerChannelId: string
   providerEventId: string
   providerMessageTs: string
+  threadTs?: string | null
   responseThreadTs?: string | null
+  eventKind?: 'event_callback' | 'block_actions'
+  attachments?: ProviderAttachmentDescriptorV1[]
   providerTarget: ProviderTargetIdentity
   rawData?: Record<string, unknown>
 }
@@ -34,18 +37,20 @@ export type SlackEnrollmentHandoff = {
 export type SlackHandoffRequest = SlackMessageHandoff | SlackEnrollmentHandoff
 
 export type TeamsMessageHandoff = {
-  kind: 'teams.message'
+  kind: 'teams.message' | 'teams.attachment-message.v1'
   content: string
   workflowRunId?: string
   providerUserId: string
   providerWorkspaceId: string
   providerChannelId: string
   providerConversationId: string
+  providerThreadRootId?: string | null
   providerReplyToMessageId?: string | null
   providerChannelType?: string | null
   providerEventId: string
   providerMessageId: string
   serviceUrl: string
+  attachments?: ProviderAttachmentDescriptorV1[]
   providerTarget: ProviderTargetIdentity
   rawData?: Record<string, unknown>
 }

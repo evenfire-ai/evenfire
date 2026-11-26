@@ -11,10 +11,54 @@ export interface SessionKey {
 }
 
 /**
+ * Strip any trailing `[;?&]messageid=[^;?&]+` suffix from Microsoft Teams
+ * channel IDs ONLY when deriving canonical session keys or per-conversation
+ * FIFO keys. Raw `msg.channelId` (`providerConversationId`) remains untouched
+ * for `channelRuntimeSourceMismatch` and Bot Framework reply delivery.
+ */
+export function normalizeSessionChannelId(
+  channelType: string | undefined,
+  channelId: string | undefined
+): string {
+  const raw = (channelId || '').trim()
+  if (!raw) return 'default'
+  if (channelType === 'teams') {
+    const stripped = raw.replace(/[;?&]messageid=[^;?&]+$/i, '').trim()
+    return stripped || 'default'
+  }
+  return raw
+}
+
+/**
  * Serialize a SessionKey to a string for use as a Map key.
  */
 export function serializeSessionKey(key: SessionKey): string {
   return `${key.userId}:${key.channelType}:${key.channelId || 'default'}:${key.threadId || 'default'}`
+}
+
+/**
+ * Single canonical session-key derivation shared across execute, executeAsync,
+ * resolveTaskSessionKey, createIncomingAdmission, /channel-attachments/ingest,
+ * releaseSessionForTask, and subscribeLifecycle cancel cleanup.
+ */
+export function resolveCanonicalSessionKey(
+  msg:
+    | {
+        sender?: string
+        userId?: string
+        channelType?: string
+        channelId?: string
+        threadId?: string
+      }
+    | undefined
+): string {
+  const channelType = msg?.channelType || 'internal'
+  return serializeSessionKey({
+    userId: msg?.sender || msg?.userId || 'anonymous',
+    channelType,
+    channelId: normalizeSessionChannelId(channelType, msg?.channelId),
+    threadId: msg?.threadId,
+  })
 }
 
 /**
