@@ -372,13 +372,9 @@ export function serializeApprovalChangeSummary(
   const keyFields = Object.fromEntries(
     Object.entries(shortFields).filter(([key]) => key in FIELD_ENUMS)
   )
-  const countsOnly = (
-    tools: HostApprovalToolChange[],
-    cut: number,
-    withFields: boolean
-  ): Record<string, unknown> => ({
+  const countsOnly = (tools: HostApprovalToolChange[], cut: number): Record<string, unknown> => ({
     truncated: true,
-    ...(withFields && Object.keys(keyFields).length > 0 ? { fields: keyFields } : {}),
+    ...(Object.keys(keyFields).length > 0 ? { fields: keyFields } : {}),
     tools,
     ...(cut > 0 ? { nativeToolsTruncated: cut } : {}),
     fieldCount: Object.keys(change.fields).length,
@@ -389,18 +385,20 @@ export function serializeApprovalChangeSummary(
     blockRemoved: change.blockRemoved,
     inheritedBefore: change.inheritedBefore,
   })
-  const tier3 = encode(countsOnly(natives, 0, true))
+  const tier3 = encode(countsOnly(natives, 0))
   if (fits(tier3)) return tier3
 
+  // Tier 4: native entries are cut from the end until the text fits. With
+  // none left it always fits, the two fields included: its strings are enum
+  // values, this audit's markers or values no longer than VALUE_TOO_LONG
+  // (tier 2), and the rest are counts and flags.
   let kept = natives.length
   let text = tier3
   while (kept > 0 && !fits(text)) {
     kept -= 1
-    text = encode(countsOnly(natives.slice(0, kept), natives.length - kept, true))
+    text = encode(countsOnly(natives.slice(0, kept), natives.length - kept))
   }
-  // Not even the two fields fit beside the last native entry: they go too.
-  if (!fits(text)) text = encode(countsOnly([], natives.length, false))
-  const cutNatives = natives.length - (JSON.parse(text) as { tools: unknown[] }).tools.length
+  const cutNatives = natives.length - kept
   rootLogger.child({ module: 'host-approval-audit' }).warn(
     {
       event: 'host_approval_summary_oversize',
