@@ -64,6 +64,11 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
+  readChannelSwitch,
+  readModeCeiling,
+} from '../../../mcp-host/src/core/approval/approvalMode'
+import type { ApprovalConfig } from '../../../mcp-host/src/core/extensions/approvalTypes'
+import {
   FIRST_SAVE_DIALOG_TITLE,
   FIRST_SAVE_POLICY_LABEL,
   LOOSENING_CANCEL_LABEL,
@@ -72,7 +77,9 @@ import {
 } from '../../components/HostApprovalSection/constants'
 import type { FirstSavePolicy, RowState } from '../../components/HostApprovalSection/types'
 import { apiSend } from '../../lib/api'
-import { approvalBlockOf, effectiveApproval, toolsEqual } from '../../lib/approvalEffective'
+// S7 only: spec A6 makes the loosening oracle (approvalLoosening.oracle.test.ts,
+// checked against mcp-host's asks fixture) the check of the item list itself;
+// this suite checks that every item a write loosens was in a confirmed dialog.
 import { looseningItems } from '../../lib/approvalLoosening'
 import {
   type OffSwitchOutcome,
@@ -247,6 +254,11 @@ type View = {
   firstLoadFailed: boolean
   /** The switch's result the tab showed after the last step. */
   result: string
+  /**
+   * The oracle's own "dirty": the rows the admin set differ from the base, by
+   * the oracle's reader, in the edit session the suite last opened.
+   */
+  dirty: boolean
 }
 
 type GroupWrite = { stored: HostObject; settleLogLen: number; settleStep: number }
@@ -436,16 +448,102 @@ function hostOfRead(entry: FakeLogEntry): HostObject | undefined {
   return body as HostObject
 }
 
+// ── The oracle's readers (spec A6: independent of the code under test) ────
+//
+// None of these is the product's (lib/approvalEffective). The ceiling and the
+// channel switches are mcp-host's own readers, imported by relative path as
+// approvalEffective.parity.test.ts does; the block, the three-valued tools,
+// the policy and the rest are local, written to mcp-host's semantics.
+
+const CHANNEL_TYPES = ['telegram', 'email', 'slack', 'teams'] as const
+
+/** The Host's own `spec.approval`, as mcp-host takes it: an object, or none (the agent inherits). */
 function blockOf(host: unknown): Record<string, unknown> | undefined {
-  return approvalBlockOf(host)
+  const spec = isRecord(host) ? host.spec : undefined
+  const block = isRecord(spec) ? spec.approval : undefined
+  return isRecord(block) ? block : undefined
 }
 
-function effectiveTools(host: unknown): Tools {
-  return effectiveApproval(blockOf(host)).tools
+/** mcp-host reads the ceiling and the switches from the Host's own block only. */
+function snapshotOf(block: Record<string, unknown> | undefined) {
+  const config = block as ApprovalConfig | undefined
+  return { effective: config, hostSpec: config }
+}
+
+/** The ceiling as mcp-host runs it (approvalMode.ts readModeCeiling). */
+function ceilingOfBlock(
+  block: Record<string, unknown> | undefined
+): 'manual' | 'auto' | 'allow_all' {
+  return readModeCeiling(snapshotOf(block))
 }
 
 function ceilingOf(host: unknown): 'manual' | 'auto' | 'allow_all' {
-  return effectiveApproval(blockOf(host)).modeCeiling
+  return ceilingOfBlock(blockOf(host))
+}
+
+/**
+ * `tools`, three-valued: an override is an explicit true or false; an absent,
+ * null or undefined value is no override, and key order does not matter.
+ * The model writes nothing else, so any other value is a harness error.
+ */
+function overridesOf(block: Record<string, unknown> | undefined): Tools {
+  const tools = block?.tools
+  const out: Tools = {}
+  if (!isRecord(tools)) return out
+  for (const [name, value] of Object.entries(tools)) {
+    if (value === null || value === undefined) continue
+    if (typeof value !== 'boolean') throw harnessError(`tools.${name} is ${JSON.stringify(value)}`)
+    out[name] = value
+  }
+  return out
+}
+
+function effectiveTools(host: unknown): Tools {
+  return overridesOf(blockOf(host))
+}
+
+/** Two override maps hold the same overrides. */
+function sameTools(a: Tools, b: Tools): boolean {
+  const keys = Object.keys(a)
+  return (
+    keys.length === Object.keys(b).length &&
+    keys.every(key => Object.hasOwn(b, key) && b[key] === a[key])
+  )
+}
+
+/**
+ * `defaultPolicy` as mcp-host's readApproverPolicy (approverPolicy.ts) reads
+ * it: absent, null, empty and `channel_users` are the open policy; an unknown
+ * value refuses every channel approval.
+ */
+function policyOf(block: Record<string, unknown> | undefined): string {
+  const policy = block?.defaultPolicy
+  if (policy === undefined || policy === null || policy === '' || policy === 'channel_users') {
+    return 'open'
+  }
+  if (policy === 'cli_only' || policy === 'designated_approvers') return policy
+  return `unknown:${typeof policy === 'string' ? policy : JSON.stringify(policy)}`
+}
+
+/** A channel's switch (mcp-host readChannelSwitch), `enabled` (absent is on) and approvers (a set of exact strings). */
+function channelOf(
+  block: Record<string, unknown> | undefined,
+  type: (typeof CHANNEL_TYPES)[number]
+) {
+  const channels = block?.channels
+  const entry = isRecord(channels) ? channels[type] : undefined
+  const approvers = isRecord(entry) && Array.isArray(entry.approvers) ? entry.approvers : []
+  return {
+    switch: readChannelSwitch(snapshotOf(block), type),
+    enabled: isRecord(entry) && entry.enabled !== undefined ? entry.enabled : true,
+    approvers: [...new Set(approvers.map(String))].sort(),
+  }
+}
+
+/** The judge model: a trimmed string, or none (the code default). */
+function judgeOf(block: Record<string, unknown> | undefined): string | null {
+  const model = block?.shellClassifierModel
+  return typeof model === 'string' && model.trim().length > 0 ? model.trim() : null
 }
 
 /**
@@ -474,24 +572,19 @@ function changedKeys(before: Map<string, string>, after: Map<string, string>): s
   return [...keys].filter(key => before.get(key) !== after.get(key))
 }
 
-/** Leaves whose effective value differs between two blocks (spec decision 13). */
+/** Leaves whose effective value differs between two blocks (spec decision 13), by the oracle's readers. */
 function unstoredLeaves(
   sent: Record<string, unknown> | undefined,
   stored: Record<string, unknown> | undefined
 ): string[] {
-  const a = effectiveApproval(sent)
-  const b = effectiveApproval(stored)
   const out: string[] = []
-  const compare = (path: string, x: unknown, y: unknown) => {
-    if (!sameJson(x, y)) out.push(path)
+  if (ceilingOfBlock(sent) !== ceilingOfBlock(stored)) out.push('modeCeiling')
+  if (policyOf(sent) !== policyOf(stored)) out.push('defaultPolicy')
+  if (judgeOf(sent) !== judgeOf(stored)) out.push('shellClassifierModel')
+  for (const type of CHANNEL_TYPES) {
+    if (!sameJson(channelOf(sent, type), channelOf(stored, type))) out.push(`channels.${type}`)
   }
-  compare('modeCeiling', a.modeCeiling, b.modeCeiling)
-  compare('defaultPolicy', a.policy, b.policy)
-  compare('shellClassifierModel', a.shellClassifierModel, b.shellClassifierModel)
-  for (const type of Object.keys(a.channels) as Array<keyof typeof a.channels>) {
-    compare(`channels.${type}`, a.channels[type], b.channels[type])
-  }
-  if (!toolsEqual(a.tools, b.tools)) out.push('tools')
+  if (!sameTools(overridesOf(sent), overridesOf(stored))) out.push('tools')
   return out
 }
 
@@ -553,10 +646,6 @@ function shownRows(section: HTMLElement): Tools {
 
 function editing(section: HTMLElement): boolean {
   return button(section, 'Cancel') !== null
-}
-
-function dirty(section: HTMLElement): boolean {
-  return section.querySelector('.cu-host-approval-section__dirty') !== null
 }
 
 function sectionMessage(section: HTMLElement): HTMLElement | null {
@@ -809,6 +898,7 @@ function openView(w: World): void {
     shown: false,
     firstLoadFailed: false,
     result: '',
+    dirty: false,
   })
   w.instance.viewId = w.viewSeq
 }
@@ -1126,7 +1216,7 @@ function settleSave(w: World, save: SaveRecord, inViewSaves: readonly SaveRecord
       flag(w, 'L2', `save #${save.id} ended with ${outcome.kind} and the section shows no message`)
     }
     if (DRAFT_KEPT.has(outcome.kind) && save.viewId === view?.id && section) {
-      if (!editing(section) || !toolsEqual(shownRows(section), save.press.draft)) {
+      if (!editing(section) || !sameTools(shownRows(section), save.press.draft)) {
         flag(w, 'L2', `save #${save.id} ended with ${outcome.kind} and its draft is not on screen`)
       }
     }
@@ -1241,11 +1331,13 @@ type GroupValues = { block: boolean; tools: Tools | null; policy: string } | { c
 function toolsGroupOf(host: unknown): { block: boolean; tools: Tools; policy: string } {
   const block = blockOf(host)
   if (block === undefined) return { block: false, tools: {}, policy: CLUSTER_DEFAULT_TEXT }
-  const { policy } = effectiveApproval(block)
+  const policy = policyOf(block)
   return {
     block: true,
-    tools: effectiveApproval(block).tools,
-    policy: typeof policy === 'object' ? `unknown:${policy.unknown}` : POLICY_TEXT[policy],
+    tools: overridesOf(block),
+    policy: policy.startsWith('unknown:')
+      ? policy
+      : POLICY_TEXT[policy as keyof typeof POLICY_TEXT],
   }
 }
 
@@ -1275,7 +1367,7 @@ function sameGroup(shown: GroupValues, source: unknown, group: 'tools' | 'ceilin
   return (
     shown.block === expected.block &&
     shown.policy === policy &&
-    (shown.tools === null || toolsEqual(shown.tools, expected.tools))
+    (shown.tools === null || sameTools(shown.tools, expected.tools))
   )
 }
 
@@ -1440,15 +1532,14 @@ function checkS2(w: World): void {
         event.agent === save.agent &&
         event.logLen > base.logLen &&
         event.step <= (save.settleStep ?? w.step) &&
-        !toolsEqual(effectiveTools(event.after), base.tools)
+        !sameTools(effectiveTools(event.after), base.tools)
     )
     if (moved) count(w.stats, 'checks', 'S2')
     for (const put of savePuts(w, save)) {
       const event = applyEvent(w, put)
       if (!event) continue
-      const atWrite = blockOf(event.before)
-      const tools = effectiveApproval(atWrite).tools
-      if (!toolsEqual(tools, base.tools) && !toolsEqual(tools, save.press.draft)) {
+      const tools = effectiveTools(event.before)
+      if (!sameTools(tools, base.tools) && !sameTools(tools, save.press.draft)) {
         flag(
           w,
           'S2',
@@ -1480,7 +1571,7 @@ function checkS3(w: World): void {
     if (outcome.kind === 'saved') {
       count(w.stats, 'checks', 'S3')
       const stored = outcome.stored
-      if (!toolsEqual(effectiveTools(stored), save.press.draft)) {
+      if (!sameTools(effectiveTools(stored), save.press.draft)) {
         flag(
           w,
           'S3',
@@ -1490,10 +1581,7 @@ function checkS3(w: World): void {
       const policy = save.press.firstSavePolicy
       if (
         policy !== undefined &&
-        !sameJson(
-          effectiveApproval(blockOf(stored)).policy,
-          effectiveApproval({ defaultPolicy: policy }).policy
-        )
+        !sameJson(policyOf(blockOf(stored)), policyOf({ defaultPolicy: policy }))
       ) {
         flag(w, 'S3', `first save #${save.id} reported saved without its policy ${policy}`)
       }
@@ -1627,7 +1715,7 @@ function checkS7(w: World): void {
       const items = looseningItems({
         before: firstSave ? undefined : fresh,
         after: blockOf({ spec: sentSpec(put) }) ?? {},
-        ceiling: effectiveApproval(fresh).modeCeiling,
+        ceiling: ceilingOfBlock(fresh),
         firstSave,
       })
       if (items.length > 0) count(w.stats, 'checks', 'S7')
@@ -1678,10 +1766,15 @@ function checkS8(w: World): void {
   }
 }
 
-/** L2 at rest: Save is usable once every load has settled. */
+/**
+ * L2 at rest: once every load has settled, an edit the admin left off its
+ * base (by the oracle's reader, not the section's own "Unsaved changes") can
+ * be saved.
+ */
 function checkL2(w: World): void {
   const section = perToolSection()
-  if (!section || !onApprovals(w) || !editing(section) || !dirty(section) || dialogOpen()) return
+  const view = currentView(w)
+  if (!section || !view?.dirty || !onApprovals(w) || !editing(section) || dialogOpen()) return
   count(w.stats, 'checks', 'L2')
   if (!usable(button(section, 'Save'))) {
     flag(w, 'L2', 'every load has settled and Save is still disabled')
@@ -1894,30 +1987,41 @@ function editable(): HTMLElement | null {
   return editing(section) || button(section, 'Edit') !== null ? section : null
 }
 
-/** Edit if needed, then the rows; records S2's base when the section turns dirty. */
+/**
+ * Edit if needed, then the rows. S2's base is what the rows showed when the
+ * session turned dirty, by the oracle's own reader: §6.4's section takes new
+ * data as its base while clean, so the base freezes at the first change that
+ * leaves the draft off it.
+ */
 async function editRows(w: World, changes: ReadonlyArray<[number, RowState]>): Promise<void> {
   const view = currentView(w)
   const section = editable()
   if (!view || !section) return
   const edit = button(section, 'Edit')
-  if (edit) await interact(w, () => fireEvent.click(edit))
+  if (edit) {
+    await interact(w, () => fireEvent.click(edit))
+    view.dirty = false
+  }
   for (const [slot, state] of changes) {
     const current = perToolSection()
     if (!current || !editing(current) || dialogOpen()) return
     const name = NATIVE[view.agent][slot % NATIVE[view.agent].length]
     const select = current.querySelector<HTMLSelectElement>(`#approval-${name}`)
     if (!select || select.disabled) return
-    const clean = !dirty(current)
     const capture = {
       tools: shownRows(current),
       inherited: inheritingShown(tabRoot() as HTMLElement),
       logLen: w.fake.log.length,
     }
+    const base = view.dirty && view.base ? view.base.tools : capture.tools
     await interact(w, () => fireEvent.change(select, { target: { value: state } }))
     const after = perToolSection()
-    if (clean && after && dirty(after)) {
+    if (!after) return
+    const dirtyNow = !sameTools(shownRows(after), base)
+    if (!view.dirty && dirtyNow) {
       view.base = { ...capture, source: baseSource(w, view.agent, capture) }
     }
+    view.dirty = dirtyNow
   }
 }
 
@@ -1929,7 +2033,7 @@ function baseSource(
 ): number | 'seed' {
   const matches = (host: unknown) =>
     (blockOf(host) === undefined) === capture.inherited &&
-    toolsEqual(effectiveTools(host), capture.tools)
+    sameTools(effectiveTools(host), capture.tools)
   for (let index = w.fake.log.length - 1; index >= 0; index -= 1) {
     const entry = w.fake.log[index]
     if (agentOfPath(entry.path) !== agent || !entry.delivered || entry.response?.status !== 200) {
@@ -2280,7 +2384,7 @@ class External extends Command {
     }
     const after = w.fake.stored(agent)
     const hasBlock = isRecord(after.spec.approval)
-    const tools = !toolsEqual(effectiveTools(before), effectiveTools(after))
+    const tools = !sameTools(effectiveTools(before), effectiveTools(after))
     if (hadBlock !== hasBlock) {
       count(w.stats, 'events', 'blockCreatedOrRemoved')
       // E15 proper: an edit on this agent is under way, its base taken from
