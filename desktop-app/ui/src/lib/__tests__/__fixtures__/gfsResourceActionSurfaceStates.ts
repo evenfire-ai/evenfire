@@ -212,8 +212,10 @@ export function withFullPreviewPermission(state: PreviewState): PreviewState {
  * menu, rule for rule as the hook computes them. Share, Rename and Delete need
  * only `canResolve` and the bit: the hook does not check the resolved kind, so
  * affordances already cached under the resource's key (a folder's, loaded by
- * the Files browser) can grant them on a folder or before the URI resolves.
- * Hiding them there is the surface builder's job, not the gates'. Move needs a
+ * the Files browser) can grant them on a folder. Before the URI resolves the
+ * hook reads under the URI's key, which nothing writes, so the app has no bits
+ * there; the states still vary them, as a superset the builder must hide too.
+ * Hiding them is the surface builder's job, not the gates'. Move needs a
  * resolved file with a parent whose read did not fail and that grants the
  * move bits; Download needs a resolved file.
  */

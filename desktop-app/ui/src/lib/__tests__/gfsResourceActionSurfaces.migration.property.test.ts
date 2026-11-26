@@ -159,11 +159,13 @@ function frozenPreview(state: PreviewState): FrozenAction[] {
 const sorted = (ids: readonly string[]) => [...ids].sort()
 
 /**
- * The one intended difference on the preview tab. Before, a preview whose URI
- * had not resolved to a file still offered Share, Rename and Delete whenever
- * affordances cached under its key granted them (a folder's, loaded by the
- * Files browser), since nothing in the old menu looked at the resolved kind.
- * Those actions now stay out of the menu until the URI resolves to a file.
+ * The one intended difference on the preview tab. Before, a preview that
+ * resolved to a folder still offered Share, Rename and Delete whenever
+ * affordances cached under its key granted them (loaded by the Files browser),
+ * since nothing in the old menu looked at the resolved kind. Those actions now
+ * stay out of the menu until the URI resolves to a file. The carve-out also
+ * spans a URI that has not resolved yet: the app holds no bits for it, but the
+ * states vary them and the live menu must hide the actions all the same.
  */
 const FILE_ONLY_PREVIEW_ACTIONS = ['share', 'rename', 'delete'] as const
 
