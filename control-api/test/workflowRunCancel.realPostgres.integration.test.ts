@@ -1799,4 +1799,73 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(row).toMatchObject({ phase: 'Running', canceled_by: L.id })
     expect(row.cancel_requested_at).toBeInstanceOf(Date)
   }, 60_000)
+
+  // ── S40 · a step held on an approval, end to end ────────────────────────
+
+  it('cancel during a step held on an approval ends Canceled', async () => {
+    const recipe = `s40-${suffix}`
+    const token = await v1Token(L, null, 'member')
+    const target = await runReadyForApprovals(recipe)
+    const proof = await runningStep(target.runId, 'step-held')
+    const held = await requestStepApproval({ ...target, recipe, stepId: 'step-held', proof })
+    if (!('status' in held)) throw new Error('expected an approval')
+    expect(await approvalOf(held.id)).toMatchObject({
+      status: 'pending',
+      bound_workflow_run_id: target.runId,
+    })
+    expect(await readRun(target.runId)).toMatchObject({
+      phase: 'Running',
+      child_recipe_name: target.child,
+    })
+
+    expect((await cancel(token, target.runId, recipe)).status).toBe(200)
+
+    expect(await approvalOf(held.id)).toEqual({
+      status: 'cancelled',
+      cancelled_by: L.id,
+      bound_workflow_run_id: target.runId,
+    })
+    // mcp-host's gateStep throws on the cancelled approval and returns the step
+    // failed with this error (mcp-host/src/workflow/userApprovalRequester.ts,
+    // workflowService.ts); the runtime then reports the workflow failed.
+    const stepError = `approval-denied: Approval cancelled for step (request ${held.id})`
+    const onRunTerminal = vi.fn()
+    const processor = createDbRunProcessor({
+      instanceId: `s40-${suffix}`,
+      pool: runtimePool(),
+      runPollMs: 60_000,
+      maxRunDurationCapSeconds: 86_400,
+      createChildRecipe: async () => {
+        throw new Error('no child is created by this test')
+      },
+      deliverCancelSignal: () => {
+        throw new Error('no cancel is delivered by this test')
+      },
+      onRunTerminal,
+    })
+    await processor.syncFromRecipeExecution({
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipe',
+      metadata: {
+        name: target.child,
+        namespace: ns,
+        labels: { 'clerum.io/workflow-run-id': target.runId },
+      },
+      spec: {},
+      status: {
+        phase: 'active',
+        workflowExecution: { phase: 'failed' },
+        steps: [{ id: 'step-held', phase: 'failed', error: stepError }],
+      },
+    } as never)
+
+    expect(await readRun(target.runId)).toMatchObject({ phase: 'Canceled', canceled_by: L.id })
+    const step = await databasePool.query(
+      `SELECT phase, error FROM workflow_run_steps WHERE run_id = $1 AND step_id = 'step-held'`,
+      [target.runId]
+    )
+    expect(step.rows).toEqual([{ phase: 'Failed', error: stepError }])
+    expect(onRunTerminal).toHaveBeenCalledOnce()
+    expect(onRunTerminal).toHaveBeenCalledWith(target.runId, 'Canceled')
+  }, 60_000)
 })

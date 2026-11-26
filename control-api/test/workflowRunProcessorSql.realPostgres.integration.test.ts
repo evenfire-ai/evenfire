@@ -6,6 +6,7 @@ import {
   type DbRunProcessorOptions,
   createDbRunProcessor,
 } from '../../workflow-recipes/src/reconciler/dbRunProcessor.js'
+import type { WorkflowRecipeCRD } from '../../workflow-recipes/src/types.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // SQL checks of the workflow-recipes run processor against the schema built by
@@ -127,6 +128,41 @@ describeRealPostgres('workflow run processor SQL on PostgreSQL 16', () => {
     )
     expect(result.rows).toHaveLength(1)
     return result.rows[0].phase
+  }
+
+  async function stepOf(
+    runId: string,
+    stepId: string
+  ): Promise<{ phase: string; error: string | null }[]> {
+    const result = await databasePool.query<{ phase: string; error: string | null }>(
+      'SELECT phase, error FROM workflow_run_steps WHERE run_id = $1 AND step_id = $2',
+      [runId, stepId]
+    )
+    return result.rows
+  }
+
+  /** The child recipe status the runtime's report produces, as the watcher syncs it. */
+  function childReport(
+    runId: string,
+    childName: string,
+    executionPhase: 'running' | 'completed' | 'failed' | 'cancelled',
+    steps: { id: string; phase: string; error?: string }[]
+  ): WorkflowRecipeCRD {
+    return {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipe',
+      metadata: {
+        name: childName,
+        namespace: 'sandbox-recipes',
+        labels: { 'clerum.io/workflow-run-id': runId },
+      },
+      spec: {},
+      status: {
+        phase: 'active',
+        workflowExecution: { phase: executionPhase },
+        steps,
+      },
+    } as WorkflowRecipeCRD
   }
 
   async function runtimeClient(): Promise<PoolClient> {
@@ -450,6 +486,159 @@ describeRealPostgres('workflow run processor SQL on PostgreSQL 16', () => {
       expect(onRunTerminal).toHaveBeenCalledWith(owned, 'Failed')
       expect(await phaseOf(owned)).toBe('Failed')
       expect(await phaseOf(ownerless)).toBe('AuthorizationPaused')
+    })
+  })
+
+  describe('terminal label after a cancel request (X11)', () => {
+    it('a cancelled report moves a paused run with a request to Canceled and emits run_end', async () => {
+      const instanceId = `label-paused-${randomUUID()}`
+      const childName = `child-${randomBytes(4).toString('hex')}`
+      const runId = await insertRun({
+        phase: 'AuthorizationPaused',
+        ownerInstanceId: instanceId,
+        maxDurationSeconds: null,
+        startedSecondsAgo: 30,
+        childRecipeName: childName,
+        cancelRequested: true,
+      })
+      const before = await databasePool.query(
+        'SELECT phase, child_recipe_name FROM workflow_runs WHERE run_id = $1',
+        [runId]
+      )
+      expect(before.rows).toEqual([{ phase: 'AuthorizationPaused', child_recipe_name: childName }])
+      const onRunTerminal = vi.fn()
+      const syncer = processor({ instanceId, onRunTerminal })
+
+      await syncer.syncFromRecipeExecution(childReport(runId, childName, 'cancelled', []))
+
+      expect(await phaseOf(runId)).toBe('Canceled')
+      expect(onRunTerminal).toHaveBeenCalledOnce()
+      expect(onRunTerminal).toHaveBeenCalledWith(runId, 'Canceled')
+    })
+
+    it('a failed report on a run with a cancel request is recorded Canceled', async () => {
+      const instanceId = `label-failed-${randomUUID()}`
+      const fixture = (cancelRequested: boolean): RunFixture => ({
+        phase: 'Running',
+        ownerInstanceId: instanceId,
+        maxDurationSeconds: null,
+        startedSecondsAgo: 30,
+        childRecipeName: `child-${randomBytes(4).toString('hex')}`,
+        cancelRequested,
+      })
+      const requested = await insertRun(fixture(true))
+      const plain = await insertRun(fixture(false))
+      const failedStep = { id: 'step-1', phase: 'failed', error: 'step approval cancelled' }
+      const onRunTerminal = vi.fn()
+      const syncer = processor({ instanceId, onRunTerminal })
+
+      await syncer.syncFromRecipeExecution(
+        childReport(requested, 'child-a', 'failed', [failedStep])
+      )
+      await syncer.syncFromRecipeExecution(childReport(plain, 'child-b', 'failed', [failedStep]))
+
+      expect(await phaseOf(requested)).toBe('Canceled')
+      expect(await stepOf(requested, 'step-1')).toEqual([
+        { phase: 'Failed', error: 'step approval cancelled' },
+      ])
+      // The same report on a run without a request is recorded as the failure it is.
+      expect(await phaseOf(plain)).toBe('Failed')
+      expect(onRunTerminal.mock.calls).toEqual([
+        [requested, 'Canceled'],
+        [plain, 'Failed'],
+      ])
+    })
+
+    it('the stuck sweep and the missing-child reclaim record Canceled for a run with a request', async () => {
+      // Stuck sweep: two owned runs past the cap, one with a request.
+      const sweepInstance = `label-sweep-${randomUUID()}`
+      const stuck = (cancelRequested: boolean): RunFixture => ({
+        phase: 'Running',
+        ownerInstanceId: sweepInstance,
+        maxDurationSeconds: null,
+        startedSecondsAgo: DEFAULT_CAP_SECONDS + 120,
+        childRecipeName: `child-${randomBytes(4).toString('hex')}`,
+        cancelRequested,
+      })
+      const sweptRequested = await insertRun(stuck(true))
+      const sweptPlain = await insertRun(stuck(false))
+      const sweepTerminal = vi.fn()
+      const sweeper = processor({ instanceId: sweepInstance, onRunTerminal: sweepTerminal })
+
+      await expect(sweeper.checkStuckRuns()).resolves.toBe(2)
+
+      expect(await phaseOf(sweptRequested)).toBe('Canceled')
+      expect(await phaseOf(sweptPlain)).toBe('Failed')
+      expect(new Map(sweepTerminal.mock.calls)).toEqual(
+        new Map([
+          [sweptRequested, 'Canceled'],
+          [sweptPlain, 'Failed'],
+        ])
+      )
+      expect(sweepTerminal).toHaveBeenCalledTimes(2)
+
+      // Missing-child reclaim: ownerless Running runs whose child is gone
+      // (both branches: a child name that does not exist, and no child name).
+      const orphan = (childRecipeName: string | null, cancelRequested: boolean): RunFixture => ({
+        phase: 'Running',
+        ownerInstanceId: null,
+        maxDurationSeconds: null,
+        startedSecondsAgo: 30,
+        childRecipeName,
+        cancelRequested,
+      })
+      const goneRequested = await insertRun(orphan(`child-${randomBytes(4).toString('hex')}`, true))
+      const gonePlain = await insertRun(orphan(`child-${randomBytes(4).toString('hex')}`, false))
+      const unnamedRequested = await insertRun(orphan(null, true))
+      const reclaimTerminal = vi.fn()
+      const childRecipeExists = vi.fn(async () => false)
+      const reclaimer = processor({
+        instanceId: `label-reclaim-${randomUUID()}`,
+        runPollMs: 40,
+        childRecipeExists,
+        deliverCancelSignal: vi.fn(),
+        onRunTerminal: reclaimTerminal,
+      })
+      await reclaimer.start()
+      await vi.waitFor(() => expect(reclaimTerminal).toHaveBeenCalledTimes(3), { timeout: 5_000 })
+      await reclaimer.stop()
+
+      expect(childRecipeExists).toHaveBeenCalledTimes(2)
+      expect(await phaseOf(goneRequested)).toBe('Canceled')
+      expect(await phaseOf(gonePlain)).toBe('Failed')
+      expect(await phaseOf(unnamedRequested)).toBe('Canceled')
+      expect(new Map(reclaimTerminal.mock.calls)).toEqual(
+        new Map([
+          [goneRequested, 'Canceled'],
+          [gonePlain, 'Failed'],
+          [unnamedRequested, 'Canceled'],
+        ])
+      )
+    })
+
+    it('a late step report on a Canceled run writes the step and leaves the phase', async () => {
+      const instanceId = `label-late-${randomUUID()}`
+      const childName = `child-${randomBytes(4).toString('hex')}`
+      const runId = await insertRun({
+        phase: 'Canceled',
+        ownerInstanceId: instanceId,
+        maxDurationSeconds: null,
+        startedSecondsAgo: 30,
+        childRecipeName: childName,
+        cancelRequested: true,
+      })
+      const onRunTerminal = vi.fn()
+      const syncer = processor({ instanceId, onRunTerminal })
+
+      await syncer.syncFromRecipeExecution(
+        childReport(runId, childName, 'failed', [
+          { id: 'step-2', phase: 'failed', error: 'late failure' },
+        ])
+      )
+
+      expect(await stepOf(runId, 'step-2')).toEqual([{ phase: 'Failed', error: 'late failure' }])
+      expect(await phaseOf(runId)).toBe('Canceled')
+      expect(onRunTerminal).not.toHaveBeenCalled()
     })
   })
 })
