@@ -21,6 +21,7 @@ import {
 } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
+import { agentDisplayName, fleetAgentSelector } from './helpers/agentIdentity.js'
 
 export const DESKTOP_APP_ROOT = path.resolve(__dirname, '../..')
 export const MAIN_ENTRY = path.join(DESKTOP_APP_ROOT, 'dist/main.js')
@@ -301,34 +302,26 @@ export async function openExactAgentChat(page: Page, hostRef: string): Promise<v
   await expect(agentsItem).toBeVisible({ timeout: 15_000 })
   await agentsItem.click()
   const chatInput = page.getByRole('textbox', { name: 'Agent message composer' })
-  const exactAgent = page.locator('.agents-table-row-clickable', { hasText: hostRef }).first()
+  const exactAgent = page.locator(fleetAgentSelector(hostRef))
   const emptyState = page.getByText('No agents available')
-  await expect(chatInput.or(exactAgent).or(emptyState)).toBeVisible({ timeout: 20_000 })
+  await expect(exactAgent.or(emptyState)).toBeVisible({ timeout: 20_000 })
 
   if (await emptyState.isVisible().catch(() => false)) {
     throw new Error(`No agents are available for the configured Desktop test user.`)
   }
-  if (await exactAgent.isVisible().catch(() => false)) {
-    await exactAgent.click()
-  }
+  await expect(exactAgent).toBeVisible({ timeout: 20_000 })
+  await exactAgent.click()
 
   await page.getByTestId('nav-chat').click()
+  const displayName = await agentDisplayName(page, hostRef)
   const switchAgent = page.getByRole('button', { name: /^Switch chat agent$/ })
   await expect(switchAgent).toBeVisible({ timeout: 20_000 })
 
-  if (
-    !(await chatInput.isVisible().catch(() => false)) ||
-    !(await switchAgent
-      .getByText(hostRef, { exact: true })
-      .isVisible()
-      .catch(() => false))
-  ) {
-    await switchAgent.click()
-    await page.getByRole('menuitem', { name: hostRef, exact: true }).click()
-  }
+  // Select through the exact fleet identity before entering Chat. A display-name
+  // menu lookup is ambiguous when two catalog agents have the same name.
 
   await expect(chatInput).toBeVisible({ timeout: 20_000 })
-  await expect(switchAgent).toContainText(hostRef)
+  await expect(switchAgent).toContainText(displayName)
 }
 
 /** Send a chat message and wait for a non-empty assistant response. */

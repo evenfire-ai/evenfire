@@ -1,4 +1,5 @@
 import { type Page, expect } from '@playwright/test'
+import { agentDisplayName, fleetAgentSelector } from './helpers/agentIdentity.js'
 import { openAgentsPage } from './navigationHelpers.js'
 
 export const USER_A_EMAIL = process.env.E2E_DEV_LOGIN_EMAIL ?? 'test@clerum.io'
@@ -28,13 +29,13 @@ function escapeRegExp(value: string): string {
 export async function enterAgentChat(page: Page): Promise<void> {
   await openAgentsPage(page)
   const chatInput = page.getByTestId('chat-input')
-  const agentRow = page.locator('.agents-table-row-clickable', { hasText: HOST_REF }).first()
+  const agentRow = page.locator(fleetAgentSelector(HOST_REF))
   await expect(
     agentRow,
     `[cross-device] Expected authorized agent row for "${HOST_REF}" before opening chat.`
   ).toBeVisible({ timeout: 20_000 })
 
-  await agentRow.getByRole('button', { name: `More actions for ${HOST_REF}` }).click()
+  await agentRow.getByRole('button', { name: /^More actions for / }).click()
   const actionsMenu = page.getByRole('menu')
   await expect(actionsMenu).toBeVisible({ timeout: 10_000 })
   const newChatAction = actionsMenu
@@ -44,9 +45,12 @@ export async function enterAgentChat(page: Page): Promise<void> {
   await newChatAction.click()
 
   await expect(chatInput).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(HOST_REF, {
-    timeout: 30_000,
-  })
+  await expect(page.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(
+    await agentDisplayName(page, HOST_REF),
+    {
+      timeout: 30_000,
+    }
+  )
 }
 
 export function sidebarSessionButton(page: Page, title: string) {

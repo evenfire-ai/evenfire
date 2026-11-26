@@ -9,6 +9,7 @@ import {
   fireEvent,
   render as testingLibraryRender,
 } from '@testing-library/react'
+import { fleetAgentSelector } from '../../../../../test/e2e-playwright/helpers/agentIdentity'
 import { fleetRowHostRefs } from '../../../../../test/e2e-playwright/helpers/fleetRowHostRefs'
 import { FleetBoard } from '../FleetBoard'
 
@@ -101,6 +102,22 @@ describe('fleetRowHostRefs on rendered FleetBoard rows', () => {
     expect(state.open.mock.calls.slice(2)).toEqual([
       ['chatllm-stateless', 'mcp-servers'],
       ['researcher', 'mcp-servers'],
+    ])
+  })
+
+  it('selects exact references when one is a substring and neither display name contains it', () => {
+    state.refs = ['support', 'support-prod']
+    state.display = { support: 'Customer service', 'support-prod': 'Production service' }
+    const { container } = render(<FleetBoard />)
+    for (const ref of state.refs) {
+      const rows = container.querySelectorAll(fleetAgentSelector(ref))
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.getAttribute('data-agent-ref')).toBe(ref)
+      fireEvent.click(rows[0]!)
+    }
+    expect(state.open.mock.calls).toEqual([
+      ['support', 'mcp-servers'],
+      ['support-prod', 'mcp-servers'],
     ])
   })
 
