@@ -7,8 +7,74 @@ const ACTION_OPERATION_SCOPE_PREFIX = 'action:'
 const ACTION_TARGET_HASH_PREFIX = 'ath2_'
 const ACTION_BEHAVIOR_HASH_PREFIX = 'bh2_'
 const ACTION_AUTHORITY_CHECKPOINT_PATH = '/api/v1/internal/action-authority/checkpoint'
-const RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER = 'x-clerum-rpc-proxy-edge-token'
-const RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT = 'dev-rpc-proxy-mcp-host-edge-token'
+const HOST_EDGE_ASSERTION_HEADER = 'x-clerum-edge-assertion'
+const HOST_EDGE_ASSERTION_AUDIENCE = 'evenfire-host-runtime-edge'
+const HOST_EDGE_ASSERTION_JWT_TYPE = 'host-edge-assertion+jwt'
+const HOST_EDGE_ASSERTION_CLAIM_TYPE = 'host_edge_assertion'
+const HOST_EDGE_ASSERTION_MAX_TTL_SECONDS = 300
+const HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS = 5
+const HOST_EDGE_ASSERTION_V1_CLAIM_KEYS = Object.freeze([
+  'typ',
+  'v',
+  'iss',
+  'aud',
+  'sub',
+  'host',
+  'jti',
+  'iat',
+  'exp',
+  'teamId',
+  'scopes',
+])
+const HOST_EDGE_ASSERTION_V2_CLAIM_KEYS = Object.freeze([
+  'typ',
+  'v',
+  'iss',
+  'aud',
+  'sub',
+  'host',
+  'jti',
+  'iat',
+  'exp',
+  'operationId',
+  'delegationJti',
+  'sid',
+  'sessionVersion',
+  'accessPathId',
+  'pathKind',
+  'effectiveTeamId',
+  'resource',
+  'targetHash',
+  'authorizationRevision',
+  'behaviorBindingHash',
+  'checkedAt',
+])
+// Scope a V1 edge assertion must list for each Host route that admits caller rpc-proxy. Each value
+// is the scope rpc-proxy requires on every request it forwards to that Host route. A
+// `POST /v1/runtime/messages` body that carries `approvalMode` also needs the scope of the
+// approval-mode PATCH row, which the Host message handler checks. rpc-proxy and the Host both read
+// their route scopes from this map.
+const HOST_EDGE_RPC_PROXY_ROUTE_SCOPES = Object.freeze({
+  'GET /v1/runtime/status': 'host:status:read',
+  'GET /v1/runtime/activity': 'host:activity:read',
+  'GET /v1/runtime/activity/stream': 'host:activity:read',
+  'POST /v1/runtime/messages': 'host:message:invoke',
+  'POST /v1/runtime/approvals/approve': 'host:approval:write',
+  'POST /v1/runtime/approvals/deny': 'host:approval:write',
+  'GET /v1/runtime/sessions/search': 'host:session:read',
+  'GET /v1/runtime/sessions': 'host:session:read',
+  'GET /v1/runtime/sessions/:agent/:chatId/messages': 'host:session:read',
+  'GET /v1/runtime/sessions/:agent/:chatId/context-breakdown': 'host:session:read',
+  'GET /v1/runtime/tasks/:taskId/result': 'host:message:invoke',
+  'POST /v1/runtime/tasks/:taskId/cancel': 'host:message:invoke',
+  'GET /v1/runtime/models': 'host:session:read',
+  'POST /v1/runtime/model': 'host:model:write',
+  'PATCH /v1/runtime/sessions/:agent/:chatId/name': 'host:session:write',
+  'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode': 'host:approval:write',
+  'GET /v1/runtime/tasks/:taskId/progress/stream': 'host:activity:read',
+  'GET /v1/runtime/artifacts': 'host:task:read',
+  'GET /v1/runtime/artifacts/:filename/download': 'host:task:read',
+})
 const ACTION_AUTHORITY_DESTINATION_KINDS = Object.freeze(['host', 'mcp_server'])
 const MAX_TARGET_FIELDS = 12
 const MAX_TARGET_VALUE_LENGTH = 1024
@@ -100,6 +166,111 @@ function validateHostApprovalRequestId(value) {
     return Object.freeze({ ok: false, error: 'Missing userId or requestId' })
   }
   return Object.freeze({ ok: true, requestId: value })
+}
+
+function edgeAssertionFailure(error) {
+  return Object.freeze({ ok: false, error })
+}
+
+function isWholeSeconds(value) {
+  return Number.isSafeInteger(value) && value > 0
+}
+
+// A clock in seconds stays below this bound until the year 5138. `Date.now()`, which is in
+// milliseconds, has been above it since 1973, so a millisecond clock is refused.
+const VERIFIER_CLOCK_MAX_SECONDS = 99_999_999_999
+
+function isVerifierClockSeconds(value) {
+  return isWholeSeconds(value) && value <= VERIFIER_CLOCK_MAX_SECONDS
+}
+
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0
+}
+
+function sameJsonValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/**
+ * Checks the claims of a verified Host edge assertion. The signature, algorithm, header type,
+ * issuer, audience and expiry are checked by the JWT verifier before this runs; this function
+ * re-checks the registered claims it receives in the decoded payload, the exact key set of the
+ * declared version, the lifetime bound, an `iat` no more than
+ * HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS ahead of the verifier clock, and the binding to the
+ * request (`expected`).
+ *
+ * expected: { v, iss, host, sub } plus, for v 1, { teamId, requiredScope } and, for v 2, every
+ * bound V2 claim (operationId ... checkedAt).
+ * nowSeconds: the verifier clock in whole seconds since the epoch; required. A millisecond clock
+ * such as Date.now() is refused.
+ */
+function validateHostEdgeAssertionClaims(payload, expected, nowSeconds) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return edgeAssertionFailure('payload must be an object')
+  }
+  if (!expected || (expected.v !== 1 && expected.v !== 2)) {
+    return edgeAssertionFailure('expected version must be 1 or 2')
+  }
+  if (!isVerifierClockSeconds(nowSeconds)) {
+    return edgeAssertionFailure('verifier clock must be whole seconds')
+  }
+  if (payload.v !== expected.v) return edgeAssertionFailure('version mismatch')
+  const keys =
+    expected.v === 1 ? HOST_EDGE_ASSERTION_V1_CLAIM_KEYS : HOST_EDGE_ASSERTION_V2_CLAIM_KEYS
+  const payloadKeys = Object.keys(payload)
+  if (payloadKeys.length !== keys.length || !keys.every(key => Object.hasOwn(payload, key))) {
+    return edgeAssertionFailure('claim keys do not match the declared version')
+  }
+  if (payload.typ !== HOST_EDGE_ASSERTION_CLAIM_TYPE) return edgeAssertionFailure('typ mismatch')
+  if (payload.aud !== HOST_EDGE_ASSERTION_AUDIENCE) return edgeAssertionFailure('aud mismatch')
+  if (!isNonEmptyString(payload.iss) || payload.iss !== expected.iss) {
+    return edgeAssertionFailure('iss mismatch')
+  }
+  if (!isNonEmptyString(payload.jti) || !UUID_PATTERN.test(payload.jti)) {
+    return edgeAssertionFailure('jti must be a UUID')
+  }
+  if (!isWholeSeconds(payload.iat) || !isWholeSeconds(payload.exp)) {
+    return edgeAssertionFailure('iat and exp must be whole seconds')
+  }
+  const lifetime = payload.exp - payload.iat
+  if (lifetime < 1 || lifetime > HOST_EDGE_ASSERTION_MAX_TTL_SECONDS) {
+    return edgeAssertionFailure('lifetime out of bounds')
+  }
+  if (payload.iat > nowSeconds + HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS) {
+    return edgeAssertionFailure('iat is in the future')
+  }
+  if (!isNonEmptyString(payload.host) || payload.host !== expected.host) {
+    return edgeAssertionFailure('host mismatch')
+  }
+  if (!isNonEmptyString(payload.sub) || payload.sub !== expected.sub) {
+    return edgeAssertionFailure('sub mismatch')
+  }
+  if (expected.v === 1) {
+    if (payload.teamId !== null && typeof payload.teamId !== 'string') {
+      return edgeAssertionFailure('teamId must be a string or null')
+    }
+    if (payload.teamId !== (expected.teamId ?? null)) return edgeAssertionFailure('teamId mismatch')
+    if (
+      !Array.isArray(payload.scopes) ||
+      payload.scopes.length === 0 ||
+      !payload.scopes.every(isNonEmptyString)
+    ) {
+      return edgeAssertionFailure('scopes must be a non-empty array of strings')
+    }
+    if (!isNonEmptyString(expected.requiredScope)) {
+      return edgeAssertionFailure('expected requiredScope is missing')
+    }
+    if (!payload.scopes.includes(expected.requiredScope)) {
+      return edgeAssertionFailure('route scope missing')
+    }
+    return Object.freeze({ ok: true })
+  }
+  for (const key of HOST_EDGE_ASSERTION_V2_CLAIM_KEYS.slice(9)) {
+    if (!Object.hasOwn(expected, key)) return edgeAssertionFailure(`expected ${key} is missing`)
+    if (!sameJsonValue(payload[key], expected[key])) return edgeAssertionFailure(`${key} mismatch`)
+  }
+  return Object.freeze({ ok: true })
 }
 
 function sessionsCursorScope(userSub, agent) {
@@ -419,12 +590,16 @@ function validateCheckpointTimestamp(value) {
   return checkpointString(value, 64) && Number.isFinite(Date.parse(value))
 }
 
-function isHostMessageAdmissionReceipt(value) {
+function isCompactJws(value) {
   return (
     typeof value === 'string' &&
     value.length <= 8192 &&
     /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)
   )
+}
+
+function isHostMessageAdmissionReceipt(value) {
+  return isCompactJws(value)
 }
 
 function validateHostMessageAdmissionContext(value) {
@@ -582,7 +757,8 @@ function validateActionAuthorityCheckpointResponse(value) {
           'attribution',
           'destination',
         ].concat(
-          value.hostMessageAdmissionReceipt === undefined ? [] : ['hostMessageAdmissionReceipt']
+          value.hostMessageAdmissionReceipt === undefined ? [] : ['hostMessageAdmissionReceipt'],
+          value.hostEdgeAssertion === undefined ? [] : ['hostEdgeAssertion']
         )
       ) ||
       !AUTHORIZATION_REVISION_PATTERN.test(value.authorizationRevision) ||
@@ -592,6 +768,10 @@ function validateActionAuthorityCheckpointResponse(value) {
       (value.validUntil !== null && !validateCheckpointTimestamp(value.validUntil)) ||
       (value.hostMessageAdmissionReceipt !== undefined &&
         !isHostMessageAdmissionReceipt(value.hostMessageAdmissionReceipt)) ||
+      (value.hostEdgeAssertion !== undefined &&
+        (!isCompactJws(value.hostEdgeAssertion) ||
+          !value.destination ||
+          value.destination.kind !== 'host')) ||
       (value.validUntil !== null && Date.parse(value.validUntil) < Date.parse(value.checkedAt)) ||
       !hasExactKeys(value.attribution, [
         'userId',
@@ -1224,8 +1404,16 @@ function classifyMcpCallerOperation(input) {
 module.exports = {
   ACTION_CONTEXT_VERSION,
   ACTION_AUTHORITY_CHECKPOINT_PATH,
-  RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER,
-  RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT,
+  HOST_EDGE_ASSERTION_HEADER,
+  HOST_EDGE_ASSERTION_AUDIENCE,
+  HOST_EDGE_ASSERTION_JWT_TYPE,
+  HOST_EDGE_ASSERTION_CLAIM_TYPE,
+  HOST_EDGE_ASSERTION_MAX_TTL_SECONDS,
+  HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS,
+  HOST_EDGE_ASSERTION_V1_CLAIM_KEYS,
+  HOST_EDGE_ASSERTION_V2_CLAIM_KEYS,
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
+  validateHostEdgeAssertionClaims,
   ACTION_AUTHORITY_DESTINATION_KINDS,
   ACTION_BEHAVIOR_HASH_PREFIX,
   ACCESS_RESOURCE_TYPES,

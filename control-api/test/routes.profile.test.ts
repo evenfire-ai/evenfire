@@ -272,10 +272,13 @@ describe('routes/profile', () => {
       request(app).get('/rpc/access/users/u1/mcp-hosts/agent-a')
     )
       .expect(200)
-      .expect({
-        userId: 'u1',
-        hostRef: 'agent-a',
-        url: 'http://agent-a.mcp-host.svc.cluster.local:8080',
+      .expect(({ body }) => {
+        expect(body).toEqual({
+          userId: 'u1',
+          hostRef: 'agent-a',
+          url: 'http://agent-a.mcp-host.svc.cluster.local:8080',
+          edgeAssertion: expect.any(String),
+        })
       })
 
     await withInternalServiceAuthAndRpcToken(
@@ -317,10 +320,13 @@ describe('routes/profile', () => {
         .set('x-rpc-access-token', modelWriteToken)
     )
       .expect(200)
-      .expect({
-        userId: 'u1',
-        hostRef: 'agent-a',
-        url: 'http://agent-a.mcp-host.svc.cluster.local:8080',
+      .expect(({ body }) => {
+        expect(body).toEqual({
+          userId: 'u1',
+          hostRef: 'agent-a',
+          url: 'http://agent-a.mcp-host.svc.cluster.local:8080',
+          edgeAssertion: expect.any(String),
+        })
       })
   })
 
@@ -353,10 +359,13 @@ describe('routes/profile', () => {
         .set('x-rpc-access-token', sessionWriteToken)
     )
       .expect(200)
-      .expect({
-        userId: 'u1',
-        hostRef: 'agent-a',
-        url: 'http://agent-a.mcp-host.svc.cluster.local:8080',
+      .expect(({ body }) => {
+        expect(body).toEqual({
+          userId: 'u1',
+          hostRef: 'agent-a',
+          url: 'http://agent-a.mcp-host.svc.cluster.local:8080',
+          edgeAssertion: expect.any(String),
+        })
       })
   })
 

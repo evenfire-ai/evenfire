@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   ControlApiHostAccessRejectedError,
+  ControlApiHostEdgeAssertionMissingError,
   fetchHostConnectionFromControlApi,
 } from '../src/services/controlApiRestService.js'
 
@@ -19,6 +20,7 @@ describe('control-api canonical host access client', () => {
             userId: 'user-1',
             hostRef: 'host-a',
             url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+            edgeAssertion: 'edge-assertion-fixture',
           }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         )
@@ -32,6 +34,7 @@ describe('control-api canonical host access client', () => {
       name: 'host-a',
       url: 'http://host-a.mcp-host.svc.cluster.local:8080',
       headers: {},
+      edgeAssertion: 'edge-assertion-fixture',
     })
 
     expect(fetchImpl).toHaveBeenCalledOnce()
@@ -49,6 +52,7 @@ describe('control-api canonical host access client', () => {
             hostRef: 'host-a',
             url: 'http://host-a.mcp-host.svc.cluster.local:8080',
             bindingStatus: 'recorded',
+            edgeAssertion: 'edge-assertion-fixture',
           }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         )
@@ -64,6 +68,7 @@ describe('control-api canonical host access client', () => {
       url: 'http://host-a.mcp-host.svc.cluster.local:8080',
       headers: {},
       attributionBindingStatus: 'recorded',
+      edgeAssertion: 'edge-assertion-fixture',
     })
 
     expect(fetchImpl).toHaveBeenCalledOnce()
@@ -259,5 +264,32 @@ describe('control-api canonical host access client', () => {
         fetchImpl: fetchImpl as typeof fetch,
       })
     ).rejects.toMatchObject({ status, denialCode: null })
+  })
+
+  // A control-api older than rpc-proxy authorizes the Host without issuing an
+  // edge assertion. The typed error is what the routes answer as 503
+  // `authority_unavailable`.
+  it.each([
+    ['missing', {}],
+    ['empty', { edgeAssertion: '' }],
+    ['a number', { edgeAssertion: 42 }],
+    ['null', { edgeAssertion: null }],
+  ])('a 200 with the edge assertion %s rejects with the typed error', async (_label, extra) => {
+    const fetchImpl = jsonResponse(200, {
+      userId: 'user-1',
+      hostRef: 'host-a',
+      url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+      ...extra,
+    })
+
+    const rejection = fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+      fetchImpl: fetchImpl as typeof fetch,
+    })
+
+    await expect(rejection).rejects.toBeInstanceOf(ControlApiHostEdgeAssertionMissingError)
+    await expect(rejection).rejects.toMatchObject({
+      name: 'ControlApiHostEdgeAssertionMissingError',
+    })
+    expect(fetchImpl).toHaveBeenCalledOnce()
   })
 })

@@ -185,6 +185,7 @@ import {
   WorkflowApprovalNotificationTerminal,
 } from './server'
 import { createSessionRouteHandlers } from './server/sessionRouteHandlers'
+import { pendingApprovalsForStatus } from './server/statusProjection'
 import { projectContextBreakdown } from './server/wireProjections'
 import { SessionProcessor } from './session'
 import { serializeSessionKey } from './session/types.js'
@@ -2760,8 +2761,8 @@ async function getStatus(): Promise<StatusResponse> {
 
   const cronJobs = cronScheduler?.getAllJobs().length || 0
 
-  // Phase 6: Include pending approvals
-  const pendingApprovals = agent?.getPendingApprovals() || []
+  // Phase 6: Include pending approvals, projected to their start time only
+  const pendingApprovals = pendingApprovalsForStatus(agent)
 
   const mcpServers = mcpManager ? mcpManager.status.snapshot() : []
   const degraded = computeDegradedReason()
@@ -3099,7 +3100,9 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onSetApprovalMode(handleSetApprovalMode)
   // T3.1 — session search REST endpoint. Only wired when the feature is
   // enabled and the SQLite backend is live; otherwise the route returns 501
-  // through `handleSessionSearchRoute`.
+  // through `handleSessionSearchRoute`; in this release the edge guard answers
+  // 401 before the handler runs, so the route returns neither 200 nor 501
+  // until V2 edge assertions are accepted.
   if (sessionSearchService) {
     const service = sessionSearchService
     rpcServer.onSessionSearch(async req => {

@@ -8,12 +8,27 @@
  *   - Queue depth changes correctly
  *   - The failure is graceful (no crash)
  */
-import { describe, expect, it } from 'vitest'
-import { MCP_HOST_URL, getPodLogs, getStatus, sendMessage, sleep, waitForIdle } from '../helpers.js'
+import { beforeAll, describe, expect, it } from 'vitest'
+import {
+  DEFAULT_HOST_REF,
+  MCP_HOST_URL,
+  getPodLogs,
+  getStatus,
+  sendMessage,
+  sleep,
+  waitForIdle,
+} from '../helpers.js'
+import { issueRealRpcToken } from './runtimeAuth.js'
+
+let statusToken: string
+
+beforeAll(async () => {
+  statusToken = await issueRealRpcToken(['host:status:read'], [DEFAULT_HOST_REF])
+})
 
 describe('Message Flow', () => {
   it('POST /message returns 200 and queues the message', async () => {
-    const before = await getStatus()
+    const before = await getStatus(statusToken)
     const initialProcessed = before.agent.tasksProcessed
 
     const res = await sendMessage('Hello from E2E test')
@@ -23,7 +38,7 @@ describe('Message Flow', () => {
     await sleep(500)
 
     // The message should be processing or already processed
-    const after = await getStatus()
+    const after = await getStatus(statusToken)
     const stateChanged =
       after.agent.state === 'processing' || after.agent.tasksProcessed > initialProcessed
     const queued = after.queue.pending > 0 || after.queue.processing > 0
@@ -32,12 +47,12 @@ describe('Message Flow', () => {
 
   it('agent returns to idle after processing (even if LLM fails)', async () => {
     // Wait for the agent to finish processing (LLM will fail with placeholder key)
-    const status = await waitForIdle(30_000)
+    const status = await waitForIdle(statusToken, 30_000)
     expect(status.agent.state).toBe('idle')
   })
 
   it('task is counted as processed', async () => {
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     // At least 1 task should have been processed (success or failure)
     expect(status.agent.tasksProcessed).toBeGreaterThanOrEqual(1)
   })
@@ -53,7 +68,7 @@ describe('Message Flow', () => {
     }
 
     // Wait for all to be processed
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
   })
 
   it('mcp-host does not crash after failed LLM call', async () => {

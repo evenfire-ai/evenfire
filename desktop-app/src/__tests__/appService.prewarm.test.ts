@@ -627,4 +627,129 @@ describe('AppService host status stream — ANTI-FLAP invariant', () => {
 
     svc.stopHostStatusStream('stream-1')
   })
+
+  it('a cycle that opens and ends in auth-expired without a status backs off', async () => {
+    vi.useFakeTimers()
+    // rpc-proxy writes `open` before its first Host poll; under a persistent
+    // Host refusal the stream ends in auth-expired without any status.
+    mockOpenHostStatusStream.mockImplementation(
+      async (
+        _token: string,
+        _hostRef: string,
+        onSse: (frame: { event: string; data: unknown }) => void
+      ) => {
+        onSse({ event: 'open', data: { hostRef: 'chatllm' } })
+        onSse({ event: 'auth-expired', data: { message: 'RPC token expired' } })
+      }
+    )
+    const svc = makeService()
+
+    svc.startHostStatusStream('stream-1', 7, 'chatllm', ['chatllm'], () => {})
+
+    // Counts are calls to mockOpenHostStatusStream (connects), not `open` events.
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(2)
+    // The second wait is 2000 ms because `open` no longer resets the backoff.
+    await vi.advanceTimersByTimeAsync(1999)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(3)
+
+    svc.stopHostStatusStream('stream-1')
+  })
+
+  // Preservation pin, not a fix proof: it passes with and without the z2-F3
+  // change, and turns red if the reset in the `status` branch is removed too.
+  it('a cycle that delivered a status reconnects after 1 s', async () => {
+    vi.useFakeTimers()
+    mockOpenHostStatusStream.mockImplementation(
+      async (
+        _token: string,
+        _hostRef: string,
+        onSse: (frame: { event: string; data: unknown }) => void
+      ) => {
+        onSse({ event: 'open', data: { hostRef: 'chatllm' } })
+        onSse({ event: 'status', data: { hostRef: 'chatllm', state: 'active' } })
+        onSse({ event: 'auth-expired', data: { message: 'RPC token expired' } })
+      }
+    )
+    const svc = makeService()
+    const events: Array<{ type: string }> = []
+
+    svc.startHostStatusStream('stream-1', 7, 'chatllm', ['chatllm'], event => {
+      events.push(event)
+    })
+
+    // Counts are calls to mockOpenHostStatusStream (connects).
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(1)
+    expect(events.some(event => event.type === 'status')).toBe(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(4)
+
+    svc.stopHostStatusStream('stream-1')
+  })
+
+  it('auth-expired drops the cached RPC token before the reconnect asks for one; a plain disconnect keeps it', async () => {
+    vi.useFakeTimers()
+    // Later connects deliver a status and then end without auth-expired: a
+    // plain disconnect.
+    mockOpenHostStatusStream.mockImplementation(
+      async (
+        _token: string,
+        _hostRef: string,
+        onSse: (frame: { event: string; data: unknown }) => void
+      ) => {
+        onSse({ event: 'open', data: { hostRef: 'chatllm' } })
+        onSse({ event: 'status', data: { hostRef: 'chatllm', state: 'active' } })
+      }
+    )
+    // The first connect ends in auth-expired.
+    mockOpenHostStatusStream.mockImplementationOnce(
+      async (
+        _token: string,
+        _hostRef: string,
+        onSse: (frame: { event: string; data: unknown }) => void
+      ) => {
+        onSse({ event: 'open', data: { hostRef: 'chatllm' } })
+        onSse({ event: 'status', data: { hostRef: 'chatllm', state: 'active' } })
+        onSse({ event: 'auth-expired', data: { message: 'RPC token expired' } })
+      }
+    )
+    const svc = makeService()
+    const events: Array<{ type: string; message?: string }> = []
+
+    svc.startHostStatusStream('stream-1', 7, 'chatllm', ['chatllm'], event => {
+      events.push(event)
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(1)
+    expect(mockRpcTokenManagerClear).toHaveBeenCalledTimes(1)
+    expect(events).toContainEqual({ type: 'error', message: 'RPC token expired' })
+
+    // The reconnect requests its token after the clear, so it cannot reuse
+    // the token rpc-proxy refused.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(2)
+    expect(mockGetOrIssue).toHaveBeenCalledTimes(2)
+    expect(mockRpcTokenManagerClear.mock.invocationCallOrder[0]).toBeLessThan(
+      mockGetOrIssue.mock.invocationCallOrder[1]
+    )
+
+    // Witness: the second cycle ended and a third connect ran, yet the plain
+    // disconnect left the cached token alone.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(mockOpenHostStatusStream).toHaveBeenCalledTimes(3)
+    expect(events).toContainEqual({ type: 'error', message: 'Status stream disconnected' })
+    expect(mockRpcTokenManagerClear).toHaveBeenCalledTimes(1)
+
+    svc.stopHostStatusStream('stream-1')
+  })
 })

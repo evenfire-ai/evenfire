@@ -14,6 +14,7 @@ import {
   resolveInvocableMcpServersForContexts,
 } from '../../services/access/mcpInvocable.js'
 import {
+  type AuthorizedRpcHostAccess,
   type RpcHostAccessDenialReason,
   type RpcHostAccessDirectory,
   authorizeRpcHostAccess,
@@ -24,6 +25,10 @@ import {
   DirectRunBindingConflictError,
 } from '../../services/tracing/directRunAttributionBindingService.js'
 import { parseDirectRunBindingRequest } from '../../services/tracing/directRunBindingRequest.js'
+import {
+  HostEdgeAssertionBindingError,
+  issueHostEdgeAssertion,
+} from '../../utils/auth/hostEdgeAssertion.js'
 
 type RpcAccessUsersRouterOptions = {
   bindingService: Pick<DirectRunAttributionBindingService, 'bind'>
@@ -67,6 +72,32 @@ function denyHostAccess(
   )
   res.setHeader(HOST_ACCESS_DENIAL_REASON_HEADER, reason)
   res.status(403).json({ error: 'Forbidden' })
+}
+
+/**
+ * Signs the Host edge assertion for an authorized V1 Host access. Every claim comes from the
+ * verified RPC token or from the authorized connection; the lifetime ends no later than the
+ * token. Returns null, after answering 401 as for an expired token, when the token ends in the
+ * second of issue.
+ */
+function issueV1HostEdgeAssertion(
+  res: Response,
+  claims: RpcAccessClaims,
+  connection: AuthorizedRpcHostAccess
+): string | null {
+  try {
+    return issueHostEdgeAssertion({
+      v: 1,
+      sub: claims.sub,
+      host: `${config.hostsNamespace}/${connection.hostRef}`,
+      expBound: claims.exp,
+      fields: { teamId: claims.teamId, scopes: claims.scopes },
+    })
+  } catch (error) {
+    if (!(error instanceof HostEdgeAssertionBindingError)) throw error
+    res.status(401).json({ error: 'Unauthorized' })
+    return null
+  }
 }
 
 async function bindDirectRunWithinBudget(
@@ -214,7 +245,9 @@ export function createRpcAccessUsersRouter(
           denyHostAccess(req, res, authorization.reason)
           return
         }
-        res.status(200).json(authorization.connection)
+        const edgeAssertion = issueV1HostEdgeAssertion(res, claims, authorization.connection)
+        if (edgeAssertion === null) return
+        res.status(200).json({ ...authorization.connection, edgeAssertion })
       } catch (error) {
         next(error)
       }
@@ -251,6 +284,9 @@ export function createRpcAccessUsersRouter(
           denyHostAccess(req, res, authorization.reason)
           return
         }
+        // Signed before the binding, so a token that has no lifetime left records nothing.
+        const edgeAssertion = issueV1HostEdgeAssertion(res, claims, authorization.connection)
+        if (edgeAssertion === null) return
 
         const bindingStatus = await bindDirectRunWithinBudget(
           bindingService,
@@ -268,6 +304,7 @@ export function createRpcAccessUsersRouter(
           res.status(200).json({
             ...authorization.connection,
             bindingStatus: 'recorded',
+            edgeAssertion,
           })
           return
         }
@@ -286,6 +323,7 @@ export function createRpcAccessUsersRouter(
         res.status(200).json({
           ...authorization.connection,
           bindingStatus: 'unavailable',
+          edgeAssertion,
         })
       } catch (error) {
         next(error)
