@@ -204,8 +204,8 @@ function emitWindowControlsState(win: BrowserWindow): void {
  * app-wide (not per-window); `send` is a no-op when the webContents is gone.
  * The sandbox UI session loop gets the same tick: a cookie that expired during
  * sleep is re-minted now instead of whenever its timer catches up.
- * The browser sign-in deadline is checked too (D12): a sleep may have kept its
- * timer from firing, and the service pushes a `timed_out` end itself.
+ * The browser sign-in deadline is checked first (D12): a sleep may have kept its
+ * timer from firing, and a throwing listener ahead of it would skip the check.
  */
 function wirePowerMonitor(): void {
   const emit = () => {
@@ -214,12 +214,12 @@ function wirePowerMonitor(): void {
     }
   }
   const checkBrowserSignInDeadline = () => appService.checkBrowserSignInDeadline()
+  powerMonitor.on('resume', checkBrowserSignInDeadline)
+  powerMonitor.on('unlock-screen', checkBrowserSignInDeadline)
   powerMonitor.on('resume', emit)
   powerMonitor.on('unlock-screen', emit)
   powerMonitor.on('resume', notifySandboxUiHostResumed)
   powerMonitor.on('unlock-screen', notifySandboxUiHostResumed)
-  powerMonitor.on('resume', checkBrowserSignInDeadline)
-  powerMonitor.on('unlock-screen', checkBrowserSignInDeadline)
 }
 
 /** Push native window state to the renderer on every visibility/focus change. */

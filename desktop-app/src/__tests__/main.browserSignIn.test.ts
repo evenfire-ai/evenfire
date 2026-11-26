@@ -264,6 +264,14 @@ function secondInstance(argv: string[]): void {
   listener({}, argv)
 }
 
+/**
+ * Emits a power event as Electron's `EventEmitter.emit` does: each listener in the order it was
+ * registered, and a throw leaves `emit` before the listeners after it run.
+ */
+function emitPowerEvent(event: string): void {
+  for (const listener of harness.powerMonitorListeners.get(event) ?? []) listener()
+}
+
 function markRendererReady(window: Record<string, any>): void {
   const rendererReady = harness.handleHandlers.get('app:rendererReady')
   if (!rendererReady) throw new Error('main.ts registered no app:rendererReady handler')
@@ -443,6 +451,31 @@ describe('main.ts browser sign-in wiring', () => {
     for (const listener of unlockScreen) listener()
     expect(window.webContents.send.mock.calls).toEqual([['system:resume'], ['system:resume']])
     expect(harness.checkBrowserSignInDeadline).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ["the renderer's resume tick", 'fake resume tick failure'],
+    ["the sandbox UI's resume notice", 'fake sandbox UI resume failure'],
+  ])('checks the deadline on a power event even when %s throws', async (_listener, failure) => {
+    await startMain()
+    const window = mainWindow()
+    const { notifySandboxUiHostResumed } = await import('../sandboxUiSessionRefresh.js')
+    const thrower =
+      failure === 'fake resume tick failure'
+        ? window.webContents.send
+        : vi.mocked(notifySandboxUiHostResumed)
+    thrower.mockImplementation(() => {
+      throw new Error(failure)
+    })
+
+    for (const event of ['resume', 'unlock-screen']) {
+      harness.checkBrowserSignInDeadline.mockClear()
+      thrower.mockClear()
+      expect(() => emitPowerEvent(event)).toThrow(failure)
+      // The throwing listener ran, and the deadline check ran too.
+      expect(thrower, event).toHaveBeenCalledTimes(1)
+      expect(harness.checkBrowserSignInDeadline, event).toHaveBeenCalledTimes(1)
+    }
   })
 
   it('A3-70 a matched link during a deferred quit cancels it', async () => {
