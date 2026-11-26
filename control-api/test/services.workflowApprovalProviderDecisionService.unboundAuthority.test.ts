@@ -87,6 +87,8 @@ function workflowRunRow(): WorkflowRunRow {
     ttl_seconds_after_finished: null,
     approval_request_id: APPROVAL_ID,
     idempotency_payload_hash: 'hash-1',
+    cancel_requested_at: null,
+    canceled_by: null,
     initiating_authority_binding_id: null,
     failure_reason: null,
     started_at: null,
@@ -295,6 +297,8 @@ describe('provider approval decisions without V2 trigger authority (M-41 WF-22)'
         actor: { type: 'user-session', userId: 'user-1' },
         executionRef: null,
         approvalRequestId: APPROVAL_ID,
+        cancelRequestedAt: null,
+        canceledBy: null,
       },
     })
     // Liveness witnesses: the provider event records success, and the run

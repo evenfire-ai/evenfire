@@ -53,6 +53,8 @@ export interface WorkflowRunRow {
   updated_at: string
   initiating_authority_binding_id: string | null
   failure_reason: WorkflowRunFailureReason | null
+  cancel_requested_at: string | null
+  canceled_by: string | null
 }
 
 export interface CreateRunInput {

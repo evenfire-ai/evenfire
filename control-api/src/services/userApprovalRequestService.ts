@@ -139,6 +139,11 @@ export async function resolveWorkflowApprovalRunBinding(
     throw new InvalidWorkflowApprovalRunBindingError()
   }
   const proofSha256 = createHash('sha256').update(proof).digest('hex')
+  // The share lock on the run row serialises this read, and the approval
+  // INSERT that follows it in the same transaction, with a run cancel
+  // (`cancelWorkflowRun`, which locks the row for update): an approval whose
+  // read ran first is cancelled by the cancel's approval sweep, and a read that
+  // waited on the cancel re-checks the row, sees the request and binds nothing.
   const result = await db.query(
     `SELECT wr.run_id::text AS "runId", step.step_id AS "stepId",
             wr.initiating_authority_binding_id::text AS "authorityBindingId"
@@ -160,7 +165,9 @@ export async function resolveWorkflowApprovalRunBinding(
         AND wr.child_recipe_namespace = $2
         AND wr.child_recipe_name = $6
         AND wr.phase = 'Running'
-      LIMIT 1`,
+        AND wr.cancel_requested_at IS NULL
+      LIMIT 1
+        FOR SHARE OF wr`,
     [runId, params.recipeNamespace, params.recipeName, stepId, proofSha256, childRecipeName]
   )
   if (!result.rows[0]) throw new InvalidWorkflowApprovalRunBindingError()
@@ -1259,6 +1266,65 @@ export async function cancelRequest(
 
     return { ok: true }
   })
+}
+
+/**
+ * Cancels every unexpired pending step approval bound to a run. Runs inside the
+ * run cancel transaction, after the run row lock, so an approval created
+ * before the cancel is cancelled here and one created after it finds no run
+ * binding (`resolveWorkflowApprovalRunBinding`). An approval already past
+ * `expires_at` is left for the expiry path, which records it `expired`.
+ */
+export const CANCEL_PENDING_APPROVALS_FOR_RUN = `
+  UPDATE workflow_approval_requests
+     SET status = 'cancelled',
+         cancelled_at = NOW(),
+         cancelled_by = $2
+   WHERE bound_workflow_run_id = $1::uuid
+     AND status = 'pending'
+     AND expires_at >= NOW()
+   RETURNING id::text AS id,
+             recipe_namespace AS "recipeNamespace",
+             recipe_name AS "recipeName",
+             target_user_id::text AS "targetUserId",
+             target_team_id::text AS "targetTeamId"`
+
+export async function cancelPendingRequestsForRun(
+  db: DbClient,
+  runId: string,
+  cancelledBy: string
+): Promise<string[]> {
+  const cancelled = await db.query(CANCEL_PENDING_APPROVALS_FOR_RUN, [runId, cancelledBy])
+  const rows = cancelled.rows as Array<{
+    id: string
+    recipeNamespace: string
+    recipeName: string
+    targetUserId: string | null
+    targetTeamId: string | null
+  }>
+  for (const row of rows) {
+    await enqueueApprovalUpdatedNotification(db, {
+      approvalRequestId: row.id,
+      recipeNamespace: row.recipeNamespace,
+      recipeName: row.recipeName,
+      targetUserId: row.targetUserId,
+      targetTeamId: row.targetTeamId,
+      status: 'cancelled',
+    })
+    rootLogger.info(
+      {
+        event: 'approval_transition',
+        from: 'pending',
+        to: 'cancelled',
+        approvalRequestId: row.id,
+        cancelledBy,
+        workflowRunId: runId,
+      },
+      'approval transition'
+    )
+  }
+  if (rows.length > 0) approvalsCancelledTotal.inc(rows.length)
+  return rows.map(row => row.id)
 }
 
 /**
