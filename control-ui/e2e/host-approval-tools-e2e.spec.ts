@@ -112,7 +112,7 @@ test.describe('Approvals tab E2E -- per-tool overrides, off switch, version rule
     await sectionActions(page).getByRole('button', { name: 'Save', exact: true }).click()
 
     // Skip on a tool that asks by default loosens approval: the save waits for a confirmation.
-    const dialog = page.getByRole('dialog', { name: 'Confirm looser approval' })
+    const dialog = page.getByRole('alertdialog', { name: 'Confirm looser approval' })
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await dialog.getByRole('button', { name: 'Save these changes' }).click()
 
