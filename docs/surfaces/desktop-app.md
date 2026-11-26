@@ -18,7 +18,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
 1. **Log in.** The sign-in screen shows the methods the environment lists at
    `GET /api/v1/auth/methods`: email and password, posted to
    `POST /api/v1/auth/password-login`, and, with member sign-in (OIDC) on,
-   "Continue with <provider>" through the system browser. That opens Profile
+   "Continue with …" through the system browser. That opens Profile
    UI's `/desktop-login` page, Profile UI returns the result through the
    `evenfire://desktop-login` deep link, and the app redeems its code at
    `POST /api/v1/oidc/desktop-sign-in/redeem` (step 7 of [Profile UI's
