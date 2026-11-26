@@ -272,6 +272,8 @@ type SwitchRecord = {
   settleLogLen?: number
   settleClock?: number
   shown: boolean
+  /** An `AdvanceClock` command moved the clock while the run went on (L3 then promises nothing). */
+  clockMoved: boolean
 }
 
 type StoreEvent = {
@@ -851,6 +853,7 @@ function installTracking(w: World): void {
       startClock: w.clock.now(),
       startStep: w.step,
       shown: false,
+      clockMoved: false,
     }
     w.switches.push(record)
     count(w.stats, 'events', 'E2')
@@ -1679,7 +1682,13 @@ function checkL2(w: World): void {
   }
 }
 
-/** L3: the switch succeeds through up to six conflicts inside its 20 s budget. */
+/**
+ * L3: the switch succeeds through up to six conflicts inside its 20 s budget.
+ * Every run that met only conflicts is held to it, unless an `AdvanceClock`
+ * command moved the clock during the run: the drain only runs the clock to
+ * each next timer, so the budget can run out only through the switch's own
+ * waits.
+ */
 function checkL3(w: World): void {
   for (const record of w.switches) {
     const outcome = record.outcome
@@ -1699,8 +1708,8 @@ function checkL3(w: World): void {
         )
     )
     if (conflicts.length === 0 || conflicts.length > 6 || others.length > 0) continue
+    if (record.clockMoved) continue
     const elapsed = (record.settleClock ?? 0) - record.startClock
-    if (elapsed >= 20_000) continue
     count(w.stats, 'checks', 'L3')
     if (outcome.kind === 'failed') {
       flag(
@@ -1842,6 +1851,9 @@ class AdvanceClock extends Command {
     super()
   }
   async perform(w: World) {
+    // The drain moves the clock only to the next timer; this command can jump
+    // past a run's budget, so L3 holds no run this command moved.
+    for (const record of w.switches) if (!record.outcome) record.clockMoved = true
     await advanceClock(w, this.ms)
   }
   toString() {
