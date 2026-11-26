@@ -6,7 +6,7 @@ import { approvalBlockOf, effectiveApproval } from '@lib/approvalEffective'
 import { skipOverrides } from '@lib/approvalToolCatalog'
 import { isSettingManual, subscribeSettingManual } from '@lib/hostApprovalSave'
 import { NeverAskList } from './ReadViews'
-import { manifestSignal, manifestWarningText } from './banners'
+import { switchManifestWarning } from './banners'
 import {
   ALREADY_MANUAL_TEXT,
   APPLIED_AT_NEXT_CALL_TEXT,
@@ -68,18 +68,12 @@ function SavedMessage({ outcome }: SavedResultProps) {
 /**
  * Step 7's manifest addition, worded as the manifest banner (spec §6.7,
  * Ruling 47), from the switch's own read before its write, or its write's
- * answer.
+ * answer (`switchManifestWarning`, which the root toast also uses).
  */
 function ManifestWarning({ outcome }: SavedResultProps) {
-  // The answer's own signal first (it can show values); else the one the
-  // switch's read showed before its write, which the write may have removed.
-  const after = manifestSignal(outcome.stored)
-  const manifest =
-    after.managed || outcome.kind !== 'saved' ? after : (outcome.manifestBefore ?? after)
-  if (!manifest.managed) return null
-  return (
-    <p className="cu-host-approvals-tab__switch-manifest">{manifestWarningText(manifest.values)}</p>
-  )
+  const warning = switchManifestWarning(outcome)
+  if (warning === null) return null
+  return <p className="cu-host-approvals-tab__switch-manifest">{warning}</p>
 }
 
 /**

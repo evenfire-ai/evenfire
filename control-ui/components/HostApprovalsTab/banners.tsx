@@ -4,6 +4,8 @@ import React from 'react'
 import { IconInfoCircle } from '@components/icons'
 import type { HostResource } from '@lib/api'
 import { effectiveApproval } from '@lib/approvalEffective'
+import type { OffSwitchOutcome } from '@lib/hostApprovalSave'
+import { manifestSignal } from '@lib/hostManifestSignal'
 import {
   CHANNEL_LABELS,
   CHANNEL_ORDER,
@@ -63,6 +65,21 @@ export function manifestValuesText(values: Record<string, unknown>): string {
  */
 export function manifestWarningText(values: Record<string, unknown> | null): string {
   return manifestBannerText(values === null ? null : manifestValuesText(values))
+}
+
+/**
+ * Spec §6.3 step 7 with §6.7: the manifest warning a switch's outcome adds,
+ * or null when no manifest sets the agent's settings (and for a failure). The
+ * answer's own signal comes first, since it can show values; otherwise the one
+ * the switch's read showed before its write, which the write may have removed
+ * (security m-4). The tab's result and the root toast both take it from here.
+ */
+export function switchManifestWarning(outcome: OffSwitchOutcome): string | null {
+  if (outcome.kind === 'failed') return null
+  const after = manifestSignal(outcome.stored)
+  const manifest =
+    after.managed || outcome.kind !== 'saved' ? after : (outcome.manifestBefore ?? after)
+  return manifest.managed ? manifestWarningText(manifest.values) : null
 }
 
 /** Spec §6.2: the agent has no `spec.approval` of its own (absent or null; `{}` is its own). */

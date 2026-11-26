@@ -274,23 +274,41 @@ export function offSwitchFailedToast(message: string): ContinuationToast {
 }
 
 /**
+ * Spec §6.3 step 7, short for a toast: what Manual still lets run without a
+ * card, every kind step 7 lists, and where the agent's tools are listed. A
+ * success never reads as "nothing runs unattended now" (review I-1).
+ */
+export const SWITCH_TOAST_STILL_RUNNING_TEXT = `${STILL_RUNNING_TEXT}: ${SKIP_TOOLS_TEXT}, tools that never ask, approvals chats already gave and scheduled tasks; the agent's Approvals tab lists the tools.`
+
+/**
  * Spec §6.3 step 7: the root toast for a switch whose tab unmounted or now
- * shows another agent: every outcome, named after the agent. A failure carries
- * the kubectl fallback, since no tab shows it.
+ * shows another agent: every outcome, named after the agent. A success says
+ * what still runs without a card, and adds the manifest warning
+ * (`switchManifestWarning`) when a manifest sets the agent's settings. A
+ * failure carries the kubectl fallback, since no tab shows it.
  */
 export function offSwitchContinuationToast(
   host: string,
-  outcome: OffSwitchOutcome
+  outcome: OffSwitchOutcome,
+  manifestWarning: string | null
 ): ContinuationToast {
+  const after = [SWITCH_TOAST_STILL_RUNNING_TEXT, ...(manifestWarning ? [manifestWarning] : [])]
   switch (outcome.kind) {
     case 'saved':
       return {
-        message: `Manual is saved for agent ${host}. ${APPLIED_AT_NEXT_CALL_TEXT}`,
+        message: [`Manual is saved for agent ${host}.`, APPLIED_AT_NEXT_CALL_TEXT, ...after].join(
+          ' '
+        ),
         options: { tone: 'success' },
       }
     case 'already':
       return {
-        message: `Manual is saved for agent ${host}. ${ALREADY_MANUAL_TEXT} ${APPLIED_AT_NEXT_CALL_TEXT}`,
+        message: [
+          `Manual is saved for agent ${host}.`,
+          ALREADY_MANUAL_TEXT,
+          APPLIED_AT_NEXT_CALL_TEXT,
+          ...after,
+        ].join(' '),
         options: { tone: 'success' },
       }
     case 'failed':

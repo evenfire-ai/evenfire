@@ -1393,8 +1393,12 @@ function toastsDue(w: World, settled: ReadonlyArray<SaveRecord | SwitchRecord>):
         onShown,
       })
     } else {
+      // Review I-1: what still runs without a card. No Host of this suite is
+      // set by a manifest, so no manifest warning follows.
+      const stillRunning =
+        "Still running without a card: tools set to Skip, tools that never ask, approvals chats already gave and scheduled tasks; the agent's Approvals tab lists the tools."
       const already = outcome.kind === 'already' ? ' It was already Manual.' : ''
-      const text = `Manual is saved for agent ${record.agent}.${already} ${applied}`
+      const text = `Manual is saved for agent ${record.agent}.${already} ${applied} ${stillRunning}`
       due.push({
         owner,
         matches: shown => shown === text,

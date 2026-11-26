@@ -136,10 +136,17 @@ function fallback(namespace: string, name: string): string {
 // tests' errors have none of their own.
 const failedText = (message: string) => `Manual was not saved. ${message}.`
 const FALLBACK_INTRO = 'To set Manual by hand, run:'
-const savedFor = (agent: string) =>
-  `Manual is saved for agent ${agent}. Running chats apply it at their next tool call.`
-const alreadyFor = (agent: string) =>
-  `Manual is saved for agent ${agent}. It was already Manual. Running chats apply it at their next tool call.`
+// Review I-1 (new copy, for the owner's sign-off): a continuation's success
+// says what still runs without a card, every kind step 7 lists, and adds the
+// manifest warning when a manifest sets the agent's settings.
+const STILL_RUNNING_TOAST =
+  "Still running without a card: tools set to Skip, tools that never ask, approvals chats already gave and scheduled tasks; the agent's Approvals tab lists the tools."
+const savedFor = (agent: string, warning?: string) =>
+  `Manual is saved for agent ${agent}. Running chats apply it at their next tool call. ${STILL_RUNNING_TOAST}` +
+  (warning ? ` ${warning}` : '')
+const alreadyFor = (agent: string, warning?: string) =>
+  `Manual is saved for agent ${agent}. It was already Manual. Running chats apply it at their next tool call. ${STILL_RUNNING_TOAST}` +
+  (warning ? ` ${warning}` : '')
 const failedFor = (agent: string, message: string, command: string) =>
   `Manual was not saved for agent ${agent}. ${message}. To set Manual by hand, run: ${command}`
 
@@ -925,6 +932,118 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       expect(reads(fake), "the switch's one read").toHaveLength(1)
       expect(writes(fake), 'nothing written').toEqual([])
       expect(unanswered(fake)).toEqual([])
+      tab.unmount()
+    })
+
+    it.each([
+      [
+        'host-kubectl-applied',
+        manifestWarning('Highest mode: Allow all; Policy: Any channel user'),
+      ],
+      ['host-server-side-applied', MANIFEST_WARNING_NO_VALUES],
+    ])(
+      'I-1 on %s a switch that settles after the tab was left adds the manifest warning to the root toast',
+      async (fixture, warning) => {
+        const fake = createFakeControlApi({
+          hosts: { foo: fooFrom(fixture) },
+          crd: 'current',
+          versionRule: true,
+        })
+        const tab = renderApprovalsTab({ fake, host: 'foo' })
+        await approvalSettingsDriver()
+        const put = fake.hold({ method: 'PUT', path: FOO })
+        await clickSetToManual()
+        await act(async () => {
+          await put.arrived
+        })
+
+        tab.leave()
+        await act(async () => {
+          put.deliverNow()
+        })
+        await waitFor(() => expect(tab.toasts('success')).toEqual([savedFor('foo', warning)]))
+        expect(
+          writes(fake).map(entry => entry.applied),
+          'the switch wrote'
+        ).toEqual([true])
+        expect(unanswered(fake)).toEqual([])
+        tab.unmount()
+      }
+    )
+
+    it("I-1 with security m-4: the root toast takes the manifest warning from the switch's own read when the answer shows no Apply ownership", async () => {
+      // As in the in-tab m-4 test: the answer is the recorded Control
+      // UI-edited Host (Update entries only), at Manual.
+      const fake = createFakeControlApi({
+        hosts: { foo: fooFrom('host-server-side-applied') },
+        crd: 'current',
+        versionRule: true,
+      })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await approvalSettingsDriver()
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      await clickSetToManual()
+      await act(async () => {
+        await put.arrived
+      })
+
+      tab.leave()
+      const edited = fooFrom('host-control-ui-edited')
+      await act(async () => {
+        put.respondWith(200, {
+          ...edited,
+          spec: {
+            ...edited.spec,
+            approval: {
+              ...(edited.spec.approval as Record<string, unknown>),
+              modeCeiling: 'manual',
+            },
+          },
+        })
+      })
+      await waitFor(() =>
+        expect(tab.toasts('success')).toEqual([savedFor('foo', MANIFEST_WARNING_NO_VALUES)])
+      )
+      tab.unmount()
+    })
+
+    it('I-1 an Already Manual on an agent a manifest sets adds the manifest warning to the root toast', async () => {
+      // The ceiling was lowered by hand; the manifest still says Allow all.
+      const applied = fooFrom('host-kubectl-applied')
+      const fake = createFakeControlApi({
+        hosts: {
+          foo: {
+            ...applied,
+            spec: {
+              ...applied.spec,
+              approval: {
+                ...(applied.spec.approval as Record<string, unknown>),
+                modeCeiling: 'manual',
+              },
+            },
+          },
+        },
+        crd: 'current',
+        versionRule: true,
+      })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await approvalSettingsDriver()
+      const read = fake.hold({ method: 'GET', path: FOO })
+      await clickSetToManual()
+      await act(async () => {
+        await read.arrived
+      })
+
+      tab.leave()
+      await act(async () => {
+        read.deliverNow()
+      })
+      await waitFor(() =>
+        expect(tab.toasts('success')).toEqual([
+          alreadyFor('foo', manifestWarning('Highest mode: Allow all; Policy: Any channel user')),
+        ])
+      )
+      expect(writes(fake), 'nothing written').toEqual([])
       tab.unmount()
     })
 

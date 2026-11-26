@@ -23,7 +23,7 @@ import {
 import { emitRootToast } from '@lib/rootToast'
 import { OffSwitch } from './OffSwitch'
 import { ApprovalModesView, WhoCanRaiseView } from './ReadViews'
-import { InheritingBanner, ManifestBanner, manifestSignal } from './banners'
+import { InheritingBanner, ManifestBanner, manifestSignal, switchManifestWarning } from './banners'
 import {
   LOADING_LABEL,
   NOT_THIS_AGENT_MESSAGE,
@@ -327,7 +327,7 @@ export function HostApprovalsTab({ host, onRetry }: HostApprovalsTabProps) {
         // while it is mounted and shows that agent. Otherwise it goes to the
         // root toast, naming the agent, and writes nothing to the tab (C18).
         if (!mountedRef.current || current.host !== ranHost) {
-          const toast = offSwitchContinuationToast(ranHost, outcome)
+          const toast = offSwitchContinuationToast(ranHost, outcome, switchManifestWarning(outcome))
           emitRootToast(toast.message, toast.options)
           return
         }
