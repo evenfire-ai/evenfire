@@ -1,20 +1,43 @@
 // @vitest-environment jsdom
 /**
- * Each of the six binding-changing calls in `useAuthController` goes through the login model's
- * one helper (D15; A3-56, A3-64, A3-65; G2-15c, G2-15d).
+ * `useAuthController` and the browser sign-in:
+ * - each of the six binding-changing calls goes through the login model's one helper (D15;
+ *   A3-56, A3-64, A3-65; G2-15c, G2-15d);
+ * - the auth gates treat a redeeming browser sign-in as an action in progress, and a waiting one
+ *   as nothing (D14; A3-15, A3-19, A3-55, A3-68; G2-14a, G2-14b, G2-14e).
  *
  * Main is the browser sign-in harness's real `AppService` (state model §7.3): its runtime-config
- * answers, generations, refusals and login models reach the controller as Electron carries them,
- * every rejection wrapped (M5). Every methods answer is the edge's recorded one (T1): environment
- * A answers `password`, every other environment the `oidc-only` derivation.
+ * answers, generations, refusals, login models and browser sign-in snapshots reach the controller
+ * as Electron carries them, every rejection wrapped (M5) and every push sent to the listener the
+ * controller subscribed. Every methods answer is the edge's recorded one (T1).
  *
- * Only interfaces the controller had before D15 drive these tests: its handlers, its setters and
- * `window.clerum.auth`. The shown model is read from the controller's result.
+ * The D15 tests use only interfaces the controller had before D15: its handlers, its setters and
+ * `window.clerum.auth`; the shown model is read from the controller's result. The D14 tests render
+ * the existing `AuthPage` inside an `AuthContext.Provider` fed by the real controller, and read the
+ * dock from the page.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
-import { buildLoginMethodsModel } from '../../../../../src/browserSignInModel'
-import type { DesktopRuntimeConfig, LoginMethodsAnswer } from '../../../../../src/types'
+import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from '@testing-library/react'
+import { AuthPage } from '@pages/AuthPage'
+import {
+  buildDesktopLoginCodeLink,
+  buildLoginMethodsModel,
+  parseDesktopLoginPageUrl,
+} from '../../../../../src/browserSignInModel'
+import type {
+  BrowserSignInSnapshot,
+  DesktopRuntimeConfig,
+  LoginMethodsAnswer,
+} from '../../../../../src/types'
 import {
   type BrowserSignInHarness,
   cleanupBrowserSignInHarness,
@@ -63,16 +86,27 @@ function deferred(): Deferred {
 
 type Controller = ReturnType<typeof useAuthController>
 
+type DesktopEnvironmentLink = { externalRestApiBaseUrl: string; appName?: string }
+type DesktopEnvironmentListener = (payload: DesktopEnvironmentLink) => void | Promise<void>
+type BrowserSignInListener = (snapshot: BrowserSignInSnapshot) => void
+
+/** A call of one preload function that a gate holds before main: `skip` calls pass first. */
+type Gate = Deferred & { skip: number }
+
 /**
  * `window.clerum.auth` over the harness's service, as `preload.ts` and `ipc.ts` carry it: a
- * rejection reaches the renderer wrapped. `gate(name)` keeps the next call of `name` from
- * reaching main until it is opened, so the call is in flight.
+ * rejection reaches the renderer wrapped, and `push` hands main's snapshot to the listener the
+ * renderer subscribed, as `auth:browserSignInResult` does. `gate(name, skip)` lets `skip` calls of
+ * `name` through, then keeps the next one from reaching main until it is opened, so that call is
+ * in flight.
  */
 function installBridge(harness: BrowserSignInHarness) {
   const { service } = harness
-  const gates = new Map<string, Deferred>()
+  const gates = new Map<string, Gate>()
   const entered = new Set<string>()
   const loginAnswers: LoginMethodsAnswer[] = []
+  const browserSignInListeners = new Set<BrowserSignInListener>()
+  let desktopEnvironmentListener: DesktopEnvironmentListener | null = null
 
   function ipc<Args extends unknown[], Result>(
     name: string,
@@ -81,8 +115,11 @@ function installBridge(harness: BrowserSignInHarness) {
     return vi.fn(async (...args: Args): Promise<Result> => {
       entered.add(name)
       const gate = gates.get(name)
-      gates.delete(name)
-      if (gate) await gate.promise
+      if (gate && gate.skip > 0) gate.skip -= 1
+      else if (gate) {
+        gates.delete(name)
+        await gate.promise
+      }
       try {
         return await call(...args)
       } catch (error) {
@@ -132,10 +169,19 @@ function installBridge(harness: BrowserSignInHarness) {
     acknowledgeBrowserSignInResult: ipc('acknowledgeBrowserSignInResult', (attemptId: number) =>
       service.acknowledgeBrowserSignInResult(attemptId)
     ),
-    // The harness's service pushes to the harness; nothing in these tests subscribes.
-    onBrowserSignInChanged: vi.fn(() => () => undefined),
+    onBrowserSignInChanged: vi.fn((listener: BrowserSignInListener) => {
+      browserSignInListeners.add(listener)
+      return () => {
+        browserSignInListeners.delete(listener)
+      }
+    }),
     onDesktopSetupToken: vi.fn(() => () => undefined),
-    onDesktopEnvironmentSetup: vi.fn(() => () => undefined),
+    onDesktopEnvironmentSetup: vi.fn((listener: DesktopEnvironmentListener) => {
+      desktopEnvironmentListener = listener
+      return () => {
+        if (desktopEnvironmentListener === listener) desktopEnvironmentListener = null
+      }
+    }),
     onExternalLogout: vi.fn(() => () => undefined),
     onSessionCleared: vi.fn(() => () => undefined),
   }
@@ -144,13 +190,25 @@ function installBridge(harness: BrowserSignInHarness) {
   return {
     auth,
     loginAnswers,
-    /** Holds the next call of `name` before main; the returned function lets it go on. */
-    gate(name: string) {
-      const gate = deferred()
+    /**
+     * Lets `skip` calls of `name` through, then holds the next one before main; the returned
+     * function lets it go on.
+     */
+    gate(name: string, skip = 0) {
+      const gate = { ...deferred(), skip }
       gates.set(name, gate)
       return gate.resolve
     },
     entered: (name: string) => entered.has(name),
+    /** Sends main's snapshot to the renderer's listeners, as the push event does. */
+    push(snapshot: BrowserSignInSnapshot) {
+      for (const listener of [...browserSignInListeners]) listener(snapshot)
+    },
+    /** A desktop-environment link reaching the renderer (`auth:desktopEnvironmentSetup`). */
+    openDesktopEnvironmentLink(payload: DesktopEnvironmentLink): Promise<void> {
+      if (!desktopEnvironmentListener) throw new Error('the renderer subscribed no link listener')
+      return Promise.resolve(desktopEnvironmentListener(payload))
+    },
   }
 }
 
@@ -183,7 +241,7 @@ async function mountController(bridge: Bridge) {
       logoutForEnvironmentMismatch: vi.fn(async () => null),
     })
     setBooting = controller.setBooting
-    shown.push(controller.loginModel)
+    shown.push(controller.loginScreen)
     return controller
   })
   await waitFor(() => expect(onSessionNeedsLoad).toHaveBeenCalledTimes(1))
@@ -314,7 +372,7 @@ describe('useAuthController: binding changes and the login model', () => {
       await waitFor(() => expect(bridge.loginAnswers).toHaveLength(1))
       expect(bridge.loginAnswers[0]?.model).toEqual(PASSWORD_FORM)
       await flush()
-      expect(hook.result.current.loginModel, "A's late answer is dropped").toEqual(LOADING)
+      expect(hook.result.current.loginScreen, "A's late answer is dropped").toEqual(LOADING)
 
       // The call reaches main and settles; the model is read again for the binding it left.
       openCall()
@@ -323,7 +381,7 @@ describe('useAuthController: binding changes and the login model', () => {
       })
       await waitFor(() => expect(bridge.auth.getLoginMethods).toHaveBeenCalledTimes(2))
       await flush()
-      await waitFor(() => expect(hook.result.current.loginModel).toEqual(row.after))
+      await waitFor(() => expect(hook.result.current.loginScreen).toEqual(row.after))
       expect(shown, "A's form never shows").not.toContainEqual(PASSWORD_FORM)
     }
   )
@@ -342,7 +400,7 @@ describe('useAuthController: binding changes and the login model', () => {
         'a binding change re-reads the model'
       ).toHaveBeenCalledTimes(1)
     )
-    await waitFor(() => expect(hook.result.current.loginModel).toEqual(PASSWORD_FORM))
+    await waitFor(() => expect(hook.result.current.loginScreen).toEqual(PASSWORD_FORM))
     const stateReads = bridge.auth.getRuntimeConfigState.mock.calls.length
     const logged = harness.bumpLog.length
 
@@ -372,8 +430,406 @@ describe('useAuthController: binding changes and the login model', () => {
     ).toBe(stateReads + 1)
     await flush()
     await waitFor(() =>
-      expect(hook.result.current.loginModel, 'never stays loading').toEqual(PASSWORD_FORM)
+      expect(hook.result.current.loginScreen, 'never stays loading').toEqual(PASSWORD_FORM)
     )
     expect(bridge.loginAnswers.at(-1)?.generation).toBe(harness.service.getSessionGeneration())
   })
+})
+
+// --- D14: the auth gates and a browser sign-in ---
+
+/** The status every auth gate shows when another action is in progress. */
+const FINISH_CURRENT_ACTION =
+  'Finish the current authentication action, then reopen this desktop link.'
+
+/**
+ * Main for the D14 tests. Every environment answers the edge's recorded `password-and-oidc`
+ * (the harness's route), so start opens the browser. Each snapshot main pushes reaches the
+ * renderer's listener, unless `relay.muted` is set: a muted push is still in `harness.pushes`, and
+ * is lost, as with no live page.
+ */
+async function createSignInMain() {
+  const relay = {
+    muted: false,
+    deliver: (_snapshot: BrowserSignInSnapshot): void => undefined,
+  }
+  const harness = await createBrowserSignInHarness({
+    linksAvailable: true,
+    onBrowserSignInChanged: snapshot => {
+      if (!relay.muted) relay.deliver(snapshot)
+    },
+  })
+  const bridge = installBridge(harness)
+  relay.deliver = snapshot => bridge.push(snapshot)
+  return { harness, bridge, relay }
+}
+
+/** Environment B, saved in main, as a desktop-environment link names it. */
+function environmentB(harness: BrowserSignInHarness): DesktopRuntimeConfig {
+  return {
+    appName: 'Environment B',
+    externalRestApiBaseUrl: harness.envs.B.restBaseUrl,
+    rpcProxyBaseUrl: '',
+  }
+}
+
+type PageMount = Awaited<ReturnType<typeof mountAuthPage>>
+
+/**
+ * The existing `AuthPage` inside an `AuthContext.Provider` fed by the real controller, as `App`
+ * feeds it. `probe.renders` records what each render showed, so a test can tell whether React
+ * has committed. With `boot: false` the session load leaves `booting` set.
+ */
+async function mountAuthPage(bridge: Bridge, { boot = true }: { boot?: boolean } = {}) {
+  const setStatus = vi.fn()
+  const handleLogout = vi.fn(async () => undefined)
+  const onSessionEnded = vi.fn()
+  const logoutForEnvironmentMismatch = vi.fn(async () => null)
+  const probe: {
+    current: Controller | null
+    renders: Array<Readonly<{ authTransitioning: boolean; busy: boolean }>>
+  } = { current: null, renders: [] }
+  // A signed-out load ends booting, as the app's session load does.
+  const onSessionNeedsLoad = vi.fn(async () => {
+    if (boot) probe.current?.setBooting(false)
+  })
+
+  function Page() {
+    const controller = useAuthController({
+      setStatus,
+      onSessionNeedsLoad,
+      onSessionEnded,
+      logoutForEnvironmentMismatch,
+    })
+    probe.current = controller
+    probe.renders.push({ authTransitioning: controller.authTransitioning, busy: controller.busy })
+    const value: AuthContextValue = {
+      ...controller,
+      setStatus,
+      loadSession: onSessionNeedsLoad,
+      handleLogout,
+    }
+    return (
+      <AuthContext.Provider value={value}>
+        <AuthPage />
+      </AuthContext.Provider>
+    )
+  }
+
+  render(<Page />)
+  await waitFor(() => expect(onSessionNeedsLoad).toHaveBeenCalledTimes(1))
+  await waitFor(() => expect(bridge.auth.getRuntimeConfigState).toHaveBeenCalledTimes(1))
+  if (boot) await waitFor(() => expect(probe.current?.booting).toBe(false))
+  await flush()
+  const controller = () => {
+    if (!probe.current) throw new Error('the page has not rendered')
+    return probe.current
+  }
+  return { probe, controller, setStatus, onSessionNeedsLoad }
+}
+
+/** The environment menu's controls by accessible name; opens the menu if it is closed. */
+function dockControls(): Array<Readonly<{ name: string; disabled: boolean }>> {
+  if (!document.getElementById('auth-runtime-dock-panel')) {
+    fireEvent.click(screen.getByRole('button', { name: 'Open environment selector' }))
+  }
+  const panel = document.getElementById('auth-runtime-dock-panel')
+  if (!panel) throw new Error('the environment menu did not open')
+  const controls = Array.from(panel.querySelectorAll('button')).map(button => ({
+    name: button.getAttribute('aria-label') ?? button.textContent?.trim() ?? '',
+    disabled: button.disabled,
+  }))
+  // Add, then select and delete for each of the saved environments A, B and C.
+  if (controls.length !== 7) throw new Error(`the environment menu has ${controls.length} controls`)
+  return controls
+}
+
+const enabledDockControls = () =>
+  dockControls()
+    .filter(control => !control.disabled)
+    .map(control => control.name)
+
+const disabledDockControls = () =>
+  dockControls()
+    .filter(control => control.disabled)
+    .map(control => control.name)
+
+/** The end states main pushed for `attemptId`, in order. */
+function endStatesOf(harness: BrowserSignInHarness, attemptId: number): string[] {
+  return harness.pushes.flatMap(({ value }) =>
+    value.attemptId === attemptId && value.phase === 'ended' ? [value.outcome] : []
+  )
+}
+
+/** A code link from PR 2's builder, as the Profile UI sends it, with the edge's recorded code. */
+function codeLink(state: string, environment: string): string {
+  const { code } = readEdgeRecord('POST /api/v1/oidc/profile-flow/complete desktop-code-issued')
+    .body as { code: string }
+  return buildDesktopLoginCodeLink({ state, code, environment })
+}
+
+/**
+ * Main starts an attempt and accepts its code link, with the redeem held at the edge, so the
+ * attempt stays `redeeming`. Returns the `redeeming` snapshot main pushed, and the held redeem.
+ */
+async function redeemInMain(harness: BrowserSignInHarness) {
+  const { attemptId } = await harness.service.startBrowserSignIn()
+  const opened = harness.opens.at(-1)
+  const state = opened ? parseDesktopLoginPageUrl(opened.value)?.state : undefined
+  if (!state) throw new Error(`attempt ${attemptId} opened no page with a state`)
+  const redeem = harness.hold('redeem')
+  expect(harness.service.acceptDesktopLoginLink(codeLink(state, harness.envs.A.restBaseUrl))).toBe(
+    true
+  )
+  await waitFor(() => expect(redeem.reached).toBe(true))
+  const redeeming = await waitFor(() => {
+    const pushed = harness.pushes.find(
+      ({ value }) => value.attemptId === attemptId && value.phase === 'redeeming'
+    )
+    if (!pushed) throw new Error(`main pushed no redeeming snapshot for attempt ${attemptId}`)
+    return pushed.value
+  })
+  return { attemptId, redeeming, redeem }
+}
+
+/** Lets main finish a held redeem with the edge's recorded answer, once the page is gone. */
+async function finishRedeem(harness: BrowserSignInHarness, redeem: { release(): void }) {
+  cleanup()
+  redeem.release()
+  await harness.drain()
+}
+
+type StartGuardRow = Readonly<{
+  flag: 'booting' | 'busy' | 'authTransitioning'
+  /** Sets the flag through the flow that owns it; the returned function ends that flow. */
+  hold: (
+    page: PageMount,
+    bridge: Bridge,
+    harness: BrowserSignInHarness
+  ) => Promise<() => Promise<void>>
+}>
+
+const START_GUARD_ROWS: readonly StartGuardRow[] = [
+  {
+    // The session load has not ended booting.
+    flag: 'booting',
+    hold: async page => async () => {
+      act(() => page.controller().setBooting(false))
+    },
+  },
+  {
+    // An environment switch from the dock is in flight.
+    flag: 'busy',
+    hold: async (page, bridge, harness) => {
+      const openSelect = bridge.gate('selectRuntimeConfig')
+      let selected: Promise<unknown> = Promise.resolve()
+      act(() => {
+        selected = page.controller().handleSelectRuntimeConfig(harness.envs.B.optionId)
+      })
+      await waitFor(() => expect(bridge.entered('selectRuntimeConfig')).toBe(true))
+      return async () => {
+        openSelect()
+        await act(async () => {
+          await selected
+        })
+      }
+    },
+  },
+  {
+    // A desktop-environment link's confirm waits on its first session read (A3-68).
+    flag: 'authTransitioning',
+    hold: async (page, bridge, harness) => {
+      act(() => page.controller().setPendingDesktopEnvironmentSetup(environmentB(harness)))
+      const openRead = bridge.gate('getSessionGeneration')
+      let confirmed: Promise<void> = Promise.resolve()
+      act(() => {
+        confirmed = page.controller().handleConfirmDesktopEnvironmentSetup()
+      })
+      await waitFor(() => expect(bridge.entered('getSessionGeneration')).toBe(true))
+      return async () => {
+        openRead()
+        await act(async () => {
+          await confirmed
+        })
+      }
+    },
+  },
+]
+
+describe('useAuthController: the auth gates and a browser sign-in (D14)', () => {
+  it('G2-14a keeps the dock and desktop-environment links usable while waiting', async () => {
+    const { harness, bridge } = await createSignInMain()
+    const page = await mountAuthPage(bridge)
+
+    await act(async () => {
+      await page.controller().handleStartBrowserSignIn()
+    })
+    const { browserSignIn } = page.controller()
+    expect(browserSignIn.phase, 'main opened the browser and waits').toBe('waiting')
+    expect(disabledDockControls(), 'the dock stays usable while waiting').toEqual([])
+
+    // A link for the saved environment B (A3-19).
+    await act(async () => {
+      await bridge.openDesktopEnvironmentLink(environmentB(harness))
+    })
+    expect(page.setStatus).not.toHaveBeenCalledWith(FINISH_CURRENT_ACTION, 'info')
+    expect(bridge.auth.selectRuntimeConfigForHandoff, 'the link selects B').toHaveBeenCalledTimes(1)
+    // The selection's bump ends the waiting attempt `replaced` (A3-15).
+    expect(endStatesOf(harness, browserSignIn.attemptId ?? 0)).toEqual(['replaced'])
+    await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('idle'))
+  })
+
+  it('G2-14b treats redeeming as in progress before React commits', async () => {
+    const { harness, bridge, relay } = await createSignInMain()
+    const page = await mountAuthPage(bridge)
+    // A link's dialog waits for confirmation (committed).
+    act(() => page.controller().setPendingDesktopEnvironmentSetup(environmentB(harness)))
+    expect(disabledDockControls(), 'the dock is usable before the redeem').toEqual([])
+
+    // Main redeems an attempt; its pushes have not reached the renderer yet.
+    relay.muted = true
+    const { redeeming, redeem } = await redeemInMain(harness)
+    const confirm = page.controller().handleConfirmDesktopEnvironmentSetup
+    const sessionReads = bridge.auth.getSessionGeneration.mock.calls.length
+    const statusBefore = page.setStatus.mock.calls.length
+    const rendersBefore = page.probe.renders.length
+    let duringBlock: Readonly<{ status: unknown[][]; renders: number }> = {
+      status: [],
+      renders: -1,
+    }
+    let linked: Promise<void> = Promise.resolve()
+    let confirmed: Promise<void> = Promise.resolve()
+
+    // One synchronous block: the push writes the view's ref and queues its state, which React
+    // commits only when the block ends (V32, A3-55).
+    act(() => {
+      bridge.push(redeeming)
+      linked = bridge.openDesktopEnvironmentLink(environmentB(harness))
+      confirmed = confirm()
+      duringBlock = {
+        status: page.setStatus.mock.calls.slice(statusBefore),
+        renders: page.probe.renders.length,
+      }
+    })
+
+    expect(duringBlock.renders, 'React had not committed during the block').toBe(rendersBefore)
+    expect(
+      duringBlock.status,
+      'the handoff gate and the confirm report an action in progress'
+    ).toEqual([
+      [FINISH_CURRENT_ACTION, 'info'],
+      [FINISH_CURRENT_ACTION, 'info'],
+    ])
+    await act(async () => {
+      await Promise.all([linked, confirmed])
+    })
+    expect(
+      bridge.auth.getSessionGeneration.mock.calls.length,
+      'both stopped at their first check'
+    ).toBe(sessionReads)
+    expect(bridge.auth.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
+    expect(page.controller().pendingDesktopEnvironmentSetup).toBeNull()
+
+    // After the commit (decision 8).
+    expect(page.controller().authTransitioning, 'redeeming reads as a transition').toBe(true)
+    expect(enabledDockControls(), 'the dock is disabled while redeeming').toEqual([])
+
+    await finishRedeem(harness, redeem)
+  })
+
+  // The check after the third read, which follows the selection, has no row: main refuses the
+  // selection while an attempt redeems (`assertProfileHandoffSessionIsSignedOut`, D11), and an
+  // attempt started after it bumps the generation, which the check before it reports.
+  it.each([1, 2])(
+    'G2-14b stops the confirm at its check after session read %i while redeeming',
+    async read => {
+      const { harness, bridge, relay } = await createSignInMain()
+      const page = await mountAuthPage(bridge)
+      act(() => page.controller().setPendingDesktopEnvironmentSetup(environmentB(harness)))
+      relay.muted = true
+      const { redeeming, redeem } = await redeemInMain(harness)
+      const readsBefore = bridge.auth.getSessionGeneration.mock.calls.length
+
+      // The confirm passes its first check, then waits on session read `read`. Main redeems
+      // already; the renderer learns it while the read is in flight (V28).
+      const openRead = bridge.gate('getSessionGeneration', read - 1)
+      let confirmed: Promise<void> = Promise.resolve()
+      act(() => {
+        confirmed = page.controller().handleConfirmDesktopEnvironmentSetup()
+      })
+      await waitFor(() =>
+        expect(bridge.auth.getSessionGeneration).toHaveBeenCalledTimes(readsBefore + read)
+      )
+      // Main's push lands while the read is in flight.
+      act(() => bridge.push(redeeming))
+      openRead()
+      await act(async () => {
+        await confirmed
+      })
+
+      expect(page.setStatus, 'the confirm reports an action in progress').toHaveBeenLastCalledWith(
+        FINISH_CURRENT_ACTION,
+        'info'
+      )
+      expect(
+        bridge.auth.getSessionGeneration.mock.calls.length,
+        'the confirm stopped at the check after that read'
+      ).toBe(readsBefore + read)
+      // Main would refuse the selection with the same text; the renderer does not ask it.
+      expect(
+        bridge.auth.selectRuntimeConfigForHandoff,
+        'B is not selected through main'
+      ).not.toHaveBeenCalled()
+      expect(page.onSessionNeedsLoad, 'B is not loaded').toHaveBeenCalledTimes(1)
+      expect(page.controller().pendingDesktopEnvironmentSetup).toBeNull()
+
+      await finishRedeem(harness, redeem)
+    }
+  )
+
+  it('G2-14e disables the dock while a start call is held', async () => {
+    const { bridge } = await createSignInMain()
+    const page = await mountAuthPage(bridge)
+    expect(disabledDockControls(), 'the dock is usable before start').toEqual([])
+
+    const openStart = bridge.gate('startBrowserSignIn')
+    let started: Promise<void> = Promise.resolve()
+    act(() => {
+      started = page.controller().handleStartBrowserSignIn()
+    })
+    await waitFor(() => expect(bridge.entered('startBrowserSignIn')).toBe(true))
+    expect(enabledDockControls(), 'the dock is disabled while start is held').toEqual([])
+
+    openStart()
+    await act(async () => {
+      await started
+    })
+    expect(page.controller().browserSignIn.phase, 'main opened the browser and waits').toBe(
+      'waiting'
+    )
+    expect(disabledDockControls(), 'the dock is usable again once start returns').toEqual([])
+  })
+
+  it.each(START_GUARD_ROWS.map(row => [row.flag, row] as const))(
+    'ignores a start while %s is set',
+    async (_flag, row) => {
+      const { harness, bridge } = await createSignInMain()
+      const page = await mountAuthPage(bridge, { boot: row.flag !== 'booting' })
+      const release = await row.hold(page, bridge, harness)
+      expect(page.controller()[row.flag], `${row.flag} is set`).toBe(true)
+
+      await act(async () => {
+        await page.controller().handleStartBrowserSignIn()
+      })
+      expect(bridge.auth.startBrowserSignIn, 'start returns at once').not.toHaveBeenCalled()
+
+      await release()
+      await act(async () => {
+        await page.controller().handleStartBrowserSignIn()
+      })
+      expect(bridge.auth.startBrowserSignIn, 'start reaches main afterwards').toHaveBeenCalledTimes(
+        1
+      )
+    }
+  )
 })

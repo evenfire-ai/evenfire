@@ -19,6 +19,7 @@ import {
   resolveDesktopEnvironmentRestMatch,
 } from './desktopEnvironmentHandoff'
 import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
+import { useBrowserSignIn } from './useBrowserSignIn'
 import { useLoginMethods } from './useLoginMethods'
 
 interface UseAuthControllerParams {
@@ -153,16 +154,6 @@ export function useAuthController({
     (!dependencyHealth.externalRestApi.ok || !dependencyHealth.rpcProxy.ok)
   )
 
-  const getDesktopEnvironmentHandoffAuthState = useCallback(
-    () => ({
-      booting: bootingRef.current,
-      busy: busyRef.current,
-      authTransitioning: authTransitioningRef.current,
-      isAuthenticated: isAuthenticatedRef.current,
-    }),
-    []
-  )
-
   const refreshRuntimeConfigState = useCallback(async () => {
     const state = await window.clerum.auth.getRuntimeConfigState()
     setRuntimeConfigState(state)
@@ -172,6 +163,28 @@ export function useAuthController({
   // Every call that can change the environment binding goes through `runBindingChange` (D15).
   const loginMethods = useLoginMethods({ refreshRuntimeConfigState })
   const { runBindingChange } = loginMethods
+  // `refresh` is stable, so the browser sign-in's callbacks keep their identity (P42).
+  const browserSignIn = useBrowserSignIn({
+    setStatus,
+    onSessionNeedsLoad,
+    refreshLoginMethods: loginMethods.refresh,
+  })
+  /**
+   * A browser sign-in that redeems blocks every other auth action (D14). It is read from the
+   * hook's ref, so it holds before React commits the view (V32, A3-55). It is never written to
+   * `authTransitioningRef`, which other flows' `finally` blocks clear (X3).
+   */
+  const browserSignInBlocksAuthActions = browserSignIn.isRedeeming
+
+  const getDesktopEnvironmentHandoffAuthState = useCallback(
+    () => ({
+      booting: bootingRef.current,
+      busy: busyRef.current,
+      authTransitioning: authTransitioningRef.current || browserSignInBlocksAuthActions(),
+      isAuthenticated: isAuthenticatedRef.current,
+    }),
+    [browserSignInBlocksAuthActions]
+  )
 
   const getSessionGeneration = useCallback(() => window.clerum.auth.getSessionGeneration(), [])
 
@@ -188,7 +201,7 @@ export function useAuthController({
       setEmail(normalizedEmail)
       setDesktopSetupAuthorizationToken('')
       setDesktopSetupStarted(false)
-      setStatus('Desktop setup complete. Sign in with your email and password.', 'success')
+      setStatus('Desktop setup complete. Sign in to continue.', 'success')
     },
     [runBindingChange, setStatus]
   )
@@ -607,7 +620,12 @@ export function useAuthController({
       setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
     }
 
-    if (bootingRef.current || busyRef.current || authTransitioningRef.current) {
+    if (
+      bootingRef.current ||
+      busyRef.current ||
+      authTransitioningRef.current ||
+      browserSignInBlocksAuthActions()
+    ) {
       reportAuthenticationInProgress()
       return
     }
@@ -626,7 +644,7 @@ export function useAuthController({
         setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
         return
       }
-      if (bootingRef.current || busyRef.current) {
+      if (bootingRef.current || busyRef.current || browserSignInBlocksAuthActions()) {
         reportAuthenticationInProgress()
         return
       }
@@ -656,7 +674,7 @@ export function useAuthController({
         reportSessionChanged()
         return
       }
-      if (bootingRef.current || busyRef.current) {
+      if (bootingRef.current || busyRef.current || browserSignInBlocksAuthActions()) {
         reportAuthenticationInProgress()
         return
       }
@@ -721,7 +739,9 @@ export function useAuthController({
           reportSessionChanged()
           return
         }
-        if (busyRef.current) {
+        // Main refuses the selection while an attempt redeems (D11), so this read of the
+        // browser sign-in only backs that refusal up.
+        if (busyRef.current || browserSignInBlocksAuthActions()) {
           reportAuthenticationInProgress()
           return
         }
@@ -780,6 +800,23 @@ export function useAuthController({
     await window.clerum.auth.openDesktopRelease(releaseUrl)
   }
 
+  const { start: startBrowserSignIn } = browserSignIn
+  /**
+   * Starts a browser sign-in (D5). The start control is disabled while another auth action
+   * runs (D14, A3-68); the handler also returns at once then, for a click that lands before the
+   * disabled state commits. The call sets `busy` while it is in flight, so the dock is disabled
+   * until main answers; the waiting attempt then sets nothing.
+   */
+  const handleStartBrowserSignIn = useCallback(async () => {
+    if (bootingRef.current || busyRef.current || authTransitioningRef.current) return
+    setBusy(true)
+    try {
+      await startBrowserSignIn()
+    } finally {
+      setBusy(false)
+    }
+  }, [setBusy, startBrowserSignIn])
+
   return {
     booting,
     busy,
@@ -794,7 +831,11 @@ export function useAuthController({
     runtimeConfigSetupName,
     runtimeConfigSetupExternalRestApiBaseUrl,
     runtimeConfigSetupRpcProxyBaseUrl,
-    authTransitioning,
+    // Decision 8: a redeeming browser sign-in reaches every reader of `authTransitioning`
+    // without an edit there: the dock (`RuntimeConfigDock`) is disabled, and onboarding's invited
+    // step (`InvitedMember`) shows its in-progress label, where main refuses setup anyway (D11).
+    // The raw flag stays what the flows write and their `finally` blocks clear (X3).
+    authTransitioning: authTransitioning || browserSignIn.view.phase === 'redeeming',
     runtimeConfigState,
     dependencyHealth,
     desktopReleaseStatus,
@@ -805,8 +846,11 @@ export function useAuthController({
     runtimeConfigMissing,
     showRuntimeConfigSelector,
     hasDependencyOutage,
-    loginModel: loginMethods.model,
+    loginScreen: loginMethods.model,
+    browserSignIn: browserSignIn.view,
     refreshLoginMethods: loginMethods.refresh,
+    handleStartBrowserSignIn,
+    handleCancelBrowserSignIn: browserSignIn.cancel,
     setBooting,
     setBusy,
     setStatusText,

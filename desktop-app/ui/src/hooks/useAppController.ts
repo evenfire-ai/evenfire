@@ -1658,6 +1658,9 @@ export function useAppController() {
     showRuntimeConfigSelector: auth.showRuntimeConfigSelector,
     dependencyHealth: auth.dependencyHealth,
     hasDependencyOutage: auth.hasDependencyOutage,
+    loginScreen: auth.loginScreen,
+    browserSignIn: auth.browserSignIn,
+    refreshLoginMethods: auth.refreshLoginMethods,
     setBooting: auth.setBooting,
     setEmail: auth.setEmail,
     setPassword: auth.setPassword,
@@ -1683,6 +1686,8 @@ export function useAppController() {
     handleConfirmDesktopEnvironmentSwitchConfirmation:
       auth.handleConfirmDesktopEnvironmentSwitchConfirmation,
     handleOpenDesktopRelease: auth.handleOpenDesktopRelease,
+    handleStartBrowserSignIn: auth.handleStartBrowserSignIn,
+    handleCancelBrowserSignIn: auth.handleCancelBrowserSignIn,
     setDesktopEnvironmentSetupComplete: auth.setDesktopEnvironmentSetupComplete,
     handleLogout,
 
