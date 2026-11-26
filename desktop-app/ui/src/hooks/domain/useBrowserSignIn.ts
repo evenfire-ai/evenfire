@@ -4,6 +4,7 @@ import {
   BROWSER_SIGN_IN_REFUSAL_COPY,
   START_REJECTION_REREAD_CODES,
 } from '@constants/browserSignIn'
+import { errorClass } from '@lib/errorClass'
 import { ipcErrorCode } from '@lib/ipcErrorCode'
 import { newerBrowserSignInSnapshot } from '../../../../src/browserSignInModel'
 import type { BrowserSignInSnapshot, BrowserSignInStartResult } from '../../../../src/types'
@@ -26,11 +27,6 @@ type StartRejectionCode = (typeof START_REJECTION_CODES)[number]
 
 function isRereadCode(code: StartRejectionCode): boolean {
   return (START_REJECTION_REREAD_CODES as readonly string[]).includes(code)
-}
-
-/** Only the error's class is logged: its message may carry a link, a URL or a token (D18). */
-function errorClass(error: unknown): string {
-  return error instanceof Error ? error.name : typeof error
 }
 
 /** The status an outcome shows, or null for `replaced`, which shows nothing (decision 5). */
