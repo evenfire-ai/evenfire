@@ -102,42 +102,40 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeVisible()
   })
 
-  await test.step('Require approval for the real native workflow trigger through Advanced settings', async () => {
-    await page.getByRole('tab', { name: 'Advanced', exact: true }).click()
-    await expect(page).toHaveURL(new RegExp(`/agents/${scenario.agentName}/advanced$`))
-    await page.getByRole('tab', { name: 'Per-tool approval', exact: true }).click()
-    const advanced = page.getByRole('region', { name: 'Advanced', exact: true })
-    await advanced.getByRole('button', { name: /Advanced: conditional tools/ }).click()
-    await advanced.getByLabel('Tool name', { exact: true }).fill('workflow_trigger')
-    await advanced
-      .getByLabel('Approval state for the new custom tool', { exact: true })
-      .selectOption('required')
-    await advanced.getByRole('button', { name: 'Add', exact: true }).click()
+  await test.step('Require approval for the real native workflow trigger on the Approvals tab', async () => {
+    await page.getByRole('tab', { name: 'Approvals', exact: true }).click()
+    await expect(page).toHaveURL(new RegExp(`/agents/${scenario.agentName}/approval-settings$`))
+    await page.getByRole('button', { name: 'Edit', exact: true }).click()
+    // `workflow_trigger` is a known tool with a conditional default, so it has its
+    // own row; no custom row is added.
+    await page.locator('#approval-workflow_trigger').selectOption('required')
     const update = page.waitForResponse(
       response =>
         new URL(response.url()).pathname ===
           browserApiPath(`/api/v1/admin/hosts/${scenario.agentName}`) &&
         response.request().method() === 'PUT'
     )
-    await advanced.getByRole('button', { name: 'Save', exact: true }).click()
+    await page
+      .locator('.cu-host-approval-section__actions')
+      .getByRole('button', { name: 'Save', exact: true })
+      .click()
+    // An agent with no approval settings of its own asks for a policy on its first
+    // save. Both policies are valid here; the workflow journey needs the block.
+    const firstSave = page.getByRole('dialog', {
+      name: 'Give this agent its own approval settings',
+    })
+    if (await firstSave.isVisible({ timeout: 5_000 }).catch(() => false)) {
+      await firstSave.getByLabel('Who can approve from a channel').selectOption('cli_only')
+      await firstSave.getByRole('button', { name: 'Save', exact: true }).click()
+    }
     const response = await update
     expect(response.ok()).toBe(true)
     expect((await response.json()).spec.approval.tools.workflow_trigger).toBe(true)
-    await expect(advanced.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
-    // Saving reloads the agent: `persistApprovalTools`
-    // (`control-ui/app/hosts/[name]/page.tsx:1084-1112`) calls `loadData('none')`,
-    // which sets `initialLoading`, so `HostApprovalSection` unmounts and remounts
-    // with its conditional-tools block collapsed
-    // (`HostApprovalSection/index.tsx:187`) and the custom rows unrendered
-    // (`:260`). The row is hidden, not missing, and asserting the collapsed
-    // state first is what tells those two apart.
-    const conditionalTools = advanced.getByRole('button', {
-      name: /Advanced: conditional tools/,
-    })
-    await expect(conditionalTools).toHaveAttribute('aria-expanded', 'false')
-    await conditionalTools.click()
-    await expect(conditionalTools).toHaveAttribute('aria-expanded', 'true')
-    await expect(advanced.getByText('workflow_trigger', { exact: true })).toBeVisible()
+    // Saving Required to a tool that already asks never loosens approval, so no
+    // confirmation dialog is expected. The tab leaves edit view and shows the toast;
+    // the stored row reads Required in the read view.
+    await expect(page.getByText('Per-tool overrides saved.')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeVisible()
   })
 
   // The approval map is not part of the runtime-token contract: HCC never reads
