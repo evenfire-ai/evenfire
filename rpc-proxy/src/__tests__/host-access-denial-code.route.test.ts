@@ -334,7 +334,7 @@ describe('host authorization 403 carries a machine-readable code at every site',
     expect(res.body).toEqual({ error: DENIED_ERROR, code: 'host_access_denied' })
   })
 
-  it('messages: a threaded send posts the binding to the parent path, and a 404 is an upstream failure', async () => {
+  it('messages: a threaded send posts the binding to the parent path, and a 404 is an unavailable authority', async () => {
     const threaded: RouteCase = {
       label: 'messages with threadId',
       method: 'post',
@@ -361,8 +361,8 @@ describe('host authorization 403 carries a machine-readable code at every site',
 
     expect(controlApiCalls).toHaveLength(2)
     expect(hostCalls).toHaveLength(1)
-    expect(res.status).toBe(502)
-    expect(res.body).toEqual({ error: 'Upstream host unavailable' })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'authority_unavailable' })
   })
 
   // These two answer their own 404 (rather than a coded 403) on a Host denial,
