@@ -379,7 +379,7 @@ the runner exits.
 
 This release adds run cancellation: the user who launched a run, or a live admin of the run's
 team while the team holds the recipe, can cancel it from Desktop or the External REST API. control-api stores the request
-(`workflow_runs.cancel_requested_at`, migration `0160`) and workflow-recipes delivers it to the
+(`workflow_runs.cancel_requested_at`, migration `0160_workflow_run_cancel_request`) and workflow-recipes delivers it to the
 run's coordinator, which stops before its next step. Only workflow-recipes images of this
 release deliver cancel requests.
 
