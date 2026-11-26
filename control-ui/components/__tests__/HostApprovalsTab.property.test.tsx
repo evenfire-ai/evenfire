@@ -1764,10 +1764,12 @@ function checkS3(w: World): void {
       ) {
         flag(w, 'S3', `first save #${save.id} reported saved without its policy ${policy}`)
       }
-      const evidence = [
-        ...savePuts(w, save).map(put => put.response?.body),
-        ...ownedReads(w, { kind: 'save', id: save.id }).map(read => read.response?.body),
-      ]
+      // Ruling 69: only answers the save received are its evidence. The fake
+      // records an answer before it delivers one, and a hung, dropped or
+      // timed-out request is never delivered.
+      const evidence = [...savePuts(w, save), ...ownedReads(w, { kind: 'save', id: save.id })]
+        .filter(entry => entry.delivered)
+        .map(entry => entry.response?.body)
       if (!evidence.some(body => isRecord(body) && sameJson(body.spec, stored.spec))) {
         flag(w, 'S3', `save #${save.id} reported saved from a Host no request of it answered`)
       }
@@ -1801,9 +1803,10 @@ function checkS4(w: World): void {
     if (outcome.kind === 'failed') continue
     count(w.stats, 'checks', 'S4')
     const owner: Owner = { kind: 'switch', id: record.id }
+    // Ruling 69: only reads whose answer the switch received are its evidence.
     const reads = ownedReads(w, owner).filter(read => {
       const host = hostOfRead(read)
-      return host !== undefined && sameJson(host.spec, outcome.stored.spec)
+      return read.delivered && host !== undefined && sameJson(host.spec, outcome.stored.spec)
     })
     const writes = w.timeline.filter(
       event => event.owner?.kind === 'switch' && event.owner.id === record.id
