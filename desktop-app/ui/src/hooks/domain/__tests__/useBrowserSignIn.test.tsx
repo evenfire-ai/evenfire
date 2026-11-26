@@ -184,6 +184,34 @@ describe('useBrowserSignIn: start, cancel and start refusals (D5)', () => {
     expect(mounted.refreshLoginMethods).not.toHaveBeenCalled()
   })
 
+  it('shows an error when start finds a session that fails to load (Minor 1)', async () => {
+    const main = createMain()
+    main.auth.startBrowserSignIn.mockRejectedValueOnce(
+      ipcRejection('auth:startBrowserSignIn', 'browser_sign_in_requires_signout')
+    )
+    const onSessionNeedsLoad = vi
+      .fn<UseBrowserSignInParams['onSessionNeedsLoad']>()
+      .mockRejectedValue(new Error('fake restore failure at https://edge-fixture.example.test'))
+    const mounted = mount({ onSessionNeedsLoad })
+    await settle()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    await act(() => mounted.hook.result.current.start())
+
+    expect(onSessionNeedsLoad.mock.calls).toEqual([[]])
+    expect(mounted.setStatus.mock.calls).toEqual([
+      ['Could not load your session. Try again.', 'error'],
+    ])
+    expect(warn.mock.calls).toEqual([
+      ['[useBrowserSignIn] The session could not be loaded after start found one', 'Error'],
+    ])
+    // Neither the error's message nor its URL reaches a status or a log (D18).
+    expect(JSON.stringify([mounted.setStatus.mock.calls, warn.mock.calls])).not.toMatch(
+      /fake restore failure|example\.test/
+    )
+    expect(mounted.refreshLoginMethods).not.toHaveBeenCalled()
+  })
+
   it("shows waiting from start's reply alone, and cancels through main", async () => {
     const main = createMain()
     const mounted = mount()

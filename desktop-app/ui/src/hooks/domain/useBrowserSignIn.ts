@@ -166,6 +166,7 @@ export function useBrowserSignIn({
             '[useBrowserSignIn] The session could not be loaded after start found one',
             errorClass(loadError)
           )
+          setStatus(BROWSER_SIGN_IN_OUTCOME_COPY.sessionLoadFailed, 'error')
         }
         return
       }
