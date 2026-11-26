@@ -203,7 +203,7 @@ const bumpEvents = {
     id: 'E15',
     label: 'E15 session restore (getSessionState)',
     check: () => true,
-    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4034-4039`): it
+    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4033-4038`): it
     // never decides an expectation here. `storedA` holds while signed out on A only before the
     // first restore on A (a kept token at start), and that restore succeeds. Every later
     // `storedA` comes from a sign-in on A, and every way back to signed out (logout, or a change
@@ -1790,6 +1790,39 @@ describe('browser sign-in link acceptance, redeem and install', () => {
     expect(endStatesOf(harness, attemptId)).toEqual(['failed'])
     expect(harness.secretsSeen).toContain(`${LINK_HANDLING_FAILED} Error`)
     expect(harness.secretsSeen.filter(text => text.includes('fake redeem failure'))).toEqual([])
+  })
+
+  it('ends a waiting attempt failed when its acceptance op throws before the redeem', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    await harness.drain()
+    const now = vi.spyOn(harness.clock, 'now')
+    // The harness's own spies, which record every console line.
+    const consoleSpies = CONSOLE_LEVELS.map(level => vi.spyOn(console, level))
+    const callsBefore = consoleSpies.map(spy => spy.mock.calls.length)
+    const consoleLinesSince = () =>
+      consoleSpies.flatMap((spy, index) =>
+        spy.mock.calls.slice(callsBefore[index]).map(args => format(...args))
+      )
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    // The pre-match has read the clock. The acceptance op's own deadline check, its next read,
+    // throws: the window is raised and the attempt still waits (R-25).
+    now.mockImplementationOnce(() => {
+      throw new Error('fake clock failure')
+    })
+    await harness.drain()
+
+    expect(now.mock.results.filter(result => result.type === 'throw')).toHaveLength(1)
+    expect(snapshotsOf(harness, attemptId)).toEqual([
+      { attemptId, phase: 'waiting' },
+      { attemptId, phase: 'ended', outcome: 'failed' },
+    ])
+    expect(redeemFetches(harness)).toHaveLength(0)
+    // One line, with the error class only.
+    expect(consoleLinesSince()).toEqual([`${LINK_HANDLING_FAILED} Error`])
+    expect(harness.secretsSeen.filter(text => text.includes('fake clock failure'))).toEqual([])
   })
 
   it('logs and drops a link whose acceptance throws, never throwing to the router', async () => {

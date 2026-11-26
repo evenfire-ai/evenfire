@@ -110,7 +110,7 @@ export class FakeBrowserSignInClock implements BrowserSignInClock {
  * user, wherever it comes from. So any later bind of that user consumes a pending hold: the
  * team-switch `/me` refresh in `commitSessionToken` (`appService.ts:1340`), the team-scope
  * commit after discovery in `runWithTeamContextInTeamQueue` (`:1489`), the rebind after a
- * failed hop restore (`:1592`) and `refreshAccessCatalog` (`:4574`). Set a chat-store hold only
+ * failed hop restore (`:1592`) and `refreshAccessCatalog` (`:4573`). Set a chat-store hold only
  * when the bind it names is the next bind of that user.
  */
 export type HoldPoint =

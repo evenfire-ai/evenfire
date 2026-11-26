@@ -2761,15 +2761,14 @@ export class AppService {
       if (attempt === null) return false
       const attemptId = attempt.id
       void this.completeDesktopLogin(attemptId, link).catch((error: unknown) => {
-        // R-4: an attempt left `redeeming` would never end (L1), so one more owner op ends it
-        // `failed` if it still redeems. The op cannot reject: the store's `end` only writes
-        // memory and defers its push (D6). Only the error's class is logged: a message can carry
-        // a URL or a server body (D18).
+        // R-4, R-25: the window is raised. An attempt left `redeeming` would never end (L1), and
+        // one still `waiting`, because the acceptance op threw before the redeem, would wait for
+        // its deadline. One more owner op ends it `failed`; `end` does nothing to an attempt that
+        // has ended or been replaced. The op cannot reject: `end` only writes memory and defers
+        // its push (D6). Only the error's class is logged: a message can carry a URL or a server
+        // body (D18).
         void this.withNativeAuthEnvironmentCommit(async () => {
-          const current = this.browserSignIn.current()
-          if (current?.id === attemptId && current.phase === 'redeeming') {
-            this.browserSignIn.end(attemptId, { outcome: 'failed' })
-          }
+          this.browserSignIn.end(attemptId, { outcome: 'failed' })
         })
         console.warn(
           '[AppService] Browser sign-in link handling failed:',
