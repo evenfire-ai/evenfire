@@ -4,7 +4,10 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import type { Server } from 'node:http'
 import { Pool } from 'pg'
-import type { ActionAuthorityCheckpointRequestV2 } from '@clerum/action-context-contracts'
+import {
+  type ActionAuthorityCheckpointRequestV2,
+  canonicalActionTarget,
+} from '@clerum/action-context-contracts'
 import { StepCoordinator, WorkflowAuthorizationPausedError } from '@clerum/workflow-runtime-core'
 import {
   RUN_AUTHORITY_BOUND,
@@ -20,6 +23,7 @@ import { K8sGateway } from '../src/k8s.js'
 import type { ExternalAuthedRequest } from '../src/middleware/externalSessionAuth.js'
 import { createInternalActionAuthorityCheckpointRouter } from '../src/routes/internal/actionAuthorityCheckpoint.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
+import { parseActionAuthorityCheckpointRequest } from '../src/services/access/actionAuthorityCheckpoint.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
@@ -41,6 +45,7 @@ import {
 import { type WorkflowAuthorityBinding } from '../src/services/workflows/workflowAuthorityBindingService.js'
 import { WORKFLOW_ACTION_DELEGATION_HEADER } from '../src/services/workflows/workflowAuthorityBindingService.js'
 import { resumeWorkflowRun } from '../src/services/workflows/workflowRunResumeService.js'
+import { revalidateWorkflowTriggerCheckpoint } from '../src/services/workflows/workflowTriggerCheckpointRevalidation.js'
 import { triggerWorkflow } from '../src/services/workflows/workflowTriggerService.js'
 import {
   issueUserDelegationV2,
@@ -799,22 +804,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         [teamId, config.sandboxNamespace, bothGrantRecipe]
       )
 
-      const otherSession = await produceSelectedAuthority(bothGrantRecipe, 'team')
-      const wrongSessionAuthority = await produceRunResumeAuthority({
-        caller: otherSession.caller,
-        runId: result.row.run_id,
-        pathKind: 'team',
-      })
-      await expect(
-        resumeWorkflowRun({
-          runId: result.row.run_id,
-          recipeNamespace: config.sandboxNamespace,
-          recipeName: bothGrantRecipe,
-          authority: wrongSessionAuthority,
-          db: databasePool,
-        })
-      ).rejects.toMatchObject({ code: 'workflow_run_path_mismatch' })
-
       const resumeAuthority = await produceRunResumeAuthority({
         caller: produced.caller,
         runId: result.row.run_id,
@@ -834,7 +823,8 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       resumed = true
 
       const firstContinuation = await databasePool.query(
-        `SELECT continuation.source_expires_at::text AS continuation_exp,
+        `SELECT to_char(continuation.source_expires_at AT TIME ZONE 'UTC',
+                        'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS continuation_exp,
                 initiating.source_expires_at::text AS initiating_exp
            FROM workflow_runs run
            JOIN workflow_authority_bindings initiating
@@ -854,7 +844,7 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         },
       ])
       expect(firstContinuation.rows[0]?.continuation_exp).toBe(
-        firstContinuation.rows[0]?.initiating_exp
+        new Date(resumeAuthority.sourceExpiresAt * 1000).toISOString()
       )
 
       const processorStatusImmediatelyAfterResume = await processor.getRunStatus(
@@ -889,7 +879,8 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         `SELECT child.parent_binding_id::text AS "parentBindingId",
                 run.initiating_authority_binding_id::text AS "initiatingBindingId",
                 child.access_path_id AS "accessPathId",
-                child.source_expires_at::text AS "continuationExpiry",
+                to_char(child.source_expires_at AT TIME ZONE 'UTC',
+                        'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "continuationExpiry",
                 initiating.source_expires_at::text AS "initiatingExpiry"
            FROM workflow_runs run
            JOIN workflow_authority_bindings child
@@ -911,7 +902,9 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
           initiatingExpiry: expect.any(String),
         },
       ])
-      expect(continuation.rows[0]?.continuationExpiry).toBe(continuation.rows[0]?.initiatingExpiry)
+      expect(continuation.rows[0]?.continuationExpiry).toBe(
+        firstContinuation.rows[0]?.continuation_exp
+      )
 
       simulateCoordinatorExit = false
       const restartedRuntime = runRuntime()
@@ -1123,26 +1116,96 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
     expect(answers[1]).toMatchObject({ httpStatus: 400, body: { status: 'invalid_binding' } })
   })
 
-  it('does not resume a run after its initiating delegation expires', async () => {
-    const { result, caller } = await runSelectedTrigger(teamOnlyRecipe, 'team')
-    expect(result.kind).toBe('run')
-    if (result.kind !== 'run') throw new Error('actual V2 producer did not create a workflow run')
+  /**
+   * The continuation checkpoint of a resumed run, as workflow-recipes makes it
+   * at dequeue and at each step boundary: the request is built from the run's
+   * latest continuation binding (`SELECT_RUN`, dbRunProcessor.ts) and parsed as
+   * the internal route parses it.
+   */
+  async function continuationCheckpoint(runId: string) {
+    const loaded = await databasePool.query(
+      `SELECT binding.user_id::text AS "userId", binding.session_id::text AS sid,
+              binding.session_version AS "sessionVersion",
+              binding.delegation_jti::text AS "delegationJti", binding.resource, binding.target,
+              binding.target_hash AS "targetHash", binding.access_path_id AS "accessPathId",
+              binding.authorization_revision AS "authorizationRevision",
+              binding.behavior_binding_hash AS "behaviorBindingHash"
+         FROM workflow_authority_bindings binding
+        WHERE binding.binding_kind = 'run_management'
+          AND binding.entity_type = 'workflow_run'
+          AND binding.entity_id = $1
+        ORDER BY binding.created_at DESC, binding.id DESC
+        LIMIT 1`,
+      [runId]
+    )
+    const binding = loaded.rows[0]
+    if (!binding) throw new Error('run has no continuation binding')
+    const caller = { service: 'workflow-recipes', trustPlane: 'internal_control_jwt' } as const
+    const request = parseActionAuthorityCheckpointRequest(
+      {
+        version: 2,
+        principal: {
+          sub: binding.userId,
+          sid: binding.sid,
+          sessionVersion: binding.sessionVersion,
+        },
+        delegationJti: binding.delegationJti,
+        resource: binding.resource,
+        operationId: 'workflow.run.manage',
+        target: canonicalActionTarget(binding.target),
+        targetHash: binding.targetHash,
+        accessPathId: binding.accessPathId,
+        authorizationRevision: binding.authorizationRevision,
+        behaviorBindingHash: binding.behaviorBindingHash,
+        domain: {
+          service: 'workflow-recipes',
+          resource: binding.resource,
+          targetHash: binding.targetHash,
+        },
+      },
+      caller
+    )
+    const budget = AccessExecutionBudget.create('action')
+    try {
+      return await revalidateWorkflowTriggerCheckpoint({
+        request,
+        caller,
+        gateway,
+        budget,
+        db: databasePool,
+      })
+    } finally {
+      budget.close()
+    }
+  }
 
-    const resumeAuthority = await produceRunResumeAuthority({
-      caller,
-      runId: result.row.run_id,
-      pathKind: 'team',
-    })
-    await databasePool.query(
+  /** Pause a run that already started, as an authority checkpoint failure leaves it. */
+  async function pauseStartedRun(runId: string) {
+    const paused = await databasePool.query(
       `UPDATE workflow_runs
           SET phase = 'AuthorizationPaused',
               failure_reason = 'workflow_authority_unavailable',
               started_at = now(),
-              child_recipe_name = 'expired-authority-child',
+              child_recipe_name = 'continuation-authority-child',
               child_recipe_namespace = 'sandbox-recipes'
         WHERE run_id = $1`,
-      [result.row.run_id]
+      [runId]
     )
+    expect(paused.rowCount).toBe(1)
+  }
+
+  it('resumes a run after its initiating delegation expires, from another session of the same user', async () => {
+    const { result, caller } = await runSelectedTrigger(teamOnlyRecipe, 'team')
+    expect(result.kind).toBe('run')
+    if (result.kind !== 'run') throw new Error('actual V2 producer did not create a workflow run')
+
+    const otherSession = await produceSelectedAuthority(teamOnlyRecipe, 'team')
+    const resumeAuthority = await produceRunResumeAuthority({
+      caller: otherSession.caller,
+      runId: result.row.run_id,
+      pathKind: 'team',
+    })
+    await pauseStartedRun(result.row.run_id)
     await databasePool.query(
       `UPDATE workflow_authority_bindings
           SET source_issued_at = clock_timestamp() - interval '20 seconds',
@@ -1150,17 +1213,25 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         WHERE id = $1`,
       [result.row.initiating_authority_binding_id]
     )
+    // Witness: the initiating delegation expired and the resume comes from
+    // another login session of the same user.
+    const initiating = await databasePool.query(
+      `SELECT session_id::text AS sid, source_expires_at < clock_timestamp() AS expired
+         FROM workflow_authority_bindings WHERE id = $1`,
+      [result.row.initiating_authority_binding_id]
+    )
+    expect(initiating.rows).toEqual([{ sid: caller.session.sid, expired: true }])
+    expect(resumeAuthority.binding.userId).toBe(userId)
+    expect(resumeAuthority.binding.sid).not.toBe(initiating.rows[0]?.sid)
 
-    await expect(
-      resumeWorkflowRun({
-        runId: result.row.run_id,
-        recipeNamespace: config.sandboxNamespace,
-        recipeName: teamOnlyRecipe,
-        authority: resumeAuthority,
-        db: databasePool,
-      })
-    ).rejects.toMatchObject({ code: 'workflow_run_path_mismatch' })
-
+    const resumed = await resumeWorkflowRun({
+      runId: result.row.run_id,
+      recipeNamespace: config.sandboxNamespace,
+      recipeName: teamOnlyRecipe,
+      authority: resumeAuthority,
+      db: databasePool,
+    })
+    expect(['Running', 'Pending']).toContain(resumed.phase)
     const state = await databasePool.query(
       `SELECT phase, failure_reason,
               (SELECT COUNT(*)::int FROM workflow_authority_bindings
@@ -1170,13 +1241,25 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
          FROM workflow_runs WHERE run_id = $1`,
       [result.row.run_id]
     )
-    expect(state.rows).toEqual([
-      {
-        phase: 'AuthorizationPaused',
-        failure_reason: 'workflow_authority_unavailable',
-        continuation_count: 0,
-      },
-    ])
+    expect(state.rows).toEqual([{ phase: 'Running', failure_reason: null, continuation_count: 1 }])
+
+    // The next checkpoint, on the continuation binding.
+    await expect(continuationCheckpoint(result.row.run_id)).resolves.toMatchObject({
+      status: 'allowed',
+      attribution: { sid: resumeAuthority.binding.sid },
+    })
+    // Also once the continuation binding's own expiry is in the past.
+    await databasePool.query(
+      `UPDATE workflow_authority_bindings
+          SET source_issued_at = clock_timestamp() - interval '20 seconds',
+              source_expires_at = clock_timestamp() - interval '10 seconds'
+        WHERE binding_kind = 'run_management' AND entity_type = 'workflow_run'
+          AND entity_id = $1`,
+      [result.row.run_id]
+    )
+    await expect(continuationCheckpoint(result.row.run_id)).resolves.toMatchObject({
+      status: 'allowed',
+    })
 
     // A run id that is not the canonical text of a uuid is not found, without a
     // database error, as `run_id::text = $1` answered.
@@ -1191,6 +1274,107 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         })
       ).rejects.toMatchObject({ status: 404, code: 'workflow_run_not_found' })
     }
+  })
+
+  it("resume leaves the continuation binding's stored expiry untouched", async () => {
+    const { result, caller } = await runSelectedTrigger(teamOnlyRecipe, 'team')
+    if (result.kind !== 'run') throw new Error('actual V2 producer did not create a workflow run')
+    const resumeAuthority = await produceRunResumeAuthority({
+      caller,
+      runId: result.row.run_id,
+      pathKind: 'team',
+    })
+    await pauseStartedRun(result.row.run_id)
+    // The initiating delegation is still current but ends before the resume
+    // delegation does.
+    await databasePool.query(
+      `UPDATE workflow_authority_bindings
+          SET source_issued_at = clock_timestamp() - interval '20 seconds',
+              source_expires_at = clock_timestamp() + interval '30 seconds'
+        WHERE id = $1`,
+      [result.row.initiating_authority_binding_id]
+    )
+    const initiating = await databasePool.query(
+      `SELECT extract(epoch FROM source_expires_at) < $2 AS earlier
+         FROM workflow_authority_bindings WHERE id = $1`,
+      [result.row.initiating_authority_binding_id, resumeAuthority.sourceExpiresAt]
+    )
+    expect(initiating.rows).toEqual([{ earlier: true }])
+
+    await resumeWorkflowRun({
+      runId: result.row.run_id,
+      recipeNamespace: config.sandboxNamespace,
+      recipeName: teamOnlyRecipe,
+      authority: resumeAuthority,
+      db: databasePool,
+    })
+    const continuation = await databasePool.query(
+      `SELECT extract(epoch FROM source_expires_at)::bigint AS "expiresAt"
+         FROM workflow_authority_bindings
+        WHERE binding_kind = 'run_management' AND entity_type = 'workflow_run'
+          AND entity_id = $1`,
+      [result.row.run_id]
+    )
+    expect(continuation.rows).toHaveLength(1)
+    expect(Number(continuation.rows[0]?.expiresAt)).toBe(resumeAuthority.sourceExpiresAt)
+  })
+
+  it('still refuses resume by another user, on another path, or with a dead caller session', async () => {
+    const { result, caller } = await runSelectedTrigger(teamOnlyRecipe, 'team')
+    if (result.kind !== 'run') throw new Error('actual V2 producer did not create a workflow run')
+    await pauseStartedRun(result.row.run_id)
+    const resume = (authority: WorkflowAuthorityBinding) =>
+      resumeWorkflowRun({
+        runId: result.row.run_id,
+        recipeNamespace: config.sandboxNamespace,
+        recipeName: teamOnlyRecipe,
+        authority,
+        db: databasePool,
+      })
+    const valid = await produceRunResumeAuthority({
+      caller,
+      runId: result.row.run_id,
+      pathKind: 'team',
+    })
+
+    // The live resolver offers a user's run to no other user and on no other
+    // path (databaseAuthorityCandidates.ts: `wr.actor_id = $1`, and one path
+    // per run team), so these two cases start from a valid authority and
+    // change the user or the path to reach the resume service's own checks.
+    const dying = await produceSelectedAuthority(teamOnlyRecipe, 'team')
+    const deadSessionAuthority = await produceRunResumeAuthority({
+      caller: dying.caller,
+      runId: result.row.run_id,
+      pathKind: 'team',
+    })
+    expect(await revokeUserSession(userId, dying.caller.session.sid, 'logout')).toBe(true)
+    const cases: Array<[string, WorkflowAuthorityBinding]> = [
+      ['another user', { ...valid, binding: { ...valid.binding, userId: randomUUID() } }],
+      [
+        'another path',
+        { ...valid, binding: { ...valid.binding, pathKind: 'direct', effectiveTeamId: null } },
+      ],
+      ['a dead caller session', deadSessionAuthority],
+    ]
+    for (const [label, authority] of cases) {
+      await expect(resume(authority), label).rejects.toMatchObject({
+        status: 403,
+        code: 'workflow_run_path_mismatch',
+      })
+    }
+    const unchanged = await databasePool.query(
+      `SELECT phase,
+              (SELECT COUNT(*)::int FROM workflow_authority_bindings
+                WHERE binding_kind = 'run_management'
+                  AND entity_type = 'workflow_run'
+                  AND entity_id = run_id::text) AS continuation_count
+         FROM workflow_runs WHERE run_id = $1`,
+      [result.row.run_id]
+    )
+    expect(unchanged.rows).toEqual([{ phase: 'AuthorizationPaused', continuation_count: 0 }])
+
+    // Witness: the same run resumes for the right caller.
+    await expect(resume(valid)).resolves.toMatchObject({ phase: 'Running' })
   })
 
   it('serializes concurrent grant revocation against the durable resume write', async () => {

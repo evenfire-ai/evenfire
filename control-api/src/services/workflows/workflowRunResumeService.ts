@@ -20,15 +20,11 @@ type LockedRun = {
   usage_team_id: string | null
   initiating_authority_binding_id: string | null
   initiating_user_id: string | null
-  initiating_session_id: string | null
-  initiating_session_version: number | null
   initiating_operation_id: string | null
   initiating_resource: Record<string, unknown> | null
   initiating_target: Record<string, unknown> | null
   initiating_path_kind: string | null
   initiating_effective_team_id: string | null
-  initiating_source_is_current: boolean | null
-  initiating_source_expires_at: string | null
   started_at: string | null
   child_recipe_name: string | null
 }
@@ -57,15 +53,11 @@ const LOCK_RUN_FOR_RESUME = `
          run.usage_team_id,
          run.initiating_authority_binding_id::text AS initiating_authority_binding_id,
          initiating.user_id::text AS initiating_user_id,
-         initiating.session_id::text AS initiating_session_id,
-         initiating.session_version AS initiating_session_version,
          initiating.operation_id AS initiating_operation_id,
          initiating.resource AS initiating_resource,
          initiating.target AS initiating_target,
          initiating.path_kind AS initiating_path_kind,
          initiating.effective_team_id::text AS initiating_effective_team_id,
-         initiating.source_expires_at > clock_timestamp() AS initiating_source_is_current,
-         initiating.source_expires_at::text AS initiating_source_expires_at,
          run.started_at,
          run.child_recipe_name
     FROM workflow_runs run
@@ -121,8 +113,6 @@ function initiatingPathMatches(
     run.initiating_authority_binding_id === null ||
     run.initiating_operation_id !== 'workflow.trigger' ||
     run.initiating_user_id !== binding.userId ||
-    run.initiating_session_id !== binding.sid ||
-    run.initiating_session_version !== binding.sessionVersion ||
     run.initiating_path_kind !== binding.pathKind ||
     run.initiating_effective_team_id !== binding.effectiveTeamId ||
     run.initiating_resource?.type !== 'workflow_recipe' ||
@@ -259,9 +249,6 @@ export async function resumeWorkflowRun(input: {
       if (run.phase !== 'AuthorizationPaused') {
         throw new WorkflowRunResumeError(409, 'workflow_run_not_paused')
       }
-      if (run.initiating_source_is_current !== true) {
-        throw new WorkflowRunResumeError(403, 'workflow_run_path_mismatch')
-      }
       if (
         !initiatingPathMatches(
           run,
@@ -286,25 +273,14 @@ export async function resumeWorkflowRun(input: {
         authority: input.authority,
       })
 
-      if (!run.initiating_source_expires_at) {
-        throw new WorkflowRunResumeError(403, 'workflow_run_path_mismatch')
-      }
-      const continuationBindingId = await persistWorkflowAuthorityBinding(db, {
+      // The continuation binding keeps the resume delegation's own expiry as
+      // provenance; continuation checkpoints do not read it.
+      await persistWorkflowAuthorityBinding(db, {
         authority: input.authority,
         kind: 'run_management',
         entityType: 'workflow_run',
         entityId: input.runId,
       })
-      const boundedExpiry = await db.query(
-        `UPDATE workflow_authority_bindings
-            SET source_expires_at = LEAST(source_expires_at, $2::timestamptz)
-          WHERE id = $1
-          RETURNING source_expires_at > clock_timestamp() AS current`,
-        [continuationBindingId, run.initiating_source_expires_at]
-      )
-      if ((boundedExpiry.rows[0] as { current?: boolean } | undefined)?.current !== true) {
-        throw new WorkflowRunResumeError(403, 'workflow_run_path_mismatch')
-      }
       const resumed = await db.query(RESUME_PAUSED_RUN, [
         input.runId,
         input.recipeNamespace,

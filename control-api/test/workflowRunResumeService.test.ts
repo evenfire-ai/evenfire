@@ -25,7 +25,6 @@ const fakeClient = vi.hoisted(() => ({
       if (sql.includes('FROM team_members')) return 'lineage-team-membership'
       if (sql.includes('FROM team_workflow_triggers')) return 'lineage-team-grant'
       if (sql.includes('INSERT INTO workflow_authority_bindings')) return 'insert-binding'
-      if (sql.includes('SET source_expires_at = LEAST')) return 'bound-expiry'
       if (sql.includes('UPDATE workflow_runs')) return 'resume-run'
       throw new Error(`Unexpected resume statement: ${sql}`)
     })()
@@ -127,8 +126,6 @@ function pausedRunRows(): Record<string, unknown[]> {
         usage_team_id: null,
         initiating_authority_binding_id: 'initiating-binding',
         initiating_user_id: userId,
-        initiating_session_id: sid,
-        initiating_session_version: 3,
         initiating_operation_id: 'workflow.trigger',
         initiating_resource: {
           type: 'workflow_recipe',
@@ -137,8 +134,6 @@ function pausedRunRows(): Record<string, unknown[]> {
         initiating_target: { recipeNamespace, recipeName },
         initiating_path_kind: 'direct',
         initiating_effective_team_id: null,
-        initiating_source_is_current: true,
-        initiating_source_expires_at: new Date(Date.now() + 60_000).toISOString(),
         started_at: '2026-11-08T00:00:00.000Z',
         child_recipe_name: 'child-1',
       },
@@ -146,7 +141,6 @@ function pausedRunRows(): Record<string, unknown[]> {
     'lineage-session': [{ id: userId }],
     'lineage-direct-grant': [{ user_id: userId }],
     'insert-binding': [{ id: 'continuation-binding' }],
-    'bound-expiry': [{ current: true }],
     'resume-run': [{ run_id: runId, phase: 'Running' }],
   }
 }
@@ -187,12 +181,16 @@ describe('workflow run resume service (T-W3)', () => {
       'lineage-session',
       'lineage-direct-grant',
       'insert-binding',
-      'bound-expiry',
       'resume-run',
       'COMMIT',
     ])
     expect(state.authorize).toHaveBeenCalledTimes(0)
     expect(state.statements['lock-run']).toContain('run.run_id = $1::uuid')
+    // The run lock reads neither the initiating session nor its expiry: the
+    // resume caller's own session is checked live by the lineage statement.
+    expect(state.statements['lock-run']).not.toContain('session_id')
+    expect(state.statements['lock-run']).not.toContain('source_expires_at')
+    expect(state.statements['lineage-session']).toContain('session.sid = $2')
     expect(state.statements['resume-run']).toContain('run_id = $1::uuid')
   })
 
@@ -250,7 +248,6 @@ describe('workflow run resume service (T-W3)', () => {
       'lineage-team-membership',
       'lineage-team-grant',
       'insert-binding',
-      'bound-expiry',
       'resume-run',
       'COMMIT',
     ])
