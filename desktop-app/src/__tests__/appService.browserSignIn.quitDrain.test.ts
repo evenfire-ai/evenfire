@@ -131,8 +131,10 @@ function accountOf(envKey: string): string {
 type DeferredQuit = Readonly<{ release: () => Promise<void> }>
 
 /**
- * Defers a macOS quit the same way in every scenario (N-3). An admitted token-store operation,
- * the deferring op, is held on its keychain call: a direct read of another environment's token.
+ * Defers a macOS quit the same way in every scenario that calls it (N-3): A3-69, A3-71 and A3-73.
+ * A3-72 does not: there the install's own admitted token write is the deferring op, since that
+ * write is what the row is about. An admitted token-store operation, the deferring op, is held on
+ * its keychain call: a direct read of another environment's token.
  * Admission then closes with it in flight, as `will-quit` closes it (E39), and the quit waits
  * for it. The operation under test comes after, so its token-store call queues behind closed
  * admission, not behind this hold. `release` lets the deferring op end and waits until it has:
