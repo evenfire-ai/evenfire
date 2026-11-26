@@ -3,8 +3,10 @@ import {
   MAX_TOOL_KEYS,
   MAX_TOOL_NAME_LENGTH,
   MAX_VALUE_LENGTH,
+  buildApprovalChangeSummary,
   buildHostApprovalChange,
 } from '../src/services/hostApprovalAudit.js'
+import { MCP_HOST_NATIVE_TOOL_NAMES } from '../src/services/mcpHostNativeToolNames.js'
 
 const block = (approval?: Record<string, unknown>): Record<string, unknown> | undefined => approval
 
@@ -152,5 +154,93 @@ describe('buildHostApprovalChange', () => {
     expect(MAX_TOOL_NAME_LENGTH).toBe(64)
     expect(Object.keys(change?.tools ?? {})).toEqual(['t'.repeat(64)])
     expect(change?.tools['t'.repeat(64)]).toEqual({ old: null, new: false })
+  })
+
+  describe('native tool names are listed first (security M-1)', () => {
+    const decoys = (count: number, width: number, value: boolean): Record<string, boolean> => {
+      const out: Record<string, boolean> = {}
+      for (let i = 0; i < count; i += 1) {
+        out[`a${String(i).padStart(width - 1, '0')}`] = value
+      }
+      return out
+    }
+    const summaryTools = (summary: string | undefined): string[] => {
+      expect(summary).toBeDefined()
+      expect((summary as string).length).toBeLessThanOrEqual(4096)
+      return Object.keys((JSON.parse(summary as string) as { tools: object }).tools)
+    }
+
+    it('F1: 50 decoys sorted before shell_exec still list shell_exec in the line and the summary', () => {
+      const before = { tools: { shell_exec: true } }
+      const after = { tools: { shell_exec: false, ...decoys(50, 3, true) } }
+      const change = buildHostApprovalChange({ before: block(before), after: block(after) })
+      expect(Object.keys(change?.tools ?? {})[0]).toBe('shell_exec')
+      expect(change?.tools.shell_exec).toEqual({ old: true, new: false })
+      expect(Object.keys(change?.tools ?? {})).toHaveLength(51)
+      expect(change?.toolsTruncated).toBe(0)
+      const summary = buildApprovalChangeSummary({ before, after })
+      expect(summaryTools(summary)).toContain('shell_exec')
+    })
+
+    it('F2: 49 decoys with 64-character names keep shell_exec in the summary', () => {
+      const long: Record<string, boolean> = {}
+      for (let i = 0; i < 49; i += 1) long[`a${String(i).padStart(2, '0')}${'x'.repeat(61)}`] = true
+      const before = { tools: { shell_exec: true } }
+      const after = { tools: { shell_exec: false, ...long } }
+      const change = buildHostApprovalChange({ before: block(before), after: block(after) })
+      expect(change?.tools.shell_exec).toEqual({ old: true, new: false })
+      const summary = buildApprovalChangeSummary({ before, after })
+      const kept = summaryTools(summary)
+      expect(kept).toContain('shell_exec')
+      // The trim dropped decoys and counted them, so the cut is visible.
+      expect(kept.length).toBeLessThan(50)
+      expect(JSON.parse(summary as string).toolsTruncated).toBe(50 - kept.length)
+    })
+
+    it('F3: decoys set to false do not push shell_exec out either', () => {
+      const before = { tools: { shell_exec: true } }
+      const after = { tools: { shell_exec: false, ...decoys(50, 3, false) } }
+      const change = buildHostApprovalChange({ before: block(before), after: block(after) })
+      expect(change?.tools.shell_exec).toEqual({ old: true, new: false })
+      expect(summaryTools(buildApprovalChangeSummary({ before, after }))).toContain('shell_exec')
+    })
+
+    it('worst case: all native names changed plus decoys list every native name within 4096 characters', () => {
+      const before: Record<string, boolean> = {}
+      const after: Record<string, boolean> = { ...decoys(60, 3, true) }
+      for (const name of MCP_HOST_NATIVE_TOOL_NAMES) {
+        before[name] = true
+        after[name] = false
+      }
+      const change = buildHostApprovalChange({
+        before: block({ tools: before }),
+        after: block({ tools: after }),
+      })
+      const listed = Object.keys(change?.tools ?? {})
+      expect(listed.slice(0, MCP_HOST_NATIVE_TOOL_NAMES.length)).toEqual(
+        [...MCP_HOST_NATIVE_TOOL_NAMES].sort()
+      )
+      expect(listed).toHaveLength(MCP_HOST_NATIVE_TOOL_NAMES.length + MAX_TOOL_KEYS)
+      expect(change?.toolsTruncated).toBe(10)
+      const kept = summaryTools(
+        buildApprovalChangeSummary({ before: { tools: before }, after: { tools: after } })
+      )
+      for (const name of MCP_HOST_NATIVE_TOOL_NAMES) expect(kept).toContain(name)
+    })
+
+    it('a plain single change is unchanged', () => {
+      const change = buildHostApprovalChange({
+        before: block({ tools: { shell_exec: true } }),
+        after: block({ tools: { shell_exec: false } }),
+      })
+      expect(change).toEqual({
+        fields: {},
+        tools: { shell_exec: { old: true, new: false } },
+        toolsTruncated: 0,
+        approvers: {},
+        blockRemoved: false,
+        inheritedBefore: false,
+      })
+    })
   })
 })

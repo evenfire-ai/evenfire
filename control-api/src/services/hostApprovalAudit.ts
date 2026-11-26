@@ -10,8 +10,12 @@
  */
 import { rootLogger } from '../observability/logger.js'
 import { approvalBlocksEqual } from './hostApprovalRules.js'
+import { isMcpHostNativeToolName } from './mcpHostNativeToolNames.js'
 
-/** A per-tool override map may be large; the line lists at most this many changed tools. */
+/**
+ * A per-tool override map may be large; the line lists every changed mcp-host
+ * native tool, then at most this many other changed tools.
+ */
 export const MAX_TOOL_KEYS = 50
 /** Tool names (the keys of `tools`) are cut to this many characters. */
 export const MAX_TOOL_NAME_LENGTH = 64
@@ -126,19 +130,26 @@ export function buildHostApprovalChange(input: {
     if (oldValue !== newValue) fields[cut(key)] = { old: oldValue, new: newValue }
   }
 
+  // Every changed key that is an mcp-host native tool name is listed first, in
+  // key order, whatever else changed; then at most MAX_TOOL_KEYS other changed
+  // keys, in key order. The rest are counted. A flood of unrelated keys
+  // therefore cannot push a native tool's change out of the line.
   const tools: HostApprovalChange['tools'] = {}
-  let toolsTruncated = 0
+  const native: Array<[string, { old: boolean | null; new: boolean | null }]> = []
+  const other: Array<[string, { old: boolean | null; new: boolean | null }]> = []
   for (const key of [...new Set([...before.tools.keys(), ...after.tools.keys()])].sort()) {
     const asFlag = (value: unknown): boolean | null => (typeof value === 'boolean' ? value : null)
     const oldValue = asFlag(before.tools.get(key))
     const newValue = asFlag(after.tools.get(key))
     if (oldValue === newValue) continue
-    if (Object.keys(tools).length >= MAX_TOOL_KEYS) {
-      toolsTruncated += 1
-      continue
-    }
-    tools[key.slice(0, MAX_TOOL_NAME_LENGTH)] = { old: oldValue, new: newValue }
+    const entry: [string, { old: boolean | null; new: boolean | null }] = [
+      key.slice(0, MAX_TOOL_NAME_LENGTH),
+      { old: oldValue, new: newValue },
+    ]
+    ;(isMcpHostNativeToolName(key) ? native : other).push(entry)
   }
+  for (const [name, entry] of [...native, ...other.slice(0, MAX_TOOL_KEYS)]) tools[name] = entry
+  const toolsTruncated = Math.max(0, other.length - MAX_TOOL_KEYS)
 
   const approvers: HostApprovalChange['approvers'] = {}
   for (const key of [...new Set([...before.approvers.keys(), ...after.approvers.keys()])].sort()) {
@@ -191,15 +202,20 @@ function encode(value: unknown): string {
  * `MAX_APPROVAL_CHANGE_SUMMARY_LENGTH` characters, never a JSON string cut
  * mid-way:
  *
- * 1. Tool entries are dropped from the end, one by one, and counted into
- *    `toolsTruncated`, until the text fits.
+ * 1. Tool entries are dropped one by one, other tools first (from the end),
+ *    and counted into `toolsTruncated`, until the text fits. mcp-host native
+ *    tool entries stay until no other entry is left; they are short enough
+ *    that all of them fit.
  * 2. If it still does not fit with no tool entries (many changed fields), the
  *    text is a counts-only object marked `truncated: true`: field, tool and
  *    approver-channel counts, the approver totals and the two flags. Its size
  *    is bounded, so it always fits.
  */
 export function serializeApprovalChangeSummary(change: HostApprovalChange): string {
-  const toolKeys = Object.keys(change.tools)
+  const toolKeys = [
+    ...Object.keys(change.tools).filter(isMcpHostNativeToolName),
+    ...Object.keys(change.tools).filter(key => !isMcpHostNativeToolName(key)),
+  ]
   for (let kept = toolKeys.length; kept >= 0; kept -= 1) {
     const text = encode({
       ...change,
