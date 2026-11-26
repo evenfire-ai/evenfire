@@ -1,14 +1,21 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { Writable } from 'node:stream'
+import pino from 'pino'
+import { rootLogger } from '../src/observability/logger.js'
 import {
   MAX_TOOL_KEYS,
   MAX_TOOL_NAME_LENGTH,
   MAX_VALUE_LENGTH,
   buildApprovalChangeSummary,
   buildHostApprovalChange,
+  logHostApprovalChange,
 } from '../src/services/hostApprovalAudit.js'
 import { MCP_HOST_NATIVE_TOOL_NAMES } from '../src/services/mcpHostNativeToolNames.js'
+import { TOKEN_LEAK_REDACT_PATHS } from '../src/utils/log/redact.js'
 
 const block = (approval?: Record<string, unknown>): Record<string, unknown> | undefined => approval
+const toolNames = (change: { tools: Array<{ name: string }> } | null | undefined): string[] =>
+  (change?.tools ?? []).map(entry => entry.name)
 
 describe('buildHostApprovalChange', () => {
   it('is null when the approval blocks are equal', () => {
@@ -37,9 +44,9 @@ describe('buildHostApprovalChange', () => {
       before: block({ tools: {} }),
       after: block({ tools }),
     })
-    expect(Object.keys(change?.tools ?? {})).toHaveLength(MAX_TOOL_KEYS)
+    expect(change?.tools).toHaveLength(MAX_TOOL_KEYS)
     expect(change?.toolsTruncated).toBe(10)
-    expect(change?.tools.tool_00).toEqual({ old: null, new: true })
+    expect(change?.tools[0]).toEqual({ name: 'tool_00', old: null, new: true })
   })
 
   it('counts approvers and never serializes one', () => {
@@ -108,7 +115,7 @@ describe('buildHostApprovalChange', () => {
     for (const before of [undefined, null]) {
       expect(buildHostApprovalChange({ before, after: block({}) })).toEqual({
         fields: {},
-        tools: {},
+        tools: [],
         toolsTruncated: 0,
         approvers: {},
         blockRemoved: false,
@@ -121,7 +128,7 @@ describe('buildHostApprovalChange', () => {
     for (const after of [undefined, null]) {
       expect(buildHostApprovalChange({ before: block({}), after })).toEqual({
         fields: {},
-        tools: {},
+        tools: [],
         toolsTruncated: 0,
         approvers: {},
         blockRemoved: true,
@@ -152,8 +159,7 @@ describe('buildHostApprovalChange', () => {
       after: block({ tools: { [longName]: false } }),
     })
     expect(MAX_TOOL_NAME_LENGTH).toBe(64)
-    expect(Object.keys(change?.tools ?? {})).toEqual(['t'.repeat(64)])
-    expect(change?.tools['t'.repeat(64)]).toEqual({ old: null, new: false })
+    expect(change?.tools).toEqual([{ name: 't'.repeat(64), old: null, new: false }])
   })
 
   describe('native tool names are listed first (security M-1)', () => {
@@ -167,16 +173,18 @@ describe('buildHostApprovalChange', () => {
     const summaryTools = (summary: string | undefined): string[] => {
       expect(summary).toBeDefined()
       expect((summary as string).length).toBeLessThanOrEqual(4096)
-      return Object.keys((JSON.parse(summary as string) as { tools: object }).tools)
+      return (JSON.parse(summary as string) as { tools: Array<{ name: string }> }).tools.map(
+        entry => entry.name
+      )
     }
 
     it('F1: 50 decoys sorted before shell_exec still list shell_exec in the line and the summary', () => {
       const before = { tools: { shell_exec: true } }
       const after = { tools: { shell_exec: false, ...decoys(50, 3, true) } }
       const change = buildHostApprovalChange({ before: block(before), after: block(after) })
-      expect(Object.keys(change?.tools ?? {})[0]).toBe('shell_exec')
-      expect(change?.tools.shell_exec).toEqual({ old: true, new: false })
-      expect(Object.keys(change?.tools ?? {})).toHaveLength(51)
+      expect(toolNames(change)[0]).toBe('shell_exec')
+      expect(change?.tools[0]).toEqual({ name: 'shell_exec', old: true, new: false })
+      expect(change?.tools).toHaveLength(51)
       expect(change?.toolsTruncated).toBe(0)
       const summary = buildApprovalChangeSummary({ before, after })
       expect(summaryTools(summary)).toContain('shell_exec')
@@ -188,7 +196,7 @@ describe('buildHostApprovalChange', () => {
       const before = { tools: { shell_exec: true } }
       const after = { tools: { shell_exec: false, ...long } }
       const change = buildHostApprovalChange({ before: block(before), after: block(after) })
-      expect(change?.tools.shell_exec).toEqual({ old: true, new: false })
+      expect(change?.tools[0]).toEqual({ name: 'shell_exec', old: true, new: false })
       const summary = buildApprovalChangeSummary({ before, after })
       const kept = summaryTools(summary)
       expect(kept).toContain('shell_exec')
@@ -201,7 +209,7 @@ describe('buildHostApprovalChange', () => {
       const before = { tools: { shell_exec: true } }
       const after = { tools: { shell_exec: false, ...decoys(50, 3, false) } }
       const change = buildHostApprovalChange({ before: block(before), after: block(after) })
-      expect(change?.tools.shell_exec).toEqual({ old: true, new: false })
+      expect(change?.tools[0]).toEqual({ name: 'shell_exec', old: true, new: false })
       expect(summaryTools(buildApprovalChangeSummary({ before, after }))).toContain('shell_exec')
     })
 
@@ -216,7 +224,7 @@ describe('buildHostApprovalChange', () => {
         before: block({ tools: before }),
         after: block({ tools: after }),
       })
-      const listed = Object.keys(change?.tools ?? {})
+      const listed = toolNames(change)
       expect(listed.slice(0, MCP_HOST_NATIVE_TOOL_NAMES.length)).toEqual(
         [...MCP_HOST_NATIVE_TOOL_NAMES].sort()
       )
@@ -235,12 +243,87 @@ describe('buildHostApprovalChange', () => {
       })
       expect(change).toEqual({
         fields: {},
-        tools: { shell_exec: { old: true, new: false } },
+        tools: [{ name: 'shell_exec', old: true, new: false }],
         toolsTruncated: 0,
         approvers: {},
         blockRemoved: false,
         inheritedBefore: false,
       })
+    })
+  })
+
+  describe('no changed tool vanishes from the audit (security m-1)', () => {
+    // JSON.parse makes `__proto__` an own key, as a request body does.
+    const parsed = (text: string): Record<string, unknown> =>
+      JSON.parse(text) as Record<string, unknown>
+
+    it('P1: a changed tool named __proto__ is audited and the summary exists', () => {
+      const before = parsed('{"tools":{}}')
+      const after = parsed('{"tools":{"__proto__":false}}')
+      const change = buildHostApprovalChange({ before, after })
+      expect(change?.tools).toEqual([{ name: '__proto__', old: null, new: false }])
+      const summary = buildApprovalChangeSummary({ before, after })
+      expect(summary).toBeDefined()
+      expect(toolNames(JSON.parse(summary as string))).toEqual(['__proto__'])
+    })
+
+    it('P2: __proto__ next to a real change does not hide either', () => {
+      const before = parsed('{"tools":{"shell_exec":true}}')
+      const after = parsed('{"tools":{"shell_exec":false,"__proto__":false}}')
+      const change = buildHostApprovalChange({ before, after })
+      expect(toolNames(change)).toEqual(['shell_exec', '__proto__'])
+      expect(
+        toolNames(JSON.parse(buildApprovalChangeSummary({ before, after }) as string))
+      ).toEqual(['shell_exec', '__proto__'])
+    })
+
+    it('P3: two names sharing their first 64 characters stay two entries', () => {
+      const first = `${'p'.repeat(64)}one`
+      const second = `${'p'.repeat(64)}two`
+      const change = buildHostApprovalChange({
+        before: block({ tools: {} }),
+        after: block({ tools: { [first]: true, [second]: false } }),
+      })
+      expect(change?.tools).toEqual([
+        { name: 'p'.repeat(64), old: null, new: true },
+        { name: 'p'.repeat(64), old: null, new: false },
+      ])
+      expect(change?.toolsTruncated).toBe(0)
+    })
+
+    it('L1: the root logger redaction keeps tools named like a redacted key', async () => {
+      const lines: string[] = []
+      const logger = pino(
+        { redact: { paths: [...TOKEN_LEAK_REDACT_PATHS], remove: true } },
+        new Writable({
+          write(chunk, _encoding, done) {
+            lines.push(String(chunk))
+            done()
+          },
+        })
+      )
+      vi.spyOn(rootLogger, 'child').mockReturnValue(logger as never)
+      const change = buildHostApprovalChange({
+        before: block({ tools: { shell_exec: true } }),
+        after: block({ tools: { shell_exec: false, access_token: false, id_token: false } }),
+      })
+      expect(change).not.toBeNull()
+      logHostApprovalChange({
+        change: change as NonNullable<typeof change>,
+        host: 'foo',
+        namespace: 'ns',
+        operatorSub: null,
+        operationId: null,
+        via: 'host_put',
+      })
+      expect(lines).toHaveLength(1)
+      const logged = JSON.parse(lines[0] as string) as { tools: Array<{ name: string }> }
+      expect(logged.tools.map(entry => entry.name).sort()).toEqual([
+        'access_token',
+        'id_token',
+        'shell_exec',
+      ])
+      vi.restoreAllMocks()
     })
   })
 })

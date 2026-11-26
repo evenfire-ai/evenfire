@@ -50,7 +50,7 @@ const SEED: HarnessObject = {
 function change(overrides: Partial<HostApprovalChange> = {}): HostApprovalChange {
   return {
     fields: {},
-    tools: {},
+    tools: [],
     toolsTruncated: 0,
     approvers: {},
     blockRemoved: false,
@@ -66,7 +66,7 @@ describe('serializeApprovalChangeSummary', () => {
     )
     expect(JSON.parse(text)).toEqual({
       fields: { modeCeiling: { old: 'manual', new: 'allow_all' } },
-      tools: {},
+      tools: [],
       toolsTruncated: 0,
       approvers: {},
       blockRemoved: false,
@@ -75,9 +75,13 @@ describe('serializeApprovalChangeSummary', () => {
   })
 
   it('an oversized change drops tool entries into toolsTruncated and still parses', () => {
-    const tools: HostApprovalChange['tools'] = {}
+    const tools: HostApprovalChange['tools'] = []
     for (let index = 0; index < 50; index += 1) {
-      tools[`${String(index).padStart(2, '0')}-${'t'.repeat(61)}`] = { old: null, new: true }
+      tools.push({
+        name: `${String(index).padStart(2, '0')}-${'t'.repeat(61)}`,
+        old: null,
+        new: true,
+      })
     }
     const input = change({ tools, toolsTruncated: 3 })
     expect(JSON.stringify(input).length).toBeGreaterThan(MAX_APPROVAL_CHANGE_SUMMARY_LENGTH)
@@ -86,11 +90,11 @@ describe('serializeApprovalChangeSummary', () => {
 
     expect(text.length).toBeLessThanOrEqual(MAX_APPROVAL_CHANGE_SUMMARY_LENGTH)
     const parsed = JSON.parse(text) as HostApprovalChange
-    const kept = Object.keys(parsed.tools)
+    const kept = parsed.tools.map(entry => entry.name)
     expect(kept.length).toBeGreaterThan(0)
     expect(kept.length).toBeLessThan(50)
     // Entries go from the end: the kept ones are the first, in order.
-    expect(kept).toEqual(Object.keys(tools).slice(0, kept.length))
+    expect(kept).toEqual(tools.map(entry => entry.name).slice(0, kept.length))
     expect(parsed.toolsTruncated).toBe(3 + (50 - kept.length))
   })
 
@@ -99,7 +103,7 @@ describe('serializeApprovalChangeSummary', () => {
     for (let index = 0; index < 60; index += 1) {
       fields[`f${index}-${'k'.repeat(120)}`] = { old: 'o'.repeat(128), new: 'n'.repeat(128) }
     }
-    const tools: HostApprovalChange['tools'] = { a: { old: null, new: true } }
+    const tools: HostApprovalChange['tools'] = [{ name: 'a', old: null, new: true }]
     const approvers = { 'channels.telegram': { added: 2, removed: 1 } }
     const input = change({ fields, tools, toolsTruncated: 4, approvers, inheritedBefore: true })
 
@@ -364,14 +368,16 @@ describe('the administrative trace read profile', () => {
   it('discloses a summary whose tool name holds a DEL character, and it parses back to the name', () => {
     const name = `tool${String.fromCharCode(127)}name`
     const summary = serializeApprovalChangeSummary(
-      change({ tools: { [name]: { old: null, new: true } } })
+      change({ tools: [{ name, old: null, new: true }] })
     )
     expect(summary).not.toContain(String.fromCharCode(127))
     expect(projectTraceSafeFields({ status: 'attempted', summary }, 'administrative')).toEqual({
       status: 'attempted',
       summary,
     })
-    expect(Object.keys((JSON.parse(summary) as HostApprovalChange).tools)).toEqual([name])
+    expect((JSON.parse(summary) as HostApprovalChange).tools.map(entry => entry.name)).toEqual([
+      name,
+    ])
   })
 
   it('drops a summary that is not a string of at most the cap', () => {

@@ -4,6 +4,11 @@
  * log line that lists what changed field by field, so an operator can answer
  * "who widened this agent's approvals, and when" from the log alone.
  *
+ * Completeness: every changed mcp-host native tool is always listed; other
+ * changed tools are capped (`MAX_TOOL_KEYS`) and the rest are counted in
+ * `toolsTruncated`. Changed tools are an array of `{ name, old, new }` so a
+ * tool name never meets an object member or a logger redaction path.
+ *
  * Privacy: the line carries no approver identity, only how many approvers were
  * added and removed per channel. Every value is a primitive cut to
  * `MAX_VALUE_LENGTH` characters.
@@ -24,9 +29,17 @@ export const MAX_VALUE_LENGTH = 128
 
 type Leaf = string | number | boolean | null
 
+export type HostApprovalToolChange = { name: string; old: boolean | null; new: boolean | null }
+
 export type HostApprovalChange = {
   fields: Record<string, { old: Leaf; new: Leaf }>
-  tools: Record<string, { old: boolean | null; new: boolean | null }>
+  /**
+   * An array, not a map keyed by tool name: a request-supplied name such as
+   * `__proto__` cannot collide with an object's own members, two names that
+   * share their first 64 characters stay two entries, and no logger redaction
+   * path (`*.access_token` and the like) can match a tool name.
+   */
+  tools: HostApprovalToolChange[]
   toolsTruncated: number
   approvers: Record<string, { added: number; removed: number }>
   blockRemoved: boolean
@@ -134,21 +147,17 @@ export function buildHostApprovalChange(input: {
   // key order, whatever else changed; then at most MAX_TOOL_KEYS other changed
   // keys, in key order. The rest are counted. A flood of unrelated keys
   // therefore cannot push a native tool's change out of the line.
-  const tools: HostApprovalChange['tools'] = {}
-  const native: Array<[string, { old: boolean | null; new: boolean | null }]> = []
-  const other: Array<[string, { old: boolean | null; new: boolean | null }]> = []
+  const native: HostApprovalToolChange[] = []
+  const other: HostApprovalToolChange[] = []
   for (const key of [...new Set([...before.tools.keys(), ...after.tools.keys()])].sort()) {
     const asFlag = (value: unknown): boolean | null => (typeof value === 'boolean' ? value : null)
     const oldValue = asFlag(before.tools.get(key))
     const newValue = asFlag(after.tools.get(key))
     if (oldValue === newValue) continue
-    const entry: [string, { old: boolean | null; new: boolean | null }] = [
-      key.slice(0, MAX_TOOL_NAME_LENGTH),
-      { old: oldValue, new: newValue },
-    ]
+    const entry = { name: key.slice(0, MAX_TOOL_NAME_LENGTH), old: oldValue, new: newValue }
     ;(isMcpHostNativeToolName(key) ? native : other).push(entry)
   }
-  for (const [name, entry] of [...native, ...other.slice(0, MAX_TOOL_KEYS)]) tools[name] = entry
+  const tools = [...native, ...other.slice(0, MAX_TOOL_KEYS)]
   const toolsTruncated = Math.max(0, other.length - MAX_TOOL_KEYS)
 
   const approvers: HostApprovalChange['approvers'] = {}
@@ -167,7 +176,7 @@ export function buildHostApprovalChange(input: {
   if (
     (beforeApproval === undefined) === (afterApproval === undefined) &&
     Object.keys(fields).length === 0 &&
-    Object.keys(tools).length === 0 &&
+    tools.length === 0 &&
     toolsTruncated === 0 &&
     Object.keys(approvers).length === 0
   ) {
@@ -212,15 +221,15 @@ function encode(value: unknown): string {
  *    is bounded, so it always fits.
  */
 export function serializeApprovalChangeSummary(change: HostApprovalChange): string {
-  const toolKeys = [
-    ...Object.keys(change.tools).filter(isMcpHostNativeToolName),
-    ...Object.keys(change.tools).filter(key => !isMcpHostNativeToolName(key)),
+  const entries = [
+    ...change.tools.filter(entry => isMcpHostNativeToolName(entry.name)),
+    ...change.tools.filter(entry => !isMcpHostNativeToolName(entry.name)),
   ]
-  for (let kept = toolKeys.length; kept >= 0; kept -= 1) {
+  for (let kept = entries.length; kept >= 0; kept -= 1) {
     const text = encode({
       ...change,
-      tools: Object.fromEntries(toolKeys.slice(0, kept).map(key => [key, change.tools[key]])),
-      toolsTruncated: change.toolsTruncated + (toolKeys.length - kept),
+      tools: entries.slice(0, kept),
+      toolsTruncated: change.toolsTruncated + (entries.length - kept),
     })
     if (text.length <= MAX_APPROVAL_CHANGE_SUMMARY_LENGTH) return text
   }
@@ -228,7 +237,7 @@ export function serializeApprovalChangeSummary(change: HostApprovalChange): stri
   return encode({
     truncated: true,
     fieldCount: Object.keys(change.fields).length,
-    toolCount: toolKeys.length + change.toolsTruncated,
+    toolCount: entries.length + change.toolsTruncated,
     approverChannelCount: counts.length,
     approversAdded: counts.reduce((sum, entry) => sum + entry.added, 0),
     approversRemoved: counts.reduce((sum, entry) => sum + entry.removed, 0),
