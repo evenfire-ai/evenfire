@@ -13,6 +13,39 @@ export type HostAccessDenialCode = 'host_access_revoked' | 'host_access_denied'
 export type HostAccessDenial = { denied: true; code: HostAccessDenialCode }
 
 /**
+ * control-api refused the request rather than the Host: a 401 without the
+ * service gate's mark (the caller's RPC token, or an upstream 401 that
+ * control-api forwards), or 409 (direct-run attribution). A 401 the service gate
+ * marked is an unavailable authority, not a rejection.
+ */
+export type HostAccessRejection = { rejected: true; status: 401 | 409 }
+
+/**
+ * control-api could not complete the Host authorization: it timed out, the call
+ * failed, it answered a status that is not an answer about access, its 200
+ * answer cannot authorize a Host request (invalid binding status on POST, no
+ * edge assertion), or it refused rpc-proxy's own service credential (a 401 that
+ * carries the service gate's mark).
+ */
+export type HostAuthorityUnavailable =
+  | {
+      unavailable: true
+      cause:
+        | 'timeout'
+        | 'request_failed'
+        | 'invalid_binding_status'
+        | 'edge_assertion_missing'
+        | 'service_credential_rejected'
+    }
+  | { unavailable: true; cause: 'http_status'; status: number }
+
+/** Every way a V1 Host resolve ends without a connection. */
+export type HostResolveRefusal = HostAccessDenial | HostAccessRejection | HostAuthorityUnavailable
+
+/** How a route answers a denial: 403 with the code, or 404 (task result and cancel). */
+export type HostDenialAnswer = 'forbidden' | 'not_found'
+
+/**
  * control-api denial reasons (control-api `RpcHostAccessDenialReason`) that
  * prove the access was actually removed from the user. Every other reason
  * (`host_disabled`, `host_missing`, `host_claim_missing`, `subject_mismatch`,
@@ -37,11 +70,16 @@ export function hostAccessDenied(code: HostAccessDenialCode): HostAccessDenial {
   return { denied: true, code }
 }
 
-/** Narrows `resolveHostConnectionForUser`'s result: true means "respond 403". */
-export function isHostAccessDenied<T extends object>(
-  resolved: T | HostAccessDenial | null
-): resolved is HostAccessDenial {
-  return resolved !== null && (resolved as Partial<HostAccessDenial>).denied === true
+/**
+ * Narrows a Host resolve result: true means "answer it with
+ * respondHostResolveRefusal". A connection carries none of the three keys.
+ */
+export function isHostResolveRefusal(value: object): value is HostResolveRefusal {
+  return (
+    Object.hasOwn(value, 'denied') ||
+    Object.hasOwn(value, 'rejected') ||
+    Object.hasOwn(value, 'unavailable')
+  )
 }
 
 const RESERVED_HOST_ACCESS_CODES: ReadonlySet<unknown> = new Set<HostAccessDenialCode>([
@@ -76,42 +114,6 @@ export function withoutReservedHostAccessCode(status: number, body: string): str
   return JSON.stringify(rest)
 }
 
-/**
- * `name` of the error control-api's Host-access client throws when control-api
- * authorizes a Host (200) without issuing an edge assertion: control-api is
- * older than rpc-proxy. Declared here so the responder below can recognise the
- * error without importing the client (which imports this module).
- */
-export const CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR =
-  'ControlApiHostEdgeAssertionMissingError'
-
-/**
- * Answers a Host request whose authorization control-api could not complete
- * because it issued no edge assertion: 503 `authority_unavailable`, the answer
- * the V2 path and the V1 re-resolve give for an unavailable authority, never
- * the error's internal message. Called first by the terminal error paths
- * (respondUpstreamUnavailable, apiErrorHandler) and by the stream routes'
- * catches. The error is matched by `name`. Returns false, having written
- * nothing, for every other error; returns true without writing when the
- * response is already committed.
- */
-export function respondControlApiAuthorityUnavailable(
-  res: ExpressResponse,
-  error: unknown
-): boolean {
-  if (!(error instanceof Error) || error.name !== CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR) {
-    return false
-  }
-  if (res.headersSent) {
-    console.warn(
-      '[RPC_PROXY] suppressing duplicate terminal response (control-api authority unavailable)'
-    )
-    return true
-  }
-  res.status(503).json({ error: 'authority_unavailable' })
-  return true
-}
-
 /** The single writer of rpc-proxy's own Host authorization 403. */
 export function respondHostAccessDenied(
   res: ExpressResponse,
@@ -121,4 +123,61 @@ export function respondHostAccessDenied(
     error: HOST_ACCESS_DENIED_ERROR,
     code: typeof code === 'string' ? code : code.code,
   })
+}
+
+/**
+ * The one writer of a Host resolve refusal, at a route's first resolve and at
+ * the wake-and-hold re-resolve alike. A denial answers 403 with its code, or
+ * 404 for the routes whose `denialAnswer` is `not_found`; a rejection answers
+ * its own status; a control-api timeout answers 504 and every other
+ * unavailability 503 `authority_unavailable`. No body carries a control-api
+ * message. A committed response is left as it is, with one warn line.
+ */
+export function respondHostResolveRefusal(
+  res: ExpressResponse,
+  refusal: HostResolveRefusal,
+  denialAnswer: HostDenialAnswer
+): void {
+  if (res.headersSent) {
+    console.warn('[RPC_PROXY] suppressing duplicate terminal response (host-resolve-refusal)')
+    return
+  }
+  if ('denied' in refusal) {
+    if (denialAnswer === 'not_found') {
+      res.status(404).json({ error: 'Host not found or not accessible' })
+      return
+    }
+    respondHostAccessDenied(res, refusal)
+    return
+  }
+  if ('rejected' in refusal) {
+    if (refusal.status === 401) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    res.status(409).json({ error: 'Direct run attribution conflict' })
+    return
+  }
+  if ('unavailable' in refusal) {
+    switch (refusal.cause) {
+      case 'timeout':
+        res.status(504).json({ error: 'Gateway Timeout' })
+        return
+      case 'request_failed':
+      case 'invalid_binding_status':
+      case 'edge_assertion_missing':
+      case 'http_status':
+      case 'service_credential_rejected':
+        res.status(503).json({ error: 'authority_unavailable' })
+        return
+      default: {
+        // A new cause without a status decision above fails the build here.
+        const unhandledCause: never = refusal
+        throw new Error(`Unhandled host authority cause: ${JSON.stringify(unhandledCause)}`)
+      }
+    }
+  }
+  // A new refusal member without a branch above fails the build here.
+  const unhandled: never = refusal
+  throw new Error(`Unhandled host resolve refusal: ${JSON.stringify(unhandled)}`)
 }
