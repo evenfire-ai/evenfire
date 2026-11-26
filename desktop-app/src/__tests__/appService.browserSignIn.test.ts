@@ -1345,6 +1345,44 @@ describe('browser sign-in start, cancel and the methods read', () => {
     }
   )
 
+  // Round-3 review minor 6: G2-5b crosses a generation advance only. On the legacy duplicate
+  // profiles, a signed-out discovery commit changes the profile id with no bump (X5, T0-5), so
+  // only op 2's binding check refuses the start.
+  it('rejects a start whose methods read crossed a profile change with no bump (round-3 review minor 6)', async () => {
+    const harness = await createBrowserSignInHarness({
+      legacyDuplicateProfiles: true,
+      linksAvailable: true,
+    })
+    const { service } = harness
+    const runtimeConfig = await import('../config.js')
+    const [slash, bare] = service
+      .getRuntimeConfigState()
+      .options.filter(option => new URL(option.externalRestApiBaseUrl).host === LEGACY_REST_HOST)
+    if (!slash || !bare) throw new Error('the legacy profiles were not loaded')
+    expect(runtimeConfig.getActiveRuntimeConfigOptionId()).toBe(bare.id)
+    const methods = harness.hold('methods')
+
+    const start = service.startBrowserSignIn()
+    await until(harness, () => methods.reached, "start's methods read")
+    // Start's op 1 has advanced the generation; this is the one op 2 checks.
+    const generation = service.getSessionGeneration()
+    await service.getDependenciesHealth()
+    expect(
+      runtimeConfig.getActiveRuntimeConfigOptionId(),
+      'the discovery commit made the slash profile active'
+    ).toBe(slash.id)
+    expect(service.getSessionGeneration(), 'the generation did not move').toBe(generation)
+    // A usable answer: without the binding check, the browser would open.
+    methods.release(edgeResponse(readEdgeRecord(BOTH_METHODS)))
+
+    await expect(start).rejects.toThrow(/^stale_runtime_environment$/)
+    await harness.drain()
+    expect(methodsFetches(harness)).toHaveLength(1)
+    expect(harness.opens).toEqual([])
+    expect(harness.pushes).toEqual([])
+    expect(service.getBrowserSignInState()).toEqual({ attemptId: null, phase: 'idle' })
+  })
+
   it('G2-5c ends the attempt failed when the browser cannot open', async () => {
     const harness = await createBrowserSignInHarness({ linksAvailable: true })
     const open = harness.hold('open')
