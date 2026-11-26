@@ -67,9 +67,6 @@ five steps live together.
    also default to Required). See
    [Configure approvals](../how-to/configure-approvals.md).
 
-   ![Control UI per-tool approval editor on a host detail page](../assets/control-ui-approval-editor.webp)
-   _Dev cluster, demo tenant._
-
 4. **Constrain it** — `EgressEditor` (`components/EgressEditor.tsx`, model in
    `lib/egressModel.ts`): closed-by-default, exact-host, exact-CIDR/IP (where
    enabled — connector creation, connector edit, and registry install expose
