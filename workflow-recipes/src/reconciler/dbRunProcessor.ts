@@ -290,18 +290,27 @@ const PAUSE_PENDING_FOR_AUTHORITY = `
    WHERE run_id = $1
      AND phase = 'Pending'`
 
+// A run that fails after a cancel request was asked to stop: it is recorded
+// `Canceled`, here, in the stuck sweep and in the missing-child reclaim. The
+// statements return the phase written, which is the phase reported to
+// `onRunTerminal`. `Succeeded` is never relabelled, and a row that is already
+// terminal is not matched by any of them (except `Failed` → `Succeeded` here).
 const UPDATE_RUN_TERMINAL = `
   UPDATE workflow_runs
-     SET phase = $1,
+     SET phase = CASE
+                   WHEN $1::text = 'Failed' AND cancel_requested_at IS NOT NULL THEN 'Canceled'
+                   ELSE $1::text
+                 END,
          completed_at = COALESCE($2::timestamptz, now()),
          last_reconciled_at = now(),
          updated_at = now()
    WHERE run_id = $3
      AND (
        phase IN ('Pending', 'Running')
-       OR (phase = 'AuthorizationPaused' AND $1 IN ('Failed', 'Canceled'))
-       OR (phase = 'Failed' AND $1 = 'Succeeded')
-     )`
+       OR (phase = 'AuthorizationPaused' AND $1::text IN ('Failed', 'Canceled'))
+       OR (phase = 'Failed' AND $1::text = 'Succeeded')
+     )
+  RETURNING phase`
 
 const UPDATE_RUN_PROGRESS = `
   UPDATE workflow_runs
@@ -357,13 +366,14 @@ const FIND_STUCK_RUNS = `
 
 const FAIL_STUCK_RUN = `
   UPDATE workflow_runs
-     SET phase = 'Failed',
+     SET phase = CASE WHEN cancel_requested_at IS NOT NULL THEN 'Canceled' ELSE 'Failed' END,
          completed_at = now(),
          last_reconciled_at = now(),
          updated_at = now()
    WHERE run_id = $1
      AND phase IN ('Running', 'AuthorizationPaused')
-     AND owner_instance_id = $2`
+     AND owner_instance_id = $2
+  RETURNING phase`
 
 const FIND_ORPHAN_RUNS = `
   SELECT run_id, phase
@@ -388,13 +398,14 @@ const CLAIM_ORPHAN_RUNNING = `
 
 const FAIL_RECLAIMED_MISSING_CHILD = `
   UPDATE workflow_runs
-     SET phase = 'Failed',
+     SET phase = CASE WHEN cancel_requested_at IS NOT NULL THEN 'Canceled' ELSE 'Failed' END,
          completed_at = now(),
          last_reconciled_at = now(),
          updated_at = now()
    WHERE run_id = $1
      AND phase = 'Running'
-     AND owner_instance_id = $2`
+     AND owner_instance_id = $2
+  RETURNING phase`
 
 // Cancel delivery reads with no owner predicate: any processor re-queues the
 // signal, because the coordinator may poll any workflow-recipes pod. The tick
@@ -492,15 +503,19 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     if (!stopped) await attachListener()
   }
 
-  async function failReclaimedRunMissingChild(runId: string): Promise<boolean> {
+  /** The terminal phase written, or null when the row was not updated. */
+  async function failReclaimedRunMissingChild(runId: string): Promise<WorkflowRunPhase | null> {
     const client = await connect()
     let committed = false
     try {
       await client.query('BEGIN')
-      const res = await client.query(FAIL_RECLAIMED_MISSING_CHILD, [runId, opts.instanceId])
+      const res = await client.query<{ phase: WorkflowRunPhase }>(FAIL_RECLAIMED_MISSING_CHILD, [
+        runId,
+        opts.instanceId,
+      ])
       await client.query('COMMIT')
       committed = true
-      return Boolean(res.rowCount)
+      return res.rows[0]?.phase ?? null
     } catch (err) {
       if (!committed) {
         try {
@@ -523,13 +538,14 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     if (!opts.childRecipeExists) return
 
     if (!childRecipeName || !childRecipeNamespace) {
-      const failed = await failReclaimedRunMissingChild(runId)
-      if (failed) {
+      const written = await failReclaimedRunMissingChild(runId)
+      if (written) {
         log.warn('reclaimed running run missing child recipe reference; failing run', {
           run_id: runId,
           owner_instance_id: opts.instanceId,
+          phase: written,
         })
-        notifyRunTerminal(runId, 'Failed')
+        notifyRunTerminal(runId, written)
       }
       return
     }
@@ -552,15 +568,16 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
 
     if (childExists) return
 
-    const failed = await failReclaimedRunMissingChild(runId)
-    if (failed) {
+    const written = await failReclaimedRunMissingChild(runId)
+    if (written) {
       log.warn('reclaimed running run child recipe missing; failing run', {
         run_id: runId,
         child_name: childRecipeName,
         child_namespace: childRecipeNamespace,
         owner_instance_id: opts.instanceId,
+        phase: written,
       })
-      notifyRunTerminal(runId, 'Failed')
+      notifyRunTerminal(runId, written)
     }
   }
 
@@ -869,13 +886,14 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       }
 
       if (mappedPhase && TERMINAL_PHASES.has(mappedPhase)) {
-        const res = await client.query(UPDATE_RUN_TERMINAL, [
+        const res = await client.query<{ phase: WorkflowRunPhase }>(UPDATE_RUN_TERMINAL, [
           mappedPhase,
           execution?.completedAt ?? null,
           runId,
         ])
-        if (res.rowCount && res.rowCount > 0) {
-          terminalNotification = { runId, phase: mappedPhase }
+        const written = res.rows[0]?.phase
+        if (written) {
+          terminalNotification = { runId, phase: written }
         }
       } else {
         // Non-terminal sync — just bump heartbeat. Do NOT overwrite `phase`
@@ -915,11 +933,18 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         opts.maxRunDurationCapSeconds,
       ])
       for (const row of res.rows) {
-        const upd = await client.query(FAIL_STUCK_RUN, [row.run_id, opts.instanceId])
-        if (upd.rowCount && upd.rowCount > 0) {
+        const upd = await client.query<{ phase: WorkflowRunPhase }>(FAIL_STUCK_RUN, [
+          row.run_id,
+          opts.instanceId,
+        ])
+        const written = upd.rows[0]?.phase
+        if (written) {
           failed += 1
-          log.warn('run force-failed (max duration exceeded)', { run_id: row.run_id })
-          terminalNotifications.push({ runId: row.run_id, phase: 'Failed' })
+          log.warn('run force-failed (max duration exceeded)', {
+            run_id: row.run_id,
+            phase: written,
+          })
+          terminalNotifications.push({ runId: row.run_id, phase: written })
         }
       }
       await client.query('COMMIT')

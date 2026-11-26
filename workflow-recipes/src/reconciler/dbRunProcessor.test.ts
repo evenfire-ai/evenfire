@@ -852,7 +852,7 @@ describe('createDbRunProcessor', () => {
     const client = makeClient(async sql => {
       if (/^BEGIN$/i.test(sql) || /^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
       if (/UPDATE workflow_runs[\s\S]*completed_at/i.test(sql)) {
-        return { rows: [], rowCount: 1 }
+        return { rows: [{ phase: 'Succeeded' }], rowCount: 1 }
       }
       if (/INSERT INTO workflow_run_steps/i.test(sql)) {
         return { rows: [], rowCount: 1 }
@@ -927,7 +927,9 @@ describe('createDbRunProcessor', () => {
   it('does not fail syncFromRecipeExecution when the post-commit terminal callback throws', async () => {
     const client = makeClient(async sql => {
       if (/^BEGIN$/i.test(sql) || /^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
-      if (/UPDATE workflow_runs[\s\S]*completed_at/i.test(sql)) return { rows: [], rowCount: 1 }
+      if (/UPDATE workflow_runs[\s\S]*completed_at/i.test(sql)) {
+        return { rows: [{ phase: 'Succeeded' }], rowCount: 1 }
+      }
       if (/^ROLLBACK$/i.test(sql)) return { rows: [], rowCount: 0 }
       return { rows: [], rowCount: 0 }
     })
@@ -985,10 +987,12 @@ describe('createDbRunProcessor', () => {
       if (/^BEGIN$/i.test(sql) || /^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
       if (/UPDATE workflow_runs[\s\S]*completed_at/i.test(sql)) {
         sawRecoveredTerminalPredicate =
-          /phase = 'Failed' AND \$1 = 'Succeeded'/.test(sql) &&
+          /phase = 'Failed' AND \$1::text = 'Succeeded'/.test(sql) &&
           params?.[0] === 'Succeeded' &&
           params?.[2] === 'run-recovered'
-        return { rows: [], rowCount: sawRecoveredTerminalPredicate ? 1 : 0 }
+        return sawRecoveredTerminalPredicate
+          ? { rows: [{ phase: 'Succeeded' }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
       }
       return { rows: [], rowCount: 0 }
     })
@@ -1141,7 +1145,7 @@ describe('createDbRunProcessor', () => {
     expect(failed).toBe(0)
 
     const anyFail = client.calls.find(c =>
-      /UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(c.sql)
+      /UPDATE workflow_runs[\s\S]*ELSE 'Failed' END/i.test(c.sql)
     )
     expect(anyFail).toBeUndefined()
   })
@@ -1154,8 +1158,8 @@ describe('createDbRunProcessor', () => {
       if (/FROM workflow_runs[\s\S]*FOR UPDATE SKIP LOCKED/i.test(sql)) {
         return { rows: stuckRows, rowCount: stuckRows.length }
       }
-      if (/UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(sql)) {
-        return { rows: [], rowCount: 1 }
+      if (/UPDATE workflow_runs[\s\S]*ELSE 'Failed' END/i.test(sql)) {
+        return { rows: [{ phase: 'Failed' }], rowCount: 1 }
       }
       return { rows: [], rowCount: 0 }
     })
@@ -1178,7 +1182,7 @@ describe('createDbRunProcessor', () => {
     expect(onRunTerminal).toHaveBeenCalledWith('run-stuck-1', 'Failed')
 
     const failUpdate = client.calls.find(c =>
-      /UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(c.sql)
+      /UPDATE workflow_runs[\s\S]*ELSE 'Failed' END/i.test(c.sql)
     )
     expect(failUpdate?.params).toEqual(['run-stuck-1', 'wrc-1'])
   })
@@ -1423,8 +1427,8 @@ describe('createDbRunProcessor', () => {
       if (/FROM workflow_runs[\s\S]*FOR UPDATE SKIP LOCKED/i.test(sql)) {
         return { rows: [{ run_id: 'run-orphan-running-2' }], rowCount: 1 }
       }
-      if (/UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(sql)) {
-        return { rows: [], rowCount: 1 }
+      if (/UPDATE workflow_runs[\s\S]*ELSE 'Failed' END/i.test(sql)) {
+        return { rows: [{ phase: 'Failed' }], rowCount: 1 }
       }
       return { rows: [], rowCount: 0 }
     })
@@ -1469,7 +1473,7 @@ describe('createDbRunProcessor', () => {
     expect(failed).toBe(1)
     expect(onRunTerminal).toHaveBeenCalledWith('run-orphan-running-2', 'Failed')
     const failUpdate = stuckClient.calls.find(c =>
-      /UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(c.sql)
+      /UPDATE workflow_runs[\s\S]*ELSE 'Failed' END/i.test(c.sql)
     )
     expect(failUpdate?.params).toEqual(['run-orphan-running-2', 'wrc-3'])
   })
@@ -1490,9 +1494,9 @@ describe('createDbRunProcessor', () => {
           rowCount: 1,
         }
       }
-      if (/SET phase = 'Failed'/.test(sql)) {
+      if (/ELSE 'Failed' END/.test(sql)) {
         expect(params).toEqual(['run-orphan-running-3', 'wrc-4'])
-        return { rows: [], rowCount: 1 }
+        return { rows: [{ phase: 'Failed' }], rowCount: 1 }
       }
       if (/FROM workflow_runs[\s\S]*FOR UPDATE SKIP LOCKED/i.test(sql)) {
         return { rows: [], rowCount: 0 }
@@ -1542,7 +1546,7 @@ describe('createDbRunProcessor', () => {
       namespace: 'sandbox-recipes',
     })
     const failUpdate = workerClient.calls.find(c =>
-      /UPDATE workflow_runs[\s\S]*SET phase = 'Failed'/i.test(c.sql)
+      /UPDATE workflow_runs[\s\S]*ELSE 'Failed' END/i.test(c.sql)
     )
     expect(failUpdate).toBeDefined()
     expect(onRunTerminal).toHaveBeenCalledWith('run-orphan-running-3', 'Failed')
