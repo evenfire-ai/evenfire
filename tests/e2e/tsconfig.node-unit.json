@@ -8,6 +8,7 @@
     "gfsUploadV2Fixtures.test.ts",
     "integration/codex-subscription-contract-freeze.test.ts",
     "integration/chat-body-budget-parity.test.ts",
-    "helpers.test.ts"
+    "helpers.test.ts",
+    "mcp-host/cronLog.test.ts"
   ]
 }

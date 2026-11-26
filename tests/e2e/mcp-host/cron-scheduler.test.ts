@@ -3,9 +3,13 @@
  * the full agent pipeline. Tests cron job CRUD, manual triggering,
  * and cron-triggered task execution.
  *
- * Tests CR-1 through CR-11 across two phases:
+ * Tests CR-1 through CR-13 across three phases:
  *   Phase 1 (CR-1–CR-6, CR-9, CR-11): Cron CRUD & execution
  *   Phase 2 (CR-7–CR-8, CR-10): Approval + cron
+ *   Phase 3 (CR-12–CR-13): Scheduler timing, read from the runtime pod's
+ *     Cron log lines: an every-minute job fires every minute; disabling after
+ *     repeated enables stops every run; a re-enabled job waits for its next
+ *     cron time. Focused run: -t "CR-12|CR-13".
  *
  * Issue #529 focused gate (branch-scoped minikube): CR-9 and CR-10 only.
  * They use sendWithApproval and assert cron dispatch stores status=completed
@@ -42,20 +46,25 @@
  * of the default deterministic minikube gate.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { CRON_EXEC_PROBE_INSTRUCTION } from '../fixtures/cronExecProbeInstruction.js'
 import {
   DEFAULT_HOST_REF,
+  KUBE_CONTEXT,
+  MCP_HOST_NAMESPACE,
   MCP_HOST_URL,
   approveRequest,
   fetchJson,
   getStatus,
   getTaskResult,
   mcpHostExec,
+  resolveMcpHostDeployment,
   sendMessage,
   sleep,
   waitForAgentState,
   waitForIdle,
 } from '../helpers.js'
+import { type CronLogEntry, type CronLogEvent, parseCronLogLines } from './cronLog.js'
 import { issueRealRpcToken } from './runtimeAuth.js'
 
 let statusToken: string
@@ -666,6 +675,287 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 2: Approval + Cron (approval enabled
 
     await sendAndWait("Delete the 'approval-autonomous-e2e' cron job.", { userId })
   }, 600_000)
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3: Scheduler timing
+//
+// The fire times come from the Cron lines of the mcp-host runtime pod log
+// (see ./cronLog.ts), not from the LLM reply or GET /v1/runtime/cron/results:
+// those carry no fire time, and the in-cluster channel-reader may ACK-delete
+// cron results. Every requested cron_manage action must show its own Cron
+// line, so a reply without a tool call fails the test instead of passing it.
+// ---------------------------------------------------------------------------
+
+const MINUTE_MS = 60_000
+const ACTION_TIMEOUT_MS = 240_000
+
+/**
+ * Cron lines the mcp-host runtime pod logged since `since` (epoch ms).
+ * The kubectl() helper keeps execSync's 1 MiB output limit, which a
+ * fifteen-minute runtime log can exceed, so this read sets its own limit.
+ */
+function readCronLog(since: number): CronLogEntry[] {
+  const log = execFileSync(
+    'kubectl',
+    [
+      `--context=${KUBE_CONTEXT}`,
+      'logs',
+      `deploy/${resolveMcpHostDeployment()}`,
+      '-n',
+      MCP_HOST_NAMESPACE,
+      `--since-time=${new Date(since).toISOString()}`,
+    ],
+    { encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 }
+  )
+  return parseCronLogLines(log)
+}
+
+function linesOf(
+  entries: CronLogEntry[],
+  jobId: string,
+  event: CronLogEvent,
+  after = Number.NEGATIVE_INFINITY
+): CronLogEntry[] {
+  return entries.filter(e => e.jobId === jobId && e.event === event && e.at > after)
+}
+
+async function waitForCronLog(
+  since: number,
+  what: string,
+  done: (entries: CronLogEntry[]) => boolean,
+  timeoutMs: number
+): Promise<CronLogEntry[]> {
+  const deadline = Date.now() + timeoutMs
+  let entries: CronLogEntry[] = []
+  while (Date.now() < deadline) {
+    entries = readCronLog(since)
+    if (done(entries)) return entries
+    await sleep(2000)
+  }
+  throw new Error(
+    `Timed out after ${timeoutMs}ms waiting for ${what}. Last Cron lines: ` +
+      JSON.stringify(entries.slice(-20))
+  )
+}
+
+/** Send a chat request that should run cron_manage, approving the tool call if asked. */
+async function sendCronRequest(content: string, userId: string): Promise<void> {
+  let res = await sendMessage(content, { userId })
+  expect(res.status, JSON.stringify(res.data)).toBe(200)
+
+  if (
+    res.data?.status !== 'waiting_approval' &&
+    typeof res.data?.response === 'string' &&
+    /requires approval|shall i proceed|would you like|want me to/i.test(res.data.response)
+  ) {
+    res = await sendMessage('Yes, proceed. Execute it now.', { userId })
+    expect(res.status, JSON.stringify(res.data)).toBe(200)
+  }
+
+  if (res.data?.status === 'waiting_approval' && res.data?.approval) {
+    const approvalRes = await approveRequest(
+      res.data.approval.userId || userId,
+      res.data.approval.requestId,
+      true
+    )
+    expect(approvalRes.status, JSON.stringify(approvalRes.data)).toBe(200)
+    expect(approvalRes.data?.success, JSON.stringify(approvalRes.data)).toBe(true)
+  }
+}
+
+/** Ask the agent to create an every-minute job; returns its id from the Created line. */
+async function createEveryMinuteJob(name: string, userId: string, since: number): Promise<string> {
+  await sendCronRequest(
+    `Create a cron job named '${name}' with the schedule */1 * * * * (every minute). ` +
+      "Its task content must be exactly: 'Reply with the single word OK.'",
+    userId
+  )
+  const entries = await waitForCronLog(
+    since,
+    `the agent to run cron_manage create for ${name}`,
+    es => es.some(e => e.event === 'Created' && e.jobName === name),
+    ACTION_TIMEOUT_MS
+  )
+  return entries.find(e => e.event === 'Created' && e.jobName === name)!.jobId
+}
+
+/** Ask the agent for one action on a job and return the Cron line it produced. */
+async function runJobAction(
+  action: 'enable' | 'disable' | 'delete',
+  jobId: string,
+  userId: string,
+  since: number
+): Promise<CronLogEntry> {
+  const event: CronLogEvent =
+    action === 'enable' ? 'Enabled' : action === 'disable' ? 'Disabled' : 'Deleted'
+  const before = linesOf(readCronLog(since), jobId, event).length
+  const request =
+    action === 'enable'
+      ? `Enable the cron job with id ${jobId} now, even if it is already enabled.`
+      : action === 'disable'
+        ? `Disable the cron job with id ${jobId}.`
+        : `Delete the cron job with id ${jobId}.`
+  await sendCronRequest(request, userId)
+  const entries = await waitForCronLog(
+    since,
+    `the agent to run cron_manage ${action} for job ${jobId}`,
+    es => linesOf(es, jobId, event).length > before,
+    ACTION_TIMEOUT_MS
+  )
+  return linesOf(entries, jobId, event)[before]!
+}
+
+/**
+ * Delete every job, trying each one even when an earlier delete fails, then
+ * fail with every delete error.
+ */
+async function deleteJobs(jobs: Array<[jobId: string, userId: string]>, since: number) {
+  const failures: string[] = []
+  for (const [jobId, userId] of jobs) {
+    try {
+      await runJobAction('delete', jobId, userId, since)
+    } catch (err) {
+      failures.push(`${jobId}: ${(err as Error).message}`)
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`Cron job cleanup failed; delete these jobs by hand:\n${failures.join('\n')}`)
+  }
+}
+
+function podSecondOfMinute(): number {
+  const second = Number(mcpHostExec('date -u +%S'))
+  if (!Number.isInteger(second)) throw new Error('Could not read the mcp-host pod clock')
+  return second
+}
+
+/** Distance to the nearest minute boundary; a timer may fire a millisecond early. */
+function msFromMinuteBoundary(at: number): number {
+  const offset = at % MINUTE_MS
+  return Math.min(offset, MINUTE_MS - offset)
+}
+
+const isoTimes = (entries: CronLogEntry[]) => entries.map(e => new Date(e.at).toISOString())
+
+describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 3: Scheduler timing', () => {
+  it('CR-12: an every-minute job fires once in every minute', async () => {
+    const since = Date.now() - MINUTE_MS
+    const userId = `cron-test-${++testCounter}`
+    const name = `cadence-e2e-${Date.now()}`
+    const jobId = await createEveryMinuteJob(name, userId, since)
+
+    try {
+      const first = await waitForCronLog(
+        since,
+        `the first fire of ${name}`,
+        es => linesOf(es, jobId, 'Executing').length > 0,
+        150_000
+      )
+      const firstAt = linesOf(first, jobId, 'Executing')[0]!.at
+      // Four minute boundaries follow the first fire within 270 s.
+      const windowEnd = firstAt + 270_000
+      await sleep(Math.max(0, windowEnd + 5_000 - Date.now()))
+
+      const fires = linesOf(readCronLog(since), jobId, 'Executing').filter(e => e.at <= windowEnd)
+      const gaps = fires.slice(1).map((f, i) => Math.round((f.at - fires[i]!.at) / 1000))
+
+      expect.soft(fires.length, `fires: ${isoTimes(fires)}`).toBeGreaterThanOrEqual(4)
+      expect
+        .soft(
+          gaps.every(gap => gap >= 55 && gap <= 65),
+          `gaps in seconds: ${gaps}`
+        )
+        .toBe(true)
+      expect
+        .soft(
+          fires.every(f => msFromMinuteBoundary(f.at) < 3_000),
+          `every fire on a minute boundary: ${isoTimes(fires)}`
+        )
+        .toBe(true)
+    } finally {
+      await deleteJobs([[jobId, userId]], since)
+    }
+  }, 600_000)
+
+  it('CR-13: disabling after repeated enables stops every run, and re-enabling waits for the next cron time', async () => {
+    const since = Date.now() - MINUTE_MS
+    const runId = Date.now()
+    const targetUser = `cron-test-${++testCounter}`
+    const controlUser = `cron-test-${++testCounter}`
+    const target = await createEveryMinuteJob(`toggle-target-${runId}`, targetUser, since)
+    const control = await createEveryMinuteJob(`toggle-control-${runId}`, controlUser, since)
+
+    try {
+      await waitForCronLog(
+        since,
+        'the first fire of the target job',
+        es => linesOf(es, target, 'Executing').length > 0,
+        150_000
+      )
+
+      // Enabling an enabled job twice used to leave orphaned timers that
+      // disableJob could not clear.
+      await runJobAction('enable', target, targetUser, since)
+      await runJobAction('enable', target, targetUser, since)
+      const disabledAt = (await runJobAction('disable', target, targetUser, since)).at
+
+      // Two control fires after the disable: the scheduler kept running and
+      // the log was read across the target's next cron time.
+      await waitForCronLog(
+        since,
+        'two control fires after the target was disabled',
+        es => linesOf(es, control, 'Executing', disabledAt).length >= 2,
+        300_000
+      )
+      await sleep(5_000)
+      const afterDisable = readCronLog(since)
+      const controlFires = linesOf(afterDisable, control, 'Executing', disabledAt)
+      const targetFires = linesOf(afterDisable, target, 'Executing', disabledAt)
+      expect(
+        controlFires.length,
+        `control fires: ${isoTimes(controlFires)}`
+      ).toBeGreaterThanOrEqual(2)
+      expect
+        .soft(
+          targetFires,
+          `target fires after the disable at ${new Date(disabledAt).toISOString()}`
+        )
+        .toEqual([])
+
+      // Re-enable early in a minute, so that "at once" and "at the next
+      // boundary" are far apart.
+      const second = podSecondOfMinute()
+      if (second < 3 || second > 10) await sleep(((63 - second) % 60) * 1000)
+      const enabledAt = (await runJobAction('enable', target, targetUser, since)).at
+      if (enabledAt % MINUTE_MS >= 55_000) {
+        throw new Error(
+          `Inconclusive timing: the re-enable ran at ${new Date(enabledAt).toISOString()}, ` +
+            'too close to the next minute boundary to tell an immediate run from a scheduled one'
+        )
+      }
+      const afterEnable = await waitForCronLog(
+        since,
+        'the first target fire after the re-enable',
+        es => linesOf(es, target, 'Executing', enabledAt).length > 0,
+        120_000
+      )
+      const firstFire = linesOf(afterEnable, target, 'Executing', enabledAt)[0]!
+      const fireReport =
+        `re-enabled at ${new Date(enabledAt).toISOString()}, ` +
+        `fired at ${new Date(firstFire.at).toISOString()}`
+      expect.soft(firstFire.at - enabledAt, fireReport).toBeGreaterThanOrEqual(3_000)
+      expect.soft(msFromMinuteBoundary(firstFire.at), fireReport).toBeLessThan(3_000)
+    } finally {
+      await deleteJobs(
+        [
+          [target, targetUser],
+          [control, controlUser],
+        ],
+        since
+      )
+    }
+  }, 900_000)
 })
 
 // ---------------------------------------------------------------------------

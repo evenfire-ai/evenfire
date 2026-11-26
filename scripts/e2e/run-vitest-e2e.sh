@@ -22,6 +22,9 @@ DEFAULT_NODE_UNIT_VITEST_SUITES=(
   # E2E helper contract: stubs fetch and checks which edge each helper uses,
   # so it needs no cluster.
   helpers.test.ts
+  # Cron log parser for the cron scheduler timing suite: parses captured
+  # log lines, so it needs no cluster.
+  mcp-host/cronLog.test.ts
 )
 DEFAULT_CLUSTER_VITEST_SUITES=(
   gfsUploadProductMutation.test.ts
