@@ -383,20 +383,24 @@ describe('buildHostApprovalChange', () => {
           },
         })
       )
-      vi.spyOn(rootLogger, 'child').mockReturnValue(logger as never)
+      const spy = vi.spyOn(rootLogger, 'child').mockReturnValue(logger as never)
       const change = buildHostApprovalChange({
         before: block({ tools: { shell_exec: true } }),
         after: block({ tools: { shell_exec: false, access_token: false, id_token: false } }),
       })
       expect(change).not.toBeNull()
-      logHostApprovalChange({
-        change: change as NonNullable<typeof change>,
-        host: 'foo',
-        namespace: 'ns',
-        operatorSub: null,
-        operationId: null,
-        via: 'host_put',
-      })
+      try {
+        logHostApprovalChange({
+          change: change as NonNullable<typeof change>,
+          host: 'foo',
+          namespace: 'ns',
+          operatorSub: null,
+          operationId: null,
+          via: 'host_put',
+        })
+      } finally {
+        spy.mockRestore()
+      }
       expect(lines).toHaveLength(1)
       const logged = JSON.parse(lines[0] as string) as { tools: Array<{ name: string }> }
       expect(logged.tools.map(entry => entry.name).sort()).toEqual([
@@ -404,13 +408,21 @@ describe('buildHostApprovalChange', () => {
         'id_token',
         'shell_exec',
       ])
-      vi.restoreAllMocks()
     })
   })
 
   describe('free text in the durable summary (security m-2)', () => {
     it('P5: bidi and C1 characters in a tool name or value are escaped in the summary', () => {
-      const hostile = ['\u202e', '\u0085', '\u200f', '\u2066', '\u009f'].join('')
+      const hostile = [
+        '\u202e',
+        '\u0085',
+        '\u200f',
+        '\u2066',
+        '\u009f',
+        '\u061c',
+        '\u2028',
+        '\u2029',
+      ].join('')
       const before = { tools: {}, shellClassifierModel: 'plain' }
       const after = {
         tools: { [`shell${hostile}exe`]: false },
@@ -420,7 +432,9 @@ describe('buildHostApprovalChange', () => {
       expect(summary).toBeDefined()
       // eslint-disable-next-line no-misleading-character-class
       expect(
-        /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(summary)
+        /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/.test(
+          summary
+        )
       ).toBe(false)
       const parsedSummary = JSON.parse(summary) as {
         tools: Array<{ name: string }>

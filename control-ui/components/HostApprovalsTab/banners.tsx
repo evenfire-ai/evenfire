@@ -4,7 +4,6 @@ import React from 'react'
 import { IconInfoCircle } from '@components/icons'
 import type { HostResource } from '@lib/api'
 import { effectiveApproval } from '@lib/approvalEffective'
-import { type ManifestSignal } from '@lib/hostManifestSignal'
 import {
   CHANNEL_LABELS,
   CHANNEL_ORDER,

@@ -22,7 +22,10 @@ import { isMcpHostNativeToolName } from './mcpHostNativeToolNames.js'
  * native tool, then at most this many other changed tools.
  */
 export const MAX_TOOL_KEYS = 50
-/** Tool names (the keys of `tools`) are cut to this many characters. */
+/**
+ * The tool name of a changed-tool entry is cut to this many characters. The cut
+ * name is only a label: whether a tool is native is decided on the full name.
+ */
 export const MAX_TOOL_NAME_LENGTH = 64
 /** Other strings (values and field keys) are cut to this many characters. */
 export const MAX_VALUE_LENGTH = 128
@@ -221,10 +224,12 @@ export const MAX_APPROVAL_CHANGE_SUMMARY_LENGTH = 4096
 /**
  * Characters `JSON.stringify` leaves raw that can make a summary read
  * misleadingly or that the trace read refuses: DEL, the C1 controls
- * (U+0080-U+009F), the bidirectional marks and embeddings (U+200E-U+200F,
- * U+202A-U+202E) and the bidirectional isolates (U+2066-U+2069).
+ * (U+0080-U+009F), the Arabic letter mark (U+061C), the bidirectional marks
+ * and embeddings (U+200E-U+200F, U+202A-U+202E), the bidirectional isolates
+ * (U+2066-U+2069) and the line and paragraph separators (U+2028-U+2029).
  */
-const ESCAPED_IN_SUMMARY = /[\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+const ESCAPED_IN_SUMMARY =
+  /[\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g
 
 /**
  * JSON text with those characters written as `\uXXXX` escapes. `JSON.stringify`
