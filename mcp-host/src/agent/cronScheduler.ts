@@ -728,7 +728,13 @@ export class CronScheduler extends EventEmitter {
     logger.info({ jobId: job.id, name: job.name, component: 'Cron' }, 'Executing cron job')
     job.lastRun = new Date(atMs)
 
-    const task = this.queue.createTaskFromCron(job.id, job.task, job.origin, 'normal')
+    const task = this.queue.createTaskFromCron(
+      job.id,
+      job.task,
+      job.origin,
+      'normal',
+      job.providerIdentity
+    )
     this.queue.enqueue(task)
 
     this.emit('cron:triggered', { job, task })

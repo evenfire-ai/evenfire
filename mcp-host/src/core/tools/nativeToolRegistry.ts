@@ -297,7 +297,12 @@ export class NativeToolRegistry implements ToolRegistry {
     // generators write under its reserved outputs directory; without it they
     // refuse to write, never falling back to a folder shared by the Host.
     // Trailing optional; only taskExecutor passes it.
-    callerOutputRoot?: string
+    callerOutputRoot?: string,
+    /**
+     * Cron with no authenticated caller omits workflow tools. Their unbound
+     * schema accepts a model-supplied targetUserId or targetTeamId.
+     */
+    workflowTools?: { omitModelSuppliedTargets?: boolean }
   ) {
     // A Host-owned GFS store establishes a trusted caller binding even when
     // memory is disabled. In that mode file tools never fall back to the shared
@@ -485,8 +490,12 @@ export class NativeToolRegistry implements ToolRegistry {
         workflowCallerContextOverride === undefined
           ? rpcWorkflowCallerContext
           : workflowCallerContextOverride
-      const canExposeWorkflowTools =
-        !sourceMessage || sourceMessage.channelType === 'rpc' || Boolean(workflowCallerContext)
+      const authenticatedCaller = Boolean(
+        workflowCallerContext?.targetUserId?.trim() || workflowCallerContext?.targetTeamId?.trim()
+      )
+      const canExposeWorkflowTools = workflowTools?.omitModelSuppliedTargets
+        ? authenticatedCaller
+        : !sourceMessage || sourceMessage.channelType === 'rpc' || Boolean(workflowCallerContext)
       if (canExposeWorkflowTools) {
         for (const tool of createWorkflowTools({
           getEnv: workflowEnvGetter,
