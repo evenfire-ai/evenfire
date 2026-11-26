@@ -424,7 +424,10 @@ describe('App sidebar GFS resource menu', () => {
     await waitFor(() => expect(screen.queryByTestId('nav-files')).toBeNull())
     expect(await main.getSessionState()).toMatchObject({ authenticated: false })
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: SIGNED_IN_USER.email } })
+    // The sign-in page shows its form once main's login model arrives, read when it mounts.
+    fireEvent.change(await screen.findByLabelText('Email'), {
+      target: { value: SIGNED_IN_USER.email },
+    })
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'test-password' } })
     // Only the toast expiry needs a jump. The clock keeps advancing with real
     // time so every other setTimeout (query notifications, waitFor) runs as
