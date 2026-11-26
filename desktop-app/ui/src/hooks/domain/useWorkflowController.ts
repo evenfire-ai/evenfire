@@ -88,6 +88,27 @@ async function loadRecentRunsWithLatestArtifacts(
   }
 }
 
+const TERMINAL_WORKFLOW_RUN_PHASES: ReadonlySet<string> = new Set([
+  'Succeeded',
+  'Failed',
+  'Canceled',
+])
+
+export function isTerminalWorkflowRunPhase(phase: string): boolean {
+  return TERMINAL_WORKFLOW_RUN_PHASES.has(phase)
+}
+
+/** A cancel was requested and the runtime has not stopped the run yet. */
+export function isWorkflowRunCanceling(
+  run: Pick<WorkflowRunsResult['items'][number], 'phase' | 'cancelRequestedAt'>
+): boolean {
+  return Boolean(run.cancelRequestedAt) && !isTerminalWorkflowRunPhase(run.phase)
+}
+
+// While the latest run is "Canceling", its row re-reads the runs on this interval so the
+// cell reaches the terminal phase without a manual Refresh. No other state polls.
+export const WORKFLOW_CANCELING_REFETCH_INTERVAL_MS = 5_000
+
 export type WorkflowRecentRuns = {
   latestRun: WorkflowRunsResult['items'][number] | null
   runCount: number
@@ -109,6 +130,12 @@ export function useWorkflowRecentRuns(wf: WorkflowSummary): WorkflowRecentRuns {
     queryFn: () => loadRecentRunsWithLatestArtifacts(wf, RECENT_RUNS_LIMIT),
     staleTime: Infinity,
     gcTime: Infinity,
+    refetchInterval: current => {
+      const latest = current.state.data?.items?.[0]
+      return latest && isWorkflowRunCanceling(latest)
+        ? WORKFLOW_CANCELING_REFETCH_INTERVAL_MS
+        : false
+    },
   })
 
   const items =
@@ -397,6 +424,24 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
     ]
   )
 
+  const cancelRun = useCallback(
+    async (ns: string, name: string, runId: string) => {
+      try {
+        await window.clerum.workflows.cancelRun(ns, name, runId)
+      } catch (error) {
+        setStatus(`Cancel failed: ${toErrorMessage(error)}`, 'error')
+        return
+      }
+      setStatus('Cancel requested.', 'success', undefined, { global: false, toast: true })
+      // The table's Recent Runs cell reads the RECENT_RUNS_LIMIT key; re-read it so the
+      // row shows "Canceling" (or the terminal phase) without a manual Refresh.
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.workflowRuns(ns, name, RECENT_RUNS_LIMIT),
+      })
+    },
+    [queryClient, setStatus]
+  )
+
   const clearSelectedWorkflow = useCallback(() => {
     selectWorkflowSeqRef.current += 1
     setWorkflowSelection(current => ({
@@ -446,6 +491,7 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
       handleRefreshWorkflows,
       handleSelectWorkflow,
       handleTriggerWorkflow,
+      cancelRun,
       loadWorkflowRunsFor,
       clearSelectedWorkflow,
       resetWorkflows,
@@ -464,6 +510,7 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
       handleRefreshWorkflows,
       handleSelectWorkflow,
       handleTriggerWorkflow,
+      cancelRun,
       loadWorkflowRunsFor,
       clearSelectedWorkflow,
       resetWorkflows,

@@ -15,7 +15,9 @@ vi.mock('../../contexts/AuthContext', () => ({
   useAuthContext: () => ({ setStatus: setStatusSpy }),
 }))
 
-vi.mock('../../hooks/domain/useWorkflowController', () => ({
+// Only the hooks are mocked; the pure run-phase helpers the page reads stay real.
+vi.mock('../../hooks/domain/useWorkflowController', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../hooks/domain/useWorkflowController')>()),
   useWorkflowController: vi.fn(),
   useWorkflowRecentRuns: vi.fn(),
 }))

@@ -60,6 +60,7 @@ import {
   WorkflowNotificationStreamEvent,
   WorkflowRecipeListResult,
   WorkflowRunArtifactsResult,
+  WorkflowRunCancelResult,
   WorkflowRunsResult,
 } from './types.js'
 
@@ -790,6 +791,7 @@ declare global {
           idempotencyKey?: string
         ) => Promise<unknown>
         runs: (ns: string, name: string, limit?: number) => Promise<WorkflowRunsResult>
+        cancelRun: (ns: string, name: string, runId: string) => Promise<WorkflowRunCancelResult>
         listRunArtifacts: (
           ns: string,
           name: string,

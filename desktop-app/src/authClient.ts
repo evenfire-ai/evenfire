@@ -22,6 +22,7 @@ import {
   WorkflowNotificationStreamEvent,
   WorkflowRecipeListResult,
   WorkflowRunArtifactsResult,
+  WorkflowRunCancelResult,
   WorkflowRunCompletedNotification,
   WorkflowRunsResult,
 } from './types.js'
@@ -600,6 +601,25 @@ export class AuthClient {
       'GET',
       url(
         `/api/v1/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs${qs ? `?${qs}` : ''}`
+      ),
+      { token: sessionToken, retryTransientOnce: true }
+    )
+  }
+
+  /**
+   * Request cancellation of one run. The server answers a repeated request for a run
+   * that already has one with 200 and writes nothing, so a transient retry is safe.
+   */
+  async cancelWorkflowRun(
+    sessionToken: string,
+    ns: string,
+    name: string,
+    runId: string
+  ): Promise<WorkflowRunCancelResult> {
+    return requestJson<WorkflowRunCancelResult>(
+      'POST',
+      url(
+        `/api/v1/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/cancel`
       ),
       { token: sessionToken, retryTransientOnce: true }
     )

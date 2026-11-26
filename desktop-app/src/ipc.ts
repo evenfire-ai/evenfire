@@ -2359,6 +2359,18 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   )
 
   ipcMain.handle(
+    'workflows:cancelRun',
+    async (event, payload: { ns: string; name: string; runId: string }) => {
+      assertTrustedSender(event)
+      const ns = sanitizeString(payload?.ns)
+      const name = sanitizeString(payload?.name)
+      const runId = sanitizeString(payload?.runId)
+      if (!ns || !name || !runId) throw new Error('ns, name, and runId are required')
+      return service.cancelWorkflowRun(ns, name, runId)
+    }
+  )
+
+  ipcMain.handle(
     'workflows:runArtifacts',
     async (event, payload: { ns: string; name: string; runId: string }) => {
       assertTrustedSender(event)
