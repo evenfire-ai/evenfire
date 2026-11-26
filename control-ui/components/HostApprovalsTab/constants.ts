@@ -216,7 +216,7 @@ export const TOOLS_SAVED_TOAST = 'Per-tool overrides saved.'
 
 /**
  * How long a per-tool continuation's warning or error, and a failed switch's
- * toast in the tab that ran it, stay: longer than a success, to be read. A
+ * toast in the tab that ran it, stay: longer than Toast's default success, to be read. A
  * switch's failure continuation stays longer still (below).
  */
 export const CONTINUATION_PROBLEM_DURATION_MS = 8000

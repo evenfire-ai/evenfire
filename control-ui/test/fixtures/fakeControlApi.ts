@@ -40,7 +40,7 @@
  * fallbacks and `allowedModels` entries, other Host validation, and pruning on
  * read. The apiserver also prunes a stored block on read when the CRD lacks a
  * field; the fake serves a seed as given, so a seed written under a newer CRD
- * stands for a CRD that changed after the seed was stored.
+ * stands for a CRD that changed between the read and the write.
  *
  * control-api/test/routes.hostPut.fakeContract.test.ts pins this model to the
  * real routes.
