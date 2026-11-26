@@ -465,6 +465,41 @@ describe('the owner queue, op by op (N-1), and a restore racing a start (A3-62)'
   })
 })
 
+describe('the desktop-environment handoff save while an attempt waits (L3)', () => {
+  it('L3 a handoff save of another environment is not refused by a waiting attempt, and replaces it', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId } = await startAttempt(harness)
+    await harness.drain()
+    const environmentB = service
+      .getRuntimeConfigState()
+      .options.find(option => option.id === envs.B.optionId)
+    if (!environmentB) throw new Error('environment B has no stored profile')
+    const generation = service.getSessionGeneration()
+
+    // E29: the handoff saves B's configuration with the generation it was shown.
+    await expect(
+      service.saveRuntimeConfig(
+        {
+          externalRestApiBaseUrl: environmentB.externalRestApiBaseUrl,
+          rpcProxyBaseUrl: environmentB.rpcProxyBaseUrl,
+          appName: environmentB.appName,
+        },
+        generation
+      )
+    ).resolves.toMatchObject({ activeOptionId: envs.B.optionId })
+    await harness.drain()
+
+    // The attempt is not counted (D11), so the save proceeds; its bump ends the attempt once.
+    expect(snapshotsOf(harness, attemptId)).toEqual([
+      { attemptId, phase: 'waiting' },
+      { attemptId, phase: 'ended', outcome: 'replaced' },
+    ])
+    expect(service.getSessionGeneration()).toBeGreaterThan(generation)
+    expectS9(harness)
+  })
+})
+
 describe('acknowledging an overdue attempt (D12)', () => {
   it('D12 acknowledging an overdue waiting attempt answers waiting, pushes nothing, and the next read ends it', async () => {
     const harness = await createBrowserSignInHarness({ linksAvailable: true })
@@ -558,16 +593,21 @@ type Queued =
   | { kind: 'logout'; tracked: Tracked<unknown> }
   | { kind: 'select'; target: Env; tracked: Tracked<unknown> }
   | { kind: 'handoff'; target: Env; bumpsAtIssue: number; tracked: Tracked<unknown> }
+  | { kind: 'saveOther'; target: Env; tracked: Tracked<unknown> }
+  | { kind: 'handoffSave'; target: Env; bumpsAtIssue: number; tracked: Tracked<unknown> }
+  | { kind: 'clear'; tracked: Tracked<unknown> }
   | { kind: 'link'; link: AcceptedLink }
 
 type Model = {
-  env: Env
-  exists: Record<Env, boolean>
+  /** The active environment; null once the selection is cleared (E24). */
+  env: Env | null
+  /** The stored profiles, in storage order: deleting the active one makes the last active. */
+  profiles: Env[]
   session: Who | null
   /** Whose token the token store keeps for the active environment. */
   stored: Who | null
   /** The restore's 5 s retry gate (`getSessionState`): the environment and wall time of its last try. */
-  gate: { env: Env; atMs: number } | null
+  gate: { env: Env | null; atMs: number } | null
   /** Logins in flight that count (D11): password, Google, and a redeem. */
   count: number
   bumps: number
@@ -646,6 +686,14 @@ const REFUSED_GOOGLE_TOKEN = 'fake-google-id-token-refused'
 const NO_SNAPSHOT: BrowserSignInSnapshot = { attemptId: null, phase: 'idle' }
 
 /** The model's coverage witness (M3h): every pair below must be visited. */
+/** Each environment bump of §7.2, seen with an attempt waiting (review I-1). */
+const WITNESS_WAITING_REQUIRED: ReadonlyArray<string> = [
+  'waiting Bump(saveOther)',
+  'waiting Bump(handoffSave)',
+  'waiting Bump(clear)',
+  'waiting Bump(deleteActive)',
+]
+
 const WITNESS_REQUIRED: ReadonlyArray<readonly [Gap, WitnessEvent]> = [
   ['Γ2', 'Bump'],
   ['Γ2', 'Cancel'],
@@ -756,8 +804,15 @@ function record(m: Model, env: Env): number {
   return m.lastId
 }
 
+/** The active environment where the command needs one: a start past op 1 and the holds. */
+function activeEnv(m: Readonly<Model>): Env {
+  if (m.env === null) throw new Error('model: no environment is configured')
+  return m.env
+}
+
 /** Op 1 of a start: its refusals, then its bump and its methods read (D3, D4, D10). */
 function startOp1(m: Model): string | null {
+  if (m.env === null) return 'desktop_setup_required'
   if (m.session !== null) return 'browser_sign_in_requires_signout'
   if (m.attempt?.phase === 'redeeming') return 'browser_sign_in_finishing'
   bump(m)
@@ -1153,11 +1208,13 @@ function resyncFromObservation(real: Real, m: Model, readsBefore: number): void 
   )
   const lastId = Math.max(0, ...ids)
   const known = m.attempt?.id ?? 0
-  for (let id = known + 1; id <= lastId; id += 1) m.envOf.set(id, m.env)
+  // An attempt recorded in the window was started on the environment active now: any
+  // environment change after its op 1 would have replaced it.
+  for (let id = known + 1; id <= lastId; id += 1) m.envOf.set(id, activeEnv(m))
   if (lastId > known) {
     m.attempt = {
       id: lastId,
-      env: m.env,
+      env: activeEnv(m),
       phase: 'waiting',
       deadlineMs: m.nowMs + DEADLINE,
       timerDueMs: m.timerMs + DEADLINE,
@@ -1201,7 +1258,9 @@ class ModelCommand implements fc.AsyncCommand<Model, Real> {
     private readonly label: string,
     private readonly event: WitnessEvent,
     private readonly allowed: (m: Readonly<Model>) => boolean,
-    private readonly body: CommandBody
+    private readonly body: CommandBody,
+    /** Recorded as `waiting <tag>` when the command ran with an attempt waiting. */
+    private readonly waitingTag?: string
   ) {}
 
   check(m: Readonly<Model>): boolean {
@@ -1210,11 +1269,12 @@ class ModelCommand implements fc.AsyncCommand<Model, Real> {
 
   async run(m: Model, real: Real): Promise<void> {
     const gaps = gapsOf(m)
+    const pairs = gaps.map(gap => `${gap} ${this.event}`)
+    if (this.waitingTag && m.attempt?.phase === 'waiting') pairs.push(`waiting ${this.waitingTag}`)
     real.stats.ran.set(this.label, (real.stats.ran.get(this.label) ?? 0) + 1)
     const counts = await this.body(m, real)
     if (counts !== false) {
-      for (const gap of gaps) {
-        const pair = `${gap} ${this.event}`
+      for (const pair of pairs) {
         real.stats.witness.set(pair, (real.stats.witness.get(pair) ?? 0) + 1)
       }
     }
@@ -1364,7 +1424,7 @@ const startCommand = new ModelCommand(
         settles: 'rejects',
         code: new RegExp(`^${refusal}$`),
       })
-    const result = startOp2(m, m.bumps, m.env, 'password-and-oidc')
+    const result = startOp2(m, m.bumps, activeEnv(m), 'password-and-oidc')
     expectSettled(
       'Start',
       tracked,
@@ -1469,7 +1529,7 @@ function deliverCodeCommand(
       real.generated.add(code)
       real.redeemAnswerByCode.set(code, answer)
       const state = attemptState(real, m, stateChoice, randomState)
-      const env = m.envOf.get(m.lastId) ?? m.env
+      const env = m.envOf.get(m.lastId) ?? m.env ?? 'A'
       const link: AcceptedLink = {
         kind: 'code',
         state,
@@ -1548,7 +1608,9 @@ function deliverLaunchLinkCommand(randomState: string, code: string) {
       const before = real.windowRequests
       const fetches = real.harness.fetches.length
       // A desktop-login link is never queued (D8, A3-31): the launch queue drops it.
-      real.router.enqueuePending(codeLink(state, restOf(real, m.env), code))
+      real.router.enqueuePending(
+        codeLink(state, restOf(real, m.envOf.get(m.lastId) ?? m.env ?? 'A'), code)
+      )
       real.router.drainPending()
       await drain(real, m)
       expect(real.windowRequests, 'DeliverLaunchLink: no window').toBe(before)
@@ -1566,6 +1628,13 @@ type BumpKind =
   | { kind: 'setup' }
   | { kind: 'restore' }
   | { kind: 'switchTeam' }
+  // The other environment changes of §7.2 (E24, E26, E27, E29): the add-environment form saving
+  // another environment, the desktop-environment handoff saving one (with the generation it was
+  // shown), clearing the selection, and deleting the active environment.
+  | { kind: 'saveOther'; target: Env }
+  | { kind: 'handoffSave'; target: Env }
+  | { kind: 'clear' }
+  | { kind: 'deleteActive' }
 
 function bumpLabel(event: BumpKind): string {
   switch (event.kind) {
@@ -1576,6 +1645,8 @@ function bumpLabel(event: BumpKind): string {
       return `Bump(logout${event.viaLink ? ', evenfire://logout' : ''})`
     case 'select':
     case 'handoff':
+    case 'saveOther':
+    case 'handoffSave':
       return `Bump(${event.kind} ${event.target})`
     default:
       return `Bump(${event.kind})`
@@ -1586,17 +1657,35 @@ function bumpLabel(event: BumpKind): string {
 function bumpQueues(event: BumpKind): boolean {
   if (event.kind === 'password' || event.kind === 'setup') return true
   if (event.kind === 'logout') return !event.viaLink
-  if (event.kind === 'select' || event.kind === 'handoff') return event.target !== 'C'
-  return false
+  if (
+    event.kind === 'select' ||
+    event.kind === 'handoff' ||
+    event.kind === 'saveOther' ||
+    event.kind === 'handoffSave'
+  ) {
+    return event.target !== 'C'
+  }
+  // Deleting the active profile is not queued: which profile it deletes is fixed at the call,
+  // and a select queued ahead of it would make that one inactive.
+  return event.kind === 'clear'
 }
 
 function bumpAllowed(event: BumpKind, m: Readonly<Model>): boolean {
   if (blocked(m) && !bumpQueues(event)) return false
   switch (event.kind) {
     case 'select':
-      return m.exists[event.target]
     case 'handoff':
-      return m.exists[event.target]
+      return m.profiles.includes(event.target)
+    case 'saveOther':
+    case 'handoffSave':
+      return m.profiles.includes(event.target) && event.target !== m.env
+    case 'clear':
+      return m.env !== null
+    case 'deleteActive':
+      return m.env !== null && m.profiles.length >= 2
+    case 'google':
+      // With no environment configured, Google login would go to the built-in default endpoint.
+      return m.env !== null
     case 'switchTeam':
       return m.session !== null
     default:
@@ -1610,6 +1699,47 @@ function settingUp(m: Model): string | null {
   return null
 }
 
+/**
+ * A save of `target`'s configuration: the same boundary saves with no bump; another boundary is
+ * an environment change, as a select is.
+ */
+function saveEffect(m: Model, target: Env): void {
+  if (target !== m.env) selectEffect(m, target)
+}
+
+/** Clearing the selection: two bumps, and no environment configured (E24). */
+function clearEffect(m: Model): void {
+  if (m.env === null) {
+    // Already cleared: the boundary does not move, so the session is kept; both bumps run.
+    bump(m)
+    bump(m)
+    return
+  }
+  signOutWithTwoBumps(m)
+  m.env = null
+}
+
+/** Deleting the active profile: the last stored one becomes active (E27). */
+function deleteActiveEffect(m: Model): void {
+  const deleted = activeEnv(m)
+  signOutWithTwoBumps(m)
+  m.profiles = m.profiles.filter(env => env !== deleted)
+  m.env = m.profiles.at(-1) ?? null
+}
+
+/** The configuration `target`'s profile stores now, as the add-environment form would send it. */
+function storedConfig(real: Real, target: Env) {
+  const option = real.harness.service
+    .getRuntimeConfigState()
+    .options.find(candidate => candidate.id === real.harness.envs[target].optionId)
+  if (!option) throw new Error(`model: environment ${target} has no stored profile`)
+  return {
+    externalRestApiBaseUrl: option.externalRestApiBaseUrl,
+    rpcProxyBaseUrl: option.rpcProxyBaseUrl,
+    appName: option.appName,
+  }
+}
+
 function selectEffect(m: Model, target: Env): void {
   if (target === m.env) {
     bump(m)
@@ -1620,7 +1750,7 @@ function selectEffect(m: Model, target: Env): void {
   m.env = target
 }
 
-function issueBump(real: Real, event: BumpKind): Tracked<unknown> | null {
+function issueBump(real: Real, event: BumpKind, m: Readonly<Model>): Tracked<unknown> | null {
   const { service, envs } = real.harness
   switch (event.kind) {
     case 'password':
@@ -1659,8 +1789,22 @@ function issueBump(real: Real, event: BumpKind): Tracked<unknown> | null {
       return startTracking(real, service.getSessionState())
     case 'switchTeam':
       return startTracking(real, service.switchTeam('team-switched'))
+    case 'saveOther':
+      return startTracking(real, service.saveRuntimeConfig(storedConfig(real, event.target)))
+    case 'handoffSave':
+      return startTracking(
+        real,
+        service.saveRuntimeConfig(storedConfig(real, event.target), service.getSessionGeneration())
+      )
+    case 'clear':
+      return startTracking(real, service.clearRuntimeConfigSelection())
+    case 'deleteActive':
+      return startTracking(real, service.deleteRuntimeConfig(envs[activeEnv(m)].optionId))
   }
 }
+
+/** The bump kinds the witness must see with an attempt waiting (review I-1). */
+const ENVIRONMENT_BUMPS = ['saveOther', 'handoffSave', 'clear', 'deleteActive'] as const
 
 function bumpCommand(event: BumpKind) {
   return new ModelCommand(
@@ -1671,7 +1815,7 @@ function bumpCommand(event: BumpKind) {
       const waitingWithNoLogin = m.attempt?.phase === 'waiting' && m.count === 0
       const signedOutWithNoLogin = m.session === null && m.count === 0
       const bumpsAtIssue = m.bumps
-      const tracked = issueBump(real, event)
+      const tracked = issueBump(real, event, m)
       if (blocked(m)) {
         if (!tracked) throw new Error('model: a queued bump must be tracked')
         if (event.kind === 'password') m.queue.push({ kind: 'password', ok: event.ok, tracked })
@@ -1681,7 +1825,11 @@ function bumpCommand(event: BumpKind) {
           m.queue.push({ kind: 'select', target: event.target, tracked })
         else if (event.kind === 'handoff') {
           m.queue.push({ kind: 'handoff', target: event.target, bumpsAtIssue, tracked })
-        }
+        } else if (event.kind === 'saveOther') {
+          m.queue.push({ kind: 'saveOther', target: event.target, tracked })
+        } else if (event.kind === 'handoffSave') {
+          m.queue.push({ kind: 'handoffSave', target: event.target, bumpsAtIssue, tracked })
+        } else if (event.kind === 'clear') m.queue.push({ kind: 'clear', tracked })
         await drain(real, m)
         expectSettled(`${bumpLabel(event)} (queued)`, tracked, { settles: 'pending' })
         return
@@ -1692,7 +1840,10 @@ function bumpCommand(event: BumpKind) {
         case 'password':
         case 'google': {
           bump(m)
-          if (event.ok) {
+          if (m.env === null) {
+            // Password login's op 1 bumps, then finds no environment (Google is not issued here).
+            expected = { settles: 'rejects', code: /^desktop_setup_required$/ }
+          } else if (event.ok) {
             signIn(m, event.kind)
             expected = { settles: 'resolves', value: { authenticated: true } }
           } else {
@@ -1709,13 +1860,25 @@ function bumpCommand(event: BumpKind) {
         case 'select':
           selectEffect(m, event.target)
           break
+        case 'saveOther':
+          saveEffect(m, event.target)
+          break
+        case 'clear':
+          clearEffect(m)
+          break
+        case 'deleteActive':
+          deleteActiveEffect(m)
+          break
         case 'handoff':
+        case 'handoffSave':
         case 'setup': {
           const refusal = settingUp(m)
           if (refusal) {
             expected = { settles: 'rejects', code: new RegExp(`^${refusal}$`) }
           } else if (event.kind === 'handoff') {
             selectEffect(m, event.target)
+          } else if (event.kind === 'handoffSave') {
+            saveEffect(m, event.target)
           } else {
             bump(m)
             expected = { settles: 'rejects', code: /^desktop_setup_not_found$/ }
@@ -1731,9 +1894,9 @@ function bumpCommand(event: BumpKind) {
           break
       }
       if (tracked) expectSettled(bumpLabel(event), tracked, expected)
-      if (event.kind === 'setup' || event.kind === 'handoff') {
-        // L3: a waiting attempt does not refuse setup or the handoff; their bump replaces it. L5:
-        // signed out with no login in flight, nothing counts.
+      if (event.kind === 'setup' || event.kind === 'handoff' || event.kind === 'handoffSave') {
+        // L3: a waiting attempt does not refuse setup or the handoff's select or save; their bump
+        // replaces it. L5: signed out with no login in flight, nothing counts.
         if (waitingWithNoLogin || signedOutWithNoLogin) {
           expect(tracked?.result, `L3/L5: ${bumpLabel(event)}`).not.toEqual({
             ok: false,
@@ -1741,7 +1904,10 @@ function bumpCommand(event: BumpKind) {
           })
         }
       }
-    }
+    },
+    (ENVIRONMENT_BUMPS as readonly string[]).includes(event.kind)
+      ? `Bump(${event.kind})`
+      : undefined
   )
 }
 
@@ -1752,7 +1918,10 @@ function noBumpCommand(kind: NoBumpKind) {
   return new ModelCommand(
     `NoBump(${kind})`,
     'other',
-    m => free(m) && (target === null || (m.exists[target] && m.env !== target)),
+    m =>
+      free(m) &&
+      (target === null || (m.profiles.includes(target) && m.env !== target)) &&
+      (kind !== 'saveSame' || m.env !== null),
     async (m, real) => {
       const { service } = real.harness
       const bumpsBefore = real.harness.bumpLog.length
@@ -1770,14 +1939,18 @@ function noBumpCommand(kind: NoBumpKind) {
           service.deleteRuntimeConfig(real.harness.envs[target ?? 'B'].optionId)
         )
       await drain(real, m)
-      if (kind === 'getLoginMethods') m.methodsFetches += 1
-      if (target) m.exists[target] = false
+      // With no environment configured, the methods read refuses before it fetches.
+      const methodsRead = kind === 'getLoginMethods' && m.env !== null
+      if (methodsRead) m.methodsFetches += 1
+      if (target) m.profiles = m.profiles.filter(env => env !== target)
       expectSettled(
         `NoBump(${kind})`,
         tracked,
-        kind === 'getLoginMethods'
-          ? { settles: 'resolves', value: { model: { kind: 'methods', password: true } } }
-          : { settles: 'resolves' }
+        kind !== 'getLoginMethods'
+          ? { settles: 'resolves' }
+          : methodsRead
+            ? { settles: 'resolves', value: { model: { kind: 'methods', password: true } } }
+            : { settles: 'rejects', code: /^desktop_setup_required$/ }
       )
       expect(real.harness.bumpLog, `NoBump(${kind}) advances nothing`).toHaveLength(bumpsBefore)
     }
@@ -1790,6 +1963,7 @@ type EnterPoint = 'methods' | 'open' | 'redeem' | OwnerHold
 function canStart(m: Readonly<Model>): boolean {
   return (
     free(m) &&
+    m.env !== null &&
     m.start === null &&
     m.redeem === null &&
     m.session === null &&
@@ -1815,7 +1989,9 @@ function enterAllowed(point: EnterPoint, m: Readonly<Model>): boolean {
   switch (point) {
     case 'methods':
     case 'open':
-      return m.start === null && m.session === null && attempt?.phase !== 'redeeming'
+      return (
+        m.env !== null && m.start === null && m.session === null && attempt?.phase !== 'redeeming'
+      )
     case 'redeem':
       return canEnterRedeem(m)
     case 'restoreTokenRead':
@@ -1825,13 +2001,13 @@ function enterAllowed(point: EnterPoint, m: Readonly<Model>): boolean {
         m.redeem === null &&
         m.session === null &&
         m.count === 0 &&
-        m.env !== 'C' &&
+        (m.env === 'A' || m.env === 'B') &&
         !restoreGated(m) &&
         (point === 'restoreTokenRead' || m.stored === 'kept')
       )
     case 'installChatBind':
     case 'installTokenWrite':
-      if (m.env === 'C') return false
+      if (m.env !== 'A' && m.env !== 'B') return false
       if (m.redeem !== null) {
         return attempt?.phase === 'redeeming' && !attempt.bumpedWhileRedeeming
       }
@@ -1844,7 +2020,7 @@ async function plainStart(m: Model, real: Real): Promise<void> {
   const tracked = startTracking(real, real.harness.service.startBrowserSignIn())
   await drain(real, m)
   if (startOp1(m)) throw new Error('model: a plain start passed its check but op 1 refuses')
-  const result = startOp2(m, m.bumps, m.env, 'password-and-oidc')
+  const result = startOp2(m, m.bumps, activeEnv(m), 'password-and-oidc')
   if (!('attemptId' in result)) throw new Error('model: a plain start recorded no attempt')
   expectSettled('Start (before a hold)', tracked, {
     settles: 'resolves',
@@ -1863,7 +2039,7 @@ async function enterRedeem(m: Model, real: Real): Promise<void> {
   const link: AcceptedLink = {
     kind: 'code',
     state,
-    environment: restOf(real, m.envOf.get(attemptId) ?? m.env),
+    environment: restOf(real, m.envOf.get(attemptId) ?? activeEnv(m)),
     envChoice: 'same',
     code,
     end: null,
@@ -1901,11 +2077,11 @@ function enterCommand(point: EnterPoint) {
           const bumpsAtOp1 = m.bumps
           let attemptId: number | null = null
           if (point === 'open') {
-            const result = startOp2(m, bumpsAtOp1, m.env, 'password-and-oidc')
+            const result = startOp2(m, bumpsAtOp1, activeEnv(m), 'password-and-oidc')
             if (!('attemptId' in result)) throw new Error('model: Hold(open) found no attempt')
             attemptId = result.attemptId
           }
-          m.start = { stage: point, bumpsAtOp1, env: m.env, attemptId }
+          m.start = { stage: point, bumpsAtOp1, env: activeEnv(m), attemptId }
           expectReached(`Hold(${point})`, hold)
           return
         }
@@ -2082,13 +2258,21 @@ const releaseOwnerCommand = new ModelCommand(
             remaining.push({
               kind: 'start',
               bumpsAtOp1: m.bumps,
-              env: m.env,
+              env: activeEnv(m),
               tracked: item.tracked,
             })
           break
         }
         case 'password':
           bump(m)
+          if (m.env === null) {
+            settled.push([
+              'queued password',
+              item.tracked,
+              { settles: 'rejects', code: /^desktop_setup_required$/ },
+            ])
+            break
+          }
           m.count += 1
           remaining.push({
             kind: 'password',
@@ -2133,6 +2317,28 @@ const releaseOwnerCommand = new ModelCommand(
           }
           break
         }
+        case 'saveOther':
+          saveEffect(m, item.target)
+          settled.push(['queued save', item.tracked, SESSION_RESOLVES])
+          break
+        case 'handoffSave': {
+          const refusal = m.bumps !== item.bumpsAtIssue ? 'stale_session_generation' : settingUp(m)
+          if (refusal)
+            settled.push([
+              'queued handoff save',
+              item.tracked,
+              { settles: 'rejects', code: new RegExp(`^${refusal}$`) },
+            ])
+          else {
+            saveEffect(m, item.target)
+            settled.push(['queued handoff save', item.tracked, SESSION_RESOLVES])
+          }
+          break
+        }
+        case 'clear':
+          clearEffect(m)
+          settled.push(['queued clear', item.tracked, SESSION_RESOLVES])
+          break
         case 'link': {
           const attemptId = m.lastId
           const began = acceptanceOp(m, item.link, attemptId)
@@ -2355,7 +2561,11 @@ function commandArbitrary(): fc.Arbitrary<fc.AsyncCommand<Model, Real>> {
     ENV_ARB.map(target => ({ kind: 'handoff' as const, target })),
     fc.constant({ kind: 'setup' as const }),
     fc.constant({ kind: 'restore' as const }),
-    fc.constant({ kind: 'switchTeam' as const })
+    fc.constant({ kind: 'switchTeam' as const }),
+    ENV_ARB.map(target => ({ kind: 'saveOther' as const, target })),
+    ENV_ARB.map(target => ({ kind: 'handoffSave' as const, target })),
+    fc.constant({ kind: 'clear' as const }),
+    fc.constant({ kind: 'deleteActive' as const })
   )
   const noBumpKinds = fc.constantFrom<NoBumpKind>(
     'getLoginMethods',
@@ -2597,7 +2807,7 @@ async function runModel(
     })
     const model: Model = {
       env: 'A',
-      exists: { A: true, B: true, C: true },
+      profiles: ['A', 'B', 'C'],
       session: null,
       stored: keptToken ? 'kept' : null,
       gate: null,
@@ -2641,9 +2851,10 @@ describe('the A6 model', () => {
     // What runs depends on the seed, fast-check's version (4.9.0) and the weights in
     // `commandArbitrary`: a missing pair means the runs no longer reach that gap, so change the
     // weights, never a predicate.
-    const missing = WITNESS_REQUIRED.map(([gap, event]) => `${gap} ${event}`).filter(
-      pair => !stats.witness.has(pair)
-    )
+    const missing = [
+      ...WITNESS_REQUIRED.map(([gap, event]) => `${gap} ${event}`),
+      ...WITNESS_WAITING_REQUIRED,
+    ].filter(pair => !stats.witness.has(pair))
     expect(
       missing,
       `the coverage witness: ${JSON.stringify([...stats.witness])}; commands run: ${JSON.stringify([...stats.ran])}`
