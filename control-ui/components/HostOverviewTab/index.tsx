@@ -1,5 +1,6 @@
 import React from 'react'
 import { SingleValueEditDialog } from '@clerum/frontend-components'
+import { AGENT_TYPE_LABELS, AGENT_TYPE_TOOLTIPS } from '../../lib/agentLifecycle'
 import { IconRobot } from '../Sidebar/icons'
 import { IconPencil } from '../icons'
 import { Field, TextInput } from '../ui'
@@ -77,6 +78,7 @@ export function HostOverviewTab({
   hostName,
   displayName,
   loadingName = false,
+  agentType,
   statusLabel,
   statusTone,
   contextRef,
@@ -157,9 +159,14 @@ export function HostOverviewTab({
             )}
           </>
         </div>
-        <div className="cu-host-overview-identity__status">
-          <StatusDot tone={statusTone} />
-          <span>{statusLabel}</span>
+        <div className="cu-host-overview-identity__meta">
+          <span className="cu-host-overview-identity__type" title={AGENT_TYPE_TOOLTIPS[agentType]}>
+            {AGENT_TYPE_LABELS[agentType]}
+          </span>
+          <div className="cu-host-overview-identity__status">
+            <StatusDot tone={statusTone} />
+            <span>{statusLabel}</span>
+          </div>
         </div>
 
         <div className="cu-host-overview-identity__divider" />

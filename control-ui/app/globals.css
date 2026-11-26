@@ -8007,6 +8007,24 @@ td.cu-registry-description {
   color: var(--cu-text-muted);
 }
 
+.cu-host-overview-identity__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.cu-host-overview-identity__type {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.55rem;
+  border: 1px solid var(--cu-border);
+  border-radius: var(--cu-radius-pill);
+  background: var(--cu-bg-elevated);
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+  cursor: help;
+}
+
 .cu-host-overview-identity__status {
   display: inline-flex;
   align-items: center;

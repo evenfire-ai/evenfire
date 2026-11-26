@@ -1,3 +1,5 @@
+import type { AgentLifecycleType } from '../../lib/agentLifecycle'
+
 export type HostOverviewAccessSummary = {
   memberCount: number
   teamCount: number
@@ -16,6 +18,7 @@ export type HostOverviewTabProps = {
    * and the edit affordance is hidden until a real name is on screen.
    */
   loadingName?: boolean
+  agentType: AgentLifecycleType
   statusLabel: string
   statusTone: 'active' | 'inactive' | 'unknown'
   contextRef: string

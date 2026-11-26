@@ -509,6 +509,13 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.queryByTitle(host.spec.description)).not.toBeInTheDocument()
     expect(screen.queryByText(/coordinates customer support requests/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Edit agent name' })).toBeInTheDocument()
+    // No spec.lifecycle on the fixture host → Stateful, left of the status.
+    const typeChip = container.querySelector('.cu-host-overview-identity__type')
+    expect(typeChip).toHaveTextContent('Stateful')
+    expect(typeChip).toHaveAttribute(
+      'title',
+      'This agent runs continuously; its process is never scaled to zero.'
+    )
     expect(screen.getByText('Created').nextElementSibling).toHaveTextContent(/2026/)
     expect(screen.queryByText('Last updated')).not.toBeInTheDocument()
     expect(container.querySelector('.cu-host-overview-identity__slug')).toBeNull()
@@ -518,6 +525,7 @@ describe('HostDetailsPage identity integration', () => {
   it('labels a suspended lifecycle state as Idle', async () => {
     const suspendedHost = {
       ...host,
+      spec: { ...host.spec, lifecycle: { stateless: true } },
       status: { lifecycle: { state: 'Suspended' } },
     }
     ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -537,6 +545,13 @@ describe('HostDetailsPage identity integration', () => {
     const status = container.querySelector('.cu-host-overview-identity__status')
     expect(status).toHaveTextContent('Idle')
     expect(status).not.toHaveTextContent('Suspended')
+    // The stateless host announces its type left of the status.
+    const typeChip = container.querySelector('.cu-host-overview-identity__type')
+    expect(typeChip).toHaveTextContent('Stateless')
+    expect(typeChip).toHaveAttribute(
+      'title',
+      'This agent persists session state to disk and scales to zero while idle (shown as Idle). It wakes on demand.'
+    )
   })
 
   it('edits the agent name in a scalar dialog via one PUT without changing the agent slug', async () => {

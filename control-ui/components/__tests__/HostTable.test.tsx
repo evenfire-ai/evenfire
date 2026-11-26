@@ -399,3 +399,41 @@ describe('HostTable — row actions kebab', () => {
     expect(deletingItem).toBeDisabled()
   })
 })
+
+describe('HostTable type column (lifecycle)', () => {
+  function hostWithLifecycle(name: string, stateless: boolean): HostItem {
+    return {
+      metadata: { name, namespace: 'mcp-host' },
+      spec: {
+        contextRef: 'context1',
+        model: { provider: 'openai' },
+        lifecycle: { stateless },
+      },
+    }
+  }
+
+  it('renders the Type column with the lifecycle label and a hover explanation', () => {
+    renderHostTable([hostWithLifecycle('warm-agent', false), hostWithLifecycle('cold-agent', true)])
+
+    expect(screen.getByRole('columnheader', { name: 'Type' })).toBeInTheDocument()
+
+    const stateful = within(screen.getByLabelText('Open agent warm-agent')).getByText('Stateful')
+    expect(stateful).toHaveAttribute(
+      'title',
+      'This agent runs continuously; its process is never scaled to zero.'
+    )
+    const stateless = within(screen.getByLabelText('Open agent cold-agent')).getByText('Stateless')
+    expect(stateless).toHaveAttribute(
+      'title',
+      'This agent persists session state to disk and scales to zero while idle (shown as Idle). It wakes on demand.'
+    )
+  })
+
+  it('labels a host without lifecycle state as Stateful', () => {
+    renderHostTable([hostWithContext('legacy-agent', 'context1')])
+
+    expect(
+      within(screen.getByLabelText('Open agent legacy-agent')).getByText('Stateful')
+    ).toBeInTheDocument()
+  })
+})

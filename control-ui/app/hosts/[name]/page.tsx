@@ -15,6 +15,7 @@ import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapability
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { type AgentLifecycleType, agentLifecycleTypeFromSpec } from '@lib/agentLifecycle'
 import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { HostAccessTab } from '../../../components/HostAccessTab'
@@ -343,6 +344,7 @@ export default function HostDetailsPage() {
   const [selectedConnectorNames, setSelectedConnectorNames] = useState<string[]>([])
   const [hostStatusLabel, setHostStatusLabel] = useState('Unknown')
   const [hostStatusTone, setHostStatusTone] = useState<'active' | 'inactive' | 'unknown'>('unknown')
+  const [hostAgentType, setHostAgentType] = useState<AgentLifecycleType>('stateful')
   const [hostCreatedAt, setHostCreatedAt] = useState('')
   const [accessSummary, setAccessSummary] = useState<{
     memberCount: number
@@ -623,6 +625,7 @@ export default function HostDetailsPage() {
         const lifecycleState = String(
           (host.status as { lifecycle?: { state?: string } } | undefined)?.lifecycle?.state || ''
         ).trim()
+        setHostAgentType(agentLifecycleTypeFromSpec(spec))
         const lowerState = lifecycleState.toLowerCase()
         if (lowerState === 'active' || lowerState === 'ready') {
           setHostStatusLabel('Active')
@@ -1498,6 +1501,7 @@ export default function HostDetailsPage() {
               setHostDisplayDraft(hostDisplaySaved)
               setEditingDisplayName(false)
             }}
+            agentType={hostAgentType}
             statusLabel={hostStatusLabel}
             statusTone={hostStatusTone}
             contextRef={contextRefDraft}
