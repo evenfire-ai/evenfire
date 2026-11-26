@@ -209,8 +209,8 @@ function expectSafetyAndCost(
     ),
     label
   ).toHaveLength(1)
-  // S1, S4: after the attempt's waiting push, the only bump is the install's own
-  // (`appService.ts:2119`), and it comes before the install's token write.
+  // S1, S4: after the attempt's waiting push, the only bump is the install's own generation
+  // advance (`installAuthenticatedLogin`), and it comes before the install's token write.
   const waitingSeq = records.pushes.find(
     record => record.value.attemptId === attempt.attemptId && record.value.phase === 'waiting'
   )?.seq
@@ -410,8 +410,8 @@ describe('browser sign-in under the macOS quit drain', () => {
     const keychainBefore = store.keychainCalls.length
 
     // The install op goes on during the deferral and reaches its token write
-    // (`appService.ts:2132`), which queues behind closed admission: the store is called, the
-    // keychain is not.
+    // (`installAuthenticatedLogin`'s `tokenStore.setSessionToken`), which queues behind closed
+    // admission: the store is called, the keychain is not.
     held.release(
       run.point === 'redeem' ? edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)) : undefined
     )
@@ -428,8 +428,8 @@ describe('browser sign-in under the macOS quit drain', () => {
       label
     ).toEqual([token])
     expect(keychainAccounts(store, 'setPassword', keychainBefore), label).toEqual([])
-    // The session is set in memory (`appService.ts:2123-2124`); the attempt waits on its
-    // install op, still redeeming.
+    // The session is set in memory (`installAuthenticatedLogin` sets `sessionToken` and `me`);
+    // the attempt waits on its install op, still redeeming.
     expect(service.getSessionPresence(), label).toEqual({ hasToken: true, hasMe: true })
     expect(snapshotsOf(harness, attempt.attemptId).at(-1), label).toEqual({
       attemptId: attempt.attemptId,
@@ -529,8 +529,8 @@ describe('browser sign-in under the macOS quit drain', () => {
     const keychainBefore = store.keychainCalls.length
     const account = accountOf(store.activeEnvKey)
 
-    // A restore (E15): its owner op reads the kept token (`appService.ts:1936`), and the read
-    // queues behind closed admission.
+    // A restore (E15): its owner op reads the kept token (`restoreSavedSessionOnce`'s
+    // `tokenStore.getSessionToken`), and the read queues behind closed admission.
     const restore = service.getSessionState()
     await until(
       harness,

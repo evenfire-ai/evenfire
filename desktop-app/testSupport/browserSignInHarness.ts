@@ -78,11 +78,11 @@ export async function pushedBrowserSignInSnapshots(): Promise<BrowserSignInSnaps
  * - `methods`: the methods fetch, start's own read or `getLoginMethods`'s.
  * - `open`: `shell.openExternal`.
  * - `redeem`: the redeem fetch.
- * - `restoreTokenRead`: restore's `tokenStore.getSessionToken` (`appService.ts:1936`).
- * - `restoreChatBind`: restore's `bindChatStoreForUser` (`appService.ts:2008`).
+ * - `restoreTokenRead`: restore's `tokenStore.getSessionToken` (`restoreSavedSessionOnce`).
+ * - `restoreChatBind`: restore's `bindChatStoreForUser` (`restoreSavedSessionOnce`).
  * - `installChatBind`: install's `bindChatStoreForUser`, via `bindCurrentChatStore`
- *   (`appService.ts:2126`).
- * - `installTokenWrite`: install's `tokenStore.setSessionToken` (`appService.ts:2132`).
+ *   (`installAuthenticatedLogin`).
+ * - `installTokenWrite`: install's `tokenStore.setSessionToken` (`installAuthenticatedLogin`).
  *
  * With `realTokenStore`, the two token-store holds sit on the mocked `keytar` call inside the
  * real `TokenStore`, so its admission runs around them: `restoreTokenRead` on the next
@@ -97,10 +97,10 @@ export async function pushedBrowserSignInSnapshots(): Promise<BrowserSignInSnaps
  * The two chat-store holds match by user id, not by call site. `restoreChatBind` takes the next
  * bind of the restore driver's user, and `installChatBind` the next bind of the redeem answer's
  * user, wherever it comes from. So any later bind of that user consumes a pending hold: the
- * team-switch `/me` refresh in `commitSessionToken` (`appService.ts:1340`), the team-scope
- * commit after discovery in `runWithTeamContextInTeamQueue` (`:1489`), the rebind after a
- * failed hop restore (`:1592`) and `refreshAccessCatalog` (`:4622`). Set a chat-store hold only
- * when the bind it names is the next bind of that user.
+ * team-switch `/me` refresh in `commitSessionToken`, the team-scope commit after discovery and
+ * the rebind after a failed hop restore, both in `runWithTeamContextInTeamQueue`, and
+ * `refreshAccessCatalog`. Set a chat-store hold only when the bind it names is the next bind of
+ * that user.
  */
 export type HoldPoint =
   | 'methods'
@@ -714,7 +714,7 @@ export async function createBrowserSignInHarness(
       },
       setPassword: (_service: string, account: string, password: string) => {
         recordKeychainCall('setPassword', account)
-        // A team switch writes its token through the same store call (`appService.ts:1331`).
+        // A team switch writes its token through the same store call (`commitSessionToken`).
         const pending = switchTokens.has(password)
           ? undefined
           : holds.get('installTokenWrite')?.shift()
@@ -807,7 +807,7 @@ export async function createBrowserSignInHarness(
     setSessionToken: (token: string, envKey: string) => {
       tokenWrites.push({ seq: nextSeq(), value: token })
       secretsSeen.push(token)
-      // A team switch writes its token through the same method (`appService.ts:1331`).
+      // A team switch writes its token through the same method (`commitSessionToken`).
       const point: HoldPoint | null = switchTokens.has(token) ? null : 'installTokenWrite'
       return passThrough(point, 'tokenStore.setSessionToken', held => {
         refuseResponse('installTokenWrite')(held)

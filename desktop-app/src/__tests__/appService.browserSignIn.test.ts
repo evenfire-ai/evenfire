@@ -158,7 +158,7 @@ function modelRestUrls(real: BumpReal, model: BumpModel): string[] {
   return envs.map(env => (env === 'D' ? ENV_D_REST : real.harness.envs[env].restBaseUrl)).sort()
 }
 
-/** A boundary change away from A clears A's saved token (`appService.ts:2294`). */
+/** A boundary change away from A clears A's saved token (`applyRuntimeEnvironmentChange`). */
 function leave(model: BumpModel, next: EnvName | null) {
   if (model.active === 'A' && next !== 'A') model.storedA = false
   model.active = next
@@ -203,11 +203,11 @@ const bumpEvents = {
     id: 'E15',
     label: 'E15 session restore (getSessionState)',
     check: () => true,
-    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4082-4087`): it
-    // never decides an expectation here. `storedA` holds while signed out on A only before the
-    // first restore on A (a kept token at start), and that restore succeeds. Every later
-    // `storedA` comes from a sign-in on A, and every way back to signed out (logout, or a change
-    // away from A) clears it.
+    // The model leaves out `getSessionState`'s 5 s retry gate
+    // (`SAVED_SESSION_RESTORE_RETRY_DELAY_MS`): it never decides an expectation here. `storedA`
+    // holds while signed out on A only before the first restore on A (a kept token at start), and
+    // that restore succeeds. Every later `storedA` comes from a sign-in on A, and every way back
+    // to signed out (logout, or a change away from A) clears it.
     expect: model => ({ bump: !model.signedIn && model.active === 'A' && model.storedA }),
     act: real => real.harness.service.getSessionState(),
     next: model => {
@@ -1636,8 +1636,8 @@ describe('browser sign-in link acceptance, redeem and install', () => {
 
     const restore = service.getSessionState()
     await until(harness, () => bind.reached, "the restore's chat-store bind")
-    // The restore commit holds the owner with the session token set (`appService.ts:2006`) and
-    // its generation advance (`:2036`) still ahead.
+    // The restore commit (`restoreSavedSessionOnce`) holds the owner with the session token set
+    // and its generation advance, which follows the chat-store bind, still ahead.
     expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: false })
     expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
     await harness.drain({ owner: false })
@@ -2510,11 +2510,11 @@ describe('redeeming: Cancel, a new start and the interactive login count', () =>
       return ended
     })
     // The settle step's discovery commit, held. The count below rests on two call sites of the
-    // private `commitPendingRuntimeConfigDiscoveryIfSafe`: logout's (`appService.ts:3239`, in
-    // `logout`) makes the first call, and the settle step's (`:2455`, in
-    // `settleInteractiveLoginAttempt`) the second. The third, restore's (`:1916`), is not reached:
-    // no restore runs here. While the second is held, the settle op keeps the owner, so the new
-    // start's op 2 queues ahead of the fail-safe op, which is queued only after the settle.
+    // private `commitPendingRuntimeConfigDiscoveryIfSafe`: logout's (in `logout`) makes the first
+    // call, and the settle step's (in `settleInteractiveLoginAttempt`) the second. The third,
+    // restore's (in `restoreSavedSession`), is not reached: no restore runs here. While the
+    // second is held, the settle op keeps the owner, so the new start's op 2 queues ahead of the
+    // fail-safe op, which is queued only after the settle.
     const pending = service as unknown as {
       commitPendingRuntimeConfigDiscoveryIfSafe(): Promise<void>
     }
