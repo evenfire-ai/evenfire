@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { DEFAULT_TOAST_DURATION_MS } from '@constants/toasts'
+import { ipcErrorCode } from '@lib/ipcErrorCode'
 import { desktopQueryClient } from '@lib/queryClient'
 import { classifySignInFailure } from '@lib/signInFailure'
 import type {
@@ -26,10 +27,9 @@ interface UseAuthControllerParams {
   logoutForEnvironmentMismatch: () => Promise<number | null>
 }
 
-// The code main raises for desktop setup, whole, after the IPC wrapper's `Error: `.
+// The code main raises for desktop setup, whole, bare or inside the IPC wrapper.
 function isMissingInvitationConfigError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error)
-  return /(^|Error: )invitation_config_not_found$/.test(message)
+  return ipcErrorCode(error, ['invitation_config_not_found']) !== null
 }
 
 function describeLoginWait(seconds: number): string {
