@@ -2364,4 +2364,23 @@ describe('redeeming: Cancel, a new start and the interactive login count', () =>
     await expect(completeSetup(harness)).resolves.toMatchObject({ configured: true })
     expect(setupFetches(harness)).toBe(1)
   })
+
+  it('queues the acceptance op, which counts the redeem, before the link is accepted (A3-33)', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    await harness.drain()
+
+    // Setup queues its first owner op, which reads the count, on the call. Called in the turn
+    // that `true` returns in, it finds the redeem counted only if the acceptance op was queued
+    // before the return. A restore cannot tell: the op that reads the count is its second,
+    // after a discovery check, so an acceptance op queued a turn late would still precede it.
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await expect(completeSetup(harness)).rejects.toThrow(/^auth_transition_in_progress$/)
+    await harness.drain()
+
+    expect(setupFetches(harness)).toBe(0)
+    expect(redeemFetches(harness)).toHaveLength(1)
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+  })
 })
