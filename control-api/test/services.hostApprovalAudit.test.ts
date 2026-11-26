@@ -430,10 +430,14 @@ describe('buildHostApprovalChange', () => {
         expect(text.length).toBeLessThanOrEqual(4096)
         const parsed = JSON.parse(text) as {
           truncated: boolean
+          fields?: Record<string, { old: unknown; new: unknown }>
           tools: Array<{ name: string }>
           nativeToolsTruncated: number
         }
         expect(parsed.truncated).toBe(true)
+        // Ruling 76: tier 4 keeps the changed ceiling beside the counts, ahead
+        // of the native entries it cuts.
+        expect(parsed.fields).toEqual({ modeCeiling: { old: 'manual', new: 'allow_all' } })
         expect(parsed.tools.length + parsed.nativeToolsTruncated).toBe(200)
         expect(parsed.nativeToolsTruncated).toBeGreaterThan(0)
         // Cut from the end: the kept ones are the first, in order.
