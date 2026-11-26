@@ -106,7 +106,7 @@ const appService = new AppService({
     }
   },
   // C-1: the snapshot crosses as the service built it. With no window nothing is sent; the
-  // snapshot stays in the service, which the renderer reads at boot (D13).
+  // snapshot stays in the service, where auth:getBrowserSignInState returns it (D13).
   onBrowserSignInChanged: snapshot => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('auth:browserSignInResult', snapshot)
