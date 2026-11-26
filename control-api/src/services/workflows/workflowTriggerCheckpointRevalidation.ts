@@ -155,6 +155,10 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
 
   let storedRows: StoredWorkflowBinding[]
   try {
+    // A trigger binding belongs to the trigger, or to the approval request when
+    // the recipe requires approval (workflowTriggerApprovalService.ts); either
+    // way it is the run's initiating binding, pinned by
+    // `run.initiating_authority_binding_id = binding.id` below.
     const stored = isTrigger
       ? await runAccessDatabaseQuery(
           input.db,
@@ -164,7 +168,7 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
               binding.effective_team_id::text AS effective_team_id
          FROM workflow_authority_bindings binding
         WHERE binding.binding_kind = 'trigger'
-          AND binding.entity_type = 'workflow_trigger'
+          AND binding.entity_type IN ('workflow_trigger', 'workflow_approval')
           AND binding.delegation_jti = $1
           AND binding.user_id = $2
           AND binding.session_id = $3
