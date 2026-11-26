@@ -604,6 +604,79 @@ describe('CronScheduler — next run after a fire', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Re-enabling: a disabled job waits for its next cron time; an enabled job
+// keeps its pending run
+// ---------------------------------------------------------------------------
+
+describe('CronScheduler — re-enabling a disabled job', () => {
+  let scheduler: CronScheduler
+  let queue: MessageQueue
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-26T12:00:30.000Z'))
+    queue = createMockQueue()
+    scheduler = new CronScheduler(queue)
+  })
+
+  afterEach(() => {
+    scheduler.stop()
+    vi.useRealTimers()
+  })
+
+  it('runs a re-enabled job at its next cron time, not at once', () => {
+    const createTask = vi.spyOn(queue, 'createTaskFromCron')
+    const runsOf = (jobId: string) => createTask.mock.calls.filter(([id]) => id === jobId).length
+    scheduler.start()
+    const target = scheduler.createJob('target', '*/5 * * * *', 'target task')! // nextRun 12:05
+    const control = scheduler.createJob('control', '*/5 * * * *', 'control task')!
+    expect(scheduler.disableJob(target.id)).toBe(true)
+
+    vi.advanceTimersByTime(10 * 60_000) // 12:10:30: control ran at 12:05 and 12:10
+    expect(scheduler.enableJob(target.id)).toBe(true)
+    vi.advanceTimersByTime(60_000) // 12:11:30
+
+    expect({ target: runsOf(target.id), control: runsOf(control.id) }).toEqual({
+      target: 0,
+      control: 2,
+    })
+    expect(target.nextRun!.toISOString()).toBe('2026-11-26T12:15:00.000Z')
+
+    vi.advanceTimersByTime(3 * 60_000 + 30_000) // 12:15:00, liveness for the re-enabled job
+    expect({ target: runsOf(target.id), control: runsOf(control.id) }).toEqual({
+      target: 1,
+      control: 3,
+    })
+  })
+
+  it('keeps the pending run of an enabled job that is enabled again after an early fire', () => {
+    const fired: string[] = []
+    scheduler.on('cron:triggered', () => fired.push(new Date().toISOString()))
+    scheduler.start()
+    const job = scheduler.createJob('every-minute', '*/1 * * * *', 'task')! // due 12:01:00.000
+    vi.setSystemTime(new Date('2026-11-26T12:00:29.990Z')) // the timer fires 10 ms early
+    vi.advanceTimersByTime(30_000) // fires at 12:00:59.990, nextRun becomes 12:02
+    expect(scheduler.enableJob(job.id)).toBe(true)
+    vi.advanceTimersByTime(1_000)
+    expect(fired).toEqual(['2026-11-26T12:00:59.990Z'])
+    expect(job.nextRun!.toISOString()).toBe('2026-11-26T12:02:00.000Z')
+    vi.advanceTimersByTime(59_010) // liveness: the pending run still happens
+    expect(fired).toEqual(['2026-11-26T12:00:59.990Z', '2026-11-26T12:02:00.000Z'])
+  })
+
+  it('keeps a due run of an enabled job that is enabled again before its timer fires', () => {
+    const fired: string[] = []
+    scheduler.on('cron:triggered', () => fired.push(new Date().toISOString()))
+    scheduler.start()
+    const job = scheduler.createJob('every-five', '*/5 * * * *', 'task')! // due 12:05:00.000
+    vi.setSystemTime(new Date('2026-11-26T12:05:00.000Z')) // due now, timer not fired yet
+    expect(scheduler.enableJob(job.id)).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(fired).toEqual(['2026-11-26T12:05:00.000Z'])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Re-enabling an enabled job must not leave an orphaned timer behind
 // ---------------------------------------------------------------------------
 

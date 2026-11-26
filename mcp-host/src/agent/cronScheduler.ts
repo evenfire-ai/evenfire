@@ -130,6 +130,10 @@ export class CronScheduler extends EventEmitter {
       return false
     }
 
+    if (!job.enabled) {
+      // A disabled job has no pending occurrence: restart its schedule from now.
+      job.nextRun = parseNextRun(job.schedule) ?? undefined
+    }
     job.enabled = true
     if (this.isRunning) {
       // Replace, never add: an already-enabled job keeps one timer.
