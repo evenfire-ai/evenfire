@@ -1,7 +1,11 @@
 import { getConnectorPresentation } from '@lib/connectorPresentation'
 import type { ConnectorIdentityProps } from './types'
 
-export function ConnectorIdentity({ name, iconOnly = false }: ConnectorIdentityProps) {
+export function ConnectorIdentity({
+  name,
+  iconOnly = false,
+  instanceName,
+}: ConnectorIdentityProps) {
   const connector = getConnectorPresentation(name)
   const icon = (
     <span className="cu-connector-icon" aria-hidden="true">
@@ -29,7 +33,7 @@ export function ConnectorIdentity({ name, iconOnly = false }: ConnectorIdentityP
   )
   if (iconOnly) return icon
   return (
-    <span className="cu-connector-identity" title={name}>
+    <span className="cu-connector-identity" title={instanceName ?? name}>
       {icon}
       <span className="cu-registry-name">{connector.name}</span>
     </span>

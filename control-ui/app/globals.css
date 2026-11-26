@@ -2222,6 +2222,7 @@ textarea.cu-input {
   container-type: inline-size;
 }
 
+/* Name, description, authentication, managed, enabled, status, actions. */
 .cu-connectors-table {
   min-width: 62rem;
   table-layout: fixed;
@@ -2240,21 +2241,23 @@ textarea.cu-input {
 
 .cu-connectors-table th:nth-child(3),
 .cu-connectors-table td:nth-child(3) {
-  width: 6rem;
+  width: 10rem;
 }
 
 .cu-connectors-table th:nth-child(4),
-.cu-connectors-table td:nth-child(4) {
-  width: 6rem;
-}
-
+.cu-connectors-table td:nth-child(4),
 .cu-connectors-table th:nth-child(5),
 .cu-connectors-table td:nth-child(5) {
-  width: 7rem;
+  width: 6rem;
 }
 
 .cu-connectors-table th:nth-child(6),
 .cu-connectors-table td:nth-child(6) {
+  width: 7rem;
+}
+
+.cu-connectors-table th:nth-child(7),
+.cu-connectors-table td:nth-child(7) {
   width: 3.5rem;
   text-align: right;
 }
@@ -15113,7 +15116,7 @@ button.cu-gfs-tree__button:focus-visible,
   scrollbar-color: var(--cu-border-hover) var(--cu-surface);
 }
 
-/* Marketplace connector names use local, decorative SVGs beside the label. */
+/* Catalog-linked connector names use local, decorative SVGs beside the label. */
 .cu-connector-identity {
   display: inline-flex;
   align-items: center;

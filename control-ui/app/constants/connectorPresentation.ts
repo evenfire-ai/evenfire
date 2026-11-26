@@ -4,6 +4,11 @@ export const CONNECTOR_PRESENTATION: Record<
   string,
   { name: string; icon: string; darkIcon?: string }
 > = {
+  '@evenfire-dev/github-reviewer-ro': {
+    name: 'GitHub Reviewer (Read-only)',
+    icon: '/connector-icons/github.svg',
+    darkIcon: '/connector-icons/github-on-dark.svg',
+  },
   '@evenfire/mcp-airtable': { name: 'Airtable', icon: '/connector-icons/airtable.svg' },
   '@evenfire/mcp-arxiv': {
     name: 'arXiv',
@@ -130,4 +135,25 @@ export const CONNECTOR_PRESENTATION: Record<
     icon: '/connector-icons/wikipedia.svg',
     darkIcon: '/connector-icons/wikipedia-on-dark.svg',
   },
+}
+
+// Observed legacy first-party catalog IDs. These aliases affect presentation only;
+// never infer a catalog source from an installed resource name or another publisher.
+export const INSTALLED_CONNECTOR_CATALOG_ALIASES: Record<string, string> = {
+  '@evenfire-dev/mcp-dovetail-remote': '@evenfire/mcp-dovetail-remote',
+  '@evenfire-dev/mcp-monid': '@evenfire/mcp-monid',
+  '@evenfire-dev/mcp-figma': '@evenfire/mcp-figma',
+  '@evenfire-dev/mcp-gitlab': '@evenfire/mcp-gitlab',
+  '@evenfire-dev/mcp-hubspot': '@evenfire/mcp-hubspot',
+  '@evenfire-dev/mcp-paddle': '@evenfire/mcp-paddle',
+  '@evenfire-dev/mcp-snowflake': '@evenfire/mcp-snowflake',
+  'github-mcp': '@evenfire/mcp-github-remote',
+  'mcp-github': '@evenfire/mcp-github-clerum',
+  'mcp-etherscan': '@evenfire/mcp-etherscan',
+  'mcp-coingecko-remote': '@evenfire/mcp-coingecko',
+  'mcp-defillama-remote': '@evenfire/mcp-defillama',
+  'mcp-stripe-remote': '@evenfire/mcp-stripe',
+  'mcp-tavily-remote': '@evenfire/mcp-tavily-remote',
+  'web-research': '@evenfire/mcp-web-research',
+  whois: '@evenfire/mcp-whois',
 }

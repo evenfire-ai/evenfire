@@ -522,3 +522,139 @@ describe('McpServerTable — header actions', () => {
     expect(screen.queryByRole('menuitem', { name: 'Create connector' })).not.toBeInTheDocument()
   })
 })
+
+describe('McpServerTable — saved marketplace identity', () => {
+  function linkedItem(
+    name: string,
+    annotations: Record<string, string>,
+    labels?: Record<string, string>
+  ) {
+    const item = makeItem({ name })
+    return { ...item, metadata: { ...item.metadata, annotations, labels } }
+  }
+
+  it('shows catalog branding while keeping two installed instances distinct and actions unchanged', () => {
+    const onOpen = vi.fn()
+    const onDelete = vi.fn()
+    render(
+      <McpServerTable
+        items={[
+          linkedItem('airtable-sales', { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' }),
+          linkedItem('airtable-research', { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' }),
+        ]}
+        onOpen={onOpen}
+        onDelete={onDelete}
+      />
+    )
+    expect(screen.queryByRole('columnheader', { name: 'Instance' })).not.toBeInTheDocument()
+    expect(screen.getAllByText('Airtable')).toHaveLength(2)
+    const row = screen.getByTitle('airtable-sales').closest('tr')!
+    expect(row.querySelector('img')).toHaveAttribute('src', '/connector-icons/airtable.svg')
+    fireEvent.click(within(row).getByText('Airtable'))
+    expect(onOpen).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-sales' })
+    fireEvent.click(
+      within(row).getByRole('button', { name: 'Actions for connector airtable-sales' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    expect(onDelete).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-sales' })
+  })
+
+  it('prefers annotations, reads legacy labels, and resolves only explicit first-party aliases', () => {
+    render(
+      <McpServerTable
+        items={[
+          linkedItem(
+            'annotation-wins',
+            { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' },
+            { 'clerum.io/catalog-id': '@evenfire/mcp-stripe' }
+          ),
+          linkedItem('label-only', {}, { 'clerum.io/catalog-id': '@evenfire/mcp-stripe' }),
+          linkedItem('dovetail', { 'clerum.io/catalog-id': '@evenfire-dev/mcp-dovetail-remote' }),
+          linkedItem('third-party', { 'clerum.io/catalog-id': '@someone-else/mcp-airtable' }),
+          makeItem({ name: 'evenfire-mcp-airtable' }),
+        ]}
+      />
+    )
+    expect(screen.getByTitle('annotation-wins').closest('tr')).toHaveTextContent('Airtable')
+    expect(screen.getByTitle('label-only').closest('tr')).toHaveTextContent('Stripe')
+    expect(screen.getByTitle('dovetail').closest('tr')?.querySelector('img')).toHaveAttribute(
+      'src',
+      '/connector-icons/dovetail.svg'
+    )
+    expect(screen.getByTitle('third-party').closest('tr')).toHaveTextContent(
+      '@someone-else/mcp-airtable'
+    )
+    expect(
+      screen.getAllByText('evenfire-mcp-airtable')[0].closest('tr')?.querySelector('img')
+    ).toBeNull()
+  })
+
+  it('searches display names, instance names and original legacy IDs, and sorts the friendly-name column', () => {
+    render(
+      <McpServerTable
+        items={[
+          linkedItem('aaa-instance', { 'clerum.io/catalog-id': '@evenfire/mcp-stripe' }),
+          linkedItem('zzz-instance', { 'clerum.io/catalog-id': '@evenfire/mcp-google-sheets' }),
+          linkedItem('middle-instance', {
+            'clerum.io/catalog-id': '@evenfire-dev/mcp-dovetail-remote',
+          }),
+        ]}
+      />
+    )
+    const names = () =>
+      Array.from(document.querySelectorAll('tbody tr td:first-child')).map(x => x.textContent)
+    expect(names()).toEqual(['Dovetail', 'Google Sheets', 'Stripe'])
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Name descending' }))
+    expect(names()).toEqual(['Stripe', 'Google Sheets', 'Dovetail'])
+    const search = screen.getByLabelText('Search connectors')
+    for (const query of ['Google Sheets', 'zzz-instance', '@evenfire/mcp-google-sheets']) {
+      fireEvent.change(search, { target: { value: query } })
+      expect(names()).toEqual(['Google Sheets'])
+    }
+    fireEvent.change(search, { target: { value: '@evenfire-dev/mcp-dovetail-remote' } })
+    expect(names()).toEqual(['Dovetail'])
+  })
+})
+
+describe('McpServerTable — legacy catalog icon mappings', () => {
+  it('uses branded icons for known saved legacy IDs while retaining the fallback for unknown IDs', () => {
+    const sources = [
+      ['mcp-etherscan', 'Etherscan', 'etherscan'],
+      ['mcp-stripe-remote', 'Stripe', 'stripe'],
+      ['github-mcp', 'GitHub (Remote)', 'github'],
+      ['@evenfire-dev/github-reviewer-ro', 'GitHub Reviewer (Read-only)', 'github'],
+    ]
+    render(
+      <McpServerTable
+        items={sources
+          .map(([source], i) => ({
+            ...makeItem({ name: `installed-${i}` }),
+            metadata: {
+              name: `installed-${i}`,
+              namespace: 'mcp-server',
+              annotations: { 'clerum.io/catalog-id': source },
+            },
+          }))
+          .concat([
+            {
+              ...makeItem({ name: 'custom-scanner' }),
+              metadata: {
+                name: 'custom-scanner',
+                namespace: 'mcp-server',
+                annotations: { 'clerum.io/catalog-id': 'evm-safe-scanner' },
+              },
+            },
+          ])}
+      />
+    )
+    for (const [i, [, label, icon]] of sources.entries()) {
+      const identity = screen.getByTitle(`installed-${i}`)
+      expect(identity).toHaveTextContent(label)
+      expect(identity.querySelector('img')).toHaveAttribute('src', `/connector-icons/${icon}.svg`)
+    }
+    expect(screen.getByTitle('custom-scanner').querySelector('img')).toHaveAttribute(
+      'src',
+      '/connector-icons/modelcontextprotocol.svg'
+    )
+  })
+})

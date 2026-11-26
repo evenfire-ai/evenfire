@@ -8,7 +8,12 @@ import {
   TableViewport,
   TruncatedText,
 } from '@clerum/frontend-components'
+import { ConnectorIdentity } from '@components/ConnectorIdentity'
 import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
+import {
+  getConnectorPresentation,
+  getInstalledConnectorCatalogId,
+} from '@lib/connectorPresentation'
 import { ConnectorAgentAccessDialog } from './ConnectorAgentAccessDialog'
 import type {
   ConnectorAgentBinding,
@@ -29,7 +34,7 @@ type ConnectorSortKey = 'name' | 'description' | 'authentication' | 'managed' | 
 type SortDirection = 'asc' | 'desc'
 
 const CONNECTOR_COLUMNS: TableHeaderColumn[] = [
-  { key: 'name', label: 'Name', width: '24%' },
+  { key: 'name', label: 'Name' },
   { key: 'description', label: 'Description' },
   { key: 'authentication', label: 'Authentication', width: '10rem' },
   { key: 'managed', label: 'Managed', width: '6rem' },
@@ -119,7 +124,9 @@ export function McpServerTable({
       items.map(item => {
         const namespace = item.metadata?.namespace || 'default'
         const name = item.metadata?.name || 'unknown'
-        return { key: `${namespace}/${name}`, namespace, name, item }
+        const catalogId = getInstalledConnectorCatalogId(item.metadata)
+        const displayName = catalogId ? getConnectorPresentation(catalogId).name : name
+        return { key: `${namespace}/${name}`, namespace, name, catalogId, displayName, item }
       }),
     [items]
   )
@@ -127,7 +134,7 @@ export function McpServerTable({
   const filteredRows = useMemo(() => {
     const matchingRows = !normalizedSearch
       ? rows
-      : rows.filter(({ namespace, name, item }) => {
+      : rows.filter(({ namespace, name, displayName, catalogId, item }) => {
           const spec = item.spec || {}
           const accessText = (agentBindingsByConnectorName[name] ?? [])
             .flatMap(binding => binding.agents)
@@ -141,6 +148,10 @@ export function McpServerTable({
           return [
             namespace,
             name,
+            displayName,
+            catalogId,
+            item.metadata?.annotations?.['clerum.io/catalog-id'],
+            item.metadata?.labels?.['clerum.io/catalog-id'],
             spec.image,
             spec.description,
             spec.auth?.type,
@@ -157,7 +168,7 @@ export function McpServerTable({
     return [...matchingRows].sort((left, right) => {
       const comparison =
         sortKey === 'name'
-          ? left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+          ? left.displayName.localeCompare(right.displayName, undefined, { sensitivity: 'base' })
           : sortKey === 'description'
             ? (left.item.spec?.description ?? '').localeCompare(
                 right.item.spec?.description ?? '',
@@ -317,7 +328,7 @@ export function McpServerTable({
                 }
               />
             ) : (
-              filteredRows.map(({ key, namespace, name, item }) => {
+              filteredRows.map(({ key, namespace, name, catalogId, item }) => {
                 const spec = item.spec || {}
                 const agentAccessBusy = updatingAgentAccessKey === key
                 return (
@@ -326,7 +337,13 @@ export function McpServerTable({
                     key={key}
                     onNavigate={onOpen ? () => onOpen({ namespace, name }) : undefined}
                   >
-                    <td>{name}</td>
+                    <td>
+                      {catalogId ? (
+                        <ConnectorIdentity name={catalogId} instanceName={name} />
+                      ) : (
+                        <span title={name}>{name}</span>
+                      )}
+                    </td>
                     <td className="cu-registry-description">
                       <TruncatedText value={spec.description} />
                     </td>
