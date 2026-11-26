@@ -290,7 +290,7 @@ const SIX_BINDING_CALLS: readonly BindingCallRow[] = [
   {
     call: 'saveRuntimeConfig',
     prior: selectA,
-    // The add-environment form (`AuthPage/index.tsx:63-69`).
+    // The add-environment form (`AuthPage`'s `handleRuntimeSetupSubmit`).
     fill: controller => {
       controller.setRuntimeConfigSetupName('Environment D')
       controller.setRuntimeConfigSetupExternalRestApiBaseUrl('https://api-d.example.test')
@@ -652,7 +652,7 @@ const ENVIRONMENT_CHANGE_ROWS: readonly EnvironmentChangeRow[] = [
   {
     handler: 'handleSaveRuntimeConfig',
     call: 'saveRuntimeConfig',
-    // The add-environment form (`AuthPage/index.tsx:63-69`).
+    // The add-environment form (`AuthPage`'s `handleRuntimeSetupSubmit`).
     prepare: async page => {
       act(() => {
         page.controller().setRuntimeConfigSetupName('Environment D')
