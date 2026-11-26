@@ -160,6 +160,34 @@ export function createExternalWorkflowsRouter(): Router {
     }
   )
 
+  // Cancel is authorized by control-api from the run row and the caller's session alone
+  // (launcher or live team admin); it reads no action delegation, so V1 and V2 sessions
+  // take the same path and no delegation header is forwarded.
+  router.post(
+    '/workflows/:ns/:name/runs/:runId/cancel',
+    requireAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const ns = String(req.params.ns || '').trim()
+        const name = String(req.params.name || '').trim()
+        const runId = String(req.params.runId || '').trim()
+        if (!ns || !name || !runId) {
+          res.status(400).json({ error: 'namespace, name, and runId are required' })
+          return
+        }
+        const sessionToken = extractAuthToken(req)
+        const { data, status } = await controlApiRequestWithStatus(
+          'POST',
+          `/external/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/cancel`,
+          { userSessionToken: sessionToken }
+        )
+        res.status(status).json(data)
+      } catch (error) {
+        forwardControlApiError(error, res, next)
+      }
+    }
+  )
+
   router.get(
     '/workflows/:ns/:name/runs/:runId/artifacts',
     requireAuth,
