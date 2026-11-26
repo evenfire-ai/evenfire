@@ -196,11 +196,7 @@ describe('useLoginMethods: scenarios', () => {
     act(() => {
       void hook.result.current.runBindingChange(() => change.promise)
     })
-    await act(async () =>
-      main
-        .read(0)
-        .reject(wrapLikeElectronIpc('auth:getLoginMethods', new TypeError('fetch failed')))
-    )
+    await act(async () => main.read(0).reject(failedRead()))
 
     expect(hook.result.current.model).toEqual(LOADING)
   })
@@ -261,6 +257,9 @@ describe('useLoginMethods: scenarios', () => {
     const main = installMain()
     const { hook } = mountHook()
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    // Synthetic, adversarial input (plan, Fixtures): no error main's getLoginMethods throws names
+    // a URL (`failedRead()`'s does not), so this message carries one as a canary that proves the
+    // log line keeps only the error's class (D18).
     const failure = wrapLikeElectronIpc(
       'auth:getLoginMethods',
       new Error('stale_runtime_environment https://api.example.test')
@@ -350,6 +349,8 @@ describe('useLoginMethods: scenarios', () => {
     installMain()
     const { hook, refreshRuntimeConfigState } = mountHook()
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    // Synthetic, adversarial input (plan, Fixtures): the URL is a canary that proves the log line
+    // keeps only the error's class (D18).
     refreshRuntimeConfigState.mockRejectedValueOnce(
       wrapLikeElectronIpc('auth:getRuntimeConfigState', new Error('https://api.example.test'))
     )
@@ -363,6 +364,7 @@ describe('useLoginMethods: scenarios', () => {
     await flush()
     expect(warn).toHaveBeenCalledTimes(1)
     expect(warn.mock.calls[0]).toEqual([expect.stringMatching(/^\[useLoginMethods\] /), 'Error'])
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('example.test')
   })
 
   it('keeps refresh and runBindingChange stable across renders', async () => {
