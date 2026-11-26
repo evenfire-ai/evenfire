@@ -270,12 +270,14 @@ dedup + `ff54367c2` wake-hold latch; the inert-on-wake-retry path was P1-1
 ```
 
 **Avoid.** Minting a new id per forward attempt (causes double-execution on
-retry). **Residual to close:** the current stable id is
-`sha256(sender|hostRef|threadId|content)` — a _content_ hash, so two truly
-identical messages inside the dedup TTL replay rather than execute. The
-correct long-term identity is a per-request nonce (e.g. a client-supplied
-idempotency key from the desktop app), which distinguishes deliveries by
-intent rather than by bytes.
+retry). **Current identity:** rpc-proxy takes the `messageId` from a validated
+V2 authorization when one is present, otherwise the client's `Idempotency-Key`
+header, and otherwise mints a random per-request nonce (`deliveryMessageId` in
+`rpc-proxy/src/routes/rpc.ts`). The desktop app sends one `Idempotency-Key`
+per user send and reuses it on its token-refresh retry
+(`AppService.invokeHostMessage`), so a retry of a message the Host already
+admitted replays, while two identical messages sent separately still both
+execute.
 
 ---
 

@@ -1,5 +1,4 @@
 import { dirname, join } from 'node:path'
-import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT } from '@clerum/action-context-contracts'
 import { parseVerifierMaterial } from '@clerum/jwt-key-policy'
 import { readDevVerifierMaterial, resolveDevKeyStoreDir } from '@clerum/jwt-key-policy/dev-store'
 
@@ -22,7 +21,6 @@ type Config = {
   controlApiBaseUrl: string
   controlApiServiceToken: string
   controlApiServiceName: string
-  mcpHostEdgeToken: string
   controlApiCacheTtlMs: number
   artifactDownloadMaxBytes: number
   artifactDownloadTimeoutMs: number
@@ -113,21 +111,6 @@ function assertNotPlaceholder(label: string, value: string): void {
   }
 }
 
-export function parseRpcProxyMcpHostEdgeToken(
-  raw: string | undefined,
-  production: boolean
-): string {
-  const supplied = raw?.trim() ?? ''
-  const value = supplied || (production ? '' : RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT)
-  // The dedicated credential is required only for authenticated V2 traffic.
-  // PR1/PR2 can serve the pre-PR3 legacy path without this dormant secret.
-  if (!value) return ''
-  assertNotPlaceholder('RPC_PROXY_MCP_HOST_EDGE_TOKEN', value)
-  if (value.length < 16 || value.length > 4096) {
-    throw new Error('RPC_PROXY_MCP_HOST_EDGE_TOKEN must contain 16 to 4096 characters')
-  }
-  return value
-}
 export function parseSandboxUiAllowedPorts(raw: string): ReadonlySet<number> {
   const ports = new Set<number>()
   for (const token of raw.split(',')) {
@@ -259,10 +242,6 @@ export const config: Config = {
     return v
   })(),
   controlApiServiceName: process.env.RPC_PROXY_CONTROL_API_SERVICE_NAME || 'rpc-proxy',
-  mcpHostEdgeToken: parseRpcProxyMcpHostEdgeToken(
-    process.env.RPC_PROXY_MCP_HOST_EDGE_TOKEN,
-    process.env.NODE_ENV === 'production'
-  ),
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   // The Host refuses artifact files above 50 MiB (MAX_ARTIFACT_BYTES in
   // mcp-host/src/workflow/artifactPaths.ts) and checks that size before it redacts

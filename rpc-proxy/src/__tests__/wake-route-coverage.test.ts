@@ -20,6 +20,7 @@ const serviceMock = vi.hoisted(() => ({
   listAllowedServersForUser: vi.fn(),
   resolveServerConnectionForUser: vi.fn(),
   resolveHostConnectionForUser: vi.fn(),
+  refreshV1HostConnection: vi.fn(),
   validateRpcRequest: vi.fn(),
   forwardRpcToServer: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
@@ -115,6 +116,7 @@ const originalUpstreamTimeoutMs = config.upstreamTimeoutMs
 beforeEach(() => {
   vi.clearAllMocks()
   serviceMock.resolveHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
+  serviceMock.refreshV1HostConnection.mockResolvedValue(null)
   controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
     kind: 'active',
     wakeGeneration: null,

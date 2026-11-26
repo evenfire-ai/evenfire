@@ -1,15 +1,22 @@
 import type { NextFunction, Request, Response } from 'express'
-import { createHash, timingSafeEqual } from 'node:crypto'
+import jwt from 'jsonwebtoken'
+import { createHash } from 'node:crypto'
 import {
   type ActionOperationId,
-  RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER,
+  HOST_EDGE_ASSERTION_AUDIENCE,
+  HOST_EDGE_ASSERTION_HEADER,
+  HOST_EDGE_ASSERTION_JWT_TYPE,
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
+  type HostEdgeRpcProxyScope,
   type TrustedEdgeActionContextV2,
   canonicalActionTargetJson,
   hashActionTarget,
   validateActionOperationTarget,
   validateCanonicalResourceIdentity,
+  validateHostEdgeAssertionClaims,
 } from '@clerum/action-context-contracts'
 import { config } from '../config'
+import { logger } from '../logger'
 import type { RuntimeCallerContext, RuntimeCallerKind } from './types'
 
 const EDGE_CALLER_HEADER = 'x-clerum-edge-caller'
@@ -20,7 +27,6 @@ const EDGE_REQUEST_ID_HEADER = 'x-clerum-edge-request-id'
 const EDGE_CHANNEL_TYPE_HEADER = 'x-clerum-edge-channel-type'
 const EDGE_CHANNEL_ID_HEADER = 'x-clerum-edge-channel-id'
 const EDGE_SENDER_HEADER = 'x-clerum-edge-sender'
-const EDGE_SERVICE_HEADER = 'x-service-token'
 export const EDGE_ACTION_CONTEXT_HEADER = 'x-clerum-edge-action-context'
 const V2_AUTHORITY_ONLY_HEADERS = [
   'x-clerum-edge-access-path-id',
@@ -57,20 +63,6 @@ function hasHeader(req: Request, name: string): boolean {
 function cleanHeader(req: Request, name: string): string | undefined {
   const value = firstHeaderValue(req, name)?.trim()
   return value ? value : undefined
-}
-
-function rpcProxyServiceAuthenticated(req: Request): boolean {
-  const expected = config.rpcProxyEdgeToken
-  const service = cleanHeader(req, EDGE_SERVICE_HEADER)
-  const token = cleanHeader(req, RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER) ?? ''
-
-  // Configuration supplies either the projected cluster secret or the one
-  // explicit local development value. Never accept caller/context headers alone.
-  if (!expected) return false
-  if (service !== 'rpc-proxy' || token.length < 16 || token.length > 4096) return false
-  const actualBytes = Buffer.from(token)
-  const expectedBytes = Buffer.from(expected)
-  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes)
 }
 
 function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
@@ -271,31 +263,127 @@ export function runtimeActionTargetMatches(
   )
 }
 
+const RPC_PROXY_ROUTE_SCOPE_VALUES: ReadonlySet<string> = new Set(
+  Object.values(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES)
+)
+
+type EdgeAssertionRefusalReason =
+  | 'missing'
+  | 'not-a-string'
+  | 'v2-refused'
+  | 'no-verification-key'
+  | 'verify-failed'
+  | 'typ-mismatch'
+  | 'claims-rejected'
+
+type EdgeAssertionVerdict =
+  | { accepted: true; scopes: readonly string[] }
+  | {
+      accepted: false
+      reason: EdgeAssertionRefusalReason
+      errorName?: string
+      claimError?: string
+    }
+
+// Same bound the logger applies to an error name it summarizes.
+const ERROR_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+
+/**
+ * Verifies the edge assertion control-api signed for an rpc-proxy request and binds it to the
+ * caller the handler will see and to the route scope. Only version 1 is accepted: a request that
+ * carries V2 authority is refused, because the Host does not yet compare V2 claims with the
+ * trusted action context. A Host without a verification key refuses every assertion. A refusal
+ * names its reason from a closed set; the guard logs it and never returns it to the caller.
+ */
+function verifyRpcProxyEdgeAssertion(
+  req: Request,
+  context: RuntimeCallerContext & { userId: string },
+  requiredScope: HostEdgeRpcProxyScope
+): EdgeAssertionVerdict {
+  const raw = req.headers[HOST_EDGE_ASSERTION_HEADER]
+  if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
+    return { accepted: false, reason: 'missing' }
+  }
+  if (typeof raw !== 'string') return { accepted: false, reason: 'not-a-string' }
+  if (declaresV2RuntimeAuthority(req) || context.actionContextV2) {
+    return { accepted: false, reason: 'v2-refused' }
+  }
+  if (!config.authJwtPublicKey) return { accepted: false, reason: 'no-verification-key' }
+
+  let decoded: jwt.Jwt
+  try {
+    decoded = jwt.verify(raw, config.authJwtPublicKey, {
+      algorithms: ['RS256'],
+      issuer: config.authJwtIssuer,
+      audience: HOST_EDGE_ASSERTION_AUDIENCE,
+      complete: true,
+    })
+  } catch (error) {
+    // Every verification failure (signature, algorithm, issuer, audience,
+    // expiry, malformed token) is the same refusal to the caller; the guard
+    // logs the error name, never its message or the token.
+    const name = error instanceof Error ? error.name : ''
+    return {
+      accepted: false,
+      reason: 'verify-failed',
+      errorName: ERROR_NAME_RE.test(name) ? name : 'Error',
+    }
+  }
+  if (decoded.header.typ !== HOST_EDGE_ASSERTION_JWT_TYPE) {
+    return { accepted: false, reason: 'typ-mismatch' }
+  }
+
+  const claims = validateHostEdgeAssertionClaims(
+    decoded.payload,
+    {
+      v: 1,
+      iss: config.authJwtIssuer,
+      host: `${config.namespace}/${config.hostName}`,
+      sub: context.userId,
+      teamId: context.teamId ?? null,
+      requiredScope,
+    },
+    Math.floor(Date.now() / 1000)
+  )
+  if (!claims.ok) return { accepted: false, reason: 'claims-rejected', claimError: claims.error }
+  // The claims validator has checked that `scopes` is a non-empty array of non-empty strings.
+  return {
+    accepted: true,
+    scopes: Object.freeze([...(decoded.payload as { scopes: string[] }).scopes]),
+  }
+}
+
+/**
+ * Guards a direct Host runtime route. A route that admits caller `rpc-proxy`
+ * must name the scope an rpc-proxy edge assertion has to list for it (from
+ * `HOST_EDGE_RPC_PROXY_ROUTE_SCOPES`); registering it without one throws.
+ */
 export function runtimeEdgeGuard(
   allowedCallers: RuntimeCallerKind[],
-  allowedV2Operations?: readonly ActionOperationId[]
+  allowedV2Operations?: readonly ActionOperationId[],
+  rpcProxyScope?: HostEdgeRpcProxyScope
 ) {
   const allowed = new Set<RuntimeCallerKind>(allowedCallers)
+  if (
+    allowed.has('rpc-proxy') &&
+    (typeof rpcProxyScope !== 'string' || !RPC_PROXY_ROUTE_SCOPE_VALUES.has(rpcProxyScope))
+  ) {
+    throw new Error('A runtime route that admits caller rpc-proxy requires its edge route scope')
+  }
   return (req: Request, res: Response, next: NextFunction): void => {
     const assertedCaller = cleanHeader(req, EDGE_CALLER_HEADER)
     const unsupportedAuthorityHeader = V2_AUTHORITY_ONLY_HEADERS.some(name => hasHeader(req, name))
     const declaresV2Authority = declaresV2RuntimeAuthority(req)
 
-    // Legacy context headers retain their pre-PR3 behavior. A declared V2
-    // envelope selects the authenticated path; standalone authority fields are
-    // rejected rather than reinterpreted as legacy context.
+    // Caller rpc-proxy is trusted only through a verified edge assertion bound
+    // to its clear context headers; the reader callers keep their context
+    // headers. Standalone authority fields are rejected rather than
+    // reinterpreted as legacy context.
     if (unsupportedAuthorityHeader) {
       res.status(401).json({ error: 'Unsupported runtime V2 authority header' })
       return
     }
     if (declaresV2Authority && assertedCaller !== 'rpc-proxy') {
-      res.status(401).json({ error: 'Missing authenticated rpc-proxy service context' })
-      return
-    }
-    if (
-      declaresV2Authority &&
-      (!cleanHeader(req, EDGE_ACTION_CONTEXT_HEADER) || !rpcProxyServiceAuthenticated(req))
-    ) {
       res.status(401).json({ error: 'Missing authenticated rpc-proxy service context' })
       return
     }
@@ -319,6 +407,33 @@ export function runtimeEdgeGuard(
     if (context.caller === 'rpc-proxy' && !context.userId) {
       res.status(401).json({ error: 'Missing rpc edge caller context' })
       return
+    }
+    if (context.caller === 'rpc-proxy') {
+      const verdict = verifyRpcProxyEdgeAssertion(
+        req,
+        context as RuntimeCallerContext & { userId: string },
+        rpcProxyScope as HostEdgeRpcProxyScope
+      )
+      if (!verdict.accepted) {
+        logger.warn(
+          {
+            event: 'runtime_edge_assertion_refused',
+            reason: verdict.reason,
+            scope: rpcProxyScope,
+            ...(verdict.errorName ? { errorName: verdict.errorName } : {}),
+            ...(verdict.claimError ? { claimError: verdict.claimError } : {}),
+          },
+          '[Server] Refused rpc-proxy edge assertion'
+        )
+        res.status(401).json({
+          error:
+            verdict.reason === 'missing'
+              ? 'Missing runtime edge assertion'
+              : 'Invalid runtime edge assertion',
+        })
+        return
+      }
+      context.edgeAssertionScopes = verdict.scopes
     }
     if (
       context.actionContextV2 &&

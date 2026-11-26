@@ -26,7 +26,7 @@ import { HostCRD, HostCrdStatus } from '../src/types'
 import {
   type MockAppsApi,
   type MockCustomApi,
-  asAppsApi,
+  asAppsApiWithSignedAssertionRpcProxy,
   asCoreApi,
   asCustomApi,
   asNetworkingApi,
@@ -46,6 +46,7 @@ vi.mock('../src/config', () => ({
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
+    hostRpcProxyEdgeProtocol: 'signed-assertion-v1',
     channelsNamespace: 'channels',
     channelReaderImage: 'clerum/channel-reader:test',
     channelReaderImagePullPolicy: 'IfNotPresent',
@@ -184,7 +185,7 @@ function createReconciler(deps?: {
   const customApi = createMockCustomApi()
 
   const reconciler = new HostReconciler({} as k8s.KubeConfig, {
-    appsApi: asAppsApi(appsApi),
+    appsApi: asAppsApiWithSignedAssertionRpcProxy(appsApi),
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),
@@ -4642,10 +4643,14 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
       resolveContextMounts: async () => mounts,
     })
+    // The RPC Proxy cohort list stays empty; only the wfc pod lists answer.
     coreApi.listNamespacedPod.mockImplementation(
       ({ labelSelector }: { labelSelector?: string } = {}) =>
         Promise.resolve({
-          items: [{ spec: { nodeName: labelSelector?.includes('sfs-a') ? 'node-1' : 'node-2' } }],
+          items:
+            labelSelector === 'app=rpc-proxy'
+              ? []
+              : [{ spec: { nodeName: labelSelector?.includes('sfs-a') ? 'node-1' : 'node-2' } }],
         })
     )
     await reconciler.reconcile(makeStatelessHost({ status: suspendedStatus() }))
@@ -4668,7 +4673,13 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
       resolveContextMounts: async () => mounts,
     })
-    coreApi.listNamespacedPod.mockResolvedValue({ items: [{ spec: { nodeName: 'node-1' } }] })
+    // The RPC Proxy cohort list stays empty; only the wfc pod lists answer.
+    coreApi.listNamespacedPod.mockImplementation(
+      ({ labelSelector }: { labelSelector?: string } = {}) =>
+        Promise.resolve({
+          items: labelSelector === 'app=rpc-proxy' ? [] : [{ spec: { nodeName: 'node-1' } }],
+        })
+    )
     await reconciler.reconcile(makeStatelessHost({ status: suspendedStatus(4) }))
 
     expect(hostDeploymentBody(appsApi, 'stateless-host').spec?.replicas).toBe(0)

@@ -1,29 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import jwt from 'jsonwebtoken'
-import { generateKeyPairSync } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 const originalEnv = new Map<string, string | undefined>()
-const envKeys = [
-  'CLERUM_ENABLE_AUTH',
-  'CLERUM_AUTH_JWT_PUBLIC_KEY',
-  'CLERUM_AUTH_JWT_ISSUER',
-  'CLERUM_AUTH_JWT_AUDIENCE',
-  'CLERUM_HOST_NAME',
-  'CLERUM_HOST_NAMESPACE',
-  'MCP_HOST_RPC_PROXY_EDGE_TOKEN',
-]
-let privateKey = ''
-let publicKey = ''
+const envKeys = ['CLERUM_ENABLE_AUTH', 'CLERUM_HOST_NAME', 'CLERUM_NAMESPACE']
 
 beforeAll(() => {
-  const pair = generateKeyPairSync('rsa', {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-  })
-  privateKey = pair.privateKey
-  publicKey = pair.publicKey
   for (const key of envKeys) originalEnv.set(key, process.env[key])
 })
 
@@ -36,25 +18,16 @@ afterAll(() => {
   vi.resetModules()
 })
 
-function legacyToken(sub: string, hostRefs: string[] = ['chatllm']): string {
-  return jwt.sign({ sub, typ: 'user', scopes: ['host:session:read'], hostRefs }, privateKey, {
-    algorithm: 'RS256',
-    issuer: 'control-api',
-    audience: 'rpc-proxy',
-    expiresIn: '5m',
-  })
-}
-
 async function withServer(
-  run: (baseUrl: string, search: ReturnType<typeof vi.fn>) => Promise<void>
+  run: (
+    baseUrl: string,
+    search: ReturnType<typeof vi.fn>,
+    sessionsList: ReturnType<typeof vi.fn>
+  ) => Promise<void>
 ) {
   process.env.CLERUM_ENABLE_AUTH = 'true'
-  process.env.CLERUM_AUTH_JWT_PUBLIC_KEY = publicKey.replace(/\n/g, '\\n')
-  process.env.CLERUM_AUTH_JWT_ISSUER = 'control-api'
-  process.env.CLERUM_AUTH_JWT_AUDIENCE = 'rpc-proxy'
   process.env.CLERUM_HOST_NAME = 'chatllm'
-  process.env.CLERUM_HOST_NAMESPACE = 'mcp-host'
-  process.env.MCP_HOST_RPC_PROXY_EDGE_TOKEN = 'r34-test-only-edge-token'
+  process.env.CLERUM_NAMESPACE = 'mcp-host'
   vi.resetModules()
   const { RPCServer } = await import('../server')
   const server = new RPCServer(0)
@@ -70,72 +43,64 @@ async function withServer(
     ],
     total: 1,
   }))
+  const sessionsList = vi.fn().mockResolvedValue({ sessions: [], nextCursor: null })
   server.onSessionSearch(search)
+  server.onSessionsList(sessionsList)
   await server.start()
   const address = (server as unknown as { server: { address: () => AddressInfo } }).server.address()
   try {
-    await run(`http://127.0.0.1:${address.port}`, search)
+    await run(`http://127.0.0.1:${address.port}`, search, sessionsList)
   } finally {
     await server.stop()
     vi.resetModules()
   }
 }
 
+const edgeHeaders = {
+  'x-clerum-edge-caller': 'rpc-proxy',
+  'x-clerum-edge-host-ref': 'chatllm',
+  'x-clerum-edge-user-id': 'alice-user',
+}
+
 describe('mounted session-search authority', () => {
-  it('rejects unsigned legacy actor assertions before querying', async () => {
-    await withServer(async (baseUrl, search) => {
-      const response = await fetch(`${baseUrl}/v1/runtime/sessions/search?q=budget`, {
-        headers: {
-          'x-clerum-edge-caller': 'rpc-proxy',
-          'x-clerum-edge-host-ref': 'chatllm',
-          'x-clerum-edge-user-id': 'victim-user',
-        },
-      })
-      expect(response.status).toBe(401)
+  it('refuses legacy actor headers, signed or not, as missing V2 authority', async () => {
+    await withServer(async (baseUrl, search, sessionsList) => {
+      for (const headers of [edgeHeaders, withRpcProxyEdgeTestAuthentication(edgeHeaders)]) {
+        const response = await fetch(`${baseUrl}/v1/runtime/sessions/search?q=budget`, {
+          headers,
+        })
+        expect(response.status).toBe(401)
+        expect(await response.json()).toEqual({ error: 'V2 runtime authority required' })
+      }
       expect(search).not.toHaveBeenCalled()
+
+      // Witness: the same signed headers open the V1 sessions route.
+      const list = await fetch(`${baseUrl}/v1/runtime/sessions`, {
+        headers: withRpcProxyEdgeTestAuthentication(edgeHeaders),
+      })
+      expect(list.status).toBe(200)
+      expect(sessionsList).toHaveBeenCalledTimes(1)
     })
   })
 
-  it('uses the signed legacy subject and ignores a forged actor header', async () => {
-    await withServer(async (baseUrl, search) => {
+  it('sends a declared V2 request through the strict edge guard', async () => {
+    await withServer(async (baseUrl, search, sessionsList) => {
       const response = await fetch(`${baseUrl}/v1/runtime/sessions/search?q=budget`, {
         headers: {
-          authorization: `Bearer ${legacyToken('alice-user')}`,
           'x-clerum-edge-caller': 'rpc-proxy',
           'x-clerum-edge-host-ref': 'chatllm',
-          'x-clerum-edge-user-id': 'victim-user',
-        },
-      })
-      expect(response.status).toBe(200)
-      expect(search).toHaveBeenCalledWith(expect.objectContaining({ userSub: 'alice-user' }))
-      expect(await response.json()).toMatchObject({ results: [{ snippet: 'alice-user' }] })
-    })
-  })
-
-  it('rejects a signed legacy token bounded to a different Host', async () => {
-    await withServer(async (baseUrl, search) => {
-      const response = await fetch(`${baseUrl}/v1/runtime/sessions/search?q=budget`, {
-        headers: { authorization: `Bearer ${legacyToken('alice-user', ['other-host'])}` },
-      })
-      expect(response.status).toBe(403)
-      expect(search).not.toHaveBeenCalled()
-    })
-  })
-
-  it('does not downgrade a declared but unauthenticated V2 request to signed legacy', async () => {
-    await withServer(async (baseUrl, search) => {
-      const response = await fetch(`${baseUrl}/v1/runtime/sessions/search?q=budget`, {
-        headers: {
-          authorization: `Bearer ${legacyToken('alice-user')}`,
-          'x-clerum-edge-caller': 'rpc-proxy',
-          'x-clerum-edge-host-ref': 'chatllm',
-          'x-clerum-edge-user-id': 'alice-user',
           'x-clerum-edge-action-context': 'malformed-v2-envelope',
-          'x-service-token': 'rpc-proxy',
         },
       })
       expect(response.status).toBe(401)
+      expect(await response.json()).toEqual({ error: 'Missing runtime edge caller context' })
       expect(search).not.toHaveBeenCalled()
+
+      const list = await fetch(`${baseUrl}/v1/runtime/sessions`, {
+        headers: withRpcProxyEdgeTestAuthentication(edgeHeaders),
+      })
+      expect(list.status).toBe(200)
+      expect(sessionsList).toHaveBeenCalledTimes(1)
     })
   })
 })

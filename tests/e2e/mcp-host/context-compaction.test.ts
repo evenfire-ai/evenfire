@@ -22,8 +22,9 @@
  * Run:
  *   cd tests/e2e && E2E_RUN_CONTEXT_COMPACTION=1 npx vitest run context-compaction.test.ts
  */
-import { afterAll, describe as baseDescribe, expect, it } from 'vitest'
+import { afterAll, describe as baseDescribe, beforeAll, expect, it } from 'vitest'
 import {
+  DEFAULT_HOST_REF,
   MCP_HOST_URL,
   fetchJson,
   getPodLogs,
@@ -34,6 +35,13 @@ import {
   sleep,
   waitForIdle,
 } from '../helpers.js'
+import { issueRealRpcToken } from './runtimeAuth.js'
+
+let statusToken: string
+
+beforeAll(async () => {
+  statusToken = await issueRealRpcToken(['host:status:read'], [DEFAULT_HOST_REF])
+})
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -141,11 +149,11 @@ describe('Phase 2: Multi-Turn Conversation', () => {
     for (const msg of messages) {
       const res = await sendMessage(msg, { userId: COMPACTION_USER })
       expect(res.status).toBe(200)
-      await waitForIdle(60_000)
+      await waitForIdle(statusToken, 60_000)
     }
 
     // Agent should still be healthy after multiple turns
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
     expect(status.agent.tasksProcessed).toBeGreaterThanOrEqual(3)
   }, 240_000)
@@ -162,14 +170,14 @@ describe('Phase 2: Multi-Turn Conversation', () => {
     for (const msg of messages) {
       const res = await sendMessage(msg, { userId: COMPACTION_USER })
       expect(res.status).toBe(200)
-      await waitForIdle(60_000)
+      await waitForIdle(statusToken, 60_000)
     }
 
     // Health check
     const health = await fetchJson(`${MCP_HOST_URL}/v1/runtime/health`)
     expect(health.status).toBe(200)
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
   }, 360_000)
 })
@@ -290,14 +298,14 @@ describe('Phase 4: Forced Compaction', () => {
 
       const res = await sendMessage(content, { userId: longUser })
       expect(res.status).toBe(200)
-      await waitForIdle(60_000)
+      await waitForIdle(statusToken, 60_000)
     }
 
     // Agent must still be healthy after the stress test
     const health = await fetchJson(`${MCP_HOST_URL}/v1/runtime/health`)
     expect(health.status).toBe(200)
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
 
     // Verify no crashes in logs
@@ -318,14 +326,14 @@ describe('Phase 4: Forced Compaction', () => {
     })
 
     expect(res.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     // Should get a real response (not an error)
     if (res.data?.response) {
       expect(res.data.response.length).toBeGreaterThan(0)
     }
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
   }, 90_000)
 })

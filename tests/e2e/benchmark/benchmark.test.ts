@@ -21,7 +21,8 @@
  *   BENCHMARK_PROVIDERS=openai,claude npx vitest run benchmark/benchmark.test.ts
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { healthCheck, waitForIdle } from '../helpers.js'
+import { DEFAULT_HOST_REF, healthCheck, waitForIdle } from '../helpers.js'
+import { issueRealRpcToken } from '../mcp-host/runtimeAuth.js'
 import {
   type BenchmarkResult,
   cleanWorkspace,
@@ -53,6 +54,7 @@ const TIMEOUT_PROVIDER_SWITCH = 30_000
 // ---------------------------------------------------------------------------
 
 const allResults: BenchmarkResult[] = []
+let statusToken: string
 const providers = getActiveProviders()
 
 // ---------------------------------------------------------------------------
@@ -68,7 +70,8 @@ describe('LLM Provider Benchmark', () => {
           'Ensure port-forward is active: kubectl port-forward -n mcp-host svc/chatllm 8080:8080'
       )
     }
-    await waitForIdle(10_000)
+    statusToken = await issueRealRpcToken(['host:status:read'], [DEFAULT_HOST_REF])
+    await waitForIdle(statusToken, 10_000)
     console.log(
       `\n[Benchmark] Starting benchmark with ${providers.length} providers, ${ALL_PROMPTS.length} prompts each`
     )
@@ -83,9 +86,9 @@ describe('LLM Provider Benchmark', () => {
   for (const provider of providers) {
     describe(`Provider: ${provider.label} (${provider.provider}/${provider.model})`, () => {
       beforeAll(async () => {
-        await switchProvider(provider)
+        await switchProvider(provider, statusToken)
         cleanWorkspace()
-        await waitForIdle(5_000).catch(() => {})
+        await waitForIdle(statusToken, 5_000).catch(() => {})
       }, TIMEOUT_PROVIDER_SWITCH)
 
       for (const category of [
@@ -110,6 +113,7 @@ describe('LLM Provider Benchmark', () => {
                   difficulty: prompt.difficulty,
                   label: prompt.label,
                   provider,
+                  statusToken,
                   timeoutMs: catTimeout - 15_000, // leave buffer for vitest
                 })
 
