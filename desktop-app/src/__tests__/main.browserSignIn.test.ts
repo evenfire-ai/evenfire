@@ -545,4 +545,41 @@ describe('main.ts browser sign-in wiring', () => {
     )
     expect(harness.acceptDesktopLoginLink).not.toHaveBeenCalled()
   })
+
+  // Task 5 concern 2: acceptance never throws by contract, and the Electron handlers must not
+  // depend on that. The error's message carries the link, so a log of the message would show.
+  it('drops a desktop-login link whose handling throws, and the Electron handlers carry on', async () => {
+    await startMain()
+    const window = mainWindow()
+    markRendererReady(window)
+    window.webContents.send.mockClear()
+    harness.acceptDesktopLoginLink.mockImplementation(() => {
+      throw new Error(`fake acceptance failure for ${DESKTOP_LOGIN_LINK}`)
+    })
+    const logs = spyOnConsole()
+    const warn = vi.mocked(console.warn)
+
+    // The desktop-setup link after the failing one is still routed.
+    expect(() =>
+      secondInstance([process.execPath, DESKTOP_LOGIN_LINK, DESKTOP_SETUP_LINK])
+    ).not.toThrow()
+    expect(harness.acceptDesktopLoginLink).toHaveBeenCalledTimes(1)
+    expect(window.webContents.send).toHaveBeenCalledWith(
+      'auth:desktopSetupToken',
+      DESKTOP_SETUP_PAYLOAD
+    )
+
+    // With no window, the dropped link requests none.
+    closeMainWindow()
+    expect(() => openUrl(DESKTOP_LOGIN_LINK)).not.toThrow()
+    expect(harness.acceptDesktopLoginLink).toHaveBeenCalledTimes(2)
+    await flush()
+    expect(harness.windows).toHaveLength(0)
+
+    expect(warn.mock.calls).toEqual([
+      ['[Desktop] A desktop-login link could not be handled:', 'Error'],
+      ['[Desktop] A desktop-login link could not be handled:', 'Error'],
+    ])
+    expectNoLinkLogged(logs)
+  })
 })

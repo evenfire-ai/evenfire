@@ -426,18 +426,34 @@ function handleGfsResourceDeepLink(rawUrl: string): boolean {
   return true
 }
 
+// D8: only a link that matches the waiting attempt requests the window, and on macOS that request
+// also cancels a deferred quit (A3-70).
+const handOffDesktopLoginLink = createDesktopLoginLinkHandler({
+  accept: rawUrl => appService.acceptDesktopLoginLink(rawUrl),
+  requestMainWindow,
+})
+
+function handleDesktopLoginLink(rawUrl: string): void {
+  try {
+    handOffDesktopLoginLink(rawUrl)
+  } catch (error) {
+    // Acceptance never throws by contract. If the hand-off throws anyway, the link is dropped
+    // here, so the throw cannot leave the `open-url` or `second-instance` handler and stop the
+    // links after it. Only the error's class is logged: its message may carry the link (D18).
+    console.warn(
+      '[Desktop] A desktop-login link could not be handled:',
+      error instanceof Error ? error.name : typeof error
+    )
+  }
+}
+
 const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   appProtocol: DESKTOP_SETUP_PROTOCOL,
   focusMainWindow,
   getWindow: () => mainWindow,
   handleSandboxUiDeepLink,
   handleGfsResourceDeepLink,
-  // D8: only a link that matches the waiting attempt requests the window, and on macOS that
-  // request also cancels a deferred quit (A3-70).
-  handleDesktopLoginLink: createDesktopLoginLinkHandler({
-    accept: rawUrl => appService.acceptDesktopLoginLink(rawUrl),
-    requestMainWindow,
-  }),
+  handleDesktopLoginLink,
   gfsResourceDeepLinkHost: GFS_RESOURCE_DEEP_LINK_HOST,
   isRendererReady: () => mainWindowRendererReady,
   logout: logoutAndClearGfsResourceDeepLinks,
