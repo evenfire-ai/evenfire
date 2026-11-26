@@ -356,6 +356,69 @@ describe('FileExplorerTree row resource menu: bits and session', () => {
     expect(vi.mocked(window.clerum.gfs.affordances)).not.toHaveBeenCalled()
   })
 
+  it('greys out Preview and Download for an unreadable file row, naming the read access', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('folder-d', 'Docs', 'directory', { permissions: ['read'] }),
+        ])
+      ),
+      listChildren: vi.fn(async () =>
+        listChildrenPage([
+          childView('file-x', 'locked.md', 'file', {
+            parentResourceId: 'folder-d',
+            readable: false,
+          }),
+          childView('file-o', 'open.md', 'file', { parentResourceId: 'folder-d' }),
+        ])
+      ),
+      affordances: vi.fn(
+        appServiceAffordanceProducer(async () => heldPermissionResponse(['read', 'write']))
+      ),
+    })
+    renderShell()
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Docs' }))
+    fireEvent.contextMenu(await screen.findByRole('button', { name: /locked\.md.*No access/ }), {
+      clientX: 10,
+      clientY: 10,
+    })
+    const menu = await screen.findByRole('menu', { name: 'Actions for locked.md' })
+    for (const label of ['Preview', 'Download']) {
+      const item = menuItem(menu, label)
+      expect(itemState(menu, label), label).toBe('unavailable')
+      expect(item?.getAttribute('title')).toBe("You don't have read access to this file")
+    }
+    fireEvent.keyDown(menu, { key: 'Escape' })
+
+    // Witness: a readable sibling in the same listing offers both.
+    const openMenu = await openMenuOn('open.md')
+    expect(itemState(openMenu, 'Preview')).toBe('enabled')
+    expect(itemState(openMenu, 'Download')).toBe('enabled')
+  })
+
+  it('leaves Move out of the menu of a forest root, which has no parent folder', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('file-s', 'shared.txt', 'file', {
+            permissions: ['read', 'write', 'delete'],
+          }),
+        ])
+      ),
+      affordances: vi.fn(
+        appServiceAffordanceProducer(async () =>
+          heldPermissionResponse(['read', 'write', 'delete'])
+        )
+      ),
+    })
+    renderShell()
+    const menu = await openMenuOn('shared.txt')
+    // Witness: the root's own bits settled, so its actions are live.
+    await waitFor(() => expect(itemState(menu, 'Rename')).toBe('enabled'))
+    expect(itemState(menu, 'Download')).toBe('enabled')
+    expect(itemState(menu, 'Move to')).toBe('absent')
+  })
+
   it('fails the session closed when the menu reads a 401 for its bits', async () => {
     const unauthorized = await affordancesFailureMessage(401, {
       code: 'unauthorized',

@@ -1167,6 +1167,109 @@ describe('FilesPage', () => {
     )
   })
 
+  it('offers Preview in a row menu only for a file whose format has a preview', async () => {
+    const { items } = await listChildrenPage([
+      childView('file-bin', 'archive.bin', 'file', { parentResourceId: 'parent-1' }),
+      childView('file-md', 'notes.md', 'file', { parentResourceId: 'parent-1' }),
+    ])
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: await resolveResource(resolvedDirectory('parent-1', 'Workspace')),
+      items,
+    })
+
+    renderFilesPage()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for archive.bin' }))
+    })
+    const binMenu = screen.getByRole('menu', { name: 'Actions for archive.bin' })
+    // Witness: the readable row's read action is live; only Preview does not apply.
+    expect(isMenuItemEnabled(within(binMenu).getByRole('menuitem', { name: 'Download' }))).toBe(
+      true
+    )
+    expect(within(binMenu).queryByRole('menuitem', { name: 'Preview' })).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.md' }))
+    })
+    const mdMenu = screen.getByRole('menu', { name: 'Actions for notes.md' })
+    expect(isMenuItemEnabled(within(mdMenu).getByRole('menuitem', { name: 'Preview' }))).toBe(true)
+  })
+
+  it('leaves breadcrumb Move out of the menu when the current folder has no parent', async () => {
+    const current = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Root folder', {
+        parentResourceId: null,
+      })
+    )
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current,
+      crumbs: [current],
+      affordances: delegationAffordances(new Set(['read', 'write', 'delete']), false),
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Root folder' }))
+    })
+
+    const menu = screen.getByRole('menu', { name: 'Actions for Root folder' })
+    // Witness: the current folder's own actions are offered.
+    expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+  })
+
+  it('offers Preview on the open file menu only when its format has a preview', async () => {
+    const renderCurrentFile = async (name: string) => {
+      const current = await resolveResource(
+        resolvedFile('abcdefabcdefabcdefabcdefabcdefab', name, { parentResourceId: 'parent-1' })
+      )
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        current,
+        crumbs: [current],
+      })
+      const view = renderFilesPage()
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: `Options for ${name}` }))
+      })
+      return { menu: screen.getByRole('menu', { name: `Actions for ${name}` }), view }
+    }
+
+    const bin = await renderCurrentFile('archive.bin')
+    // Witness: the open file's read action is offered; only Preview does not apply.
+    expect(within(bin.menu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
+    expect(within(bin.menu).queryByRole('menuitem', { name: 'Preview' })).toBeNull()
+    bin.view.unmount()
+
+    const md = await renderCurrentFile('notes.md')
+    expect(isMenuItemEnabled(within(md.menu).getByRole('menuitem', { name: 'Preview' }))).toBe(true)
+  })
+
+  it('leaves Move out of the row menu of a shared root resource', async () => {
+    const { items } = await listAccessiblePage([
+      accessibleResource('root-file', 'root.txt', 'file', {
+        permissions: ['read', 'write', 'delete'],
+      }),
+    ])
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: items,
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for root.txt' }))
+    })
+
+    const menu = screen.getByRole('menu', { name: 'Actions for root.txt' })
+    // Witness: the root row's own actions are offered.
+    expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+  })
+
   it('uses a size column and keeps folder rows focused on the icon and name', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),

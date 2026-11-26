@@ -40,19 +40,10 @@ function controller() {
   }
 }
 
-function renderWithPermissions(resourceBits: string[], parentBits: string[]) {
-  hookMock.useGfsBrowserController.mockReturnValue({
-    accessState: 'active',
-    sessionScope: 'preview-permissions-user:main',
-    sessionGeneration: 1,
-    authorityPending: false,
-    handleAuthorityFailure: vi.fn(() => false),
-  })
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  })
-  queryClients.push(queryClient)
-  const resolve = vi.fn(async () =>
+function renderWithPermissions(
+  resourceBits: string[],
+  parentBits: string[],
+  resolved: () => Promise<Awaited<ReturnType<typeof resolveResource>>> = () =>
     resolveResource({
       resourceId,
       rid: resourceId,
@@ -64,7 +55,19 @@ function renderWithPermissions(resourceBits: string[], parentBits: string[]) {
       version: 7,
       bytes: 1,
     })
-  )
+) {
+  hookMock.useGfsBrowserController.mockReturnValue({
+    accessState: 'active',
+    sessionScope: 'preview-permissions-user:main',
+    sessionGeneration: 1,
+    authorityPending: false,
+    handleAuthorityFailure: vi.fn(() => false),
+  })
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  })
+  queryClients.push(queryClient)
+  const resolve = vi.fn(resolved)
   const affordances = vi.fn(async (id: string) =>
     delegationAffordances(new Set(id === 'preview-parent' ? parentBits : resourceBits), false)
   )
@@ -93,7 +96,14 @@ function renderWithPermissions(resourceBits: string[], parentBits: string[]) {
       ),
     }
   )
-  return { affordances, view }
+  return { affordances, resolve, view }
+}
+
+/** The labels of the items a menu offers, in order. */
+function offeredLabels(menu: HTMLElement) {
+  return within(menu)
+    .queryAllByRole('menuitem')
+    .map(item => item.textContent)
 }
 
 function openMenu() {
@@ -322,6 +332,47 @@ describe('FilePreviewPage permission-derived actions', () => {
     expect(isMenuItemEnabled(within(ownerShareMenu).getByRole('menuitem', { name: 'Share' }))).toBe(
       true
     )
+  })
+
+  it("keeps the file's own actions out of the menu when the preview URI resolves to a folder", async () => {
+    const owner = ['read', 'write', 'delete', 'manage_acl', 'share']
+    const { resolve } = renderWithPermissions(owner, owner, () =>
+      resolveResource(
+        resolvedDirectory(resourceId, 'diagram.png', { parentResourceId: 'preview-parent' })
+      )
+    )
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(resourceUri))
+    await act(async () => {
+      await resolve.mock.results[0]!.value
+    })
+    const menu = openMenu()
+    // Witness: the menu still offers the actions that do not read the file's bits.
+    expect(within(menu).getByRole('menuitem', { name: 'Copy content' })).toBeTruthy()
+    for (const label of ['Rename', 'Move to', 'Download', 'Delete']) {
+      expect(within(menu).queryByRole('menuitem', { name: label }), label).toBeNull()
+    }
+    // The Share entry stays only as the home of Copy link; Share itself is gone.
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
+    const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
+    expect(offeredLabels(shareMenu)).toEqual(['Copy link'])
+  })
+
+  it('leaves Move out of the menu for a resolved file with no parent folder', async () => {
+    const owner = ['read', 'write', 'delete', 'manage_acl', 'share']
+    const { affordances } = renderWithPermissions(owner, owner, () =>
+      resolveResource(
+        resolvedFile(resourceId, 'diagram.png', { parentResourceId: null, version: 7 })
+      )
+    )
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(resourceId, 'main'))
+    const menu = openMenu()
+    // Witness: the file resolved and its bits landed, so its own actions are live.
+    await waitFor(() =>
+      expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Rename' }))).toBe(true)
+    )
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Delete' }))).toBe(true)
+    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
   })
 
   it('renders inherited rows for a complete derivation without a coverage notice', async () => {
