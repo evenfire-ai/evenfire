@@ -188,6 +188,29 @@ describe('useLoginMethods: scenarios', () => {
     expect(hook.result.current.model, "a later read's answer applies").toEqual(UNREACHABLE)
   })
 
+  it('orders answers of one generation by the read applied last, not the latest-sent read applied (delta review DR-2)', async () => {
+    const main = installMain()
+    const { hook } = mountHook()
+    const password = modelOf('password')
+    const oidcOnly = modelOf('oidc-only')
+    const both = modelOf('password-and-oidc')
+
+    // Three reads in one epoch. Main's FIFO owner queue never answers an earlier read with a
+    // higher generation, but the hook's order does not rely on it (the property's domain).
+    act(() => hook.result.current.refresh())
+    act(() => hook.result.current.refresh())
+    act(() => hook.result.current.refresh())
+    await act(async () => main.read(2).resolve({ model: password, generation: 4 }))
+    expect(hook.result.current.model, 'the third read applies first').toEqual(password)
+    await act(async () => main.read(0).resolve({ model: oidcOnly, generation: 5 }))
+    expect(hook.result.current.model, 'a higher generation applies').toEqual(oidcOnly)
+    await act(async () => main.read(1).resolve({ model: both, generation: 5 }))
+
+    // Same generation as the applied answer, and sent after it: it applies, although a read
+    // sent later (the third) applied an answer before.
+    expect(hook.result.current.model, 'the later-sent read of generation 5 applies').toEqual(both)
+  })
+
   it("G2-15b never shows env A's form after a binding change", async () => {
     const main = installMain()
     const { hook, shown } = mountHook()
