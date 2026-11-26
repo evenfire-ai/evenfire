@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { produceCatalogAnnotations } from '@/test/fixtures/connectorCatalogProducer'
 import { McpServerTable } from '../McpServerTable'
 
 afterEach(() => {
@@ -539,7 +540,21 @@ describe('McpServerTable — saved marketplace identity', () => {
     labels?: Record<string, string>
   ) {
     const item = makeItem({ name })
-    return { ...item, metadata: { ...item.metadata, annotations, labels } }
+    for (const value of Object.values(labels ?? {})) {
+      expect(value.length).toBeLessThanOrEqual(63)
+      expect(value).toMatch(/^([A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?)?$/)
+    }
+    const catalogId = annotations['clerum.io/catalog-id']
+    return {
+      ...item,
+      metadata: {
+        ...item.metadata,
+        annotations: catalogId
+          ? { ...produceCatalogAnnotations(catalogId, '1.0.0'), ...annotations }
+          : annotations,
+        labels,
+      },
+    }
   }
 
   it('shows catalog branding while keeping two installed instances distinct and actions unchanged', () => {
@@ -597,10 +612,12 @@ describe('McpServerTable — saved marketplace identity', () => {
         items={[
           linkedItem(
             'annotation-wins',
-            { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' },
-            { 'clerum.io/catalog-id': '@evenfire/mcp-stripe' }
+            produceCatalogAnnotations('@evenfire/mcp-airtable', '1.0.0'),
+            { 'clerum.io/catalog-id': 'mcp-stripe-remote' }
           ),
-          linkedItem('label-only', {}, { 'clerum.io/catalog-id': '@evenfire/mcp-stripe' }),
+          // Historical ID explicitly supported by INSTALLED_CONNECTOR_CATALOG_ALIASES.
+          linkedItem('label-only', {}, { 'clerum.io/catalog-id': 'mcp-stripe-remote' }),
+          linkedItem('unknown-label', {}, { 'clerum.io/catalog-id': 'unknown-legacy-id' }),
           linkedItem('dovetail', { 'clerum.io/catalog-id': '@evenfire-dev/mcp-dovetail-remote' }),
           linkedItem('third-party', { 'clerum.io/catalog-id': '@someone-else/mcp-airtable' }),
           makeItem({ name: 'evenfire-mcp-airtable' }),
@@ -608,7 +625,13 @@ describe('McpServerTable — saved marketplace identity', () => {
       />
     )
     expect(screen.getByTitle('annotation-wins').closest('tr')).toHaveTextContent('Airtable')
-    expect(screen.getByTitle('label-only').closest('tr')).toHaveTextContent('Stripe')
+    const legacyRow = screen.getByTitle('label-only').closest('tr')!
+    expect(legacyRow).toHaveTextContent('Stripe')
+    expect(legacyRow.querySelector('img')).toHaveAttribute('src', '/connector-icons/stripe.svg')
+    expect(screen.getByTitle('unknown-label').closest('tr')?.querySelector('img')).toHaveAttribute(
+      'src',
+      '/connector-icons/modelcontextprotocol.svg'
+    )
     expect(screen.getByTitle('dovetail').closest('tr')?.querySelector('img')).toHaveAttribute(
       'src',
       '/connector-icons/dovetail.svg'
