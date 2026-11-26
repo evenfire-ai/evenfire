@@ -7,7 +7,10 @@
  *
  *   Pending → (create child recipe) → Running   [processPending]
  *   Running → Succeeded|Failed|Canceled         [syncFromRecipeExecution]
- *   Running → Failed (timeout)                  [checkStuckRuns]
+ *   Running|AuthorizationPaused → Failed (timeout), or Canceled after a
+ *     cancel request                            [checkStuckRuns]
+ *   reclaimed Running, child missing → Failed, or Canceled after a cancel
+ *     request                                   [verifyReclaimedChild]
  *   cancel request → runtime cancel signal      [deliverCancelRequests]
  *
  * Every UPDATE carries `WHERE owner_instance_id = $self AND phase = $expected`
