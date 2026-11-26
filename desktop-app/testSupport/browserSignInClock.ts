@@ -1,8 +1,6 @@
 /**
- * The browser sign-in test clock, apart from `browserSignInHarness.ts`, so renderer tests can drive
- * a real `BrowserSignInAttempts` without loading the harness: its module-level
- * `fileURLToPath(import.meta.url)` throws under the renderer's module server, where
- * `import.meta.url` is not a `file:` URL.
+ * The browser sign-in test clock, apart from `browserSignInHarness.ts`, so a renderer test can
+ * drive a real `BrowserSignInAttempts` without building the harness's `AppService`.
  */
 import type { BrowserSignInClock, BrowserSignInTimerHandle } from '../src/browserSignIn.js'
 

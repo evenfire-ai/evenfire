@@ -3,7 +3,7 @@ import type { Scheduler } from 'fast-check'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { URL as NodeUrl, fileURLToPath } from 'node:url'
 import { format } from 'node:util'
 import type { AppService } from '../src/appService.js'
 import { BrowserSignInAttempts } from '../src/browserSignIn.js'
@@ -311,8 +311,10 @@ const DISCOVERED_RPC_BASE_URL = 'https://rpc-discovered.example.test'
 const DISCOVERED_APP_NAME = 'Evenfire'
 const SETUP_REST_BASE_URL = 'https://api-setup.example.test'
 
+// Node's own URL, as `edgeContractRecords.ts` reads its file: under a renderer test's jsdom
+// environment, the global `URL` resolves this relative path to a URL that is not `file:`.
 const LEGACY_PROFILES_PATH = fileURLToPath(
-  new URL('./fixtures/legacy-duplicate-profiles/runtime-configs', import.meta.url)
+  new NodeUrl('./fixtures/legacy-duplicate-profiles/runtime-configs', import.meta.url)
 )
 const FETCH_HOLD_POINTS: Readonly<Record<string, HoldPoint>> = {
   'GET /api/v1/auth/methods': 'methods',
