@@ -57,16 +57,26 @@ function telegramInlineKeyboard(
   return inline_keyboard.length > 0 ? { inline_keyboard } : undefined
 }
 
+/** Unsigned base-10 integer, or undefined when the topic id is not one. */
+function parseTelegramMessageThreadId(raw: string): number | undefined {
+  const trimmed = raw.trim()
+  if (!/^[0-9]+$/.test(trimmed)) return undefined
+  const parsed = Number(trimmed)
+  const canonical = trimmed.replace(/^0+(?=\d)/, '')
+  if (!Number.isSafeInteger(parsed) || String(parsed) !== canonical) return undefined
+  return parsed
+}
+
 function telegramMessageThread(
   options?: SendMessageOptions
 ): { message_thread_id: number } | undefined {
   const threadId = options?.telegramMessageThreadId
   if (typeof threadId !== 'string') return undefined
-  const trimmed = threadId.trim()
-  if (trimmed === '') return undefined
-  // Topic ids are stored as strings. Grammy types this Bot API field as a number.
-  // The stored string is sent unchanged and is never copied onto reply_to_message_id.
-  return { message_thread_id: trimmed as unknown as number }
+  // Bot API message_thread_id is an integer. A non-integer is omitted, not sent
+  // as JSON text, and is never copied onto reply_to_message_id.
+  const messageThreadId = parseTelegramMessageThreadId(threadId)
+  if (messageThreadId === undefined) return undefined
+  return { message_thread_id: messageThreadId }
 }
 
 function sendMessageOptions(

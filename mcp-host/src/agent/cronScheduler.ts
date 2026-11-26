@@ -644,15 +644,17 @@ export class CronScheduler extends EventEmitter {
     const store = this.store
     if (!store) return null
     const started = this.now()
+    let lastError: unknown
     for (;;) {
       if (this.terminal) return null
       if (this.now() - started >= CRON_CLAIM_BUSY_BUDGET_MS) {
-        this.exitOnClaimFailure(args.id, 'busy_timeout')
+        this.exitOnClaimFailure(args.id, 'busy_timeout', lastError)
         return null
       }
       try {
         return await store.claim(args)
       } catch (error) {
+        lastError = error
         const again = await this.pauseForBusy(error, started, args.id)
         if (!again) return null
       }
@@ -698,19 +700,19 @@ export class CronScheduler extends EventEmitter {
     const elapsed = this.now() - started
     const busy = isSqliteBusy(error)
     if (!busy || elapsed >= CRON_CLAIM_BUSY_BUDGET_MS) {
-      this.exitOnClaimFailure(jobId, busy ? 'busy_timeout' : 'sql_error')
+      this.exitOnClaimFailure(jobId, busy ? 'busy_timeout' : 'sql_error', error)
       return false
     }
     const remaining = CRON_CLAIM_BUSY_BUDGET_MS - elapsed
     const wait = Math.min(CRON_CLAIM_BACKOFF_MS, remaining)
     if (wait <= 0) {
-      this.exitOnClaimFailure(jobId, 'busy_timeout')
+      this.exitOnClaimFailure(jobId, 'busy_timeout', error)
       return false
     }
     await this.sleep(wait)
     if (this.terminal) return false
     if (this.now() - started >= CRON_CLAIM_BUSY_BUDGET_MS) {
-      this.exitOnClaimFailure(jobId, 'busy_timeout')
+      this.exitOnClaimFailure(jobId, 'busy_timeout', error)
       return false
     }
     return true
@@ -727,15 +729,15 @@ export class CronScheduler extends EventEmitter {
     })
   }
 
-  private exitOnClaimFailure(jobId: string, reason: ClaimFailureReason): void {
-    logger.error({ jobId, reason, component: 'Cron' }, 'Cron claim failed')
+  private exitOnClaimFailure(jobId: string, reason: ClaimFailureReason, error?: unknown): void {
+    logger.error({ err: error, jobId, reason, component: 'Cron' }, 'Cron claim failed')
     try {
       process.exit(1)
-    } catch (error) {
+    } catch (exitError) {
       // A test double throws. Production process.exit does not return.
       // The caller returns without arming the slot at delay 0.
       logger.error(
-        { err: error, jobId, component: 'Cron' },
+        { err: exitError, jobId, component: 'Cron' },
         'Cron claim process exit returned control'
       )
     }

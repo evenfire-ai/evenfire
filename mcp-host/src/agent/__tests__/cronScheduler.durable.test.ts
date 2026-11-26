@@ -3,6 +3,7 @@
  * Live timers are setTimeout handles that were not later passed to clearTimeout.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { logger } from '../../logger'
 import { MessageQueue } from '../../queue/messageQueue'
 import { CRON_CLAIM_BACKOFF_MS, CronScheduler, MAX_SAFE_TIMEOUT } from '../cronScheduler'
 import type { CronClaimArgs, CronDurableStore, CronJobRecord } from '../cronStore'
@@ -222,6 +223,7 @@ describe('CronScheduler durable claim', () => {
       throw new Error('SQLITE_FULL: database or disk is full')
     })
     const scheduler = new CronScheduler(queue, { store, now: () => Date.now() })
+    const errorLog = vi.spyOn(logger, 'error')
 
     await scheduler.loadFromStore()
     scheduler.start()
@@ -229,6 +231,12 @@ describe('CronScheduler durable claim', () => {
 
     expect(store.claim).toHaveBeenCalledTimes(1)
     expect(exitSpy).toHaveBeenCalledWith(1)
+    const claimLog = errorLog.mock.calls.find(call => call[1] === 'Cron claim failed')
+    const fields = claimLog?.[0] as { err?: unknown; jobId?: string; reason?: string } | undefined
+    expect(fields?.jobId).toBe('full')
+    expect(fields?.reason).toBe('sql_error')
+    expect(fields?.err).toBeInstanceOf(Error)
+    expect((fields?.err as Error).message).toContain('SQLITE_FULL')
     expect(queue.enqueue).not.toHaveBeenCalled()
 
     const timeoutsAfterFailure = setTimeoutSpy.mock.calls.length

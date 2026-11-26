@@ -99,7 +99,7 @@ function telegramAdapter(api: TelegramApi) {
   return { adapter, calls }
 }
 
-function expectThreadOnEveryMethod(api: TelegramApi, threadId: string) {
+function expectThreadOnEveryMethod(api: TelegramApi, threadId: number) {
   const bodies = [
     ...api.sendMessage.mock.calls.map(call => call[2]),
     ...api.sendPhoto.mock.calls.map(call => call[2]),
@@ -108,6 +108,7 @@ function expectThreadOnEveryMethod(api: TelegramApi, threadId: string) {
   expect(bodies.length).toBeGreaterThan(0)
   for (const body of bodies) {
     expect(body).toMatchObject({ message_thread_id: threadId })
+    expect(typeof body.message_thread_id).toBe('number')
     expect(body).not.toHaveProperty('reply_to_message_id')
   }
 }
@@ -158,7 +159,7 @@ describe('pollCronResults creating thread', () => {
     expect(calls).toEqual([
       ['424242', response, undefined, undefined, { telegramMessageThreadId: '77' }],
     ])
-    expectThreadOnEveryMethod(api, '77')
+    expectThreadOnEveryMethod(api, 77)
   })
 
   it('does not pass a teams thread id as the reply or the conversation id', async () => {
@@ -243,7 +244,7 @@ describe('sendTelegramMessage forum topic', () => {
     }
 
     await sendTelegramMessage({ api } as never, '424242', response, undefined, undefined, options)
-    expectThreadOnEveryMethod(api, '77')
+    expectThreadOnEveryMethod(api, 77)
 
     api.sendMessage.mockClear()
     api.sendPhoto.mockClear()
@@ -259,7 +260,7 @@ describe('sendTelegramMessage forum topic', () => {
       options
     )
     expect(api.sendPhoto).toHaveBeenCalledTimes(2)
-    expectThreadOnEveryMethod(api, '77')
+    expectThreadOnEveryMethod(api, 77)
 
     api.sendMessage.mockClear()
     api.sendPhoto.mockClear()
@@ -284,7 +285,21 @@ describe('sendTelegramMessage forum topic', () => {
     )
     expect(api.sendDocument).toHaveBeenCalledTimes(1)
     expect(api.sendMessage).toHaveBeenCalled()
-    expectThreadOnEveryMethod(api, '77')
+    expectThreadOnEveryMethod(api, 77)
+  })
+
+  it('omits message_thread_id when the forum topic is not a base-10 integer', async () => {
+    for (const threadId of ['77abc', '7.7', '1e2', '-3']) {
+      const api = telegramApi()
+      await sendTelegramMessage({ api } as never, '424242', response, undefined, undefined, {
+        telegramMessageThreadId: threadId,
+      })
+      const body = api.sendMessage.mock.calls[0]?.[2] as Record<string, unknown>
+      expect(Object.prototype.hasOwnProperty.call(body, 'message_thread_id'), threadId).toBe(false)
+      expect(Object.prototype.hasOwnProperty.call(body, 'reply_to_message_id'), threadId).toBe(
+        false
+      )
+    }
   })
 
   it('omits message_thread_id when the forum topic is absent', async () => {
