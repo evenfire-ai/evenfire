@@ -263,7 +263,8 @@ type View = {
 
 type GroupWrite = { stored: HostObject; settleLogLen: number; settleStep: number }
 
-type Instance = { id: number; agent: Agent; tab: TabSlug; viewId: number | null }
+/** A page instance: `mountStep` is the step it mounted in (requests sent before belong to another). */
+type Instance = { id: number; agent: Agent; tab: TabSlug; viewId: number | null; mountStep: number }
 
 type SaveRecord = {
   id: number
@@ -364,8 +365,9 @@ type World = {
   conflicts: Record<Agent, number>
   toasts: ToastSeen[]
   observer: MutationObserver
-  /** Log seqs in the order their answers reached the client. */
+  /** Log seqs in the order their answers reached the client, and as a set. */
   deliveries: number[]
+  delivered: Set<number>
   /** The properties broken in this step, each with what broke it. */
   violations: string[]
   /** The section's message after the last step, to tell one a continuation wrote. */
@@ -750,7 +752,10 @@ function scheduleHook(world: () => World): NonNullable<FakeControlApiOptions['sc
       Promise.resolve(),
       `${point} ${entry.method} ${entry.path.replace('/api/v1/admin/hosts/', '')} #${entry.seq}`
     )
-    if (point === 'delivery') w.deliveries.push(entry.seq)
+    if (point === 'delivery') {
+      w.deliveries.push(entry.seq)
+      w.delivered.add(entry.seq)
+    }
     // E6, timed: a status write lands just before a versioned PUT applies (L3).
     if (point === 'apply' && entry.versionSent !== undefined && w.conflicts[agent] > 0) {
       w.conflicts[agent] -= 1
@@ -845,7 +850,7 @@ async function startWorld(scheduler: fc.Scheduler, setup: Setup): Promise<World>
     clock,
     crd: setup.crd,
     page: undefined as unknown as HostPageHandle,
-    instance: { id: 1, agent: setup.start, tab: APPROVALS_SLUG, viewId: null },
+    instance: { id: 1, agent: setup.start, tab: APPROVALS_SLUG, viewId: null, mountStep: 0 },
     instanceSeq: 1,
     views: new Map(),
     viewSeq: 0,
@@ -865,6 +870,7 @@ async function startWorld(scheduler: fc.Scheduler, setup: Setup): Promise<World>
     toasts,
     observer,
     deliveries: [],
+    delivered: new Set(),
     violations: [],
     lastMessage: null,
     step: 0,
@@ -1436,13 +1442,17 @@ function checkS5(w: World): void {
   )
   if (foreign.length > 0)
     flag(w, 'S5', `the ${agent} tab shows ${[...new Set(foreign)].join(', ')}`)
-  // Non-vacuous: the other agent's data could reach this tab (a kept page that
-  // showed it, or a write of it in flight).
-  const view = currentView(w)
-  const keptBefore = [...w.views.values()].some(
-    item => item.instanceId === w.instance.id && item.agent === other
+  // Non-vacuous: the other agent's data can still reach this tab. A save or
+  // switch of it is in flight, or a load of it that this instance sent (a
+  // kept page that showed it) has not answered. A remount starts a new
+  // instance, so its loads count no more.
+  const pendingLoad = w.fake.log.some(
+    entry =>
+      entry.path === `/api/v1/admin/hosts/${other}/detail` &&
+      (w.sentAt.get(entry.seq) ?? 0) >= w.instance.mountStep &&
+      !w.delivered.has(entry.seq)
   )
-  if (view && (keptBefore || inFlight(w, other))) count(w.stats, 'checks', 'S5')
+  if (currentView(w) && (pendingLoad || inFlight(w, other))) count(w.stats, 'checks', 'S5')
 }
 
 type GroupValues = { block: boolean; tools: Tools | null; policy: string } | { ceiling: string }
@@ -1694,15 +1704,17 @@ function checkS3(w: World): void {
         flag(w, 'S3', `save #${save.id} reported saved from a Host no request of it answered`)
       }
     }
+    // No false failure: live for every save with an applied PUT (a wrong
+    // prune check could report any of them not stored). `not_stored` needs
+    // an applied PUT of the save that did lose a leaf; Ruling 52 keeps every
+    // PUT whole here, so it never shows.
+    if (applied.length > 0) count(w.stats, 'checks', 'S3noFalseFailure')
     if (outcome.kind === 'not_stored') {
-      // Never reached here (Ruling 52: no PUT stores less than it sends).
-      count(w.stats, 'checks', 'S3notStored')
-      const last = applied.at(-1)
-      if (
-        !last ||
-        unstoredLeaves(blockOf({ spec: sentSpec(last.put) }), blockOf(last.event.after)).length ===
-          0
-      ) {
+      const lost = applied.some(
+        ({ put, event }) =>
+          unstoredLeaves(blockOf({ spec: sentSpec(put) }), blockOf(event.after)).length > 0
+      )
+      if (!lost) {
         flag(
           w,
           'S3',
@@ -2701,7 +2713,7 @@ async function remount(w: World, agent: Agent, tab: TabSlug): Promise<void> {
     if (link && agent === w.instance.agent) fireEvent.click(link)
     w.page.remount({ name: agent, tab })
     w.instanceSeq += 1
-    w.instance = { id: w.instanceSeq, agent, tab, viewId: null }
+    w.instance = { id: w.instanceSeq, agent, tab, viewId: null, mountStep: w.step }
     openView(w)
   })
 }
