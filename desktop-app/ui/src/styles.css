@@ -15143,6 +15143,14 @@ pre {
   pointer-events: auto;
 }
 
+/* The reveal rule above outranks the primitive's :disabled dimming, so a
+   disabled inline icon would show at full strength. Pointer events stay on
+   so its tooltip explains why it is unavailable. */
+.da-gfs-drive__grid .da-grid__row:hover .da-gfs-list__actions > .ui-icon-button:disabled,
+.da-gfs-drive__grid .da-grid__row:focus-within .da-gfs-list__actions > .ui-icon-button:disabled {
+  opacity: 0.5;
+}
+
 .da-gfs-list__rid {
   max-width: 8rem;
   overflow: hidden;

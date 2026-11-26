@@ -2817,6 +2817,14 @@ export function FilesPage({
                 {visibleResources.map(resource => {
                   const resourceName = resource.name || resource.drive
                   const availability = rowActionAvailability(resource)
+                  const rowActions = resourceMenuActionsFor(resource, availability)
+                  const rowAction = (id: GfsResourceActionId) =>
+                    rowActions.find(action => action.id === id)
+                  // The inline icons are views of the row menu's own actions, so an
+                  // icon can never be enabled while its menu item is not.
+                  const shareAction = rowAction('share')
+                  const downloadAction = rowAction('download')
+                  const renameAction = rowAction('rename')
                   const permissionNotice = rowPermissionNoticeFor(resource.resourceId, resourceName)
                   const isDragging =
                     draggingResourceId === resource.resourceId ||
@@ -2941,31 +2949,36 @@ export function FilesPage({
                         {formatSharedFileSize(resource.bytes)}
                       </span>
                       <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
-                        {availability.canManage ? (
+                        {shareAction ? (
                           <IconButton
                             label={`Share ${resource.name || resource.drive}`}
-                            onClick={() => openManage(resource)}
+                            onClick={() => shareAction.run()}
+                            disabled={shareAction.disabled}
+                            title={shareAction.disabledReason}
                             size="sm"
                             variant="ghost"
                           >
                             <IconShare width={16} height={16} />
                           </IconButton>
                         ) : null}
-                        {resource.kind === 'file' ? (
+                        {downloadAction ? (
                           <IconButton
                             label={`Download ${resource.name}`}
-                            onClick={() => void handleDownload(resource.gfsUri, resource.name)}
+                            onClick={() => downloadAction.run()}
+                            disabled={downloadAction.disabled}
+                            title={downloadAction.disabledReason}
                             size="sm"
                             variant="ghost"
-                            disabled={resource.readable === false}
                           >
                             <IconDownload width={16} height={16} />
                           </IconButton>
                         ) : null}
-                        {availability.canRename ? (
+                        {renameAction ? (
                           <IconButton
                             label={`Rename ${resource.name || resource.drive}`}
-                            onClick={() => openRenameTarget(resource)}
+                            onClick={() => renameAction.run()}
+                            disabled={renameAction.disabled}
+                            title={renameAction.disabledReason}
                             size="sm"
                             variant="ghost"
                           >
@@ -2974,7 +2987,7 @@ export function FilesPage({
                         ) : null}
                         {resource.kind === 'directory' ? (
                           <GfsResourceMenu
-                            actions={resourceMenuActionsFor(resource, availability)}
+                            actions={rowActions}
                             resourceName={resource.name}
                             onOpenChange={open => {
                               ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
@@ -2985,7 +2998,7 @@ export function FilesPage({
                           />
                         ) : (
                           <GfsResourceMenu
-                            actions={resourceMenuActionsFor(resource, availability)}
+                            actions={rowActions}
                             resourceName={resource.name}
                             onOpenChange={open => {
                               ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)

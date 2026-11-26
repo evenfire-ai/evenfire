@@ -50,6 +50,10 @@ const authValue = {
   runtimeConfigState: { envKey: 'test-environment' },
 } as unknown as AuthContextValue
 
+function inlineRename(): HTMLButtonElement {
+  return screen.getByRole('button', { name: 'Rename report.txt' }) as HTMLButtonElement
+}
+
 function wrapper(client: QueryClient) {
   const clerum = (window as unknown as { clerum?: Record<string, unknown> }).clerum
   if (clerum) {
@@ -118,7 +122,7 @@ describe('FilesPage stale permission action oracle', () => {
     render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
     await screen.findByText('report.txt')
     await waitFor(() => expect(reportPermissionReads).toBe(1))
-    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(inlineRename().disabled).toBe(false)
 
     // Expiry alone is not a fetch trigger. Opening the real menu mounts the
     // selected-row observer, which must refresh this exact resource first.
@@ -189,7 +193,7 @@ describe('FilesPage stale permission action oracle', () => {
     vi.setSystemTime(Date.now() + 16_000)
     rerender(<FilesPage pendingGfsUri={FOLDER_URI} />)
     expect(reportPermissionReads).toBe(1)
-    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(inlineRename().disabled).toBe(false)
     expect(screen.queryByText('Permissions will be checked when you use an action.')).toBeNull()
     expect(screen.queryByText('Checking permissions for report.txt…')).toBeNull()
     act(() => {
@@ -212,9 +216,8 @@ describe('FilesPage stale permission action oracle', () => {
     })
 
     expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
-    await waitFor(() =>
-      expect(screen.queryByRole('button', { name: 'Rename report.txt' })).toBeNull()
-    )
+    await waitFor(() => expect(inlineRename().disabled).toBe(true))
+    expect(inlineRename().getAttribute('title')).toBe("Rename isn't available")
     expect(renameResource).not.toHaveBeenCalled()
     expect(reportPermissionReads).toBe(2)
     client.clear()
@@ -266,7 +269,7 @@ describe('FilesPage stale permission action oracle', () => {
 
     vi.setSystemTime(Date.now() + 16_000)
     rerender(<FilesPage pendingGfsUri={FOLDER_URI} />)
-    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(inlineRename().disabled).toBe(false)
     expect(reportPermissionReads).toBe(1)
 
     await act(async () => {
@@ -286,7 +289,7 @@ describe('FilesPage stale permission action oracle', () => {
     client.clear()
   })
 
-  it('removes stale row actions after the exact resource is no longer found', async () => {
+  it('disables stale row actions after the exact resource is no longer found', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     const folder = await resolveResource(
       resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
@@ -329,13 +332,12 @@ describe('FilesPage stale permission action oracle', () => {
     vi.setSystemTime(Date.now() + 16_000)
     rerender(<FilesPage pendingGfsUri={FOLDER_URI} />)
     expect(reportPermissionReads).toBe(1)
-    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(inlineRename().disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Rename report.txt' }))
     await waitFor(() => expect(reportPermissionReads).toBe(2))
     expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
-    await waitFor(() =>
-      expect(screen.queryByRole('button', { name: 'Rename report.txt' })).toBeNull()
-    )
+    await waitFor(() => expect(inlineRename().disabled).toBe(true))
+    expect(inlineRename().getAttribute('title')).toBe("Rename isn't available")
     expect(renameResource).not.toHaveBeenCalled()
     client.clear()
   })
@@ -378,7 +380,7 @@ describe('FilesPage stale permission action oracle', () => {
     })
     await screen.findByText('report.txt')
     await waitFor(() => expect(reportPermissionReads).toBe(1))
-    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(inlineRename().disabled).toBe(false)
 
     firstMount.unmount()
     await act(async () => {
@@ -389,9 +391,8 @@ describe('FilesPage stale permission action oracle', () => {
 
     render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
     await screen.findByText('report.txt')
-    await waitFor(() =>
-      expect(screen.queryByRole('button', { name: 'Rename report.txt' })).toBeNull()
-    )
+    await waitFor(() => expect(inlineRename().disabled).toBe(true))
+    expect(inlineRename().getAttribute('title')).toBe("Rename isn't available")
     expect(reportPermissionReads).toBe(2)
     client.clear()
   })

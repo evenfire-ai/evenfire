@@ -808,9 +808,143 @@ describe('FilesPage', () => {
     expect(within(fileRow!).getByRole('button', { name: 'Download report.txt' })).toBeTruthy()
     expect(within(fileRow!).getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
 
-    expect(within(readonlyRow!).queryByRole('button', { name: 'Share readonly.txt' })).toBeNull()
-    expect(within(readonlyRow!).queryByRole('button', { name: 'Rename readonly.txt' })).toBeNull()
+    for (const [row, name] of [
+      [folderRow!, 'Assets'],
+      [fileRow!, 'report.txt'],
+    ] as const) {
+      expect(
+        (within(row).getByRole('button', { name: `Share ${name}` }) as HTMLButtonElement).disabled
+      ).toBe(false)
+      expect(
+        (within(row).getByRole('button', { name: `Rename ${name}` }) as HTMLButtonElement).disabled
+      ).toBe(false)
+    }
+
+    // Without manage_acl/write the icons stay, greyed out with the reason as
+    // their tooltip, instead of disappearing.
+    const readonlyShare = within(readonlyRow!).getByRole('button', {
+      name: 'Share readonly.txt',
+    }) as HTMLButtonElement
+    const readonlyRename = within(readonlyRow!).getByRole('button', {
+      name: 'Rename readonly.txt',
+    }) as HTMLButtonElement
+    expect(readonlyShare.disabled).toBe(true)
+    expect(readonlyShare.getAttribute('title')).toBe("Share isn't available")
+    expect(readonlyShare.getAttribute('aria-label')).toBe('Share readonly.txt')
+    expect(readonlyRename.disabled).toBe(true)
+    expect(readonlyRename.getAttribute('title')).toBe("Rename isn't available")
+    expect(readonlyRename.getAttribute('aria-label')).toBe('Rename readonly.txt')
+    expect(
+      (
+        within(readonlyRow!).getByRole('button', {
+          name: 'Download readonly.txt',
+        }) as HTMLButtonElement
+      ).disabled
+    ).toBe(false)
+
+    fireEvent.click(readonlyShare)
+    fireEvent.click(readonlyRename)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
   })
+
+  type InlineIconCase = {
+    kind: 'directory' | 'file'
+    readable: boolean
+    mutating: boolean
+    held: string[]
+  }
+  const INLINE_ICON_BITS = ['read', 'write', 'delete', 'manage_acl'] as const
+  const inlineIconCases: InlineIconCase[] = (['directory', 'file'] as const).flatMap(kind =>
+    [true, false].flatMap(readable =>
+      [false, true].flatMap(mutating =>
+        Array.from({ length: 1 << INLINE_ICON_BITS.length }, (_, mask) => ({
+          kind,
+          readable,
+          mutating,
+          held: INLINE_ICON_BITS.filter((_, bit) => mask & (1 << bit)),
+        }))
+      )
+    )
+  )
+
+  it.each(inlineIconCases)(
+    'keeps each inline icon in step with its row menu item ($kind, readable=$readable, mutating=$mutating, held=$held)',
+    async ({ kind, readable, mutating, held }) => {
+      const name = kind === 'directory' ? 'Assets' : 'report.txt'
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        current: {
+          resourceId: 'parent-1',
+          gfsUri: 'gfs://main/parent-1',
+          name: 'Workspace',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+        items: [
+          {
+            resourceId: 'child-1',
+            rid: 'child-1',
+            gfsUri: 'gfs://main/child-1',
+            drive: 'main',
+            parentResourceId: 'parent-1',
+            name,
+            kind,
+            path: `/Workspace/${name}`,
+            version: 2,
+            bytes: kind === 'file' ? 12 : 0,
+            readable,
+          },
+        ],
+        rowAffordancesByResourceId: {
+          'child-1': delegationAffordances(new Set(held), false),
+        },
+        mutating,
+      })
+
+      renderFilesPage()
+      const row = screen.getByRole('button', {
+        name: readable ? `Open ${name}` : `${name} (no read access)`,
+      })
+
+      const inline = {
+        share: within(row).queryByRole('button', { name: `Share ${name}` }),
+        download: within(row).queryByRole('button', { name: `Download ${name}` }),
+        rename: within(row).queryByRole('button', { name: `Rename ${name}` }),
+      }
+
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: `Options for ${name}` }))
+      })
+      const menu = screen.getByRole('menu', { name: `Actions for ${name}` })
+      const menuDownload = within(menu).queryByRole('menuitem', { name: 'Download' })
+      const menuRename = within(menu).queryByRole('menuitem', { name: 'Rename' })
+      await act(async () => {
+        fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
+      })
+      const shareMenu = screen.getByRole('menu', { name: `Share options for ${name}` })
+      const menuShare = within(shareMenu).queryByRole('menuitem', { name: 'Share' })
+
+      for (const [icon, item] of [
+        [inline.share, menuShare],
+        [inline.download, menuDownload],
+        [inline.rename, menuRename],
+      ] as const) {
+        expect(icon === null).toBe(item === null)
+        if (!icon || !item) continue
+        const enabled = isMenuItemEnabled(item)
+        expect((icon as HTMLButtonElement).disabled).toBe(!enabled)
+        // An item held back only by an in-flight change carries no reason; the
+        // icon then keeps its label as the tooltip.
+        const reason = item.getAttribute('title')
+        expect(icon.getAttribute('title')).toBe(reason ?? icon.getAttribute('aria-label'))
+      }
+      expect(inline.share).not.toBeNull()
+      expect(inline.rename).not.toBeNull()
+      expect(inline.download === null).toBe(kind === 'directory')
+    }
+  )
 
   it('orders directories before files, both alphabetically by name', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
