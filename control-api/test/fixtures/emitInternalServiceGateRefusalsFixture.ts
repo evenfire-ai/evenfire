@@ -1,5 +1,8 @@
 import express from 'express'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { once } from 'node:events'
+import type { Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { installControlApiJwtTestKeys } from '../../../scripts/testing/controlApiJwtTestKeys.js'
 import type { K8sGateway } from '../../src/k8s.js'
@@ -61,6 +64,7 @@ function withAlteredSignature(signed: string): string {
  * (`authorized` as GET only), and prints one JSON line with every answer:
  * status, response headers and the raw body text. The service tokens are the
  * ones control-api's config holds at run time; the wrong token is random.
+ * All cases go to one server bound on 127.0.0.1, which must serve each of them.
  */
 async function main(): Promise<void> {
   installControlApiJwtTestKeys()
@@ -191,40 +195,66 @@ async function main(): Promise<void> {
     [authorized, 'GET'],
   ]
 
+  // One server for every case, bound to the IPv4 loopback the client dials.
+  // supertest's request(app) would listen on the wildcard, and this child runs
+  // outside vitest, so scripts/testing/bind-loopback-in-tests.mjs does not apply.
+  const server: Server = app.listen(0, '127.0.0.1')
+  // Outside the try: listen(port, host) binds after an async lookup, and a listen
+  // error must surface as itself, not as close()'s ERR_SERVER_NOT_RUNNING.
+  await once(server, 'listening')
   const answers: EmittedAnswer[] = []
-  for (const [entry, method] of plan) {
-    let pending = method === 'GET' ? request(app).get(path) : request(app).post(path)
-    if (entry.serviceToken !== null) {
-      pending = pending.set('authorization', `Bearer ${entry.serviceToken}`)
-    }
-    if (entry.serviceName !== null) pending = pending.set('x-service-token', entry.serviceName)
-    if (entry.rpcAccessToken !== null) {
-      pending = pending.set('x-rpc-access-token', entry.rpcAccessToken)
-    }
-    if (method === 'POST') {
-      pending = pending
-        .set('content-type', 'application/json')
-        .send(
-          JSON.stringify({ runId: randomUUID(), sessionId: 'session-1', origin: 'direct_chat' })
-        )
-    }
-    const response = await pending
-    if (response.status !== entry.expectedStatus) {
+  try {
+    const address = server.address() as AddressInfo | null
+    if (address === null || address.address !== '127.0.0.1') {
       throw new Error(
-        `${entry.case} on ${method} answered ${response.status}, expected ${entry.expectedStatus}`
+        `the gate fixture server is not bound on 127.0.0.1: ${JSON.stringify(address)}`
       )
     }
-    const headers: Record<string, string> = {}
-    for (const [name, value] of Object.entries(response.headers as Record<string, unknown>)) {
-      headers[name] = Array.isArray(value) ? value.join(', ') : String(value)
-    }
-    answers.push({
-      case: entry.case,
-      method,
-      status: response.status,
-      headers,
-      body: response.text,
+    let served = 0
+    server.on('request', () => {
+      served++
     })
+    for (const [entry, method] of plan) {
+      const servedBefore = served
+      let pending = method === 'GET' ? request(server).get(path) : request(server).post(path)
+      if (entry.serviceToken !== null) {
+        pending = pending.set('authorization', `Bearer ${entry.serviceToken}`)
+      }
+      if (entry.serviceName !== null) pending = pending.set('x-service-token', entry.serviceName)
+      if (entry.rpcAccessToken !== null) {
+        pending = pending.set('x-rpc-access-token', entry.rpcAccessToken)
+      }
+      if (method === 'POST') {
+        pending = pending
+          .set('content-type', 'application/json')
+          .send(
+            JSON.stringify({ runId: randomUUID(), sessionId: 'session-1', origin: 'direct_chat' })
+          )
+      }
+      const response = await pending
+      if (served !== servedBefore + 1) {
+        throw new Error(`${entry.case} on ${method} was not answered by the fixture's own server`)
+      }
+      if (response.status !== entry.expectedStatus) {
+        throw new Error(
+          `${entry.case} on ${method} answered ${response.status}, expected ${entry.expectedStatus}`
+        )
+      }
+      const headers: Record<string, string> = {}
+      for (const [name, value] of Object.entries(response.headers as Record<string, unknown>)) {
+        headers[name] = Array.isArray(value) ? value.join(', ') : String(value)
+      }
+      answers.push({
+        case: entry.case,
+        method,
+        status: response.status,
+        headers,
+        body: response.text,
+      })
+    }
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) => server.close(e => (e ? reject(e) : resolve())))
   }
   process.stdout.write(`${JSON.stringify(answers)}\n`)
 }
