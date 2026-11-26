@@ -176,40 +176,6 @@ export class CronScheduler extends EventEmitter {
     return true
   }
 
-  updateJob(
-    jobId: string,
-    updates: Partial<Pick<CronJob, 'name' | 'schedule' | 'task'>>
-  ): CronJob | null {
-    const job = this.jobs.get(jobId)
-    if (!job) return null
-
-    if (updates.name) job.name = updates.name
-    if (updates.task) job.task = updates.task
-
-    if (updates.schedule) {
-      const nextRun = parseNextRun(updates.schedule)
-      if (!nextRun) {
-        logger.error({ component: 'Cron', jobId, schedule: updates.schedule }, 'Invalid schedule')
-        return null
-      }
-      job.schedule = updates.schedule
-      job.nextRun = nextRun
-    }
-
-    // Reschedule if running and enabled
-    if (this.isRunning && job.enabled) {
-      const timer = this.timers.get(jobId)
-      if (timer) {
-        clearTimeout(timer)
-        this.timers.delete(jobId)
-      }
-      this.scheduleJob(job)
-    }
-
-    logger.info({ component: 'Cron', jobId, jobName: job.name }, 'Updated job')
-    return job
-  }
-
   triggerJob(jobId: string): Task | null {
     const job = this.jobs.get(jobId)
     if (!job) return null

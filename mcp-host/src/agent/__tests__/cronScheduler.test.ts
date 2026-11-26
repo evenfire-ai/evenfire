@@ -142,54 +142,6 @@ describe('CronScheduler — Enable / Disable', () => {
 })
 
 // ---------------------------------------------------------------------------
-// CronScheduler — Update
-// ---------------------------------------------------------------------------
-
-describe('CronScheduler — Update', () => {
-  let scheduler: CronScheduler
-
-  beforeEach(() => {
-    scheduler = new CronScheduler(createMockQueue())
-  })
-
-  afterEach(() => {
-    scheduler.stop()
-  })
-
-  it('should update job name', () => {
-    const job = scheduler.createJob('old-name', '0 * * * *', 'task')
-    const updated = scheduler.updateJob(job!.id, { name: 'new-name' })
-    expect(updated).not.toBeNull()
-    expect(updated!.name).toBe('new-name')
-  })
-
-  it('should update job task', () => {
-    const job = scheduler.createJob('j', '0 * * * *', 'old-task')
-    const updated = scheduler.updateJob(job!.id, { task: 'new-task' })
-    expect(updated!.task).toBe('new-task')
-  })
-
-  it('should update schedule and recompute nextRun', () => {
-    const job = scheduler.createJob('j', '0 * * * *', 'task')
-    const oldNextRun = job!.nextRun
-    const updated = scheduler.updateJob(job!.id, { schedule: '*/10 * * * *' })
-    expect(updated!.schedule).toBe('*/10 * * * *')
-    // nextRun should be recomputed (may or may not differ, but should be a Date)
-    expect(updated!.nextRun).toBeInstanceOf(Date)
-  })
-
-  it('should return null for invalid schedule update', () => {
-    const job = scheduler.createJob('j', '0 * * * *', 'task')
-    const updated = scheduler.updateJob(job!.id, { schedule: 'bad' })
-    expect(updated).toBeNull()
-  })
-
-  it('should return null for non-existent job', () => {
-    expect(scheduler.updateJob('nope', { name: 'x' })).toBeNull()
-  })
-})
-
-// ---------------------------------------------------------------------------
 // CronScheduler — Trigger (manual execution)
 // ---------------------------------------------------------------------------
 
