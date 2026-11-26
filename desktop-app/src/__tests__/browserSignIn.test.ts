@@ -892,6 +892,31 @@ describe('attempt store', () => {
     expect(store.snapshot()).toEqual({ attemptId: id, phase: 'ended', outcome: 'signed_in' })
   })
 
+  // The service's terminal fail-safe ends its attempt with `end(id, failed)` and no check of its
+  // own (R-25), so that it never ends a newer attempt rests on this id check alone.
+  it('ends nothing for an earlier id once a newer attempt waits or redeems', async () => {
+    const { store, pushes } = newStore()
+    const first = store.record(attemptInput())
+    store.onGenerationAdvanced()
+    const second = store.record(attemptInput())
+
+    expect(store.end(first, { outcome: 'failed' })).toBe(false)
+    expect(store.snapshot()).toEqual({ attemptId: second, phase: 'waiting' })
+    expect(store.beginRedeem(second)).toBe(true)
+    expect(store.end(first, { outcome: 'failed' })).toBe(false)
+    expect(store.snapshot()).toEqual({ attemptId: second, phase: 'redeeming' })
+    // The positive control: the same call with the newer attempt's id ends it.
+    expect(store.end(second, { outcome: 'failed' })).toBe(true)
+    await flushPushes()
+    expect(pushes).toEqual([
+      { attemptId: first, phase: 'waiting' },
+      { attemptId: first, phase: 'ended', outcome: 'replaced' },
+      { attemptId: second, phase: 'waiting' },
+      { attemptId: second, phase: 'redeeming' },
+      { attemptId: second, phase: 'ended', outcome: 'failed' },
+    ])
+  })
+
   describe('T2 property over store operations', () => {
     const MINUTE = 60 * 1000
     type IdChoice = 'current' | 'previous' | 'unissued'
