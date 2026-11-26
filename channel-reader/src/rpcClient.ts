@@ -59,8 +59,8 @@ export type ShellAction = 'once' | 'command' | 'shell'
 
 export interface MessageResponse {
   success: boolean
-  /** "completed" for normal responses, "waiting_approval" when a tool needs user approval, "pending" when polling for a result. */
-  status?: 'completed' | 'waiting_approval' | 'pending'
+  /** "completed" for normal responses, "waiting_approval" when a tool needs user approval, "pending" when polling for a result, "failed"/"cancelled" for terminal failures. */
+  status?: 'completed' | 'waiting_approval' | 'pending' | 'failed' | 'cancelled'
   response?: string
   attachments?: Attachment[]
   error?: TaskError
@@ -165,14 +165,45 @@ export interface ChannelReaderRuntimeSource {
   sender: string
 }
 
+export interface RPCClientOptions {
+  sleep?: (ms: number) => Promise<void>
+  drainRetryMaxMs?: number
+  drainRetryBaseDelayMs?: number
+  drainRetryMaxDelayMs?: number
+}
+
+const DEFAULT_DRAIN_RETRY_MAX_MS = 30_000
+const DEFAULT_DRAIN_RETRY_BASE_DELAY_MS = 500
+const DEFAULT_DRAIN_RETRY_MAX_DELAY_MS = 5_000
+const MAX_ATTACHMENT_META_HEADER_BYTES = 16 * 1024
+
+function isHostDrainingResponseBody(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false
+  const record = body as Record<string, unknown>
+  if (record.code === 'host_draining' || record.error === 'host_draining') return true
+  if (record.error && typeof record.error === 'object') {
+    const nested = record.error as Record<string, unknown>
+    if (nested.code === 'host_draining') return true
+  }
+  return false
+}
+
 /**
  * RPC Client for communicating with mcp-host.
  */
 export class RPCClient {
   private readonly baseUrl: string
+  private readonly sleepImpl: (ms: number) => Promise<void>
+  private readonly drainRetryMaxMs: number
+  private readonly drainRetryBaseDelayMs: number
+  private readonly drainRetryMaxDelayMs: number
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, options: RPCClientOptions = {}) {
     this.baseUrl = baseUrl
+    this.sleepImpl = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
+    this.drainRetryMaxMs = options.drainRetryMaxMs ?? DEFAULT_DRAIN_RETRY_MAX_MS
+    this.drainRetryBaseDelayMs = options.drainRetryBaseDelayMs ?? DEFAULT_DRAIN_RETRY_BASE_DELAY_MS
+    this.drainRetryMaxDelayMs = options.drainRetryMaxDelayMs ?? DEFAULT_DRAIN_RETRY_MAX_DELAY_MS
     console.log(`[RPC] Client initialized with URL: ${this.baseUrl}`)
   }
 
@@ -180,9 +211,12 @@ export class RPCClient {
     return this.baseUrl
   }
 
-  private runtimeHeaders(source?: ChannelReaderRuntimeSource): Record<string, string> {
+  private runtimeHeaders(
+    source?: ChannelReaderRuntimeSource,
+    contentType: string = 'application/json'
+  ): Record<string, string> {
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
+      'Content-Type': contentType,
       'x-clerum-edge-caller': 'channel-reader',
       'x-clerum-edge-host-ref': config.hostRef,
     }
@@ -195,7 +229,152 @@ export class RPCClient {
   }
 
   /**
+   * Stream raw attachment bytes to mcp-host's PVC-backed intake endpoint.
+   * Retries HTTP 503 `host_draining` with bounded exponential backoff up to 30 s.
+   * Fails closed on HTTP 404 (older mcp-host during rolling upgrade).
+   */
+  async ingestChannelAttachment(
+    metadata: ChannelAttachmentIngestMetadataV1,
+    body: Buffer | Uint8Array | ReadableStream<Uint8Array>
+  ): Promise<ChannelAttachmentReceiptV1> {
+    const encodedMeta = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64url')
+    if (Buffer.byteLength(encodedMeta, 'utf8') > MAX_ATTACHMENT_META_HEADER_BYTES) {
+      return {
+        ok: false,
+        error: {
+          code: 'attachment_metadata_too_large',
+          message: 'Attachment metadata header exceeded the 16 KiB limit.',
+          retryable: false,
+        },
+      }
+    }
+
+    const headers: Record<string, string> = {
+      ...this.runtimeHeaders(
+        {
+          channelType: metadata.channelType,
+          channelId: metadata.channelId,
+          sender: metadata.sender,
+        },
+        'application/octet-stream'
+      ),
+      'x-clerum-attachment-meta': encodedMeta,
+    }
+
+    const isRetryableBody = body instanceof Uint8Array || Buffer.isBuffer(body)
+    const startedAt = Date.now()
+    let attempt = 0
+
+    for (;;) {
+      attempt += 1
+      try {
+        const requestInit: RequestInit & { duplex?: 'half' } = {
+          method: 'POST',
+          headers,
+          body: body as RequestInit['body'],
+          ...(isRetryableBody ? {} : { duplex: 'half' as const }),
+        }
+        const response = await fetch(
+          `${this.baseUrl}/v1/runtime/channel-attachments/ingest`,
+          requestInit
+        )
+        const parsed = (await response.json().catch(() => null)) as Record<string, unknown> | null
+
+        if (response.status === 404) {
+          return {
+            ok: false,
+            error: {
+              code: 'host_attachment_ingest_unsupported',
+              message:
+                'Attachment upload is temporarily unavailable while the host is upgrading. Please try again shortly.',
+              retryable: false,
+            },
+          }
+        }
+
+        if (response.status === 503 && isHostDrainingResponseBody(parsed)) {
+          const elapsed = Date.now() - startedAt
+          const delayMs = Math.min(
+            this.drainRetryBaseDelayMs * Math.pow(2, attempt - 1),
+            this.drainRetryMaxDelayMs
+          )
+          if (isRetryableBody && elapsed + delayMs <= this.drainRetryMaxMs) {
+            console.warn(
+              `[RPC] Attachment ingest hit 503 host_draining (attempt ${attempt}); retrying in ${delayMs}ms`
+            )
+            await this.sleepImpl(delayMs)
+            continue
+          }
+          return {
+            ok: false,
+            error: {
+              code: 'host_draining',
+              message: 'The assistant host is restarting. Please resend your attachment shortly.',
+              retryable: true,
+            },
+          }
+        }
+
+        if (
+          response.ok &&
+          parsed &&
+          parsed.ok === true &&
+          typeof parsed.attachmentId === 'string' &&
+          parsed.attachmentId.trim()
+        ) {
+          return parsed as unknown as ChannelAttachmentReceiptV1
+        }
+
+        if (parsed && parsed.ok === false && parsed.error && typeof parsed.error === 'object') {
+          const errObj = parsed.error as Record<string, unknown>
+          return {
+            ok: false,
+            error: {
+              code:
+                typeof errObj.code === 'string' ? errObj.code : `ingest_http_${response.status}`,
+              message:
+                typeof errObj.message === 'string'
+                  ? errObj.message
+                  : `Attachment ingest failed (HTTP ${response.status})`,
+              retryable:
+                typeof errObj.retryable === 'boolean' ? errObj.retryable : response.status >= 500,
+            },
+          }
+        }
+
+        return {
+          ok: false,
+          error: {
+            code:
+              typeof parsed?.code === 'string'
+                ? parsed.code
+                : typeof parsed?.error === 'string'
+                  ? parsed.error
+                  : `ingest_http_${response.status}`,
+            message:
+              typeof parsed?.message === 'string'
+                ? parsed.message
+                : `Attachment ingest failed (HTTP ${response.status}: ${response.statusText})`,
+            retryable: response.status >= 500,
+          },
+        }
+      } catch (error) {
+        console.error('[RPC] Attachment ingest network error:', error)
+        return {
+          ok: false,
+          error: {
+            code: 'ingest_network_error',
+            message: error instanceof Error ? error.message : 'Unknown error',
+            retryable: true,
+          },
+        }
+      }
+    }
+  }
+
+  /**
    * Send a message to mcp-host for processing.
+   * Retries HTTP 503 `host_draining` with bounded exponential backoff up to 30 s.
    */
   async sendMessage(
     message: Message,
@@ -210,6 +389,12 @@ export class RPCClient {
       messageId: message.messageId,
       hostRef: config.hostRef,
       threadId: message.threadId,
+      ...(message.channelAttachmentIds && message.channelAttachmentIds.length > 0
+        ? { channelAttachmentIds: message.channelAttachmentIds }
+        : {}),
+      ...(message.attachmentIngestErrors && message.attachmentIngestErrors.length > 0
+        ? { attachmentIngestErrors: message.attachmentIngestErrors }
+        : {}),
       metadata: message.rawData,
       ...(message.providerIdentity ? { providerIdentity: message.providerIdentity } : {}),
       ...(options?.traceContext ? { traceContext: options.traceContext } : {}),
@@ -217,43 +402,77 @@ export class RPCClient {
 
     console.log(`[RPC] Sending message to mcp-host: ${message.messageId}`)
 
-    try {
-      const query = options?.async ? '?async=true' : ''
-      const response = await fetch(`${this.baseUrl}/v1/runtime/messages${query}`, {
-        method: 'POST',
-        headers: this.runtimeHeaders(message),
-        body: JSON.stringify(payload),
-      })
+    const query = options?.async ? '?async=true' : ''
+    const startedAt = Date.now()
+    let attempt = 0
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
+    for (;;) {
+      attempt += 1
+      try {
+        const response = await fetch(`${this.baseUrl}/v1/runtime/messages${query}`, {
+          method: 'POST',
+          headers: this.runtimeHeaders(message),
+          body: JSON.stringify(payload),
+        })
 
-      const result = (await response.json()) as MessageResponse
-
-      if (result.success) {
-        if (result.status === 'waiting_approval') {
-          console.log(`[RPC] Tool approval needed (request: ${result.approval?.requestId})`)
-        } else {
-          console.log(`[RPC] Message processed successfully by ${result.model}`)
+        if (response.status === 503) {
+          const parsed503 = (await response.json().catch(() => null)) as unknown
+          if (isHostDrainingResponseBody(parsed503)) {
+            const elapsed = Date.now() - startedAt
+            const delayMs = Math.min(
+              this.drainRetryBaseDelayMs * Math.pow(2, attempt - 1),
+              this.drainRetryMaxDelayMs
+            )
+            if (elapsed + delayMs <= this.drainRetryMaxMs) {
+              console.warn(
+                `[RPC] sendMessage hit 503 host_draining (attempt ${attempt}); retrying in ${delayMs}ms`
+              )
+              await this.sleepImpl(delayMs)
+              continue
+            }
+            return {
+              success: false,
+              error: {
+                code: 'host_draining',
+                message: 'The assistant host is restarting. Please try again in a moment.',
+                retryable: true,
+                provider: 'mcp-host',
+              },
+            }
+          }
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
         }
-      } else {
-        console.error(
-          `[RPC] Message processing failed: ${result.error?.message ?? 'unknown error'}`
-        )
-      }
 
-      return result
-    } catch (error) {
-      console.error(`[RPC] Failed to send message:`, error)
-      return {
-        success: false,
-        error: {
-          code: 'LLM_API_CALL_FAILED',
-          message: error instanceof Error ? error.message : 'Unknown error',
-          retryable: true,
-          provider: 'unknown',
-        },
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        }
+
+        const result = (await response.json()) as MessageResponse
+
+        if (result.success) {
+          if (result.status === 'waiting_approval') {
+            console.log(`[RPC] Tool approval needed (request: ${result.approval?.requestId})`)
+          } else {
+            console.log(`[RPC] Message processed successfully by ${result.model}`)
+          }
+        } else {
+          console.error(
+            `[RPC] Message processing failed: ${result.error?.message ?? 'unknown error'}`
+          )
+        }
+
+        return result
+      } catch (error) {
+        console.error(`[RPC] Failed to send message:`, error)
+        return {
+          success: false,
+          error: {
+            code: 'LLM_API_CALL_FAILED',
+            message: error instanceof Error ? error.message : 'Unknown error',
+            retryable: true,
+            provider: 'unknown',
+          },
+        }
       }
     }
   }
@@ -272,18 +491,19 @@ export class RPCClient {
         }),
         body: JSON.stringify({ providerIdentity: identity }),
       })
-      if (!response.ok) return { authorized: false }
-      const body = (await response.json()) as { authorized?: unknown; reason?: unknown }
+      if (!response.ok) return { authorized: false, reason: 'error' }
+      const body = (await response.json()) as { authorized?: unknown; reason?: unknown } | null
+      if (!body || typeof body !== 'object') return { authorized: false, reason: 'error' }
       if (body.authorized === true) return { authorized: true }
-      return body.reason === 'unresolved' || body.reason === 'error'
-        ? { authorized: false, reason: body.reason }
-        : { authorized: false }
+      return body.reason === 'unresolved'
+        ? { authorized: false, reason: 'unresolved' }
+        : { authorized: false, reason: 'error' }
     } catch (error) {
       console.warn(
         '[RPC] Provider message authorization failed closed:',
         error instanceof Error ? error.message : error
       )
-      return { authorized: false }
+      return { authorized: false, reason: 'error' }
     }
   }
 
@@ -297,7 +517,13 @@ export class RPCClient {
     channelType: string,
     channelId: string,
     options?: { shellAction?: ShellAction }
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{
+    success: boolean
+    error?: string
+    cancelled?: boolean
+    retryable?: boolean
+    status?: number
+  }> {
     console.log(`[RPC] Sending approval for request ${requestId}`)
     const shellAction = options?.shellAction
     const forwardedShellAction =
@@ -321,7 +547,19 @@ export class RPCClient {
           ...(forwardedShellAction ? { shellAction: forwardedShellAction } : {}),
         }),
       })
-      return (await response.json()) as { success: boolean; error?: string }
+      const body = (await response.json().catch(() => ({}))) as {
+        success?: boolean
+        error?: string
+        cancelled?: boolean
+        retryable?: boolean
+      }
+      return {
+        success: body.success === true && response.ok,
+        ...(body.error !== undefined ? { error: body.error } : {}),
+        ...(body.cancelled !== undefined ? { cancelled: body.cancelled } : {}),
+        ...(body.retryable !== undefined ? { retryable: body.retryable } : {}),
+        ...(response.ok ? {} : { status: response.status }),
+      }
     } catch (error) {
       console.error(`[RPC] Failed to send approval:`, error)
       return {
@@ -339,7 +577,13 @@ export class RPCClient {
     requestId: string,
     channelType: string,
     channelId: string
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{
+    success: boolean
+    error?: string
+    cancelled?: boolean
+    retryable?: boolean
+    status?: number
+  }> {
     console.log(`[RPC] Sending denial for request ${requestId}`)
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/approvals/deny`, {
@@ -356,7 +600,19 @@ export class RPCClient {
           channelId,
         }),
       })
-      return (await response.json()) as { success: boolean; error?: string }
+      const body = (await response.json().catch(() => ({}))) as {
+        success?: boolean
+        error?: string
+        cancelled?: boolean
+        retryable?: boolean
+      }
+      return {
+        success: body.success === true && response.ok,
+        ...(body.error !== undefined ? { error: body.error } : {}),
+        ...(body.cancelled !== undefined ? { cancelled: body.cancelled } : {}),
+        ...(body.retryable !== undefined ? { retryable: body.retryable } : {}),
+        ...(response.ok ? {} : { status: response.status }),
+      }
     } catch (error) {
       console.error(`[RPC] Failed to send denial:`, error)
       return {

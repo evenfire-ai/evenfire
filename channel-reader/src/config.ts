@@ -49,6 +49,11 @@ export interface Config {
   attachmentMaxCount: number
   attachmentMaxBytes: number
 
+  // Inbound channel attachment ingest limits (issue #1640)
+  channelAttachmentMaxBytes: number
+  channelAttachmentMaxCount: number
+  perConversationQueueMaxDepth: number
+
   // Internal handoff endpoint used by workflow-approval-request-reader after
   // provider signature verification. Empty token disables the listener.
   channelReaderHandoffPort: number
@@ -167,6 +172,9 @@ export const config: Config = {
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
   attachmentMaxCount: getEnvInt('CLERUM_ATTACHMENT_MAX_COUNT', 3),
   attachmentMaxBytes: getEnvInt('CLERUM_ATTACHMENT_MAX_BYTES', 52_428_800),
+  channelAttachmentMaxBytes: getEnvInt('CLERUM_CHANNEL_ATTACHMENT_MAX_BYTES', 20_971_520),
+  channelAttachmentMaxCount: getEnvInt('CLERUM_CHANNEL_ATTACHMENT_MAX_COUNT', 10),
+  perConversationQueueMaxDepth: getEnvInt('CLERUM_CONVERSATION_QUEUE_MAX_DEPTH', 64),
   channelReaderHandoffPort: getEnvInt('CLERUM_CHANNEL_READER_HANDOFF_PORT', 8099),
   channelReaderHandoffToken: getEnv('CLERUM_CHANNEL_READER_HANDOFF_TOKEN', '')!,
 }

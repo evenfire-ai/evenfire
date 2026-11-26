@@ -1,5 +1,9 @@
 import http from 'node:http'
-import type { ProviderAttachmentDescriptorV1, ProviderTargetIdentity } from './types'
+import type {
+  ChannelAttachmentIngestError,
+  ProviderAttachmentDescriptorV1,
+  ProviderTargetIdentity,
+} from './types'
 
 const MAX_HANDOFF_BODY_BYTES = 256 * 1024
 
@@ -16,6 +20,7 @@ export type SlackMessageHandoff = {
   responseThreadTs?: string | null
   eventKind?: 'event_callback' | 'block_actions'
   attachments?: ProviderAttachmentDescriptorV1[]
+  attachmentIngestErrors?: ChannelAttachmentIngestError[]
   providerTarget: ProviderTargetIdentity
   rawData?: Record<string, unknown>
 }
@@ -51,6 +56,7 @@ export type TeamsMessageHandoff = {
   providerMessageId: string
   serviceUrl: string
   attachments?: ProviderAttachmentDescriptorV1[]
+  attachmentIngestErrors?: ChannelAttachmentIngestError[]
   providerTarget: ProviderTargetIdentity
   rawData?: Record<string, unknown>
 }

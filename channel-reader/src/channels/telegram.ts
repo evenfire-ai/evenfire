@@ -13,16 +13,21 @@ import {
   AdapterCredentials,
   Attachment,
   ChannelAdapter,
+  ChannelAttachmentDownloadResult,
+  DownloadAttachmentOptions,
   FetchMessagesOptions,
   Message,
+  ProviderAttachmentDescriptorV1,
   ProviderTargetIdentity,
   SendMessageOptions,
   TelegramProviderChatType,
 } from '../types'
+import { readBoundedResponseBytes } from './downloadStream'
 import { sendTelegramMessage } from './telegramDelivery'
 import { buildTelegramOperationalMessage } from './telegramOperationalMessage'
 import { withTelegramBotIdentity } from './telegramProviderTarget'
 import {
+  type TelegramEntity,
   type TelegramVerificationClient,
   handleTelegramVerificationCommand,
   isTelegramVerifyCommand,
@@ -34,6 +39,244 @@ import {
 
 const TELEGRAM_MAX_LENGTH = 4096
 const TELEGRAM_CALLBACK_DEBOUNCE_MS = 2_000
+const TELEGRAM_DEFAULT_API_ROOT = 'https://api.telegram.org'
+const TELEGRAM_GET_FILE_MAX_BYTES = 20 * 1024 * 1024 // 20 MiB Telegram Bot API limit
+const TELEGRAM_DOWNLOAD_TIMEOUT_MS = 30_000
+export const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 800
+export const TELEGRAM_MEDIA_GROUP_MAX_ITEMS = 10
+
+type TelegramPhotoSizeLike = {
+  file_id?: string
+  file_unique_id?: string
+  width?: number
+  height?: number
+  file_size?: number
+}
+
+type TelegramMediaObjectLike = {
+  file_id?: string
+  file_unique_id?: string
+  file_name?: string
+  mime_type?: string
+  file_size?: number
+  is_animated?: boolean
+  is_video?: boolean
+}
+
+type TelegramIncomingMessageLike = Record<string, unknown> & {
+  message_id?: number | string
+  date?: number
+  message_thread_id?: number | string
+  text?: string
+  caption?: string
+  media_group_id?: string
+  entities?: TelegramEntity[]
+  caption_entities?: TelegramEntity[]
+  reply_to_message?: { from?: { id?: number } }
+  sender_chat?: unknown
+  photo?: TelegramPhotoSizeLike[]
+  document?: TelegramMediaObjectLike
+  audio?: TelegramMediaObjectLike
+  video?: TelegramMediaObjectLike
+  voice?: TelegramMediaObjectLike
+  animation?: TelegramMediaObjectLike
+  video_note?: TelegramMediaObjectLike
+  sticker?: TelegramMediaObjectLike
+}
+
+interface PendingMediaGroupItem {
+  text: string
+  attachments: ProviderAttachmentDescriptorV1[]
+  messageId: number | string
+  date: number
+  threadId?: number | string
+  rawMessage: TelegramIncomingMessageLike
+}
+
+interface PendingMediaGroupEntry {
+  key: string
+  chatId: string
+  chatType: string
+  senderId: string
+  senderUsername: string
+  senderIsBot: boolean
+  hasSenderChat: boolean
+  mediaGroupId: string
+  items: PendingMediaGroupItem[]
+  timer: ReturnType<typeof setTimeout>
+}
+
+export function extractTelegramAttachments(
+  message: TelegramIncomingMessageLike | undefined
+): ProviderAttachmentDescriptorV1[] {
+  if (!message || typeof message !== 'object') return []
+  const descriptors: ProviderAttachmentDescriptorV1[] = []
+  const seenFileIds = new Set<string>()
+
+  const pushDescriptor = (descriptor: ProviderAttachmentDescriptorV1): void => {
+    const fileId =
+      descriptor.downloadRef.provider === 'telegram' ? descriptor.downloadRef.fileId : ''
+    if (!fileId || seenFileIds.has(fileId)) return
+    seenFileIds.add(fileId)
+    descriptors.push(descriptor)
+  }
+
+  if (Array.isArray(message.photo) && message.photo.length > 0) {
+    let best: TelegramPhotoSizeLike | null = null
+    let bestScore = -1
+    for (const candidate of message.photo) {
+      if (!candidate?.file_id) continue
+      const pixels =
+        typeof candidate.width === 'number' && typeof candidate.height === 'number'
+          ? candidate.width * candidate.height
+          : 0
+      const size = typeof candidate.file_size === 'number' ? candidate.file_size : 0
+      const score = pixels > 0 ? pixels * 1_000_000 + size : size
+      if (!best || score >= bestScore) {
+        best = candidate
+        bestScore = score
+      }
+    }
+    if (best?.file_id) {
+      pushDescriptor({
+        providerAttachmentId: best.file_unique_id || best.file_id,
+        filename: null,
+        declaredMediaType: 'image/jpeg',
+        reportedSizeBytes: typeof best.file_size === 'number' ? best.file_size : null,
+        downloadRef: {
+          provider: 'telegram',
+          fileId: best.file_id,
+          kindHint: 'photo',
+        },
+      })
+    }
+  }
+
+  if (message.animation?.file_id) {
+    pushDescriptor({
+      providerAttachmentId: message.animation.file_unique_id || message.animation.file_id,
+      filename: message.animation.file_name ?? null,
+      declaredMediaType: message.animation.mime_type ?? null,
+      reportedSizeBytes:
+        typeof message.animation.file_size === 'number' ? message.animation.file_size : null,
+      downloadRef: {
+        provider: 'telegram',
+        fileId: message.animation.file_id,
+        kindHint: 'animation',
+      },
+    })
+  }
+
+  if (message.document?.file_id) {
+    pushDescriptor({
+      providerAttachmentId: message.document.file_unique_id || message.document.file_id,
+      filename: message.document.file_name ?? null,
+      declaredMediaType: message.document.mime_type ?? null,
+      reportedSizeBytes:
+        typeof message.document.file_size === 'number' ? message.document.file_size : null,
+      downloadRef: {
+        provider: 'telegram',
+        fileId: message.document.file_id,
+        kindHint: 'document',
+      },
+    })
+  }
+
+  if (message.audio?.file_id) {
+    pushDescriptor({
+      providerAttachmentId: message.audio.file_unique_id || message.audio.file_id,
+      filename: message.audio.file_name ?? null,
+      declaredMediaType: message.audio.mime_type ?? null,
+      reportedSizeBytes:
+        typeof message.audio.file_size === 'number' ? message.audio.file_size : null,
+      downloadRef: {
+        provider: 'telegram',
+        fileId: message.audio.file_id,
+        kindHint: 'audio',
+      },
+    })
+  }
+
+  if (message.video?.file_id) {
+    pushDescriptor({
+      providerAttachmentId: message.video.file_unique_id || message.video.file_id,
+      filename: message.video.file_name ?? null,
+      declaredMediaType: message.video.mime_type ?? null,
+      reportedSizeBytes:
+        typeof message.video.file_size === 'number' ? message.video.file_size : null,
+      downloadRef: {
+        provider: 'telegram',
+        fileId: message.video.file_id,
+        kindHint: 'video',
+      },
+    })
+  }
+
+  if (message.voice?.file_id) {
+    pushDescriptor({
+      providerAttachmentId: message.voice.file_unique_id || message.voice.file_id,
+      filename: null,
+      declaredMediaType: message.voice.mime_type ?? null,
+      reportedSizeBytes:
+        typeof message.voice.file_size === 'number' ? message.voice.file_size : null,
+      downloadRef: {
+        provider: 'telegram',
+        fileId: message.voice.file_id,
+        kindHint: 'voice',
+      },
+    })
+  }
+
+  if (message.video_note?.file_id) {
+    pushDescriptor({
+      providerAttachmentId: message.video_note.file_unique_id || message.video_note.file_id,
+      filename: null,
+      declaredMediaType: 'video/mp4',
+      reportedSizeBytes:
+        typeof message.video_note.file_size === 'number' ? message.video_note.file_size : null,
+      downloadRef: {
+        provider: 'telegram',
+        fileId: message.video_note.file_id,
+        kindHint: 'video_note',
+      },
+    })
+  }
+
+  if (message.sticker?.file_id) {
+    const declaredMediaType = message.sticker.is_video
+      ? 'video/webm'
+      : message.sticker.is_animated
+        ? 'application/x-tgsticker'
+        : 'image/webp'
+    pushDescriptor({
+      providerAttachmentId: message.sticker.file_unique_id || message.sticker.file_id,
+      filename: null,
+      declaredMediaType,
+      reportedSizeBytes:
+        typeof message.sticker.file_size === 'number' ? message.sticker.file_size : null,
+      downloadRef: {
+        provider: 'telegram',
+        fileId: message.sticker.file_id,
+        kindHint: 'sticker',
+      },
+    })
+  }
+
+  return descriptors
+}
+
+function isSafeTelegramFilePath(filePath: string): boolean {
+  if (!filePath || typeof filePath !== 'string') return false
+  if (filePath.startsWith('/') || filePath.startsWith('\\')) return false
+  if (filePath.includes('\\') || filePath.includes('..')) return false
+  if (filePath.includes('://') || /^[a-z][a-z0-9+.-]*:/i.test(filePath)) return false
+  if (/[\x00-\x1f\x7f?#]/.test(filePath)) return false
+  const segments = filePath.split('/')
+  for (const segment of segments) {
+    if (!segment || segment === '.' || segment === '..') return false
+  }
+  return true
+}
 
 function reencodeToolApprovalDecision(
   decision: TelegramToolApprovalDecision
@@ -74,7 +317,10 @@ export class TelegramAdapter implements ChannelAdapter {
   readonly channelType = 'telegram' as const
 
   private bot: Bot | null = null
+  private botToken: string | null = null
+  private apiRoot: string = TELEGRAM_DEFAULT_API_ROOT
   private pendingMessages: Message[] = []
+  private pendingMediaGroups: Map<string, PendingMediaGroupEntry> = new Map()
   private allowedSendersByChat: Map<string, Set<string> | null> = new Map()
   private replyOnlyWhenMentionedByChat: Map<string, boolean> = new Map()
   private telegramChatTypeByChat: Map<string, TelegramProviderChatType> = new Map()
@@ -121,9 +367,11 @@ export class TelegramAdapter implements ChannelAdapter {
         config.telegramApiRoot ? { client: { apiRoot: config.telegramApiRoot } } : undefined
       )
       this.bot = bot
+      this.botToken = token
+      this.apiRoot = config.telegramApiRoot?.trim() || TELEGRAM_DEFAULT_API_ROOT
 
-      // Set up message handler
-      bot.on('message:text', (ctx: Context) => {
+      // Set up message handler (all message types: text + photos/documents/media)
+      bot.on('message', (ctx: Context) => {
         this.handleMessage(ctx)
       })
       bot.on('callback_query:data', (ctx: Context) => {
@@ -200,6 +448,8 @@ export class TelegramAdapter implements ChannelAdapter {
 
   private resetConnectionState(): void {
     this.bot = null
+    this.botToken = null
+    this.apiRoot = TELEGRAM_DEFAULT_API_ROOT
     this.connected = false
     this.botId = null
     this.botUsernameLower = ''
@@ -207,6 +457,10 @@ export class TelegramAdapter implements ChannelAdapter {
     this.defaultProviderTarget = null
     this.defaultProviderTargets = []
     this.recentCallbackActions.clear()
+    for (const entry of this.pendingMediaGroups.values()) {
+      clearTimeout(entry.timer)
+    }
+    this.pendingMediaGroups.clear()
   }
 
   private async waitForStartupStability(
@@ -489,15 +743,113 @@ export class TelegramAdapter implements ChannelAdapter {
     )
   }
 
+  private flushMediaGroup(key: string): void {
+    const entry = this.pendingMediaGroups.get(key)
+    if (!entry) return
+    clearTimeout(entry.timer)
+    this.pendingMediaGroups.delete(key)
+
+    const first = entry.items[0]
+    if (!first) return
+
+    let combinedText = ''
+    let combinedEntities: TelegramEntity[] | undefined
+    let combinedCaptionEntities: TelegramEntity[] | undefined
+    let replyToMessage: { from?: { id?: number } } | undefined
+    const combinedAttachments: ProviderAttachmentDescriptorV1[] = []
+    const coalescedMessageIds: Array<number | string> = []
+
+    for (const item of entry.items) {
+      coalescedMessageIds.push(item.messageId)
+      if (!combinedText && item.text) {
+        combinedText = item.text
+        combinedEntities = item.rawMessage.entities
+        combinedCaptionEntities = item.rawMessage.caption_entities
+      }
+      if (!replyToMessage && item.rawMessage.reply_to_message) {
+        replyToMessage = item.rawMessage.reply_to_message
+      }
+      for (const att of item.attachments) {
+        if (combinedAttachments.length < TELEGRAM_MEDIA_GROUP_MAX_ITEMS) {
+          combinedAttachments.push(att)
+        }
+      }
+    }
+
+    const rawMessage: Record<string, unknown> = {
+      ...first.rawMessage,
+      media_group_id: entry.mediaGroupId,
+      coalescedMessageIds,
+      ...(combinedEntities ? { entities: combinedEntities } : {}),
+      ...(combinedCaptionEntities ? { caption_entities: combinedCaptionEntities } : {}),
+      ...(replyToMessage ? { reply_to_message: replyToMessage } : {}),
+    }
+
+    const message = buildTelegramOperationalMessage({
+      text: combinedText,
+      chatId: entry.chatId,
+      chatType: entry.chatType,
+      senderId: entry.senderId,
+      senderUsername: entry.senderUsername,
+      senderIsBot: entry.senderIsBot,
+      hasSenderChat: entry.hasSenderChat,
+      messageId: first.messageId,
+      date: first.date,
+      threadId: first.threadId,
+      attachments: combinedAttachments,
+      rawMessage,
+      allowedSenders: this.allowedSendersByChat.get(entry.chatId),
+      expectedChatType: this.telegramChatTypeByChat.get(entry.chatId),
+      requireMention: this.replyOnlyWhenMentionedByChat.get(entry.chatId) ?? false,
+      botId: this.botId,
+      botUsernameLower: this.botUsernameLower,
+      providerTarget: this.providerTargetByChat.get(entry.chatId),
+    })
+    if (!message) return
+
+    this.pendingMessages.push(message)
+    console.log(
+      `[Telegram] Flushed media group ${entry.mediaGroupId} (${combinedAttachments.length} attachment(s)) from user ${entry.senderId}`
+    )
+  }
+
+  private flushOpenMediaGroupsForSender(
+    chatId: string,
+    senderId: string | null,
+    excludeKey?: string
+  ): void {
+    if (!chatId || !senderId) return
+    const keysToFlush: string[] = []
+    for (const [key, entry] of this.pendingMediaGroups) {
+      if (entry.chatId === chatId && entry.senderId === senderId && key !== excludeKey) {
+        keysToFlush.push(key)
+      }
+    }
+    for (const key of keysToFlush) {
+      this.flushMediaGroup(key)
+    }
+  }
+
   private handleMessage(ctx: Context): void {
-    if (!ctx.message?.text) {
+    const rawMsg = ctx.message as TelegramIncomingMessageLike | undefined
+    if (!rawMsg) {
+      return
+    }
+
+    const text =
+      typeof rawMsg.text === 'string'
+        ? rawMsg.text
+        : typeof rawMsg.caption === 'string'
+          ? rawMsg.caption
+          : ''
+    const attachments = extractTelegramAttachments(rawMsg)
+    if (!text && attachments.length === 0) {
       return
     }
 
     const rawSenderId = (ctx.from as { id?: number | string } | undefined)?.id
     const senderId = rawSenderId === undefined || rawSenderId === null ? null : String(rawSenderId)
     const senderUsername = ctx.from?.username || 'no-username'
-    const text = ctx.message.text
     const chatId = ctx.chat?.id.toString() || ''
     const chatType = ctx.chat?.type || 'unknown'
     const chatRecord = (ctx.chat ?? {}) as {
@@ -512,14 +864,15 @@ export class TelegramAdapter implements ChannelAdapter {
       null
     const chatHandle = chatRecord.username || null
     const senderIsBot = (ctx.from as { is_bot?: boolean } | undefined)?.is_bot === true
-    const hasSenderChat = Boolean((ctx.message as { sender_chat?: unknown }).sender_chat)
+    const hasSenderChat = Boolean(rawMsg.sender_chat)
     const logText = redactTelegramVerificationText(text)
 
     console.log(
-      `[Telegram] Message received - chat: ${chatId} (${chatType}), sender: ${senderId ?? 'missing'} (@${senderUsername}), text: "${logText.substring(0, 50)}..."`
+      `[Telegram] Message received - chat: ${chatId} (${chatType}), sender: ${senderId ?? 'missing'} (@${senderUsername}), text: "${logText.substring(0, 50)}...", attachments: ${attachments.length}`
     )
 
-    if (isTelegramVerifyCommand(text)) {
+    if (text && isTelegramVerifyCommand(text)) {
+      this.flushOpenMediaGroupsForSender(chatId, senderId)
       const providerTarget = this.defaultProviderTarget
         ? withTelegramBotIdentity(this.defaultProviderTarget, this.botId, this.botUsernameLower)
         : null
@@ -556,6 +909,63 @@ export class TelegramAdapter implements ChannelAdapter {
       return
     }
 
+    const mediaGroupId =
+      typeof rawMsg.media_group_id === 'string' && rawMsg.media_group_id.trim()
+        ? rawMsg.media_group_id.trim()
+        : null
+
+    if (mediaGroupId && senderId && attachments.length > 0) {
+      const groupKey = `${chatId}\0${senderId}\0${mediaGroupId}`
+      // Synchronously flush any distinct open album(s) for this (chatId, senderId) first
+      this.flushOpenMediaGroupsForSender(chatId, senderId, groupKey)
+
+      const item: PendingMediaGroupItem = {
+        text,
+        attachments,
+        messageId: rawMsg.message_id ?? Date.now(),
+        date: rawMsg.date ?? Math.floor(Date.now() / 1000),
+        threadId: rawMsg.message_thread_id,
+        rawMessage: rawMsg,
+      }
+
+      const existing = this.pendingMediaGroups.get(groupKey)
+      if (existing) {
+        clearTimeout(existing.timer)
+        existing.items.push(item)
+        if (existing.items.length >= TELEGRAM_MEDIA_GROUP_MAX_ITEMS) {
+          this.flushMediaGroup(groupKey)
+        } else {
+          existing.timer = setTimeout(
+            () => this.flushMediaGroup(groupKey),
+            TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS
+          )
+        }
+        return
+      }
+
+      const timer = setTimeout(
+        () => this.flushMediaGroup(groupKey),
+        TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS
+      )
+      this.pendingMediaGroups.set(groupKey, {
+        key: groupKey,
+        chatId,
+        chatType,
+        senderId,
+        senderUsername,
+        senderIsBot,
+        hasSenderChat,
+        mediaGroupId,
+        items: [item],
+        timer,
+      })
+      return
+    }
+
+    // Synchronously flush any open media group buffers for (chatId, senderId) BEFORE
+    // pushing a non-album message so rapid follow-up text never overtakes a buffered album (R66).
+    this.flushOpenMediaGroupsForSender(chatId, senderId)
+
     const message = buildTelegramOperationalMessage({
       text,
       chatId,
@@ -564,10 +974,11 @@ export class TelegramAdapter implements ChannelAdapter {
       senderUsername,
       senderIsBot,
       hasSenderChat,
-      messageId: ctx.message.message_id,
-      date: ctx.message.date,
-      threadId: ctx.message.message_thread_id,
-      rawMessage: ctx.message as unknown as Record<string, unknown>,
+      messageId: rawMsg.message_id ?? Date.now(),
+      date: rawMsg.date ?? Math.floor(Date.now() / 1000),
+      threadId: rawMsg.message_thread_id,
+      attachments,
+      rawMessage: rawMsg,
       allowedSenders: this.allowedSendersByChat.get(chatId),
       expectedChatType: this.telegramChatTypeByChat.get(chatId),
       requireMention: this.replyOnlyWhenMentionedByChat.get(chatId) ?? false,
@@ -579,6 +990,243 @@ export class TelegramAdapter implements ChannelAdapter {
 
     this.pendingMessages.push(message)
     console.log(`[Telegram] Received message from user ${senderId}`)
+  }
+
+  /**
+   * Download raw bytes for a Telegram attachment descriptor using an immutable
+   * snapshot of credentials/client captured synchronously before the first await.
+   */
+  async downloadAttachment(
+    descriptor: ProviderAttachmentDescriptorV1,
+    options?: DownloadAttachmentOptions
+  ): Promise<ChannelAttachmentDownloadResult> {
+    if (descriptor.downloadRef.provider !== 'telegram') {
+      return {
+        ok: false,
+        code: 'provider_download_rejected',
+        message: 'Mismatched attachment descriptor provider for Telegram adapter.',
+        retryable: false,
+      }
+    }
+
+    // Snapshot credentials and API handle synchronously before any await so a
+    // concurrent CRD restart() cannot nullify them mid-download (R20).
+    const snapshotToken = this.botToken
+    const snapshotApiRoot =
+      this.apiRoot || config.telegramApiRoot?.trim() || TELEGRAM_DEFAULT_API_ROOT
+    const snapshotBotApi = this.bot?.api ?? null
+
+    if (!snapshotToken) {
+      return {
+        ok: false,
+        code: 'provider_not_connected',
+        message: 'Telegram adapter is not connected.',
+        retryable: true,
+      }
+    }
+
+    const configuredMax =
+      options?.maxBytes ?? config.channelAttachmentMaxBytes ?? TELEGRAM_GET_FILE_MAX_BYTES
+    const effectiveMaxBytes = Math.min(configuredMax, TELEGRAM_GET_FILE_MAX_BYTES)
+
+    if (
+      typeof descriptor.reportedSizeBytes === 'number' &&
+      descriptor.reportedSizeBytes > effectiveMaxBytes
+    ) {
+      return {
+        ok: false,
+        code: 'file_too_large',
+        message: `Telegram file exceeds the ${effectiveMaxBytes} byte limit.`,
+        retryable: false,
+      }
+    }
+
+    let apiOrigin: string
+    try {
+      apiOrigin = new URL(snapshotApiRoot).origin
+    } catch {
+      return {
+        ok: false,
+        code: 'provider_download_rejected',
+        message: 'Configured Telegram API root is invalid.',
+        retryable: false,
+      }
+    }
+
+    const fileId = descriptor.downloadRef.fileId
+    let filePath: string | undefined
+    let fileSize: number | undefined
+
+    try {
+      if (snapshotBotApi && typeof snapshotBotApi.getFile === 'function') {
+        const fileInfo = (await snapshotBotApi.getFile(fileId)) as {
+          file_path?: string
+          file_size?: number
+        }
+        filePath = fileInfo?.file_path
+        fileSize = fileInfo?.file_size
+      } else {
+        const getFileUrl = `${apiOrigin}/bot${snapshotToken}/getFile?file_id=${encodeURIComponent(fileId)}`
+        const metaResponse = await fetch(getFileUrl, {
+          method: 'GET',
+          redirect: 'manual',
+          signal: AbortSignal.timeout(TELEGRAM_DOWNLOAD_TIMEOUT_MS),
+        })
+        if (!metaResponse.ok) {
+          return {
+            ok: false,
+            code: 'provider_download_failed',
+            message: `Telegram getFile failed (HTTP ${metaResponse.status}).`,
+            retryable: metaResponse.status >= 500,
+          }
+        }
+        const metaJson = (await metaResponse.json().catch(() => null)) as {
+          ok?: boolean
+          result?: { file_path?: string; file_size?: number }
+        } | null
+        if (!metaJson?.ok || !metaJson.result?.file_path) {
+          return {
+            ok: false,
+            code: 'provider_download_failed',
+            message: 'Telegram getFile did not return a downloadable file path.',
+            retryable: false,
+          }
+        }
+        filePath = metaJson.result.file_path
+        fileSize = metaJson.result.file_size
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (/too big/i.test(msg)) {
+        return {
+          ok: false,
+          code: 'file_too_large',
+          message: `Telegram rejected file download as too large (20 MiB Bot API cap).`,
+          retryable: false,
+        }
+      }
+      return {
+        ok: false,
+        code: 'provider_download_failed',
+        message: 'Failed to resolve Telegram file metadata.',
+        retryable: true,
+      }
+    }
+
+    if (typeof fileSize === 'number' && fileSize > effectiveMaxBytes) {
+      return {
+        ok: false,
+        code: 'file_too_large',
+        message: `Telegram file exceeds the ${effectiveMaxBytes} byte limit.`,
+        retryable: false,
+      }
+    }
+
+    if (!filePath || !isSafeTelegramFilePath(filePath)) {
+      return {
+        ok: false,
+        code: 'provider_download_rejected',
+        message: 'Telegram returned an unsafe file path.',
+        retryable: false,
+      }
+    }
+
+    let downloadUrl: URL
+    try {
+      downloadUrl = new URL(`/file/bot${snapshotToken}/${filePath}`, apiOrigin)
+    } catch {
+      return {
+        ok: false,
+        code: 'provider_download_rejected',
+        message: 'Could not construct safe Telegram file URL.',
+        retryable: false,
+      }
+    }
+
+    if (
+      downloadUrl.origin !== apiOrigin ||
+      !downloadUrl.pathname.startsWith(`/file/bot${snapshotToken}/`)
+    ) {
+      return {
+        ok: false,
+        code: 'provider_download_rejected',
+        message: 'Telegram file download URL escaped the configured API origin.',
+        retryable: false,
+      }
+    }
+
+    try {
+      const response = await fetch(downloadUrl.toString(), {
+        method: 'GET',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(TELEGRAM_DOWNLOAD_TIMEOUT_MS),
+      })
+
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers?.get?.('location')
+        if (!location) {
+          return {
+            ok: false,
+            code: 'provider_download_rejected',
+            message: 'Telegram file download redirected without a valid destination.',
+            retryable: false,
+          }
+        }
+        let targetUrl: URL
+        try {
+          targetUrl = new URL(location, downloadUrl)
+        } catch {
+          return {
+            ok: false,
+            code: 'provider_download_rejected',
+            message: 'Telegram file download redirected to an invalid URL.',
+            retryable: false,
+          }
+        }
+        if (targetUrl.origin !== apiOrigin) {
+          return {
+            ok: false,
+            code: 'provider_download_rejected',
+            message: 'Telegram file download attempted an off-origin redirect.',
+            retryable: false,
+          }
+        }
+        return {
+          ok: false,
+          code: 'provider_download_rejected',
+          message: 'Unexpected redirect from Telegram file endpoint.',
+          retryable: false,
+        }
+      }
+
+      if (!response.ok) {
+        return {
+          ok: false,
+          code: 'provider_download_failed',
+          message: `Telegram file download failed (HTTP ${response.status}).`,
+          retryable: response.status >= 500,
+        }
+      }
+
+      const bounded = await readBoundedResponseBytes(response, effectiveMaxBytes)
+      if (!bounded.ok) {
+        return bounded
+      }
+
+      return {
+        ok: true,
+        bytes: bounded.bytes,
+        filename: descriptor.filename,
+        declaredMediaType: descriptor.declaredMediaType,
+      }
+    } catch {
+      return {
+        ok: false,
+        code: 'provider_download_failed',
+        message: 'Network error while downloading Telegram file.',
+        retryable: true,
+      }
+    }
   }
 
   async sendMessage(
