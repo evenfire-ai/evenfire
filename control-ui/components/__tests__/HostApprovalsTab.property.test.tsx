@@ -491,7 +491,9 @@ function blockOf(host: unknown): Record<string, unknown> | undefined {
 
 /** mcp-host reads the ceiling and the switches from the Host's own block only. */
 function snapshotOf(block: Record<string, unknown> | undefined) {
-  const config = block as ApprovalConfig | undefined
+  // The stored block, as it is: `ApprovalConfig` declares fields a stored
+  // block may lack, and the two readers read every field as unknown.
+  const config = block as unknown as ApprovalConfig | undefined
   return { effective: config, hostSpec: config }
 }
 
