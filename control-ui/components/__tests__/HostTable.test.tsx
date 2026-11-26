@@ -418,13 +418,16 @@ describe('HostTable type column (lifecycle)', () => {
     expect(screen.getByRole('columnheader', { name: 'Type' })).toBeInTheDocument()
 
     const stateful = within(screen.getByLabelText('Open agent warm-agent')).getByText('Stateful')
-    expect(stateful).toHaveAttribute(
-      'data-tooltip',
+    fireEvent.mouseEnter(stateful)
+    expect(screen.getByRole('tooltip')).toHaveTextContent(
       'This agent runs continuously; its process is never scaled to zero.'
     )
+    fireEvent.mouseLeave(stateful)
+    expect(screen.queryByRole('tooltip')).toBeNull()
+
     const stateless = within(screen.getByLabelText('Open agent cold-agent')).getByText('Stateless')
-    expect(stateless).toHaveAttribute(
-      'data-tooltip',
+    fireEvent.mouseEnter(stateless)
+    expect(screen.getByRole('tooltip')).toHaveTextContent(
       'This agent persists session state to disk and scales to zero while idle (shown as Idle). It wakes on demand.'
     )
   })

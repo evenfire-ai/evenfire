@@ -512,10 +512,12 @@ describe('HostDetailsPage identity integration', () => {
     // No spec.lifecycle on the fixture host → Stateful, left of the status.
     const typeChip = container.querySelector('.cu-host-overview-identity__type')
     expect(typeChip).toHaveTextContent('Stateful')
-    expect(typeChip).toHaveAttribute(
-      'data-tooltip',
+    fireEvent.mouseEnter(typeChip)
+    expect(screen.getByRole('tooltip')).toHaveTextContent(
       'This agent runs continuously; its process is never scaled to zero.'
     )
+    fireEvent.mouseLeave(typeChip)
+    expect(screen.queryByRole('tooltip')).toBeNull()
     expect(screen.getByText('Created').nextElementSibling).toHaveTextContent(/2026/)
     expect(screen.queryByText('Last updated')).not.toBeInTheDocument()
     expect(container.querySelector('.cu-host-overview-identity__slug')).toBeNull()
@@ -548,8 +550,8 @@ describe('HostDetailsPage identity integration', () => {
     // The stateless host announces its type left of the status.
     const typeChip = container.querySelector('.cu-host-overview-identity__type')
     expect(typeChip).toHaveTextContent('Stateless')
-    expect(typeChip).toHaveAttribute(
-      'data-tooltip',
+    fireEvent.mouseEnter(typeChip)
+    expect(screen.getByRole('tooltip')).toHaveTextContent(
       'This agent persists session state to disk and scales to zero while idle (shown as Idle). It wakes on demand.'
     )
   })

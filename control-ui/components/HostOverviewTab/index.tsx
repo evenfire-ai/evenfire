@@ -1,6 +1,7 @@
 import React from 'react'
 import { SingleValueEditDialog } from '@clerum/frontend-components'
 import { AGENT_TYPE_LABELS, AGENT_TYPE_TOOLTIPS } from '../../lib/agentLifecycle'
+import { HoverTooltip } from '../HoverTooltip'
 import { IconRobot } from '../Sidebar/icons'
 import { IconPencil } from '../icons'
 import { Field, TextInput } from '../ui'
@@ -161,13 +162,11 @@ export function HostOverviewTab({
         </div>
         {/* __badges, not __meta: that name is the Created <dl> below. */}
         <div className="cu-host-overview-identity__badges">
-          <span
+          <HoverTooltip
             className="cu-host-overview-identity__type"
-            tabIndex={0}
-            data-tooltip={AGENT_TYPE_TOOLTIPS[agentType]}
-          >
-            {AGENT_TYPE_LABELS[agentType]}
-          </span>
+            label={AGENT_TYPE_LABELS[agentType]}
+            tooltip={AGENT_TYPE_TOOLTIPS[agentType]}
+          />
           <div className="cu-host-overview-identity__status">
             <StatusDot tone={statusTone} />
             <span>{statusLabel}</span>

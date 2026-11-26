@@ -16,6 +16,7 @@ import {
 import { getProviderLabel } from '../lib/llm'
 import { ConnectorCountHoverCard } from './ConnectorCountCell'
 import type { HostItem, HostRef } from './HostTable.types'
+import { HoverTooltip } from './HoverTooltip'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -217,13 +218,11 @@ export function HostTable({
                       <span className="cu-table__cell-name">{displayName}</span>
                     </td>
                     <td className="cu-table__cell-soft">
-                      <span
+                      <HoverTooltip
                         className="cu-table__cell-type"
-                        tabIndex={0}
-                        data-tooltip={AGENT_TYPE_TOOLTIPS[agentType]}
-                      >
-                        {AGENT_TYPE_LABELS[agentType]}
-                      </span>
+                        label={AGENT_TYPE_LABELS[agentType]}
+                        tooltip={AGENT_TYPE_TOOLTIPS[agentType]}
+                      />
                     </td>
                     <td>
                       {rawContext ? (

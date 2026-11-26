@@ -8017,7 +8017,6 @@ td.cu-registry-description {
 }
 
 .cu-host-overview-identity__type {
-  position: relative;
   display: inline-flex;
   align-items: center;
   padding: 0.1rem 0.55rem;
@@ -8026,41 +8025,7 @@ td.cu-registry-description {
   background: var(--cu-bg-elevated);
   color: var(--cu-text-muted);
   font-size: var(--cu-font-size-xs);
-}
-
-/* Same CSS tooltip contract as .cu-help-tooltip, rendered below the chip so
- * it clears the card header. Keyboard focus mirrors hover (tabIndex on the
- * chip), as in CommunicationChannelProviderSetup. */
-.cu-host-overview-identity__type[data-tooltip]::after {
-  position: absolute;
-  top: calc(100% + var(--cu-space-2));
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 30;
-  width: max-content;
-  max-width: min(18rem, 72vw);
-  padding: var(--cu-space-2) var(--cu-space-3);
-  color: var(--cu-text);
-  font-size: 0.75rem;
-  font-weight: 500;
-  line-height: 1.45;
-  text-align: left;
-  white-space: normal;
-  pointer-events: none;
-  content: attr(data-tooltip);
-  background: var(--cu-surface);
-  border: 1px solid var(--cu-border);
-  border-radius: var(--cu-radius-sm);
-  box-shadow: var(--cu-shadow);
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity var(--cu-control-transition);
-}
-
-.cu-host-overview-identity__type[data-tooltip]:hover::after,
-.cu-host-overview-identity__type[data-tooltip]:focus-visible::after {
-  opacity: 1;
-  visibility: visible;
+  cursor: default;
 }
 
 .cu-host-overview-identity__status {
@@ -10054,22 +10019,22 @@ td.cu-registry-description {
   font-size: 0.8125rem;
 }
 
-/* Agent lifecycle Type cell. Same data-tooltip CSS contract as the detail
- * card chip; the card renders below the label, inside the cell. */
+/* Agent lifecycle Type cell — the tooltip card itself renders in a portal
+ * (components/HoverTooltip.tsx), so nothing here needs overflow tricks. */
 .cu-table__cell-type {
-  position: relative;
   display: inline-flex;
   align-items: center;
   color: var(--cu-text-soft);
   font-size: 0.8125rem;
+  cursor: default;
 }
 
-.cu-table__cell-type[data-tooltip]::after {
-  position: absolute;
-  top: calc(100% + var(--cu-space-1));
-  left: 50%;
+/* Portal hover tooltip card (HoverTooltip). Fixed under the trigger,
+ * horizontally centered by the component; no fade — it appears at once. */
+.cu-hover-tooltip-card {
+  position: fixed;
   transform: translateX(-50%);
-  z-index: 30;
+  z-index: 1000;
   width: max-content;
   max-width: min(18rem, 72vw);
   padding: var(--cu-space-2) var(--cu-space-3);
@@ -10080,22 +10045,10 @@ td.cu-registry-description {
   text-align: left;
   white-space: normal;
   pointer-events: none;
-  content: attr(data-tooltip);
-  background: var(--cu-bg);
-  border: 1px solid var(--cu-border-hover);
+  background: var(--cu-surface);
+  border: 1px solid var(--cu-border);
   border-radius: var(--cu-radius-sm);
   box-shadow: var(--cu-shadow);
-  opacity: 0;
-  visibility: hidden;
-  transition:
-    opacity 80ms ease,
-    visibility 80ms ease;
-}
-
-.cu-table__cell-type[data-tooltip]:hover::after,
-.cu-table__cell-type[data-tooltip]:focus-visible::after {
-  opacity: 1;
-  visibility: visible;
 }
 
 /* Secondary identity line under a primary display name (e.g. the immutable
