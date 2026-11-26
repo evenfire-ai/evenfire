@@ -2417,9 +2417,12 @@ describe('redeeming: Cancel, a new start and the interactive login count', () =>
       endCalls.push({ id, current: current?.id ?? null, phase: current?.phase ?? null, ended })
       return ended
     })
-    // The settle step's discovery commit, held. Logout makes the first call and the settle step
-    // the second; while the second is held, the settle op keeps the owner, so the new start's
-    // op 2 queues ahead of the fail-safe op, which is queued only after the settle.
+    // The settle step's discovery commit, held. The count below rests on two call sites of the
+    // private `commitPendingRuntimeConfigDiscoveryIfSafe`: logout's (`appService.ts:3239`, in
+    // `logout`) makes the first call, and the settle step's (`:2455`, in
+    // `settleInteractiveLoginAttempt`) the second. The third, restore's (`:1916`), is not reached:
+    // no restore runs here. While the second is held, the settle op keeps the owner, so the new
+    // start's op 2 queues ahead of the fail-safe op, which is queued only after the settle.
     const pending = service as unknown as {
       commitPendingRuntimeConfigDiscoveryIfSafe(): Promise<void>
     }
