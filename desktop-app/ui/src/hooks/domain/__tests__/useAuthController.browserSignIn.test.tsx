@@ -891,6 +891,45 @@ describe('useAuthController: the auth gates and a browser sign-in (D14)', () => 
     expect(disabledDockControls(), 'the dock is usable again once start returns').toEqual([])
   })
 
+  // Review Focus 5: the page's button commits `disabled` only after React renders, so two quick
+  // activations both reach the handler; its `busy` ref lets only the first through.
+  it('sends one start for a double activation', async () => {
+    const { bridge } = await createSignInMain()
+    const page = await mountAuthPage(bridge)
+    // The harness's methods route answers the edge's recorded `password-and-oidc`.
+    const both = modelOf('password-and-oidc')
+    if (both.kind !== 'methods' || !both.provider) throw new Error('the record offers no provider')
+    const name = `Continue with ${both.provider.label}`
+    const button = await waitFor(() => {
+      const found = screen.queryByRole('button', { name })
+      expect(found, 'the sign-in page offers the provider').not.toBeNull()
+      return found as HTMLButtonElement
+    })
+    expect(button.disabled, 'Continue is usable before the activations').toBe(false)
+    const rendersBefore = page.probe.renders.length
+    let between: Readonly<{ disabled: boolean; renders: number }> = {
+      disabled: true,
+      renders: -1,
+    }
+
+    // Two activations in one synchronous block: React commits the first one's `busy` only when
+    // the block ends, so the second meets a button that is still enabled.
+    act(() => {
+      button.click()
+      between = { disabled: button.disabled, renders: page.probe.renders.length }
+      button.click()
+    })
+
+    expect(between.renders, 'React had not committed between the activations').toBe(rendersBefore)
+    expect(between.disabled, 'the second activation met an enabled button').toBe(false)
+    expect(bridge.auth.startBrowserSignIn, 'one start reaches main').toHaveBeenCalledTimes(1)
+    await waitFor(() =>
+      expect(page.controller().browserSignIn.phase, 'main opened the browser and waits').toBe(
+        'waiting'
+      )
+    )
+  })
+
   it.each(START_GUARD_ROWS.map(row => [row.flag, row] as const))(
     'ignores a start while %s is set',
     async (_flag, row) => {

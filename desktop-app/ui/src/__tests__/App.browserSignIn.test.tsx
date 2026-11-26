@@ -3,8 +3,9 @@
  * `App` passes the browser sign-in fields of `useAppController` through `AuthContext`: the login
  * screen's model and its refresh, main's snapshot, and the start and cancel handlers reach the
  * provider's value. The `ui` typecheck is not a gate, so this test is what catches a field that
- * is not passed on. The page that reads the fields comes later, so a probe stands in for
- * `AuthPage` and keeps the value it was given.
+ * is not passed on. A probe stands in for `AuthPage` and keeps the value it was given, so the
+ * fields are read as `App` passes them, without the page's own reads; `AuthPage.test.tsx` covers
+ * how the page uses them.
  *
  * The real coordinator boots signed out on the shared app-controller bridge. Its browser sign-in
  * calls answer from a real `BrowserSignInAttempts`, whose pushes reach the listener the renderer

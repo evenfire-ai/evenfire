@@ -1,7 +1,11 @@
 import type { DesktopLoginRefusalReason } from '../../../src/browserSignInModel'
 
-/** What the login screen says about signing in through the browser (design §10.1). */
+/**
+ * What the login screen says about its sign-in methods and about signing in through the browser
+ * (design §10.1).
+ */
 export const BROWSER_SIGN_IN_COPY = Object.freeze({
+  loadingMethods: 'Loading sign-in options…',
   continueWith: (label: string) => `Continue with ${label}`,
   passwordHeading: 'Sign in with a password',
   waiting: 'Finish signing in in your browser',

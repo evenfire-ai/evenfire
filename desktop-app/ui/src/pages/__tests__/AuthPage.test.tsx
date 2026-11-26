@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { BrowserSignInAttempts } from '../../../../src/browserSignIn'
-import type { BrowserSignInSnapshot } from '../../../../src/types'
+import { buildLoginMethodsModel } from '../../../../src/browserSignInModel'
+import type { BrowserSignInSnapshot, LoginMethodsModel } from '../../../../src/types'
 import { FakeBrowserSignInClock } from '../../../../testSupport/browserSignInClock'
+import { LOGIN_SCREEN_ROWS, deriveEdgeRecord } from '../../../../testSupport/edgeContractRecords'
 import { LOCALHOST_RUNTIME_CONFIG_OPTION_ID } from '../../constants/runtimeConfig'
 import { AuthContext } from '../../contexts/AuthContext'
 import type { AuthContextValue } from '../../contexts/AuthContext'
@@ -54,6 +56,25 @@ async function captureMainSnapshots() {
 
 const MAIN = await captureMainSnapshots()
 
+/** The login model main builds for a `LOGIN_SCREEN_ROWS` answer (design §10.1). */
+function modelOf(label: string): LoginMethodsModel {
+  const row = LOGIN_SCREEN_ROWS.find(([rowLabel]) => rowLabel === label)
+  if (!row) throw new Error(`LOGIN_SCREEN_ROWS has no row "${label}"`)
+  return buildLoginMethodsModel(row[1], { linksAvailable: true })
+}
+
+const PASSWORD_FORM = modelOf('password')
+const BOTH_METHODS = modelOf('password-and-oidc')
+const UNREACHABLE = modelOf('unreachable')
+const MISCONFIGURED = modelOf('nothing-usable:empty')
+
+function providerLabel(model: LoginMethodsModel): string {
+  if (model.kind !== 'methods' || !model.provider) throw new Error('the model offers no provider')
+  return model.provider.label
+}
+
+const CONTINUE = `Continue with ${providerLabel(BOTH_METHODS)}`
+
 // The environment dock probes for a local Evenfire and only lists Localhost
 // when one answers, so these tests must say whether one is running.
 let probeLocalhostReachable = vi.fn()
@@ -95,7 +116,8 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   showRuntimeConfigSelector: false,
   dependencyHealth: null,
   hasDependencyOutage: false,
-  loginScreen: { kind: 'loading' },
+  // The password form: what the page showed before it read the login model.
+  loginScreen: PASSWORD_FORM,
   browserSignIn: { attemptId: null, phase: 'idle' },
   refreshLoginMethods: vi.fn(),
   setBooting: vi.fn(),
@@ -368,4 +390,226 @@ describe('AuthPage: environment changes and a browser sign-in (R-38)', () => {
       )
     }
   )
+})
+
+/** The text of the screen's one status line, or null when it shows none. */
+function statusLine(): string | null {
+  return screen.queryByRole('status')?.textContent ?? null
+}
+
+/** The "Continue with <label>" button, or null when the screen does not offer the provider. */
+function providerButton(label = providerLabel(BOTH_METHODS)): HTMLButtonElement | null {
+  return screen.queryByRole('button', { name: `Continue with ${label}` })
+}
+
+function requiredProviderButton(label?: string): HTMLButtonElement {
+  const button = providerButton(label)
+  expect(button, 'the screen offers the provider').not.toBeNull()
+  return button as HTMLButtonElement
+}
+
+function inputLabelled(label: string): HTMLInputElement {
+  return screen.getByLabelText(label) as HTMLInputElement
+}
+
+describe('AuthPage: the login screen from main’s model (design §10.1)', () => {
+  it.each(LOGIN_SCREEN_ROWS.map(([label, answer]) => [label, answer] as const))(
+    'renders %s',
+    (_label, answer) => {
+      const model = buildLoginMethodsModel(answer, { linksAvailable: true })
+      renderAuthPage({ loginScreen: model })
+
+      const passwordForm = screen.queryByLabelText('Email')
+      const retry = screen.queryByRole('button', { name: 'Retry' })
+      switch (model.kind) {
+        case 'methods': {
+          const { provider } = model
+          if (provider) {
+            expect(providerButton(provider.label), 'the provider is offered').not.toBeNull()
+          } else {
+            expect(
+              screen.queryByRole('button', { name: /^Continue with / }),
+              'no provider is offered'
+            ).toBeNull()
+          }
+          expect(passwordForm !== null, 'the password form shows exactly when offered').toBe(
+            model.password
+          )
+          const both = provider !== null && model.password
+          expect(
+            screen.queryByText('Sign in with a password') !== null,
+            'the password form is headed as the secondary action below a provider'
+          ).toBe(both)
+          expect(
+            document.querySelector('.auth-card__divider') !== null,
+            'a divider separates the two methods'
+          ).toBe(both)
+          expect(retry, 'a usable model has no Retry').toBeNull()
+          break
+        }
+        case 'misconfigured':
+        case 'unreachable':
+          expect(
+            screen.queryByText(
+              model.kind === 'misconfigured'
+                ? "This environment's sign-in isn't set up correctly."
+                : "Can't reach this environment."
+            ),
+            'the screen says why it offers nothing'
+          ).not.toBeNull()
+          expect(retry, 'Retry is offered').not.toBeNull()
+          expect(passwordForm, 'no form and no guess').toBeNull()
+          expect(screen.queryByRole('button', { name: /^Continue with / })).toBeNull()
+          break
+      }
+    }
+  )
+
+  it('shows a status line and no form while the model loads', () => {
+    renderAuthPage({ loginScreen: { kind: 'loading' } })
+
+    expect(statusLine(), 'the screen says it is loading').toBe('Loading sign-in options…')
+    expect(screen.queryByLabelText('Email'), 'no form before the model').toBeNull()
+    expect(screen.queryByRole('button', { name: /^Continue with / })).toBeNull()
+  })
+
+  it('reads the methods when the login screen shows', () => {
+    const refreshLoginMethods = vi.fn()
+    renderAuthPage({ refreshLoginMethods })
+
+    expect(refreshLoginMethods, 'one read when the screen shows').toHaveBeenCalledTimes(1)
+  })
+
+  it('Retry re-reads the methods', async () => {
+    const user = userEvent.setup()
+    for (const model of [UNREACHABLE, MISCONFIGURED]) {
+      const refreshLoginMethods = vi.fn()
+      const { unmount } = renderAuthPage({ loginScreen: model, refreshLoginMethods })
+      expect(
+        refreshLoginMethods,
+        'the screen read the methods when it showed'
+      ).toHaveBeenCalledTimes(1)
+      const retry = screen.queryByRole('button', { name: 'Retry' })
+      expect(retry, `${model.kind} offers Retry`).not.toBeNull()
+
+      await user.click(retry as HTMLButtonElement)
+      expect(
+        refreshLoginMethods,
+        `Retry on ${model.kind} reads the methods again`
+      ).toHaveBeenCalledTimes(2)
+      unmount()
+    }
+  })
+
+  it('starts a browser sign-in from Continue', async () => {
+    const user = userEvent.setup()
+    const handleStartBrowserSignIn = vi.fn()
+    renderAuthPage({ loginScreen: BOTH_METHODS, handleStartBrowserSignIn })
+
+    await user.click(requiredProviderButton())
+
+    expect(handleStartBrowserSignIn).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a waiting browser sign-in with Cancel, and keeps Continue offered', async () => {
+    const user = userEvent.setup()
+    const handleCancelBrowserSignIn = vi.fn()
+    renderAuthPage({
+      loginScreen: BOTH_METHODS,
+      browserSignIn: MAIN.waiting,
+      handleCancelBrowserSignIn,
+    })
+
+    expect(statusLine(), 'the panel says where to finish').toBe('Finish signing in in your browser')
+    // A new start replaces an attempt whose page was closed.
+    expect(requiredProviderButton().disabled, 'Continue stays usable while waiting').toBe(false)
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(handleCancelBrowserSignIn, 'Cancel reaches the controller').toHaveBeenCalledTimes(1)
+  })
+
+  it('G2-14c disables the password form and provider button and hides Cancel while redeeming', () => {
+    const credentials = { email: 'member@example.test', password: 'fake-password' }
+    // Positive control: with these credentials and nothing running, the form is usable.
+    const { unmount } = renderAuthPage({ loginScreen: BOTH_METHODS, ...credentials })
+    expect(passwordSubmit().disabled, 'the password submit is usable before redeeming').toBe(false)
+    unmount()
+
+    // Main redeems: the view says so, and the controller returns the widened flag (decision 8).
+    // `busy` stays clear, as it does while an attempt redeems (D14).
+    renderAuthPage({
+      loginScreen: BOTH_METHODS,
+      browserSignIn: MAIN.redeeming,
+      authTransitioning: true,
+      busy: false,
+      ...credentials,
+    })
+
+    expect(inputLabelled('Email').disabled, 'the email input is disabled while redeeming').toBe(
+      true
+    )
+    expect(
+      inputLabelled('Password').disabled,
+      'the password input is disabled while redeeming'
+    ).toBe(true)
+    expect(passwordSubmit().disabled, 'the password submit is disabled while redeeming').toBe(true)
+    expect(
+      requiredProviderButton().disabled,
+      'the provider button is disabled while redeeming'
+    ).toBe(true)
+    expect(
+      screen.queryByRole('button', { name: 'Cancel' }),
+      'Cancel is hidden while redeeming'
+    ).toBeNull()
+    expect(statusLine(), 'the panel says it is finishing').toBe('Finishing sign-in…')
+    expect(screen.queryByText('Signing in...'), 'one progress line at a time (R-15)').toBeNull()
+  })
+
+  it('G2-14d disables Continue while a handoff confirm runs', () => {
+    // Positive control: nothing runs, so Continue is usable.
+    const { unmount } = renderAuthPage({ loginScreen: BOTH_METHODS })
+    expect(requiredProviderButton().disabled, 'Continue is usable when nothing runs').toBe(false)
+    unmount()
+
+    // A desktop-environment link's confirm sets the raw flag alone while it reads the session
+    // (`handleConfirmDesktopEnvironmentSetup`, A3-68); no attempt exists.
+    renderAuthPage({ loginScreen: BOTH_METHODS, authTransitioning: true, busy: false })
+    expect(
+      requiredProviderButton().disabled,
+      'Continue is disabled while a handoff confirm runs'
+    ).toBe(true)
+  })
+
+  it.each(['booting', 'busy'] as const)('disables Continue while %s is set', flag => {
+    renderAuthPage({ loginScreen: BOTH_METHODS, [flag]: true })
+
+    expect(requiredProviderButton().disabled, `Continue is disabled while ${flag}`).toBe(true)
+  })
+
+  it('renders a provider label with markup as text', () => {
+    // Within the edge's 80-character bound, so main offers the provider (a longer label would
+    // make the screen `misconfigured` and prove nothing).
+    const label = '<img src=x onerror=alert(1)><b>Sign-in</b>'
+    const answer = deriveEdgeRecord(
+      'GET /api/v1/auth/methods password-and-oidc',
+      'password-and-oidc:label-with-markup',
+      recorded => {
+        const body = recorded as { oidc: Record<string, unknown> }
+        return { ...body, oidc: { ...body.oidc, label } }
+      }
+    )
+    const model = buildLoginMethodsModel(
+      { status: 200, body: answer.body },
+      { linksAvailable: true }
+    )
+    expect(model, 'main offers the provider with the label as sent').toEqual({
+      kind: 'methods',
+      provider: { label },
+      password: true,
+    })
+    renderAuthPage({ loginScreen: model })
+
+    const button = requiredProviderButton(label)
+    expect(button.textContent, 'the label reads as text').toBe(`Continue with ${label}`)
+    expect(button.querySelector('img, b'), 'no element came from the label').toBeNull()
+  })
 })
