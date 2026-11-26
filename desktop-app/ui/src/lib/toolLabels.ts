@@ -21,6 +21,7 @@ export function formatToolDisplayName({
   displayName: string
   toolName: string
 }): string {
+  // The historical runtime namespace is not the public product name.
   if (toolName.startsWith('clerum__') && displayName === 'Clerum') {
     return 'Evenfire'
   }
