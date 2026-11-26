@@ -280,6 +280,8 @@ type SaveRecord = {
   settleLogLen?: number
   /** It settled (a re-asking `reconfirm` has not): the tab reported it. */
   reported?: boolean
+  /** Whether it settled in the tab and section it ran in. */
+  settledInView?: boolean
 }
 
 type SwitchRecord = {
@@ -295,6 +297,8 @@ type SwitchRecord = {
   shown: boolean
   /** An `AdvanceClock` command moved the clock while the run went on (L3 then promises nothing). */
   clockMoved: boolean
+  /** Whether it settled in the instance and agent that ran it. */
+  settledInInstance?: boolean
 }
 
 type StoreEvent = {
@@ -691,6 +695,8 @@ type Setup = {
   start: Agent
   blocks: Record<Agent, BlockSeed | null>
   random: number
+  /** A fixed example's name: what it must reach (`PINS`). Generated runs have none. */
+  pin?: keyof typeof PINS
 }
 
 function blockFrom(agent: Agent, seed: BlockSeed): Record<string, unknown> {
@@ -1169,6 +1175,7 @@ const DRAFT_KEPT: ReadonlySet<ToolsSaveOutcome['kind']> = new Set([
 
 function settleSave(w: World, save: SaveRecord, inViewSaves: readonly SaveRecord[]): void {
   save.reported = true
+  save.settledInView = saveInView(w, save)
   const outcome = save.outcome as ToolsSaveOutcome
   const inView = saveInView(w, save)
   const view = currentView(w)
@@ -1221,6 +1228,7 @@ function settleSave(w: World, save: SaveRecord, inViewSaves: readonly SaveRecord
 function settleSwitch(w: World, record: SwitchRecord): void {
   const outcome = record.outcome as OffSwitchOutcome
   const inInstance = switchInInstance(w, record)
+  record.settledInInstance = inInstance
   const root = tabRoot()
   // L4: every outcome is shown, in the tab that ran it or as a root toast naming the agent.
   count(w.stats, 'checks', 'L4')
@@ -1933,6 +1941,43 @@ function checkL3(w: World): void {
   }
 }
 
+/**
+ * E16's cases: the older saves' PUTs of `agent` with an approval write and a
+ * load that answered between the save's read and its PUT.
+ */
+function olderSavesBetween(w: World, agent: Agent): FakeLogEntry[] {
+  return w.fake.log.filter(put => {
+    if (put.kind !== 'write' || w.owners.get(put.seq) !== null || agentOfPath(put.path) !== agent) {
+      return false
+    }
+    const read = [...w.fake.log]
+      .reverse()
+      .find(
+        entry =>
+          entry.seq < put.seq &&
+          entry.kind === 'read' &&
+          entry.path === put.path &&
+          w.owners.get(entry.seq) === null
+      )
+    if (!read) return false
+    const approvalWrite = w.timeline.some(
+      event =>
+        event.agent === agent &&
+        event.logLen >= read.seq &&
+        event.logLen <= put.seq &&
+        !sameJson(event.before.spec.approval, event.after.spec.approval)
+    )
+    const load = w.fake.log.some(
+      entry =>
+        entry.path === `/api/v1/admin/hosts/${agent}/detail` &&
+        entry.seq > read.seq &&
+        entry.seq < put.seq &&
+        entry.delivered
+    )
+    return approvalWrite && load
+  })
+}
+
 /** Events read off the history once the run is at rest: E10, E16, E17. */
 function countHistoryEvents(w: World): void {
   const order = new Map(w.deliveries.map((seq, index) => [seq, index]))
@@ -1957,36 +2002,7 @@ function countHistoryEvents(w: World): void {
       if (overtaken) count(w.stats, 'events', 'E10')
     }
     // E16: an older save's PUT, with an approval write and a load landing between its read and it.
-    for (const put of w.fake.log) {
-      if (
-        put.kind !== 'write' ||
-        w.owners.get(put.seq) !== null ||
-        agentOfPath(put.path) !== agent
-      ) {
-        continue
-      }
-      const read = [...w.fake.log]
-        .reverse()
-        .find(
-          entry =>
-            entry.seq < put.seq &&
-            entry.kind === 'read' &&
-            entry.path === put.path &&
-            w.owners.get(entry.seq) === null
-        )
-      if (!read) continue
-      const approvalWrite = w.timeline.some(
-        event =>
-          event.agent === agent &&
-          event.logLen >= read.seq &&
-          event.logLen <= put.seq &&
-          !sameJson(event.before.spec.approval, event.after.spec.approval)
-      )
-      const load = loads.some(
-        entry => entry.seq > read.seq && entry.seq < put.seq && entry.delivered
-      )
-      if (approvalWrite && load) count(w.stats, 'events', 'E16')
-    }
+    count(w.stats, 'events', 'E16', olderSavesBetween(w, agent).length)
   }
   // E17: a protocol's read before its PUT failed (network, 5xx, 403, 429, or its timeout).
   for (const entry of w.fake.log) {
@@ -3017,6 +3033,170 @@ const setupArb: fc.Arbitrary<Setup> = fc.record({
 
 // ── The property ────────────────────────────────────────────────────────────
 
+// ── What each fixed example must reach (Ruling 67(5), M9) ─────────────────
+
+function savesOf(w: World, kind: ToolsSaveOutcome['kind']): SaveRecord[] {
+  return w.saves.filter(save => save.outcome?.kind === kind)
+}
+
+function writesOf(w: World, owner: Owner): FakeLogEntry[] {
+  return w.fake.log.filter(entry => {
+    const tag = w.owners.get(entry.seq)
+    return entry.kind === 'write' && tag?.kind === owner.kind && tag.id === owner.id
+  })
+}
+
+/** The deliveries of `agent`'s `/detail` loads, in the order they reached the client. */
+function loadDeliveries(w: World, agent: Agent): FakeLogEntry[] {
+  const path = `/api/v1/admin/hosts/${agent}/detail`
+  return w.deliveries
+    .map(seq => w.fake.log.find(entry => entry.seq === seq))
+    .filter((entry): entry is FakeLogEntry => entry?.path === path)
+}
+
+/**
+ * Each fixed example's case, checked at rest: null when the run reached it,
+ * else what it missed. A scenario that stops reaching its case fails as a
+ * harness error, not as a quiet pass.
+ */
+const PINS = {
+  noticeLoadAfterWrite: (w: World) => {
+    const save = savesOf(w, 'saved')[0]
+    const late = save
+      ? loadDeliveries(w, 'alpha').some(
+          entry =>
+            entry.seq > (save.settleLogLen ?? Infinity) && blockOf(hostOfRead(entry)) === undefined
+        )
+      : false
+    return late ? null : 'no load sent after the save answered with the block removed'
+  },
+  twoSavesOneStep: (w: World) => {
+    const [a, b] = w.saves
+    const ok =
+      a?.settleStep !== undefined &&
+      a.settleStep === b?.settleStep &&
+      a.settledInView !== b.settledInView
+    return ok ? null : 'no continuation and in-tab save settled in one step'
+  },
+  olderLoadAfterWrite: (w: World) => {
+    const save = savesOf(w, 'saved')[0]
+    const writeDelivered = save
+      ? w.deliveries.indexOf(writesOf(w, { kind: 'save', id: save.id }).at(-1)?.seq ?? -1)
+      : -1
+    const older = save
+      ? loadDeliveries(w, 'alpha').some(
+          entry =>
+            entry.seq <= (save.settleLogLen ?? -1) &&
+            w.deliveries.indexOf(entry.seq) > writeDelivered
+        )
+      : false
+    const switches = w.switches.filter(item => item.outcome && item.outcome.kind !== 'failed')
+    return older && switches.length === 2
+      ? null
+      : 'no load sent before the save answered after it, or not two switches'
+  },
+  conflictBeforeWrite: (w: World) => {
+    const save = savesOf(w, 'conflict')[0]
+    return save && writesOf(w, { kind: 'save', id: save.id }).length === 0
+      ? null
+      : 'no save stopped on its base with no PUT'
+  },
+  unappliedProxy504: (w: World) => {
+    const save = savesOf(w, 'maybe')[0]
+    const put = save ? writesOf(w, { kind: 'save', id: save.id })[0] : undefined
+    return put && put.response?.status === 504 && !put.applied
+      ? null
+      : 'no unapplied 504 PUT ended "may not have applied"'
+  },
+  keptContinuation: (w: World) => {
+    const save = savesOf(w, 'saved')[0]
+    return save && save.agent === 'alpha' && save.settledInView === false
+      ? null
+      : "alpha's save did not settle away from its tab"
+  },
+  reconfirmAtWrite: (w: World) => {
+    const reasked = w.saves.some(save => save.outcome?.kind === 'reconfirm' && !save.reported)
+    const confirmed = savesOf(w, 'saved').some(save => save.press.labels?.includes('shell_exec'))
+    return reasked && confirmed ? null : 'the save did not re-ask and then write shell_exec'
+  },
+  lateApply: (w: World) => {
+    const save = savesOf(w, 'maybe')[0]
+    const put = save ? writesOf(w, { kind: 'save', id: save.id })[0] : undefined
+    return put?.applied && !put.delivered ? null : 'no abandoned PUT was applied later'
+  },
+  step4SuccessNoApply: (w: World) => {
+    const save = savesOf(w, 'saved')[0]
+    const puts = save ? writesOf(w, { kind: 'save', id: save.id }) : []
+    const reread = save?.outcome?.kind === 'saved' && save.outcome.via === 'reread'
+    return reread && puts.length > 0 && puts.every(put => put.response?.status === 409)
+      ? null
+      : "no save ended saved from a read with only 409'd PUTs"
+  },
+  outsideRaiseAfterSwitch: (w: World) => {
+    const done = w.switches.find(item => item.outcome?.kind === 'saved')
+    const raised = w.timeline.some(
+      event =>
+        event.kind === 'external' &&
+        event.step > (done?.settleStep ?? Infinity) &&
+        ceilingOf(event.after) !== 'manual'
+    )
+    return raised ? null : 'no outside raise after the switch saved Manual'
+  },
+  refreshFailed: (w: World) => {
+    const save = savesOf(w, 'saved')[0]
+    const failed = save
+      ? w.fake.log.some(
+          entry =>
+            entry.path === '/api/v1/admin/hosts/alpha/detail' &&
+            entry.seq > (save.settleLogLen ?? Infinity) &&
+            entry.response?.status === 500
+        )
+      : false
+    return failed ? null : 'the save did not settle with its refresh failing'
+  },
+  sixConflicts: (w: World) => {
+    const record = w.switches[0]
+    const conflicts = record
+      ? writesOf(w, { kind: 'switch', id: record.id }).filter(put => put.response?.status === 409)
+      : []
+    return record?.outcome?.kind === 'saved' && conflicts.length === 6
+      ? null
+      : 'the switch did not save Manual through six conflicts'
+  },
+  switchContinuation: (w: World) => {
+    const record = w.switches[0]
+    return record?.outcome && record.settledInInstance === false && record.shown
+      ? null
+      : 'the switch did not settle away from its tab with its toast'
+  },
+  olderSaveRefused: (w: World) => {
+    const put = w.fake.log.find(entry => entry.kind === 'write' && w.owners.get(entry.seq) === null)
+    return put?.response?.status === 409 && olderSavesBetween(w, 'alpha').includes(put)
+      ? null
+      : 'no older save was refused after an approval write and a load'
+  },
+  firstSavePolicy: (w: World) => {
+    const save = savesOf(w, 'saved')[0]
+    const stored = save?.outcome?.kind === 'saved' ? save.outcome.stored : undefined
+    return save?.press.firstSavePolicy === 'cli_only' && policyOf(blockOf(stored)) === 'cli_only'
+      ? null
+      : 'no first save stored "Nobody (Desktop only)"'
+  },
+  continuationToasts: (w: World) => {
+    const save = savesOf(w, 'maybe')[0]
+    const record = w.switches.find(item => item.outcome?.kind === 'failed')
+    return save?.settledInView === false && record?.settledInInstance === false && record.shown
+      ? null
+      : 'no save and no switch ended away from their tab with their toasts'
+  },
+} satisfies Record<string, (w: World) => string | null>
+
+function checkPin(w: World, pin: keyof typeof PINS | undefined): void {
+  if (pin === undefined) return
+  const missed = PINS[pin](w)
+  if (missed !== null) flag(w, 'harness', `example ${pin} did not reach its case: ${missed}`)
+}
+
 // ── Fixed examples ──────────────────────────────────────────────────────────
 
 /**
@@ -3111,7 +3291,13 @@ const EXAMPLES: Example[] = [
   // removes the block before that load arrives, and the tab shows no block.
   [
     scriptedScheduler(),
-    { crd: 'current', start: 'alpha', blocks: { alpha: OPEN_BLOCK, beta: null }, random: 1 },
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: OPEN_BLOCK, beta: null },
+      random: 1,
+      pin: 'noticeLoadAfterWrite',
+    },
     [
       new SaveDraft([[2, 'required']], 'channel_users', true, false),
       new UntilSettled(16),
@@ -3124,7 +3310,13 @@ const EXAMPLES: Example[] = [
   // time out together); the section's message is the second save's.
   [
     scriptedScheduler(),
-    { crd: 'current', start: 'alpha', blocks: { alpha: null, beta: null }, random: 2 },
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: null, beta: null },
+      random: 2,
+      pin: 'twoSavesOneStep',
+    },
     [
       new ArmFault('alpha', 'read', 'hang'),
       new SaveDraft([[2, 'required']], 'cli_only', true, false),
@@ -3154,6 +3346,7 @@ const EXAMPLES: Example[] = [
       start: 'alpha',
       blocks: { alpha: { ...OPEN_BLOCK, ceiling: 'auto' }, beta: null },
       random: 3,
+      pin: 'olderLoadAfterWrite',
     },
     [
       new Step(4),
@@ -3171,7 +3364,13 @@ const EXAMPLES: Example[] = [
   // before its save reads the Host; the save stops (step 4), with no PUT.
   [
     scriptedScheduler(),
-    { crd: 'current', start: 'alpha', blocks: { alpha: OPEN_BLOCK, beta: null }, random: 4 },
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: OPEN_BLOCK, beta: null },
+      random: 4,
+      pin: 'conflictBeforeWrite',
+    },
     [
       new Step(4),
       new EditTools([[2, 'required']]),
@@ -3183,7 +3382,13 @@ const EXAMPLES: Example[] = [
   // (step 13) does not hold the draft, so the save is not reported saved.
   [
     scriptedScheduler(),
-    { crd: 'current', start: 'alpha', blocks: { alpha: OPEN_BLOCK, beta: null }, random: 5 },
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: OPEN_BLOCK, beta: null },
+      random: 5,
+      pin: 'unappliedProxy504',
+    },
     [
       new Step(4),
       new ArmFault('alpha', 'put', 'unapplied-504'),
@@ -3199,6 +3404,7 @@ const EXAMPLES: Example[] = [
       start: 'alpha',
       blocks: { alpha: OPEN_BLOCK, beta: OPEN_BLOCK },
       random: 6,
+      pin: 'keptContinuation',
     },
     [
       new Step(4),
@@ -3217,6 +3423,7 @@ const EXAMPLES: Example[] = [
       start: 'alpha',
       blocks: { alpha: { ...OPEN_BLOCK, ceiling: 'manual', tools: [[0, true]] }, beta: null },
       random: 7,
+      pin: 'reconfirmAtWrite',
     },
     [
       new Step(4),
@@ -3240,7 +3447,13 @@ const EXAMPLES: Example[] = [
   // later, and its version still matches.
   [
     scriptedScheduler(),
-    { crd: 'current', start: 'alpha', blocks: { alpha: OPEN_BLOCK, beta: null }, random: 8 },
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: OPEN_BLOCK, beta: null },
+      random: 8,
+      pin: 'lateApply',
+    },
     [
       new Step(4),
       new ArmFault('alpha', 'put', 'hang'),
@@ -3264,6 +3477,7 @@ const EXAMPLES: Example[] = [
       start: 'alpha',
       blocks: { alpha: { ...OPEN_BLOCK, ceiling: 'auto' }, beta: null },
       random: 9,
+      pin: 'step4SuccessNoApply',
     },
     [
       new Step(4),
@@ -3283,6 +3497,7 @@ const EXAMPLES: Example[] = [
       start: 'alpha',
       blocks: { alpha: { ...OPEN_BLOCK, ceiling: 'auto' }, beta: null },
       random: 10,
+      pin: 'outsideRaiseAfterSwitch',
     },
     [
       new Step(4),
@@ -3295,7 +3510,13 @@ const EXAMPLES: Example[] = [
   // tools group keeps what the save stored.
   [
     scriptedScheduler(),
-    { crd: 'current', start: 'alpha', blocks: { alpha: OPEN_BLOCK, beta: null }, random: 11 },
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: OPEN_BLOCK, beta: null },
+      random: 11,
+      pin: 'refreshFailed',
+    },
     [
       new Step(4),
       new ArmFault('alpha', 'load', '500'),
@@ -3311,6 +3532,7 @@ const EXAMPLES: Example[] = [
       start: 'alpha',
       blocks: { alpha: { ...OPEN_BLOCK, ceiling: 'auto' }, beta: null },
       random: 12,
+      pin: 'sixConflicts',
     },
     [new Step(4), new SwitchThroughConflicts(6)],
   ],
@@ -3323,6 +3545,7 @@ const EXAMPLES: Example[] = [
       start: 'alpha',
       blocks: { alpha: { ...OPEN_BLOCK, ceiling: 'auto' }, beta: null },
       random: 13,
+      pin: 'switchContinuation',
     },
     [new Step(4), new SetToManual(false), new Navigate('overview'), new Step(10)],
   ],
@@ -3342,6 +3565,7 @@ const EXAMPLES: Example[] = [
       start: 'alpha',
       blocks: { alpha: { ...OPEN_BLOCK, ceiling: 'auto' }, beta: null },
       random: 14,
+      pin: 'olderSaveRefused',
     },
     [
       new OlderSave('overview'),
@@ -3354,7 +3578,13 @@ const EXAMPLES: Example[] = [
   // first-save dialog; the save stores that policy with the draft.
   [
     scriptedScheduler(),
-    { crd: 'current', start: 'alpha', blocks: { alpha: null, beta: null }, random: 15 },
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: null, beta: null },
+      random: 15,
+      pin: 'firstSavePolicy',
+    },
     [new Step(4), new SaveDraft([[2, 'required']], 'cli_only', true, false)],
   ],
   // Continuations' root toasts (Ruling 67(2)): a save whose PUT hangs is left
@@ -3363,7 +3593,13 @@ const EXAMPLES: Example[] = [
   // the agent, with its outcome's words and tone.
   [
     scriptedScheduler(),
-    { crd: 'current', start: 'alpha', blocks: { alpha: OPEN_BLOCK, beta: null }, random: 16 },
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: OPEN_BLOCK, beta: null },
+      random: 16,
+      pin: 'continuationToasts',
+    },
     [
       new Step(4),
       new ArmFault('alpha', 'put', 'hang'),
@@ -3424,6 +3660,7 @@ describe('approval settings — property suite (spec §7 A4, A6)', () => {
               await fc.asyncModelRun(() => ({ model: {}, real: world }), commands)
               await drain(world)
               checkScriptFollowed(world)
+              checkPin(world, setup.pin)
               checkAtRest(world)
               totals.runs += 1
               totals.ms.push(Date.now() - started)
