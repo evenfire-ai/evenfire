@@ -26,7 +26,10 @@ import {
   resolveLiveActionAuthorization,
 } from './liveAuthorizationResolver.js'
 import { actionOperationTargetHash } from './operationTarget.js'
-import type { LogicalSessionCheckpointAuthority } from './principalAuthoritySnapshot.js'
+import type {
+  LogicalSessionCheckpointAuthority,
+  UserGrantContinuationAuthority,
+} from './principalAuthoritySnapshot.js'
 import {
   type CanonicalResourceIdentity,
   canonicalResourceIdentity,
@@ -103,7 +106,10 @@ function mapResolverOutcome(
 
 export async function authorizeActionV2(
   input: Readonly<{
-    session: ExternalSessionAuthorityContext | LogicalSessionCheckpointAuthority
+    session:
+      | ExternalSessionAuthorityContext
+      | LogicalSessionCheckpointAuthority
+      | UserGrantContinuationAuthority
     requested: RequestedActionContextV2
     operationId: ActionOperationId
     resource: CanonicalResourceIdentity
