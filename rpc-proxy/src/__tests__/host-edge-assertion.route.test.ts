@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync, randomUUID } from 'node:crypto'
@@ -14,6 +14,13 @@ import {
   HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
   type HostEdgeRpcProxyRoute,
 } from '@clerum/action-context-contracts'
+import {
+  type GateAnswer,
+  emitGateAnswers,
+  gateAnswer,
+  responseFromGateAnswer,
+} from '../../test/support/internalServiceGateAnswers.js'
+import { producerBudgetMs } from '../../test/support/producerChild.js'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
@@ -87,6 +94,19 @@ let controlApiHostAccessAnswer: ((index: number) => Response) | null
 let hostCalls: HostCall[]
 // Answers the Host request with the given index (0 = first Host call).
 let hostAnswer: (index: number, path: string) => Response
+
+// Setup, not behaviour under test: control-api's internal service gate fixture
+// runs once in a `tsx` child, bounded by PRODUCER_CHILD_TIMEOUT_MS. Its answers
+// are the two control-api producer stubs of FAILURE_STUBS, read when a test
+// runs.
+let gateAnswers: GateAnswer[] | undefined
+
+beforeAll(async () => {
+  gateAnswers = await emitGateAnswers(
+    'control-api/test/fixtures/emitInternalServiceGateRefusalsFixture.ts',
+    { userId: USER_ID, hostRef: 'chatllm' }
+  )
+}, producerBudgetMs(1))
 
 function headersOf(init?: RequestInit): Record<string, string> {
   return Object.fromEntries(new Headers(init?.headers).entries())
@@ -602,23 +622,41 @@ describe('authentication failures reach the client as 401', () => {
     expect(res.body).toEqual({ error: 'Unauthorized' })
   })
 
-  it('status: any other Host failure keeps the 500 answer', async () => {
-    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes(['host:status:read']))
-    hostAnswer = () => jsonResponse(500, { error: 'boom' })
+  it.each(NEXT_ERROR_ROWS)('$label: a Host 500 answers 500 without the Host body', async row => {
+    const marker = 'host-internal-detail-7f3a'
+    authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope]))
+    hostAnswer = () => jsonResponse(500, { error: marker })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
-    const res = await send(NEXT_ERROR_ROWS[0]!)
+    try {
+      const res = await send(row)
 
-    expect(hostCalls).toHaveLength(1)
-    expect(res.status).toBe(500)
+      // Witness: the Host was asked once and its failure reached the app
+      // error handler, which logged it by name and status only.
+      expect(hostCalls).toHaveLength(1)
+      expect(res.status).toBe(500)
+      expect(res.body).toEqual({ error: 'Internal Server Error' })
+      expect(res.text).not.toContain(marker)
+      const lines = logged.mock.calls
+        .map(args => String(args[0]))
+        .filter(line => line.startsWith('[RPC_PROXY] unhandled route error '))
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toContain('error=UpstreamHostError status=500')
+      expect(lines[0]).not.toContain(marker)
+    } finally {
+      logged.mockRestore()
+    }
   })
 })
 
 // Two row sets for the V1 re-resolve before a wake-and-hold retry.
-// V1_WAKE_ROWS: every route of this file that retries through wake-and-hold
-// with the V1 refresh, each passing its own denial answer for a denied
-// re-resolve; the approval-mode PATCH is covered in
-// session-approval-mode-passthrough.test.ts. They run the re-resolved
-// assertion case and one denial case.
+// V1_WAKE_ROWS: every V1 route that retries through wake-and-hold with the V1
+// refresh, each passing its own denial answer for a denied re-resolve. That is
+// 13 of the 14 `wakeAndHoldAuthorityOptions` sites in routes/rpc.ts; session
+// search is V2 only. They run the re-resolved assertion case, one denial case
+// and the failure-stub matrix of the V1 re-resolve outcome block.
+// session-approval-mode-passthrough.test.ts covers the approval-mode body and
+// scope with a mocked resolver.
 // REFRESH_ROWS: a single-attempt route (re-issued at most once after the wake)
 // and a route that retries until the hold deadline. They run the cases of the
 // shared re-resolve and wake-and-hold code: the other denials, the 401, the
@@ -639,11 +677,13 @@ const V1_WAKE_ROW_LABELS = [
   'task cancel',
   'artifacts list',
   'artifact download',
+  'approval mode',
 ]
-const V1_WAKE_ROWS = V1_WAKE_ROW_LABELS.map(label => {
-  const row = ROUTE_SCOPE_ROWS.find(candidate => candidate.label === label)
+const V1_WAKE_ROWS: RequestRow[] = V1_WAKE_ROW_LABELS.map(label => {
+  const row = FIRST_RESOLVE_ROWS.find(candidate => candidate.label === label)
   if (!row) throw new Error(`no route row labelled ${label}`)
-  return row
+  if (row.hostPath === null) throw new Error(`route row ${label} never calls the Host`)
+  return { ...row, hostPath: row.hostPath }
 })
 
 // The first resolve succeeds; every later Host-access call (a re-resolve before
@@ -751,6 +791,7 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     expect(hostAccessCalls()).toHaveLength(1)
   })
 
+  // Hardening: control-api's `utils/auth/hostEdgeAssertion.ts` always signs `exp`.
   it('approve: a held assertion with no readable exp answers 502 and makes no second control-api call', async () => {
     const row = SINGLE_ATTEMPT_ROW
     authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
@@ -784,15 +825,11 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
       expect(hostAccessCalls()).toHaveLength(2)
       expect(res.status).toBe(401)
       expect(res.body).toEqual({ error: 'Unauthorized' })
-      // The log names the control-api re-check, not the Host.
+      // The rejection is an answer, not a failed retry: the hold loop logs nothing.
       const retryLines = warn.mock.calls
         .map(args => String(args[0]))
         .filter(line => line.includes('[RPC_PROXY] wake-hold'))
-      expect(retryLines).toEqual([
-        expect.stringContaining(
-          '[RPC_PROXY] wake-hold authority re-check retry failed host=chatllm error=ControlApiHostAccessRejectedError'
-        ),
-      ])
+      expect(retryLines).toEqual([])
       warn.mockRestore()
     }
   )
@@ -804,7 +841,12 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
   ]
   // Run on REFRESH_ROWS: the other denials the shared re-resolve code maps.
   const SHARED_DENIAL_CASES: DenialCase[] = [
+    // Not written by the route, but reachable through the error handler: the
+    // `app.ts:304` fallthrough under version skew, or a Kubernetes 404 that
+    // `http/errorHandler.ts:46-67,217-248` forwards.
     { label: 'control-api 404', answer: () => jsonResponse(404, { error: 'not found' }) },
+    // Hardening: the authorizer returns the request's own userId
+    // (`rpcHostAccessAuthorizer.ts:43-44,80`).
     {
       label: 'a userId mismatch',
       answer: () =>
@@ -846,6 +888,8 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     )
   })
 
+  // Hardening within one deployment: the url comes from the hostRef and config
+  // (`rpcHostAccessAuthorizer.ts:82`).
   it.each(REFRESH_ROWS)('$label: a re-resolve that moves the Host URL answers 502', async row => {
     authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
     controlApiHostAccessAnswer = firstResolveThen(() =>
@@ -864,30 +908,49 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     expect(res.status).toBe(502)
   })
 
-  const UNAVAILABLE_CASES: Array<{ label: string; answer: () => Response }> = [
+  const UNAVAILABLE_CASES: Array<{
+    label: string
+    answer: () => Response
+    status: number
+    body: Record<string, unknown>
+  }> = [
+    // Not written by control-api: the transport (the request never gets an answer).
     {
       label: 'a network failure',
       answer: () => {
         throw new TypeError('fetch failed')
       },
+      status: 503,
+      body: { error: 'authority_unavailable' },
     },
+    // Not written by control-api: the transport (rpc-proxy's upstream timeout).
     {
       label: 'a timeout',
       answer: () => {
         throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
       },
+      status: 504,
+      body: { error: 'Gateway Timeout' },
     },
-    { label: 'a control-api 503', answer: () => jsonResponse(503, { error: 'unavailable' }) },
+    // Only from an intermediary: control-api does not write 503 on this route.
+    {
+      label: 'a control-api 503',
+      answer: () => jsonResponse(503, { error: 'unavailable' }),
+      status: 503,
+      body: { error: 'authority_unavailable' },
+    },
     {
       label: 'a 200 without an edge assertion',
       answer: () => jsonResponse(200, { ...OLD_SHAPE_CONNECTION }),
+      status: 503,
+      body: { error: 'authority_unavailable' },
     },
   ]
 
   describe.each(REFRESH_ROWS)('$label', row => {
     it.each(UNAVAILABLE_CASES)(
-      'a re-resolve that fails with $label answers 503 authority_unavailable at once',
-      async ({ answer }) => {
+      'a re-resolve that fails with $label answers $status at once',
+      async ({ answer, status, body }) => {
         authTokenMock.verifyRpcToken.mockReturnValue(
           claimsWithScopes([row.scope, 'host:wake:write'])
         )
@@ -901,8 +964,8 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
         expect(hostCalls).toHaveLength(1)
         expect(hostCalls[0]!.path).toBe(row.hostPath)
         expect(hostAccessCalls()).toHaveLength(2)
-        expect(res.status).toBe(503)
-        expect(res.body).toEqual({ error: 'authority_unavailable' })
+        expect(res.status).toBe(status)
+        expect(res.body).toEqual(body)
       }
     )
   })
@@ -922,14 +985,14 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     try {
       await expect(
         refreshV1HostConnection(host, USER_ID, 'chat\r\nllm\tforged', 'rpc-access-token')
-      ).rejects.toMatchObject({ status: 503 })
+      ).resolves.toEqual({ unavailable: true, cause: 'request_failed' })
 
       // Exactly one line: it is also the witness that the failure path ran.
       const lines = warn.mock.calls
         .map(args => String(args[0]))
-        .filter(line => line.startsWith('[RPC_PROXY] host connection re-resolve failed'))
+        .filter(line => line.startsWith('[RPC_PROXY] control-api host resolve unavailable'))
       expect(lines).toEqual([
-        '[RPC_PROXY] host connection re-resolve failed host=chatllmforged error=TypeError',
+        '[RPC_PROXY] control-api host resolve unavailable phase=re-resolve host=chatllmforged cause=request_failed error=TypeError',
       ])
     } finally {
       warn.mockRestore()
@@ -1199,5 +1262,412 @@ describe('streams and the assertion expiry', () => {
       expect(lateEventAt).toBeGreaterThanOrEqual(expSeconds * 1000)
     },
     10_000
+  )
+})
+
+// The outcome of every control-api answer at the V1 Host resolve, through the
+// real routes (S1: first resolve; S2: re-resolve before a wake-and-hold retry).
+// Each stub carries its expected outcome per control-api method: a refusal of
+// the refusal writer's table, a denial (answered 403 with its code, or 404 on
+// the task routes), or a success.
+type ControlApiMethod = 'GET' | 'POST'
+type StubOutcome =
+  | { kind: 'refusal'; status: number; body: Record<string, unknown> }
+  | { kind: 'denied'; code: 'host_access_revoked' | 'host_access_denied' }
+  | { kind: 'success' }
+type FailureStub = {
+  failure: string
+  answer: (method: ControlApiMethod) => Response
+  GET: StubOutcome
+  POST: StubOutcome
+}
+
+const UNAVAILABLE: StubOutcome = {
+  kind: 'refusal',
+  status: 503,
+  body: { error: 'authority_unavailable' },
+}
+const DENIED: StubOutcome = { kind: 'denied', code: 'host_access_denied' }
+
+// A 200 body that is a valid connection except for `override`; a POST answer
+// carries a valid binding status, so the field under test decides the outcome.
+function connectionAnswer(method: ControlApiMethod, override: Record<string, unknown>): Response {
+  return jsonResponse(200, {
+    ...OLD_SHAPE_CONNECTION,
+    edgeAssertion,
+    ...(method === 'POST' ? { bindingStatus: 'recorded' } : {}),
+    ...override,
+  })
+}
+
+function withoutKey(key: string): Record<string, unknown> {
+  const connection: Record<string, unknown> = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
+  delete connection[key]
+  return connection
+}
+
+// Which of these answers control-api's host-access route can send (paths under
+// `control-api/src/`):
+// - Written by the route or its gates: a 401 without the service gate's mark
+//   from the caller-token checks (`middleware/rpcAccessAuth.ts:24,30,47,53`,
+//   `routes/rpc-access/users.ts:98`); the service gate's 401
+//   (`middleware/internalServiceAuth.ts`), which carries the
+//   `x-internal-service-auth-refusal` mark and is an unavailable authority (the
+//   two control-api producer stubs answer both 401s); the 403 with a reason
+//   (`users.ts:64-75`: `denyHostAccess` always sets
+//   `x-host-access-denial-reason`); the 403 without a reason
+//   (`rpcAccessAuth.ts:34,57`); 409 and 400 on POST only (`users.ts:312`,
+//   `:272`); 200 without an edge assertion, only from a control-api older than
+//   it.
+// - Not written by the route, but reachable through the error handler, an
+//   intermediary or the transport: 500 (`next(error)` at `users.ts:252,329`);
+//   404 (the `app.ts:304` fallthrough under version skew, or a Kubernetes 404
+//   that `http/errorHandler.ts:46-67,217-248` forwards); a 401 without the mark
+//   as a forwarded Kubernetes 401; a 403 without a reason also as a forwarded
+//   Kubernetes RBAC 403; 429 as a forwarded Kubernetes 429;
+//   503 only from an intermediary, never from control-api on this path; timeout
+//   and network failure. See `app.ts:100-146`, `:174-289` and
+//   `errorHandler.ts:157-300`.
+// - Hardening, the route never writes it: GET 409, GET 400, 200 text/html,
+//   200 JSON null, 200 JSON [], 204, an invalid bindingStatus (`users.ts:306,325`
+//   write only `recorded` and `unavailable`), and 200 for another user, without
+//   a url or for another hostRef (`services/access/rpcHostAccessAuthorizer.ts:
+//   44-46,77-84` returns the request's own userId and hostRef and always builds
+//   the url).
+const FAILURE_STUBS: FailureStub[] = [
+  // 401 without the gate's mark: the caller-token checks or a forwarded
+  // Kubernetes 401, and the gate 401 of a control-api older than the mark. 409:
+  // route-written on POST only; GET 409 is hardening.
+  ...[401, 409].map(
+    (status): FailureStub => ({
+      failure: String(status),
+      answer: () => jsonResponse(status, { error: 'rejected' }),
+      GET: {
+        kind: 'refusal',
+        status,
+        body: { error: status === 401 ? 'Unauthorized' : 'Direct run attribution conflict' },
+      },
+      POST: {
+        kind: 'refusal',
+        status,
+        body: { error: status === 401 ? 'Unauthorized' : 'Direct run attribution conflict' },
+      },
+    })
+  ),
+  {
+    // Gate-written: control-api's own answer to a wrong rpc-proxy service
+    // credential, carrying the refusal mark (from the fixture).
+    failure: 'gate 401 (producer)',
+    answer: method => responseFromGateAnswer(gateAnswer(gateAnswers, 'gate_token_wrong', method)),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    // Route-written: control-api's own answer to an RPC token whose signature
+    // does not verify (the expired-token branch), without the mark (from the
+    // fixture).
+    failure: 'caller-token 401 (producer)',
+    answer: method =>
+      responseFromGateAnswer(gateAnswer(gateAnswers, 'caller_token_unverifiable', method)),
+    GET: { kind: 'refusal', status: 401, body: { error: 'Unauthorized' } },
+    POST: { kind: 'refusal', status: 401, body: { error: 'Unauthorized' } },
+  },
+  {
+    // Route-written (`users.ts:64-75`).
+    failure: '403 with the reason team_membership_missing',
+    answer: () =>
+      new Response(JSON.stringify({ error: 'Forbidden' }), {
+        status: 403,
+        headers: {
+          'content-type': 'application/json',
+          'x-host-access-denial-reason': 'team_membership_missing',
+        },
+      }),
+    GET: { kind: 'denied', code: 'host_access_revoked' },
+    POST: { kind: 'denied', code: 'host_access_revoked' },
+  },
+  {
+    // Route-written (`rpcAccessAuth.ts:34,57`), or a forwarded Kubernetes RBAC 403.
+    failure: '403 without a reason',
+    answer: () => jsonResponse(403, { error: 'Forbidden' }),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    // Not route-written: the `app.ts:304` fallthrough under skew, or a forwarded Kubernetes 404.
+    failure: '404',
+    answer: () => jsonResponse(404, { error: 'not found' }),
+    GET: DENIED,
+    POST: UNAVAILABLE,
+  },
+  // 400: route-written on POST only; GET 400 is hardening. 429 and 500: through
+  // the error handler. 503: an intermediary only.
+  ...[400, 429, 500, 503].map(
+    (status): FailureStub => ({
+      failure: String(status),
+      answer: () => jsonResponse(status, { error: 'control-api-detail' }),
+      GET: UNAVAILABLE,
+      POST: UNAVAILABLE,
+    })
+  ),
+  {
+    // Transport.
+    failure: 'timeout',
+    answer: () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    },
+    GET: { kind: 'refusal', status: 504, body: { error: 'Gateway Timeout' } },
+    POST: { kind: 'refusal', status: 504, body: { error: 'Gateway Timeout' } },
+  },
+  {
+    // Transport.
+    failure: 'network failure',
+    answer: () => {
+      throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })
+    },
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    // Only a control-api older than the edge assertion.
+    failure: '200 without an edge assertion',
+    answer: method => connectionAnswer(method, { edgeAssertion: undefined }),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    // Hardening: the route never writes it.
+    failure: '200 text/html',
+    answer: () =>
+      new Response('<html>control-api-detail</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    // Hardening: the route never writes it.
+    failure: '200 JSON null',
+    answer: () => jsonResponse(200, null),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    // Hardening: the authorizer returns the request's own userId.
+    failure: '200 for another user',
+    answer: method => connectionAnswer(method, { userId: 'another-user' }),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    // Hardening: the authorizer always builds the url.
+    failure: '200 without a url',
+    answer: method =>
+      jsonResponse(200, {
+        ...withoutKey('url'),
+        ...(method === 'POST' ? { bindingStatus: 'recorded' } : {}),
+      }),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    // Hardening: the authorizer returns the request's own hostRef.
+    failure: '200 for another hostRef',
+    answer: method => connectionAnswer(method, { hostRef: 'another-host' }),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    // Hardening: the route never writes it.
+    failure: '200 JSON []',
+    answer: () => jsonResponse(200, []),
+    GET: DENIED,
+    POST: DENIED,
+  },
+  {
+    // Hardening: the route never writes it.
+    failure: '204 without a body',
+    answer: () => new Response(null, { status: 204 }),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    // Hardening: the route writes only `recorded` and `unavailable`.
+    failure: '200 with an invalid bindingStatus',
+    answer: () =>
+      jsonResponse(200, { ...OLD_SHAPE_CONNECTION, edgeAssertion, bindingStatus: 'not-a-status' }),
+    GET: { kind: 'success' },
+    POST: UNAVAILABLE,
+  },
+]
+
+// The task routes answer a denial 404; every other V1 route 403 with the code.
+const NOT_FOUND_DENIAL_LABELS = new Set(['task result', 'task cancel'])
+
+type ExpectedAnswer = { status: number; body: Record<string, unknown> }
+
+function expectedRefusal(label: string, outcome: StubOutcome): ExpectedAnswer | null {
+  if (outcome.kind === 'success') return null
+  if (outcome.kind === 'refusal') return { status: outcome.status, body: outcome.body }
+  if (NOT_FOUND_DENIAL_LABELS.has(label)) {
+    return { status: 404, body: { error: 'Host not found or not accessible' } }
+  }
+  return {
+    status: 403,
+    body: { error: 'Forbidden: user cannot access this host', code: outcome.code },
+  }
+}
+
+function wakeCalls(): string[] {
+  return controlApiCalls.filter(url => url.endsWith('/wake'))
+}
+
+// The row's success leg of the existing harness: wake answers 200 with one
+// control-api wake call and no Host call; every other route reaches the Host
+// once (a stream route is aborted once the Host call is observable).
+async function expectRowReachesHost(row: FirstResolveRow): Promise<void> {
+  if (row.hostPath === null) {
+    const woken = await send(row)
+    expect(woken.status).toBe(200)
+    expect(wakeCalls()).toHaveLength(1)
+    expect(hostCalls).toEqual([])
+  } else {
+    await sendUntilHostCall(row)
+    expect(hostCalls).toHaveLength(1)
+    expect(hostCalls[0]!.path).toBe(row.hostPath)
+  }
+  expect(hostAccessCalls()).toHaveLength(1)
+}
+
+type FirstResolveOutcomeRow = FirstResolveRow & { controlApiMethod: ControlApiMethod }
+
+const FIRST_RESOLVE_OUTCOME_ROWS: FirstResolveOutcomeRow[] = [
+  ...FIRST_RESOLVE_ROWS.map(row => ({ ...row, controlApiMethod: 'GET' as const })),
+  {
+    label: 'messages with threadId',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/messages',
+    body: { content: 'hi', threadId: 'session-1' },
+    scope: HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/messages'],
+    hostPath: '/v1/runtime/messages',
+    controlApiMethod: 'POST',
+  },
+]
+
+const FIRST_RESOLVE_OUTCOME_CASES = FIRST_RESOLVE_OUTCOME_ROWS.flatMap(row =>
+  FAILURE_STUBS.map(stub => {
+    const outcome = stub[row.controlApiMethod]
+    const expected = expectedRefusal(row.label, outcome)
+    return {
+      route: row.label,
+      failure: stub.failure,
+      status: expected ? String(expected.status) : 'the Host',
+      row,
+      stub,
+      expected,
+    }
+  })
+)
+
+describe('V1 first resolve outcome', () => {
+  it('covers every V1 first-resolve route and every failure stub', () => {
+    expect(FIRST_RESOLVE_ROWS).toHaveLength(21)
+    expect(FIRST_RESOLVE_OUTCOME_CASES).toHaveLength(22 * FAILURE_STUBS.length)
+  })
+
+  it.each(FIRST_RESOLVE_OUTCOME_CASES)(
+    '$route: control-api $failure answers $status',
+    async ({ row, stub, expected }) => {
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope]))
+      controlApiHostAccessAnswer = () => stub.answer(row.controlApiMethod)
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        if (expected === null) {
+          // The stub is a success for this method: the request reaches the Host.
+          await expectRowReachesHost(row)
+          return
+        }
+
+        const res = await send(row)
+
+        // Witness: the resolve reached control-api once; its refusal stopped
+        // the request before any Host call and any wake.
+        expect(hostAccessCalls()).toHaveLength(1)
+        expect(res.status).toBe(expected.status)
+        expect(res.body).toEqual(expected.body)
+        // rpc-proxy never relays control-api's refusal mark.
+        expect(res.headers['x-internal-service-auth-refusal']).toBeUndefined()
+        expect(hostCalls).toEqual([])
+        expect(wakeCalls()).toEqual([])
+
+        // The same request with a valid control-api answer reaches the Host.
+        controlApiCalls = []
+        controlApiHostAccessAnswer = null
+        await expectRowReachesHost(row)
+      } finally {
+        warn.mockRestore()
+      }
+    }
+  )
+})
+
+const RE_RESOLVE_OUTCOME_CASES = V1_WAKE_ROWS.flatMap(row =>
+  FAILURE_STUBS.filter(stub => stub.failure !== '200 with an invalid bindingStatus').map(stub => {
+    const expected = expectedRefusal(row.label, stub.GET)
+    if (expected === null) throw new Error(`${stub.failure} is not a refusal on GET`)
+    return { route: row.label, failure: stub.failure, status: expected.status, row, stub, expected }
+  })
+)
+
+describe('V1 re-resolve outcome', () => {
+  const originalWakeMaxHoldMs = config.wakeMaxHoldMs
+
+  beforeEach(() => {
+    // Bounds a retry-until-deadline route.
+    config.wakeMaxHoldMs = 3_000
+    // The first resolve's assertion is within the margin of its exp, so the
+    // retry re-resolves it.
+    edgeAssertion = signEdgeAssertion(nearExpSeconds(), [])
+    controlApiBody = { ...OLD_SHAPE_CONNECTION, edgeAssertion }
+  })
+
+  afterEach(() => {
+    config.wakeMaxHoldMs = originalWakeMaxHoldMs
+  })
+
+  it('covers every V1 wake route and every failure stub but the GET success', () => {
+    expect(V1_WAKE_ROWS).toHaveLength(13)
+    expect(RE_RESOLVE_OUTCOME_CASES).toHaveLength(13 * (FAILURE_STUBS.length - 1))
+  })
+
+  it.each(RE_RESOLVE_OUTCOME_CASES)(
+    '$route: a re-resolve that gets $failure answers $status',
+    async ({ row, stub, expected }) => {
+      authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
+      controlApiHostAccessAnswer = firstResolveThen(() => stub.answer('GET'))
+      hostAnswer = hostDownThen(() => jsonResponse(200, {}))
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        const res = await send(row)
+
+        // Witness: the first forward failed as Host down, the wake ran once
+        // and the retry re-resolved. The refusal then ended the request: no
+        // second Host call and no further control-api call.
+        expect(hostCalls).toHaveLength(1)
+        expect(hostAccessCalls()).toHaveLength(2)
+        expect(wakeCalls()).toHaveLength(1)
+        expect(res.status).toBe(expected.status)
+        expect(res.body).toEqual(expected.body)
+        // rpc-proxy never relays control-api's refusal mark.
+        expect(res.headers['x-internal-service-auth-refusal']).toBeUndefined()
+        const retryFailures = warn.mock.calls
+          .map(args => String(args[0]))
+          .filter(line => line.startsWith('[RPC_PROXY] wake-hold') && line.includes('retry failed'))
+        expect(retryFailures).toEqual([])
+      } finally {
+        warn.mockRestore()
+      }
+    }
   )
 })

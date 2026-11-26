@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  ControlApiHostAccessRejectedError,
-  fetchHostConnectionFromControlApi,
-} from '../controlApiRestService.js'
+import { fetchHostConnectionFromControlApi } from '../controlApiRestService.js'
 
 // control-api's 403 for a Host-access denial carries its reason in a header and
 // a fixed body the proxy never parses. The body must still be read to the end:
@@ -53,21 +50,16 @@ describe('fetchHostConnectionFromControlApi 403 body', () => {
     expect(state.pulls).toBe(CHUNKS)
   })
 
-  it('reads the whole 403 body of a direct-run lookup before throwing the rejection', async () => {
+  it('reads the whole 403 body of a direct-run lookup before returning the denial code', async () => {
     const { response, state } = streamedDenial('host_disabled')
 
-    const error = await fetchHostConnectionFromControlApi('user-1', 'host-1', 'token', {
+    const resolved = await fetchHostConnectionFromControlApi('user-1', 'host-1', 'token', {
       directRunBinding: BINDING,
       fetchImpl: async () => response,
-    }).then(
-      () => {
-        throw new Error('expected the direct-run lookup to reject')
-      },
-      (caught: unknown) => caught
-    )
+    })
 
-    expect(error).toBeInstanceOf(ControlApiHostAccessRejectedError)
-    expect((error as ControlApiHostAccessRejectedError).denialCode).toBe('host_access_denied')
+    // Liveness witness: the reason header was read and mapped, so the 403 branch ran.
+    expect(resolved).toEqual({ denied: true, code: 'host_access_denied' })
     expect(response.bodyUsed).toBe(true)
     expect(state.drained).toBe(true)
     expect(state.pulls).toBe(CHUNKS)
