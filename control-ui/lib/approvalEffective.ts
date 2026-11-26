@@ -5,6 +5,7 @@
  * equal. The rules mirror how mcp-host reads the block; the parity test in
  * `__tests__/approvalEffective.parity.test.ts` pins them to its readers.
  */
+import { isPlainObject } from './unknownValue'
 
 export type EffectiveChannel = {
   allowModeChange: boolean
@@ -33,10 +34,6 @@ const CHANNEL_SWITCH_DEFAULT: Record<(typeof CHANNEL_TYPES)[number], boolean> = 
   email: false,
   slack: true,
   teams: true,
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**

@@ -21,6 +21,7 @@ import {
   setManualNow,
 } from '@lib/hostApprovalSave'
 import { emitRootToast } from '@lib/rootToast'
+import { messageOf } from '@lib/unknownValue'
 import { OffSwitch } from './OffSwitch'
 import { ApprovalModesView, WhoCanRaiseView } from './ReadViews'
 import { InheritingBanner, ManifestBanner, manifestSignal, switchManifestWarning } from './banners'
@@ -51,15 +52,6 @@ function viewOf(host: string): ApprovalsTabView {
     loadError: null,
     switchResult: null,
   }
-}
-
-/** A thrown value's message (a DOMException is not an `Error` in every realm). */
-function messageOf(error: unknown): string {
-  const message =
-    typeof error === 'object' && error !== null
-      ? (error as { message?: unknown }).message
-      : undefined
-  return typeof message === 'string' && message.length > 0 ? message : String(error)
 }
 
 /** The namespace of the Host the tab shows, for the switch's fallback; undefined before a load. */

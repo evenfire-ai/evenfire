@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { HostResource } from '@lib/api'
 import { approvalBlockOf, effectiveApproval, toolsEqual } from '@lib/approvalEffective'
+import { isPlainObject } from '@lib/unknownValue'
 import type {
   ApprovalToolsBase,
   ApprovalToolsDraft,
@@ -10,10 +11,6 @@ import type {
   CustomRowState,
   RowState,
 } from './types'
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 /** A Host's name: what tells one agent's data from another's. */
 function hostName(host: HostResource | null): string | null {

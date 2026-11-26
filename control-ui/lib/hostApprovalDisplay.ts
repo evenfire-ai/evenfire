@@ -31,6 +31,7 @@
  */
 import type { HostResource } from './api'
 import { approvalBlockOf } from './approvalEffective'
+import { isPlainObject } from './unknownValue'
 
 export type WriteGroup = 'ceiling' | 'tools'
 
@@ -100,10 +101,6 @@ const HOST_CHANGED_CHANNEL = 'control-ui-host-approval-changed'
 let lastEpoch = 0
 const hostChangedListeners = new Map<string, Set<() => void>>()
 let hostChangedChannel: BroadcastChannel | null = null
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 /**
  * Whether `resource` is agent `host`. A Host object always carries its name;

@@ -18,6 +18,7 @@
  */
 import { NATIVE_TOOLS, type NativeToolMeta } from '@/components/HostApprovalSection/constants'
 import { type EffectiveApproval, effectiveApproval } from './approvalEffective'
+import { isPlainObject } from './unknownValue'
 
 export const LOOSENING_RULES = [
   'tool_to_skip',
@@ -81,10 +82,6 @@ const NATIVE_BY_NAME: ReadonlyMap<string, NativeToolMeta> = new Map(
 )
 
 type Override = 'required' | 'default' | 'skip'
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 /**
  * A block's stored overrides by tool name. null and undefined values read as

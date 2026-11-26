@@ -6,6 +6,7 @@ import type { HostResource } from '@lib/api'
 import { effectiveApproval } from '@lib/approvalEffective'
 import type { OffSwitchOutcome } from '@lib/hostApprovalSave'
 import { manifestSignal } from '@lib/hostManifestSignal'
+import { isPlainObject } from '@lib/unknownValue'
 import {
   CHANNEL_LABELS,
   CHANNEL_ORDER,
@@ -18,10 +19,6 @@ import {
 } from './constants'
 
 export { manifestSignal, type ManifestSignal } from '@lib/hostManifestSignal'
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function approverCount(count: number): string {
   return `${count} ${count === 1 ? 'approver' : 'approvers'}`
@@ -40,7 +37,7 @@ export function manifestValuesText(values: Record<string, unknown>): string {
     parts.push(`Highest mode: ${MODE_LABELS[approval.modeCeiling]}`)
   }
   if (Object.hasOwn(values, 'defaultPolicy')) parts.push(`Policy: ${policyText(approval.policy)}`)
-  const channels = isRecord(values.channels) ? values.channels : {}
+  const channels = isPlainObject(values.channels) ? values.channels : {}
   for (const type of CHANNEL_ORDER) {
     if (!Object.hasOwn(channels, type)) continue
     const channel = approval.channels[type]

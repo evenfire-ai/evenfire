@@ -31,6 +31,7 @@ import {
 } from './approvalEffective'
 import { type LooseningItem, looseningItems, looseningItemsConfirmed } from './approvalLoosening'
 import { type ManifestSignal, manifestSignal } from './hostManifestSignal'
+import { isPlainObject, messageOf } from './unknownValue'
 
 export type ApprovalClock = {
   now(): number
@@ -158,10 +159,6 @@ type Settled<T> =
   | { state: 'answered'; value: T }
   | { state: 'failed'; error: unknown; timedOut: boolean }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /** One request with its own signal, aborted after `timeoutMs` on the protocol clock. */
 async function timed<T>(
   clock: ApprovalClock,
@@ -186,12 +183,6 @@ async function timed<T>(
 function statusOf(error: unknown): number | undefined {
   const status = isPlainObject(error) ? error.status : undefined
   return typeof status === 'number' ? status : undefined
-}
-
-/** A thrown value's message (a DOMException is not an `Error` in every realm). */
-function messageOf(error: unknown): string {
-  const message = isPlainObject(error) ? error.message : undefined
-  return typeof message === 'string' && message.length > 0 ? message : String(error)
 }
 
 /** A block's stored `tools`. One that is not an object holds no override. */
