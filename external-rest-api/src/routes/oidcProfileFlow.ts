@@ -26,12 +26,12 @@ const INVITATION_TOKEN_RE = /^[\x21-\x7e]{1,2048}$/
 /** A code lives 90 s. A lifetime over 120 s is an upstream contract break. */
 const DESKTOP_SIGN_IN_CODE_MAX_TTL_SECONDS = 120
 /**
- * Refusal reasons Profile UI may see, and that Desktop sign-in redeem relays in its 403.
- * Anything else is an upstream contract break. `invitation_email_mismatch` comes only from an
- * invitation sign-in's /complete: an attempt is never both for Desktop and from an invitation
- * (design §9), and redeem refuses only a disabled account.
+ * Refusal reasons /complete relays to Profile UI. Anything else is an upstream contract break.
+ * `invitation_email_mismatch` comes only from an invitation sign-in: an attempt is never both
+ * for Desktop and from an invitation (design §9). Desktop sign-in redeem relays its own set,
+ * Desktop's eight reasons (DESKTOP_SIGN_IN_REFUSAL_REASONS in oidcDesktopSignIn.ts).
  */
-export const REFUSAL_REASONS: ReadonlySet<string> = new Set([
+const REFUSAL_REASONS: ReadonlySet<string> = new Set([
   'account_disabled',
   'identity_conflict',
   'account_needs_attention',

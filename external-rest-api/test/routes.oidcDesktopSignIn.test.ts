@@ -1,5 +1,6 @@
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
+import { createRequire } from 'node:module'
 import request from 'supertest'
 import {
   type ControlApiRecord,
@@ -368,6 +369,58 @@ describe('edge POST /oidc/desktop-sign-in/redeem: request and answers', () => {
     expect(other.status).toBe(200)
     // The limiter guards the redeem path only, not every route mounted after it.
     expect((await app.get('/api/v1/no-such-route')).status).toBe(404)
+  })
+})
+
+describe("edge POST /oidc/desktop-sign-in/redeem: Desktop's refusal reasons", () => {
+  /**
+   * The closed set of refusal reasons Desktop accepts. The edge does not depend on the package,
+   * so this reads it from the repository.
+   */
+  const { DESKTOP_LOGIN_REFUSAL_REASONS } = createRequire(import.meta.url)(
+    '../../packages/desktop-app-links/index.cjs'
+  ) as { DESKTOP_LOGIN_REFUSAL_REASONS: readonly string[] }
+
+  it("relays exactly the refusal reasons in Desktop's set", async () => {
+    vi.resetModules()
+    const { DESKTOP_SIGN_IN_REFUSAL_REASONS } = await import('../src/routes/oidcDesktopSignIn.js')
+
+    expect(DESKTOP_SIGN_IN_REFUSAL_REASONS).toBeInstanceOf(Set)
+    expect([...DESKTOP_SIGN_IN_REFUSAL_REASONS].sort()).toEqual(
+      [...DESKTOP_LOGIN_REFUSAL_REASONS].sort()
+    )
+  })
+
+  // Derived from the recorded 403: only its reason changed.
+  it.each(DESKTOP_LOGIN_REFUSAL_REASONS)('relays a 403 refused for %s', async reason => {
+    controlApiAnswers(derived(refused, { reason }))
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'desktop_sign_in_refused', reason })
+    expect(errorLog).toHaveBeenCalledTimes(0)
+  })
+
+  it('answers 503 for invitation_email_mismatch, which only /complete relays', async () => {
+    const answers = [refused, derived(refused, { reason: 'invitation_email_mismatch' })]
+    const fetchMock = controlApiAnswers(() => answers.shift()!)
+    const app = await edge()
+
+    // The control: the recorded refusal is relayed, so the refusal branch runs.
+    const relayed = await app.post(REDEEM).send(redeemBody)
+    expect(relayed.status).toBe(403)
+    expect(relayed.body).toEqual({ error: 'desktop_sign_in_refused', reason: refused.body.reason })
+    expect(errorLog).toHaveBeenCalledTimes(0)
+
+    const mismatch = await app.post(REDEEM).send(redeemBody)
+    expect(mismatch.status).toBe(503)
+    expect(mismatch.body).toEqual(ISSUANCE_UNAVAILABLE)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(onlyLoggedLine())).toEqual({
+      msg: FALLBACK_MSG,
+      error: 'ControlApiError',
+      upstreamStatus: 403,
+    })
   })
 })
 
