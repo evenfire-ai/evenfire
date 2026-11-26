@@ -277,6 +277,8 @@ type SaveRecord = {
   outcome?: ToolsSaveOutcome
   settleStep?: number
   settleLogLen?: number
+  /** It settled (a re-asking `reconfirm` has not): the tab reported it. */
+  reported?: boolean
 }
 
 type SwitchRecord = {
@@ -1077,6 +1079,7 @@ function afterCommand(w: World): void {
     if ('input' in record) settleSave(w, record, inViewSaves)
     else settleSwitch(w, record)
   }
+  checkApprovalToasts(w, settled)
   checkSwitchResult(w, settled)
   checkS5(w)
   checkGroups(w, false)
@@ -1159,10 +1162,10 @@ const DRAFT_KEPT: ReadonlySet<ToolsSaveOutcome['kind']> = new Set([
 ])
 
 function settleSave(w: World, save: SaveRecord, inViewSaves: readonly SaveRecord[]): void {
+  save.reported = true
   const outcome = save.outcome as ToolsSaveOutcome
   const inView = saveInView(w, save)
   const view = currentView(w)
-  const toasts = toastsThisStep(w)
   const section = perToolSection()
   const reconfirmAsked =
     outcome.kind === 'reconfirm' &&
@@ -1170,28 +1173,16 @@ function settleSave(w: World, save: SaveRecord, inViewSaves: readonly SaveRecord
     dialogNamed('alertdialog', LOOSENING_DIALOG_TITLE) !== null
   if (reconfirmAsked) {
     // Not settled: the dialog asks again in the same edit session.
+    save.reported = false
     count(w.stats, 'events', 'reconfirm')
     return
   }
   // S5 (spec §6.5 "After unmount"): a continuation writes nothing into the tab
   // and reports through the root toast, naming the agent.
   if (!inView) {
+    // Its root toast is checked with every other toast of the step
+    // (checkApprovalToasts).
     count(w.stats, 'checks', 'S5')
-    const savedHere = inViewSaves.some(other => other.outcome?.kind === 'saved')
-    if (!savedHere && toasts.some(toast => toast.text === TOOLS_SAVED_TOAST)) {
-      flag(
-        w,
-        'S5',
-        `save #${save.id} of ${save.agent} settled away from its tab and toasted in the tab`
-      )
-    }
-    if (!toasts.some(toast => toast.text.includes(`for agent ${save.agent}`))) {
-      flag(
-        w,
-        'S5',
-        `save #${save.id} of ${save.agent} settled away from its tab and no root toast names the agent`
-      )
-    }
     const message = section ? sectionMessage(section) : null
     if (inViewSaves.length === 0 && message && (message.textContent ?? '') !== w.lastMessage) {
       flag(
@@ -1201,9 +1192,6 @@ function settleSave(w: World, save: SaveRecord, inViewSaves: readonly SaveRecord
       )
     }
   } else if (outcome.kind === 'saved') {
-    if (!toasts.some(toast => toast.text === TOOLS_SAVED_TOAST)) {
-      flag(w, 'S3', `save #${save.id} saved in its tab with no success toast`)
-    }
     if (view) {
       if (view.groupWrites.ceiling) count(w.stats, 'events', 'E18')
       view.groupWrites.tools = groupWrite(w, outcome.stored as HostObject, save.settleLogLen)
@@ -1226,9 +1214,7 @@ function settleSave(w: World, save: SaveRecord, inViewSaves: readonly SaveRecord
 
 function settleSwitch(w: World, record: SwitchRecord): void {
   const outcome = record.outcome as OffSwitchOutcome
-  const inInstance =
-    onApprovals(w) && record.instanceId === w.instance.id && w.instance.agent === record.agent
-  const toasts = toastsThisStep(w)
+  const inInstance = switchInInstance(w, record)
   const root = tabRoot()
   // L4: every outcome is shown, in the tab that ran it or as a root toast naming the agent.
   count(w.stats, 'checks', 'L4')
@@ -1242,12 +1228,6 @@ function settleSwitch(w: World, record: SwitchRecord): void {
         `switch #${record.id} ended ${outcome.kind} and its tab shows "${result.slice(0, 80)}"`
       )
     }
-    if (
-      outcome.kind === 'failed' &&
-      !toasts.some(toast => toast.text.startsWith('Manual was not saved.'))
-    ) {
-      flag(w, 'L4', `switch #${record.id} failed with no root toast`)
-    }
     if (outcome.kind !== 'failed') {
       const view = currentView(w)
       if (view) {
@@ -1255,15 +1235,137 @@ function settleSwitch(w: World, record: SwitchRecord): void {
         view.groupWrites.ceiling = groupWrite(w, outcome.stored as HostObject, record.settleLogLen)
       }
     }
-  } else if (!toasts.some(toast => toast.text.includes(`for agent ${record.agent}.`))) {
-    flag(
-      w,
-      'L4',
-      `switch #${record.id} of ${record.agent} ended away from its tab and no root toast names the agent`
-    )
   }
   record.shown = true
   checkL5(w, record.agent, record.settleLogLen as number, `switch #${record.id} (${outcome.kind})`)
+}
+
+function switchInInstance(w: World, record: SwitchRecord): boolean {
+  return onApprovals(w) && record.instanceId === w.instance.id && w.instance.agent === record.agent
+}
+
+/** A toast the step must show: who owes it, its text, its tone, and the property it proves. */
+type ToastDue = {
+  owner: string
+  matches: (text: string) => boolean
+  tone: string
+  /** S3 or S4 when the toast says the write succeeded; L4 or S5 otherwise. */
+  property: string
+}
+
+/** The approval toasts (spec §6.3 step 7, §6.4 step 10, §6.5): every other toast is the page's. */
+function isApprovalToast(text: string): boolean {
+  return text.startsWith('Per-tool overrides') || text.startsWith('Manual ')
+}
+
+/** The toast each outcome that settled this step owes, by the copy of spec §6.3, §6.5 and Task 21c. */
+function toastsDue(w: World, settled: ReadonlyArray<SaveRecord | SwitchRecord>): ToastDue[] {
+  const due: ToastDue[] = []
+  for (const record of settled) {
+    if ('input' in record) {
+      if (!record.reported) continue
+      const outcome = record.outcome as ToolsSaveOutcome
+      const owner = `save #${record.id} of ${record.agent} (${outcome.kind})`
+      if (saveInView(w, record)) {
+        // In its tab only a success toasts; the section shows the rest.
+        if (outcome.kind === 'saved') {
+          due.push({
+            owner,
+            matches: text => text === TOOLS_SAVED_TOAST,
+            tone: 'success',
+            property: 'S3',
+          })
+        }
+        continue
+      }
+      const prefix = `Per-tool overrides for agent ${record.agent}`
+      if (outcome.kind === 'saved') {
+        const text = `Per-tool overrides saved for agent ${record.agent}.`
+        due.push({ owner, matches: shown => shown === text, tone: 'success', property: 'S3' })
+      } else if (outcome.kind === 'maybe') {
+        const text = `${prefix}: The save may not have applied. Reload to check.`
+        due.push({ owner, matches: shown => shown === text, tone: 'warning', property: 'S5' })
+      } else if (outcome.kind === 'reconfirm') {
+        const text = `${prefix}: The save was not sent`
+        due.push({ owner, matches: shown => shown.startsWith(text), tone: 'error', property: 'S5' })
+      } else if (outcome.kind === 'not_stored') {
+        const text = `${prefix}: This cluster's Host schema is older`
+        due.push({ owner, matches: shown => shown.startsWith(text), tone: 'error', property: 'S5' })
+      } else {
+        const text = `${prefix} were not saved. `
+        due.push({ owner, matches: shown => shown.startsWith(text), tone: 'error', property: 'S5' })
+      }
+      continue
+    }
+    const outcome = record.outcome as OffSwitchOutcome
+    const owner = `switch #${record.id} of ${record.agent} (${outcome.kind})`
+    const applied = 'Running chats apply it at their next tool call.'
+    if (switchInInstance(w, record)) {
+      // In its tab the result shows the outcome; only a failure also toasts.
+      if (outcome.kind === 'failed') {
+        due.push({
+          owner,
+          matches: text => text.startsWith('Manual was not saved. '),
+          tone: 'error',
+          property: 'L4',
+        })
+      }
+      continue
+    }
+    if (outcome.kind === 'failed') {
+      const text = `Manual was not saved for agent ${record.agent}. `
+      due.push({
+        owner,
+        matches: shown =>
+          shown.startsWith(text) && shown.includes('To set Manual by hand, run: kubectl'),
+        tone: 'error',
+        property: 'L4',
+      })
+    } else {
+      const already = outcome.kind === 'already' ? ' It was already Manual.' : ''
+      const text = `Manual is saved for agent ${record.agent}.${already} ${applied}`
+      due.push({ owner, matches: shown => shown === text, tone: 'success', property: 'S4' })
+    }
+  }
+  return due
+}
+
+/**
+ * Ruling 67(2): every approval toast this step shows comes from an outcome
+ * that settled in it, with that outcome's text and tone, and every outcome
+ * that owes a toast shows one. A success toast with no `saved` save (S3) or
+ * no `saved` or `already` switch (S4) behind it is a false success.
+ */
+function checkApprovalToasts(w: World, settled: ReadonlyArray<SaveRecord | SwitchRecord>): void {
+  const shown = toastsThisStep(w).filter(toast => isApprovalToast(toast.text))
+  const unmatched = [...shown]
+  for (const expected of toastsDue(w, settled)) {
+    const index = unmatched.findIndex(
+      toast => expected.matches(toast.text) && toast.tone === expected.tone
+    )
+    if (index >= 0) {
+      unmatched.splice(index, 1)
+      count(w.stats, 'checks', 'toasts')
+      continue
+    }
+    const near = unmatched.find(toast => expected.matches(toast.text))
+    flag(
+      w,
+      expected.property,
+      near
+        ? `${expected.owner}: its toast has tone ${near.tone}, not ${expected.tone}`
+        : `${expected.owner}: no ${expected.tone} toast says so`
+    )
+  }
+  for (const toast of unmatched) {
+    const manual = toast.text.startsWith('Manual ')
+    const property = toast.tone === 'success' ? (manual ? 'S4' : 'S3') : manual ? 'L4' : 'S5'
+    flag(
+      w,
+      property,
+      `a ${toast.tone} toast no outcome of this step owes: "${toast.text.slice(0, 120)}"`
+    )
+  }
 }
 
 /**
@@ -3239,6 +3341,28 @@ const EXAMPLES: Example[] = [
     scriptedScheduler(),
     { crd: 'current', start: 'alpha', blocks: { alpha: null, beta: null }, random: 15 },
     [new Step(4), new SaveDraft([[2, 'required']], 'cli_only', true, false)],
+  ],
+  // Continuations' root toasts (Ruling 67(2)): a save whose PUT hangs is left
+  // for Overview and ends "may not have applied"; then a switch whose read
+  // gets control-api's 403 is left the same way and fails. Each toast names
+  // the agent, with its outcome's words and tone.
+  [
+    scriptedScheduler(),
+    { crd: 'current', start: 'alpha', blocks: { alpha: OPEN_BLOCK, beta: null }, random: 16 },
+    [
+      new Step(4),
+      new ArmFault('alpha', 'put', 'hang'),
+      new SaveDraft([[2, 'required']], 'cli_only', true, false),
+      new Step(2),
+      new Navigate('overview'),
+      new AdvanceClock(10_000),
+      new Step(4),
+      new Navigate('approval-settings'),
+      new ArmFault('alpha', 'read', '403'),
+      new SetToManual(false),
+      new Navigate('overview'),
+      new Step(4),
+    ],
   ],
 ]
 
