@@ -224,10 +224,13 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       return { success: false, error: validated.error }
     }
 
-    // Only images engage the image-capability gate, the revision check and the
-    // visual model selection write. A file-only message runs on any model: the
-    // model reads it through a tool, not as image input (issue #666).
-    const hasImageAttachments = Boolean(validated.attachments?.some(a => a.kind === 'image'))
+    // Only Desktop (`rpc`) inline images engage the `#654/#669` hard-refusal
+    // gate, the revision check, and the visual model selection write. Channel
+    // attachments (`channelAttachmentIds`) and non-rpc turns without Desktop
+    // inline images degrade gracefully per-attempt in `LlmPortAdapter` (`X12`),
+    // and file-only messages run on any model (issue #666).
+    const hasImageAttachments =
+      message.channelType === 'rpc' && Boolean(validated.attachments?.some(a => a.kind === 'image'))
     const acceptedAttachmentIds = validated.attachments?.map(a => a.id) ?? []
 
     /** One structured line per refusal, so an operator can tell WHY a turn was

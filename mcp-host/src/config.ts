@@ -270,6 +270,17 @@ export interface Config {
    * `server.ts` and rpc-proxy (issue #678).
    */
   attachmentFileMaxBytes: number
+  /**
+   * Issue #1640 — maximum raw bytes accepted on
+   * `POST /v1/runtime/channel-attachments/ingest`. Defaults to
+   * `attachmentFileMaxBytes` (11 MiB) and is configurable up to 20 MiB.
+   */
+  channelAttachmentMaxBytes: number
+  /**
+   * Issue #1640 — retention TTL in hours for PVC-backed channel attachments.
+   * Default 168h (7 days).
+   */
+  channelAttachmentTtlHours: number
   /** Bytes one `clerum__attachment_read` call may return (issue #666). */
   attachmentTextReadMaxBytes: number
   /**
@@ -634,6 +645,18 @@ const attachmentFileMaxBytes = getExecutionLimit(
   11_534_336,
   false,
   11_534_336
+)
+const channelAttachmentMaxBytes = getExecutionLimit(
+  'CLERUM_CHANNEL_ATTACHMENT_MAX_BYTES',
+  attachmentFileMaxBytes,
+  false,
+  20_971_520
+)
+const channelAttachmentTtlHours = getExecutionLimit(
+  'CLERUM_CHANNEL_ATTACHMENT_TTL_HOURS',
+  168,
+  false,
+  8_760
 )
 const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
 const configuredRuntimeKind = resolveMcpHostRuntimeKind({
@@ -1333,6 +1356,8 @@ export const config: Config = {
   attachmentMaxCount: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_COUNT', '3')!, 10),
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
   attachmentFileMaxBytes,
+  channelAttachmentMaxBytes,
+  channelAttachmentTtlHours,
   attachmentTextReadMaxBytes,
   fileReferenceMaxCount: FILE_REFERENCE_MAX_COUNT,
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),

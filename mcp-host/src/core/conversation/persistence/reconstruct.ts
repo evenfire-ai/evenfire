@@ -83,6 +83,9 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     ...(persisted.session.channel_type != null
       ? { channel_type: persisted.session.channel_type }
       : {}),
+    ...(persisted.session.linked_user_id != null
+      ? { linked_user_id: persisted.session.linked_user_id }
+      : {}),
     auto_shell_grants: { wholeTool: false, commands: new Set() },
     denials: parseDenials(persisted.session.denied_tools, () =>
       logger.error(

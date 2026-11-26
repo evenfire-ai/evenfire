@@ -18,9 +18,19 @@ describe('effective visual delivery limits', () => {
     })
   })
 
+  it('reuses the Grok contract as the explicit subscription profile', () => {
+    expect(resolveVisualDeliveryLimits('grok-subscription')).toEqual({
+      maxImageBytes: 20 * 1024 * 1024,
+      maxTotalImageBytes: 20 * 1024 * 1024,
+      maxImages: 20,
+      maxVisualRequestBytes: 35 * 1024 * 1024,
+      maxNonImageRequestBytes: 8 * 1024 * 1024,
+    })
+  })
+
   it('does not invent profiles for other providers or wire families', () => {
     expect(resolveVisualDeliveryLimits('openai')).toBeNull()
-    expect(resolveVisualDeliveryLimits('grok-subscription')).toBeNull()
+    expect(resolveVisualDeliveryLimits('zai')).toBeNull()
     expect(resolveVisualDeliveryLimits('unknown')).toBeNull()
   })
 

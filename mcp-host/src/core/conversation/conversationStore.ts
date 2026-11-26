@@ -1,4 +1,12 @@
-import type { ModelSelectionWriteOutcome, ReapedSession } from '../../db/worker/protocol'
+import type {
+  EndObsoleteApprovalSessionResult,
+  InsertChannelAttachmentResult,
+  ModelSelectionWriteOutcome,
+  ReapedSession,
+  RetainedChannelAttachmentRow,
+  RotateSessionOnIdentityChangeResult,
+  SweptChannelAttachmentRef,
+} from '../../db/worker/protocol'
 import type { ApprovalMode } from '../approval/approvalMode'
 import {
   type Conversation,
@@ -49,6 +57,11 @@ export interface GetOrCreateOptions {
    * session is loaded from the store or already cached.
    */
   approvalMode?: ApprovalMode
+  /**
+   * Migration 020 — live verified linked user ID for external channel sessions.
+   * Persisted onto `sessions.linked_user_id` when creating a session.
+   */
+  linkedUserId?: string | null
 }
 
 export interface PersistedSessionListing {
@@ -391,6 +404,39 @@ export interface ConversationStore {
     requestId: string,
     decision: 'approve' | 'deny' | 'cancel'
   ): Promise<void>
+
+  /** Migration 020 — durable channel attachment and atomic identity rotation ops. */
+  insertChannelAttachment?(
+    row: RetainedChannelAttachmentRow
+  ): Promise<InsertChannelAttachmentResult>
+  listActiveChannelAttachments?(
+    sessionKey: string,
+    linkedUserId: string,
+    nowEpoch?: number
+  ): Promise<RetainedChannelAttachmentRow[]>
+  getChannelAttachmentForOwner?(
+    attachmentId: string,
+    sessionKey: string,
+    linkedUserId: string,
+    nowEpoch?: number
+  ): Promise<RetainedChannelAttachmentRow | null>
+  sweepExpiredChannelAttachments?(
+    nowEpoch?: number,
+    limit?: number
+  ): Promise<SweptChannelAttachmentRef[]>
+  endObsoleteApprovalSession?(params: {
+    sessionId?: string
+    sessionKey?: string
+    requestId?: string
+    endReason: string
+    endedAt?: number
+  }): Promise<EndObsoleteApprovalSessionResult>
+  rotateSessionOnIdentityChange?(params: {
+    sessionKey: string
+    expectedLinkedUserId?: string | null
+    endReason?: string
+    endedAt?: number
+  }): Promise<RotateSessionOnIdentityChangeResult>
 
   /** Optional shutdown drain. Implementations without a worker may no-op. */
   shutdown?(): Promise<void>

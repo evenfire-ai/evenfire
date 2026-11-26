@@ -81,6 +81,7 @@ describe('migration 008 — active trace context', () => {
         '017-session-parent-index',
         '018-session-denied-tools',
         '019-sessions-approval-mode',
+        '020-conversation-attachments',
       ],
       pending: [],
     })

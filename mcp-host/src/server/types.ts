@@ -500,6 +500,16 @@ export type ProviderWorkflowResultRequestHandler = (
 export type ProviderMessageAuthorizationHandler = (
   input: ProviderMessageAuthorization
 ) => Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }>
+export interface ChannelAttachmentIngestResponse {
+  status: number
+  body: ChannelAttachmentReceiptV1
+}
+export type ChannelAttachmentIngestHandler = (input: {
+  metadata: ChannelAttachmentIngestMetadataV1
+  stream: NodeJS.ReadableStream
+  contentLength?: number
+  caller: RuntimeCallerContext
+}) => Promise<ChannelAttachmentIngestResponse>
 export type WorkflowApprovalNotificationClaimHandler = (
   input: WorkflowApprovalNotificationClaim
 ) => Promise<{ deliveries: WorkflowApprovalNotificationDelivery[] } | { error: string }>
