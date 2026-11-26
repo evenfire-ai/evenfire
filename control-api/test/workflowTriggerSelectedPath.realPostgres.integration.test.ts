@@ -591,6 +591,7 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       instanceId: `r68-h1-${randomUUID()}`,
       pool: databasePool,
       runPollMs: 60_000,
+      maxRunDurationCapSeconds: 86_400,
       createChildRecipe: async () => ({ name: childName, namespace: config.sandboxNamespace }),
       checkpointAuthority: checkpoint,
     })

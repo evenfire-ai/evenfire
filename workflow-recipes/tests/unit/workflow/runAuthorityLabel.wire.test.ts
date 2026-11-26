@@ -106,6 +106,7 @@ async function report(child: Record<string, unknown>, pool: Pool, body: Report) 
     instanceId: 'wire-label',
     pool,
     runPollMs: 60_000,
+    maxRunDurationCapSeconds: 86_400,
     checkpointAuthority: vi.fn(),
     createChildRecipe: vi.fn(),
     logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), withStep: vi.fn() },

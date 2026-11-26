@@ -228,6 +228,7 @@ async function runWire(
     pool: pool as never,
     connect,
     runPollMs: 60_000,
+    maxRunDurationCapSeconds: 86_400,
     checkpointAuthority,
     createChildRecipe: vi.fn(),
     logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), withStep: vi.fn() },

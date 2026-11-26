@@ -164,6 +164,12 @@ export interface DbRunProcessorOptions {
   pool: Pool
   /** Fallback poll interval (ms) for runs that slipped past LISTEN. */
   runPollMs: number
+  /**
+   * Upper bound, in seconds, on how long an owned run may stay Running or
+   * AuthorizationPaused. The stuck sweep reads a NULL or larger stored
+   * `max_duration_seconds` as this cap (`config.workflowMaxRunDurationSeconds`).
+   */
+  maxRunDurationCapSeconds: number
   /** Builds + creates the child WorkflowRecipe for a run (injected). */
   createChildRecipe: ChildRecipeCreator
   /** Live Control API checkpoint required before protected v2 queued work. */
@@ -332,9 +338,8 @@ const FIND_STUCK_RUNS = `
     FROM workflow_runs
    WHERE phase IN ('Running', 'AuthorizationPaused')
      AND owner_instance_id = $1
-     AND max_duration_seconds IS NOT NULL
      AND started_at IS NOT NULL
-     AND started_at < now() - (max_duration_seconds || ' seconds')::interval
+     AND started_at < now() - make_interval(secs => LEAST(COALESCE(max_duration_seconds, $2), $2))
    FOR UPDATE SKIP LOCKED
    LIMIT 50`
 
@@ -815,7 +820,10 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     const terminalNotifications: Array<{ runId: string; phase: WorkflowRunPhase }> = []
     try {
       await client.query('BEGIN')
-      const res = await client.query<{ run_id: string }>(FIND_STUCK_RUNS, [opts.instanceId])
+      const res = await client.query<{ run_id: string }>(FIND_STUCK_RUNS, [
+        opts.instanceId,
+        opts.maxRunDurationCapSeconds,
+      ])
       for (const row of res.rows) {
         const upd = await client.query(FAIL_STUCK_RUN, [row.run_id, opts.instanceId])
         if (upd.rowCount && upd.rowCount > 0) {

@@ -755,6 +755,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         instanceId: this.config.db.instanceId,
         pool,
         runPollMs: this.config.db.runPollMs,
+        maxRunDurationCapSeconds: this.config.workflowMaxRunDurationSeconds,
         createChildRecipe: this.makeChildRecipeCreator(),
         checkpointAuthority: createWorkflowRunAuthorityCheckpointer(),
         childRecipeExists: this.makeChildRecipeExists(),
