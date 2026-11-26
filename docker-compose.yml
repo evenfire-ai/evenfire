@@ -13,8 +13,12 @@ services:
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
       ZAI_API_KEY: ${ZAI_API_KEY:-}
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
-    # Dev mode runs with auth off and trusts the edge headers, so publish the
-    # port on loopback only. Never expose it on a reachable interface.
+    # Dev mode runs with JWT auth off. The Host still trusts the clear edge
+    # context headers of the reader callers (channel-reader,
+    # workflow-approval-request-reader) with no credential, and refuses every
+    # request that names caller rpc-proxy because it has no key to verify the
+    # edge assertion. So publish the port on loopback only. Never expose it on
+    # a reachable interface.
     ports:
       - '127.0.0.1:8080:8080'
     healthcheck:

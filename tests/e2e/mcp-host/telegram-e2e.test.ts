@@ -28,7 +28,14 @@
  *   TG_POLL_TIMEOUT_MS  — Max wait for manual TG test (default: 90000)
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { MCP_HOST_URL, fetchJson, kubectl, sendMessage, sleep } from '../helpers'
+import {
+  MCP_HOST_URL,
+  fetchJson,
+  kubectl,
+  readTaskProgressStream,
+  sendMessage,
+  sleep,
+} from '../helpers.js'
 
 // ── Config ──────────────────────────────────────────────────────────
 const GROUP_CHAT_ID = process.env.TG_GROUP_CHAT_ID || 'test-channel'
@@ -95,34 +102,70 @@ async function postToGroup(text: string): Promise<number> {
 }
 
 /**
- * Auto-approve ALL pending MCP tool approval requests for a given userId.
- * Keeps polling and approving until the agent returns to idle or timeout.
+ * Approve every tool approval a task suspends on, as the Telegram channel
+ * reader that sent the message, until the task reaches its terminal event.
+ * The task's own progress stream names each approval; the Host status route
+ * admits only rpc-proxy. Returns the task result.
  */
-async function autoApproveLoop(userId: string, timeoutMs = 90_000): Promise<void> {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    const { data: status } = await fetchJson(`${MCP_HOST_URL}/v1/runtime/status`)
-    const pending = status.pendingApprovals || []
-    const mine = pending.find((a: any) => a.userId === userId)
-    if (mine) {
-      console.log(`[AutoApprove] Approving ${mine.toolName} for ${userId}`)
-      await fetchJson(`${MCP_HOST_URL}/v1/runtime/approvals/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId,
-          requestId: mine.requestId,
-          alwaysApprove: true,
-        }),
-      })
-      // Don't return — keep looping to catch more approvals
-      await sleep(500)
-      continue
-    }
-    // Check if agent is done (no approval needed)
-    if (status.agent?.state === 'idle') return
-    await sleep(1000)
+async function approveUntilTerminal(taskId: string, userId: string): Promise<any> {
+  const edge = {
+    caller: 'channel-reader' as const,
+    channelType: 'telegram',
+    channelId: GROUP_CHAT_ID,
+    sender: userId,
   }
+
+  const terminal = await readTaskProgressStream(
+    taskId,
+    edge,
+    async event => {
+      if (event.type !== 'suspended') return
+      const { requestId, reason, displayName, alwaysApproveAllowed } = event.data
+      if (reason !== 'approval_required') {
+        throw new Error(
+          `Task ${taskId} suspended on ${reason} (${displayName}); only tool approvals can be granted here`
+        )
+      }
+      console.log(`[AutoApprove] Approving ${displayName} for ${userId}`)
+      const approval = await fetchJson(
+        `${MCP_HOST_URL}/v1/runtime/approvals/approve`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId,
+            requestId,
+            alwaysApprove: alwaysApproveAllowed !== false,
+            channelType: 'telegram',
+            channelId: GROUP_CHAT_ID,
+          }),
+        },
+        edge
+      )
+      if (approval.status !== 200 || approval.data?.success !== true) {
+        throw new Error(
+          `Approving ${requestId} for task ${taskId} failed: HTTP ${approval.status} ${JSON.stringify(approval.data)}`
+        )
+      }
+    },
+    90_000
+  )
+
+  if (terminal?.status !== 'completed') {
+    throw new Error(`Task ${taskId} ended ${terminal?.status}: ${terminal?.reason}`)
+  }
+
+  const taskResult = await fetchJson(
+    `${MCP_HOST_URL}/v1/runtime/tasks/${encodeURIComponent(taskId)}/result`,
+    undefined,
+    edge
+  )
+  if (taskResult.status !== 200) {
+    throw new Error(
+      `Task ${taskId} result read failed: HTTP ${taskResult.status} ${JSON.stringify(taskResult.data)}`
+    )
+  }
+  return taskResult.data
 }
 
 /** Send a question via HTTP, auto-approve MCP tools, post Q&A to TG. */
@@ -140,66 +183,22 @@ async function benchmarkQuestion(
     await postToGroup(`🔬 *E2E Benchmark — ${label}*\n\n📩 ${question}`)
   }
 
-  // For MCP tools that need approval, send message and auto-approve in parallel
   if (opts?.needsApproval) {
-    // Fire the message (may return immediately with waiting_approval or block)
-    const resultPromise = sendMessage(fullQuestion, {
+    // A synchronous reply returns at the first approval and names the task in
+    // `approval.taskId`; a reply that completed without approval carries the
+    // response and no task to follow.
+    let result = await sendMessage(fullQuestion, {
       channelId: GROUP_CHAT_ID,
       userId,
       channelType: 'telegram',
     })
 
-    // Start auto-approve loop in parallel — keeps approving until agent is idle
-    const approvePromise = autoApproveLoop(userId, 90_000)
-
-    // Wait for the HTTP response first
-    const result = await resultPromise
-
-    // If the response came back as waiting_approval, we need to poll for task result
     if (result.data?.status === 'waiting_approval' || !result.data?.response) {
-      const taskId = result.data?.taskId || result.data?.approval?.taskId
-      // Keep approving while we wait for task completion
-      const start = Date.now()
-      while (Date.now() - start < 90_000) {
-        // Check and approve any pending approvals inline
-        const { data: status } = await fetchJson(`${MCP_HOST_URL}/v1/runtime/status`)
-        const pending = status.pendingApprovals || []
-        const mine = pending.find((a: any) => a.userId === userId)
-        if (mine) {
-          console.log(`[AutoApprove] Approving ${mine.toolName} for ${userId}`)
-          await fetchJson(`${MCP_HOST_URL}/v1/runtime/approvals/approve`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId, requestId: mine.requestId, alwaysApprove: true }),
-          })
-          await sleep(500)
-          continue
-        }
-
-        // Check if task completed
-        if (taskId) {
-          const taskRes = await fetchJson(`${MCP_HOST_URL}/v1/runtime/tasks/${taskId}/result`)
-          if (taskRes.data?.status === 'completed' || taskRes.data?.response) {
-            result.data = { ...result.data, ...taskRes.data, success: true, status: 'completed' }
-            break
-          }
-        }
-
-        // If agent is idle, the task is done — fetch final result
-        if (status.agent?.state === 'idle') {
-          if (taskId) {
-            const taskRes = await fetchJson(`${MCP_HOST_URL}/v1/runtime/tasks/${taskId}/result`)
-            result.data = { ...result.data, ...taskRes.data, success: true, status: 'completed' }
-          }
-          break
-        }
-
-        await sleep(1000)
+      const taskId = result.data?.approval?.taskId ?? result.data?.taskId
+      if (taskId) {
+        result = { status: result.status, data: await approveUntilTerminal(taskId, userId) }
       }
     }
-
-    // Cancel the background approve loop (it'll stop on idle anyway)
-    await Promise.race([approvePromise, sleep(100)])
 
     // Post response to TG
     if (TG_API && result.data?.response) {

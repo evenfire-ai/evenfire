@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express'
 import {
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
   validateHostActivityLimit,
   validateHostApprovalRequestId,
   validateHostModelSelectionRequest,
@@ -176,7 +177,8 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/health': 'Health check endpoint',
       'GET /v1/runtime/live': 'Liveness check endpoint',
       'GET /metrics': 'Prometheus metrics endpoint',
-      'GET /v1/runtime/status': 'Get agent and queue status (includes pendingApprovals)',
+      'GET /v1/runtime/status':
+        'Get agent and queue status (includes the start time of each pending approval)',
       'GET /v1/runtime/activity': 'Get host activity timeline snapshot',
       'GET /v1/runtime/activity/stream': 'Read-only host activity stream (SSE)',
       'POST /v1/runtime/messages': 'Submit a message for processing',
@@ -370,6 +372,20 @@ export async function handleMessageRoute(
           badRequest(res, 'V2 authority requires authenticated V2 runtime context')
           return
         }
+        // A body that carries its own approval mode also needs the approval-mode scope, as
+        // rpc-proxy requires before forwarding it. The check is on the key, not on its value; a
+        // caller context without verified assertion scopes is refused.
+        if (
+          Object.prototype.hasOwnProperty.call(message, 'approvalMode') &&
+          !caller.edgeAssertionScopes?.includes(
+            HOST_EDGE_RPC_PROXY_ROUTE_SCOPES[
+              'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode'
+            ]
+          )
+        ) {
+          json(res, 403, { error: 'Forbidden: missing scope' })
+          return
+        }
         message.sender = caller.userId
         if (caller.actionContextV2) {
           const target = caller.actionContextV2.target
@@ -405,9 +421,13 @@ export async function handleMessageRoute(
             }
             message.metadata = sanitized
           }
-        } else if (caller.teamId) {
-          // Explicit v1 compatibility adapter. V2 never copies team metadata.
-          message.metadata = { ...(message.metadata ?? {}), teamId: caller.teamId }
+        } else {
+          // V1: the verified caller is the only source of access scope. Body
+          // metadata is discarded and rebuilt as rpc-proxy sends it.
+          message.metadata =
+            typeof caller.teamId === 'string'
+              ? { accessScope: 'team', teamId: caller.teamId }
+              : { accessScope: 'user' }
         }
       } else {
         json(res, 401, { error: 'Missing rpc edge caller context' })
@@ -1597,8 +1617,7 @@ export async function handleSessionsListRoute(
 /**
  * T3.1 — GET /v1/runtime/sessions/search. Authenticated full-text search over
  * the trusted-edge user's history. `userSub` comes from rpc-proxy's validated
- * action context (or its isolated v1 edge adapter); caller-supplied `?user=`
- * is silently ignored.
+ * action context; caller-supplied `?user=` is silently ignored.
  *
  * Status codes:
  *   - 200: results returned (possibly empty).
