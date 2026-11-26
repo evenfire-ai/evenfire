@@ -1242,7 +1242,7 @@ describe('workflow approval request reader server', () => {
     expect(handoffSlackMessageToChannelReader).not.toHaveBeenCalled()
   })
 
-  it('dedupes Slack message and app_mention envelopes for the same message', async () => {
+  it('dedupes Slack webhook retries by envelope event_id while forwarding distinct app_mention and message deliveries for channel-reader dedupe', async () => {
     vi.mocked(verifySlackTargetSignature).mockResolvedValue({
       ok: true,
       hostRef: 'sandbox-recipes/figure-d-recipe',
@@ -1281,7 +1281,14 @@ describe('workflow approval request reader server', () => {
     await vi.waitFor(() => {
       expect(handoffSlackMessageToChannelReader).toHaveBeenCalledTimes(1)
     })
-    const second = await postWebhook(
+    const retry = await postWebhook(
+      baseConfig,
+      'slack',
+      slackBody('app_mention', 'Ev-app-mention-dedupe'),
+      headers,
+      SLACK_TARGET_ID
+    )
+    const companionMessage = await postWebhook(
       baseConfig,
       'slack',
       slackBody('message', 'Ev-message-dedupe'),
@@ -1290,12 +1297,14 @@ describe('workflow approval request reader server', () => {
     )
 
     expect(first.status).toBe(200)
-    expect(second.status).toBe(200)
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(handoffSlackMessageToChannelReader).toHaveBeenCalledTimes(1)
+    expect(retry).toEqual({ status: 200, body: { ok: true, ignored: true } })
+    expect(companionMessage.status).toBe(200)
+    await vi.waitFor(() => {
+      expect(handoffSlackMessageToChannelReader).toHaveBeenCalledTimes(2)
+    })
   })
 
-  it('strips Slack mentions when a message envelope wins app_mention dedupe', async () => {
+  it('strips Slack mentions on message deliveries when companion app_mention also arrives', async () => {
     vi.mocked(verifySlackTargetSignature).mockResolvedValue({
       ok: true,
       hostRef: 'sandbox-recipes/figure-d-recipe',
@@ -1337,6 +1346,7 @@ describe('workflow approval request reader server', () => {
         expect.any(Object),
         expect.objectContaining({
           content: 'hello',
+          eventKind: 'event_callback',
           providerEventId: 'slack:T123:C123:1710000999.000002',
         })
       )
@@ -1351,8 +1361,9 @@ describe('workflow approval request reader server', () => {
 
     expect(first.status).toBe(200)
     expect(second.status).toBe(200)
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(handoffSlackMessageToChannelReader).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => {
+      expect(handoffSlackMessageToChannelReader).toHaveBeenCalledTimes(2)
+    })
   })
 
   it('passes Slack thread context to channel-reader for app mentions', async () => {

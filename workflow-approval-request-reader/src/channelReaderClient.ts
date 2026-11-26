@@ -160,8 +160,10 @@ export async function handoffTeamsMessageToChannelReader(
   const channelRef = splitCommunicationChannelRef(target.communicationChannelRef)
   if (!channelRef) return { ok: false, status: 400, error: 'invalid_communication_channel_ref' }
   const hasAttachments = Array.isArray(command.attachments) && command.attachments.length > 0
+  const hasAttachmentErrors =
+    Array.isArray(command.attachmentErrors) && command.attachmentErrors.length > 0
   return postHandoff(cfg, target, '/internal/teams/handoff', {
-    kind: hasAttachments ? 'teams.attachment-message.v1' : 'teams.message',
+    kind: hasAttachments || hasAttachmentErrors ? 'teams.attachment-message.v1' : 'teams.message',
     content: command.content,
     ...(command.workflowRunId ? { workflowRunId: command.workflowRunId } : {}),
     providerUserId: command.providerUserId,
@@ -175,6 +177,7 @@ export async function handoffTeamsMessageToChannelReader(
     providerMessageId: command.providerMessageTs,
     serviceUrl: command.serviceUrl ?? '',
     ...(hasAttachments ? { attachments: command.attachments } : {}),
+    ...(hasAttachmentErrors ? { attachmentErrors: command.attachmentErrors } : {}),
     providerTarget: {
       hostRef: target.hostRef,
       communicationChannelNamespace: channelRef.namespace,

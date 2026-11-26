@@ -73,12 +73,19 @@ describe('slackAppManifest', () => {
       'im:read',
       'mpim:read',
       'chat:write',
+      'files:read',
       'files:write',
       'users:read',
     ]) {
       expect(scopes).toContain(scope)
     }
-    expect(scopes).toHaveLength(12)
+    expect(scopes).toHaveLength(13)
+  })
+
+  it('includes_files_read_scope', () => {
+    const scopes = listItemsUnder(yaml, 'bot:')
+    expect(scopes).toContain('files:read')
+    expect(scopes).toContain('files:write')
   })
 
   it('disables socket mode, which this platform does not use', () => {

@@ -58,7 +58,9 @@ const TEAMS_WORKFLOW_APPROVAL_ACTION_RE =
 const TEAMS_COMPACT_WORKFLOW_APPROVAL_ACTION_RE =
   /^(?:a|d):[A-Za-z0-9_-]{22}:(?:~[0-9a-f]{16}|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::[0-9a-f]{16})?$/i
 
-type SlackTargetContext = SlackTargetHandoffContext
+type SlackTargetContext = SlackTargetHandoffContext & {
+  botUserId?: string | null
+}
 type TeamsTargetContext = TeamsTargetHandoffContext & {
   appId: string
   appName?: string
@@ -286,8 +288,49 @@ function slackEventText(payload: unknown): string {
   return asString(asRecord(asRecord(payload).event).text)
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function slackAuthorizedBotUserId(target: SlackTargetContext, payload: unknown): string | null {
+  const body = asRecord(payload)
+  if (Array.isArray(body.authorizations)) {
+    for (const entry of body.authorizations) {
+      const auth = asRecord(entry)
+      const userId = asString(auth.user_id)
+      const teamId = asString(auth.team_id)
+      if (userId && (!teamId || teamId === target.providerWorkspaceId)) return userId
+    }
+    for (const entry of body.authorizations) {
+      const userId = asString(asRecord(entry).user_id)
+      if (userId) return userId
+    }
+  }
+  return asString(target.botUserId) || null
+}
+
 function slackEventStartsWithMention(payload: unknown): boolean {
-  return /^<@[A-Z0-9]+>(?:\s|$)/i.test(slackEventText(payload))
+  return /^<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s|$)/i.test(slackEventText(payload))
+}
+
+function slackEventMentionsBot(target: SlackTargetContext, payload: unknown): boolean {
+  const botUserId = slackAuthorizedBotUserId(target, payload)
+  if (botUserId) {
+    return new RegExp(`<@${escapeRegExp(botUserId)}(?:\\|[^>]*)?>`, 'i').test(
+      slackEventText(payload)
+    )
+  }
+  return slackEventStartsWithMention(payload)
+}
+
+function slackWebhookDedupeKey(payload: unknown, fallbackEventId: string): string {
+  const body = asRecord(payload)
+  const envelopeEventId = asString(body.event_id)
+  if (asString(body.type) === 'event_callback' && envelopeEventId) {
+    const teamId = slackWorkspaceFromPayload(payload) || 'unknown'
+    return `slack:event:${teamId}:${envelopeEventId}`
+  }
+  return fallbackEventId
 }
 
 function slackEventIsInlineApprovalCommand(payload: unknown): boolean {
@@ -316,7 +359,7 @@ function slackCanUseEvent(
   if (channelId.startsWith('D')) return eventType === 'message' || eventType === 'app_mention'
   if (eventType === 'message' && slackEventIsInlineApprovalCommand(payload)) return true
   if (eventType === 'app_mention') return true
-  return eventType === 'message' && slackEventStartsWithMention(payload)
+  return eventType === 'message' && slackEventMentionsBot(target, payload)
 }
 
 function slackCanUseMessage(
@@ -339,7 +382,7 @@ function slackMessageShouldStripAcceptedMention(
     !channelId.startsWith('D') &&
     slackEventType(payload) === 'message' &&
     !slackEventIsInlineApprovalCommand(payload) &&
-    slackEventStartsWithMention(payload)
+    slackEventMentionsBot(target, payload)
   )
 }
 
@@ -351,7 +394,8 @@ function slackCanUseEnrollmentEvent(
   if (slackCanUseEvent(target, payload, channelId)) return true
   const eventType = slackEventType(payload)
   return (
-    eventType === 'app_mention' || (eventType === 'message' && slackEventStartsWithMention(payload))
+    eventType === 'app_mention' ||
+    (eventType === 'message' && slackEventMentionsBot(target, payload))
   )
 }
 
@@ -595,6 +639,7 @@ async function providerAuthorized(
         providerWorkspaceId: result.providerWorkspaceId,
         replyInThreads: result.replyInThreads === true,
         replyOnlyWhenMentioned: result.replyOnlyWhenMentioned === true,
+        ...(result.botUserId ? { botUserId: result.botUserId } : {}),
       },
     }
   }
@@ -891,18 +936,27 @@ export function createServer(cfg = config): http.Server {
             writeJson(res, 200, { ok: true, ignored: true })
             return
           }
-          const handoffMessage = slackMessageShouldStripAcceptedMention(
-            auth.slackTarget,
-            payload,
-            message.providerChannelId
-          )
-            ? normalizeProviderMessage(medium, payload, { stripLeadingMention: true })
+          const botUserId = slackAuthorizedBotUserId(auth.slackTarget, payload)
+          const shouldStripMention =
+            slackEventType(payload) === 'app_mention' ||
+            slackMessageShouldStripAcceptedMention(
+              auth.slackTarget,
+              payload,
+              message.providerChannelId
+            )
+          const handoffMessage = shouldStripMention
+            ? normalizeProviderMessage(medium, payload, {
+                stripLeadingMention: true,
+                ...(botUserId ? { stripBotUserId: botUserId } : {}),
+              })
             : message
           if (!handoffMessage) {
             writeJson(res, 200, { ok: true, ignored: true })
             return
           }
-          if (!markProviderEventSeen(handoffMessage.providerEventId)) {
+          if (
+            !markProviderEventSeen(slackWebhookDedupeKey(payload, handoffMessage.providerEventId))
+          ) {
             writeJson(res, 200, { ok: true, ignored: true })
             return
           }

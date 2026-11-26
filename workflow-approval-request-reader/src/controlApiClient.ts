@@ -21,6 +21,7 @@ export type SlackTargetVerificationResult =
       providerWorkspaceId: string
       replyOnlyWhenMentioned?: boolean
       replyInThreads?: boolean
+      botUserId?: string | null
       channelName: string
       channelNamespace: string
     }
@@ -86,7 +87,8 @@ export async function canApprove(
   )
   url.searchParams.set('medium', params.medium)
   url.searchParams.set('providerUserId', params.providerUserId)
-  if (params.providerWorkspaceId) url.searchParams.set('providerWorkspaceId', params.providerWorkspaceId)
+  if (params.providerWorkspaceId)
+    url.searchParams.set('providerWorkspaceId', params.providerWorkspaceId)
   if (params.providerChannelId) url.searchParams.set('providerChannelId', params.providerChannelId)
   url.searchParams.set('channelAlias', params.channelAlias)
 
@@ -137,7 +139,8 @@ export async function resolveCommunicationChannelRef(
   const base = cfg.controlApiBaseUrl.replace(/\/+$/, '')
   const url = new URL('/api/v1/internal/workflow-approval-reader/channel-ref', base)
   url.searchParams.set('medium', params.medium)
-  if (params.providerWorkspaceId) url.searchParams.set('providerWorkspaceId', params.providerWorkspaceId)
+  if (params.providerWorkspaceId)
+    url.searchParams.set('providerWorkspaceId', params.providerWorkspaceId)
   if (params.providerChannelId) url.searchParams.set('providerChannelId', params.providerChannelId)
 
   let response: Response
@@ -174,7 +177,9 @@ export async function resolveCommunicationChannelRef(
     return { ok: false, error: body.error ?? 'channel_ref_resolve_failed' }
   }
   const ref = body.communicationChannelRef?.trim()
-  return ref ? { ok: true, communicationChannelRef: ref } : { ok: false, error: 'channel_ref_missing' }
+  return ref
+    ? { ok: true, communicationChannelRef: ref }
+    : { ok: false, error: 'channel_ref_missing' }
 }
 
 export async function verifySlackTargetSignature(
@@ -238,6 +243,9 @@ export async function verifySlackTargetSignature(
     }
   }
 
+  const botUserId =
+    typeof body.botUserId === 'string' && body.botUserId.trim() ? body.botUserId.trim() : null
+
   return {
     ok: true,
     hostRef: String(body.hostRef || ''),
@@ -245,6 +253,7 @@ export async function verifySlackTargetSignature(
     providerWorkspaceId: String(body.providerWorkspaceId || ''),
     replyOnlyWhenMentioned: body.replyOnlyWhenMentioned === true,
     replyInThreads: body.replyInThreads === true,
+    ...(botUserId ? { botUserId } : {}),
     channelName: String(body.channelName || ''),
     channelNamespace: String(body.channelNamespace || ''),
   }
@@ -445,9 +454,7 @@ export function sendTeamsTargetMessage(
     )}/send-message`,
     {
       conversationId: params.conversationId,
-      ...(params.threadConversationId
-        ? { threadConversationId: params.threadConversationId }
-        : {}),
+      ...(params.threadConversationId ? { threadConversationId: params.threadConversationId } : {}),
       ...(params.replyToId ? { replyToId: params.replyToId } : {}),
       serviceUrl: params.serviceUrl,
       text: params.text,
