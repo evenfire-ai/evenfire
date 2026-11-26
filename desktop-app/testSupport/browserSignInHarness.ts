@@ -321,9 +321,10 @@ export type BrowserSignInHarnessOptions = Readonly<{
    * `process.platform` is `darwin` until cleanup, as `tokenStore.quitLifecycle.test.ts:31-57`
    * sets it, so the store's quit-drain admission (V33) runs; `keytar` is mocked, and
    * `safeStorage` reports no encryption. The kept token, if any, is in the mocked keychain.
-   * Cleanup releases this harness's holds, reopens admission and waits for the store's calls,
-   * then closes admission for good before it unmocks `keytar`, so no later call from this
-   * module instance can reach the real keychain.
+   * Cleanup releases this harness's holds, reopens admission and waits until no store call is
+   * left, then closes admission for good before it unmocks `keytar`. On a darwin host a later
+   * call from this module instance then queues and never reaches the real keychain; elsewhere
+   * admission is ungated once the platform is back, and only the settle leaves no call behind.
    */
   realTokenStore?: boolean
 }>
@@ -1033,8 +1034,8 @@ export async function createBrowserSignInHarness(
         }
         await harness.drain()
       } finally {
-        // Closed for good, while the platform is still `darwin`: a later call from this module
-        // instance queues and never loads `keytar`, which cleanup unmocks next.
+        // Closed for good, while the platform is still `darwin`. On a darwin host a later call
+        // from this module instance queues and never loads `keytar`, which cleanup unmocks next.
         tokenStoreModule.closeTokenStoreAdmission()
       }
     }
