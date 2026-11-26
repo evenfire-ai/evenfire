@@ -7,6 +7,8 @@ import { InputContractForm } from '../components/InputContractForm'
 import { useAuthContext } from '../contexts/AuthContext'
 import {
   type WorkflowRecentRuns,
+  isTerminalWorkflowRunPhase,
+  isWorkflowRunCanceling,
   useWorkflowController,
   useWorkflowRecentRuns,
 } from '../hooks/domain/useWorkflowController'
@@ -27,16 +29,22 @@ function hasContractInputs(
 /**
  * Compact "Recent Runs" cell (spec 12 §5.F): the latest run's phase + relative
  * time and a run count — never the full expanded list that lived in the old
- * accordion. The latest run's artifacts stay downloadable inline.
+ * accordion. The latest run's artifacts stay downloadable inline. The latest run
+ * can be cancelled from here when the server says the viewer may cancel it; once
+ * a cancel is requested and the run has not stopped, it reads "Canceling".
  */
 function RecentRunsCell({
   recent,
   onDownload,
   downloadingKey,
+  onCancel,
+  cancelPending,
 }: {
   recent: WorkflowRecentRuns
   onDownload: (run: WorkflowRunListItem, artifact: WorkflowRunArtifact) => void
   downloadingKey: string | null
+  onCancel: (run: WorkflowRunListItem) => void
+  cancelPending: boolean
 }) {
   if (recent.loading) {
     return <span className="muted">Loading runs…</span>
@@ -51,14 +59,34 @@ function RecentRunsCell({
     return <span className="muted">No runs yet</span>
   }
   const when = run.startedAt ?? run.triggeredAt
+  const canceling = isWorkflowRunCanceling(run)
+  const showCancel =
+    run.viewerCanCancel === true && !isTerminalWorkflowRunPhase(run.phase) && !run.cancelRequestedAt
   return (
     <span className="workflow-recent-runs">
       <span className="workflow-recent-runs__summary">
-        <Pill tone={workflowStatusPillTone(run.phase)} size="xs">
-          {run.phase}
+        <Pill
+          data-testid="workflow-latest-run-phase"
+          tone={canceling ? 'neutral' : workflowStatusPillTone(run.phase)}
+          size="xs"
+        >
+          {canceling ? 'Canceling' : run.phase}
         </Pill>
         <span className="muted">{when ? formatRelativeTime(when) : 'Pending'}</span>
         {recent.runCount > 1 ? <span className="muted">· {recent.runCount} runs</span> : null}
+        {showCancel ? (
+          <Button
+            aria-label="Cancel run"
+            color="danger"
+            loading={cancelPending}
+            onClick={() => onCancel(run)}
+            size="xs"
+            title="Cancel this run: the current step finishes and the next does not start"
+            variant="ghost"
+          >
+            Cancel
+          </Button>
+        ) : null}
       </span>
       {run.artifacts && run.artifacts.length > 0 ? (
         <span className="workflow-recent-runs__artifacts" aria-label="Latest run artifacts">
@@ -89,15 +117,30 @@ function WorkflowRow({
   pendingTriggerKey,
   triggerModalOpen,
   onTrigger,
+  onCancelRun,
 }: {
   wf: WorkflowSummary
   pendingTriggerKey: string | null
   triggerModalOpen: boolean
   onTrigger: (wf: WorkflowSummary) => void
+  onCancelRun: (ns: string, name: string, runId: string) => Promise<void>
 }) {
   const { setStatus } = useAuthContext()
   const recent = useWorkflowRecentRuns(wf)
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null)
+  const [cancelPending, setCancelPending] = useState(false)
+
+  const handleCancel = useCallback(
+    async (run: WorkflowRunListItem) => {
+      setCancelPending(true)
+      try {
+        await onCancelRun(wf.namespace, wf.name, run.id)
+      } finally {
+        setCancelPending(false)
+      }
+    },
+    [onCancelRun, wf.namespace, wf.name]
+  )
 
   const rowKey = workflowKey(wf)
   const isTriggering = pendingTriggerKey === rowKey
@@ -150,6 +193,8 @@ function WorkflowRow({
           recent={recent}
           onDownload={handleDownload}
           downloadingKey={downloadingKey}
+          onCancel={run => void handleCancel(run)}
+          cancelPending={cancelPending}
         />
       </td>
       <td className="da-table__cell da-table__cell--right">
@@ -200,6 +245,7 @@ export function WorkflowsPage() {
     workflowsError: error,
     handleSelectWorkflow,
     handleTriggerWorkflow,
+    cancelRun,
   } = useWorkflowController({ setStatus })
 
   // Which workflow's Trigger modal is open (a recipe with an input contract).
@@ -302,6 +348,7 @@ export function WorkflowsPage() {
                     pendingTriggerKey={pendingTriggerKey}
                     triggerModalOpen={triggerModalWorkflow !== null}
                     onTrigger={w => void handleTrigger(w)}
+                    onCancelRun={cancelRun}
                   />
                 ))}
               </tbody>

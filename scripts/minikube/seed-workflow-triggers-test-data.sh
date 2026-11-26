@@ -11,11 +11,18 @@
 #   2. e2e-ondemand-approval   -- onDemand with approval (policy: triggerer)
 #   3. e2e-scheduled-recipe    -- onDemand fixture; schedule flows live in dedicated E2E
 #   4. e2e-retention-recipe    -- onDemand with runRetention limits
+#   5. e2e-cancel-two-step     -- two steps; the first waits on a step approval that
+#                                 no test decides (workflows.cancel.test.ts)
+#   6. e2e-cancel-scheduled    -- the same two-step shape, team-labelled; the cancel
+#                                 E2E installs and removes its schedule itself
 #
 # Users seeded (ON CONFLICT DO NOTHING):
-#   - test@clerum.io              (trigger owner / default approver)
+#   - test@clerum.io              (trigger owner / default approver; set to an active
+#                                  admin of the trigger team)
 #   - trigger-outsider-e2e@clerum.io (outsider, no access)
 #   - placeholder-cfo@clerum.io   (approval user for workflow-snippet-runtime-happy-path.test.ts)
+#   - trigger-member-e2e@clerum.io (active member, not admin, of the trigger team;
+#                                  granted on e2e-cancel-two-step)
 #
 # Prerequisites:
 #   - Minikube cluster running with all services deployed
@@ -187,6 +194,35 @@ if [[ -z "$CFO_USER_ID" || "$CFO_USER_ID" == *ERROR* ]]; then
   exit 1
 fi
 ok "placeholder-cfo@clerum.io (id=${CFO_USER_ID:0:8}...)"
+
+# The cancel E2E needs a fixed role for each user in the trigger team. The team
+# lookup above reuses any active membership whatever its role, so the trigger
+# user's admin role is written explicitly here.
+psql_checked() {
+  local output
+  if ! output="$($KC exec -n control-plane deployment/control-postgres -- \
+    psql -U postgres -d profiles -v ON_ERROR_STOP=1 -t -A -c "$1" 2>&1)"; then
+    err "$2: $output"
+    exit 1
+  fi
+}
+
+psql_checked "INSERT INTO team_members(team_id, user_id, role, status)
+  VALUES ('${TRIGGER_TEAM_ID}', '${TRIGGER_USER_ID}', 'admin', 'active')
+  ON CONFLICT (team_id, user_id) DO UPDATE SET role = 'admin', status = 'active';" \
+  "Failed to make ${TRIGGER_USER_EMAIL} an active admin of the trigger team"
+ok "${TRIGGER_USER_EMAIL} is an active admin of the trigger team"
+
+MEMBER_USER_ID=$(psql_scalar "INSERT INTO users (email, name) VALUES ('trigger-member-e2e@clerum.io', 'E2E Trigger Member') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name RETURNING id;")
+if [[ -z "$MEMBER_USER_ID" || "$MEMBER_USER_ID" == *ERROR* ]]; then
+  err "Failed to seed member user: $MEMBER_USER_ID"
+  exit 1
+fi
+psql_checked "INSERT INTO team_members(team_id, user_id, role, status)
+  VALUES ('${TRIGGER_TEAM_ID}', '${MEMBER_USER_ID}', 'member', 'active')
+  ON CONFLICT (team_id, user_id) DO UPDATE SET role = 'member', status = 'active';" \
+  "Failed to make trigger-member-e2e@clerum.io an active member of the trigger team"
+ok "trigger-member-e2e@clerum.io (id=${MEMBER_USER_ID:0:8}...) is an active member of the trigger team"
 echo ""
 
 # ── Step 3: Seed workflow trigger grants + approval team allowlists ──
@@ -208,6 +244,21 @@ for recipe in "${RECIPES_FOR_USER_A[@]}"; do
              ON CONFLICT DO NOTHING;" || true
 done
 ok "Trigger owner granted + team approval allowlisted on ${#RECIPES_FOR_USER_A[@]} recipes"
+
+CANCEL_GRANTS=(
+  "${TRIGGER_USER_ID}:e2e-cancel-two-step"
+  "${TRIGGER_USER_ID}:e2e-cancel-scheduled"
+  "${MEMBER_USER_ID}:e2e-cancel-two-step"
+)
+for grant in "${CANCEL_GRANTS[@]}"; do
+  grant_user="${grant%%:*}"
+  grant_recipe="${grant#*:}"
+  psql_checked "INSERT INTO user_workflow_triggers (user_id, recipe_namespace, recipe_name)
+    VALUES ('${grant_user}', '${RECIPE_NS}', '${grant_recipe}')
+    ON CONFLICT DO NOTHING;" \
+    "Failed to grant ${grant_recipe} to user ${grant_user:0:8}"
+done
+ok "Cancel E2E grants seeded: trigger owner on both cancel recipes, member on e2e-cancel-two-step"
 echo ""
 
 # ── Step 4: Apply WorkflowRecipe CRDs ────────────────────────────────
@@ -350,6 +401,78 @@ spec:
       timeoutSeconds: 60
 YAML
 
+# 5. e2e-cancel-two-step: the first step waits on a step approval that no test
+# decides, so a run holds in Running with a child until it is cancelled. The
+# second step must never start after a cancel.
+cat > "$TMPDIR/e2e-cancel-two-step.yaml" <<YAML
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-cancel-two-step
+  namespace: ${RECIPE_NS}
+  labels:
+    clerum.io/e2e: "true"
+    clerum.io/trigger-suite: "true"
+spec:
+  agent:
+    provider: ${E2E_WORKFLOW_MODEL_PROVIDER}
+    model: ${E2E_WORKFLOW_SIMPLE_MODEL_NAME}
+  triggers:
+    onDemand:
+      requiresApproval: false
+      allowedActors:
+        - user
+  steps:
+    - id: hold-for-approval
+      instruction: "Say hello. This is the first step of the cancel E2E."
+      timeoutSeconds: 60
+      requiresApproval:
+        target:
+          userId: "${TRIGGER_USER_ID}"
+        message: "E2E cancel: never decided; the run is cancelled while it waits"
+        timeoutSeconds: 900
+    - id: after-approval
+      instruction: "Say goodbye. This step must not start after a cancel."
+      timeoutSeconds: 60
+YAML
+
+# 6. e2e-cancel-scheduled: the same two-step shape under another name. It carries
+# the team label a schedule requires; workflows.cancel.test.ts installs the
+# schedule, forces one fire and removes it, so the base seed leaves no
+# workflow_schedules row for it.
+cat > "$TMPDIR/e2e-cancel-scheduled.yaml" <<YAML
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-cancel-scheduled
+  namespace: ${RECIPE_NS}
+  labels:
+    clerum.io/e2e: "true"
+    clerum.io/trigger-suite: "true"
+    clerum.io/workflow-team-id: "${TRIGGER_TEAM_ID}"
+spec:
+  agent:
+    provider: ${E2E_WORKFLOW_MODEL_PROVIDER}
+    model: ${E2E_WORKFLOW_SIMPLE_MODEL_NAME}
+  triggers:
+    onDemand:
+      requiresApproval: false
+      allowedActors:
+        - user
+  steps:
+    - id: hold-for-approval
+      instruction: "Say hello. This is the first step of the scheduled cancel E2E."
+      timeoutSeconds: 60
+      requiresApproval:
+        target:
+          userId: "${TRIGGER_USER_ID}"
+        message: "E2E scheduled cancel: never decided; the run is cancelled while it waits"
+        timeoutSeconds: 900
+    - id: after-approval
+      instruction: "Say goodbye. This step must not start after a cancel."
+      timeoutSeconds: 60
+YAML
+
 # Apply all recipes
 APPLIED=0
 FAILED=0
@@ -448,7 +571,7 @@ ok "Trigger grants seeded: $TRIGGER_GRANT_COUNT"
 ok "Team approval allowlist rows seeded: $TEAM_ALLOWLIST_COUNT"
 ok "Expected negative fixtures: $NEGATIVE_FIXTURE_COUNT"
 
-USER_COUNT=$(psql_scalar "SELECT COUNT(*) FROM users WHERE email IN ('${TRIGGER_USER_EMAIL}', 'trigger-outsider-e2e@clerum.io', 'placeholder-cfo@clerum.io');")
+USER_COUNT=$(psql_scalar "SELECT COUNT(*) FROM users WHERE email IN ('${TRIGGER_USER_EMAIL}', 'trigger-outsider-e2e@clerum.io', 'placeholder-cfo@clerum.io', 'trigger-member-e2e@clerum.io');")
 ok "E2E users in DB: $USER_COUNT"
 echo ""
 
@@ -458,7 +581,7 @@ echo -e "${BOLD}  Seed Summary${NC}"
 echo -e "${BOLD}=================================================================${NC}"
 echo -e "  Recipes applied:  ${GREEN}${APPLIED}${NC}"
 echo -e "  Recipes failed:   ${RED}${FAILED}${NC}"
-echo -e "  Users seeded:     3 (trigger-e2e, outsider, CFO)"
+echo -e "  Users seeded:     4 (trigger-e2e, outsider, CFO, member)"
 echo -e "  Trigger grants:   ${TRIGGER_GRANT_COUNT}"
 echo -e "  Team allowlists:  ${TEAM_ALLOWLIST_COUNT}"
 echo -e "  Negative fixtures:${YELLOW} ${NEGATIVE_FIXTURE_COUNT}${NC}"

@@ -364,6 +364,14 @@ export type WorkflowRunListItem = {
   actor: WorkflowRunActor | null
   executionRef: WorkflowRunExecutionRef | null
   artifacts?: WorkflowRunArtifact[]
+  /** Set once a cancel was requested; the run stays non-terminal until the runtime stops it. */
+  cancelRequestedAt?: string | null
+  /** Per-caller: the viewer may cancel this run now (permitted, non-terminal, no request yet). */
+  viewerCanCancel?: boolean
+}
+
+export type WorkflowRunCancelResult = {
+  run: WorkflowRunListItem
 }
 
 export type WorkflowRunsResult = {
