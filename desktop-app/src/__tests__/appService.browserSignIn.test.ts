@@ -716,7 +716,8 @@ describe('the generation hook and the test seams', () => {
   })
 
   it('logs and survives an observer that throws', async () => {
-    const failure = new Error('fake observer failure')
+    // The message carries a URL, which the line must not log (D18; final review F4).
+    const failure = new Error(`fake observer failure at ${FAILURE_DETAIL_URL}`)
     let failNext = false
     const harness = await createBrowserSignInHarness({
       onSessionGenerationAdvanced: () => {
@@ -741,9 +742,13 @@ describe('the generation hook and the test seams', () => {
     expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
     expect(harness.bumpLog.slice(-2).map(record => record.value)).toEqual([before + 1, before + 2])
     const warnings = warn.mock.calls.slice(warnedBefore)
-    expect(warnings).toEqual([[OBSERVER_FAILED, failure]])
+    expect(warnings).toEqual([[OBSERVER_FAILED, 'Error']])
     const text = format(...(warnings[0] ?? []))
     for (const { value: token } of harness.tokenWrites) expect(text).not.toContain(token)
+    expect(
+      harness.secretsSeen.filter(line => line.includes(FAILURE_DETAIL_URL)),
+      "the error message's URL is not logged"
+    ).toEqual([])
   })
 
   it('reads session presence without restoring', async () => {
@@ -1411,6 +1416,8 @@ const REDEEM_REFUSED: EdgeRecordKey =
 const SIGNED_IN_WITHOUT_ME_ID = 'signed-in-without-me-id'
 const LINK_HANDLING_FAILED = '[AppService] Browser sign-in link handling failed:'
 const UNUSABLE_ANSWER = '[AppService] Browser sign-in answer is not a usable session'
+/** A URL in a thrown error's message, which no log line may carry (D18). */
+const FAILURE_DETAIL_URL = 'https://failure-detail.example.test/fake-path'
 const CONSOLE_LEVELS = ['log', 'info', 'warn', 'error', 'debug'] as const
 
 function redeemFetches(harness: BrowserSignInHarness) {
@@ -2527,7 +2534,8 @@ function recordedRefusal(): BrowserSignInEnd {
 
 describe('browser sign-in state reads, acknowledgement and the resume check', () => {
   it('G2-6b signs out even when the push target throws', async () => {
-    const failure = new Error('fake push target failure')
+    // The message carries a URL, which the line must not log (D18; final review F4).
+    const failure = new Error(`fake push target failure at ${FAILURE_DETAIL_URL}`)
     const pushTarget = vi.fn<(snapshot: BrowserSignInSnapshot) => void>()
     const harness = await createBrowserSignInHarness({
       linksAvailable: true,
@@ -2561,7 +2569,11 @@ describe('browser sign-in state reads, acknowledgement and the resume check', ()
     expect(pushTarget.mock.calls.slice(1)).toEqual([[replaced]])
     expect(pushTarget.mock.results.at(-1)?.type).toBe('throw')
     expect(service.getBrowserSignInState()).toEqual(replaced)
-    expect(warn.mock.calls.slice(warnedBefore)).toEqual([[PUSH_FAILED, failure]])
+    expect(warn.mock.calls.slice(warnedBefore)).toEqual([[PUSH_FAILED, 'Error']])
+    expect(
+      harness.secretsSeen.filter(line => line.includes(FAILURE_DETAIL_URL)),
+      "the error message's URL is not logged"
+    ).toEqual([])
   })
 
   it('G2-12a ends an overdue attempt on resume, and pushes it', async () => {

@@ -95,7 +95,7 @@ function endedSnapshot(attemptId: number, end: BrowserSignInEnd): BrowserSignInS
  */
 export class BrowserSignInAttempts {
   private readonly push: (snapshot: BrowserSignInSnapshot) => void
-  private readonly warn: (message: string, error: unknown) => void
+  private readonly warn: (message: string, errorClass: string) => void
   private readonly clock: BrowserSignInClock
   private lastId = 0
   private attempt: BrowserSignInAttempt | null = null
@@ -105,7 +105,11 @@ export class BrowserSignInAttempts {
   constructor(
     deps: Readonly<{
       push: (snapshot: BrowserSignInSnapshot) => void
-      warn: (message: string, error: unknown) => void
+      /**
+       * Gets fixed text and the error's class, never the error, whose message may carry a URL
+       * (D18).
+       */
+      warn: (message: string, errorClass: string) => void
       clock: BrowserSignInClock
     }>
   ) {
@@ -271,7 +275,10 @@ export class BrowserSignInAttempts {
     } catch (error) {
       // The generation hook must not throw (D6). A timer that still fires finds its attempt no
       // longer waiting, or another attempt, and does nothing (onTimer).
-      this.warn('[AppService] Browser sign-in timer clear failed', error)
+      this.warn(
+        '[AppService] Browser sign-in timer clear failed',
+        error instanceof Error ? error.name : typeof error
+      )
     }
   }
 
@@ -285,7 +292,10 @@ export class BrowserSignInAttempts {
       } catch (error) {
         // A throw here would be an uncaught exception in the main process (D6). The snapshot
         // stays in V14, so the renderer's next read still finds it (D13).
-        this.warn('[AppService] Browser sign-in state push failed', error)
+        this.warn(
+          '[AppService] Browser sign-in state push failed',
+          error instanceof Error ? error.name : typeof error
+        )
       }
     })
   }

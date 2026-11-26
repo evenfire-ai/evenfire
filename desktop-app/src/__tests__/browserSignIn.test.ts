@@ -660,7 +660,7 @@ describe('attempt store', () => {
     })
     const id = store.record(attemptInput())
     await flushPushes()
-    expect(warnings).toEqual([[PUSH_FAILED, failure]])
+    expect(warnings).toEqual([[PUSH_FAILED, 'Error']])
     expect(store.snapshot()).toEqual({ attemptId: id, phase: 'waiting' })
   })
 
@@ -858,7 +858,7 @@ describe('attempt store', () => {
     })
     const id = store.record(attemptInput())
     expect(() => store.onGenerationAdvanced()).not.toThrow()
-    expect(warnings).toEqual([['[AppService] Browser sign-in timer clear failed', failure]])
+    expect(warnings).toEqual([['[AppService] Browser sign-in timer clear failed', 'Error']])
     // The timer that was not cleared fires later and finds nothing waiting.
     clock.advance(BROWSER_SIGN_IN_DEADLINE_MS)
     expect(store.snapshot()).toEqual({ attemptId: id, phase: 'ended', outcome: 'replaced' })

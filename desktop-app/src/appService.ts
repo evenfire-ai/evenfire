@@ -1058,8 +1058,9 @@ export class AppService {
     this.browserSignInLinksAvailable = options.browserSignInLinksAvailable ?? false
     this.browserSignIn = new BrowserSignInAttempts({
       push: snapshot => this.onBrowserSignInChanged?.(snapshot),
-      // Read at each call, so a console spy set up after construction still sees the line.
-      warn: (message, error) => console.warn(message, error),
+      // Read at each call, so a console spy set up after construction still sees the line. The
+      // store hands over the error's class only (D18).
+      warn: (message, errorClass) => console.warn(message, errorClass),
       clock: options.browserSignInClock ?? {
         now: Date.now,
         setTimer: setTimeout,
@@ -1099,7 +1100,11 @@ export class AppService {
     try {
       observe(value)
     } catch (error) {
-      console.warn('[AppService] The session generation observer failed:', error)
+      // Only the error's class: a message may carry a URL (D18).
+      console.warn(
+        '[AppService] The session generation observer failed:',
+        error instanceof Error ? error.name : typeof error
+      )
     }
   }
 
