@@ -375,9 +375,10 @@ describe('end-state mapping', () => {
       const label = `refused-in-set:${reason}`
       return [label, refusedWith(label, reason), { outcome: 'refused', reason }] as const
     }),
-    // The one reason outside PR 2's set that a conforming edge relays as a 403: the edge's
-    // redeem allowlist is the shared REFUSAL_REASONS (`external-rest-api/src/routes/
-    // oidcDesktopSignIn.ts` relayFailure), which lists it. Desktop ends it `failed` (D17).
+    // A reason outside PR 2's set. A conforming edge no longer relays it on redeem: its
+    // allowlist there is DESKTOP_SIGN_IN_REFUSAL_REASONS (`external-rest-api/src/routes/
+    // oidcDesktopSignIn.ts`), Desktop's eight, so it answers 503 instead. An older or
+    // non-conforming edge may still send this 403, and Desktop ends it `failed` (D17).
     [
       'refused-outside-set:invitation_email_mismatch',
       refusedWith('refused-outside-set:invitation_email_mismatch', 'invitation_email_mismatch'),
