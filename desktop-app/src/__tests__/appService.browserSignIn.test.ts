@@ -1410,6 +1410,7 @@ const REDEEM_REFUSED: EdgeRecordKey =
   'POST /api/v1/oidc/desktop-sign-in/redeem refused-account-disabled'
 const SIGNED_IN_WITHOUT_ME_ID = 'signed-in-without-me-id'
 const LINK_HANDLING_FAILED = '[AppService] Browser sign-in link handling failed:'
+const UNUSABLE_ANSWER = '[AppService] Browser sign-in answer is not a usable session'
 const CONSOLE_LEVELS = ['log', 'info', 'warn', 'error', 'debug'] as const
 
 function redeemFetches(harness: BrowserSignInHarness) {
@@ -1776,8 +1777,16 @@ describe('browser sign-in link acceptance, redeem and install', () => {
   it(`fails a 200 whose me has no id, without installing (${SIGNED_IN_WITHOUT_ME_ID})`, async () => {
     const harness = await createBrowserSignInHarness({ linksAvailable: true })
     const { service, envs } = harness
-    harness.routes[REDEEM_ROUTE] = () => edgeResponse(signedInWithoutMeId())
+    const answer = signedInWithoutMeId()
+    harness.routes[REDEEM_ROUTE] = () => edgeResponse(answer)
     const { attemptId, state } = await startAttempt(harness)
+    // The harness's own spies, which record every console line since it was created.
+    const consoleSpies = CONSOLE_LEVELS.map(level => vi.spyOn(console, level))
+    const callsBefore = consoleSpies.map(spy => spy.mock.calls.length)
+    const consoleLines = (from: readonly number[] = consoleSpies.map(() => 0)) =>
+      consoleSpies.flatMap((spy, index) =>
+        spy.mock.calls.slice(from[index]).map(args => format(...args))
+      )
 
     expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
     await harness.drain()
@@ -1790,6 +1799,19 @@ describe('browser sign-in link acceptance, redeem and install', () => {
     })
     expect(harness.tokenWrites).toEqual([])
     expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
+    // D18 (final review FR-T1): the answer carries a live session token and an email. The
+    // warning is fixed text, and no console line carries either of them.
+    expect(consoleLines(callsBefore), 'the unusable answer logs one fixed warning').toEqual([
+      UNUSABLE_ANSWER,
+    ])
+    const { token, me } = answer.body as { token: unknown; me: { email: unknown } }
+    expect(typeof token === 'string' && token.length > 0, 'the answer carries a token').toBe(true)
+    expect(typeof me.email === 'string' && me.email.includes('@'), 'it carries an email').toBe(true)
+    const secrets = [token, me.email] as string[]
+    expect(
+      consoleLines().filter(line => secrets.some(secret => line.includes(secret))),
+      'no console line carries the token or the email'
+    ).toEqual([])
   })
 
   it(`ends an unusable 200 that a logout overtook replaced (${SIGNED_IN_WITHOUT_ME_ID})`, async () => {
