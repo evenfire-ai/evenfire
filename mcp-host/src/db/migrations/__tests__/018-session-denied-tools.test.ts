@@ -22,10 +22,15 @@ function preMigrationDb(): Database.Database {
 }
 
 describe('migration 018 — sessions.denied_tools', () => {
-  it('appends last to the ordered migration list', () => {
+  it('is followed by 019 and then 020-cron-jobs', () => {
     const names = migrations.map(m => m.name)
     const index = names.indexOf(migration.name)
-    expect(names[index + 1]).toBe('019-sessions-approval-mode')
+    expect(names.slice(index, index + 3)).toEqual([
+      '018-session-denied-tools',
+      '019-sessions-approval-mode',
+      '020-cron-jobs',
+    ])
+    expect(names.at(-1)).toBe('020-cron-jobs')
   })
 
   it('adds a nullable column that reads null for a pre-existing row', () => {

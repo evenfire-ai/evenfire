@@ -91,10 +91,11 @@ async function evict(
 }
 
 describe('migration 019 — sessions.approval_mode', () => {
-  it('sorts last, after 018', () => {
-    expect(migrations.at(-1)?.name).toBe(migration.name)
+  it('is followed by 020-cron-jobs', () => {
+    expect(migrations.at(-1)?.name).toBe('020-cron-jobs')
+    expect(migrations.at(-2)?.name).toBe(migration.name)
     expect(migration.name).toBe('019-sessions-approval-mode')
-    expect(migrations.at(-2)?.name).toBe('018-session-denied-tools')
+    expect(migrations.at(-3)?.name).toBe('018-session-denied-tools')
   })
 
   it('adds a manual default, is idempotent, and drops the column', () => {
