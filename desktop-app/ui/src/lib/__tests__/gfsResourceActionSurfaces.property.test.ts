@@ -3,11 +3,11 @@
  * builds it, run through the real pipeline (surface options →
  * `buildGfsResourceActions` → the menu's permission gate).
  *
- * Shape: what applies to a resource (its kind, listing, format, readability,
- * parent, resolvable authority, action host) fixes which actions are offered
- * and in which order. Permission bits and an in-flight change only enable or
- * disable them, so a surface that hides an action for lack of a permission
- * fails here.
+ * Shape: what applies to a resource (its kind, listing, format, parent,
+ * resolvable authority, action host) fixes which actions are offered and in
+ * which order. Permission bits, the listing's read flag and an in-flight
+ * change only enable or disable them, so a surface that hides an action for
+ * lack of a permission or of read access fails here.
  *
  * Monotonicity: losing a permission never enables nor reveals an action, and
  * an enabled action always holds the permission it needs.

@@ -12,7 +12,9 @@
  *  1. the enabled actions are exactly the ones enabled before;
  *  2. an action hidden before only for lack of a permission is now offered,
  *     disabled;
- *  3. an action hidden before because it did not apply stays hidden;
+ *  3. an action hidden before because it did not apply stays hidden, and
+ *     the offered actions keep the order, labels, menu placement and loading
+ *     flag the old model gave them once every bit was granted;
  *  4. running an enabled action reaches its handler, running a disabled one
  *     does not.
  * "Hidden for lack of a permission" is read off the old model itself: hidden
@@ -60,7 +62,13 @@ const MIGRATION_DIR = resolve(__dirname, '__fixtures__/__migration__')
 const NUM_RUNS = 3000
 const URI = 'gfs://drive/resource'
 
-type FrozenAction = { id: string; disabled: boolean }
+type FrozenAction = {
+  id: string
+  label: string
+  menu: boolean
+  loading: boolean
+  disabled: boolean
+}
 
 function frozenGated(
   actions: FrozenAction[],
@@ -189,6 +197,11 @@ function expectMigrated(
   // 2 + 3. Offered exactly where it applied before: everything the old model
   // showed once every bit was granted, and nothing else.
   expect(sorted(offeredIds(actions))).toEqual(sorted(beforeWithEveryBit.map(action => action.id)))
+  // In the same order, under the same labels, with the same menu placement and
+  // loading flag.
+  const presentation = (list: readonly FrozenAction[]) =>
+    list.map(({ id, label, menu, loading }) => ({ id, label, menu, loading }))
+  expect(presentation(actions)).toEqual(presentation(beforeWithEveryBit))
   const hiddenForPermission = beforeWithEveryBit
     .map(action => action.id)
     .filter(id => !before.some(action => action.id === id))

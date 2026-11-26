@@ -25,14 +25,18 @@ const parentArb = fc.constantFrom<string | null>(PARENT_ID, null)
 /** Inputs that decide which actions apply; never a permission. */
 export type RowShape = {
   kind: GfsResourceKind
-  readable: boolean | undefined
   previewable: boolean
   parentResourceId: string | null
   listing: GfsRowListing
 }
 
-/** Permission inputs of a row: its own bits and its parent's. */
+/**
+ * Permission inputs of a row: its own bits, its parent's and the listing's
+ * read flag, which greys out the reads but never hides them.
+ */
 export type RowBits = {
+  /** The listing's flag; only an explicit `false` marks the row unreadable. */
+  readable: boolean | undefined
   /** The listing's bits (Shared with me roots). */
   permissions: PermissionBit[]
   /** The row's own affordances (folder children); null when not loaded. */
@@ -46,13 +50,13 @@ export type FilesRowState = RowShape & RowBits
 
 export const rowShapeArb: fc.Arbitrary<RowShape> = fc.record({
   kind: kindArb,
-  readable: readableArb,
   previewable: fc.boolean(),
   parentResourceId: parentArb,
   listing: fc.constantFrom<GfsRowListing>('folder', 'roots'),
 })
 
 export const rowBitsArb: fc.Arbitrary<RowBits> = fc.record({
+  readable: readableArb,
   permissions: bitsArb,
   rowHeld: heldOrNullArb,
   parentHeld: heldOrNullArb,
