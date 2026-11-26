@@ -266,8 +266,11 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
-  it('returns the rename 403 when the host cannot be resolved, without calling it', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+  it('returns the rename 403 when the host access is denied, without calling it', async () => {
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     const fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
@@ -277,7 +280,10 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
       .send({ mode: 'auto' })
       .expect(403)
 
-    expect(res.body).toEqual({ error: 'Forbidden: user cannot access this host' })
+    expect(res.body).toEqual({
+      error: 'Forbidden: user cannot access this host',
+      code: 'host_access_denied',
+    })
     expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
     expect(fetchMock).not.toHaveBeenCalled()
   })
