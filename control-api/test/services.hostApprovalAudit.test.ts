@@ -82,10 +82,10 @@ describe('buildHostApprovalChange', () => {
     const long = 'm'.repeat(300)
     const change = buildHostApprovalChange({
       before: block({ shellClassifierModel: 'a' }),
-      after: block({ shellClassifierModel: long, defaultPolicy: ['x'.repeat(300)] }),
+      after: block({ shellClassifierModel: long, modeCeiling: ['x'.repeat(300)] }),
     })
     expect(change?.fields.shellClassifierModel?.new).toBe('m'.repeat(MAX_VALUE_LENGTH))
-    const extra = change?.fields.defaultPolicy?.new
+    const extra = change?.fields.modeCeiling?.new
     expect(typeof extra).toBe('string')
     expect((extra as string).length).toBe(MAX_VALUE_LENGTH)
     expect((extra as string).startsWith('["xxx')).toBe(true)
@@ -324,6 +324,48 @@ describe('buildHostApprovalChange', () => {
         'shell_exec',
       ])
       vi.restoreAllMocks()
+    })
+  })
+
+  describe('free text in the durable summary (security m-2)', () => {
+    it('P5: bidi and C1 characters in a tool name or value are escaped in the summary', () => {
+      const hostile = ['\u202e', '\u0085', '\u200f', '\u2066', '\u009f'].join('')
+      const before = { tools: {}, shellClassifierModel: 'plain' }
+      const after = {
+        tools: { [`shell${hostile}exe`]: false },
+        shellClassifierModel: `model${hostile}`,
+      }
+      const summary = buildApprovalChangeSummary({ before, after }) as string
+      expect(summary).toBeDefined()
+      // eslint-disable-next-line no-misleading-character-class
+      expect(
+        /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(summary)
+      ).toBe(false)
+      const parsedSummary = JSON.parse(summary) as {
+        tools: Array<{ name: string }>
+        fields: { shellClassifierModel: { new: string } }
+      }
+      expect(parsedSummary.tools[0]?.name).toBe(`shell${hostile}exe`)
+      expect(parsedSummary.fields.shellClassifierModel.new).toBe(`model${hostile}`)
+    })
+
+    it('a defaultPolicy outside the CRD enum stays out of the summary and the line', () => {
+      const before = block({ modeCeiling: 'manual' })
+      const after = block({ defaultPolicy: 'typed-by-an-admin-not-a-policy', modeCeiling: 'auto' })
+      const change = buildHostApprovalChange({ before, after })
+      // The partner: the same write's modeCeiling change is audited.
+      expect(Object.keys(change?.fields ?? {})).toEqual(['modeCeiling'])
+      const summary = buildApprovalChangeSummary({ before, after }) as string
+      expect(summary).toContain('"modeCeiling"')
+      expect(summary).not.toContain('typed-by-an-admin')
+    })
+
+    it('a defaultPolicy that is an enum value is still audited', () => {
+      const change = buildHostApprovalChange({
+        before: block({ defaultPolicy: 'cli_only' }),
+        after: block({ defaultPolicy: 'channel_users' }),
+      })
+      expect(change?.fields).toEqual({ defaultPolicy: { old: 'cli_only', new: 'channel_users' } })
     })
   })
 })

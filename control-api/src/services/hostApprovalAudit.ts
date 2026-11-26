@@ -80,6 +80,12 @@ type Walk = {
  * (control-ui/test/fixtures/wire/host-crd-approval.current.json).
  */
 const TOP_LEVEL_FIELDS = ['modeCeiling', 'defaultPolicy', 'shellClassifierModel'] as const
+/**
+ * The Host CRD's `defaultPolicy` enum. A value outside it cannot be stored (the
+ * apiserver rejects it), but the summary is built before that check, so it is
+ * kept out: an admin-typed string never reaches the durable record.
+ */
+const DEFAULT_POLICIES: readonly string[] = ['cli_only', 'channel_users', 'designated_approvers']
 const CHANNEL_TYPES = ['telegram', 'email', 'slack', 'teams'] as const
 const CHANNEL_FIELDS = ['enabled', 'allowModeChange'] as const
 
@@ -87,7 +93,9 @@ function flatten(approval: unknown): Walk {
   const out: Walk = { leaves: new Map(), tools: new Map(), approvers: new Map() }
   if (!isRecord(approval)) return out
   for (const key of TOP_LEVEL_FIELDS) {
-    if (Object.hasOwn(approval, key)) out.leaves.set(key, approval[key])
+    if (!Object.hasOwn(approval, key)) continue
+    if (key === 'defaultPolicy' && !DEFAULT_POLICIES.includes(String(approval[key]))) continue
+    out.leaves.set(key, approval[key])
   }
   if (isRecord(approval.channels)) {
     for (const type of CHANNEL_TYPES) {
@@ -197,12 +205,24 @@ export function buildHostApprovalChange(input: {
 export const MAX_APPROVAL_CHANGE_SUMMARY_LENGTH = 4096
 
 /**
- * JSON text with U+007F escaped. `JSON.stringify` leaves DEL raw (it escapes
- * only U+0000 to U+001F), and the trace read drops a summary that holds a
- * control character, so a valid summary would vanish from the detail read.
+ * Characters `JSON.stringify` leaves raw that can make a summary read
+ * misleadingly or that the trace read refuses: DEL, the C1 controls
+ * (U+0080-U+009F), the bidirectional marks and embeddings (U+200E-U+200F,
+ * U+202A-U+202E) and the bidirectional isolates (U+2066-U+2069).
+ */
+const ESCAPED_IN_SUMMARY = /[\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+
+/**
+ * JSON text with those characters written as `\uXXXX` escapes. `JSON.stringify`
+ * escapes only U+0000 to U+001F, and the trace read drops a summary that holds
+ * a control character, so a valid summary would vanish from the detail read.
+ * The escapes parse back to the same strings.
  */
 function encode(value: unknown): string {
-  return JSON.stringify(value).replaceAll(String.fromCharCode(127), '\\u007f')
+  return JSON.stringify(value).replace(
+    ESCAPED_IN_SUMMARY,
+    char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+  )
 }
 
 /**
