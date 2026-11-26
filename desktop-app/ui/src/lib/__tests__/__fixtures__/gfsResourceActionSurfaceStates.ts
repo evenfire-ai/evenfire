@@ -209,9 +209,13 @@ export function withFullPreviewPermission(state: PreviewState): PreviewState {
 
 /**
  * The gates `useFilePreviewResourceActions` and `FilePreviewPage` hand to the
- * menu. The hook reads affordances only for a resolved file, so every
- * permission gate includes `canResolve` and a resolved file; Move also a
- * parent whose read did not fail, and Download only a resolved file.
+ * menu, rule for rule as the hook computes them. Share, Rename and Delete need
+ * only `canResolve` and the bit: the hook does not check the resolved kind, so
+ * affordances already cached under the resource's key (a folder's, loaded by
+ * the Files browser) can grant them on a folder or before the URI resolves.
+ * Hiding them there is the surface builder's job, not the gates'. Move needs a
+ * resolved file with a parent whose read did not fail and that grants the
+ * move bits; Download needs a resolved file.
  */
 export function previewGates(state: PreviewState) {
   const canResolve = !state.accessBlocked && !state.authorityPending
@@ -221,9 +225,9 @@ export function previewGates(state: PreviewState) {
     canResolve,
     parentResourceId,
     resourceKind: state.resolvedKind,
-    canShare: resolvedFile && state.canDelegate,
-    canRename: resolvedFile && state.write,
-    canDelete: resolvedFile && state.delete,
+    canShare: canResolve && state.canDelegate,
+    canRename: canResolve && state.write,
+    canDelete: canResolve && state.delete,
     canMove:
       resolvedFile && Boolean(parentResourceId) && !state.parentReadFailed && state.parentMoveBits,
     canDownload: resolvedFile,

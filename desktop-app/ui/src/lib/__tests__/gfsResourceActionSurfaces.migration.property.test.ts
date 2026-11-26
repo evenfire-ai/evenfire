@@ -158,6 +158,22 @@ function frozenPreview(state: PreviewState): FrozenAction[] {
 
 const sorted = (ids: readonly string[]) => [...ids].sort()
 
+/**
+ * The one intended difference on the preview tab. Before, a preview whose URI
+ * had not resolved to a file still offered Share, Rename and Delete whenever
+ * affordances cached under its key granted them (a folder's, loaded by the
+ * Files browser), since nothing in the old menu looked at the resolved kind.
+ * Those actions now stay out of the menu until the URI resolves to a file.
+ */
+const FILE_ONLY_PREVIEW_ACTIONS = ['share', 'rename', 'delete'] as const
+
+function previewNotResolvedToFile(state: PreviewState): boolean {
+  return state.resolvedKind !== 'file'
+}
+
+const withoutFileOnlyPreviewActions = (actions: FrozenAction[]) =>
+  actions.filter(action => !(FILE_ONLY_PREVIEW_ACTIONS as readonly string[]).includes(action.id))
+
 function expectMigrated(
   live: SurfaceRun,
   before: FrozenAction[],
@@ -229,14 +245,52 @@ describe('EvenDrive resource menu migration: hidden by permission → greyed out
   it('the file preview tab', () => {
     fc.assert(
       fc.property(previewStateArb, state => {
+        const live = livePreview(state)
+        const before = frozenPreview(state)
+        const beforeWithEveryBit = frozenPreview(withFullPreviewPermission(state))
+        if (!previewNotResolvedToFile(state)) {
+          expectMigrated(live, before, beforeWithEveryBit)
+          return
+        }
+        for (const id of FILE_ONLY_PREVIEW_ACTIONS) {
+          expect(offeredIds(live.actions)).not.toContain(id)
+        }
         expectMigrated(
-          livePreview(state),
-          frozenPreview(state),
-          frozenPreview(withFullPreviewPermission(state))
+          live,
+          withoutFileOnlyPreviewActions(before),
+          withoutFileOnlyPreviewActions(beforeWithEveryBit)
         )
       }),
       { numRuns: NUM_RUNS }
     )
+  })
+
+  it('the file preview tab: cached bits on a folder no longer offer the file-only actions', () => {
+    const folderWithCachedBits = withFullPreviewPermission({
+      accessBlocked: false,
+      authorityPending: false,
+      resolvedKind: 'directory',
+      parentResourceId: 'parent-1',
+      copyContentSupported: false,
+      hasOpenRoute: false,
+      canDelegate: false,
+      write: false,
+      delete: false,
+      parentMoveBits: false,
+      parentReadFailed: false,
+      copyContentReady: false,
+      mutating: false,
+      refreshing: false,
+    })
+    // The old model offered and enabled them on the cached bits alone.
+    const before = frozenPreview(folderWithCachedBits)
+    for (const id of FILE_ONLY_PREVIEW_ACTIONS) {
+      expect(before.find(action => action.id === id)?.disabled, id).toBe(false)
+    }
+    const live = offeredIds(livePreview(folderWithCachedBits).actions)
+    for (const id of FILE_ONLY_PREVIEW_ACTIONS) {
+      expect(live, id).not.toContain(id)
+    }
   })
 })
 

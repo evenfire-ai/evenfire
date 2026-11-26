@@ -54,7 +54,10 @@ function renderWithPermissions(
       kind: 'file',
       version: 7,
       bytes: 1,
-    })
+    }),
+  queryDefaults: ConstructorParameters<typeof QueryClient>[0] = {
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  }
 ) {
   hookMock.useGfsBrowserController.mockReturnValue({
     accessState: 'active',
@@ -63,9 +66,7 @@ function renderWithPermissions(
     authorityPending: false,
     handleAuthorityFailure: vi.fn(() => false),
   })
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  })
+  const queryClient = new QueryClient(queryDefaults)
   queryClients.push(queryClient)
   const resolve = vi.fn(resolved)
   const affordances = vi.fn(async (id: string) =>
@@ -96,7 +97,7 @@ function renderWithPermissions(
       ),
     }
   )
-  return { affordances, resolve, view }
+  return { affordances, queryClient, resolve, view }
 }
 
 /** The labels of the items a menu offers, in order. */
@@ -352,6 +353,61 @@ describe('FilePreviewPage permission-derived actions', () => {
       expect(within(menu).queryByRole('menuitem', { name: label }), label).toBeNull()
     }
     // The Share entry stays only as the home of Copy link; Share itself is gone.
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
+    const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
+    expect(offeredLabels(shareMenu)).toEqual(['Copy link'])
+  })
+
+  it('keeps Share, Rename and Delete out of a folder preview even with permissive folder bits cached', async () => {
+    const owner = ['read', 'write', 'delete', 'manage_acl', 'share']
+    let releaseResolve!: () => void
+    const resolveGate = new Promise<void>(release => {
+      releaseResolve = release
+    })
+    // App query defaults: the folder's cached bits outlive the moment nothing
+    // observes them, as they do between the Files browser and a new tab.
+    const { affordances, queryClient, resolve } = renderWithPermissions(
+      owner,
+      owner,
+      async () => {
+        await resolveGate
+        return resolveResource(
+          resolvedDirectory(resourceId, 'diagram.png', { parentResourceId: 'preview-parent' })
+        )
+      },
+      { defaultOptions: desktopQueryDefaults }
+    )
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(resourceUri))
+    // The Files browser has already loaded the open folder's affordances under
+    // this same key, through the same producer, by the time a preview tab is
+    // opened on its URI; the preview reads whatever it finds there.
+    const folderAffordancesKey = desktopQueryKeys.gfsAffordances(
+      'preview-permissions-user:main',
+      resourceId,
+      'main',
+      1
+    )
+    await act(async () => {
+      await queryClient.fetchQuery({
+        queryKey: folderAffordancesKey,
+        queryFn: () => window.clerum.gfs.affordances(resourceId, 'main'),
+      })
+    })
+    expect(affordances).toHaveBeenCalledWith(resourceId, 'main')
+    await act(async () => {
+      releaseResolve()
+      await resolve.mock.results[0]!.value
+      // Let the query layer's batched notification reach the page.
+      await new Promise(settle => setTimeout(settle, 0))
+    })
+    // Witness: permissive folder bits are still in the cache the preview reads.
+    expect(queryClient.getQueryData(folderAffordancesKey)).toMatchObject({ canDelegate: true })
+
+    const menu = openMenu()
+    expect(within(menu).getByRole('menuitem', { name: 'Copy content' })).toBeTruthy()
+    for (const label of ['Rename', 'Delete']) {
+      expect(within(menu).queryByRole('menuitem', { name: label }), label).toBeNull()
+    }
     fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
     const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
     expect(offeredLabels(shareMenu)).toEqual(['Copy link'])
