@@ -1202,6 +1202,31 @@ describe('browser sign-in start, cancel and the methods read', () => {
     })
   })
 
+  // A3-65: the add form's `type="url"` input takes this value. Its environment key is not the
+  // active one's, so the save takes `applyRuntimeEnvironmentChange`, which advances the
+  // generation before `validateRuntimeConfig` refuses the URL. The renderer's G2-15d test feeds
+  // this rejection, as Electron wraps it.
+  it('G2-15d producer: saving ftp://api.example.test rejects after a bump', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const generation = service.getSessionGeneration()
+    const logged = harness.bumpLog.length
+
+    await expect(
+      service.saveRuntimeConfig({
+        externalRestApiBaseUrl: 'ftp://api.example.test',
+        rpcProxyBaseUrl: '',
+        appName: 'Environment FTP',
+      })
+    ).rejects.toThrow(/^externalRestApiBaseUrl must be a valid http\(s\) URL$/)
+
+    expect(harness.bumpLog.slice(logged).map(record => record.value)).toEqual([generation + 1])
+    expect(service.getSessionGeneration()).toBe(generation + 1)
+    // The environment is unchanged: A stays active, and its model is read at the new generation.
+    expect(service.getRuntimeConfigState().activeOptionId).toBe(envs.A.optionId)
+    await expect(service.getLoginMethods()).resolves.toMatchObject({ generation: generation + 1 })
+  })
+
   it('opens a page URL whose fragment carries a 43-character challenge and state', async () => {
     const harness = await createBrowserSignInHarness({ linksAvailable: true })
 

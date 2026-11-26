@@ -19,6 +19,7 @@ import {
   resolveDesktopEnvironmentRestMatch,
 } from './desktopEnvironmentHandoff'
 import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
+import { useLoginMethods } from './useLoginMethods'
 
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
@@ -168,6 +169,10 @@ export function useAuthController({
     return state
   }, [])
 
+  // Every call that can change the environment binding goes through `runBindingChange` (D15).
+  const loginMethods = useLoginMethods({ refreshRuntimeConfigState })
+  const { runBindingChange } = loginMethods
+
   const getSessionGeneration = useCallback(() => window.clerum.auth.getSessionGeneration(), [])
 
   const completeDesktopSetupWith = useCallback(
@@ -176,9 +181,8 @@ export function useAuthController({
       if (!normalizedEmail || !nextAuthorizationToken.trim()) {
         throw new Error('email and authorization token are required')
       }
-      const state = await window.clerum.auth.completeDesktopSetup(
-        normalizedEmail,
-        nextAuthorizationToken.trim()
+      const state = await runBindingChange(() =>
+        window.clerum.auth.completeDesktopSetup(normalizedEmail, nextAuthorizationToken.trim())
       )
       setRuntimeConfigState(state)
       setEmail(normalizedEmail)
@@ -186,7 +190,7 @@ export function useAuthController({
       setDesktopSetupStarted(false)
       setStatus('Desktop setup complete. Sign in with your email and password.', 'success')
     },
-    [setStatus]
+    [runBindingChange, setStatus]
   )
 
   // Boot effect
@@ -362,10 +366,11 @@ export function useAuthController({
         rpcProxyBaseUrl,
         appName: name,
       }
-      const state =
+      const state = await runBindingChange(() =>
         expectedSessionGeneration === undefined
-          ? await window.clerum.auth.saveRuntimeConfig(configToSave)
-          : await window.clerum.auth.saveRuntimeConfig(configToSave, expectedSessionGeneration)
+          ? window.clerum.auth.saveRuntimeConfig(configToSave)
+          : window.clerum.auth.saveRuntimeConfig(configToSave, expectedSessionGeneration)
+      )
       setRuntimeConfigState(state)
       setRuntimeConfigSetupName('')
       setRuntimeConfigSetupExternalRestApiBaseUrl('')
@@ -416,7 +421,7 @@ export function useAuthController({
       if (typeof window.clerum.auth.deleteRuntimeConfig !== 'function') {
         throw new Error('Restart the desktop app to finish loading the environment delete action')
       }
-      const state = await window.clerum.auth.deleteRuntimeConfig(optionId)
+      const state = await runBindingChange(() => window.clerum.auth.deleteRuntimeConfig(optionId))
       setRuntimeConfigState(state)
       setStatus('Environment deleted.', 'success', undefined, { global: false, toast: true })
     } catch (error) {
@@ -444,7 +449,7 @@ export function useAuthController({
       try {
         setBusy(true)
         setBackendSwitchHint(null)
-        const state = await window.clerum.auth.selectRuntimeConfig(optionId)
+        const state = await runBindingChange(() => window.clerum.auth.selectRuntimeConfig(optionId))
         applySelectedRuntimeConfigState(state)
         reportDesktopEnvironmentSelected(state, setStatus)
         return state
@@ -458,7 +463,7 @@ export function useAuthController({
         setBusy(false)
       }
     },
-    [applySelectedRuntimeConfigState, setStatus]
+    [applySelectedRuntimeConfigState, runBindingChange, setStatus]
   )
 
   const handleSelectRuntimeConfigForHandoff = useCallback(
@@ -469,9 +474,8 @@ export function useAuthController({
       try {
         setBusy(true)
         setBackendSwitchHint(null)
-        const selection = await window.clerum.auth.selectRuntimeConfigForHandoff(
-          optionId,
-          expectedSessionGeneration
+        const selection = await runBindingChange(() =>
+          window.clerum.auth.selectRuntimeConfigForHandoff(optionId, expectedSessionGeneration)
         )
         applySelectedRuntimeConfigState(selection.runtimeConfigState)
         if (selection.runtimeConfigState.activeOptionId !== optionId) {
@@ -509,7 +513,7 @@ export function useAuthController({
         setBusy(false)
       }
     },
-    [applySelectedRuntimeConfigState, setStatus]
+    [applySelectedRuntimeConfigState, runBindingChange, setStatus]
   )
 
   useEffect(() => {
@@ -547,7 +551,7 @@ export function useAuthController({
   const handleClearRuntimeConfigSelection = async (): Promise<DesktopRuntimeConfigState | null> => {
     try {
       setBusy(true)
-      const state = await window.clerum.auth.clearRuntimeConfigSelection()
+      const state = await runBindingChange(() => window.clerum.auth.clearRuntimeConfigSelection())
       setRuntimeConfigState(state)
       setStatus('Environment unselected.', 'success', undefined, {
         global: false,
@@ -801,6 +805,8 @@ export function useAuthController({
     runtimeConfigMissing,
     showRuntimeConfigSelector,
     hasDependencyOutage,
+    loginModel: loginMethods.model,
+    refreshLoginMethods: loginMethods.refresh,
     setBooting,
     setBusy,
     setStatusText,

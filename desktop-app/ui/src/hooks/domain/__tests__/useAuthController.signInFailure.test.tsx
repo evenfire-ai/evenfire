@@ -16,6 +16,12 @@ const auth = {
   passwordLogin: vi.fn(),
   startDesktopSetup: vi.fn(),
   diagnoseLoginBackend: vi.fn(),
+  getLoginMethods: vi.fn(),
+  getBrowserSignInState: vi.fn(),
+  onBrowserSignInChanged: vi.fn(),
+  startBrowserSignIn: vi.fn(),
+  cancelBrowserSignIn: vi.fn(),
+  acknowledgeBrowserSignInResult: vi.fn(),
 }
 
 beforeEach(() => {
@@ -25,6 +31,12 @@ beforeEach(() => {
   auth.onDesktopEnvironmentSetup.mockReturnValue(() => undefined)
   auth.onExternalLogout.mockReturnValue(() => undefined)
   auth.onSessionCleared.mockReturnValue(() => undefined)
+  auth.getLoginMethods.mockResolvedValue({
+    model: { kind: 'methods', provider: null, password: true },
+    generation: 0,
+  })
+  auth.getBrowserSignInState.mockResolvedValue({ attemptId: null, phase: 'idle' })
+  auth.onBrowserSignInChanged.mockReturnValue(() => undefined)
   auth.passwordLogin.mockReset()
   auth.startDesktopSetup.mockReset()
   auth.diagnoseLoginBackend.mockReset()
