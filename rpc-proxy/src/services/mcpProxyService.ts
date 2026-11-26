@@ -114,8 +114,10 @@ export function v2HostEdgeAssertion(authorizedActionV2: AuthorizedActionV2): str
  * client throws: a timeout becomes the `timeout` refusal, anything else
  * `request_failed`. Every unavailable outcome, thrown or returned, writes
  * exactly one warn line, the operator's only view of the cause (the client
- * answer carries none). Denials and rejections are not logged: a 401 is the
- * normal expired-token path.
+ * answer carries none). That includes a 401 the service gate marked as a
+ * refusal of rpc-proxy's own credential (`service_credential_rejected`).
+ * Denials and rejections are not logged: an unmarked 401 is the normal
+ * expired-token path.
  */
 async function resolveV1HostConnection(
   userId: string,
@@ -268,10 +270,11 @@ export function isHeldEdgeAssertionNearExpiry(
  *     connection to this Host (another `userId` or `hostRef`, no url or an
  *     empty one, or a JSON value that is neither an object nor `null`;
  *     `controlApiRestService.ts` reads `parsed.userId` first);
- *   - a rejection: 401 or 409;
+ *   - a rejection: an unmarked 401, or 409;
  *   - an unavailable authority: timeout, network failure, another status, a
- *     2xx body that is not JSON (empty included) or is JSON `null`, no edge
- *     assertion.
+ *     401 the service gate marked (control-api refused rpc-proxy's own
+ *     service credential), a 2xx body that is not JSON (empty included) or is
+ *     JSON `null`, no edge assertion.
  *   None of them is wake-eligible: a control-api failure must not be read as
  *   the Host being down.
  * - A connection whose URL differs from the first resolve throws.

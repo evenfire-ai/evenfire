@@ -12,19 +12,30 @@ export type HostAccessDenialCode = 'host_access_revoked' | 'host_access_denied'
 
 export type HostAccessDenial = { denied: true; code: HostAccessDenialCode }
 
-/** control-api refused the caller rather than the Host: 401 (token) or 409 (direct-run attribution). */
+/**
+ * control-api refused the request rather than the Host: a 401 without the
+ * service gate's mark (the caller's RPC token, or an upstream 401 that
+ * control-api forwards), or 409 (direct-run attribution). A 401 the service gate
+ * marked is an unavailable authority, not a rejection.
+ */
 export type HostAccessRejection = { rejected: true; status: 401 | 409 }
 
 /**
  * control-api could not complete the Host authorization: it timed out, the call
- * failed, it answered a status that is not an answer about access, or its 200
+ * failed, it answered a status that is not an answer about access, its 200
  * answer cannot authorize a Host request (invalid binding status on POST, no
- * edge assertion).
+ * edge assertion), or it refused rpc-proxy's own service credential (a 401 that
+ * carries the service gate's mark).
  */
 export type HostAuthorityUnavailable =
   | {
       unavailable: true
-      cause: 'timeout' | 'request_failed' | 'invalid_binding_status' | 'edge_assertion_missing'
+      cause:
+        | 'timeout'
+        | 'request_failed'
+        | 'invalid_binding_status'
+        | 'edge_assertion_missing'
+        | 'service_credential_rejected'
     }
   | { unavailable: true; cause: 'http_status'; status: number }
 
@@ -148,12 +159,23 @@ export function respondHostResolveRefusal(
     return
   }
   if ('unavailable' in refusal) {
-    if (refusal.cause === 'timeout') {
-      res.status(504).json({ error: 'Gateway Timeout' })
-      return
+    switch (refusal.cause) {
+      case 'timeout':
+        res.status(504).json({ error: 'Gateway Timeout' })
+        return
+      case 'request_failed':
+      case 'invalid_binding_status':
+      case 'edge_assertion_missing':
+      case 'http_status':
+      case 'service_credential_rejected':
+        res.status(503).json({ error: 'authority_unavailable' })
+        return
+      default: {
+        // A new cause without a status decision above fails the build here.
+        const unhandledCause: never = refusal
+        throw new Error(`Unhandled host authority cause: ${JSON.stringify(unhandledCause)}`)
+      }
     }
-    res.status(503).json({ error: 'authority_unavailable' })
-    return
   }
   // A new refusal member without a branch above fails the build here.
   const unhandled: never = refusal

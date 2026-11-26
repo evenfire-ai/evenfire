@@ -27,6 +27,8 @@ const UNAVAILABLE_REFUSALS: HostResolveRefusal[] = [
   { unavailable: true, cause: 'request_failed' },
   { unavailable: true, cause: 'invalid_binding_status' },
   { unavailable: true, cause: 'edge_assertion_missing' },
+  // J1 (R1-L7): control-api's service gate refused rpc-proxy's own credential.
+  { unavailable: true, cause: 'service_credential_rejected' },
   { unavailable: true, cause: 'http_status', status: 404 },
   { unavailable: true, cause: 'http_status', status: 500 },
   { unavailable: true, cause: 'http_status', status: 503 },

@@ -30,6 +30,16 @@ type UserAllowedHost = {
  */
 export type ResolvedHostConnection = ResolvedServerConnection & { edgeAssertion: string }
 
+/**
+ * control-api (`middleware/internalServiceAuth.ts`) sets this header with this
+ * value on every refusal of its internal service gate, beside the same
+ * `401 {"error":"Unauthorized"}` a refused RPC access token gets. The services
+ * share no module; `host-access-denial.cross-service.test.ts` compares both
+ * copies.
+ */
+export const INTERNAL_SERVICE_AUTH_REFUSAL_HEADER = 'x-internal-service-auth-refusal'
+export const INTERNAL_SERVICE_CREDENTIAL_REJECTED = 'service_credential_rejected'
+
 function controlApiHeaders(rpcAccessToken: string): Record<string, string> {
   return {
     authorization: `Bearer ${config.controlApiServiceToken}`,
@@ -244,7 +254,18 @@ export async function fetchHostConnectionFromControlApi(
     await drainBody(response)
     return hostAccessDenied('host_access_denied')
   }
-  if (status === 401 || status === 409) {
+  if (status === 401) {
+    // control-api marks a refusal of rpc-proxy's own service credential; every
+    // other 401 refuses the caller (its RPC token) or is an upstream 401 that
+    // control-api forwards. Only the exact value counts as the mark.
+    const refusal = response.headers.get(INTERNAL_SERVICE_AUTH_REFUSAL_HEADER)
+    await drainBody(response)
+    if (refusal === INTERNAL_SERVICE_CREDENTIAL_REJECTED) {
+      return { unavailable: true, cause: 'service_credential_rejected' }
+    }
+    return { rejected: true, status }
+  }
+  if (status === 409) {
     await drainBody(response)
     return { rejected: true, status }
   }

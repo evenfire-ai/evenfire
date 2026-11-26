@@ -1,9 +1,16 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
 import fc from 'fast-check'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
+import {
+  type GateAnswer,
+  emitGateAnswers,
+  gateAnswer,
+  responseFromGateAnswer,
+} from '../../test/support/internalServiceGateAnswers.js'
+import { producerBudgetMs } from '../../test/support/producerChild.js'
 import { config } from '../config.js'
 import { requestHostWakeFromControlApi } from '../services/controlApiRestService.js'
 import { isHostResolveRefusal, respondHostResolveRefusal } from '../services/hostAccessDenial.js'
@@ -89,6 +96,19 @@ function fakeResponse() {
   }
   return { res: res as unknown as ExpressResponse, state }
 }
+
+// Setup, not behaviour under test: control-api's internal service gate fixture
+// runs once in a `tsx` child, bounded by PRODUCER_CHILD_TIMEOUT_MS. Its answer to
+// a wrong rpc-proxy service credential is the `service_credential` re-resolve
+// answer of the model-based test.
+let gateAnswers: GateAnswer[] | undefined
+
+beforeAll(async () => {
+  gateAnswers = await emitGateAnswers(
+    'control-api/test/fixtures/emitInternalServiceGateRefusalsFixture.ts',
+    { userId: USER_ID, hostRef: 'chatllm' }
+  )
+}, producerBudgetMs(1))
 
 const originalFetch = globalThis.fetch
 
@@ -230,6 +250,7 @@ type ReResolveAnswer =
   | 'missing_assertion'
   | 'network'
   | 'timeout'
+  | 'service_credential'
 type RetryHostAnswer = 'down' | 'ok'
 type AnswerQueues = { reResolve: ReResolveAnswer[][]; host: RetryHostAnswer[][] }
 
@@ -241,6 +262,7 @@ const RE_RESOLVE_ANSWERS: readonly ReResolveAnswer[] = [
   'missing_assertion',
   'network',
   'timeout',
+  'service_credential',
 ]
 
 // Table M with the route's denialAnswer 'forbidden', for each refusal.
@@ -257,6 +279,7 @@ const REFUSAL_ANSWER: Record<
   missing_assertion: { status: 503, body: { error: 'authority_unavailable' } },
   network: { status: 503, body: { error: 'authority_unavailable' } },
   timeout: { status: 504, body: { error: 'Gateway Timeout' } },
+  service_credential: { status: 503, body: { error: 'authority_unavailable' } },
 }
 
 function emptyQueues(): AnswerQueues {
@@ -346,7 +369,7 @@ describe('V1 wake-and-hold re-resolve outcomes (model-based)', () => {
     let runs = 0
     // Requests per terminal kind across runs: the generated sequences reach a
     // refusal and a Host still down after the retry, not only 200.
-    const reached = { refused: 0, hostWaking: 0, ok: 0 }
+    const reached = { refused: 0, hostWaking: 0, ok: 0, serviceCredential: 0 }
 
     await fc.assert(
       fc.asyncProperty(fc.scheduler(), ANSWER_COMMANDS, async (s, commands) => {
@@ -385,6 +408,9 @@ describe('V1 wake-and-hold re-resolve outcomes (model-based)', () => {
               return new TypeError('fetch failed')
             case 'timeout':
               return new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+            case 'service_credential':
+              // control-api's gate refusing rpc-proxy's own service credential.
+              return responseFromGateAnswer(gateAnswer(gateAnswers, 'gate_token_wrong', 'GET'))
           }
         }
 
@@ -473,6 +499,7 @@ describe('V1 wake-and-hold re-resolve outcomes (model-based)', () => {
           const { token, state } = results[index]!
           const expected = expectedOutcome(model, index)
           if (expected.refused) reached.refused++
+          if (model.reResolve[index]![0] === 'service_credential') reached.serviceCredential++
           else if (expected.status === 200) reached.ok++
           else reached.hostWaking++
           const calls = hostCalls.get(requestId)!
@@ -503,5 +530,6 @@ describe('V1 wake-and-hold re-resolve outcomes (model-based)', () => {
     expect(reached.refused).toBeGreaterThan(0)
     expect(reached.hostWaking).toBeGreaterThan(0)
     expect(reached.ok).toBeGreaterThan(0)
+    expect(reached.serviceCredential).toBeGreaterThan(0)
   })
 })

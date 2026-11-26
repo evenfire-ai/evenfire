@@ -267,7 +267,8 @@ describe('control-api canonical host access client', () => {
     expectOneCall(fetchImpl, method)
   })
 
-  // 401: route or gates. GET 409: hardening, the route never writes it.
+  // 401 without the gate's mark: caller token or a forwarded upstream 401. GET
+  // 409: hardening, the route never writes it.
   it.each([401, 409] as const)('a %s on GET is a rejection', async status => {
     const fetchImpl = jsonResponse(status, { error: 'x' })
 
@@ -435,4 +436,181 @@ describe('control-api canonical host access client', () => {
     ).rejects.toBeInstanceOf(TypeError)
     expectOneCall(fetchImpl, 'GET')
   })
+
+  // J1 (R1-L7): control-api's service gate marks its 401 with this header and
+  // value (`internalServiceAuth.ts`); the producer answers themselves are pinned
+  // in `internal-service-gate-refusal.producerInterop.test.ts`. Every row below
+  // but the 401 with the header absent is hardening: a shape control-api does
+  // not write. Pinned literally.
+  const GATE_REFUSAL_HEADER = 'x-internal-service-auth-refusal'
+  const GATE_REFUSAL_VALUE = 'service_credential_rejected'
+
+  const answerWith = (
+    status: number,
+    headers: Array<[string, string]>,
+    body: BodyInit | null = JSON.stringify({ error: 'Unauthorized' })
+  ) =>
+    vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) =>
+        new Response(body, { status, headers: [['content-type', 'application/json'], ...headers] })
+    )
+
+  const callWith = (fetchImpl: ReturnType<typeof answerWith>, method: 'GET' | 'POST') =>
+    fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+      ...(method === 'POST' ? { directRunBinding: BINDING } : {}),
+      fetchImpl: fetchImpl as typeof fetch,
+    })
+
+  // 'absent' is control-api's own unmarked 401: the caller's RPC token
+  // (`rpcAccessAuth.ts`, `users.ts:98`), or an upstream 401 control-api forwards
+  // through its error handler.
+  const UNMARKED_401_HEADERS: Array<{ label: string; headers: Array<[string, string]> }> = [
+    { label: 'absent', headers: [] },
+    { label: 'empty', headers: [[GATE_REFUSAL_HEADER, '']] },
+    { label: 'another value', headers: [[GATE_REFUSAL_HEADER, 'caller_token_rejected']] },
+    {
+      label: 'sent twice',
+      headers: [
+        [GATE_REFUSAL_HEADER, GATE_REFUSAL_VALUE],
+        [GATE_REFUSAL_HEADER, GATE_REFUSAL_VALUE],
+      ],
+    },
+    {
+      label: 'in another case',
+      headers: [[GATE_REFUSAL_HEADER, GATE_REFUSAL_VALUE.toUpperCase()]],
+    },
+  ]
+
+  it.each(
+    UNMARKED_401_HEADERS.flatMap(row =>
+      (['GET', 'POST'] as const).map(method => ({ ...row, method }))
+    )
+  )(
+    'a 401 with the refusal header $label on $method is a rejection',
+    async ({ headers, method }) => {
+      const fetchImpl = answerWith(401, headers)
+
+      await expect(callWith(fetchImpl, method)).resolves.toEqual({ rejected: true, status: 401 })
+      expectOneCall(fetchImpl, method)
+    }
+  )
+
+  it.each(['GET', 'POST'] as const)(
+    'the exact refusal header on a 409 on %s keeps the rejection',
+    async method => {
+      const fetchImpl = answerWith(409, [[GATE_REFUSAL_HEADER, GATE_REFUSAL_VALUE]])
+
+      await expect(callWith(fetchImpl, method)).resolves.toEqual({ rejected: true, status: 409 })
+      expectOneCall(fetchImpl, method)
+    }
+  )
+
+  it.each(['GET', 'POST'] as const)(
+    'the exact refusal header on a 403 on %s keeps the denial',
+    async method => {
+      const fetchImpl = answerWith(
+        403,
+        [[GATE_REFUSAL_HEADER, GATE_REFUSAL_VALUE]],
+        JSON.stringify(FORBIDDEN_BODY)
+      )
+
+      await expect(callWith(fetchImpl, method)).resolves.toEqual({
+        denied: true,
+        code: 'host_access_denied',
+      })
+      expectOneCall(fetchImpl, method)
+    }
+  )
+
+  it('the exact refusal header on a GET 404 keeps the denial', async () => {
+    const fetchImpl = answerWith(404, [[GATE_REFUSAL_HEADER, GATE_REFUSAL_VALUE]])
+
+    await expect(callWith(fetchImpl, 'GET')).resolves.toEqual({
+      denied: true,
+      code: 'host_access_denied',
+    })
+    expectOneCall(fetchImpl, 'GET')
+  })
+
+  it.each([
+    [404, 'POST'],
+    [500, 'GET'],
+    [500, 'POST'],
+  ] as const)(
+    'the exact refusal header on a %s on %s keeps the unavailable status',
+    async (status, method) => {
+      const fetchImpl = answerWith(status, [[GATE_REFUSAL_HEADER, GATE_REFUSAL_VALUE]])
+
+      await expect(callWith(fetchImpl, method)).resolves.toEqual({
+        unavailable: true,
+        cause: 'http_status',
+        status,
+      })
+      expectOneCall(fetchImpl, method)
+    }
+  )
+
+  it.each([
+    [
+      'GET',
+      {
+        name: 'host-a',
+        url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+        headers: {},
+        edgeAssertion: 'edge-assertion-fixture',
+      },
+    ],
+    [
+      'POST',
+      {
+        name: 'host-a',
+        url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+        headers: {},
+        attributionBindingStatus: 'recorded',
+        edgeAssertion: 'edge-assertion-fixture',
+      },
+    ],
+  ] as const)(
+    'the exact refusal header on a valid 200 on %s keeps the connection',
+    async (method, connection) => {
+      const fetchImpl = answerWith(
+        200,
+        [[GATE_REFUSAL_HEADER, GATE_REFUSAL_VALUE]],
+        JSON.stringify({
+          userId: 'user-1',
+          hostRef: 'host-a',
+          url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+          ...(method === 'POST' ? { bindingStatus: 'recorded' } : {}),
+          edgeAssertion: 'edge-assertion-fixture',
+        })
+      )
+
+      await expect(callWith(fetchImpl, method)).resolves.toEqual(connection)
+      expectOneCall(fetchImpl, method)
+    }
+  )
+
+  // The body is drained best effort; a failing body stream does not change the
+  // verdict the header gives.
+  it.each([
+    [
+      'marked',
+      [[GATE_REFUSAL_HEADER, GATE_REFUSAL_VALUE]],
+      { unavailable: true, cause: 'service_credential_rejected' },
+    ],
+    ['unmarked', [], { rejected: true, status: 401 }],
+  ] as const)(
+    'a 401 (%s) whose body stream fails keeps the verdict of its header',
+    async (_label, headers, refusal) => {
+      const failingBody = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.error(new Error('body stream failed'))
+        },
+      })
+      const fetchImpl = answerWith(401, [...headers], failingBody)
+
+      await expect(callWith(fetchImpl, 'GET')).resolves.toEqual(refusal)
+      expectOneCall(fetchImpl, 'GET')
+    }
+  )
 })

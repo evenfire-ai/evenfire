@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync, randomUUID } from 'node:crypto'
@@ -14,6 +14,13 @@ import {
   HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
   type HostEdgeRpcProxyRoute,
 } from '@clerum/action-context-contracts'
+import {
+  type GateAnswer,
+  emitGateAnswers,
+  gateAnswer,
+  responseFromGateAnswer,
+} from '../../test/support/internalServiceGateAnswers.js'
+import { producerBudgetMs } from '../../test/support/producerChild.js'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
@@ -87,6 +94,19 @@ let controlApiHostAccessAnswer: ((index: number) => Response) | null
 let hostCalls: HostCall[]
 // Answers the Host request with the given index (0 = first Host call).
 let hostAnswer: (index: number, path: string) => Response
+
+// Setup, not behaviour under test: control-api's internal service gate fixture
+// runs once in a `tsx` child, bounded by PRODUCER_CHILD_TIMEOUT_MS. Its answers
+// are the two control-api producer stubs of FAILURE_STUBS, read when a test
+// runs.
+let gateAnswers: GateAnswer[] | undefined
+
+beforeAll(async () => {
+  gateAnswers = await emitGateAnswers(
+    'control-api/test/fixtures/emitInternalServiceGateRefusalsFixture.ts',
+    { userId: USER_ID, hostRef: 'chatllm' }
+  )
+}, producerBudgetMs(1))
 
 function headersOf(init?: RequestInit): Record<string, string> {
   return Object.fromEntries(new Headers(init?.headers).entries())
@@ -1281,18 +1301,25 @@ function withoutKey(key: string): Record<string, unknown> {
   return connection
 }
 
-// Which of these answers control-api's host-access route can send, at R
-// (paths under `control-api/src/`):
-// - Written by the route or its gates: 401 (`middleware/rpcAccessAuth.ts:24,30,
-//   47,53`, `routes/rpc-access/users.ts:98`, `middleware/internalServiceAuth.ts:
-//   38-61`); both 403 stubs (`users.ts:64-75`; without a reason also
-//   `rpcAccessAuth.ts:34,57`); 409 and 400 on POST only (`users.ts:312`, `:272`);
-//   200 without an edge assertion, only from a control-api older than it.
+// Which of these answers control-api's host-access route can send (paths under
+// `control-api/src/`):
+// - Written by the route or its gates: a 401 without the service gate's mark
+//   from the caller-token checks (`middleware/rpcAccessAuth.ts:24,30,47,53`,
+//   `routes/rpc-access/users.ts:98`); the service gate's 401
+//   (`middleware/internalServiceAuth.ts`), which carries the
+//   `x-internal-service-auth-refusal` mark and is an unavailable authority (the
+//   two control-api producer stubs answer both 401s); the 403 with a reason
+//   (`users.ts:64-75`: `denyHostAccess` always sets
+//   `x-host-access-denial-reason`); the 403 without a reason
+//   (`rpcAccessAuth.ts:34,57`); 409 and 400 on POST only (`users.ts:312`,
+//   `:272`); 200 without an edge assertion, only from a control-api older than
+//   it.
 // - Not written by the route, but reachable through the error handler, an
 //   intermediary or the transport: 500 (`next(error)` at `users.ts:252,329`);
 //   404 (the `app.ts:304` fallthrough under version skew, or a Kubernetes 404
-//   that `http/errorHandler.ts:46-67,217-248` forwards); a 403 without a reason
-//   also as a forwarded Kubernetes RBAC 403; 429 as a forwarded Kubernetes 429;
+//   that `http/errorHandler.ts:46-67,217-248` forwards); a 401 without the mark
+//   as a forwarded Kubernetes 401; a 403 without a reason also as a forwarded
+//   Kubernetes RBAC 403; 429 as a forwarded Kubernetes 429;
 //   503 only from an intermediary, never from control-api on this path; timeout
 //   and network failure. See `app.ts:100-146`, `:174-289` and
 //   `errorHandler.ts:157-300`.
@@ -1303,7 +1330,9 @@ function withoutKey(key: string): Record<string, unknown> {
 //   44-46,77-84` returns the request's own userId and hostRef and always builds
 //   the url).
 const FAILURE_STUBS: FailureStub[] = [
-  // 401: route or gates. 409: route-written on POST only; GET 409 is hardening.
+  // 401 without the gate's mark: the caller-token checks or a forwarded
+  // Kubernetes 401, and the gate 401 of a control-api older than the mark. 409:
+  // route-written on POST only; GET 409 is hardening.
   ...[401, 409].map(
     (status): FailureStub => ({
       failure: String(status),
@@ -1320,6 +1349,24 @@ const FAILURE_STUBS: FailureStub[] = [
       },
     })
   ),
+  {
+    // Gate-written: control-api's own answer to a wrong rpc-proxy service
+    // credential, carrying the refusal mark (from the fixture).
+    failure: 'gate 401 (producer)',
+    answer: method => responseFromGateAnswer(gateAnswer(gateAnswers, 'gate_token_wrong', method)),
+    GET: UNAVAILABLE,
+    POST: UNAVAILABLE,
+  },
+  {
+    // Route-written: control-api's own answer to an RPC token whose signature
+    // does not verify (the expired-token branch), without the mark (from the
+    // fixture).
+    failure: 'caller-token 401 (producer)',
+    answer: method =>
+      responseFromGateAnswer(gateAnswer(gateAnswers, 'caller_token_unverifiable', method)),
+    GET: { kind: 'refusal', status: 401, body: { error: 'Unauthorized' } },
+    POST: { kind: 'refusal', status: 401, body: { error: 'Unauthorized' } },
+  },
   {
     // Route-written (`users.ts:64-75`).
     failure: '403 with the reason team_membership_missing',
@@ -1544,6 +1591,8 @@ describe('V1 first resolve outcome', () => {
         expect(hostAccessCalls()).toHaveLength(1)
         expect(res.status).toBe(expected.status)
         expect(res.body).toEqual(expected.body)
+        // rpc-proxy never relays control-api's refusal mark.
+        expect(res.headers['x-internal-service-auth-refusal']).toBeUndefined()
         expect(hostCalls).toEqual([])
         expect(wakeCalls()).toEqual([])
 
@@ -1605,6 +1654,8 @@ describe('V1 re-resolve outcome', () => {
         expect(wakeCalls()).toHaveLength(1)
         expect(res.status).toBe(expected.status)
         expect(res.body).toEqual(expected.body)
+        // rpc-proxy never relays control-api's refusal mark.
+        expect(res.headers['x-internal-service-auth-refusal']).toBeUndefined()
         const retryFailures = warn.mock.calls
           .map(args => String(args[0]))
           .filter(line => line.startsWith('[RPC_PROXY] wake-hold') && line.includes('retry failed'))
