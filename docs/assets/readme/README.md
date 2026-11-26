@@ -1,8 +1,9 @@
-# README showcase images
+# README showcase images — light mode
 
 The root [README](../../../README.md#see-evenfire-in-action) uses the six branded
-PNG exports in this folder, in the order below. Each image has its own section
-heading, explanatory copy and descriptive alt text.
+light-mode PNG exports in this folder, in the order below. Each image has its own
+section heading, explanatory copy and descriptive alt text. The dark-frame
+versions remain on the separate `docs/readme-showcase` branch.
 
 | File | Image copy | Screenshot |
 | --- | --- | --- |
@@ -18,7 +19,7 @@ heading, explanatory copy and descriptive alt text.
 - Keep these numbered filenames when replacing exports so the README links
   continue to work. Preserve the PNG format; use a matching extension and update
   the README if switching formats.
-- Keep the shared blue frame and readable interface details. Match the existing
+- Keep the light blue-and-white frame and readable interface details. Match the existing
   canvas proportions and avoid stretching screenshots.
 - Update alt text and surrounding copy if the depicted workflow changes.
 - Use demonstration data and remove private emails, credentials and private URLs
