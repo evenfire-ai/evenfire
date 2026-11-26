@@ -573,12 +573,26 @@ function channelOf(
 ) {
   const channels = block?.channels
   const entry = isRecord(channels) ? channels[type] : undefined
-  const approvers = isRecord(entry) && Array.isArray(entry.approvers) ? entry.approvers : []
   return {
     switch: readChannelSwitch(snapshotOf(block), type),
     enabled: isRecord(entry) && entry.enabled !== undefined ? entry.enabled : true,
-    approvers: [...new Set(approvers.map(String))].sort(),
+    approvers: [
+      ...new Set(approversOf(isRecord(entry) ? entry.approvers : undefined, type)),
+    ].sort(),
   }
+}
+
+/**
+ * A channel's approvers as exact strings, never coerced; absent is none. The
+ * model writes them only as lists of strings, and mcp-host refuses any other
+ * shape (approverPolicy.ts), so one is a harness error.
+ */
+function approversOf(listed: unknown, type: string): string[] {
+  if (listed === undefined) return []
+  if (!Array.isArray(listed) || !listed.every(item => typeof item === 'string')) {
+    throw harnessError(`channels.${type}.approvers is ${JSON.stringify(listed)}, not a string list`)
+  }
+  return listed
 }
 
 /** The judge model: a trimmed string, or none (the code default). */
