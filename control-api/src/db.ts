@@ -19,6 +19,10 @@ import {
   LAST_DEV_MIGRATION_VERSION,
   applyPendingPr1Migrations,
 } from './migrations/migrationRunner.js'
+import {
+  WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION,
+  applyWorkflowRunCancelRequestSchema,
+} from './migrations/workflowRunCancelRequest.js'
 import { rootLogger } from './observability/logger.js'
 import { OIDC_MEMBER_LINK_MIGRATION, applyOidcMemberLinkSchema } from './oidc/memberLinkSchema.js'
 import {
@@ -6791,6 +6795,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: OIDC_MEMBER_LINK_MIGRATION,
     apply: applyOidcMemberLinkSchema,
+    lockRetries: 2,
+  },
+  {
+    version: WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION,
+    apply: applyWorkflowRunCancelRequestSchema,
     lockRetries: 2,
   },
 ]

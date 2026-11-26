@@ -204,7 +204,8 @@ async function archiveOneBatch(
          trigger_source, idempotency_key, triggered_at, started_at,
          completed_at, duration_ms, final_phase, step_count,
          error_message, output_summary, snapshot_sha,
-         template_ref, template_sha, reaped_at
+         template_ref, template_sha, reaped_at,
+         cancel_requested_at, canceled_by
        )
        SELECT
          wr.run_id,
@@ -249,7 +250,9 @@ async function archiveOneBatch(
          'db-first'          AS snapshot_sha,
          NULL::text          AS template_ref,
          NULL::text          AS template_sha,
-         NOW()               AS reaped_at
+         NOW()               AS reaped_at,
+         wr.cancel_requested_at,
+         wr.canceled_by
        FROM workflow_runs wr
        WHERE wr.run_id = ANY($1::uuid[])
        ON CONFLICT (run_id) DO NOTHING`,

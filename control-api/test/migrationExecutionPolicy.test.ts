@@ -232,10 +232,11 @@ describe('D34 migration execution policy', () => {
       '0155_workflow_run_failure_reason',
       '0156_workflow_authorization_pause',
     ])
-    expect(RUNNER_MIGRATION_VERSIONS.slice(-3)).toEqual([
+    expect(RUNNER_MIGRATION_VERSIONS.slice(-4)).toEqual([
       '0157_governed_trace_retention_indexed',
       '0158_governed_trace_retention_hardening',
       '0159_oidc_member_links',
+      '0160_workflow_run_cancel_request',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -581,10 +582,10 @@ describe('D34 PR1 migration runner', () => {
 
     expect(applied).toEqual(RUNNER_MIGRATION_VERSIONS)
     // One transaction per version without post-schema work (0137-0150,
-    // 0153-0154, 0157-0159); a version with it commits its schema, each validation and
+    // 0153-0154, 0157-0160); a version with it commits its schema, each validation and
     // its receipt separately: 0151 1 + 4 + 1, 0152 1 + 1 + 1, 0155 1 + 1 + 1,
     // 0156 1 + 2 + 1.
-    const transactions = 19 + 6 + 3 + 3 + 4
+    const transactions = 20 + 6 + 3 + 3 + 4
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
@@ -867,7 +868,7 @@ describe('D34 PR1 migration runner', () => {
     }
   })
 
-  it('registers lock retries only on the migrations that take a lock on users or team_members', async () => {
+  it('registers lock retries only on the migrations that wait for a lock on a busy shared table', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const withRetries = CONTROL_API_MIGRATIONS.filter(
       migration => (migration as { lockRetries?: number }).lockRetries !== undefined
@@ -877,6 +878,9 @@ describe('D34 PR1 migration runner', () => {
       ['0147_gfs_watch_session_users_notify', 2],
       // 0159 adds a foreign key to users, which needs a lock on it.
       ['0159_oidc_member_links', 2],
+      // 0160 alters workflow_runs, which the workflow-recipes processor reads
+      // and updates on every poll tick.
+      ['0160_workflow_run_cancel_request', 2],
     ])
   })
 
@@ -1172,6 +1176,7 @@ describe('PR1 earlier-head guard', () => {
       '0157_governed_trace_retention_indexed',
       '0158_governed_trace_retention_hardening',
       '0159_oidc_member_links',
+      '0160_workflow_run_cancel_request',
     ])
   })
 })

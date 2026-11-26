@@ -5,6 +5,7 @@ import { GOVERNED_TRACE_RETENTION_MIGRATION } from './governedTraceRetention.js'
 import { GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION } from './governedTraceRetentionHardening.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { hasPostSchemaWork, preparePr1Migration } from './pr1OnlineIndexPlan.js'
+import { WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION } from './workflowRunCancelRequest.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0137_user_access_foundation',
@@ -79,6 +80,7 @@ export const RUNNER_MIGRATION_VERSIONS = Object.freeze([
   GOVERNED_TRACE_RETENTION_MIGRATION,
   GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
   OIDC_MEMBER_LINK_MIGRATION,
+  WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION,
 ] as const)
 
 export type MigrationDescriptor = {
