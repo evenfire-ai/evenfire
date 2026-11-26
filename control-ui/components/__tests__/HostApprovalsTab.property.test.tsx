@@ -34,7 +34,8 @@
  *   save or a switch that settled in that step, with that outcome's text and
  *   tone, and each outcome that owes a toast shows one. A success toast with
  *   no `saved` save behind it breaks S3; with no `saved` or `already` switch,
- *   S4.
+ *   S4. So does a success toast in other words, unless it is one of the
+ *   page's own save toasts.
  * - At rest, once the scheduler is drained and the clock has run out: S1, S2,
  *   S3, S4, S7 and S8 on the history, L1 and L2 again, L3, and L4 (every
  *   switch run was shown, in its tab or by its toast).
@@ -220,6 +221,17 @@ const PROXY_504 = wire('../../test/fixtures/wire/proxy-504.wire.json')
 // ── Copy the checks read (spec §6.3 step 7, §6.4, §6.5; written out) ────────
 
 const TOOLS_SAVED_TOAST = 'Per-tool overrides saved.'
+/**
+ * The success toasts of the page's own saves that the model presses: Overview
+ * and Model (app/hosts/[name]/page.tsx) and the guardrail removal
+ * (components/HostGuardrailsSection). Every other success toast must be an
+ * approval toast that an outcome owes.
+ */
+const PAGE_SAVE_TOASTS: ReadonlySet<string> = new Set([
+  'Agent configuration saved.',
+  'Model configuration saved.',
+  'sample-hook removed from this agent.',
+])
 const MODE_BY_LABEL: Readonly<Record<string, 'manual' | 'auto' | 'allow_all'>> = {
   Manual: 'manual',
   Auto: 'auto',
@@ -1383,7 +1395,8 @@ function toastsDue(w: World, settled: ReadonlyArray<SaveRecord | SwitchRecord>):
  * Ruling 67(2): every approval toast this step shows comes from an outcome
  * that settled in it, with that outcome's text and tone, and every outcome
  * that owes a toast shows one. A success toast with no `saved` save (S3) or
- * no `saved` or `already` switch (S4) behind it is a false success.
+ * no `saved` or `already` switch (S4) behind it is a false success, and so is
+ * a success toast in any other words but the page's own save toasts.
  */
 function checkApprovalToasts(w: World, settled: ReadonlyArray<SaveRecord | SwitchRecord>): void {
   const shown = toastsThisStep(w).filter(toast => isApprovalToast(toast.text))
@@ -1414,6 +1427,18 @@ function checkApprovalToasts(w: World, settled: ReadonlyArray<SaveRecord | Switc
       w,
       property,
       `a ${toast.tone} toast no outcome of this step owes: "${toast.text.slice(0, 120)}"`
+    )
+  }
+  // Ruling 67(2) holds every success toast to an outcome, whatever its words:
+  // one in other words is a false success unless it is one of the page's own.
+  const switchOnly = settled.length > 0 && settled.every(record => !('input' in record))
+  for (const toast of toastsThisStep(w)) {
+    if (toast.tone !== 'success' || isApprovalToast(toast.text)) continue
+    if (PAGE_SAVE_TOASTS.has(toast.text)) continue
+    flag(
+      w,
+      switchOnly ? 'S4' : 'S3',
+      `a success toast that is neither an approval toast nor the page's own: "${toast.text.slice(0, 120)}"`
     )
   }
 }
