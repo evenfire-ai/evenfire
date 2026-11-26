@@ -265,6 +265,13 @@ export type BrowserSignInHarness = {
    * `{ owner: false }`, the auth owner queue settled.
    */
   drain(options?: HarnessDrainOptions): Promise<void>
+  /**
+   * A copy of what the fake token store holds: environment key → session token. It is the
+   * store's content, as a restore would read it, so a model can learn which session a restore
+   * would bring back after commands whose order the scheduler chose. Empty with
+   * `realTokenStore`, whose content is `realTokenStore.keychain`.
+   */
+  storedSessionTokens(): ReadonlyMap<string, string>
   /** Set only when the harness was built with `realTokenStore`. */
   realTokenStore?: RealTokenStoreHandle
 }
@@ -1023,6 +1030,7 @@ export async function createBrowserSignInHarness(
         quietTurns = schedulerBusy || !ownerSettled ? 0 : quietTurns + 1
       }
     },
+    storedSessionTokens: () => new Map(savedTokens),
     realTokenStore,
   }
 
