@@ -364,6 +364,11 @@ kubectl -n <namespace> patch host <name> --type=json \
 The patch needs `spec.approval` to exist. On a Host without it the ceiling is
 already Manual.
 
+**Known limit: a Host CRD rolled back.** After a rollback to a Host CRD without
+`modeCeiling`, the switch reports "It was already Manual." while the stored
+ceiling is only hidden by the older schema. After upgrading the CRD again,
+check the ceiling.
+
 ### Other things to know
 
 - **Agents with no approval settings of their own.** The tab says the agent
@@ -389,7 +394,11 @@ already Manual.
   `spec.approval` (the banner shows no values). Edits made in the tab,
   `kubectl patch` and `kubectl edit` do not raise it. The next deploy puts the
   manifest's values back, including a higher ceiling, so change the manifest
-  too.
+  too. If a server-side apply owned only `modeCeiling`, the off switch's write
+  takes that field over: the switch's message still warns, but after a reload
+  the banner is gone, and a re-apply that forces conflicts
+  (`kubectl apply --server-side --force-conflicts`) puts the manifest's
+  ceiling back.
 - **HTTP allowlist.** In Auto, `http_request` runs with no card. Unless
   `CLERUM_HTTP_ALLOWLIST` is set on mcp-host, it can reach any public address
   (it refuses private ones). Neither `deploy/base` nor the minikube overlay
@@ -428,12 +437,15 @@ the control-api logger. It records the Host, namespace, the admin's `operatorSub
 String values are written with control, C1, bidirectional and line-separator
 characters as `\uXXXX` escapes.
 
-A Host create, or an update that carries a version, also stores the same
+A Host create, or an update that carries a version, also stores the intended
 change as JSON in the `summary` of the administrative intent event for the
 request, readable
 through the administrative event detail in control-api's tracing API. It is
-capped at 4096 characters. If the change is larger, other tools are dropped
-first, then long string values become `(value too long)`, then the field values
+built from the request and, for an update, the read just before the write, not
+from what the cluster stored: under an older Host CRD it can record a field
+that the apiserver then prunes. It is capped at 4096 characters. If the change
+is larger, other tools are dropped first, then long string values become
+`(value too long)`, then the field values
 become counts (the changed `modeCeiling` and `defaultPolicy` keep their old and
 new values, and every native tool entry stays). If even that cannot fit,
 control-api logs a `host_approval_summary_oversize` warning and cuts native
