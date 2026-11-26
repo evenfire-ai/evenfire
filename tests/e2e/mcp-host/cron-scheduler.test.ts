@@ -739,9 +739,30 @@ async function waitForCronLog(
   )
 }
 
-/** Send a chat request that should run cron_manage, approving the tool call if asked. */
-async function sendCronRequest(content: string, userId: string): Promise<void> {
-  let res = await sendMessage(content, { userId })
+/**
+ * Appended to every Phase 3 request. Without it the agent sometimes answers
+ * "Created cron job ..." or "Deleted." from the conversation instead of
+ * calling the tool, and no Cron line follows.
+ */
+const CRON_TOOL_INSTRUCTION =
+  'Call the cron_manage tool to do this now; do not answer from memory or from earlier messages.'
+
+/**
+ * Phase 3 user ids carry this run's id, so every run starts each user with an
+ * empty chat session. The shared counter restarts at 200 on every run, which
+ * reused the sessions of earlier runs.
+ */
+const PHASE3_RUN_ID = Date.now()
+let phase3UserCounter = 0
+const phase3UserId = () => `cron-timing-${PHASE3_RUN_ID}-${++phase3UserCounter}`
+
+/**
+ * Send a chat request that should run cron_manage, approving the tool call if
+ * asked. Returns the agent's last reply, so a missing Cron line can be
+ * reported with what the agent said instead.
+ */
+async function sendCronRequest(content: string, userId: string): Promise<string> {
+  let res = await sendMessage(`${content} ${CRON_TOOL_INSTRUCTION}`, { userId })
   expect(res.status, JSON.stringify(res.data)).toBe(200)
 
   if (
@@ -762,18 +783,19 @@ async function sendCronRequest(content: string, userId: string): Promise<void> {
     expect(approvalRes.status, JSON.stringify(approvalRes.data)).toBe(200)
     expect(approvalRes.data?.success, JSON.stringify(approvalRes.data)).toBe(true)
   }
+  return JSON.stringify(res.data?.response ?? res.data).slice(0, 800)
 }
 
 /** Ask the agent to create an every-minute job; returns its id from the Created line. */
 async function createEveryMinuteJob(name: string, userId: string, since: number): Promise<string> {
-  await sendCronRequest(
+  const reply = await sendCronRequest(
     `Create a cron job named '${name}' with the schedule */1 * * * * (every minute). ` +
       "Its task content must be exactly: 'Reply with the single word OK.'",
     userId
   )
   const entries = await waitForCronLog(
     since,
-    `the agent to run cron_manage create for ${name}`,
+    `the agent to run cron_manage create for ${name} (agent reply: ${reply})`,
     es => es.some(e => e.event === 'Created' && e.jobName === name),
     ACTION_TIMEOUT_MS
   )
@@ -796,10 +818,10 @@ async function runJobAction(
       : action === 'disable'
         ? `Disable the cron job with id ${jobId}.`
         : `Delete the cron job with id ${jobId}.`
-  await sendCronRequest(request, userId)
+  const reply = await sendCronRequest(request, userId)
   const entries = await waitForCronLog(
     since,
-    `the agent to run cron_manage ${action} for job ${jobId}`,
+    `the agent to run cron_manage ${action} for job ${jobId} (agent reply: ${reply})`,
     es => linesOf(es, jobId, event).length > before,
     ACTION_TIMEOUT_MS
   )
@@ -841,7 +863,7 @@ const isoTimes = (entries: CronLogEntry[]) => entries.map(e => new Date(e.at).to
 describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 3: Scheduler timing', () => {
   it('CR-12: an every-minute job fires once in every minute', async () => {
     const since = Date.now() - MINUTE_MS
-    const userId = `cron-test-${++testCounter}`
+    const userId = phase3UserId()
     const name = `cadence-e2e-${Date.now()}`
     const jobId = await createEveryMinuteJob(name, userId, since)
 
@@ -881,8 +903,8 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 3: Scheduler timing', () => {
   it('CR-13: disabling after repeated enables stops every run, and re-enabling waits for the next cron time', async () => {
     const since = Date.now() - MINUTE_MS
     const runId = Date.now()
-    const targetUser = `cron-test-${++testCounter}`
-    const controlUser = `cron-test-${++testCounter}`
+    const targetUser = phase3UserId()
+    const controlUser = phase3UserId()
     const target = await createEveryMinuteJob(`toggle-target-${runId}`, targetUser, since)
     const control = await createEveryMinuteJob(`toggle-control-${runId}`, controlUser, since)
 
