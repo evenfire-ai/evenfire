@@ -74,8 +74,8 @@ beforeEach(() => {
 function getHandler() {
   const bot = grammy.instances[0]
   if (!bot) throw new Error('bot was not started')
-  const call = bot.on.mock.calls.find((entry: unknown[]) => entry[0] === 'message:text')
-  if (!call) throw new Error('message:text handler not registered')
+  const call = bot.on.mock.calls.find((entry: unknown[]) => entry[0] === 'message')
+  if (!call) throw new Error('message handler not registered')
   return call[1] as (ctx: unknown) => void
 }
 

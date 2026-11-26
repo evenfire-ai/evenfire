@@ -82,11 +82,12 @@ describe('ChannelReader provider event idempotency', () => {
     expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
 
-  it('drops a Telegram event refused with an authorization error and ignores its redelivery', async () => {
+  it('drops a Telegram event refused with a transient authorization error without caching dedupe so retries succeed', async () => {
     const rpc = rpcClient()
     rpc.authorizeProviderMessage = vi
       .fn()
       .mockResolvedValueOnce({ authorized: false, reason: 'error' })
+      .mockResolvedValueOnce({ authorized: true })
     const reader = new ChannelReader({
       rpcClient: rpc,
       notificationDeliveryClient: null,
@@ -94,19 +95,21 @@ describe('ChannelReader provider event idempotency', () => {
     })
     const message = telegramMessage()
 
-    await reader.handleMessages([message, message])
-    expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
     await reader.handleMessages([message])
-
     expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
     expect(rpc.sendMessage).not.toHaveBeenCalled()
+
+    await reader.handleMessages([message])
+
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledTimes(2)
+    expect(rpc.sendMessage).toHaveBeenCalledOnce()
   })
 
-  it('records denied provider events so duplicate redelivery does not reauthorize', async () => {
+  it('records unresolved provider events so duplicate redelivery does not reauthorize', async () => {
     const rpc = rpcClient()
     rpc.authorizeProviderMessage = vi
       .fn()
-      .mockResolvedValueOnce({ authorized: false })
+      .mockResolvedValueOnce({ authorized: false, reason: 'unresolved' })
       .mockResolvedValueOnce({ authorized: true })
     const reader = new ChannelReader({
       rpcClient: rpc,

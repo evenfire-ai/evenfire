@@ -105,8 +105,8 @@ beforeEach(() => {
 // ── Helpers ──
 
 function getMessageHandler(bot: { on: ReturnType<typeof vi.fn> }) {
-  const call = bot.on.mock.calls.find((c: unknown[]) => c[0] === 'message:text')
-  if (!call) throw new Error('message:text handler not registered on bot')
+  const call = bot.on.mock.calls.find((c: unknown[]) => c[0] === 'message')
+  if (!call) throw new Error('message handler not registered on bot')
   return call[1] as (ctx: unknown) => void
 }
 
@@ -196,12 +196,12 @@ describe('TelegramAdapter — connect()', () => {
     })
   })
 
-  it('registers a message:text handler on the bot', async () => {
+  it('registers a message handler on the bot', async () => {
     const adapter = new TelegramAdapter()
     await adapter.connect({ telegramBotToken: TEST_TOKEN })
 
     const bot = grammy.instances[0]!
-    expect(bot.on).toHaveBeenCalledWith('message:text', expect.any(Function))
+    expect(bot.on).toHaveBeenCalledWith('message', expect.any(Function))
   })
 
   it('registers a callback_query:data handler on the bot', async () => {

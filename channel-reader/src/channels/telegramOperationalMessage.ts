@@ -1,4 +1,9 @@
-import type { Message, ProviderTargetIdentity, TelegramProviderChatType } from '../types'
+import type {
+  Message,
+  ProviderAttachmentDescriptorV1,
+  ProviderTargetIdentity,
+  TelegramProviderChatType,
+} from '../types'
 import { isAllowedSender, isInlineApprovalCommand } from './base'
 import { withTelegramBotIdentity } from './telegramProviderTarget'
 import { type TelegramEntity, messageAddressesBotInGroup } from './telegramVerification'
@@ -14,6 +19,7 @@ export function buildTelegramOperationalMessage(params: {
   messageId: number | string
   date: number
   threadId?: number | string
+  attachments?: ProviderAttachmentDescriptorV1[]
   rawMessage: Record<string, unknown>
   allowedSenders: Set<string> | null | undefined
   expectedChatType?: TelegramProviderChatType
@@ -89,11 +95,17 @@ export function buildTelegramOperationalMessage(params: {
     }
     const replyToFromId = (params.rawMessage as { reply_to_message?: { from?: { id: number } } })
       .reply_to_message?.from?.id
+    const rawEntities = params.rawMessage.entities as TelegramEntity[] | undefined
+    const rawCaptionEntities = params.rawMessage.caption_entities as TelegramEntity[] | undefined
+    const entities =
+      rawEntities && rawCaptionEntities
+        ? [...rawEntities, ...rawCaptionEntities]
+        : (rawEntities ?? rawCaptionEntities)
     if (
       !messageAddressesBotInGroup(
         params.text,
         params.chatType,
-        params.rawMessage.entities as TelegramEntity[] | undefined,
+        entities,
         replyToFromId,
         params.botId,
         params.botUsernameLower
@@ -114,6 +126,9 @@ export function buildTelegramOperationalMessage(params: {
     timestamp: new Date(params.date * 1000),
     messageId: String(params.messageId),
     threadId: params.threadId === undefined ? undefined : String(params.threadId),
+    ...(params.attachments && params.attachments.length > 0
+      ? { attachments: params.attachments }
+      : {}),
     providerIdentity: {
       medium: 'telegram',
       providerUserId: params.senderId,

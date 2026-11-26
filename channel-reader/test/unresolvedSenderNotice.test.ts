@@ -44,7 +44,7 @@ describe('authorizeProviderMessage response shape', () => {
   // the assertion would hold with the `!response.ok` guard deleted. Only a
   // parseable `reason: 'unresolved'` on a non-2xx proves the status is what
   // suppresses the reason.
-  it('returns no reason when the response is not ok, so callers stay silent', async () => {
+  it('returns reason error when the response is not ok, so callers stay silent and allow retries', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -53,10 +53,13 @@ describe('authorizeProviderMessage response shape', () => {
       )
     )
     const client = new RPCClient('http://mcp-host.test')
-    expect(await client.authorizeProviderMessage(identity as never)).toEqual({ authorized: false })
+    expect(await client.authorizeProviderMessage(identity as never)).toEqual({
+      authorized: false,
+      reason: 'error',
+    })
   })
 
-  it('returns no reason when the request throws', async () => {
+  it('returns reason error when the request throws', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
@@ -64,30 +67,32 @@ describe('authorizeProviderMessage response shape', () => {
       })
     )
     const client = new RPCClient('http://mcp-host.test')
-    expect(await client.authorizeProviderMessage(identity as never)).toEqual({ authorized: false })
+    expect(await client.authorizeProviderMessage(identity as never)).toEqual({
+      authorized: false,
+      reason: 'error',
+    })
   })
 
-  it('omits the reason when an older mcp-host returns only authorized', async () => {
+  it('returns reason error when an older mcp-host returns only authorized false', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify({ authorized: false })))
     )
     const client = new RPCClient('http://mcp-host.test')
-    expect(await client.authorizeProviderMessage(identity as never)).toEqual({ authorized: false })
+    expect(await client.authorizeProviderMessage(identity as never)).toEqual({
+      authorized: false,
+      reason: 'error',
+    })
   })
 
-  it('drops an unrecognized reason value instead of passing it through', async () => {
+  it('maps an unrecognized reason value to error instead of passing it through', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify({ authorized: false, reason: 'banana' })))
     )
     const client = new RPCClient('http://mcp-host.test')
     const result = await client.authorizeProviderMessage(identity as never)
-    expect(result).toEqual({ authorized: false })
-    // toEqual alone would not catch a `reason: undefined` key surviving the
-    // whitelist check, since it treats an undefined-valued key as absent.
-    // Assert the key itself is gone.
-    expect('reason' in result).toBe(false)
+    expect(result).toEqual({ authorized: false, reason: 'error' })
   })
 })
 
