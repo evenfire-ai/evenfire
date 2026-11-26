@@ -591,6 +591,7 @@ describe('main.ts browser sign-in wiring', () => {
     })
     const logs = spyOnConsole()
     const warn = vi.mocked(console.warn)
+    window.focus.mockClear()
 
     // The desktop-setup link after the failing one is still routed.
     expect(() =>
@@ -601,6 +602,9 @@ describe('main.ts browser sign-in wiring', () => {
       'auth:desktopSetupToken',
       DESKTOP_SETUP_PAYLOAD
     )
+    // And second-instance's own window request after the links still runs: the window is
+    // focused once for the setup link the router sends, and once for that request.
+    expect(window.focus).toHaveBeenCalledTimes(2)
 
     // With no window, the dropped link requests none.
     closeMainWindow()
