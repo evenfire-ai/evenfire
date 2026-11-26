@@ -2764,9 +2764,10 @@ export class AppService {
         // R-4, R-25: the window is raised. An attempt left `redeeming` would never end (L1), and
         // one still `waiting`, because the acceptance op threw before the redeem, would wait for
         // its deadline. One more owner op ends it `failed`; `end` does nothing to an attempt that
-        // has ended or been replaced. The op cannot reject: `end` only writes memory and defers
-        // its push (D6). Only the error's class is logged: a message can carry a URL or a server
-        // body (D18).
+        // has ended or been replaced. A counted redeem has already settled its count in
+        // `completeDesktopLogin`'s `finally` (D11). The op cannot reject: `end` only writes memory
+        // and defers its push (D6). Only the error's class is logged: a message can carry a URL
+        // or a server body (D18).
         void this.withNativeAuthEnvironmentCommit(async () => {
           this.browserSignIn.end(attemptId, { outcome: 'failed' })
         })
@@ -2791,57 +2792,71 @@ export class AppService {
    * D9 for attempt `attemptId` after its pre-match: the acceptance op, the redeem awaited outside
    * the owner, then the install op. The code lives only in `link` and the request body (D18).
    * The first owner op is queued before the first `await`, so the caller's `true` follows it.
+   *
+   * D11: the acceptance op counts the redeem as an interactive login when it begins it, so setup,
+   * the handoff and a restore wait for it as they wait for a password login. Once the install op
+   * has run, or the redeem has failed, the `finally` settles the count in its own owner op, as
+   * Google and password login do. A link that redeems nothing is never counted or settled.
    */
   private async completeDesktopLogin(attemptId: number, link: DesktopLoginLink): Promise<void> {
-    const dispatch = await this.withNativeAuthEnvironmentCommit(async () =>
-      this.acceptDesktopLogin(attemptId, link)
-    )
-    if (dispatch === null) return
-    const answer = await dispatch.redeem
-    // The redeem 200 is the one arm with a body; its status alone overlaps the other HTTP arm.
-    const session = 'body' in answer ? AppService.readRedeemedSession(answer.body) : null
-    await this.withNativeAuthEnvironmentCommit(async () => {
-      const attempt = this.browserSignIn.current()
-      if (attempt === null || attempt.id !== attemptId || attempt.phase !== 'redeeming') return
-      // A generation advance during the redeem (D2), or a binding change (D7): the answer is
-      // discarded, whatever it was.
-      const found = this.isBrowserSignInAttemptCurrent(attempt)
-      if (found !== 'current') {
-        this.endStaleBrowserSignIn(attemptId, found)
-        return
+    const login = { counted: false }
+    try {
+      const dispatch = await this.withNativeAuthEnvironmentCommit(async () =>
+        this.acceptDesktopLogin(attemptId, link, login)
+      )
+      if (dispatch === null) return
+      const answer = await dispatch.redeem
+      // The redeem 200 is the one arm with a body; its status alone overlaps the other HTTP arm.
+      const session = 'body' in answer ? AppService.readRedeemedSession(answer.body) : null
+      await this.withNativeAuthEnvironmentCommit(async () => {
+        const attempt = this.browserSignIn.current()
+        if (attempt === null || attempt.id !== attemptId || attempt.phase !== 'redeeming') return
+        // A generation advance during the redeem (D2), or a binding change (D7): the answer is
+        // discarded, whatever it was.
+        const found = this.isBrowserSignInAttemptCurrent(attempt)
+        if (found !== 'current') {
+          this.endStaleBrowserSignIn(attemptId, found)
+          return
+        }
+        if (!('body' in answer)) {
+          this.browserSignIn.end(attemptId, mapRedeemAnswer(answer))
+          return
+        }
+        if (session === null) {
+          this.browserSignIn.end(attemptId, { outcome: 'failed' })
+          return
+        }
+        try {
+          // `installAuthenticatedLogin` asserts the attempt's generation again first.
+          await this.installAuthenticatedLogin(session, attempt.generation)
+        } catch (error) {
+          // X1: the attempt ends `failed` whatever the install left behind. The error goes on,
+          // after the settle step below, to the chain's last catch, which logs its class.
+          this.browserSignIn.end(attemptId, { outcome: 'failed' })
+          throw error
+        }
+        this.browserSignIn.end(attemptId, { outcome: 'signed_in' })
+      })
+    } finally {
+      if (login.counted) {
+        await this.withNativeAuthEnvironmentCommit(() => this.settleInteractiveLoginAttempt())
       }
-      if (!('body' in answer)) {
-        this.browserSignIn.end(attemptId, mapRedeemAnswer(answer))
-        return
-      }
-      if (session === null) {
-        this.browserSignIn.end(attemptId, { outcome: 'failed' })
-        return
-      }
-      try {
-        // `installAuthenticatedLogin` asserts the attempt's generation again first.
-        await this.installAuthenticatedLogin(session, attempt.generation)
-      } catch (error) {
-        // X1: the attempt ends `failed` whatever the install left behind. The error goes on to
-        // the chain's last catch, which logs its class.
-        this.browserSignIn.end(attemptId, { outcome: 'failed' })
-        throw error
-      }
-      this.browserSignIn.end(attemptId, { outcome: 'signed_in' })
-    })
+    }
   }
 
   /**
    * The acceptance op (D9), run inside the owner. It re-checks the attempt (waiting, its state
    * and the deadline, through `matchWaiting`) and that it is current (D7). An `error` link ends
    * it (D17); a code for another environment ends it `failed(different_environment)` with
-   * nothing redeemed. Otherwise the attempt moves to `redeeming` and the one redeem goes to its
-   * bound REST URL, never retried. Returns that request, wrapped so the owner does not await it,
-   * or null when nothing was sent.
+   * nothing redeemed. Otherwise the attempt moves to `redeeming`, the redeem is counted as an
+   * interactive login and marked in `login` for the caller to settle (D11), and the one redeem
+   * goes to its bound REST URL, never retried. Returns that request, wrapped so the owner does
+   * not await it, or null when nothing was sent.
    */
   private acceptDesktopLogin(
     attemptId: number,
-    link: DesktopLoginLink
+    link: DesktopLoginLink,
+    login: { counted: boolean }
   ): { redeem: Promise<RedeemHttpAnswer> } | null {
     const attempt = this.browserSignIn.matchWaiting(link.state)
     if (attempt === null || attempt.id !== attemptId) return null
@@ -2863,6 +2878,10 @@ export class AppService {
           return null
         }
         if (!this.browserSignIn.beginRedeem(attemptId)) return null
+        // D11, in the op that began the redeem. The mark comes before the dispatch, so whatever
+        // happens from here, the caller's `finally` settles this count once.
+        this.interactiveLoginAttempts += 1
+        login.counted = true
         return {
           redeem: this.authClient.redeemDesktopSignInAt(attempt.binding.restBaseUrl, {
             code: link.code,

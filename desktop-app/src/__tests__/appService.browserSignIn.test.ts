@@ -203,7 +203,7 @@ const bumpEvents = {
     id: 'E15',
     label: 'E15 session restore (getSessionState)',
     check: () => true,
-    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4033-4038`): it
+    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4052-4057`): it
     // never decides an expectation here. `storedA` holds while signed out on A only before the
     // first restore on A (a kept token at start), and that restore succeeds. Every later
     // `storedA` comes from a sign-in on A, and every way back to signed out (logout, or a change
@@ -2207,5 +2207,161 @@ describe('the binding and the deadline at acceptance', () => {
 
     expect(endStatesOf(harness, attemptId)).toEqual(['timed_out'])
     expect(redeemFetches(harness)).toHaveLength(0)
+  })
+})
+
+const HUB_SETUP_PATH = HUB_SETUP_ROUTE.replace(/^POST /, '')
+const REDEEM_INVALID: EdgeRecordKey = 'POST /api/v1/oidc/desktop-sign-in/redeem invalid'
+
+/** Desktop setup with the hub's answer (E31/E32), as T0-1 sends it. */
+function completeSetup(harness: BrowserSignInHarness) {
+  return harness.service.completeDesktopSetup(
+    'user-d@example.test',
+    'fake-setup-authorization-token'
+  )
+}
+
+function setupFetches(harness: BrowserSignInHarness): number {
+  return fetchCount(harness, 'POST', HUB_SETUP_PATH)
+}
+
+describe('redeeming: Cancel, a new start and the interactive login count', () => {
+  it('G2-10a keeps redeeming when Cancel arrives', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const redeem = harness.hold('redeem')
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await until(harness, () => redeem.reached, 'the redeem fetch')
+    // D10: the server may already have spent the code, so Cancel leaves the redeem to finish.
+    expect(service.cancelBrowserSignIn()).toEqual({ attemptId, phase: 'redeeming' })
+    redeem.release(edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)))
+    await harness.drain()
+
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+  })
+
+  it('G2-10b refuses a new start while redeeming', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const redeem = harness.hold('redeem')
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await until(harness, () => redeem.reached, 'the redeem fetch')
+    const generation = service.getSessionGeneration()
+    await expect(service.startBrowserSignIn()).rejects.toThrow(/^browser_sign_in_finishing$/)
+    // Refused in op 1, before the bump and before its own methods read.
+    expect(methodsFetches(harness)).toHaveLength(1)
+    expect(service.getSessionGeneration()).toBe(generation)
+    expect(harness.opens).toHaveLength(1)
+    redeem.release(edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)))
+    await harness.drain()
+
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+  })
+
+  it('G2-11a lets desktop setup end a waiting attempt', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { attemptId } = await startAttempt(harness)
+    await harness.drain()
+
+    // D11: a waiting attempt is not counted, so setup proceeds and its bump replaces it (A3-18).
+    await expect(completeSetup(harness)).resolves.toMatchObject({ configured: true })
+    await harness.drain()
+
+    expect(setupFetches(harness)).toBe(1)
+    expect(endStatesOf(harness, attemptId)).toEqual(['replaced'])
+  })
+
+  it('G2-11b refuses desktop setup while redeeming', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const redeem = harness.hold('redeem')
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await until(harness, () => redeem.reached, 'the redeem fetch')
+    const generation = service.getSessionGeneration()
+    // D11: the redeem is counted, so setup is refused before its bump (A3-40).
+    await expect(completeSetup(harness)).rejects.toThrow(/^auth_transition_in_progress$/)
+    expect(setupFetches(harness)).toBe(0)
+    expect(service.getSessionGeneration()).toBe(generation)
+    redeem.release(edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)))
+    await harness.drain()
+
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+  })
+
+  it('G2-11c accepts desktop setup after a failed redeem settles', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    harness.routes[REDEEM_ROUTE] = () => edgeResponse(readEdgeRecord(REDEEM_INVALID))
+    const { attemptId, state } = await startAttempt(harness)
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await harness.drain()
+    expect(redeemFetches(harness)).toHaveLength(1)
+    expect(endStatesOf(harness, attemptId)).toEqual(['failed'])
+
+    // The settle step ran after the install op: the count is back to 0 (A3-51).
+    await expect(completeSetup(harness)).resolves.toMatchObject({ configured: true })
+    expect(setupFetches(harness)).toBe(1)
+  })
+
+  it('after a successful redeem, setup refuses for the session, not the count', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const { attemptId, state } = await startAttempt(harness)
+
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await harness.drain()
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+
+    // L5: at quiescence, signed in with no login in flight, the count is 0. Setup is refused for
+    // the session; a count left above 0 would have refused it first, as in progress.
+    await expect(completeSetup(harness)).rejects.toThrow(new RegExp(`^${REFUSED_SIGNED_IN}$`))
+    expect(setupFetches(harness)).toBe(0)
+  })
+
+  it('settles only a counted redeem: a link that redeems nothing leaves a password login counted', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service } = harness
+    // A password login held at its fetch keeps the count at 1, as in T0-2.
+    const passwordLoginAnswer = deferred<Response>()
+    let passwordLoginReached = false
+    harness.routes['POST /api/v1/auth/password-login'] = () => {
+      passwordLoginReached = true
+      return passwordLoginAnswer.promise
+    }
+    const login = service.passwordLogin('user-b@example.test', 'fake-password')
+    await until(harness, () => passwordLoginReached, 'the password-login fetch')
+    const { attemptId, state } = await startAttempt(harness)
+
+    // The attempt ends from an error link: nothing is redeemed, so nothing is counted or settled.
+    expect(
+      service.acceptDesktopLoginLink(buildDesktopLoginErrorLink({ state, error: 'cancelled' }))
+    ).toBe(true)
+    await harness.drain()
+    expect(endStatesOf(harness, attemptId)).toEqual(['cancelled'])
+    expect(redeemFetches(harness)).toHaveLength(0)
+    await expect(completeSetup(harness)).rejects.toThrow(/^auth_transition_in_progress$/)
+    expect(setupFetches(harness)).toBe(0)
+
+    // Once the password login settles, the count is 0 and setup proceeds.
+    passwordLoginAnswer.resolve(
+      new Response(JSON.stringify({ error: 'invalid_credentials' }), {
+        status: 401,
+        statusText: 'Unauthorized',
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    await expect(login).rejects.toThrow(/httpStatus=401$/)
+    await expect(completeSetup(harness)).resolves.toMatchObject({ configured: true })
+    expect(setupFetches(harness)).toBe(1)
   })
 })
