@@ -62,6 +62,9 @@ function authFor(teamId: string): AuthContextValue {
     showRuntimeConfigSelector: false,
     dependencyHealth: null,
     hasDependencyOutage: false,
+    loginScreen: { kind: 'loading' },
+    browserSignIn: { attemptId: null, phase: 'idle' },
+    refreshLoginMethods: vi.fn(),
     setBooting: vi.fn(),
     setEmail: vi.fn(),
     setPassword: vi.fn(),
@@ -85,6 +88,8 @@ function authFor(teamId: string): AuthContextValue {
     handleConfirmDesktopEnvironmentSetup: vi.fn(async () => undefined),
     handleOpenDesktopRelease: vi.fn(async () => undefined),
     handleLogout: vi.fn(async () => undefined),
+    handleStartBrowserSignIn: vi.fn(async () => undefined),
+    handleCancelBrowserSignIn: vi.fn(async () => undefined),
   }
 }
 
