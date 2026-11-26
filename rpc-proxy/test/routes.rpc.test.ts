@@ -20,15 +20,6 @@ const serviceMock = vi.hoisted(() => ({
 }))
 
 const controlApiMock = vi.hoisted(() => ({
-  ControlApiHostAccessRejectedError: class ControlApiHostAccessRejectedError extends Error {
-    constructor(
-      public readonly status: number,
-      public readonly denialCode: string | null = null
-    ) {
-      super(`Control API rejected host access (${status})`)
-      this.name = 'ControlApiHostAccessRejectedError'
-    }
-  },
   requestHostWakeFromControlApi: vi.fn(),
 }))
 
@@ -308,21 +299,21 @@ describe('routes/rpc', () => {
   })
 
   it.each([
-    [401, null, { error: 'Unauthorized' }],
+    [401, { rejected: true, status: 401 }, { error: 'Unauthorized' }],
     [
       403,
-      'host_access_revoked',
+      { denied: true, code: 'host_access_revoked' },
       { error: 'Forbidden: user cannot access this host', code: 'host_access_revoked' },
     ],
     [
       403,
-      'host_access_denied',
+      { denied: true, code: 'host_access_denied' },
       { error: 'Forbidden: user cannot access this host', code: 'host_access_denied' },
     ],
-    [409, null, { error: 'Direct run attribution conflict' }],
+    [409, { rejected: true, status: 409 }, { error: 'Direct run attribution conflict' }],
   ] as const)(
-    'preserves a Control API %s (%s) from atomic host resolution and never forwards',
-    async (status, denialCode, expectedBody) => {
+    'answers a Control API %s refusal of the atomic host resolution and never forwards',
+    async (status, refusal, expectedBody) => {
       authTokenMock.verifyRpcToken.mockReturnValue({
         sub: 'user-1',
         typ: 'user',
@@ -334,9 +325,7 @@ describe('routes/rpc', () => {
         iat: 1,
         exp: 9999999999,
       })
-      serviceMock.resolveHostConnectionForUser.mockRejectedValue(
-        new controlApiMock.ControlApiHostAccessRejectedError(status, denialCode)
-      )
+      serviceMock.resolveHostConnectionForUser.mockResolvedValue(refusal)
 
       await request(makeApp())
         .post('/rpc/hosts/agent2/messages')
