@@ -35,7 +35,12 @@ export function ConnectorIdentity({
   return (
     <span className="cu-connector-identity" title={instanceName ?? name}>
       {icon}
-      <span className="cu-registry-name">{connector.name}</span>
+      <span className="cu-connector-identity__text">
+        <span className="cu-registry-name">{connector.name}</span>
+        {instanceName && instanceName !== connector.name ? (
+          <span className="cu-connector-identity__instance">{instanceName}</span>
+        ) : null}
+      </span>
     </span>
   )
 }

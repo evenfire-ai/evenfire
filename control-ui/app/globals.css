@@ -15151,3 +15151,30 @@ button.cu-gfs-tree__button:focus-visible,
 :root[data-theme='light'] .cu-connector-icon .cu-connector-icon__base--themed {
   display: block;
 }
+
+.cu-connector-identity__text {
+  display: grid;
+  min-width: 0;
+}
+
+.cu-connector-identity__instance {
+  /* Reserve space so revealing identity never moves row controls. */
+  visibility: hidden;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+  font-weight: var(--cu-font-weight-regular);
+  overflow-wrap: anywhere;
+}
+
+.cu-connector-identity:hover .cu-connector-identity__instance,
+.cu-connectors-table tr:hover .cu-connector-identity__instance,
+.cu-connectors-table tr:focus-within .cu-connector-identity__instance {
+  visibility: visible;
+}
+
+/* Touch users must be able to distinguish instances before opening a row. */
+@media (hover: none), (pointer: coarse) {
+  .cu-connector-identity__instance {
+    visibility: visible;
+  }
+}

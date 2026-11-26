@@ -266,7 +266,16 @@ describe('McpServerTable — connector list', () => {
   })
 
   it('renders ordinary rows without inline detail expansion', () => {
-    const items = [makeItem({ name: 'airtable-server' })]
+    const item = makeItem({ name: 'airtable-server' })
+    const items = [
+      {
+        ...item,
+        metadata: {
+          ...item.metadata,
+          annotations: { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' },
+        },
+      },
+    ]
     render(<McpServerTable items={items} />)
 
     expect(screen.getByText('airtable-server').closest('tr')).not.toHaveAttribute('aria-expanded')
@@ -559,6 +568,29 @@ describe('McpServerTable — saved marketplace identity', () => {
     expect(onDelete).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-sales' })
   })
 
+  it('renders each instance identity in the row and preserves keyboard navigation', () => {
+    const onOpen = vi.fn()
+    render(
+      <McpServerTable
+        items={['airtable-sales', 'airtable-research'].map(name =>
+          linkedItem(name, { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' })
+        )}
+        onOpen={onOpen}
+      />
+    )
+    for (const name of ['airtable-sales', 'airtable-research']) {
+      const identity = screen.getByText(name)
+      expect(identity).toHaveClass('cu-connector-identity__instance')
+      const row = identity.closest('tr')!
+      expect(row).toHaveAttribute('tabindex', '0')
+      row.focus()
+      expect(row).toHaveFocus()
+      fireEvent.keyDown(row, { key: 'Enter' })
+      expect(onOpen).toHaveBeenLastCalledWith({ namespace: 'mcp-server', name })
+    }
+    expect(onOpen).toHaveBeenCalledTimes(2)
+  })
+
   it('prefers annotations, reads legacy labels, and resolves only explicit first-party aliases', () => {
     render(
       <McpServerTable
@@ -602,7 +634,9 @@ describe('McpServerTable — saved marketplace identity', () => {
       />
     )
     const names = () =>
-      Array.from(document.querySelectorAll('tbody tr td:first-child')).map(x => x.textContent)
+      Array.from(document.querySelectorAll('tbody tr td:first-child .cu-registry-name')).map(
+        x => x.textContent
+      )
     expect(names()).toEqual(['Dovetail', 'Google Sheets', 'Stripe'])
     fireEvent.click(screen.getByRole('button', { name: 'Sort by Name descending' }))
     expect(names()).toEqual(['Stripe', 'Google Sheets', 'Dovetail'])
