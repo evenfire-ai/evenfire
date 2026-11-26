@@ -11,6 +11,7 @@ import { type Mock, afterEach, describe, expect, it, vi } from 'vitest'
 import { type RenderHookResult, act, cleanup, renderHook } from '@testing-library/react'
 import fc, { type Scheduler } from 'fast-check'
 import { buildLoginMethodsModel } from '../../../../../src/browserSignInModel'
+import { canonicalizeDesktopRestEndpoint } from '../../../../../src/desktopEnvironmentUrl'
 import type { LoginMethodsAnswer, LoginMethodsModel } from '../../../../../src/types'
 import { LOGIN_SCREEN_ROWS } from '../../../../../testSupport/edgeContractRecords'
 import type { LoginScreenModel, UseLoginMethodsParams, UseLoginMethodsResult } from '../types'
@@ -37,6 +38,20 @@ const FAILED_SAVE = wrapLikeElectronIpc(
   'auth:saveRuntimeConfig',
   new Error('externalRestApiBaseUrl must be a valid http(s) URL')
 )
+
+/**
+ * What main's `getLoginMethods` rejects with when the active REST URL is not http(s): the error
+ * `canonicalizeDesktopRestEndpoint` throws when the read captures the binding
+ * (`appService.ts` `captureAuthEnvironmentBinding`). Taken from running that function.
+ */
+function failedRead(): Error {
+  try {
+    canonicalizeDesktopRestEndpoint('ftp://api.example.test')
+  } catch (error) {
+    return wrapLikeElectronIpc('auth:getLoginMethods', error as Error)
+  }
+  throw new Error('canonicalizeDesktopRestEndpoint accepted an ftp URL')
+}
 
 type Deferred<T> = {
   promise: Promise<T>
@@ -188,6 +203,39 @@ describe('useLoginMethods: scenarios', () => {
     )
 
     expect(hook.result.current.model).toEqual(LOADING)
+  })
+
+  it('keeps a newer model when an older read fails late (Task 13 review M1)', async () => {
+    const main = installMain()
+    const { hook, shown } = mountHook()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const oidcOnly = modelOf('oidc-only')
+
+    // Two reads of one epoch: no binding change between them.
+    act(() => hook.result.current.refresh())
+    act(() => hook.result.current.refresh())
+    await act(async () => main.read(1).resolve({ model: oidcOnly, generation: 5 }))
+    expect(hook.result.current.model, "the later read's answer applies").toEqual(oidcOnly)
+    await act(async () => main.read(0).reject(failedRead()))
+
+    expect(hook.result.current.model, "the older read's failure is dropped").toEqual(oidcOnly)
+    expect(shown).not.toContainEqual(UNREACHABLE)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('shows the unreachable state when the later read fails after an older answer', async () => {
+    const main = installMain()
+    const { hook } = mountHook()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    act(() => hook.result.current.refresh())
+    act(() => hook.result.current.refresh())
+    await act(async () => main.read(0).resolve({ model: modelOf('password'), generation: 5 }))
+    await act(async () => main.read(1).reject(failedRead()))
+
+    // Nothing sent after the failed read has applied, so its failure is the newest word (L7).
+    expect(hook.result.current.model, "the later read's failure shows").toEqual(UNREACHABLE)
+    expect(warn).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the model when main refuses with desktop_setup_required', async () => {
