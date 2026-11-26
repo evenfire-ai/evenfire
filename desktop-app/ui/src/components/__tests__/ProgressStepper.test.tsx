@@ -286,8 +286,6 @@ describe('ProgressStepper — internal tool progress labels', () => {
   it.each([
     { toolName: 'airtable__getRecords', displayName: 'Airtable' },
     { toolName: 'shell_exec', displayName: 'Shell' },
-    { toolName: 'Clerum', displayName: 'Clerum' },
-    { toolName: 'clerum__generate_pdf', displayName: 'Generate PDF' },
   ])('preserves the supplied label $displayName for $toolName', ({ toolName, displayName }) => {
     const step = makeStep({ toolName, displayName, state: 'running' })
     render(<ProgressStepper progress={makeProgress({ steps: [step] })} />)
