@@ -276,6 +276,13 @@ function lineSafe(change: HostApprovalChange): HostApprovalChange {
 /** Stands for a string value too long to keep when the summary overflows (Ruling 73, tier 2). */
 export const VALUE_TOO_LONG = '(value too long)'
 
+/** The enum values of the audited fields that have one (the Host CRD's). */
+export const FIELD_ENUMS: Record<string, readonly string[]> = {
+  modeCeiling: ['manual', 'auto', 'allow_all'],
+  defaultPolicy: DEFAULT_POLICIES,
+}
+const TOO_LONG_ESCAPED_LENGTH = JSON.stringify(VALUE_TOO_LONG).length
+
 export type SummaryOptions = {
   /** Tests only: the native-name predicate. Defaults to mcp-host's registry. */
   isNative?: (name: string) => boolean
@@ -292,9 +299,11 @@ export type SummaryOptions = {
  *
  * 1. Entries of other tools are dropped one by one, from the end, and counted
  *    into `toolsTruncated`, until the text fits.
- * 2. Long string values (longer than `VALUE_TOO_LONG`) become that marker.
- *    Every enum and boolean field keeps its old and new values, and the
- *    approver counts stay.
+ * 2. A string value becomes `VALUE_TOO_LONG` only if it is not a CRD enum value
+ *    of its field, not one of this audit's own markers, and its escaped form
+ *    is longer than the marker's escaped form. Enum and boolean values always
+ *    keep their old and new, and the approver counts stay. The text then
+ *    carries `valuesShortened: true`.
  * 3. The field values fall back to counts: a counts-only object marked
  *    `truncated: true` (field, tool and approver-channel counts, the approver
  *    totals and the two flags) that holds every native entry.
@@ -326,18 +335,27 @@ export function serializeApprovalChangeSummary(
   }
 
   // Tier 2.
-  const shorten = (value: Leaf): Leaf =>
-    typeof value === 'string' && value.length > VALUE_TOO_LONG.length ? VALUE_TOO_LONG : value
+  let valuesShortened = false
+  const shorten = (field: string, value: Leaf): Leaf => {
+    if (typeof value !== 'string') return value
+    if (value === VALUE_TOO_LONG || value === NOT_A_POLICY_VALUE) return value
+    if (FIELD_ENUMS[field]?.includes(value)) return value
+    // Judged on the escaped form, the form the cap is checked on.
+    if (encode(value).length <= TOO_LONG_ESCAPED_LENGTH) return value
+    valuesShortened = true
+    return VALUE_TOO_LONG
+  }
   const shortFields = Object.fromEntries(
     Object.entries(change.fields).map(([key, entry]) => [
       key,
-      { old: shorten(entry.old), new: shorten(entry.new) },
+      { old: shorten(key, entry.old), new: shorten(key, entry.new) },
     ])
   )
   const natives = entries.slice(0, nativeCount)
   const markerText = encode({
     ...change,
     fields: shortFields,
+    ...(valuesShortened ? { valuesShortened: true } : {}),
     tools: natives,
     toolsTruncated: change.toolsTruncated + (entries.length - nativeCount),
   })

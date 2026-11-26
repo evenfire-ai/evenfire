@@ -224,7 +224,7 @@ describe('buildHostApprovalChange', () => {
       const channels = ['telegram', 'email', 'slack', 'teams']
       const approvalOf = (flag: boolean, ceiling: string, model: string, approvers: string) => ({
         modeCeiling: ceiling,
-        defaultPolicy: flag ? 'channel_users' : 'cli_only',
+        defaultPolicy: flag ? 'cli_only' : 'designated_approvers',
         // C1 characters escape to six characters each in the summary.
         shellClassifierModel: model.repeat(MAX_VALUE_LENGTH),
         channels: Object.fromEntries(
@@ -252,6 +252,7 @@ describe('buildHostApprovalChange', () => {
       // their values, and nothing fell back to counts.
       const parsed = JSON.parse(summary as string) as {
         truncated?: boolean
+        valuesShortened?: boolean
         fields: Record<string, { old: unknown; new: unknown }>
       }
       expect(parsed.truncated).toBeUndefined()
@@ -261,6 +262,9 @@ describe('buildHostApprovalChange', () => {
         new: '(value too long)',
       })
       expect(parsed.fields.modeCeiling).toEqual({ old: 'manual', new: 'allow_all' })
+      // A CRD enum value is never replaced, however long it is.
+      expect(parsed.fields.defaultPolicy).toEqual({ old: 'cli_only', new: 'designated_approvers' })
+      expect(parsed.valuesShortened).toBe(true)
       expect(parsed.fields['channels.teams.enabled']).toEqual({ old: true, new: false })
     })
 
@@ -289,6 +293,91 @@ describe('buildHostApprovalChange', () => {
       expect(parsed.fields.shellClassifierModel?.new).toBe('(value too long)')
       expect(parsed.tools.map(entry => entry.name).sort()).toEqual([...names].sort())
       expect(parsed.truncated).toBeUndefined()
+    })
+
+    // 57 natives, every field, and a model of escape-heavy characters on both sides.
+    const worstChange = (modelLength: number, extraTools: string[] = []) => {
+      const toolsBefore: Record<string, boolean> = {}
+      const toolsAfter: Record<string, boolean> = {}
+      for (const name of [...MCP_HOST_NATIVE_TOOL_NAMES, ...extraTools]) {
+        toolsBefore[name] = true
+        toolsAfter[name] = false
+      }
+      const channels = ['telegram', 'email', 'slack', 'teams']
+      const approval = (flag: boolean) => ({
+        modeCeiling: flag ? 'manual' : 'allow_all',
+        defaultPolicy: flag ? 'cli_only' : 'designated_approvers',
+        shellClassifierModel: (flag ? '\u0085' : '\u0086').repeat(modelLength),
+        channels: Object.fromEntries(
+          channels.map(channel => [
+            channel,
+            { enabled: flag, allowModeChange: flag, approvers: [flag ? 'a' : 'b'] },
+          ])
+        ),
+        tools: flag ? toolsBefore : toolsAfter,
+      })
+      return { before: approval(true), after: approval(false) }
+    }
+    type Parsed = {
+      truncated?: boolean
+      valuesShortened?: boolean
+      tools: Array<{ name: string }>
+      fields: Record<string, { old: unknown; new: unknown }>
+    }
+
+    // The headroom measured for this worst case (every field changed, four
+    // channels, escape-heavy model): two more native tools still fit, four do not.
+    const SYNTHETIC = ['synthetic_native_a', 'synthetic_native_b']
+    const syntheticNative = (name: string): boolean =>
+      MCP_HOST_NATIVE_TOOL_NAMES.includes(name) || SYNTHETIC.includes(name)
+
+    it.each([
+      [16, 2],
+      [128, 0],
+      [128, 2],
+    ])(
+      'a %i-character escape-heavy model with %i extra natives never hides the ceiling raise or the policy widening',
+      (modelLength, extraCount) => {
+        const extra = SYNTHETIC.slice(0, extraCount)
+        const { before, after } = worstChange(modelLength, extra)
+        const change = buildHostApprovalChange({ before, after })
+        const text = serializeApprovalChangeSummary(change as NonNullable<typeof change>, {
+          isNative: syntheticNative,
+        })
+        expect(text.length).toBeLessThanOrEqual(4096)
+        const parsed = JSON.parse(text) as Parsed
+        expect(parsed.truncated).toBeUndefined()
+        expect(parsed.fields.modeCeiling).toEqual({ old: 'manual', new: 'allow_all' })
+        expect(parsed.fields.defaultPolicy).toEqual({
+          old: 'cli_only',
+          new: 'designated_approvers',
+        })
+        expect(parsed.fields['channels.slack.allowModeChange']).toEqual({ old: true, new: false })
+        expect(Object.keys(parsed.fields)).toHaveLength(11)
+        expect(parsed.tools).toHaveLength(MCP_HOST_NATIVE_TOOL_NAMES.length + extra.length)
+        expect(parsed.fields.shellClassifierModel?.new).toBe('(value too long)')
+        expect(parsed.valuesShortened).toBe(true)
+      }
+    )
+
+    it('the not-a-policy marker survives the shortening', () => {
+      const names = [...MCP_HOST_NATIVE_TOOL_NAMES].slice(0, 46)
+      const before = {
+        defaultPolicy: 'cli_only',
+        shellClassifierModel: '\u0085'.repeat(MAX_VALUE_LENGTH),
+        tools: Object.fromEntries(names.map(name => [name, false])),
+      }
+      const after = {
+        defaultPolicy: 'typed-by-an-admin',
+        shellClassifierModel: '\u0086'.repeat(MAX_VALUE_LENGTH),
+        tools: Object.fromEntries(names.map(name => [name, true])),
+      }
+      const parsed = JSON.parse(buildApprovalChangeSummary({ before, after }) as string) as Parsed
+      expect(parsed.valuesShortened).toBe(true)
+      expect(parsed.fields.defaultPolicy).toEqual({
+        old: 'cli_only',
+        new: '(not a policy value)',
+      })
     })
 
     it('tier 4: natives that cannot fit are cut from the end, counted, and logged as a warning', () => {
