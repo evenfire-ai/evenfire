@@ -24,6 +24,10 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/168438?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-168438" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/168438/daily?language=TypeScript" alt="evenfire-ai/evenfire | Trendshift" width="250" height="55"/></a>
+</p>
+
+<p align="center">
   <a href="#see-evenfire-in-action">See it in action</a> · <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
 </p>
 
