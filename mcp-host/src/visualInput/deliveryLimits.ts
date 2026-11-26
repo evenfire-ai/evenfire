@@ -1,3 +1,4 @@
+import { LIMITS as GROK_LIMITS, GROK_VISUAL_LIMITS } from '@clerum/grok-provider-attempt-contract'
 import {
   LIMITS as CODEX_LIMITS,
   VISUAL_LIMITS as CODEX_VISUAL_LIMITS,
@@ -32,6 +33,15 @@ export function resolveVisualDeliveryLimits(providerType: string): VisualDeliver
       maxNonImageRequestBytes: CODEX_LIMITS.maxRequestBodyBytes,
       maxDimension: CODEX_VISUAL_LIMITS.maxImageDimension,
       maxPixels: CODEX_VISUAL_LIMITS.maxImagePixels,
+    }
+
+  if (providerType === 'grok-subscription')
+    return {
+      maxImageBytes: GROK_VISUAL_LIMITS.maxImageBytes,
+      maxTotalImageBytes: GROK_VISUAL_LIMITS.maxTotalImageBytes,
+      maxImages: GROK_VISUAL_LIMITS.maxImages,
+      maxVisualRequestBytes: GROK_LIMITS.maxVisualRequestBodyBytes,
+      maxNonImageRequestBytes: GROK_LIMITS.maxRequestBodyBytes,
     }
 
   return null

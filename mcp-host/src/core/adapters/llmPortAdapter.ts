@@ -1,4 +1,6 @@
+import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import type { ImageInputDecision } from '@clerum/llm-providers'
+import { config } from '../../config'
 import { SingleTurnProvider } from '../../llm'
 import {
   type ImageInputCapabilitySource,
@@ -18,8 +20,16 @@ import {
 import { logger } from '../../logger'
 import { buildLlmUsageEvent } from '../../usage/buildLlmUsageEvent.js'
 import { UsageReporter, newRequestId } from '../../usage/usageReporter.js'
-import { visualDimensionLimit } from '../../visualInput/deliveryLimits'
-import { gfsImageParts, projectGfsMessages } from '../../visualInput/messageProjection'
+import {
+  channelRetainedImageParts,
+  projectChannelRetainedMessages,
+} from '../../visualInput/channelImageProjection'
+import { type VisualDeliveryLimits, visualDimensionLimit } from '../../visualInput/deliveryLimits'
+import {
+  gfsImageParts,
+  isGfsImagePart,
+  projectGfsMessages,
+} from '../../visualInput/messageProjection'
 import { type ImageInputCapability, VisualInputError } from '../../visualInput/policy'
 import { hasGfsImageInput, hasUnknownImageGeometry } from '../../visualInput/requestPolicy'
 import type { SessionTokenUsage } from '../conversation/conversationStore'
@@ -292,13 +302,61 @@ export class LlmPortAdapter implements LlmPort {
     providerMessages: ChatMessage[]
   ): ChatMessage[] {
     let messages = providerMessages
-    const candidates = gfsImageParts(messages)
+    type DemotableCandidate = {
+      kind: 'gfs' | 'channel_retained'
+      part: Extract<MessageContentPart, { type: 'image' }>
+    }
+
+    const collectCandidates = (current: ChatMessage[]): DemotableCandidate[] => {
+      const out: DemotableCandidate[] = []
+      for (const message of current) {
+        if (!Array.isArray(message.contentParts)) continue
+        for (const part of message.contentParts) {
+          if (part.type !== 'image' || part.sourceIdentityOnly) continue
+          if (isGfsImagePart(part)) {
+            out.push({ kind: 'gfs', part })
+          } else if (message.imageOrigin === 'channel_retained') {
+            out.push({ kind: 'channel_retained', part })
+          }
+        }
+      }
+      return out
+    }
+
+    let candidates = collectCandidates(messages)
     if (candidates.length === 0) return messages
 
-    const limits =
+    const providerLimits =
       this.provider.getVisualDeliveryLimits?.(
         this.dispatchMethodFor(request, 'tools' in request)
       ) ?? null
+
+    let effectiveLimits: VisualDeliveryLimits
+    if (!providerLimits) {
+      // A catalog vision capability does not establish a physical GFS contract:
+      // keep GFS receipts without pixels, while allowing valid `channel_retained`
+      // images on vision-capable OpenAI-compatible providers under conservative
+      // Host bounds (max 10 images / 20 MiB total, `X12`, `S57`).
+      const gfsOnly = candidates.filter(c => c.kind === 'gfs').map(c => c.part)
+      if (gfsOnly.length > 0) {
+        messages = projectGfsMessages(
+          messages,
+          new Set(gfsOnly),
+          'provider_visual_profile_unavailable'
+        )
+        candidates = candidates.filter(c => c.kind !== 'gfs')
+      }
+      if (candidates.length === 0) return messages
+      effectiveLimits = {
+        maxImages: FILE_REFERENCE_MAX_COUNT,
+        maxImageBytes: config.channelAttachmentMaxBytes,
+        maxTotalImageBytes: 20_971_520,
+        maxVisualRequestBytes: 32_000_000,
+      }
+    } else {
+      effectiveLimits = providerLimits
+    }
+
     const allImages = (current: ChatMessage[]) =>
       current.flatMap(message =>
         (message.contentParts ?? []).filter(
@@ -308,21 +366,89 @@ export class LlmPortAdapter implements LlmPort {
       )
     const imageBytes = (part: Extract<MessageContentPart, { type: 'image' }>): number =>
       Buffer.byteLength(part.data, 'base64')
-    if (!limits) {
-      // A catalog vision capability does not establish a physical byte/count
-      // contract. Keep the governed file receipt for this attempt, without pixels.
-      return projectGfsMessages(
-        messages,
-        new Set(candidates),
-        'provider_visual_profile_unavailable'
-      )
+    const requiresGeometry =
+      effectiveLimits.maxDimension !== undefined ||
+      effectiveLimits.maxPixels !== undefined ||
+      effectiveLimits.maxDimensionAboveImageCount !== undefined
+    const hasPositiveGeometry = (part: Extract<MessageContentPart, { type: 'image' }>): boolean =>
+      typeof part.width === 'number' &&
+      Number.isSafeInteger(part.width) &&
+      part.width > 0 &&
+      typeof part.height === 'number' &&
+      Number.isSafeInteger(part.height) &&
+      part.height > 0
+
+    const demoteCandidates = (
+      batch: DemotableCandidate[],
+      reason: 'geometry_unknown' | 'image_input_limit_exceeded'
+    ): void => {
+      const gfsBatch = batch.filter(c => c.kind === 'gfs').map(c => c.part)
+      if (gfsBatch.length > 0) {
+        messages = projectGfsMessages(messages, new Set(gfsBatch), reason)
+      }
+      const channelBatch = batch.filter(c => c.kind === 'channel_retained').map(c => c.part)
+      if (channelBatch.length > 0) {
+        messages = projectChannelRetainedMessages(messages, new Set(channelBatch), reason)
+      }
     }
-    if (hasUnknownImageGeometry(messages, limits)) {
-      return projectGfsMessages(messages, new Set(candidates), 'geometry_unknown')
+
+    // Phase 1 — per-image disqualifiers: remove individually-unfit images
+    // (unsupported MIME, unknown geometry, per-image bytes/encoded/dimension/pixel
+    // limit) BEFORE touching valid newer images (`X12`, `S51`, `S67`).
+    const unknownGeoDisqualified: DemotableCandidate[] = []
+    const limitDisqualified: DemotableCandidate[] = []
+    const remaining: DemotableCandidate[] = []
+    for (const candidate of candidates) {
+      const { part } = candidate
+      if (!isImageAttachmentMime(part.mimeType)) {
+        limitDisqualified.push(candidate)
+        continue
+      }
+      if (requiresGeometry && !hasPositiveGeometry(part)) {
+        unknownGeoDisqualified.push(candidate)
+        continue
+      }
+      const bytes = imageBytes(part)
+      const violatesPerImage =
+        (effectiveLimits.maxImageBytes !== undefined && bytes > effectiveLimits.maxImageBytes) ||
+        (effectiveLimits.maxImageEncodedBytes !== undefined &&
+          part.data.length > effectiveLimits.maxImageEncodedBytes) ||
+        (part.width !== undefined &&
+          part.height !== undefined &&
+          ((effectiveLimits.maxDimension !== undefined &&
+            (part.width > effectiveLimits.maxDimension ||
+              part.height > effectiveLimits.maxDimension)) ||
+            (effectiveLimits.maxPixels !== undefined &&
+              part.width * part.height > effectiveLimits.maxPixels)))
+      if (violatesPerImage) {
+        limitDisqualified.push(candidate)
+      } else {
+        remaining.push(candidate)
+      }
     }
+
+    let demoted = 0
+    if (unknownGeoDisqualified.length > 0) {
+      demoteCandidates(unknownGeoDisqualified, 'geometry_unknown')
+      demoted += unknownGeoDisqualified.length
+    }
+    if (limitDisqualified.length > 0) {
+      demoteCandidates(limitDisqualified, 'image_input_limit_exceeded')
+      demoted += limitDisqualified.length
+    }
+
+    // If a non-demotable (e.g. Composer) image still lacks required geometry,
+    // demote remaining GFS/channel candidates so the attempt never violates the
+    // provider contract.
+    if (hasUnknownImageGeometry(messages, effectiveLimits) && remaining.length > 0) {
+      demoteCandidates(remaining, 'geometry_unknown')
+      demoted += remaining.length
+      remaining.length = 0
+    }
+
     const exceeds = (current: ChatMessage[]): boolean => {
       const images = allImages(current)
-      const dimensionLimit = visualDimensionLimit(limits, images.length)
+      const dimensionLimit = visualDimensionLimit(effectiveLimits, images.length)
       const totalImageBytes = images.reduce((total, part) => total + imageBytes(part), 0)
       // Opaque provider state is replayed only to the driver that produced it,
       // so most attempts (any failover target) never send it and it must not
@@ -335,37 +461,43 @@ export class LlmPortAdapter implements LlmPort {
         'tools' in request ? Buffer.byteLength(JSON.stringify(request.tools ?? []), 'utf8') : 0
       )
       return (
-        images.length > limits.maxImages ||
-        (limits.maxTotalImageBytes !== undefined && totalImageBytes > limits.maxTotalImageBytes) ||
-        (limits.maxImageBytes !== undefined &&
-          images.some(part => imageBytes(part) > limits.maxImageBytes!)) ||
-        (limits.maxImageEncodedBytes !== undefined &&
-          images.some(part => part.data.length > limits.maxImageEncodedBytes!)) ||
+        images.length > effectiveLimits.maxImages ||
+        (effectiveLimits.maxTotalImageBytes !== undefined &&
+          totalImageBytes > effectiveLimits.maxTotalImageBytes) ||
+        (effectiveLimits.maxImageBytes !== undefined &&
+          images.some(part => imageBytes(part) > effectiveLimits.maxImageBytes!)) ||
+        (effectiveLimits.maxImageEncodedBytes !== undefined &&
+          images.some(part => part.data.length > effectiveLimits.maxImageEncodedBytes!)) ||
         images.some(
           part =>
             part.width !== undefined &&
             part.height !== undefined &&
             ((dimensionLimit !== undefined &&
               (part.width > dimensionLimit || part.height > dimensionLimit)) ||
-              (limits.maxPixels !== undefined && part.width * part.height > limits.maxPixels))
+              (effectiveLimits.maxPixels !== undefined &&
+                part.width * part.height > effectiveLimits.maxPixels))
         ) ||
-        requestBytes > limits.maxVisualRequestBytes
+        requestBytes > effectiveLimits.maxVisualRequestBytes
       )
     }
 
-    let demoted = 0
+    // Phase 2 — aggregate trimming:
+    // When `channel_retained` candidates are present, trim oldest-first (`shift()`)
+    // so newer valid channel images survive (`X12`, `S57`, `S67`). For pure
+    // GFS-only requests, preserve the existing `#650/#670` LIFO (`pop()`) order.
+    const hasChannelCandidates = candidates.some(c => c.kind === 'channel_retained')
     for (;;) {
       if (!exceeds(messages)) {
         if (demoted > 0)
           logger.info(
             { provider: this.providerName, model: this.model, demotedImages: demoted },
-            'GFS images projected to references for this provider attempt'
+            'Visual images projected/demoted for this provider attempt'
           )
         return messages
       }
-      const selected = candidates.pop()
+      const selected = hasChannelCandidates ? remaining.shift() : remaining.pop()
       if (!selected) throw new VisualInputError('limit_exceeded')
-      messages = projectGfsMessages(messages, new Set([selected]), 'image_input_limit_exceeded')
+      demoteCandidates([selected], 'image_input_limit_exceeded')
       demoted++
     }
   }
@@ -508,7 +640,8 @@ export class LlmPortAdapter implements LlmPort {
     input: ChatMessage[],
     method: ImageTransportOperation
   ): ChatMessage[] {
-    const messages = this.removeMalformedToolImages(input, method)
+    const afterToolSanitize = this.removeMalformedToolImages(input, method)
+    const messages = this.removeInvalidChannelRetainedImages(afterToolSanitize, method)
     for (const message of messages) {
       if (message.contentParts === undefined) continue
       if (
@@ -543,7 +676,8 @@ export class LlmPortAdapter implements LlmPort {
             new Set(gfsImages),
             'provider_visual_profile_unavailable'
           )
-        if (hasUnknownImageGeometry(messages, limits))
+        const nonChannelMessages = messages.filter(m => m.imageOrigin !== 'channel_retained')
+        if (hasUnknownImageGeometry(nonChannelMessages, limits))
           return projectGfsMessages(messages, new Set(gfsImages), 'geometry_unknown')
       }
       return messages
@@ -551,8 +685,14 @@ export class LlmPortAdapter implements LlmPort {
 
     const carriesImages = (message: ChatMessage): boolean =>
       message.contentParts?.some(part => part.type === 'image') === true
+    // Keep Desktop `#654/#669` hard-refusal strictly for Desktop user images
+    // (absent `imageOrigin`). Both `tool_result` and `channel_retained` degrade
+    // gracefully on non-vision models and failover attempts (`X12`, `S42`, `S43`).
     const userImages = messages.some(
-      message => carriesImages(message) && message.imageOrigin !== 'tool_result'
+      message =>
+        carriesImages(message) &&
+        message.imageOrigin !== 'tool_result' &&
+        message.imageOrigin !== 'channel_retained'
     )
     if (userImages) {
       logger.warn(
@@ -577,12 +717,36 @@ export class LlmPortAdapter implements LlmPort {
       )
     }
 
+    const denialDetail = imageInputDenialMessage(decision, {
+      provider: this.providerName,
+      model: this.model,
+    })
     const gfsImages = gfsImageParts(messages)
-    const projected = projectGfsMessages(
+    let projected = projectGfsMessages(
       messages,
       new Set(gfsImages),
       'model_image_input_unavailable'
     )
+    const channelImages = channelRetainedImageParts(projected)
+    if (channelImages.length > 0) {
+      logger.info(
+        {
+          component: 'LlmPortAdapter',
+          provider: this.providerName,
+          model: this.model,
+          method,
+          reason: decision.reason,
+          demotedChannelImages: channelImages.length,
+        },
+        'channel-retained images demoted: model attempt does not support image input'
+      )
+      projected = projectChannelRetainedMessages(
+        projected,
+        new Set(channelImages),
+        'model_image_input_unavailable',
+        denialDetail
+      )
+    }
     const withheld = projected.filter(
       message => message.imageOrigin === 'tool_result' && carriesImages(message)
     )
@@ -603,10 +767,7 @@ export class LlmPortAdapter implements LlmPort {
       },
       'tool screenshots withheld: model has no affirmative image-input evidence'
     )
-    const notice = `[${count} screenshot(s) returned by tool results were not forwarded: ${imageInputDenialMessage(
-      decision,
-      { provider: this.providerName, model: this.model }
-    )}]`
+    const notice = `[${count} screenshot(s) returned by tool results were not forwarded: ${denialDetail}]`
     // The rewritten message drops `contentParts` and `imageOrigin` and keeps
     // everything else the wire needs. `toolUseLoopMessages` builds this message
     // with only `role`/`content`/`contentParts`, so `tool_calls` and
@@ -623,6 +784,45 @@ export class LlmPortAdapter implements LlmPort {
           }
         : message
     )
+  }
+
+  /**
+   * Demote any `channel_retained` image part whose strict container framing
+   * validation did not pass (`visualValid !== true`) or whose encoding/MIME is
+   * malformed before provider dispatch (`X12`, `R58`, `S58`). Never throws
+   * `LlmError` for channel-retained images.
+   */
+  private removeInvalidChannelRetainedImages(
+    messages: ChatMessage[],
+    method: ImageTransportOperation
+  ): ChatMessage[] {
+    const invalidParts = new Set<MessageContentPart>()
+    for (const message of messages) {
+      if (message.imageOrigin !== 'channel_retained' || !Array.isArray(message.contentParts)) {
+        continue
+      }
+      for (const part of message.contentParts) {
+        if (
+          part &&
+          part.type === 'image' &&
+          (part.visualValid !== true || !isWellFormedImagePart(part))
+        ) {
+          invalidParts.add(part)
+        }
+      }
+    }
+    if (invalidParts.size === 0) return messages
+    logger.info(
+      {
+        component: 'LlmPortAdapter',
+        provider: this.providerName,
+        model: this.model,
+        method,
+        count: invalidParts.size,
+      },
+      'channel-retained images demoted before provider dispatch: invalid container framing'
+    )
+    return projectChannelRetainedMessages(messages, invalidParts, 'image_framing_invalid')
   }
 
   /**

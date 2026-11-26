@@ -9,6 +9,8 @@ import type { Database } from 'better-sqlite3'
 import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
 import type {
+  EndObsoleteApprovalSessionResult,
+  InsertChannelAttachmentResult,
   LoadAllPendingApprovalsRow,
   ModelSelectionWriteOutcome,
   PendingApprovalRow,
@@ -16,7 +18,10 @@ import type {
   PersistedSessionMessagePage,
   PersistedSessionSummary,
   ReapedSession,
+  RetainedChannelAttachmentRow,
+  RotateSessionOnIdentityChangeResult,
   SessionRow,
+  SweptChannelAttachmentRef,
   WorkerOp,
 } from './protocol'
 
@@ -131,6 +136,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             active_task_id: row.active_task_id ?? null,
             active_trace_context: row.active_trace_context ?? null,
             approval_mode: row.approval_mode ?? 'manual',
+            linked_user_id: row.linked_user_id ?? null,
           })
         })
         tx.immediate(op.payload)
@@ -894,7 +900,12 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
 
     case 'fts_search': {
       const rows = op.userId
-        ? s.ftsSearchByUser.all({ query: op.query, limit: op.limit, user_id: op.userId })
+        ? s.ftsSearchByUser.all({
+            query: op.query,
+            limit: op.limit,
+            user_id: op.userId,
+            linked_user_id: op.linkedUserId ?? null,
+          })
         : s.ftsSearch.all({ query: op.query, limit: op.limit })
       return rows
     }
@@ -914,10 +925,139 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         user_id: op.userId,
         channel_type: op.channelType ?? null,
         since: sinceEpoch,
+        linked_user_id: op.linkedUserId ?? null,
         limit: op.limit,
       })
       return rows
     }
+
+    case 'insert_channel_attachment':
+      return withBusyRetry(() => {
+        const tx = db.transaction(
+          (row: RetainedChannelAttachmentRow): InsertChannelAttachmentResult => {
+            const existing = s.selectChannelAttachmentByIdempotencyKey.get({
+              session_key: row.session_key,
+              linked_user_id: row.linked_user_id,
+              provider_event_id: row.provider_event_id,
+              provider_attachment_id: row.provider_attachment_id,
+            }) as RetainedChannelAttachmentRow | undefined
+            if (existing && existing.status === 'ready') {
+              return { record: existing, deduplicated: true }
+            }
+            const params = {
+              attachment_id: row.attachment_id,
+              session_key: row.session_key,
+              linked_user_id: row.linked_user_id,
+              provider_event_id: row.provider_event_id,
+              provider_attachment_id: row.provider_attachment_id,
+              storage_rel_path: row.storage_rel_path,
+              sha256: row.sha256,
+              byte_length: row.byte_length,
+              file_reference_json: row.file_reference_json,
+              width: row.width ?? null,
+              height: row.height ?? null,
+              visual_valid: row.visual_valid,
+              created_at: row.created_at,
+              expires_at: row.expires_at,
+              status: row.status,
+            }
+            if (existing) {
+              s.replaceChannelAttachmentByIdempotencyKey.run(params)
+            } else {
+              s.insertChannelAttachment.run(params)
+            }
+            return { record: row, deduplicated: false }
+          }
+        )
+        return tx.immediate(op.payload)
+      })
+
+    case 'list_active_channel_attachments': {
+      return s.listActiveChannelAttachments.all({
+        session_key: op.sessionKey,
+        linked_user_id: op.linkedUserId,
+        now_epoch: op.nowEpoch,
+      }) as RetainedChannelAttachmentRow[]
+    }
+
+    case 'get_channel_attachment_for_owner': {
+      const row = s.getChannelAttachmentForOwner.get({
+        attachment_id: op.attachmentId,
+        session_key: op.sessionKey,
+        linked_user_id: op.linkedUserId,
+        now_epoch: op.nowEpoch,
+      }) as RetainedChannelAttachmentRow | undefined
+      return row ?? null
+    }
+
+    case 'sweep_expired_channel_attachments': {
+      const limit = op.limit ?? 500
+      if (!Number.isSafeInteger(limit) || limit <= 0) {
+        throw new Error('sweep_expired_channel_attachments: limit must be a positive integer')
+      }
+      return withBusyRetry(() => {
+        const tx = db.transaction((): SweptChannelAttachmentRef[] => {
+          const rows = s.selectExpiredUnpinnedChannelAttachments.all({
+            now_epoch: op.nowEpoch,
+            limit,
+          }) as SweptChannelAttachmentRef[]
+          for (const row of rows) {
+            s.deleteChannelAttachmentById.run(row.attachment_id)
+          }
+          return rows
+        })
+        return tx.immediate()
+      })
+    }
+
+    case 'end_obsolete_approval_session':
+      return withBusyRetry(() => {
+        const tx = db.transaction((): EndObsoleteApprovalSessionResult => {
+          if (op.requestId) {
+            s.deletePendingApproval.run(op.requestId)
+          }
+          const target = op.sessionId
+            ? (s.selectSessionById.get(op.sessionId) as SessionRow | undefined)
+            : op.sessionKey
+              ? (s.selectSessionBySessionKey.get(op.sessionKey) as SessionRow | undefined)
+              : undefined
+          if (!target) {
+            return { ended: false, sessionId: null }
+          }
+          s.deletePendingApprovalsBySession.run({ session_id: target.id })
+          s.endSessionAtomic.run({
+            id: target.id,
+            ended_at: op.endedAt,
+            end_reason: op.endReason,
+          })
+          return { ended: true, sessionId: target.id }
+        })
+        return tx.immediate()
+      })
+
+    case 'rotate_session_on_identity_change':
+      return withBusyRetry(() => {
+        const tx = db.transaction((): RotateSessionOnIdentityChangeResult => {
+          const active = s.selectSessionBySessionKey.get(op.sessionKey) as SessionRow | undefined
+          if (!active) {
+            return { rotated: false, endedSessionId: null }
+          }
+          if (
+            op.expectedLinkedUserId !== undefined &&
+            active.linked_user_id === op.expectedLinkedUserId
+          ) {
+            return { rotated: false, endedSessionId: null }
+          }
+          s.deletePendingApprovalsBySession.run({ session_id: active.id })
+          s.endSessionAtomic.run({
+            id: active.id,
+            ended_at: op.endedAt,
+            end_reason: op.endReason,
+          })
+          return { rotated: true, endedSessionId: active.id }
+        })
+        return tx.immediate()
+      })
 
     case 'sweep_closed_sessions':
       // SQLite reads LIMIT 0 as "delete nothing" and a negative LIMIT as "no

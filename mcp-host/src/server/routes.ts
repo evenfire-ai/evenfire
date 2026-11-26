@@ -15,6 +15,7 @@ import type { ShellAction } from '../core/approval/shellCard'
 import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
+import type { RuntimeLifecycleGate } from '../lifecycle/statelessHeartbeat'
 import { logger } from '../logger'
 import {
   RuntimeActionAuthorityError,
@@ -22,6 +23,7 @@ import {
   authorityBindingFromTrustedEdge,
 } from '../runtime/actionAuthority'
 import { serializeSessionKey } from '../session/types'
+import { parseChannelAttachmentMetaHeader } from './channelAttachmentIngest'
 import { getRuntimeCallerContext, runtimeActionTargetMatches } from './edgeRuntimeAuth'
 import { badRequest, json } from './httpUtils'
 import type {
@@ -29,6 +31,7 @@ import type {
   ActivityStreamCheckpointHandler,
   ActivityStreamHandler,
   ApprovalHandler,
+  ChannelAttachmentIngestHandler,
   CompactionHandler,
   ContextBreakdownHandler,
   CronResultAckHandler,
@@ -71,6 +74,7 @@ export type RouteHandlers = {
   providerWorkflowApprovalResolveHandler: ProviderWorkflowApprovalResolveHandler | null
   providerWorkflowResultRequestHandler: ProviderWorkflowResultRequestHandler | null
   providerMessageAuthorizationHandler: ProviderMessageAuthorizationHandler | null
+  channelAttachmentIngestHandler?: ChannelAttachmentIngestHandler | null
   workflowApprovalNotificationClaimHandler: WorkflowApprovalNotificationClaimHandler | null
   workflowApprovalNotificationTerminalHandler: WorkflowApprovalNotificationTerminalHandler | null
   workflowApprovalMediumEnrollmentHandler: WorkflowApprovalMediumEnrollmentHandler | null
@@ -180,6 +184,8 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/activity': 'Get host activity timeline snapshot',
       'GET /v1/runtime/activity/stream': 'Read-only host activity stream (SSE)',
       'POST /v1/runtime/messages': 'Submit a message for processing',
+      'POST /v1/runtime/channel-attachments/ingest':
+        'Stream and retain a raw inbound channel attachment in Host PVC storage',
       'POST /v1/runtime/provider-messages/authorize':
         'Authorize a provider message against current identity and channel access',
       'POST /v1/runtime/approvals/approve': 'Approve a pending tool execution',
@@ -218,6 +224,7 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/activity': 'onActivitySnapshot(handler)',
       'GET /v1/runtime/activity/stream': 'onActivityStream(handler)',
       'POST /v1/runtime/messages': 'onMessage(handler)',
+      'POST /v1/runtime/channel-attachments/ingest': 'onChannelAttachmentIngest(handler)',
       'POST /v1/runtime/provider-messages/authorize': 'onProviderMessageAuthorization(handler)',
       'POST /v1/runtime/approvals/approve': 'onApproval(handler)',
       'POST /v1/runtime/approvals/deny': 'onApproval(handler)',
@@ -328,6 +335,150 @@ export async function handleStatusRoute(
   }
 }
 
+export async function handleChannelAttachmentIngestRoute(
+  req: Request,
+  res: Response,
+  handlers: RouteHandlers,
+  lifecycleGate?: RuntimeLifecycleGate | null
+): Promise<void> {
+  try {
+    if (lifecycleGate?.isIntakeFenced()) {
+      lifecycleGate.noteFencedIntake()
+      json(res, 503, {
+        ok: false,
+        error: {
+          code: 'host_draining',
+          message: 'Host is draining',
+          retryable: true,
+        },
+      })
+      return
+    }
+
+    const rawContentType = req.headers['content-type']
+    const essence =
+      typeof rawContentType === 'string'
+        ? rawContentType.split(';', 1)[0]?.trim().toLowerCase()
+        : ''
+    if (essence !== 'application/octet-stream') {
+      logger.warn(
+        { event: 'channel_attachment_ingest_rejected', reason: 'invalid_content_type' },
+        '[Server] Rejected channel attachment ingest'
+      )
+      json(res, 400, {
+        ok: false,
+        error: {
+          code: 'invalid_content_type',
+          message: 'Content-Type must be application/octet-stream',
+          retryable: false,
+        },
+      })
+      return
+    }
+
+    const parsedMeta = parseChannelAttachmentMetaHeader(req.headers['x-clerum-attachment-meta'])
+    if (!parsedMeta.ok) {
+      logger.warn(
+        { event: 'channel_attachment_ingest_rejected', reason: 'invalid_metadata' },
+        '[Server] Rejected channel attachment ingest'
+      )
+      json(res, 400, {
+        ok: false,
+        error: {
+          code: 'invalid_attachment_metadata',
+          message: parsedMeta.message,
+          retryable: false,
+        },
+      })
+      return
+    }
+
+    const caller = getRuntimeCallerContext(req)
+    const metadata = parsedMeta.metadata
+    if (
+      caller?.caller !== 'channel-reader' ||
+      channelRuntimeSourceMismatch(caller, {
+        channelType: metadata.channelType,
+        channelId: metadata.channelId,
+        sender: metadata.sender,
+      })
+    ) {
+      logger.warn(
+        { event: 'channel_attachment_ingest_rejected', reason: 'source_mismatch' },
+        '[Server] Rejected channel attachment ingest'
+      )
+      json(res, 403, {
+        ok: false,
+        error: {
+          code: 'runtime_edge_source_mismatch',
+          message: 'Runtime edge source mismatch',
+          retryable: false,
+        },
+      })
+      return
+    }
+
+    let contentLength: number | undefined
+    const rawContentLength = req.headers['content-length']
+    if (rawContentLength !== undefined) {
+      if (typeof rawContentLength !== 'string' || !/^\d+$/.test(rawContentLength.trim())) {
+        json(res, 400, {
+          ok: false,
+          error: {
+            code: 'invalid_content_length',
+            message: 'Content-Length must be a non-negative integer',
+            retryable: false,
+          },
+        })
+        return
+      }
+      const parsedLength = Number(rawContentLength.trim())
+      if (!Number.isSafeInteger(parsedLength) || parsedLength < 0) {
+        json(res, 400, {
+          ok: false,
+          error: {
+            code: 'invalid_content_length',
+            message: 'Content-Length must be a valid non-negative integer',
+            retryable: false,
+          },
+        })
+        return
+      }
+      contentLength = parsedLength
+    }
+
+    if (!handlers.channelAttachmentIngestHandler) {
+      json(res, 503, {
+        ok: false,
+        error: {
+          code: 'channel_attachment_store_unavailable',
+          message: 'Channel attachment ingest handler is not configured',
+          retryable: false,
+        },
+      })
+      return
+    }
+
+    const result = await handlers.channelAttachmentIngestHandler({
+      metadata,
+      stream: req,
+      ...(contentLength !== undefined ? { contentLength } : {}),
+      caller,
+    })
+    json(res, result.status, result.body)
+  } catch (error) {
+    logger.error({ err: error }, '[Server] Error ingesting channel attachment')
+    json(res, 500, {
+      ok: false,
+      error: {
+        code: 'internal_error',
+        message: 'Failed to ingest channel attachment',
+        retryable: true,
+      },
+    })
+  }
+}
+
 export async function handleMessageRoute(
   req: Request,
   res: Response,
@@ -346,12 +497,27 @@ export async function handleMessageRoute(
       return
     }
 
+    // Server-owned identity binding — never trust client-supplied value.
+    delete message.admittedLinkedUserId
+
     // Identity invariant for the desktop / rpc channel: the sender MUST be the
     // trusted rpc-proxy edge user, regardless of what the body claims.
     // rpc-proxy already does this; re-enforcing here is defense-in-depth for
     // the direct rpc-proxy -> mcp-host hop after removing forwarded JWT.
     //
     if (message?.channelType === 'rpc') {
+      if (
+        message.channelAttachmentIds !== undefined ||
+        message.attachmentIngestErrors !== undefined
+      ) {
+        delete message.channelAttachmentIds
+        delete message.attachmentIngestErrors
+        badRequest(
+          res,
+          'channelAttachmentIds and attachmentIngestErrors are not allowed on rpc channel'
+        )
+        return
+      }
       const caller = getRuntimeCallerContext(req)
       if (caller?.caller === 'rpc-proxy' && caller.userId) {
         const metadata =
@@ -431,6 +597,43 @@ export async function handleMessageRoute(
       ) {
         json(res, 403, { error: 'Runtime edge source mismatch' })
         return
+      }
+      if (message.channelAttachmentIds !== undefined) {
+        if (
+          !Array.isArray(message.channelAttachmentIds) ||
+          message.channelAttachmentIds.length > config.fileReferenceMaxCount ||
+          message.channelAttachmentIds.some(
+            id => typeof id !== 'string' || id.trim().length === 0 || id.length > 128
+          )
+        ) {
+          json(res, 200, {
+            success: false,
+            error: {
+              code: 'FILE_REFERENCE_INVALID',
+              message: `channelAttachmentIds must contain at most ${config.fileReferenceMaxCount} non-empty attachment IDs`,
+              retryable: false,
+              provider: 'unknown',
+            },
+          })
+          return
+        }
+      }
+      if (message.attachmentIngestErrors !== undefined) {
+        if (
+          !Array.isArray(message.attachmentIngestErrors) ||
+          message.attachmentIngestErrors.length > config.fileReferenceMaxCount ||
+          message.attachmentIngestErrors.some(
+            entry =>
+              !entry ||
+              typeof entry !== 'object' ||
+              (entry.filename !== null && typeof entry.filename !== 'string') ||
+              typeof entry.code !== 'string' ||
+              typeof entry.message !== 'string'
+          )
+        ) {
+          badRequest(res, 'Invalid attachmentIngestErrors payload')
+          return
+        }
       }
     }
 

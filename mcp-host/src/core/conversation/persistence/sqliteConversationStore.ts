@@ -15,6 +15,8 @@
  */
 import { Counter, Gauge, Histogram } from 'prom-client'
 import type {
+  EndObsoleteApprovalSessionResult,
+  InsertChannelAttachmentResult,
   LoadAllPendingApprovalsRow,
   ModelSelectionWriteOutcome,
   PendingApprovalRow,
@@ -22,7 +24,10 @@ import type {
   PersistedSessionMessagePage,
   PersistedSessionSummary,
   ReapedSession,
+  RetainedChannelAttachmentRow,
+  RotateSessionOnIdentityChangeResult,
   SessionRow,
+  SweptChannelAttachmentRef,
 } from '../../../db/worker/protocol'
 import { logger } from '../../../logger'
 import { parseSessionKey } from '../../../session/types'
@@ -715,6 +720,7 @@ export class SqliteConversationStore implements ConversationStore {
       active_task_id: conv.activeTaskId ?? null,
       active_trace_context: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
       approval_mode: opts.approvalMode ?? 'manual',
+      linked_user_id: opts.linkedUserId ?? conv.linked_user_id ?? null,
     }
     this.persistQueue.enqueueAsync(sessionKey, {
       kind: 'insert_session',
@@ -1202,6 +1208,127 @@ export class SqliteConversationStore implements ConversationStore {
           'Failed to consume a pending approval after its decision write failed'
         )
       })
+  }
+
+  async insertChannelAttachment(
+    row: RetainedChannelAttachmentRow
+  ): Promise<InsertChannelAttachmentResult> {
+    return this.persistQueue.enqueueSync<InsertChannelAttachmentResult>(
+      {
+        kind: 'insert_channel_attachment',
+        payload: row,
+      },
+      row.session_key
+    )
+  }
+
+  async listActiveChannelAttachments(
+    sessionKey: string,
+    linkedUserId: string,
+    nowEpoch: number = Date.now() / 1000
+  ): Promise<RetainedChannelAttachmentRow[]> {
+    return this.persistQueue.enqueueSync<RetainedChannelAttachmentRow[]>(
+      {
+        kind: 'list_active_channel_attachments',
+        sessionKey,
+        linkedUserId,
+        nowEpoch,
+      },
+      sessionKey
+    )
+  }
+
+  async getChannelAttachmentForOwner(
+    attachmentId: string,
+    sessionKey: string,
+    linkedUserId: string,
+    nowEpoch: number = Date.now() / 1000
+  ): Promise<RetainedChannelAttachmentRow | null> {
+    return this.persistQueue.enqueueSync<RetainedChannelAttachmentRow | null>(
+      {
+        kind: 'get_channel_attachment_for_owner',
+        attachmentId,
+        sessionKey,
+        linkedUserId,
+        nowEpoch,
+      },
+      sessionKey
+    )
+  }
+
+  async sweepExpiredChannelAttachments(
+    nowEpoch: number = Date.now() / 1000,
+    limit?: number
+  ): Promise<SweptChannelAttachmentRef[]> {
+    return this.persistQueue.enqueueSync<SweptChannelAttachmentRef[]>({
+      kind: 'sweep_expired_channel_attachments',
+      nowEpoch,
+      ...(limit !== undefined ? { limit } : {}),
+    })
+  }
+
+  async endObsoleteApprovalSession(params: {
+    sessionId?: string
+    sessionKey?: string
+    requestId?: string
+    endReason: string
+    endedAt?: number
+  }): Promise<EndObsoleteApprovalSessionResult> {
+    const resolvedKey =
+      params.sessionKey ??
+      (params.sessionId ? this.sessionKeyById.get(params.sessionId) : undefined)
+    const result = await this.persistQueue.enqueueSync<EndObsoleteApprovalSessionResult>(
+      {
+        kind: 'end_obsolete_approval_session',
+        ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+        ...(params.sessionKey !== undefined ? { sessionKey: params.sessionKey } : {}),
+        ...(params.requestId !== undefined ? { requestId: params.requestId } : {}),
+        endReason: params.endReason,
+        endedAt: params.endedAt ?? Date.now() / 1000,
+      },
+      resolvedKey
+    )
+    if (resolvedKey) {
+      this.cache.delete(resolvedKey)
+    }
+    const evictedId = result.sessionId ?? params.sessionId
+    if (evictedId) {
+      const mappedKey = this.sessionKeyById.get(evictedId)
+      if (mappedKey) this.cache.delete(mappedKey)
+      this.ordinals.delete(evictedId)
+      this.sessionKeyById.delete(evictedId)
+    }
+    pinnedCountGauge?.set(this.cache.pinnedCount())
+    return result
+  }
+
+  async rotateSessionOnIdentityChange(params: {
+    sessionKey: string
+    expectedLinkedUserId?: string | null
+    endReason?: string
+    endedAt?: number
+  }): Promise<RotateSessionOnIdentityChangeResult> {
+    const result = await this.persistQueue.enqueueSync<RotateSessionOnIdentityChangeResult>(
+      {
+        kind: 'rotate_session_on_identity_change',
+        sessionKey: params.sessionKey,
+        ...(params.expectedLinkedUserId !== undefined
+          ? { expectedLinkedUserId: params.expectedLinkedUserId }
+          : {}),
+        endReason: params.endReason ?? 'identity_changed',
+        endedAt: params.endedAt ?? Date.now() / 1000,
+      },
+      params.sessionKey
+    )
+    if (result.rotated) {
+      this.cache.delete(params.sessionKey)
+      if (result.endedSessionId) {
+        this.ordinals.delete(result.endedSessionId)
+        this.sessionKeyById.delete(result.endedSessionId)
+      }
+      pinnedCountGauge?.set(this.cache.pinnedCount())
+    }
+    return result
   }
 
   async shutdown(): Promise<void> {

@@ -147,6 +147,7 @@ export class ConversationManager {
       approval_mode: opts?.approvalMode ?? 'manual',
       auto_shell_grants: { wholeTool: false, commands: new Set() },
       ...(opts?.channelType !== undefined ? { channel_type: opts.channelType } : {}),
+      ...(opts?.linkedUserId != null ? { linked_user_id: opts.linkedUserId } : {}),
       created_at: new Date(),
       updated_at: new Date(),
       // #654 — a freshly inserted row carries the column default, so the RAM

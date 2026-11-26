@@ -59,6 +59,17 @@ export interface PreparedStatements {
   /** T3.1 — deletes up to `@limit` sessions closed before the cutoff. */
   sweepClosedSessionsEmpty: Statement
 
+  /** Migration 020 — channel attachments & atomic session ending. */
+  insertChannelAttachment: Statement
+  selectChannelAttachmentByIdempotencyKey: Statement
+  replaceChannelAttachmentByIdempotencyKey: Statement
+  listActiveChannelAttachments: Statement
+  getChannelAttachmentForOwner: Statement
+  selectExpiredUnpinnedChannelAttachments: Statement
+  deleteChannelAttachmentById: Statement
+  selectSessionById: Statement
+  endSessionAtomic: Statement
+
   integrityCheck: Statement
 }
 
@@ -74,7 +85,7 @@ export function prepareStatements(db: Database): PreparedStatements {
         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
         cache_tokens_reported,
         title, state, active_task_id, active_trace_context,
-        approval_mode
+        approval_mode, linked_user_id
       ) VALUES (
         @id, @session_key, @source, @user_id, @team_id,
         @channel_type, @channel_id, @thread_id,
@@ -84,7 +95,7 @@ export function prepareStatements(db: Database): PreparedStatements {
         @input_tokens, @output_tokens, @cache_read_tokens, @cache_write_tokens,
         @cache_tokens_reported,
         @title, @state, @active_task_id, @active_trace_context,
-        @approval_mode
+        @approval_mode, @linked_user_id
       )
       ON CONFLICT(id) DO UPDATE SET
         state = excluded.state,
@@ -285,16 +296,17 @@ export function prepareStatements(db: Database): PreparedStatements {
        WHERE id = @id
     `),
     selectSessionBySessionKey: db.prepare(`
-      SELECT * FROM sessions WHERE session_key = ?
+      SELECT * FROM sessions WHERE session_key = ? AND state != 'ended'
     `),
     selectSessionsByPrefix: db.prepare(`
-      SELECT * FROM sessions WHERE session_key LIKE ? ORDER BY started_at DESC
+      SELECT * FROM sessions WHERE session_key LIKE ? AND state != 'ended' ORDER BY started_at DESC
     `),
     selectSessionSummariesByPrefix: db.prepare(`
       WITH scoped_sessions AS (
         SELECT *
          FROM sessions
          WHERE user_id = @user_id
+           AND state != 'ended'
            AND session_key >= @prefix_start
            AND session_key < @prefix_end
            AND (
@@ -515,6 +527,7 @@ export function prepareStatements(db: Database): PreparedStatements {
         JOIN sessions s ON s.id = m.session_id
        WHERE messages_fts MATCH @query
          AND s.user_id = @user_id
+         AND (@linked_user_id IS NULL OR s.linked_user_id = @linked_user_id)
        ORDER BY rank
        LIMIT @limit
     `),
@@ -536,6 +549,7 @@ export function prepareStatements(db: Database): PreparedStatements {
         AND s.user_id = @user_id
         AND (@channel_type IS NULL OR s.channel_type = @channel_type)
         AND (@since IS NULL OR m.timestamp >= @since)
+        AND (@linked_user_id IS NULL OR s.linked_user_id = @linked_user_id)
       ORDER BY rank
       LIMIT @limit
     `),
@@ -564,6 +578,134 @@ export function prepareStatements(db: Database): PreparedStatements {
             AND ended_at IS NOT NULL
             AND ended_at < @cutoff
           LIMIT @limit)
+    `),
+    insertChannelAttachment: db.prepare(`
+      INSERT INTO conversation_attachments (
+        attachment_id, session_key, linked_user_id,
+        provider_event_id, provider_attachment_id,
+        storage_rel_path, sha256, byte_length, file_reference_json,
+        width, height, visual_valid,
+        created_at, expires_at, status
+      ) VALUES (
+        @attachment_id, @session_key, @linked_user_id,
+        @provider_event_id, @provider_attachment_id,
+        @storage_rel_path, @sha256, @byte_length, @file_reference_json,
+        @width, @height, @visual_valid,
+        @created_at, @expires_at, @status
+      )
+    `),
+    selectChannelAttachmentByIdempotencyKey: db.prepare(`
+      SELECT *
+        FROM conversation_attachments
+       WHERE session_key = @session_key
+         AND linked_user_id = @linked_user_id
+         AND provider_event_id = @provider_event_id
+         AND provider_attachment_id = @provider_attachment_id
+    `),
+    replaceChannelAttachmentByIdempotencyKey: db.prepare(`
+      UPDATE conversation_attachments
+         SET attachment_id = @attachment_id,
+             storage_rel_path = @storage_rel_path,
+             sha256 = @sha256,
+             byte_length = @byte_length,
+             file_reference_json = @file_reference_json,
+             width = @width,
+             height = @height,
+             visual_valid = @visual_valid,
+             created_at = @created_at,
+             expires_at = @expires_at,
+             status = @status
+       WHERE session_key = @session_key
+         AND linked_user_id = @linked_user_id
+         AND provider_event_id = @provider_event_id
+         AND provider_attachment_id = @provider_attachment_id
+    `),
+    listActiveChannelAttachments: db.prepare(`
+      SELECT ca.*
+        FROM conversation_attachments ca
+       WHERE ca.session_key = @session_key
+         AND ca.linked_user_id = @linked_user_id
+         AND ca.status = 'ready'
+         AND (
+           @now_epoch <= ca.expires_at
+           OR EXISTS (
+             SELECT 1
+               FROM sessions s
+              WHERE s.session_key = ca.session_key
+                AND s.state IN ('processing', 'awaiting_approval')
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM pending_approvals pa
+               JOIN sessions s ON s.id = pa.session_id
+              WHERE s.session_key = ca.session_key
+                AND s.state != 'ended'
+           )
+         )
+       ORDER BY ca.created_at ASC, ca.attachment_id ASC
+    `),
+    getChannelAttachmentForOwner: db.prepare(`
+      SELECT ca.*
+        FROM conversation_attachments ca
+       WHERE ca.attachment_id = @attachment_id
+         AND ca.session_key = @session_key
+         AND ca.linked_user_id = @linked_user_id
+         AND ca.status = 'ready'
+         AND (
+           @now_epoch <= ca.expires_at
+           OR EXISTS (
+             SELECT 1
+               FROM sessions s
+              WHERE s.session_key = ca.session_key
+                AND s.state IN ('processing', 'awaiting_approval')
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM pending_approvals pa
+               JOIN sessions s ON s.id = pa.session_id
+              WHERE s.session_key = ca.session_key
+                AND s.state != 'ended'
+           )
+         )
+       LIMIT 1
+    `),
+    selectExpiredUnpinnedChannelAttachments: db.prepare(`
+      SELECT ca.attachment_id, ca.storage_rel_path
+        FROM conversation_attachments ca
+       WHERE (
+           (ca.status IN ('ready', 'expired') AND ca.expires_at < @now_epoch)
+           OR ca.status = 'deleted'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM sessions s
+            WHERE s.session_key = ca.session_key
+              AND s.state IN ('processing', 'awaiting_approval')
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM pending_approvals pa
+             JOIN sessions s ON s.id = pa.session_id
+            WHERE s.session_key = ca.session_key
+              AND s.state != 'ended'
+         )
+       ORDER BY ca.expires_at ASC
+       LIMIT @limit
+    `),
+    deleteChannelAttachmentById: db.prepare(`
+      DELETE FROM conversation_attachments WHERE attachment_id = ?
+    `),
+    selectSessionById: db.prepare(`
+      SELECT * FROM sessions WHERE id = ?
+    `),
+    endSessionAtomic: db.prepare(`
+      UPDATE sessions
+         SET state = 'ended',
+             ended_at = @ended_at,
+             end_reason = @end_reason,
+             active_task_id = NULL,
+             active_trace_context = NULL
+       WHERE id = @id
     `),
     integrityCheck: db.prepare(`PRAGMA integrity_check`),
   }

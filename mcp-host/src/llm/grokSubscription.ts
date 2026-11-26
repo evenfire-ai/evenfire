@@ -15,12 +15,14 @@ import {
   ToolDefinition,
 } from '../core/types'
 import { logger } from '../logger'
+import { resolveVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import {
   attachmentBudgetRefusalMessageFor,
   buildAttachmentBudgetRefusals,
 } from './attachmentBudgetRefusal'
 import { classifyUnknown } from './errorClassification'
 import { GrokLlmProxyClient, GrokProxyError } from './grokLlmProxyClient'
+import { type ImageTransportOperation, transportSupportsImageInput } from './imageInput'
 import { IMAGE_SOURCE_INVALID, canonicalRefusalCode, projectMessage } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
 import { authorizeRetryDelayMs, rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
@@ -131,6 +133,11 @@ function assertTerminalGrokOutcome(result: {
 }
 
 export class GrokSubscriptionProvider implements SingleTurnProvider {
+  getVisualDeliveryLimits(operation: ImageTransportOperation) {
+    return transportSupportsImageInput('grok-subscription', operation)
+      ? resolveVisualDeliveryLimits('grok-subscription')
+      : null
+  }
   readonly requiresImageSourceIdentity =
     descriptorFor('grok-subscription').requiresImageSourceIdentity === true
   private nextProviderAttemptIndex = 1
