@@ -231,21 +231,23 @@ function encode(value: unknown): string {
  * `MAX_APPROVAL_CHANGE_SUMMARY_LENGTH` characters, never a JSON string cut
  * mid-way:
  *
- * 1. Tool entries are dropped one by one, other tools first (from the end),
- *    and counted into `toolsTruncated`, until the text fits. mcp-host native
- *    tool entries stay until no other entry is left; they are short enough
- *    that all of them fit.
- * 2. If it still does not fit with no tool entries (many changed fields), the
- *    text is a counts-only object marked `truncated: true`: field, tool and
- *    approver-channel counts, the approver totals and the two flags. Its size
- *    is bounded, so it always fits.
+ * 1. Entries of other tools are dropped one by one, from the end, and counted
+ *    into `toolsTruncated`, until the text fits. Native tool entries are never
+ *    dropped.
+ * 2. If it still does not fit with only the native entries (many changed
+ *    fields), the field values fall back to counts: the text is a counts-only
+ *    object marked `truncated: true` (field, tool and approver-channel counts,
+ *    the approver totals and the two flags) that also holds every native
+ *    entry. All native entries together take about 3,100 characters and the
+ *    rest of that object is bounded, so it always fits.
  */
 export function serializeApprovalChangeSummary(change: HostApprovalChange): string {
   const entries = [
     ...change.tools.filter(entry => isMcpHostNativeToolName(entry.name)),
     ...change.tools.filter(entry => !isMcpHostNativeToolName(entry.name)),
   ]
-  for (let kept = entries.length; kept >= 0; kept -= 1) {
+  const nativeCount = entries.filter(entry => isMcpHostNativeToolName(entry.name)).length
+  for (let kept = entries.length; kept >= nativeCount; kept -= 1) {
     const text = encode({
       ...change,
       tools: entries.slice(0, kept),
@@ -256,6 +258,7 @@ export function serializeApprovalChangeSummary(change: HostApprovalChange): stri
   const counts = Object.values(change.approvers)
   return encode({
     truncated: true,
+    tools: entries.slice(0, nativeCount),
     fieldCount: Object.keys(change.fields).length,
     toolCount: entries.length + change.toolsTruncated,
     approverChannelCount: counts.length,

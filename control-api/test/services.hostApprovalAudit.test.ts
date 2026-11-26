@@ -213,7 +213,44 @@ describe('buildHostApprovalChange', () => {
       expect(summaryTools(buildApprovalChangeSummary({ before, after }))).toContain('shell_exec')
     })
 
-    it('worst case: all native names changed plus decoys list every native name within 4096 characters', () => {
+    it('worst case: every field changed, escaping-heavy strings, approvers on every channel, all natives and decoys: every native entry stays within 4096 characters', () => {
+      const toolsBefore: Record<string, boolean> = {}
+      const toolsAfter: Record<string, boolean> = { ...decoys(60, 3, true) }
+      for (const name of MCP_HOST_NATIVE_TOOL_NAMES) {
+        toolsBefore[name] = true
+        toolsAfter[name] = false
+      }
+      const channels = ['telegram', 'email', 'slack', 'teams']
+      const approvalOf = (flag: boolean, ceiling: string, model: string, approvers: string) => ({
+        modeCeiling: ceiling,
+        defaultPolicy: flag ? 'channel_users' : 'cli_only',
+        // C1 characters escape to six characters each in the summary.
+        shellClassifierModel: model.repeat(MAX_VALUE_LENGTH),
+        channels: Object.fromEntries(
+          channels.map(channel => [
+            channel,
+            {
+              enabled: flag,
+              allowModeChange: flag,
+              approvers: Array.from({ length: 150 }, (_, i) => `${approvers}-${channel}-${i}`),
+            },
+          ])
+        ),
+        tools: flag ? toolsBefore : toolsAfter,
+      })
+      const before = approvalOf(true, 'manual', '\u0085', 'old')
+      const after = approvalOf(false, 'allow_all', '\u0086', 'new')
+
+      const change = buildHostApprovalChange({ before, after })
+      expect(Object.keys(change?.fields ?? {})).toHaveLength(11)
+      expect(Object.keys(change?.approvers ?? {})).toHaveLength(4)
+      const summary = buildApprovalChangeSummary({ before, after })
+      const kept = summaryTools(summary)
+      for (const name of MCP_HOST_NATIVE_TOOL_NAMES) expect(kept).toContain(name)
+      expect(JSON.parse(summary as string).truncated).toBe(true)
+    })
+
+    it('all natives changed plus decoys, with no field change, list every native name', () => {
       const before: Record<string, boolean> = {}
       const after: Record<string, boolean> = { ...decoys(60, 3, true) }
       for (const name of MCP_HOST_NATIVE_TOOL_NAMES) {

@@ -112,6 +112,7 @@ describe('serializeApprovalChangeSummary', () => {
     expect(text.length).toBeLessThanOrEqual(MAX_APPROVAL_CHANGE_SUMMARY_LENGTH)
     expect(JSON.parse(text)).toEqual({
       truncated: true,
+      tools: [],
       fieldCount: 60,
       toolCount: 5,
       approverChannelCount: 1,
