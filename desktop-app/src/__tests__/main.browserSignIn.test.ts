@@ -468,13 +468,20 @@ describe('main.ts browser sign-in wiring', () => {
       throw new Error(failure)
     })
 
-    for (const event of ['resume', 'unlock-screen']) {
-      harness.checkBrowserSignInDeadline.mockClear()
-      thrower.mockClear()
-      expect(() => emitPowerEvent(event)).toThrow(failure)
-      // The throwing listener ran, and the deadline check ran too.
-      expect(thrower, event).toHaveBeenCalledTimes(1)
-      expect(harness.checkBrowserSignInDeadline, event).toHaveBeenCalledTimes(1)
+    try {
+      for (const event of ['resume', 'unlock-screen']) {
+        harness.checkBrowserSignInDeadline.mockClear()
+        thrower.mockClear()
+        expect(() => emitPowerEvent(event)).toThrow(failure)
+        // The throwing listener ran, and the deadline check ran too.
+        expect(thrower, event).toHaveBeenCalledTimes(1)
+        expect(harness.checkBrowserSignInDeadline, event).toHaveBeenCalledTimes(1)
+      }
+    } finally {
+      // The module-level `vi.fn()` keeps an implementation until it is reset, and
+      // `vi.restoreAllMocks()` in `afterEach` restores only spies: no later row may inherit
+      // the throw.
+      thrower.mockReset()
     }
   })
 
