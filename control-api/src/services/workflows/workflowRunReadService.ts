@@ -373,9 +373,9 @@ function toIso(value: string | null): string | null {
 
 /**
  * A run with its cancel request. `mapDbRun` always sets both fields for a run
- * read from `workflow_runs`: both null, or both set once a permitted user asked
- * to cancel the run (the request stays on the row after it reaches a terminal
- * phase). Archived runs (`source: 'audit'`) do not carry them, which is why
+ * read from `workflow_runs`: both null, or both set once a permitted user or a
+ * Control UI operator asked to cancel the run (the request stays on the row
+ * after it reaches a terminal phase). Archived runs (`source: 'audit'`) do not carry them, which is why
  * they are optional here: run lists and health reads mix the two sources.
  */
 export type CancelAwareRunDto = CanonicalRunDto & {
