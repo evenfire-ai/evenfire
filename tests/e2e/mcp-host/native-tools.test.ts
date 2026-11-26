@@ -16,8 +16,9 @@
  * Run:
  *   cd tests/e2e && E2E_RUN_NATIVE_TOOLS=1 npx vitest run native-tools.test.ts
  */
-import { afterAll, describe as baseDescribe, expect, it } from 'vitest'
+import { afterAll, describe as baseDescribe, beforeAll, expect, it } from 'vitest'
 import {
+  DEFAULT_HOST_REF,
   MCP_HOST_URL,
   approveRequest,
   fetchJson,
@@ -28,6 +29,13 @@ import {
   sendMessage,
   waitForIdle,
 } from '../helpers.js'
+import { issueRealRpcToken } from './runtimeAuth.js'
+
+let statusToken: string
+
+beforeAll(async () => {
+  statusToken = await issueRealRpcToken(['host:status:read'], [DEFAULT_HOST_REF])
+})
 
 // ---------------------------------------------------------------------------
 // Test-wide state
@@ -70,7 +78,7 @@ async function sendWithApproval(
     res.data?.status !== 'waiting_approval' &&
     /requires approval|shall i proceed|would you like|want me to/i.test(res.data.response)
   ) {
-    await waitForIdle(timeoutMs)
+    await waitForIdle(statusToken, timeoutMs)
     res = await sendMessage('Yes, proceed. Execute it now.', { userId })
   }
 
@@ -85,7 +93,7 @@ async function sendWithApproval(
     }
     expect(approvalRes.data?.success).toBe(true)
 
-    await waitForIdle(timeoutMs)
+    await waitForIdle(statusToken, timeoutMs)
 
     const taskRes = await getTaskResult(taskId, timeoutMs)
     return { data: taskRes.data, wasApproval: true }
@@ -108,7 +116,7 @@ describe('Phase 1: Smoke', () => {
     expect(res.status).toBe(200)
     expect(res.data.success).toBe(true)
 
-    const status = await waitForIdle(30_000)
+    const status = await waitForIdle(statusToken, 30_000)
     expect(status.agent.state).toBe('idle')
 
     const response = (res.data.response || '').toLowerCase()
@@ -130,7 +138,7 @@ describe('Phase 2: Stateless', () => {
     )
 
     expect(res.status).toBe(200)
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
 
     const response = (res.data.response || '').toLowerCase()
     expect(response).toMatch(/3|three/)
@@ -142,7 +150,7 @@ describe('Phase 2: Stateless', () => {
     )
 
     expect(res.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     const response = (res.data.response || '').toLowerCase()
     expect(response).toContain('gadget')
@@ -154,7 +162,7 @@ describe('Phase 2: Stateless', () => {
     )
 
     expect(res.status).toBe(200)
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
 
     const response = (res.data.response || '').toLowerCase()
     expect(response).toMatch(/a/)
@@ -174,13 +182,13 @@ describe('Phase 3: Stateful', () => {
       "Store the value 'xylophone-42-pluto' in memory with the key 'secret_code' using the memory_write tool."
     )
     expect(writeRes.status).toBe(200)
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
 
     const readRes = await sendMessage(
       "What is my secret code? Retrieve the key 'secret_code' from memory using memory_read and tell me the exact value."
     )
     expect(readRes.status).toBe(200)
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
 
     const response = (readRes.data.response || '').toLowerCase()
     expect(response).toContain('xylophone-42-pluto')
@@ -193,7 +201,7 @@ describe('Phase 3: Stateful', () => {
       { userId: uniqueUserId('memory-persistence') }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
 
     const response = (res.data.response || '').toLowerCase()
     expect(response).toContain('xylophone-42-pluto')
@@ -213,7 +221,7 @@ describe('Phase 4: Filesystem', () => {
       'Use the file_write tool to create a file called nt4-test-output.txt with path "nt4-test-output.txt" and content "Hello from Clerum E2E test". Confirm the file was written.'
     )
     expect(writeRes.status).toBe(200)
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
 
     // Check the write response for errors
     const writeResponse = (writeRes.data.response || '').toLowerCase()
@@ -224,7 +232,7 @@ describe('Phase 4: Filesystem', () => {
       'Use the file_read tool to read the file at path "nt4-test-output.txt" and tell me exactly what it contains.'
     )
     expect(readRes.status).toBe(200)
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
 
     const response = (readRes.data.response || '').toLowerCase()
     expect(response).toContain('hello from clerum')
@@ -238,21 +246,21 @@ describe('Phase 4: Filesystem', () => {
       'Use the file_write tool with path "nt6-append-test.txt" and content "Line 1\\n" to create the file.'
     )
     expect(writeRes.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     // Step 2: Append
     const appendRes = await sendMessage(
       'Use the file_write tool with path "nt6-append-test.txt", content "Line 2\\n", and append set to true.'
     )
     expect(appendRes.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     // Step 3: Read back and verify both lines
     const readRes = await sendMessage(
       'Use file_read to read "nt6-append-test.txt" and tell me its full contents.'
     )
     expect(readRes.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     const response = (readRes.data.response || '').toLowerCase()
     expect(response).toContain('line 1')
@@ -264,7 +272,7 @@ describe('Phase 4: Filesystem', () => {
       'Use the file_read tool to read the file at path "../../etc/passwd".'
     )
     expect(res.status).toBe(200)
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
 
     const response = (res.data.response || '').toLowerCase()
     // Should indicate the file couldn't be read / path is invalid
@@ -292,7 +300,7 @@ describe('Phase 5: Shell Execution', () => {
     expect(data?.success ?? true).toBeTruthy()
     expect((data?.response || '').length).toBeGreaterThan(0)
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
   }, 90_000)
 
@@ -308,7 +316,7 @@ describe('Phase 5: Shell Execution', () => {
       expect(response).toMatch(/timeout|timed out|killed|exceeded|terminated|error|failed|approval/)
     }
 
-    const status = await waitForIdle(30_000)
+    const status = await waitForIdle(statusToken, 30_000)
     expect(status.agent.state).toBe('idle')
 
     const health = await fetchJson(`${MCP_HOST_URL}/v1/runtime/health`)
@@ -331,7 +339,7 @@ describe('Phase 6: HTTP Requests', () => {
       expect(response).toMatch(/httpbin|headers|origin|url|host/)
     }
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
   }, 90_000)
 
@@ -353,7 +361,7 @@ describe('Phase 6: HTTP Requests', () => {
       expect(isBlocked || isSuccess).toBeTruthy()
     }
 
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
   }, 90_000)
 
   it('NT-11: http_request — SSRF protection (private IP blocked)', async () => {
@@ -374,7 +382,7 @@ describe('Phase 6: HTTP Requests', () => {
     expect(logs).not.toContain('ami-id')
     expect(logs).not.toContain('instance-id')
 
-    await waitForIdle(30_000)
+    await waitForIdle(statusToken, 30_000)
   }, 90_000)
 })
 
@@ -390,14 +398,14 @@ describe('Phase 7: Integration', () => {
       'Do these steps in order using the tools: 1) Use file_write to write {"items":[1,2,3,4,5]} to "nt13-data.json". 2) Use file_read to read "nt13-data.json". 3) Use json_transform with operation "length" and path "items" on the file content. Tell me the count.'
     )
     expect(res.status).toBe(200)
-    await waitForIdle(90_000)
+    await waitForIdle(statusToken, 90_000)
 
     if (res.data?.response) {
       const response = res.data.response.toLowerCase()
       expect(response).toMatch(/5|five/)
     }
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
   }, 120_000)
 })

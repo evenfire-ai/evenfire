@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { createApp } from '../app.js'
 import { apiErrorHandler } from '../errorHandler.js'
+import { ControlApiHostEdgeAssertionMissingError } from '../services/controlApiRestService.js'
 
 function appThrowing(error: unknown) {
   const app = express()
@@ -37,6 +38,15 @@ describe('apiErrorHandler', () => {
     expect(res.body).toEqual({ error: 'Payload Too Large' })
   })
 
+  it('maps a control-api answer without an edge assertion to 503 without the message', async () => {
+    const res = await request(appThrowing(new ControlApiHostEdgeAssertionMissingError())).get(
+      '/boom'
+    )
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'authority_unavailable' })
+  })
+
+  // Pins that the generic echo of an unclassified error's message is unchanged.
   it('maps anything else to 500 with the message', async () => {
     const res = await request(appThrowing(new Error('kaput'))).get('/boom')
     expect(res.status).toBe(500)

@@ -15,6 +15,7 @@ import { type Conversation, FinishReason } from '../core/types'
 import type { Task } from '../queue'
 import type { RPCServer } from '../server'
 import type { HostCRD } from '../types'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 const HOST = 'host-a'
 const USER = 'user-1'
@@ -112,13 +113,18 @@ async function startServer(loaded: Pick<Harness, 'main' | 'agent'>): Promise<Har
   return current
 }
 
-function edgeHeaders(): Record<string, string> {
-  return {
-    'x-clerum-edge-caller': 'rpc-proxy',
-    'x-clerum-edge-host-ref': HOST,
-    'x-clerum-edge-user-id': USER,
-    'content-type': 'application/json',
-  }
+// What rpc-proxy forwards: the clear edge headers plus the edge assertion
+// control-api signs for them. The Host refuses caller rpc-proxy without it.
+function edgeHeaders(options: { scopes?: readonly string[] } = {}): Record<string, string> {
+  return withRpcProxyEdgeTestAuthentication(
+    {
+      'x-clerum-edge-caller': 'rpc-proxy',
+      'x-clerum-edge-host-ref': HOST,
+      'x-clerum-edge-user-id': USER,
+      'content-type': 'application/json',
+    },
+    options
+  )
 }
 
 async function rpcKey(): Promise<string> {
@@ -459,6 +465,37 @@ describe('main approval-mode writers and approvals over HTTP', () => {
     expect(stored?.approval_mode).toBe('auto')
   })
 
+  it('PATCH approval-mode refuses an edge assertion without host:approval:write', async () => {
+    fake.primaryKeySlot = 'claude-api-key'
+    const loaded = await loadMain()
+    await loaded.main.onHostChange(host({}))
+    const harness = await startServer(loaded)
+    await seedRpcSession(loaded.agent)
+    const url = `${harness.baseUrl}/v1/runtime/sessions/${HOST}/${CHAT}/approval-mode`
+
+    // The rename scope is not enough: the mode answers later cards in advance.
+    const refused = await fetch(url, {
+      method: 'PATCH',
+      headers: edgeHeaders({ scopes: ['host:session:write'] }),
+      body: JSON.stringify({ mode: 'auto' }),
+    })
+    expect(refused.status).toBe(401)
+    expect(await refused.json()).toEqual({ error: 'Invalid runtime edge assertion' })
+    const afterRefusal = loaded.agent.getConversationManager().getSessionByKey(await rpcKey())
+    expect(afterRefusal).toBeDefined()
+    expect(afterRefusal?.approval_mode).not.toBe('auto')
+
+    // Witness: the same request with the approval scope reaches the writer.
+    const accepted = await fetch(url, {
+      method: 'PATCH',
+      headers: edgeHeaders({ scopes: ['host:approval:write'] }),
+      body: JSON.stringify({ mode: 'auto' }),
+    })
+    expect(accepted.status).toBe(200)
+    const stored = loaded.agent.getConversationManager().getSessionByKey(await rpcKey())
+    expect(stored?.approval_mode).toBe('auto')
+  })
+
   it('a messaging approval-mode command stores the mode through main admission', async () => {
     fake.primaryKeySlot = 'claude-api-key'
     const loaded = await loadMain()
@@ -512,6 +549,32 @@ describe('main approval-mode writers and approvals over HTTP', () => {
       })
     )
     expect(stored?.approval_mode).toBe('auto')
+  })
+
+  it('GET status projects pending approvals through main to their start time only', async () => {
+    fake.primaryKeySlot = 'claude-api-key'
+    const loaded = await loadMain()
+    await loaded.main.onHostChange(host({}))
+    const harness = await startServer(loaded)
+    // Another user's approval on the same Host: status must not carry its owner,
+    // tool, parameters or request id.
+    const getPendingApprovals = vi.spyOn(loaded.agent, 'getPendingApprovals').mockReturnValue([
+      {
+        requestId: 'req-other-user',
+        userId: 'other-user-uuid',
+        toolName: 'shell_exec',
+        parameters: { command: 'cat /workspace/secret.txt' },
+        description: 'Run a shell command',
+        since: '2026-11-25T10:00:00.000Z',
+      },
+    ])
+
+    const res = await fetch(`${harness.baseUrl}/v1/runtime/status`, { headers: edgeHeaders() })
+
+    expect(res.status).toBe(200)
+    expect(getPendingApprovals).toHaveBeenCalled()
+    const body = (await res.json()) as { pendingApprovals?: unknown }
+    expect(body.pendingApprovals).toEqual([{ since: '2026-11-25T10:00:00.000Z' }])
   })
 
   it('passes the shell answer from an approval to the agent', async () => {

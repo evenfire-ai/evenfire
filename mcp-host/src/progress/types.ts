@@ -104,9 +104,8 @@ export interface SuspendedEvent {
   requestId: string
   // P1-1: the approval event carries ONLY the server-derived displayName, never
   // the raw tool_name (mirrors the REST `pendingApproval` wire shape; the
-  // progress stream is owner-scoped). NOTE: the operator-only `GET /status`
-  // endpoint still exposes raw tool_name in `pendingApprovals[]` — separate
-  // channel, tracked as a follow-up.
+  // progress stream is owner-scoped). The `GET /status` endpoint lists each
+  // pending approval only by its start time (`pendingApprovals[].since`).
   displayName: string
   // U5 — 'connect_required' is a reactive OAuth-consent suspension; the default
   // HITL gate stays 'approval_required'.

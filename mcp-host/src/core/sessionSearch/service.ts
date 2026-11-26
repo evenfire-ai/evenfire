@@ -31,7 +31,8 @@ const sessionSearchCallsCounter = (() => {
  * server-side from `sourceMessage.sender`. Wired in the **tool adapter**
  * (`core/tools/sessionSearch.ts:97`), NOT in this service, because the REST
  * route (`server/routes.ts:handleSessionSearchRoute`) never accepts a
- * client-supplied `user_id`: the route's only user filter is `auth.sub`.
+ * client-supplied `user_id`: the route's only user filter is the verified edge
+ * caller's `userId`.
  * Surfacing the counter here keeps it co-located with the rest of the
  * search instruments while the increment lives at the actual anti-bypass
  * boundary.
