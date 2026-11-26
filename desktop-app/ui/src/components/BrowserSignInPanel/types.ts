@@ -8,5 +8,6 @@ export interface BrowserSignInPanelProps {
   /** Set while another auth action runs: `booting`, `busy` or `authTransitioning` (D14, A3-68). */
   startDisabled: boolean
   onStart: () => void
-  onCancel: () => void
+  /** Settles once main has answered the cancel; Cancel stays disabled until then. */
+  onCancel: () => Promise<void>
 }

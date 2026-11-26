@@ -19,9 +19,11 @@ export const BROWSER_SIGN_IN_COPY = Object.freeze({
 /**
  * The status each end state shows (plan decision 5). `failed` with `environment_changed`, or
  * with no reason, shows `failed`; `replaced` shows nothing. `sessionLoadFailed` shows when the
- * renderer cannot load a session main holds.
+ * renderer cannot load a session main holds. `cancelFailed` shows when a cancel did not reach
+ * main and the attempt still waits.
  */
 export const BROWSER_SIGN_IN_OUTCOME_COPY = Object.freeze({
+  cancelFailed: "Browser sign-in couldn't be cancelled. Try again.",
   signedIn: 'Signed in.',
   cancelled: 'Browser sign-in cancelled.',
   timedOut: 'Browser sign-in timed out. Try again.',

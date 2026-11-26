@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { BrowserSignInAttempts } from '../../../../src/browserSignIn'
 import { buildLoginMethodsModel } from '../../../../src/browserSignInModel'
@@ -144,7 +144,8 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   handleOpenDesktopRelease: vi.fn(),
   handleLogout: vi.fn(),
   handleStartBrowserSignIn: vi.fn(),
-  handleCancelBrowserSignIn: vi.fn(),
+  // The controller's cancel never rejects; it resolves once main has answered.
+  handleCancelBrowserSignIn: vi.fn().mockResolvedValue(undefined),
   ...overrides,
 })
 
@@ -544,7 +545,7 @@ describe('AuthPage: the login screen from main’s model (design §10.1)', () =>
 
   it('shows a waiting browser sign-in with Cancel, and keeps Continue offered', async () => {
     const user = userEvent.setup()
-    const handleCancelBrowserSignIn = vi.fn()
+    const handleCancelBrowserSignIn = vi.fn().mockResolvedValue(undefined)
     renderAuthPage({
       loginScreen: BOTH_METHODS,
       browserSignIn: MAIN.waiting,
@@ -556,6 +557,36 @@ describe('AuthPage: the login screen from main’s model (design §10.1)', () =>
     expect(requiredProviderButton().disabled, 'Continue stays usable while waiting').toBe(false)
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(handleCancelBrowserSignIn, 'Cancel reaches the controller').toHaveBeenCalledTimes(1)
+  })
+
+  it('M4 disables Cancel while the cancel call is in flight (Task 12 review)', async () => {
+    const user = userEvent.setup()
+    let answer: () => void = () => undefined
+    const handleCancelBrowserSignIn = vi.fn(
+      () =>
+        new Promise<void>(resolve => {
+          answer = resolve
+        })
+    )
+    renderAuthPage({
+      loginScreen: BOTH_METHODS,
+      browserSignIn: MAIN.waiting,
+      handleCancelBrowserSignIn,
+    })
+    const cancel = () => screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement
+    expect(cancel().disabled, 'Cancel is usable while waiting').toBe(false)
+
+    await user.click(cancel())
+    expect(handleCancelBrowserSignIn, 'the cancel is in flight').toHaveBeenCalledTimes(1)
+    expect(cancel().disabled, 'Cancel is disabled while its call is in flight').toBe(true)
+    await user.click(cancel())
+    expect(handleCancelBrowserSignIn, 'a second click sends nothing').toHaveBeenCalledTimes(1)
+
+    // Main answers, and the attempt still waits (here, the view has not changed).
+    await act(async () => {
+      answer()
+    })
+    expect(cancel().disabled, 'Cancel is usable again once main answered').toBe(false)
   })
 
   it('G2-14c disables the password form and provider button and hides Cancel while redeeming', () => {

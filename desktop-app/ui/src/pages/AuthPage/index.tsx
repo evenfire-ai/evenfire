@@ -222,7 +222,7 @@ export function AuthPage() {
                 view={browserSignIn}
                 startDisabled={booting || busy || authTransitioning}
                 onStart={() => void handleStartBrowserSignIn()}
-                onCancel={() => void handleCancelBrowserSignIn()}
+                onCancel={handleCancelBrowserSignIn}
               />
             ) : null}
             {provider && loginScreen.password ? (

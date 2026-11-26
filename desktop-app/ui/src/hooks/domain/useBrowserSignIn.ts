@@ -186,13 +186,25 @@ export function useBrowserSignIn({
   }, [apply, onStartRefused])
 
   const cancel = useCallback(async () => {
+    const before = viewRef.current
     try {
       apply(await window.clerum.auth.cancelBrowserSignIn())
     } catch (error) {
-      // Main pushes every change, so the view still follows it; only this reply is lost.
       console.warn('[useBrowserSignIn] Browser sign-in could not be cancelled', errorClass(error))
+      // Main's cancel cannot throw, so the call rejects only when it did not run (an untrusted
+      // sender or no handler, `ipc.ts`), and then no push follows. A cancel that did run pushes
+      // its end, and the view has usually left `waiting` already. If the same attempt still
+      // waits, say so in fixed text (Task 12 review M4, D18); a later push's outcome replaces it.
+      const after = viewRef.current
+      if (
+        before.phase === 'waiting' &&
+        after.phase === 'waiting' &&
+        after.attemptId === before.attemptId
+      ) {
+        setStatus(BROWSER_SIGN_IN_OUTCOME_COPY.cancelFailed, 'error')
+      }
     }
-  }, [apply])
+  }, [apply, setStatus])
 
   const isRedeeming = useCallback(() => viewRef.current.phase === 'redeeming', [])
 

@@ -73,6 +73,9 @@ export interface AuthContextValue {
   handleLogout: () => Promise<void>
   /** Starts a browser sign-in; it does nothing while another auth action runs (D14). */
   handleStartBrowserSignIn: () => Promise<void>
-  /** Cancels a waiting browser sign-in. A failed cancel is logged, and main's pushes still lead. */
+  /**
+   * Cancels a waiting browser sign-in; it never rejects. A failed cancel is logged and, while the
+   * attempt still waits, shows a fixed error. Main's pushes still lead.
+   */
   handleCancelBrowserSignIn: () => Promise<void>
 }

@@ -234,6 +234,73 @@ describe('useBrowserSignIn: start, cancel and start refusals (D5)', () => {
     expect(mounted.hook.result.current.view).toEqual({ attemptId: attempt, phase: 'idle' })
   })
 
+  it('M4 shows a fixed error when a cancel does not reach main (Task 12 review)', async () => {
+    const main = createMain()
+    const mounted = mount()
+    await settle()
+    await act(() => mounted.hook.result.current.start())
+    await settle()
+    const attempt = main.store.current()?.id
+    expect(mounted.hook.result.current.view).toEqual({ attemptId: attempt, phase: 'waiting' })
+    // The handler refuses before main's cancel runs: `assertTrustedSender`'s error
+    // (`src/ipc.ts`), as Electron hands it to the renderer (M5).
+    main.auth.cancelBrowserSignIn.mockRejectedValueOnce(
+      new Error(
+        "Error invoking remote method 'auth:cancelBrowserSignIn': Error: Untrusted IPC sender"
+      )
+    )
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    await act(() => mounted.hook.result.current.cancel())
+    await settle()
+
+    expect(main.pushes.at(-1), 'main did not cancel').toEqual({
+      attemptId: attempt,
+      phase: 'waiting',
+    })
+    expect(mounted.setStatus.mock.calls, 'the failed cancel shows').toEqual([
+      ["Browser sign-in couldn't be cancelled. Try again.", 'error'],
+    ])
+    expect(warn.mock.calls).toEqual([
+      ['[useBrowserSignIn] Browser sign-in could not be cancelled', 'Error'],
+    ])
+    expect(JSON.stringify(mounted.setStatus.mock.calls), 'never the raw error (D18)').not.toMatch(
+      /Untrusted|remote method/
+    )
+    expect(mounted.hook.result.current.view, 'the attempt still waits').toEqual({
+      attemptId: attempt,
+      phase: 'waiting',
+    })
+  })
+
+  it('M4 shows only the outcome when a cancel ran in main but its reply was lost', async () => {
+    const main = createMain()
+    const mounted = mount()
+    await settle()
+    await act(() => mounted.hook.result.current.start())
+    await settle()
+    const attempt = main.store.current()?.id
+    // Main cancels and pushes the end; the reply is lost on the way back. Synthetic: main's
+    // handler returns once it has cancelled, so only the transport could lose this reply.
+    main.auth.cancelBrowserSignIn.mockImplementationOnce(async () => {
+      main.store.cancel()
+      throw new Error(
+        "Error invoking remote method 'auth:cancelBrowserSignIn': Error: fake reply lost"
+      )
+    })
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    await act(() => mounted.hook.result.current.cancel())
+    await settle()
+
+    expect(main.pushed(attempt ?? 0, 'ended'), 'main cancelled').toMatchObject({
+      outcome: 'cancelled',
+    })
+    expect(mounted.setStatus.mock.calls, 'the outcome alone shows').toEqual([
+      ['Browser sign-in cancelled.', 'info'],
+    ])
+  })
+
   it.each([...START_REJECTION_REREAD_CODES])(
     're-reads the login model, with no message, when start is refused %s',
     async code => {
