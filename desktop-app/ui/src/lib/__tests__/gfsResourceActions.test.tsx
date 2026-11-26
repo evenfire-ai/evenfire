@@ -9,7 +9,6 @@ const handler = () => vi.fn()
 const allHandlers = () => ({
   refresh: handler(),
   'copy-link': handler(),
-  'copy-route': handler(),
   'open-route': handler(),
   rename: handler(),
   move: handler(),
@@ -65,7 +64,6 @@ describe('GFS resource action model', () => {
     expect(folderActions.map(action => action.id)).toEqual([
       'share',
       'copy-link',
-      'copy-route',
       'open-folder',
       'rename',
       'move',
@@ -77,7 +75,6 @@ describe('GFS resource action model', () => {
     expect(fileActions.map(action => action.id)).toEqual([
       'share',
       'copy-link',
-      'copy-route',
       'rename',
       'move',
       'copy-content',
@@ -108,7 +105,6 @@ describe('GFS resource action model', () => {
       handlers: {
         refresh: handler(),
         'copy-link': handler(),
-        'copy-route': handler(),
         'open-route': handler(),
         rename: handler(),
         move: handler(),
@@ -130,12 +126,7 @@ describe('GFS resource action model', () => {
     })
     const actions = getGfsMenuActions(descriptors)
 
-    expect(actions.map(action => action.id)).toEqual([
-      'copy-link',
-      'copy-route',
-      'move',
-      'copy-content',
-    ])
+    expect(actions.map(action => action.id)).toEqual(['copy-link', 'move', 'copy-content'])
     expect(descriptors.find(action => action.id === 'refresh')).toMatchObject({
       menu: false,
       disabled: true,

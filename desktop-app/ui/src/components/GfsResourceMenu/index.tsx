@@ -58,7 +58,6 @@ const ACTIONS_WITHOUT_SURFACE: ReadonlySet<GfsResourceMenuActionKey> = new Set([
   'download',
   'download-zip',
   'copy-link',
-  'copy-route',
   'open-folder',
 ])
 
@@ -528,7 +527,7 @@ export function GfsResourceMenu({
   const shareMenuChildren =
     actions !== undefined
       ? (sharedActions ?? [])
-          .filter(action => ['share', 'copy-link', 'copy-route'].includes(action.key))
+          .filter(action => ['share', 'copy-link'].includes(action.key))
           .map(
             (action): GfsResourceMenuAction =>
               action.key === 'share' ? { ...action, key: 'share-access', label: 'Share' } : action
@@ -543,7 +542,7 @@ export function GfsResourceMenu({
       ].filter(isMenuAction)
     : []
   const visibleSharedActions = sharedActions?.filter(
-    action => !['share', 'copy-link', 'copy-route', 'delete'].includes(action.key)
+    action => !['share', 'copy-link', 'delete'].includes(action.key)
   )
   const actionGroups =
     actions !== undefined

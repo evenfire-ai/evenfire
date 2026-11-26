@@ -9,7 +9,6 @@ import {
   IconOpenRoute,
   IconPlus,
   IconRefresh,
-  IconRoute,
   IconShare,
   IconTrash,
   IconUpload,
@@ -19,7 +18,6 @@ export type GfsResourceKind = 'directory' | 'file'
 export type GfsResourceActionId =
   | 'refresh'
   | 'copy-link'
-  | 'copy-route'
   | 'open-route'
   | 'rename'
   | 'move'
@@ -111,13 +109,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       icon: <IconCopy />,
       menu: true,
       eligible: Boolean(options.handlers['copy-link']),
-    },
-    {
-      id: 'copy-route',
-      label: options.kind === 'directory' ? 'Copy folder ID' : 'Copy file ID',
-      icon: <IconRoute />,
-      menu: true,
-      eligible: Boolean(options.handlers['copy-route']),
     },
     {
       id: 'open-route',

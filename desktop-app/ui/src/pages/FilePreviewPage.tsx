@@ -13,7 +13,7 @@ import {
 } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
-import { copyGfsDeepLink, copyGfsResourceId } from '@lib/gfsResourceClipboard'
+import { copyGfsDeepLink } from '@lib/gfsResourceClipboard'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
 import { useFilePreviewResourceActions } from './useFilePreviewResourceActions'
 
@@ -229,14 +229,6 @@ export function FilePreviewPage({
     [gfsUri, pushToast]
   )
 
-  const handleCopyRoute = useCallback(
-    () =>
-      copyGfsResourceId(gfsUri, 'file', pushToast, {
-        formatError: error => `Could not copy the file ID: ${toMessage(error)}`,
-      }),
-    [gfsUri, pushToast]
-  )
-
   const handleCopyContent = useCallback(async () => {
     const copy = copyContentRef.current
     if (!copy) return
@@ -258,7 +250,6 @@ export function FilePreviewPage({
     handlers: {
       refresh: !denied && !unavailable && !accessRevoked ? () => void handleRefresh() : undefined,
       'copy-link': () => void handleCopyLink(),
-      'copy-route': () => void handleCopyRoute(),
       'open-route': onOpenRoute,
       'copy-content':
         !denied &&

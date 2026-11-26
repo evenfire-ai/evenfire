@@ -73,7 +73,7 @@ import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import type { GfsResourceActionId } from '@lib/gfsResourceActions'
-import { copyGfsDeepLink, copyGfsResourceId } from '@lib/gfsResourceClipboard'
+import { copyGfsDeepLink } from '@lib/gfsResourceClipboard'
 import { gfsRowActionAvailability } from '@lib/gfsRowActionAvailability'
 import type { GfsRowActionAvailability } from '@lib/gfsRowActionAvailability.types'
 import { formatSharedFileSize } from '@lib/sharedFiles'
@@ -928,9 +928,6 @@ export function FilesPage({
   }
 
   const handleCopyLink = (uri: string) => copyGfsDeepLink(uri, pushToast)
-
-  const handleCopyRoute = (uri: string, kind: GfsDriveResource['kind']) =>
-    copyGfsResourceId(uri, kind, pushToast)
 
   const handleRefreshCurrent = async () => {
     if (!current || refreshingCurrent) return
@@ -2337,7 +2334,6 @@ export function FilesPage({
         handlers: {
           refresh: () => void handleRefreshCurrent(),
           'copy-link': () => void handleCopyLink(current.gfsUri),
-          'copy-route': () => void handleCopyRoute(current.gfsUri, current.kind),
           'open-route': () => setOpenLinkOpen(true),
           rename: () => openRenameTarget(current),
           move: () => openMoveTarget(current),
@@ -2421,7 +2417,6 @@ export function FilesPage({
         uri: resource.gfsUri,
         handlers: {
           'copy-link': () => void handleCopyLink(resource.gfsUri),
-          'copy-route': () => void handleCopyRoute(resource.gfsUri, resource.kind),
           'open-route': () => setOpenLinkOpen(true),
           'open-folder': isDirectory ? () => openResource(resource) : undefined,
           'new-folder': canWrite

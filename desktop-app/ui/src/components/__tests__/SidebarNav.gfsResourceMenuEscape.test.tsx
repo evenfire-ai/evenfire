@@ -47,7 +47,7 @@ vi.mock('../SidebarNav/FileExplorerTree', () => ({
     const actions = buildGfsResourceActions({
       kind: 'file',
       uri: 'gfs://main/0123456789abcdef0123456789abcdef',
-      handlers: { share: vi.fn(), 'copy-link': vi.fn(), 'copy-route': vi.fn(), rename: vi.fn() },
+      handlers: { share: vi.fn(), 'copy-link': vi.fn(), rename: vi.fn() },
       canShare: true,
       canRename: true,
     })

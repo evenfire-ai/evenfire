@@ -1294,7 +1294,6 @@ export function FileExplorerTree({
         uri: target.gfsUri,
         handlers: {
           'copy-link': inHost('copy-link'),
-          'copy-route': inHost('copy-route'),
           'open-folder': isDirectory ? () => handleActivateFolder(target) : undefined,
           'new-folder': inHost('new-folder'),
           'upload-file': inHost('upload-file'),

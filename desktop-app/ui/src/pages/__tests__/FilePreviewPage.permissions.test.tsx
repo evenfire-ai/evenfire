@@ -261,9 +261,11 @@ describe('FilePreviewPage permission-derived actions', () => {
     const readOnlyShareMenu = screen.getByRole('menu', {
       name: 'Share options for diagram.png',
     })
-    expect(within(readOnlyShareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
-    expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
-    expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
+    expect(
+      within(readOnlyShareMenu)
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Copy link'])
     expect(readOnly.affordances).toHaveBeenCalledWith(resourceId, 'main')
     readOnly.view.unmount()
 

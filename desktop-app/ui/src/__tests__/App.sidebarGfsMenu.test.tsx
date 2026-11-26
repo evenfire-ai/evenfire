@@ -1240,25 +1240,25 @@ describe('App sidebar GFS resource menu', () => {
       notes: {
         ok: {
           panel: ['share', 'rename', 'preview', 'download', 'delete'],
-          submenu: ['share-access', 'copy-link', 'copy-route'],
+          submenu: ['share-access', 'copy-link'],
         },
       },
       summary: {
         pending: {
           panel: ['share', 'preview', 'download'],
-          submenu: ['copy-link', 'copy-route'],
+          submenu: ['copy-link'],
         },
         ok: {
           panel: ['share', 'rename', 'move', 'preview', 'download', 'delete'],
-          submenu: ['share-access', 'copy-link', 'copy-route'],
+          submenu: ['share-access', 'copy-link'],
         },
         error: {
           panel: ['share', 'preview', 'download'],
-          submenu: ['copy-link', 'copy-route'],
+          submenu: ['copy-link'],
         },
         okWithoutParent: {
           panel: ['share', 'rename', 'preview', 'download', 'delete'],
-          submenu: ['share-access', 'copy-link', 'copy-route'],
+          submenu: ['share-access', 'copy-link'],
         },
       },
     }
@@ -1266,8 +1266,8 @@ describe('App sidebar GFS resource menu', () => {
     /**
      * The same keys from the producers the tree builds its menu with
      * (`gfsPendingRowActionAvailability` / `gfsRowActionAvailability`, then
-     * the resource actions), with the menu's two layout rules: Share, Copy
-     * link and Copy ID go in the submenu behind a Share item that leads the
+     * the resource actions), with the menu's two layout rules: Share and
+     * Copy link go in the submenu behind a Share item that leads the
      * panel, Delete closes it, and unsettled bits leave inert every action
      * that needs them.
      */
@@ -1291,7 +1291,6 @@ describe('App sidebar GFS resource menu', () => {
           uri: resource.gfsUri,
           handlers: {
             'copy-link': handler,
-            'copy-route': handler,
             'new-folder': handler,
             'upload-file': handler,
             rename: handler,
@@ -1314,7 +1313,7 @@ describe('App sidebar GFS resource menu', () => {
       )
       const enabled = (action: (typeof actions)[number]) =>
         !action.disabled && (settled || !gfsActionNeedsAffordances(action.id))
-      const inSubmenu = (id: string) => ['share', 'copy-link', 'copy-route'].includes(id)
+      const inSubmenu = (id: string) => ['share', 'copy-link'].includes(id)
       const submenuActions = actions.filter(action => inSubmenu(action.id))
       return {
         panel: [

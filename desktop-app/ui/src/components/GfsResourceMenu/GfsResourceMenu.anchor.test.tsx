@@ -88,7 +88,6 @@ function AnchoredMenuOwner({ resource }: { resource: ChildResource }) {
     handlers: {
       share: vi.fn(),
       'copy-link': vi.fn(),
-      'copy-route': vi.fn(),
       preview: vi.fn(),
       rename: vi.fn(),
       move: vi.fn(),
@@ -174,7 +173,6 @@ describe('GfsResourceMenu anchor mode', () => {
     const flyout = screen.getByRole('menu', { name: 'Share options for notes.md' })
     expect(itemEnabled(flyout, 'Share')).toBe(false)
     expect(itemEnabled(flyout, 'Copy link')).toBe(true)
-    expect(itemEnabled(flyout, 'Copy file ID')).toBe(true)
 
     await act(async () => {
       held.get('target')!.resolve(heldPermissionResponse(['read', 'write', 'manage_acl']))

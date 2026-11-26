@@ -52,12 +52,11 @@ export function gfsPendingRowActionAvailability(resource: {
   }
 }
 
-// Link and ID copies need only the URI, preview and download only the
+// Link copies need only the URI, preview and download only the
 // listing's `readable` flag, and opening a folder is navigation. Every other
 // action, including any added later, waits for the target's affordances.
 const ACTIONS_WITHOUT_AFFORDANCES: ReadonlySet<GfsResourceActionId> = new Set([
   'copy-link',
-  'copy-route',
   'preview',
   'download',
   'open-folder',

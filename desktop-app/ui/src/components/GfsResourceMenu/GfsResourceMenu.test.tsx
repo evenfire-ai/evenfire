@@ -88,11 +88,10 @@ describe('GfsResourceMenu', () => {
     const refresh = vi.fn()
     const share = vi.fn()
     const copyLink = vi.fn()
-    const copyRoute = vi.fn()
     const actions = buildGfsResourceActions({
       kind: 'directory',
       uri: 'gfs://main/0123456789abcdef0123456789abcdef',
-      handlers: { refresh, share, 'copy-link': copyLink, 'copy-route': copyRoute },
+      handlers: { refresh, share, 'copy-link': copyLink },
       canShare: true,
     })
     render(<GfsResourceMenu actions={actions} resourceName="Reports" />)
@@ -112,13 +111,12 @@ describe('GfsResourceMenu', () => {
       within(shareMenu)
         .getAllByRole('menuitem')
         .map(item => item.textContent)
-    ).toEqual(['Share', 'Copy link', 'Copy folder ID'])
+    ).toEqual(['Share', 'Copy link'])
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
     expect(share).toHaveBeenCalledOnce()
     expect(screen.queryByRole('menu', { name: 'Share options for Reports' })).toBeNull()
     expect(refresh).not.toHaveBeenCalled()
     expect(copyLink).not.toHaveBeenCalled()
-    expect(copyRoute).not.toHaveBeenCalled()
   })
 
   it('toggles the Share submenu closed and returns focus after Escape', () => {
@@ -128,7 +126,6 @@ describe('GfsResourceMenu', () => {
       handlers: {
         share: vi.fn(),
         'copy-link': vi.fn(),
-        'copy-route': vi.fn(),
       },
       canShare: true,
     })

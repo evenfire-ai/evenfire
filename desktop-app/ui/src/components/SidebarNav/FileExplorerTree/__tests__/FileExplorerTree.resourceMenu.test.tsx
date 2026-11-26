@@ -696,7 +696,7 @@ describe('FileExplorerTree row resource menu focus', () => {
   it.each([
     ['Preview', false],
     ['Download', false],
-    ['Copy file ID', true],
+    ['Copy link', true],
   ] as const)(
     'returns focus to the row after %s chosen from the keyboard',
     async (label, inShareFlyout) => {
@@ -706,10 +706,7 @@ describe('FileExplorerTree row resource menu focus', () => {
             accessibleResource('file-s', 'shared.txt', 'file', { permissions: ['read'] }),
           ])
         ),
-      })
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: { writeText: vi.fn(async () => undefined) },
+        copyDeepLink: vi.fn(async () => ({ url: 'evenfire://drive/shared' })),
       })
       renderShell()
       const row = await screen.findByRole('button', { name: 'shared.txt' })

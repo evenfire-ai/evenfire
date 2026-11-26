@@ -325,8 +325,8 @@ interface GenCall {
 type ActionFamily = 'move' | 'upload' | 'dialog' | 'share' | 'gesture'
 
 /** An action that opens no surface: its only outcome is a toast. */
-type GestureId = 'copy-link' | 'copy-route' | 'download'
-const GESTURES = new Set<string>(['copy-link', 'copy-route', 'download'])
+type GestureId = 'copy-link' | 'download'
+const GESTURES = new Set<string>(['copy-link', 'download'])
 
 interface Gesture {
   actionId: GestureId
@@ -1364,12 +1364,10 @@ function checkAtRest(w: World) {
 }
 
 const COPY_LINK_TOASTS = /^Shareable EvenDrive link|^Shareable EvenDrive links are unavailable/
-const COPY_ROUTE_TOASTS = /^(File|Folder) ID copied$|^Could not copy the (file|folder) ID/
 
 /** Whether `message` is one of the toasts the gesture can end with. */
 function isGestureOutcome(gesture: Gesture, message: string): boolean {
   if (gesture.actionId === 'copy-link') return COPY_LINK_TOASTS.test(message)
-  if (gesture.actionId === 'copy-route') return COPY_ROUTE_TOASTS.test(message)
   return (
     message === `Downloaded ${gesture.name}` ||
     message === describeGfsReadError(new Error(failures.notFound)).message
@@ -1542,12 +1540,8 @@ const ACTION_LABELS: Record<string, string> = {
   'copy-link': 'Copy link',
   download: 'Download',
 }
-/** Its label names the row's kind. */
-const COPY_ROUTE_LABEL = /^Copy (file|folder) ID$/
-const labelOf = (actionId: string): string | RegExp =>
-  actionId === 'copy-route' ? COPY_ROUTE_LABEL : ACTION_LABELS[actionId]!
-const inShareFlyout = (actionId: string) =>
-  actionId === 'share' || actionId === 'copy-link' || actionId === 'copy-route'
+const labelOf = (actionId: string): string => ACTION_LABELS[actionId]!
+const inShareFlyout = (actionId: string) => actionId === 'share' || actionId === 'copy-link'
 
 /** E4: choose an item of the open menu. */
 class Choose extends OracleEvent {
@@ -2117,7 +2111,7 @@ class Advance extends OracleEvent {
           )
         )
         .map(([id]) => id)
-      if (offered.includes('share')) offered.push('copy-link', 'copy-route')
+      if (offered.includes('share')) offered.push('copy-link')
       const actionId =
         offered.includes(this.actionId) || offered.length === 0
           ? this.actionId
@@ -2673,13 +2667,12 @@ const allEvents = [
       'share',
       'share',
       'copy-link',
-      'copy-route',
       'download'
     )
   ),
   pick.map(p => new OpenMenu(p) as Cmd),
   ...times(2, step),
-  fc.constantFrom(...Object.keys(ACTION_LABELS), 'copy-route').map(id => new Choose(id) as Cmd),
+  fc.constantFrom(...Object.keys(ACTION_LABELS)).map(id => new Choose(id) as Cmd),
   fc.nat({ max: 99 }).map(n => new Submit(n) as Cmd),
   fc.constant(new DismissMenu() as Cmd),
   fc.constant(new DismissDialog() as Cmd),

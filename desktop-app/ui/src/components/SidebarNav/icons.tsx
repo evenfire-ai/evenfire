@@ -141,16 +141,6 @@ export function IconLink(props: IconProps) {
   )
 }
 
-export function IconRoute(props: IconProps) {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
-      <circle cx="6" cy="6" r="2.5" />
-      <circle cx="18" cy="18" r="2.5" />
-      <path d="M8.5 6H12a3 3 0 0 1 3 3v3a3 3 0 0 0 3 3h.5" />
-    </svg>
-  )
-}
-
 export function IconOpenRoute(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>

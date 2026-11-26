@@ -312,7 +312,7 @@ async function chooseResourceAction(resourceName: string, actionName: string) {
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
-  if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
+  if (actionName === 'Copy link') {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
     })
@@ -1141,15 +1141,10 @@ describe('FilesPage', () => {
     const copyDeepLink = vi.fn(async () => ({
       url: buildGfsResourceWebLink('https://profile.example', gfsUri),
     }))
-    const writeText = vi.fn(async () => undefined)
     const refreshCurrentLocation = vi.fn(async () => true)
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: { gfs: { copyDeepLink, getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`) } },
-    })
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
     })
     const createFileFromPath = vi.fn(async () => undefined)
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -1171,8 +1166,6 @@ describe('FilesPage', () => {
 
     await chooseResourceAction(folderName, 'Copy link')
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(gfsUri))
-    await chooseResourceAction(folderName, 'Copy folder ID')
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(gfsUri))
 
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Open link' }))
     expect(await screen.findByRole('dialog', { name: 'Open from link' })).toBeTruthy()

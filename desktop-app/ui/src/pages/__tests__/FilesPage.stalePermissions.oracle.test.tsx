@@ -1354,10 +1354,10 @@ describe('FilesPage stale permission action oracle', () => {
         within(screen.getByRole('menu', { name: 'Share options for Reports' }))
           .getAllByRole('menuitem')
           .map(item => item.textContent?.trim())
-          .filter(label => label === 'Copy link' || label === 'Copy folder ID')
+          .filter(label => label === 'Copy link')
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
       const identityActionsBefore = identityActions()
-      expect(identityActionsBefore).toEqual(['Copy link', 'Copy folder ID'])
+      expect(identityActionsBefore).toEqual(['Copy link'])
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
       expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
 
