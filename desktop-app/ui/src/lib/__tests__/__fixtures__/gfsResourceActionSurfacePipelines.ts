@@ -75,7 +75,6 @@ export function liveSidebarRow(state: SidebarRowState): SurfaceRun {
       readable: state.readable,
       previewable: state.previewable,
       parentResourceId: state.parentResourceId,
-      bits: state.bits,
       availability: rowAvailability(gfsRowActionAvailability, state),
       hostAvailable: state.hostAvailable,
       mutating: state.mutating,

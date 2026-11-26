@@ -3,8 +3,6 @@ import type {
   GfsResourceActionOptions,
   GfsResourceKind,
 } from './gfsResourceActions'
-import type { GfsResourceMenuPermissionGateStatus } from './gfsResourceMenuPermissionGate'
-import { gfsPendingRowActionAvailability } from './gfsRowActionAvailability'
 import type { GfsRowActionAvailability } from './gfsRowActionAvailability.types'
 
 /**
@@ -183,8 +181,11 @@ export type SidebarRowActionSurfaceInput = {
   /** Whether the file's format has a preview at all. */
   previewable: boolean
   parentResourceId: string | null | undefined
-  bits: GfsResourceMenuPermissionGateStatus
-  /** The availability the row's bits resolve to; only read once `bits` is `ok`. */
+  /**
+   * The availability the row's bits resolve to. While they are pending or
+   * failed the menu's permission gate keeps every bit-dependent action inert,
+   * so this needs no stand-in for that state.
+   */
   availability: GfsRowActionAvailability
   /** Whether a GFS action host is mounted to run host-routed actions. */
   hostAvailable: boolean
@@ -196,13 +197,7 @@ export type SidebarRowActionSurfaceInput = {
 export function sidebarRowActionOptions(
   input: SidebarRowActionSurfaceInput
 ): GfsResourceActionOptions {
-  const { handlers } = input
-  // Until the bits settle every bit-dependent action is listed and the menu
-  // keeps it inert.
-  const availability =
-    input.bits === 'ok'
-      ? input.availability
-      : gfsPendingRowActionAvailability({ parentResourceId: input.parentResourceId })
+  const { handlers, availability } = input
   const isDirectory = input.kind === 'directory'
   const readable = input.readable !== false
   const canWrite = isDirectory && availability.canWrite

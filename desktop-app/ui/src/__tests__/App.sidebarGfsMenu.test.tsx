@@ -1289,9 +1289,8 @@ describe('App sidebar GFS resource menu', () => {
 
     /**
      * The same keys from the producers the tree builds its menu with
-     * (`gfsPendingRowActionAvailability` / `gfsRowActionAvailability`, the
-     * sidebar row surface, the resource actions and the menu's permission
-     * gate), with the menu's two layout rules: Share and Copy link go in the
+     * (`gfsRowActionAvailability`, the sidebar row surface, the resource
+     * actions and the menu's permission gate), with the menu's two layout rules: Share and Copy link go in the
      * submenu behind a Share item that leads the panel, and Delete closes it.
      */
     function producedKeys(row: Row, bits: Bits): { enabled: LevelKeys; focusable: LevelKeys } {
@@ -1308,7 +1307,6 @@ describe('App sidebar GFS resource menu', () => {
             readable: true,
             previewable: resolveGfsPreview(resource) !== null,
             parentResourceId: resource.parentResourceId,
-            bits: status,
             availability: gfsRowActionAvailability({
               resource,
               listing: row === 'notes' ? 'roots' : 'folder',

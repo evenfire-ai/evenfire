@@ -35,23 +35,6 @@ export function gfsRowActionAvailability({
   }
 }
 
-/**
- * The row actions to show while the bits are still loading or failed to load.
- * Every bit-dependent action is offered so the menu can render it inert until
- * the bits settle; Move still needs a known parent to be judged on at all.
- */
-export function gfsPendingRowActionAvailability(resource: {
-  parentResourceId?: string | null
-}): GfsRowActionAvailability {
-  return {
-    canDelete: true,
-    canRename: true,
-    canWrite: true,
-    canManage: true,
-    canMove: Boolean(resource.parentResourceId),
-  }
-}
-
 // Link copies need only the URI, preview and download only the
 // listing's `readable` flag, and opening a folder is navigation. Every other
 // action, including any added later, waits for the target's affordances.

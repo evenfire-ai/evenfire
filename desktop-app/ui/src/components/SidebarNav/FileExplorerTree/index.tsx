@@ -1278,7 +1278,6 @@ export function FileExplorerTree({
           readable: target.readable,
           previewable: resolveGfsPreview(target) !== null,
           parentResourceId: target.parentResourceId,
-          bits: menu.bits,
           availability: gfsRowActionAvailability({
             resource: target,
             listing: menu.listing,

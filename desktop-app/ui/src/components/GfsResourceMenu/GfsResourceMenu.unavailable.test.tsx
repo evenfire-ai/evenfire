@@ -10,7 +10,6 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { filesRowActionOptions, sidebarRowActionOptions } from '@lib/gfsResourceActionSurfaces'
 import type { GfsResourceAction } from '@lib/gfsResourceActions'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
-import type { GfsResourceMenuPermissionGateStatus } from '@lib/gfsResourceMenuPermissionGate'
 import { gfsRowActionAvailability } from '@lib/gfsRowActionAvailability'
 import type { GfsRowListing } from '@lib/gfsRowActionAvailability.types'
 import { expectUnavailable, isMenuItemEnabled } from '../../test/gfsMenuItemState'
@@ -72,11 +71,7 @@ function filesRowActions(row: Row, handlers = rowHandlers()) {
   )
 }
 
-function sidebarRowActions(
-  row: Row,
-  bits: GfsResourceMenuPermissionGateStatus,
-  handlers = rowHandlers()
-) {
+function sidebarRowActions(row: Row, handlers = rowHandlers()) {
   return getGfsMenuActions(
     buildGfsResourceActions(
       sidebarRowActionOptions({
@@ -85,7 +80,6 @@ function sidebarRowActions(
         readable: row.readable,
         previewable: row.name.endsWith('.md'),
         parentResourceId: row.parentResourceId,
-        bits,
         availability: availabilityOf(row),
         hostAvailable: true,
         mutating: false,
@@ -195,18 +189,15 @@ describe('GfsResourceMenu: unavailable actions', () => {
 
   it('names the missing read access on the sidebar reads too', () => {
     const { menu } = openTriggerMenu(
-      sidebarRowActions(
-        {
-          kind: 'file',
-          name: 'locked.md',
-          readable: false,
-          parentResourceId: null,
-          listing: 'roots',
-          held: ['read'],
-          parentHeld: null,
-        },
-        'ok'
-      ),
+      sidebarRowActions({
+        kind: 'file',
+        name: 'locked.md',
+        readable: false,
+        parentResourceId: null,
+        listing: 'roots',
+        held: ['read'],
+        parentHeld: null,
+      }),
       'locked.md'
     )
     expectUnavailable(item(menu, 'Preview'), "You don't have read access to this file")
@@ -215,7 +206,7 @@ describe('GfsResourceMenu: unavailable actions', () => {
 
   it.each([
     ['Files', (row: Row) => filesRowActions(row)],
-    ['sidebar', (row: Row) => sidebarRowActions(row, 'ok')],
+    ['sidebar', (row: Row) => sidebarRowActions(row)],
   ] as const)(
     'offers Move on a %s Shared with me root only when it has a parent folder',
     (_surface, actionsFor) => {
@@ -260,7 +251,7 @@ describe('GfsResourceMenu: unavailable actions', () => {
     const handlers = rowHandlers()
     const view = render(
       <GfsResourceMenu
-        actions={sidebarRowActions(row, 'pending', handlers)}
+        actions={sidebarRowActions(row, handlers)}
         anchor={{ x: 10, y: 10 }}
         permissionStatus="pending"
         resourceName="notes.md"
@@ -273,7 +264,7 @@ describe('GfsResourceMenu: unavailable actions', () => {
 
     view.rerender(
       <GfsResourceMenu
-        actions={sidebarRowActions(row, 'ok', handlers)}
+        actions={sidebarRowActions(row, handlers)}
         anchor={{ x: 10, y: 10 }}
         permissionStatus="ok"
         resourceName="notes.md"
