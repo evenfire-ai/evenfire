@@ -169,7 +169,7 @@ const MAX_COMMANDS = 60
 /**
  * The per-test timeout, per run: about twice the slowest mean time per run
  * measured inside the whole control-ui run (0.68 s: 78.4 s over 116 runs;
- * single runs there took up to 2.5 s). About 124 s at N = 75, and it grows
+ * single runs there took up to 2.5 s). About 126 s at N = 75, and it grows
  * with APPROVAL_MODEL_RUNS.
  */
 const TIMEOUT_MS_PER_RUN = 1_350
@@ -3300,6 +3300,14 @@ const PINS = {
       ? null
       : 'the switch did not meet conflicts and a hung read, with L3 skipping it for the read'
   },
+  baseKeptAfterRemoval: (w: World) => {
+    const view = currentView(w)
+    const root = tabRoot()
+    // Still editing, dirty, from a base with the block, under the inheriting banner.
+    return view?.dirty && view.base?.inherited === false && root !== null && inheritingShown(root)
+      ? null
+      : 'the section did not edit from a base with the block while the tab showed none'
+  },
 } satisfies Record<string, (w: World) => string | null>
 
 function checkPin(w: World, pin: keyof typeof PINS | undefined): void {
@@ -3744,6 +3752,32 @@ const EXAMPLES: Example[] = [
       new ArmFault('alpha', 'read', 'hang'),
       new SwitchThroughConflicts(6),
       new ArmFault('alpha', 'read', 'hang'),
+    ],
+  ],
+  // S2's base (harness; seed 383083814 found it): an edit session takes its
+  // base with the block. The block is removed outside, and the switch's
+  // notice load puts the inheriting banner on the tab while the section
+  // still edits from its base. A row set back to the base, then another
+  // changed, must keep that session's base.
+  [
+    scriptedScheduler(),
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: { ...OPEN_BLOCK, probe: true }, beta: null },
+      random: 18,
+      pin: 'baseKeptAfterRemoval',
+    },
+    [
+      new Step(4),
+      new EditTools([[2, 'skip']]),
+      new External('alpha', { kind: 'remove' }),
+      new SetToManual(false),
+      new Step(6),
+      new EditTools([
+        [2, 'default'],
+        [1, 'required'],
+      ]),
     ],
   ],
 ]
