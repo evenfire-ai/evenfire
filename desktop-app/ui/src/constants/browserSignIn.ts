@@ -14,7 +14,8 @@ export const BROWSER_SIGN_IN_COPY = Object.freeze({
 
 /**
  * The status each end state shows (plan decision 5). `failed` with `environment_changed`, or
- * with no reason, shows `failed`; `replaced` shows nothing.
+ * with no reason, shows `failed`; `replaced` shows nothing. `sessionLoadFailed` shows when the
+ * renderer cannot load a session main holds.
  */
 export const BROWSER_SIGN_IN_OUTCOME_COPY = Object.freeze({
   signedIn: 'Signed in.',
@@ -24,6 +25,7 @@ export const BROWSER_SIGN_IN_OUTCOME_COPY = Object.freeze({
   differentEnvironment: 'This sign-in finished for a different Evenfire environment.',
   unavailable: "Sign-in through the browser isn't available here.",
   noLongerAvailable: 'Sign-in through the browser is no longer available here.',
+  sessionLoadFailed: 'Could not load your session. Try again.',
 })
 
 /**

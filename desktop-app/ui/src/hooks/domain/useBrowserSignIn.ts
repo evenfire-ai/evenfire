@@ -124,6 +124,9 @@ export function useBrowserSignIn({
             '[useBrowserSignIn] The session could not be loaded after browser sign-in',
             errorClass(error)
           )
+          // Replaces "Signed in.": the login screen is still showing. Fixed text, never the
+          // error's message (D18).
+          setStatus(BROWSER_SIGN_IN_OUTCOME_COPY.sessionLoadFailed, 'error')
         }
       }
       try {

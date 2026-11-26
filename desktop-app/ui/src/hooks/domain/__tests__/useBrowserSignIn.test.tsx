@@ -557,6 +557,39 @@ describe('useBrowserSignIn: outcomes (plan decision 5)', () => {
     ])
   })
 
+  it('shows an error when the session fails to load after browser sign-in (I-1)', async () => {
+    const main = createMain()
+    const onSessionNeedsLoad = vi
+      .fn<UseBrowserSignInParams['onSessionNeedsLoad']>()
+      .mockRejectedValue(new Error('fake restore failure at https://edge-fixture.example.test'))
+    const mounted = mount({ onSessionNeedsLoad })
+    await settle()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const attempt = main.recordAttempt()
+    main.store.end(attempt, { outcome: 'signed_in' })
+    await settle()
+
+    expect(onSessionNeedsLoad.mock.calls).toEqual([[{ preserveNav: true }]])
+    // The error replaces "Signed in.", since the login screen is still showing.
+    expect(mounted.setStatus.mock.calls).toEqual([
+      ['Signed in.', 'success'],
+      ['Could not load your session. Try again.', 'error'],
+    ])
+    const acknowledge = main.auth.acknowledgeBrowserSignInResult
+    expect(acknowledge.mock.calls).toEqual([[attempt]])
+    expect(mounted.setStatus.mock.invocationCallOrder[1]).toBeLessThan(
+      acknowledge.mock.invocationCallOrder[0] ?? Number.NEGATIVE_INFINITY
+    )
+    expect(mounted.hook.result.current.view).toEqual({ attemptId: attempt, phase: 'idle' })
+    expect(warn.mock.calls).toEqual([
+      ['[useBrowserSignIn] The session could not be loaded after browser sign-in', 'Error'],
+    ])
+    // Neither the error's message nor its URL reaches a status or a log (D18).
+    expect(JSON.stringify([mounted.setStatus.mock.calls, warn.mock.calls])).not.toMatch(
+      /fake restore failure|example\.test/
+    )
+  })
+
   it('shows nothing for replaced', async () => {
     const main = createMain()
     const mounted = mount()
