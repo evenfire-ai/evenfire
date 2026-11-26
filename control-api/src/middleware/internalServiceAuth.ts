@@ -16,6 +16,23 @@ declare global {
 // entries with trivially short values.
 const MIN_INTERNAL_TOKEN_LENGTH = 16
 
+/**
+ * Every refusal of these gates carries this header with this value, beside the
+ * unchanged `401 {"error":"Unauthorized"}`. It tells a caller that the gate
+ * refused the caller's own service credential, not a token the caller relays
+ * (rpc-proxy's `controlApiRestService.ts` answers such a Host resolve as an
+ * unavailable authority). The value is a fixed constant and names no service,
+ * token or reason.
+ */
+export const INTERNAL_SERVICE_AUTH_REFUSAL_HEADER = 'x-internal-service-auth-refusal'
+export const INTERNAL_SERVICE_CREDENTIAL_REJECTED = 'service_credential_rejected'
+
+/** The one writer of a service gate refusal. */
+function refuseServiceCredential(res: Response): void {
+  res.setHeader(INTERNAL_SERVICE_AUTH_REFUSAL_HEADER, INTERNAL_SERVICE_CREDENTIAL_REJECTED)
+  res.status(401).json({ error: 'Unauthorized' })
+}
+
 function safeEqual(a: string, b: string): boolean {
   const aBuf = Buffer.from(a)
   const bBuf = Buffer.from(b)
@@ -35,11 +52,11 @@ export function requireInternalToken(req: Request, res: Response, next: NextFunc
   const service = String(req.header('x-service-token') || '').trim()
   const token = extractBearerToken(req)
   if (!token || token.length < MIN_INTERNAL_TOKEN_LENGTH || token.length > 4096) {
-    res.status(401).json({ error: 'Unauthorized' })
+    refuseServiceCredential(res)
     return
   }
   if (!service) {
-    res.status(401).json({ error: 'Unauthorized' })
+    refuseServiceCredential(res)
     return
   }
   // Cluster-wide bootstrap path for control-plane internal callers
@@ -52,13 +69,13 @@ export function requireInternalToken(req: Request, res: Response, next: NextFunc
     next()
     return
   }
-  res.status(401).json({ error: 'Unauthorized' })
+  refuseServiceCredential(res)
 }
 
 export function requireInternalService(expectedServiceName: string) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (req.internalService?.name !== expectedServiceName) {
-      res.status(401).json({ error: 'Unauthorized' })
+      refuseServiceCredential(res)
       return
     }
     next()
