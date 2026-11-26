@@ -242,7 +242,7 @@ function tellHostChangedListeners(host: string): void {
     } catch (error) {
       // A listener's bug must not keep the other tabs, here or in other
       // browser tabs, from loading again. control-ui has no client logger: its
-      // client code reports caught errors to the browser console (lib/api.ts).
+      // client code reports caught errors with console.warn (lib/api.ts).
       console.warn(
         `Host-changed notice for agent ${host}: a listener threw; the other listeners were still told.`,
         error

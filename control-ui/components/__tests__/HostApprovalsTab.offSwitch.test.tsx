@@ -783,7 +783,7 @@ describe('HostApprovalsTab — Set to Manual now', () => {
         },
         seededRandom(21)
       )
-      const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const reported = vi.spyOn(console, 'warn').mockImplementation(() => {})
       await clickAndSettle()
 
       expect(resultParagraphs()).toEqual([
@@ -1058,7 +1058,7 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       })
       const notices = vi.fn()
       subscribeHostChanged('foo', notices)
-      const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const reported = vi.spyOn(console, 'warn').mockImplementation(() => {})
       // A root-toast listener that throws, subscribed after the page's own:
       // the continuation's toast throws out of the step that reports it.
       const failure = new Error('a toast listener failed')

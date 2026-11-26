@@ -294,13 +294,13 @@ export function HostApprovalsTab({ host, onRetry }: HostApprovalsTabProps) {
         // The section that ran the save shows every other outcome itself.
       } catch (error) {
         // Ruling 51 (review finding 4's sibling): showing the outcome threw,
-        // a bug (a root-toast listener that throws, say). It is reported to
-        // the console, since control-ui has no client logger
-        // (lib/hostApprovalSave.ts reports its listeners' errors so). It is
-        // not rethrown: the section calls this from its own settle step,
-        // which goes on to show the outcome it shows itself, and a rethrow
-        // would leave an unhandled rejection in its runSave.
-        console.error('Per-tool save: showing its outcome threw.', error)
+        // a bug (a root-toast listener that throws, say). It is reported with
+        // console.warn, since control-ui has no client logger (lib/api.ts and
+        // lib/hostApprovalSave.ts report caught errors so). It is not
+        // rethrown: the section calls this from its own settle step, which
+        // goes on to show the outcome it shows itself, and a rethrow would
+        // leave an unhandled rejection in its runSave.
+        console.warn('Per-tool save: showing its outcome threw.', error)
       } finally {
         // Every save that ends fires the Host-changed notice, even when
         // showing its outcome threw. The notice loads this tab again too, in
@@ -368,9 +368,10 @@ export function HostApprovalsTab({ host, onRetry }: HostApprovalsTabProps) {
         (error: unknown) => {
           // The protocol turns every request's failure into an outcome, so a
           // run that throws is a bug. It is shown as a failure, with the
-          // fallback, and reported to the console: control-ui has no client
-          // logger (lib/hostApprovalSave.ts reports its listeners' errors so).
-          console.error('Set to Manual now: the run threw; it is shown as a failure.', error)
+          // fallback, and reported with console.warn: control-ui has no client
+          // logger (lib/api.ts and lib/hostApprovalSave.ts report caught
+          // errors so).
+          console.warn('Set to Manual now: the run threw; it is shown as a failure.', error)
           settleSwitch(target.host, {
             kind: 'failed',
             message: messageOf(error),
@@ -381,9 +382,9 @@ export function HostApprovalsTab({ host, onRetry }: HostApprovalsTabProps) {
       .catch((error: unknown) => {
         // Review finding 4: showing the outcome threw, a bug (a root-toast
         // listener that throws, say). settleSwitch fired the notice all the
-        // same. The error goes to the console, as a run's own throw does,
-        // rather than becoming an unhandled rejection.
-        console.error('Set to Manual now: showing its outcome threw.', error)
+        // same. The error is reported with console.warn, as a run's own throw
+        // is, rather than becoming an unhandled rejection.
+        console.warn('Set to Manual now: showing its outcome threw.', error)
       })
   }, [settleSwitch])
 

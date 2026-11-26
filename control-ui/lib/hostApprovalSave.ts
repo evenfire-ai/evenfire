@@ -539,9 +539,9 @@ function notifySettingManual(): void {
     } catch (error) {
       // A listener's bug must not change the switch's outcome, throw out of
       // setManualNow, or keep the other listeners from hearing. control-ui has
-      // no client logger: its client code reports caught errors to the browser
-      // console, with what failed and the error (lib/api.ts, HostWizard).
-      console.error(
+      // no client logger: its client code reports caught errors with
+      // console.warn, with what failed and the error (lib/api.ts, HostWizard).
+      console.warn(
         'Set to Manual now: a setting-Manual listener threw; the switch and the other listeners went on.',
         error
       )

@@ -511,7 +511,7 @@ describe('HostApprovalsTab', () => {
       })
       const notices = vi.fn()
       subscribeHostChanged('foo', notices)
-      const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const reported = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const rejections: unknown[] = []
       const onRejection = (reason: unknown) => {
         rejections.push(reason)

@@ -769,7 +769,7 @@ describe('Set to Manual now (spec §6.3)', () => {
 
     it('a listener that throws changes no outcome, the others still hear, and its error is reported', async () => {
       const fake = createFake({ modeCeiling: 'auto' })
-      const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const reported = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const failure = new Error('a listener failed')
       const throwing = vi.fn(() => {
         throw failure
