@@ -15960,9 +15960,14 @@ pre {
   color: var(--text-muted);
 }
 
+/* A grey Delete keeps its red label under the pointer and under keyboard
+   focus, where it gets the neutral focus background: the danger tint is
+   reserved for a Delete that can run. */
 .da-gfs-resource-menu__panel .ui-menu-item--danger[aria-disabled='true']:hover:not(:focus-visible),
+.da-gfs-resource-menu__panel .ui-menu-item--danger[aria-disabled='true']:focus-visible,
 .da-gfs-resource-menu__submenu
-  .ui-menu-item--danger[aria-disabled='true']:hover:not(:focus-visible) {
+  .ui-menu-item--danger[aria-disabled='true']:hover:not(:focus-visible),
+.da-gfs-resource-menu__submenu .ui-menu-item--danger[aria-disabled='true']:focus-visible {
   color: var(--danger);
 }
 
@@ -16008,10 +16013,12 @@ pre {
 
 .da-gfs-resource-menu__panel
   .ui-menu-item--danger:hover:enabled:where(:not([aria-disabled='true'])),
-.da-gfs-resource-menu__panel .ui-menu-item--danger:focus-visible,
+.da-gfs-resource-menu__panel
+  .ui-menu-item--danger:focus-visible:where(:not([aria-disabled='true'])),
 .da-gfs-resource-menu__submenu
   .ui-menu-item--danger:hover:enabled:where(:not([aria-disabled='true'])),
-.da-gfs-resource-menu__submenu .ui-menu-item--danger:focus-visible {
+.da-gfs-resource-menu__submenu
+  .ui-menu-item--danger:focus-visible:where(:not([aria-disabled='true'])) {
   background: rgba(var(--danger-rgb), 0.12);
   color: var(--danger);
 }
