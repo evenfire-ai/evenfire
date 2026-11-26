@@ -6,6 +6,7 @@ import {
   type WorkflowAuthorityBinding,
   persistWorkflowAuthorityBinding,
 } from './workflows/workflowAuthorityBindingService.js'
+import { storedMaxRunDurationSeconds } from './workflows/workflowRunDuration.js'
 
 export type WorkflowRunPhase =
   | 'Pending'
@@ -302,7 +303,7 @@ export async function createRun(input: CreateRunInput, db?: DbClient): Promise<C
       input.inputs ?? null,
       input.intermediate_parameters ?? null,
       input.output_overrides ?? null,
-      input.max_duration_seconds ?? null,
+      storedMaxRunDurationSeconds(input.max_duration_seconds),
       input.ttl_seconds_after_finished ?? null,
       authorityBindingId,
     ]
@@ -411,7 +412,7 @@ export async function createApprovedRun(input: CreateApprovedRunInput): Promise<
         runInput.inputs ?? null,
         runInput.intermediate_parameters ?? null,
         runInput.output_overrides ?? null,
-        runInput.max_duration_seconds ?? null,
+        storedMaxRunDurationSeconds(runInput.max_duration_seconds),
         runInput.ttl_seconds_after_finished ?? null,
         runInput.approval_request_id,
         runInput.idempotency_payload_hash,

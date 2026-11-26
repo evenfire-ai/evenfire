@@ -8,7 +8,6 @@ import {
 import {
   FORBID_PENDING_ACTIVE_BOUND_SECONDS,
   FORBID_RUNNING_GRACE_SECONDS,
-  FORBID_RUNNING_MAX_DURATION_CAP_SECONDS,
   FORBID_SKIP_STREAK_CAPACITY,
   FORBID_SUSTAINED_SKIP_THRESHOLD,
   computeNextFire,
@@ -16,6 +15,7 @@ import {
   processMaturedSchedules,
   resetConcurrencyForbiddenStreaksForTests,
 } from '../src/services/workflowScheduleWorkerService.js'
+import { WORKFLOW_RUN_MAX_DURATION_CAP_SECONDS } from '../src/services/workflows/workflowRunDuration.js'
 
 /**
  * Tests for `workflowScheduleWorkerService.processMaturedSchedules`.
@@ -650,7 +650,7 @@ describe('processMaturedSchedules', () => {
       await processMaturedSchedules()
 
       expect(FORBID_PENDING_ACTIVE_BOUND_SECONDS).toBe(900)
-      expect(FORBID_RUNNING_MAX_DURATION_CAP_SECONDS).toBe(86_400)
+      expect(WORKFLOW_RUN_MAX_DURATION_CAP_SECONDS).toBe(86_400)
       expect(FORBID_RUNNING_GRACE_SECONDS).toBe(300)
       expect(activeRunLookups()).toEqual([['sandbox-recipes', 'pr-review', 900, 86_400, 300]])
       const lookupSql = String(
