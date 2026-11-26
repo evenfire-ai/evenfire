@@ -30,6 +30,7 @@ type GfsResourceMenuAction = {
   onClick: () => void
   submenu?: boolean
   disabled?: boolean
+  disabledReason?: string
 }
 
 function menuAction(
@@ -40,6 +41,18 @@ function menuAction(
   options: Pick<GfsResourceMenuAction, 'color' | 'submenu' | 'disabled'> = {}
 ): GfsResourceMenuAction | null {
   return onClick ? { ...options, icon, key, label, onClick } : null
+}
+
+/**
+ * An item disabled for a reason stays focusable and announces that reason, so
+ * it is `aria-disabled` and the click guard keeps it inert. One disabled only
+ * while a change is in flight has nothing to explain and stays natively
+ * disabled.
+ */
+function disabledItemProps(action: GfsResourceMenuAction) {
+  if (!action.disabled) return { disabled: false }
+  if (action.disabledReason) return { 'aria-disabled': true, title: action.disabledReason }
+  return { disabled: true }
 }
 
 function isMenuAction(action: GfsResourceMenuAction | null): action is GfsResourceMenuAction {
@@ -488,26 +501,24 @@ export function GfsResourceMenu({
     ),
   ].filter(group => group.length > 0)
   const menuActions = actions?.filter(action => action.menu)
-  const sharedActions: GfsResourceMenuAction[] | undefined = menuActions?.map(action =>
-    withPermissionGate(
-      {
-        color: action.id === 'delete' ? 'danger' : undefined,
-        disabled: action.disabled,
-        icon: action.icon,
-        key: action.id,
-        label: action.label,
-        onClick:
-          action.id === 'replace'
-            ? () =>
-                action.run(undefined, {
-                  requestFileSelection: () => replaceInputRef.current?.click(),
-                })
-            : () => action.run(),
-      },
-      action.id,
-      permissionStatus
-    )
+  const gatedMenuActions = menuActions?.map(action =>
+    withPermissionGate(action, action.id, permissionStatus)
   )
+  const sharedActions: GfsResourceMenuAction[] | undefined = gatedMenuActions?.map(action => ({
+    color: action.id === 'delete' ? 'danger' : undefined,
+    disabled: action.disabled,
+    disabledReason: action.disabledReason,
+    icon: action.icon,
+    key: action.id,
+    label: action.label,
+    onClick:
+      action.id === 'replace'
+        ? () =>
+            action.run(undefined, {
+              requestFileSelection: () => replaceInputRef.current?.click(),
+            })
+        : () => action.run(),
+  }))
   const shareMenuChildren =
     actions !== undefined
       ? (sharedActions ?? [])
@@ -596,7 +607,7 @@ export function GfsResourceMenu({
                         aria-haspopup={action.submenu ? 'menu' : undefined}
                         color={action.color}
                         data-gfs-action={action.key}
-                        disabled={action.disabled}
+                        {...disabledItemProps(action)}
                         key={action.key}
                         leadingIcon={action.icon}
                         role="menuitem"
@@ -636,7 +647,7 @@ export function GfsResourceMenu({
                   {shareMenuChildren.map(action => (
                     <MenuItem
                       data-gfs-action={action.key}
-                      disabled={action.disabled}
+                      {...disabledItemProps(action)}
                       key={action.key}
                       leadingIcon={action.icon}
                       role="menuitem"
@@ -669,7 +680,7 @@ export function GfsResourceMenu({
             event.currentTarget.value = ''
             if (!file || !gatedReplace || gatedReplace.disabled) return
             closeMenu()
-            const replaceAction = menuActions?.find(action => action.id === 'replace')
+            const replaceAction = gatedMenuActions?.find(action => action.id === 'replace')
             if (replaceAction) replaceAction.run(file)
             else onReplace?.(file)
           }}

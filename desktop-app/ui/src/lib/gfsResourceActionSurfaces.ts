@@ -12,6 +12,11 @@ import type { GfsRowActionAvailability } from './gfsRowActionAvailability.types'
  * its handlers reach `buildGfsResourceActions` and with which gates. The
  * surfaces compute their state (bits, readability, previewability) and pass
  * it in as plain data; nothing here reads hooks, context or stores.
+ *
+ * A handler is withheld only when the action does not apply to the resource
+ * (its kind, its format, a missing parent, a missing action host). A missing
+ * permission travels as a `can*` gate instead, so the menu keeps the same
+ * shape while bits load or are refused and greys the action out.
  */
 
 type Handler = GfsResourceActionHandler
@@ -38,6 +43,7 @@ export type FilesRowActionSurfaceInput = {
   readable: boolean | undefined
   /** Whether the file's format has a preview at all. */
   previewable: boolean
+  parentResourceId: string | null | undefined
   availability: GfsRowActionAvailability
   mutating: boolean
   handlers: FilesRowActionHandlers
@@ -48,9 +54,6 @@ export function filesRowActionOptions(input: FilesRowActionSurfaceInput): GfsRes
   const { availability, handlers } = input
   const isDirectory = input.kind === 'directory'
   const readable = input.readable !== false
-  const canPreview = !isDirectory && readable && input.previewable
-  const canDownload = !isDirectory && readable
-  const canDownloadZip = isDirectory && readable
   const canWrite = isDirectory && availability.canWrite
   return {
     kind: input.kind,
@@ -59,16 +62,19 @@ export function filesRowActionOptions(input: FilesRowActionSurfaceInput): GfsRes
       'copy-link': handlers['copy-link'],
       'open-route': handlers['open-route'],
       'open-folder': isDirectory ? handlers['open-folder'] : undefined,
-      'new-folder': canWrite ? handlers['new-folder'] : undefined,
-      'upload-file': canWrite ? handlers['upload-file'] : undefined,
+      'new-folder': handlers['new-folder'],
+      'upload-file': handlers['upload-file'],
       rename: handlers.rename,
       move: handlers.move,
       share: handlers.share,
       delete: handlers.delete,
-      preview: canPreview ? handlers.preview : undefined,
-      download: canDownload ? handlers.download : undefined,
-      'download-zip': canDownloadZip ? handlers['download-zip'] : undefined,
+      preview: handlers.preview,
+      download: handlers.download,
+      'download-zip': handlers['download-zip'],
     },
+    moveApplicable: Boolean(input.parentResourceId),
+    previewable: input.previewable,
+    readable: input.readable,
     canOpenFolder: isDirectory,
     canRename: availability.canRename,
     canMove: availability.canMove,
@@ -76,9 +82,9 @@ export function filesRowActionOptions(input: FilesRowActionSurfaceInput): GfsRes
     canUpload: canWrite,
     canShare: availability.canManage,
     canDelete: availability.canDelete,
-    canPreview,
-    canDownload,
-    canDownloadZip,
+    canPreview: readable,
+    canDownload: readable,
+    canDownloadZip: readable,
     mutating: input.mutating,
   }
 }
@@ -108,6 +114,7 @@ export type FilesCurrentResourceActionSurfaceInput = {
   canMove: boolean
   /** The open resource is a file whose format has a preview. */
   previewable: boolean
+  parentResourceId: string | null | undefined
   mutating: boolean
   refreshing: boolean
   handlers: FilesCurrentResourceActionHandlers
@@ -132,18 +139,20 @@ export function filesCurrentResourceActionOptions(
       'new-folder': handlers['new-folder'],
       'upload-file': handlers['upload-file'],
       share: handlers.share,
-      preview: isFile && input.previewable ? handlers.preview : undefined,
-      download: isFile ? handlers.download : undefined,
-      'download-zip': isFolder ? handlers['download-zip'] : undefined,
-      replace: isFile && input.canWrite ? handlers.replace : undefined,
+      preview: handlers.preview,
+      download: handlers.download,
+      'download-zip': handlers['download-zip'],
+      replace: handlers.replace,
       delete: handlers.delete,
     },
+    moveApplicable: Boolean(input.parentResourceId),
+    previewable: input.previewable,
     canRename: input.canWrite,
     canMove: input.canMove,
     canCreateFolder: isFolder && input.canWrite,
     canUpload: isFolder && input.canWrite,
     canShare: input.canManage,
-    canPreview: input.previewable,
+    canPreview: true,
     canDownload: isFile,
     canDownloadZip: isFolder,
     canReplace: isFile && input.canWrite,
@@ -196,7 +205,6 @@ export function sidebarRowActionOptions(
       : gfsPendingRowActionAvailability({ parentResourceId: input.parentResourceId })
   const isDirectory = input.kind === 'directory'
   const readable = input.readable !== false
-  const canPreview = !isDirectory && readable && input.previewable
   const canWrite = isDirectory && availability.canWrite
   const inHost = (handler: Handler) => (input.hostAvailable ? handler : undefined)
   return {
@@ -211,9 +219,12 @@ export function sidebarRowActionOptions(
       move: inHost(handlers.move),
       share: inHost(handlers.share),
       delete: inHost(handlers.delete),
-      preview: canPreview ? handlers.preview : undefined,
+      preview: handlers.preview,
       download: inHost(handlers.download),
     },
+    moveApplicable: Boolean(input.parentResourceId),
+    previewable: input.previewable,
+    readable: input.readable,
     canOpenFolder: isDirectory,
     canRename: availability.canRename,
     canMove: availability.canMove,
@@ -221,8 +232,8 @@ export function sidebarRowActionOptions(
     canUpload: canWrite,
     canShare: availability.canManage,
     canDelete: availability.canDelete,
-    canPreview,
-    canDownload: !isDirectory && readable,
+    canPreview: readable,
+    canDownload: readable,
     mutating: input.mutating,
   }
 }
@@ -243,6 +254,15 @@ export type FilePreviewActionSurfaceInput = {
   uri: string
   /** The file is denied, unavailable or its access was revoked. */
   accessBlocked: boolean
+  /**
+   * The preview may resolve the file's authority: false while blocked and while
+   * the session authority is pending. Implied false by `accessBlocked`.
+   */
+  canResolve: boolean
+  /** What the preview's URI resolved to; null until it resolves. */
+  resourceKind: GfsResourceKind | null
+  /** The resolved file's parent folder; unknown until the file resolves. */
+  parentResourceId: string | null
   /** The preview body can copy this format's content (image or markdown). */
   copyContentSupported: boolean
   copyContentReady: boolean
@@ -261,6 +281,11 @@ export function filePreviewActionOptions(
   input: FilePreviewActionSurfaceInput
 ): GfsResourceActionOptions {
   const { handlers } = input
+  // The file's own actions apply only once its authority can be resolved and
+  // it resolved to a file: before that, or on a folder, nothing reads its
+  // bits, so they stay out of the menu rather than greyed out.
+  const resolved = (handler: Handler) =>
+    input.canResolve && input.resourceKind === 'file' ? handler : undefined
   return {
     kind: 'file',
     uri: input.uri,
@@ -270,12 +295,16 @@ export function filePreviewActionOptions(
       'open-route': handlers['open-route'],
       'copy-content':
         !input.accessBlocked && input.copyContentSupported ? handlers['copy-content'] : undefined,
-      share: handlers.share,
-      rename: handlers.rename,
-      move: handlers.move,
-      download: handlers.download,
-      delete: handlers.delete,
+      share: resolved(handlers.share),
+      rename: resolved(handlers.rename),
+      move: resolved(handlers.move),
+      // Download is gated on the file having resolved, not on a permission.
+      download: input.canDownload ? resolved(handlers.download) : undefined,
+      delete: resolved(handlers.delete),
     },
+    moveApplicable: Boolean(input.parentResourceId),
+    // The preview tab has no Preview action of its own.
+    previewable: false,
     canShare: input.canShare,
     canRename: input.canRename,
     canMove: input.canMove,

@@ -1125,6 +1125,30 @@ const ACTION_BITS: Record<string, string> = {
   'Upload file': 'write',
 }
 
+/** Inert: natively disabled, or greyed out with the reason it cannot run. */
+function isInert(item: HTMLButtonElement): boolean {
+  return item.disabled || item.getAttribute('aria-disabled') === 'true'
+}
+
+/**
+ * The menu still waits on the target's bits: an item is inert although the
+ * bits the target holds allow it. An item its bits refuse stays inert for good.
+ */
+function awaitingBits(w: World, menu: HTMLElement): boolean {
+  const node = w.model.menu ? w.nodes.get(w.model.menu.target) : undefined
+  return (within(menu).queryAllByRole('menuitem') as HTMLButtonElement[]).some(item => {
+    if (!isInert(item)) return false
+    const label = item.textContent?.trim() ?? ''
+    if (label === 'Move to') {
+      const parent = node?.parent ? w.nodes.get(node.parent) : undefined
+      // Move needs write and delete on the exact old parent.
+      return Boolean(parent?.held.includes('write') && parent.held.includes('delete'))
+    }
+    const bit = ACTION_BITS[label]
+    return !bit || !node || node.held.includes(bit)
+  })
+}
+
 /**
  * V1/H1, checked after every event: an open menu names its own resource and
  * never enables what that resource's bits refuse, whatever is still pending.
@@ -1142,7 +1166,7 @@ function menuViolations(w: World): string[] {
     // The Share trigger opens a flyout that also carries Copy link.
     if (item.getAttribute('aria-haspopup')) continue
     const bit = ACTION_BITS[item.textContent?.trim() ?? '']
-    if (bit && !item.disabled && node && !node.held.includes(bit)) {
+    if (bit && !isInert(item) && node && !node.held.includes(bit)) {
       out.push(`H1/H2: ${item.textContent} is enabled on ${node.name}, which lacks ${bit}`)
     }
   }
@@ -1560,7 +1584,7 @@ class Choose extends OracleEvent {
       const trigger = (within(menu).queryAllByRole('menuitem') as HTMLButtonElement[]).find(entry =>
         entry.getAttribute('aria-haspopup')
       )
-      if (trigger && !trigger.disabled) {
+      if (trigger && !isInert(trigger)) {
         fireEvent.click(trigger)
         await flush()
         const flyout = screen.queryByRole('menu', { name: /^Share options for / })
@@ -1571,10 +1595,8 @@ class Choose extends OracleEvent {
         item = within(menu).queryByRole('menuitem', { name: label }) as HTMLButtonElement | null
       }
     }
-    if (!item || item.disabled) return
-    const settled = (within(menu).queryAllByRole('menuitem') as HTMLButtonElement[]).every(
-      entry => !entry.disabled
-    )
+    if (!item || isInert(item)) return
+    const settled = !awaitingBits(w, menu)
     const opened = m.menu
     const at = tick(w)
     const live = sameSession(opened.origin, m.session) && accessActive(w, m.session)
@@ -2087,10 +2109,7 @@ class Advance extends OracleEvent {
       return
     }
     if (menu) {
-      const inert = (within(menu).queryAllByRole('menuitem') as HTMLButtonElement[]).some(
-        i => i.disabled
-      )
-      if (inert && w.s.count() > 0) {
+      if (awaitingBits(w, menu) && w.s.count() > 0) {
         // Sometimes the user right-clicks another row before the bits land.
         if (this.n % 4 === 0) {
           // Half the time onto the read-only row, whose bits differ most.
@@ -2107,7 +2126,7 @@ class Advance extends OracleEvent {
       const offered = Object.entries(ACTION_LABELS)
         .filter(([, label]) =>
           (within(menu).queryAllByRole('menuitem') as HTMLButtonElement[]).some(
-            item => !item.disabled && item.textContent?.trim() === label
+            item => !isInert(item) && item.textContent?.trim() === label
           )
         )
         .map(([id]) => id)

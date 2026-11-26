@@ -24,6 +24,7 @@ import {
   appServiceAffordanceProducer,
   heldPermissionResponse,
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
+import { isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { FilesPage } from '../FilesPage'
 
 let authoritativeSessionGeneration = 1
@@ -1735,7 +1736,9 @@ describe('FilesPage Move permission generation fencing', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Options for report.txt' }))
     const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
-    await waitFor(() => expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy())
+    await waitFor(() =>
+      expect(isMenuItemEnabled(screen.getByRole('menuitem', { name: 'Move to' }))).toBe(true)
+    )
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file report.txt' })
     await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))

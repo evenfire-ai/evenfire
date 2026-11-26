@@ -21,6 +21,7 @@ import type { Tone } from '@/uiTypes'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { GfsClient } from '../../../../src/gfs/uriHandler'
 import { requestJson } from '../../../../src/httpClient'
+import { expectUnavailable, isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { FilePreviewPage } from '../FilePreviewPage'
 
 const hookMock = vi.hoisted(() => ({ useGfsBrowserController: vi.fn() }))
@@ -187,6 +188,33 @@ async function openPreviewActions() {
 }
 
 describe('FilePreviewPage move permission contract', () => {
+  it("keeps the file's own actions out of the menu while its authority cannot be resolved", async () => {
+    installGfs({ source: async () => fullAccess, resourceAffordances: async () => fullAccess })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      accessState: 'active',
+      sessionScope: 'preview-test-user:main',
+      sessionGeneration: 1,
+      principalScope: 'preview-test-user:main',
+      authorityPending: true,
+      handleAuthorityFailure: vi.fn(() => false),
+    })
+    renderPreview()
+
+    const menu = await openPreviewActions()
+    const labels = within(menu)
+      .getAllByRole('menuitem')
+      .map(item => item.textContent)
+    for (const label of ['Rename', 'Move to', 'Download', 'Delete']) {
+      expect(labels).not.toContain(label)
+    }
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    expect(
+      within(screen.getByRole('menu', { name: 'Share options for diagram.png' }))
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Copy link'])
+  })
+
   it('keeps cached Preview actions visible during a background permission refetch', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     let resourceReads = 0
@@ -248,9 +276,9 @@ describe('FilePreviewPage move permission contract', () => {
       expect(screen.queryByText('Checking move permissions…')).toBeNull()
 
       const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
-      expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
-      expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
-      expect(within(menu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+      expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Rename' }))).toBe(true)
+      expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Move to' }))).toBe(true)
+      expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Delete' }))).toBe(true)
 
       // Cached presentation is not permission to open the Move dialog. It joins
       // the background source check and opens only after that exact query resolves.
@@ -388,7 +416,7 @@ describe('FilePreviewPage move permission contract', () => {
       await waitFor(() => expect(resourceReads).toBe(2))
 
       const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
-      expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+      expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Rename' }))).toBe(true)
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
       await waitFor(() => expect(resourceReads).toBe(3))
       expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
@@ -411,7 +439,7 @@ describe('FilePreviewPage move permission contract', () => {
     { target: 'source parent', status: 403, hidden: ['Move to'] },
     { target: 'source parent', status: 404, hidden: ['Move to'] },
   ])(
-    'withholds cached $target actions after an explicit HTTP $status denial',
+    'disables cached $target actions after an explicit HTTP $status denial',
     async ({ target, status, hidden }) => {
       vi.useFakeTimers({ toFake: ['Date'] })
       let resourceReads = 0
@@ -455,13 +483,22 @@ describe('FilePreviewPage move permission contract', () => {
         await waitFor(() => {
           const refreshedMenu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
           for (const action of hidden) {
-            expect(within(refreshedMenu).queryByRole('menuitem', { name: action })).toBeNull()
+            expectUnavailable(
+              within(refreshedMenu).getByRole('menuitem', { name: action }),
+              `${action} isn't available`
+            )
           }
           if (target === 'resource') {
-            expect(within(refreshedMenu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+            expect(
+              isMenuItemEnabled(within(refreshedMenu).getByRole('menuitem', { name: 'Move to' }))
+            ).toBe(true)
           } else {
-            expect(within(refreshedMenu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
-            expect(within(refreshedMenu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+            expect(
+              isMenuItemEnabled(within(refreshedMenu).getByRole('menuitem', { name: 'Rename' }))
+            ).toBe(true)
+            expect(
+              isMenuItemEnabled(within(refreshedMenu).getByRole('menuitem', { name: 'Delete' }))
+            ).toBe(true)
           }
         })
       } finally {
@@ -471,7 +508,7 @@ describe('FilePreviewPage move permission contract', () => {
     }
   )
 
-  it('hides Move when the source parent has read and write but lacks delete', async () => {
+  it('greys out Move when the source parent has read and write but lacks delete', async () => {
     const sourceReadWrite = delegationAffordances(new Set(['read', 'write']), false)
     installGfs({ source: async () => sourceReadWrite })
     installController()
@@ -483,10 +520,13 @@ describe('FilePreviewPage move permission contract', () => {
     )
     const menu = await openPreviewActions()
 
-    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+    expectUnavailable(
+      within(menu).getByRole('menuitem', { name: 'Move to' }),
+      "Move to isn't available"
+    )
   })
 
-  it('hides Move when the source parent has read and delete but lacks write', async () => {
+  it('greys out Move when the source parent has read and delete but lacks write', async () => {
     const sourceReadDelete = delegationAffordances(new Set(['read', 'delete']), false)
     installGfs({ source: async () => sourceReadDelete })
     installController()
@@ -498,7 +538,10 @@ describe('FilePreviewPage move permission contract', () => {
     )
     const menu = await openPreviewActions()
 
-    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+    expectUnavailable(
+      within(menu).getByRole('menuitem', { name: 'Move to' }),
+      "Move to isn't available"
+    )
   })
 
   it('allows Move from a write/delete parent even when the file itself is read-only', async () => {
@@ -513,7 +556,7 @@ describe('FilePreviewPage move permission contract', () => {
     )
     const menu = await openPreviewActions()
 
-    expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Move to' }))).toBe(true)
   })
 
   it('does not leave a denied Move notice on an idle read-only Preview', async () => {
@@ -556,7 +599,7 @@ describe('FilePreviewPage move permission contract', () => {
     expect(affordances).toHaveBeenCalledTimes(2)
   })
 
-  it('hides Move until the source parent has server-derived write and delete bits', async () => {
+  it('greys out Move until the source parent has server-derived write and delete bits', async () => {
     const { affordances } = installGfs({ source: async () => readOnly })
     installController()
     renderPreview()
@@ -568,11 +611,14 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
 
     await waitFor(() =>
-      expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+      expectUnavailable(
+        within(menu).getByRole('menuitem', { name: 'Move to' }),
+        "Move to isn't available"
+      )
     )
   })
 
-  it('keeps Move hidden while the parent permission check is pending or unavailable', async () => {
+  it('keeps Move greyed out while the parent permission check is pending or unavailable', async () => {
     let finishSourceCheck!: (value: ReturnType<typeof delegationAffordances>) => void
     const sourceCheck = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
       finishSourceCheck = resolve
@@ -584,16 +630,21 @@ describe('FilePreviewPage move permission contract', () => {
     await screen.findByAltText('Preview of diagram.png')
     await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentId, 'main'))
     const menu = await openPreviewActions()
-    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+    expectUnavailable(
+      within(menu).getByRole('menuitem', { name: 'Move to' }),
+      "Move to isn't available"
+    )
 
     await act(async () => finishSourceCheck(fullAccess))
     await waitFor(() =>
       expect(
-        within(screen.getByRole('menu', { name: 'Actions for diagram.png' })).getByRole(
-          'menuitem',
-          { name: 'Move to' }
+        isMenuItemEnabled(
+          within(screen.getByRole('menu', { name: 'Actions for diagram.png' })).getByRole(
+            'menuitem',
+            { name: 'Move to' }
+          )
         )
-      ).toBeTruthy()
+      ).toBe(true)
     )
   })
 
@@ -623,7 +674,7 @@ describe('FilePreviewPage move permission contract', () => {
       await screen.findByAltText('Preview of diagram.png')
       await waitFor(() => expect(sourceReads).toBe(1))
       const menu = await openPreviewActions()
-      expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+      expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Move to' }))).toBe(true)
       expect(queryClient.getQueryData(sourceKey)).toBeTruthy()
 
       vi.setSystemTime(Date.now() + 16_000)
@@ -638,7 +689,12 @@ describe('FilePreviewPage move permission contract', () => {
 
       expect(queryClient.getQueryData(sourceKey)).toBeTruthy()
       expect(affordances).toHaveBeenCalledWith(parentId, 'main')
-      expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+      expectUnavailable(
+        within(menu).getByRole('menuitem', { name: 'Move to' }),
+        "Move to isn't available"
+      )
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+      expect(screen.queryByRole('dialog')).toBeNull()
       expect(moveResource).not.toHaveBeenCalled()
     } finally {
       focusManager.setFocused(undefined)

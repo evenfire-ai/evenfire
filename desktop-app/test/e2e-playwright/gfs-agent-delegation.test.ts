@@ -384,7 +384,11 @@ async function openShareDialogForFixtureFolder(
     exact: true,
   })
   await expect(shareOptions).toBeVisible({ timeout: 15_000 })
-  await shareOptions.getByRole('menuitem', { name: 'Share', exact: true }).click()
+  // Share is listed before the folder's bits load, greyed out (aria-disabled),
+  // and becomes enabled once they grant manage_acl.
+  const shareItem = shareOptions.getByRole('menuitem', { name: 'Share', exact: true })
+  await expect(shareItem).toBeEnabled({ timeout: 15_000 })
+  await shareItem.click()
   const dialog = page.getByRole('dialog', {
     name: `Share folder ${fixtures.folder.name}`,
     exact: true,

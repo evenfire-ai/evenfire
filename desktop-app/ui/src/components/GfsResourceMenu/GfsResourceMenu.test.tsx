@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { buildGfsResourceActions } from '@lib/gfsResourceActions'
+import { isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { GfsResourceMenu } from './index'
 
 function rect(left: number, top: number, width: number, height: number): DOMRect {
@@ -63,14 +64,18 @@ describe('GfsResourceMenu', () => {
       menu.querySelector('[data-gfs-action="share"] .ui-menu-item__icon path')?.getAttribute('d')
     ).toBe('M5 7a4 4 0 1 0 8 0a4 4 0 0 0 -8 0')
     expect(within(menu).queryByRole('menuitem', { name: 'Copy link' })).toBeNull()
-    expect(within(menu).getByRole('menuitem', { name: 'Preview' })).toBeTruthy()
-    expect(within(menu).getByRole('menuitem', { name: 'Replace file' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Preview' }))).toBe(true)
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Replace file' }))).toBe(
+      true
+    )
 
     fireEvent.click(shareItem)
     const shareMenu = screen.getByRole('menu', { name: 'Share options for report.txt' })
     expect(shareItem.getAttribute('aria-expanded')).toBe('true')
-    expect(within(shareMenu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
-    expect(within(shareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(shareMenu).getByRole('menuitem', { name: 'Share' }))).toBe(true)
+    expect(isMenuItemEnabled(within(shareMenu).getByRole('menuitem', { name: 'Copy link' }))).toBe(
+      true
+    )
     expect(within(shareMenu).queryByRole('menuitem', { name: 'Manage access' })).toBeNull()
     expect(
       shareMenu
@@ -91,6 +96,8 @@ describe('GfsResourceMenu', () => {
     const actions = buildGfsResourceActions({
       kind: 'directory',
       uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      moveApplicable: true,
+      previewable: true,
       handlers: { refresh, share, 'copy-link': copyLink },
       canShare: true,
     })
@@ -123,6 +130,8 @@ describe('GfsResourceMenu', () => {
     const actions = buildGfsResourceActions({
       kind: 'file',
       uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      moveApplicable: true,
+      previewable: true,
       handlers: {
         share: vi.fn(),
         'copy-link': vi.fn(),
@@ -154,6 +163,8 @@ describe('GfsResourceMenu', () => {
     const actions = buildGfsResourceActions({
       kind: 'file',
       uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      moveApplicable: true,
+      previewable: true,
       handlers: { replace },
       canReplace: true,
     })

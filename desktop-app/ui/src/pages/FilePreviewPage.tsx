@@ -104,13 +104,14 @@ export function FilePreviewPage({
     [ctrl.handleAuthorityFailure, capturedSessionGeneration, capturedSessionScope]
   )
 
+  const previewCanResolve = !denied && !unavailable && !accessRevoked && !ctrl.authorityPending
   const previewResourceActions = useFilePreviewResourceActions({
     gfsUri,
     fileName,
     sessionScope: ctrl.sessionScope,
     sessionGeneration: ctrl.sessionGeneration,
     principalScope: ctrl.principalScope,
-    canResolve: !denied && !unavailable && !accessRevoked && !ctrl.authorityPending,
+    canResolve: previewCanResolve,
     onAuthorityFailure: handlePreviewAuthorityFailure,
     onDeleted: () => setDenied('The file was deleted.'),
     onRenameCommitted,
@@ -249,6 +250,9 @@ export function FilePreviewPage({
     filePreviewActionOptions({
       uri: gfsUri,
       accessBlocked: Boolean(denied || unavailable || accessRevoked),
+      canResolve: previewCanResolve,
+      resourceKind: previewResourceActions.resourceKind,
+      parentResourceId: previewResourceActions.parentResourceId,
       copyContentSupported: fileKind === 'image' || fileKind === 'markdown',
       copyContentReady,
       canShare: previewResourceActions.canShare,

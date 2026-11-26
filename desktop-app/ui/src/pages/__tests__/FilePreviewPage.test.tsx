@@ -17,6 +17,7 @@ import { useGfsWatchSubscription } from '@hooks/domain/useGfsWatchSubscription'
 import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { GfsWatchEventSource } from '@/gfs/__fixtures__/gfsWatchEvents'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import { isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { FilePreviewPage } from '../FilePreviewPage'
 
 const hookMock = vi.hoisted(() => ({
@@ -183,7 +184,9 @@ describe('FilePreviewPage', () => {
     const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
     expect(within(menu).queryByRole('menuitem', { name: 'Refresh' })).toBeNull()
     expect(within(menu).queryByRole('menuitem', { name: 'Open file from ID' })).toBeNull()
-    expect(within(menu).getByRole('menuitem', { name: 'Copy content' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Copy content' }))).toBe(
+      true
+    )
     fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
     const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
     expect(
@@ -1259,7 +1262,18 @@ describe('FilePreviewPage', () => {
     expect(screen.queryByText('secret.png')).toBeNull()
     expect(screen.getByRole('button', { name: 'Options for unavailable file' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Options for unavailable file' }))
+    // Nothing is known about an unavailable file: its own actions stay out.
+    expect(
+      within(screen.getByRole('menu', { name: 'Actions for unavailable file' }))
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Share'])
     fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+    expect(
+      within(screen.getByRole('menu', { name: 'Share options for unavailable file' }))
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Copy link'])
     fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }))
 
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(uri))

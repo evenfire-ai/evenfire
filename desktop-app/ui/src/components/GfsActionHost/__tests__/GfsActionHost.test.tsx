@@ -28,6 +28,7 @@ import {
 import { GfsWatchEventSource, mainDriveKey } from '@/gfs/__fixtures__/gfsWatchEvents'
 import { GfsActionHost } from '..'
 import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
+import { isMenuItemEnabled } from '../../../test/gfsMenuItemState'
 import { useGfsActionHost } from '../context'
 import type { GfsActionHostContextValue, GfsHostActionTarget } from '../types'
 
@@ -1399,7 +1400,9 @@ describe('GfsActionHost — Share role dropdown layering', () => {
     const menu = await screen.findByRole('menu', { name: 'Actions for chatllm' })
     expect(menu.parentElement).not.toBe(document.body)
     expect(share.contains(menu)).toBe(true)
-    expect(within(menu).getByRole('menuitem', { name: 'Remove access' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Remove access' }))).toBe(
+      true
+    )
 
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() =>

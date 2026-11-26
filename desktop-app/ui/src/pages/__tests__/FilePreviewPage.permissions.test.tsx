@@ -16,6 +16,7 @@ import {
 import { desktopQueryKeys } from '@/hooks/domain/queryKeys'
 import type { Tone } from '@/uiTypes'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import { expectUnavailable, isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { FilePreviewPage } from '../FilePreviewPage'
 
 const hookMock = vi.hoisted(() => ({ useGfsBrowserController: vi.fn() }))
@@ -254,9 +255,12 @@ describe('FilePreviewPage permission-derived actions', () => {
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await screen.findByRole('button', { name: 'Options for diagram.png' })
     const readOnlyMenu = openMenu()
-    expect(within(readOnlyMenu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
-    expect(within(readOnlyMenu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
-    expect(within(readOnlyMenu).queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+    for (const label of ['Rename', 'Move to', 'Delete']) {
+      expectUnavailable(
+        within(readOnlyMenu).getByRole('menuitem', { name: label }),
+        `${label} isn't available`
+      )
+    }
     fireEvent.click(within(readOnlyMenu).getByRole('menuitem', { name: 'Share' }))
     const readOnlyShareMenu = screen.getByRole('menu', {
       name: 'Share options for diagram.png',
@@ -265,7 +269,11 @@ describe('FilePreviewPage permission-derived actions', () => {
       within(readOnlyShareMenu)
         .getAllByRole('menuitem')
         .map(item => item.textContent)
-    ).toEqual(['Copy link'])
+    ).toEqual(['Share', 'Copy link'])
+    expectUnavailable(
+      within(readOnlyShareMenu).getByRole('menuitem', { name: 'Share' }),
+      "Share isn't available"
+    )
     expect(readOnly.affordances).toHaveBeenCalledWith(resourceId, 'main')
     readOnly.view.unmount()
 
@@ -275,9 +283,17 @@ describe('FilePreviewPage permission-derived actions', () => {
       expect(parentAuthorized.affordances).toHaveBeenCalledWith('preview-parent', 'main')
     )
     const parentAuthorizedMenu = openMenu()
-    expect(within(parentAuthorizedMenu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
-    expect(within(parentAuthorizedMenu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
-    expect(within(parentAuthorizedMenu).queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+    expect(
+      isMenuItemEnabled(within(parentAuthorizedMenu).getByRole('menuitem', { name: 'Move to' }))
+    ).toBe(true)
+    expectUnavailable(
+      within(parentAuthorizedMenu).getByRole('menuitem', { name: 'Rename' }),
+      "Rename isn't available"
+    )
+    expectUnavailable(
+      within(parentAuthorizedMenu).getByRole('menuitem', { name: 'Delete' }),
+      "Delete isn't available"
+    )
     expect(parentAuthorized.affordances).toHaveBeenCalledWith('preview-parent', 'main')
     parentAuthorized.view.unmount()
 
@@ -291,12 +307,21 @@ describe('FilePreviewPage permission-derived actions', () => {
       expect(ownerAuthorized.affordances).toHaveBeenCalledWith(resourceId, 'main')
     )
     const ownerMenu = openMenu()
-    expect(within(ownerMenu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
-    expect(within(ownerMenu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
-    expect(within(ownerMenu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+    expect(isMenuItemEnabled(within(ownerMenu).getByRole('menuitem', { name: 'Rename' }))).toBe(
+      true
+    )
+    expect(isMenuItemEnabled(within(ownerMenu).getByRole('menuitem', { name: 'Delete' }))).toBe(
+      true
+    )
+    expectUnavailable(
+      within(ownerMenu).getByRole('menuitem', { name: 'Move to' }),
+      "Move to isn't available"
+    )
     fireEvent.click(within(ownerMenu).getByRole('menuitem', { name: 'Share' }))
     const ownerShareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
-    expect(within(ownerShareMenu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(ownerShareMenu).getByRole('menuitem', { name: 'Share' }))).toBe(
+      true
+    )
   })
 
   it('renders inherited rows for a complete derivation without a coverage notice', async () => {

@@ -13,6 +13,7 @@ import {
   IconTrash,
   IconUpload,
 } from '@components/SidebarNav/icons'
+import { readAccessReason, unavailableReason } from '@constants/gfsActionCopy'
 
 export type GfsResourceKind = 'directory' | 'file'
 export type GfsResourceActionId =
@@ -45,6 +46,8 @@ export type GfsResourceAction = {
   targetUri: string
   menu: boolean
   disabled: boolean
+  /** Why a disabled action cannot run, shown as its tooltip. */
+  disabledReason?: string
   loading: boolean
   run: GfsResourceActionHandler
 }
@@ -57,6 +60,18 @@ export type GfsResourceActionOptions = {
   kind: GfsResourceKind
   uri: string
   handlers: GfsResourceActionHandlers
+  /**
+   * Whether Move applies to this resource at all (it has a parent folder).
+   * Required so a surface cannot leave Move greyed out where it never applies.
+   */
+  moveApplicable: boolean
+  /**
+   * Whether the file's format has a preview. Required so a format without one
+   * is left out instead of greyed out; ignored for folders.
+   */
+  previewable: boolean
+  /** The listing's read flag; an explicit `false` names the cause on read actions. */
+  readable?: boolean
   canRename?: boolean
   canMove?: boolean
   canCreateFolder?: boolean
@@ -78,20 +93,30 @@ type ActionDefinition = {
   label: string
   icon: ReactNode
   menu: boolean
-  eligible: boolean
+  /** False leaves the action out: it does not apply to this resource. */
+  applicable: boolean
+  /** False offers the action disabled, with a reason, and makes its run inert. */
+  permitted?: boolean
+  /** A permitted action can still be inert for another cause (no reason given). */
   disabled?: boolean
+  /** Reads name the unreadable listing as their cause. */
+  read?: boolean
   loading?: boolean
 }
 
+const noop: GfsResourceActionHandler = () => {}
+
 export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsResourceAction[] {
   const mutating = options.mutating ?? false
+  const isFile = options.kind === 'file'
+  const isDirectory = options.kind === 'directory'
   const definitions: ActionDefinition[] = [
     {
       id: 'refresh',
       label: 'Refresh',
       icon: <IconRefresh />,
       menu: false,
-      eligible: Boolean(options.handlers.refresh),
+      applicable: true,
       disabled: mutating || (options.refreshing ?? false),
       loading: options.refreshing ?? false,
     },
@@ -100,7 +125,8 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       label: 'Share',
       icon: <IconShare />,
       menu: true,
-      eligible: Boolean(options.canShare && options.handlers.share),
+      applicable: true,
+      permitted: Boolean(options.canShare),
       disabled: mutating,
     },
     {
@@ -108,30 +134,29 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       label: 'Copy link',
       icon: <IconCopy />,
       menu: true,
-      eligible: Boolean(options.handlers['copy-link']),
+      applicable: true,
     },
     {
       id: 'open-route',
       label: 'Open link',
       icon: <IconOpenRoute />,
       menu: false,
-      eligible: Boolean(options.handlers['open-route']),
+      applicable: true,
     },
     {
       id: 'open-folder',
       label: 'Open folder',
       icon: <IconContexts />,
       menu: true,
-      eligible: Boolean(
-        options.kind === 'directory' && options.canOpenFolder && options.handlers['open-folder']
-      ),
+      applicable: isDirectory && Boolean(options.canOpenFolder),
     },
     {
       id: 'rename',
       label: 'Rename',
       icon: <IconEdit />,
       menu: true,
-      eligible: Boolean(options.canRename && options.handlers.rename),
+      applicable: true,
+      permitted: Boolean(options.canRename),
       disabled: mutating,
     },
     {
@@ -139,7 +164,8 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       label: 'Move to',
       icon: <IconContexts />,
       menu: true,
-      eligible: Boolean(options.canMove && options.handlers.move),
+      applicable: options.moveApplicable,
+      permitted: Boolean(options.canMove),
       disabled: mutating,
     },
     {
@@ -147,9 +173,8 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       label: 'New folder',
       icon: <IconPlus />,
       menu: true,
-      eligible: Boolean(
-        options.kind === 'directory' && options.canCreateFolder && options.handlers['new-folder']
-      ),
+      applicable: isDirectory,
+      permitted: Boolean(options.canCreateFolder),
       disabled: mutating,
     },
     {
@@ -157,9 +182,8 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       label: 'Upload file',
       icon: <IconUpload />,
       menu: true,
-      eligible: Boolean(
-        options.kind === 'directory' && options.canUpload && options.handlers['upload-file']
-      ),
+      applicable: isDirectory,
+      permitted: Boolean(options.canUpload),
       disabled: mutating,
     },
     {
@@ -167,7 +191,9 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       label: 'Copy content',
       icon: <IconCopyContent />,
       menu: true,
-      eligible: Boolean(options.kind === 'file' && options.handlers['copy-content']),
+      applicable: isFile,
+      // Inert until the preview body hands over its copier. That is not a
+      // permission, so it carries no tooltip.
       disabled: !options.canCopyContent,
     },
     {
@@ -175,46 +201,57 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       label: 'Preview',
       icon: <IconEye />,
       menu: true,
-      eligible: Boolean(options.kind === 'file' && options.canPreview && options.handlers.preview),
+      applicable: isFile && options.previewable,
+      permitted: Boolean(options.canPreview),
+      read: true,
     },
     {
       id: 'download',
       label: 'Download',
       icon: <IconDownload />,
       menu: true,
-      eligible: Boolean(
-        options.kind === 'file' && options.canDownload && options.handlers.download
-      ),
+      applicable: isFile,
+      permitted: Boolean(options.canDownload),
+      read: true,
     },
     {
       id: 'download-zip',
       label: 'Download as zip',
       icon: <IconDownload />,
       menu: true,
-      eligible: Boolean(
-        options.kind === 'directory' && options.canDownloadZip && options.handlers['download-zip']
-      ),
+      applicable: isDirectory,
+      permitted: Boolean(options.canDownloadZip),
+      read: true,
     },
     {
       id: 'replace',
       label: 'Replace file',
       icon: <IconUpload />,
       menu: true,
-      eligible: Boolean(options.kind === 'file' && options.canReplace && options.handlers.replace),
+      applicable: isFile,
+      permitted: Boolean(options.canReplace),
     },
     {
       id: 'delete',
       label: 'Delete',
       icon: <IconTrash />,
       menu: true,
-      eligible: Boolean(options.canDelete && options.handlers.delete),
+      applicable: true,
+      permitted: Boolean(options.canDelete),
       disabled: mutating,
     },
   ]
 
   return definitions.flatMap(definition => {
-    const run = options.handlers[definition.id]
-    if (!definition.eligible || !run) return []
+    const handler = options.handlers[definition.id]
+    if (!definition.applicable || !handler) return []
+    const permitted = definition.permitted ?? true
+    const disabled = !permitted || (definition.disabled ?? false)
+    const disabledReason = permitted
+      ? undefined
+      : definition.read && options.readable === false
+        ? readAccessReason(options.kind)
+        : unavailableReason(definition.label)
     return [
       {
         id: definition.id,
@@ -222,9 +259,11 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
         icon: definition.icon,
         targetUri: options.uri,
         menu: definition.menu,
-        disabled: definition.disabled ?? false,
+        disabled,
+        ...(disabledReason ? { disabledReason } : {}),
         loading: definition.loading ?? false,
-        run,
+        // An inert action never reaches its handler, whatever renders it.
+        run: disabled ? noop : handler,
       },
     ]
   })

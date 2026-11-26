@@ -22,6 +22,7 @@ import {
   heldPermissionResponse,
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import { expectUnavailable, isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { FilesPage } from '../FilesPage'
 
 vi.mock('electron', () => ({
@@ -551,9 +552,9 @@ describe('FilesPage stale permission action oracle', () => {
     await waitFor(() => expect(permissionReads).toBe(2))
 
     const menu = screen.getByRole('menu', { name: 'Actions for Reports' })
-    expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
-    expect(within(menu).getByRole('menuitem', { name: 'New folder' })).toBeTruthy()
-    expect(within(menu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Rename' }))).toBe(true)
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'New folder' }))).toBe(true)
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Delete' }))).toBe(true)
 
     await act(async () => {
       releaseRefresh(permissions)
@@ -606,7 +607,7 @@ describe('FilesPage stale permission action oracle', () => {
       await waitFor(() => expect(folderReads).toBe(1))
       fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
       const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
-      expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+      expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Move to' }))).toBe(true)
 
       await act(async () => {
         void client.refetchQueries({
@@ -622,7 +623,9 @@ describe('FilesPage stale permission action oracle', () => {
       await waitFor(() => expect(folderReads).toBe(2))
 
       const pendingMenu = screen.getByRole('menu', { name: 'Actions for report.txt' })
-      expect(within(pendingMenu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+      expect(
+        isMenuItemEnabled(within(pendingMenu).getByRole('menuitem', { name: 'Move to' }))
+      ).toBe(true)
       fireEvent.click(within(pendingMenu).getByRole('menuitem', { name: 'Move to' }))
       expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
 
@@ -680,7 +683,7 @@ describe('FilesPage stale permission action oracle', () => {
       await waitFor(() => expect(sourceParentReads).toBe(1))
       fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
       const menu = screen.getByRole('menu', { name: 'Actions for Reports' })
-      expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+      expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Move to' }))).toBe(true)
 
       await act(async () => {
         void client.refetchQueries({
@@ -696,7 +699,9 @@ describe('FilesPage stale permission action oracle', () => {
       await waitFor(() => expect(sourceParentReads).toBe(2))
 
       const pendingMenu = screen.getByRole('menu', { name: 'Actions for Reports' })
-      expect(within(pendingMenu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+      expect(
+        isMenuItemEnabled(within(pendingMenu).getByRole('menuitem', { name: 'Move to' }))
+      ).toBe(true)
       fireEvent.click(within(pendingMenu).getByRole('menuitem', { name: 'Move to' }))
       expect(screen.queryByRole('dialog', { name: 'Move folder Reports' })).toBeNull()
 
@@ -771,7 +776,9 @@ describe('FilesPage stale permission action oracle', () => {
         )
         await waitFor(() => expect(affordances).toHaveBeenCalledWith('source-parent', 'main'))
         fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
-        expect(await screen.findByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+        expect(isMenuItemEnabled(await screen.findByRole('menuitem', { name: 'Move to' }))).toBe(
+          true
+        )
 
         await act(async () => {
           await client.invalidateQueries({
@@ -1300,14 +1307,17 @@ describe('FilesPage stale permission action oracle', () => {
       expect(screen.queryByText(/private permission upstream detail/)).toBeNull()
       fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
       const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
-      expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+      expectUnavailable(
+        within(menu).getByRole('menuitem', { name: 'Move to' }),
+        "Move to isn't available"
+      )
     } finally {
       client.clear()
     }
   })
 
   it.each([403, 404])(
-    'withholds current-folder permission actions after HTTP %i and preserves identity actions',
+    'disables current-folder permission actions after HTTP %i and preserves identity actions',
     async status => {
       vi.useFakeTimers({ toFake: ['Date'] })
       const folder = await resolveResource(
@@ -1359,7 +1369,7 @@ describe('FilesPage stale permission action oracle', () => {
       const identityActionsBefore = identityActions()
       expect(identityActionsBefore).toEqual(['Copy link'])
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
-      expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+      expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Rename' }))).toBe(true)
 
       vi.setSystemTime(Date.now() + 16_000)
       const currentKey = desktopQueryKeys.gfsAffordances(
@@ -1377,16 +1387,18 @@ describe('FilesPage stale permission action oracle', () => {
       expect(screen.queryByText(/resource_access_denied|resource_not_found/)).toBeNull()
 
       const currentMenu = screen.getByRole('menu', { name: 'Actions for Reports' })
-      const actionsAfterDenial = within(currentMenu)
-        .getAllByRole('menuitem')
-        .map(item => item.textContent?.trim())
-      expect(actionsAfterDenial).not.toContain('Rename')
-      expect(actionsAfterDenial).not.toContain('New folder')
-      expect(actionsAfterDenial).not.toContain('Upload file')
-      expect(actionsAfterDenial).not.toContain('Delete')
+      for (const label of ['Rename', 'New folder', 'Upload file', 'Delete']) {
+        expectUnavailable(
+          within(currentMenu).getByRole('menuitem', { name: label }),
+          `${label} isn't available`
+        )
+      }
       fireEvent.click(within(currentMenu).getByRole('menuitem', { name: 'Share' }))
       const shareMenu = screen.getByRole('menu', { name: 'Share options for Reports' })
-      expect(within(shareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
+      expectUnavailable(
+        within(shareMenu).getByRole('menuitem', { name: 'Share' }),
+        "Share isn't available"
+      )
       expect(identityActions()).toEqual(identityActionsBefore)
       client.clear()
     }
@@ -1434,7 +1446,9 @@ describe('FilesPage stale permission action oracle', () => {
     await waitFor(() => expect(affordances).toHaveBeenCalledWith('shared-folder', 'main'))
 
     const menu = screen.getByRole('menu', { name: 'Actions for Shared folder' })
-    expect.soft(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect
+      .soft(isMenuItemEnabled(within(menu).queryByRole('menuitem', { name: 'Rename' })))
+      .toBe(true)
     client.clear()
   })
 
@@ -1501,7 +1515,10 @@ describe('FilesPage stale permission action oracle', () => {
       expect(screen.getByText(/Could not verify Move permissions:/)).toBeTruthy()
       expect(screen.getAllByRole('button', { name: 'Retry permission check' })).toHaveLength(1)
       const menu = screen.getByRole('menu', { name: 'Actions for Shared A.txt' })
-      expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+      expectUnavailable(
+        within(menu).getByRole('menuitem', { name: 'Move to' }),
+        "Move to isn't available"
+      )
       expect(moveResource).not.toHaveBeenCalled()
 
       fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
@@ -1515,11 +1532,13 @@ describe('FilesPage stale permission action oracle', () => {
         ['shared-source-parent', 'main'],
       ])
       expect(
-        within(screen.getByRole('menu', { name: 'Actions for Shared A.txt' })).getByRole(
-          'menuitem',
-          { name: 'Move to' }
+        isMenuItemEnabled(
+          within(screen.getByRole('menu', { name: 'Actions for Shared A.txt' })).getByRole(
+            'menuitem',
+            { name: 'Move to' }
+          )
         )
-      ).toBeTruthy()
+      ).toBe(true)
       expect(moveResource).not.toHaveBeenCalled()
     } finally {
       client.clear()

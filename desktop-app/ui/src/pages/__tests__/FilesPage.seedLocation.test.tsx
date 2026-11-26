@@ -28,6 +28,7 @@ import {
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import { isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { FilesPage } from '../FilesPage'
 
 // This suite mounts the REAL FilesPage on the REAL useGfsBrowserController (T1:
@@ -564,7 +565,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     const queryKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', parentResourceId, 'main', 0)
     await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentResourceId, 'main'))
     await waitFor(() => expect(client.getQueryData(queryKey)).toBe(sourcePermissions))
-    expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+    expect(isMenuItemEnabled(screen.getByRole('menuitem', { name: 'Move to' }))).toBe(true)
     client.clear()
   })
 
@@ -899,15 +900,17 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
     })
     const folderActions = within(screen.getByRole('menu', { name: 'Actions for Reports' }))
-    expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
-    expect(screen.getByRole('menuitem', { name: 'New folder' })).toBeTruthy()
-    expect(screen.getByRole('menuitem', { name: 'Upload file' })).toBeTruthy()
-    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+    expect(isMenuItemEnabled(screen.getByRole('menuitem', { name: 'Rename' }))).toBe(true)
+    expect(isMenuItemEnabled(screen.getByRole('menuitem', { name: 'New folder' }))).toBe(true)
+    expect(isMenuItemEnabled(screen.getByRole('menuitem', { name: 'Upload file' }))).toBe(true)
+    expect(isMenuItemEnabled(screen.getByRole('menuitem', { name: 'Delete' }))).toBe(true)
     fireEvent.click(folderActions.getByRole('menuitem', { name: 'Share' }))
     const folderShareOptions = within(
       screen.getByRole('menu', { name: 'Share options for Reports' })
     )
-    expect(folderShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
+    expect(isMenuItemEnabled(folderShareOptions.getByRole('menuitem', { name: 'Share' }))).toBe(
+      true
+    )
     const status = screen.getByRole('status', { name: 'Checking permissions for Reports' })
     expect(status.closest('.da-permission-status-slot')).toBeTruthy()
     expect(screen.queryByText('Checking permissions for Reports…')).toBeNull()
@@ -919,11 +922,17 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(
       await screen.findByText('Too many file requests. Wait before retrying permissions.')
     ).toBeTruthy()
-    expect(folderActions.getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
-    expect(folderActions.getByRole('menuitem', { name: 'New folder' })).toBeTruthy()
-    expect(folderActions.getByRole('menuitem', { name: 'Upload file' })).toBeTruthy()
-    expect(folderActions.getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
-    expect(folderShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
+    expect(isMenuItemEnabled(folderActions.getByRole('menuitem', { name: 'Rename' }))).toBe(true)
+    expect(isMenuItemEnabled(folderActions.getByRole('menuitem', { name: 'New folder' }))).toBe(
+      true
+    )
+    expect(isMenuItemEnabled(folderActions.getByRole('menuitem', { name: 'Upload file' }))).toBe(
+      true
+    )
+    expect(isMenuItemEnabled(folderActions.getByRole('menuitem', { name: 'Delete' }))).toBe(true)
+    expect(isMenuItemEnabled(folderShareOptions.getByRole('menuitem', { name: 'Share' }))).toBe(
+      true
+    )
     client.clear()
   })
 
@@ -1006,9 +1015,11 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.bin' }))
     })
     const fileActions = within(screen.getByRole('menu', { name: 'Actions for notes.bin' }))
-    expect(fileActions.getByRole('menuitem', { name: 'Replace file' })).toBeTruthy()
-    expect(fileActions.getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
-    expect(fileActions.getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+    expect(isMenuItemEnabled(fileActions.getByRole('menuitem', { name: 'Replace file' }))).toBe(
+      true
+    )
+    expect(isMenuItemEnabled(fileActions.getByRole('menuitem', { name: 'Rename' }))).toBe(true)
+    expect(isMenuItemEnabled(fileActions.getByRole('menuitem', { name: 'Delete' }))).toBe(true)
     fireEvent.click(fileActions.getByRole('menuitem', { name: 'Rename' }))
     expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
     if (!screen.queryByRole('menu', { name: 'Actions for notes.bin' })) {
@@ -1022,7 +1033,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     const fileShareOptions = within(
       screen.getByRole('menu', { name: 'Share options for notes.bin' })
     )
-    expect(fileShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
+    expect(isMenuItemEnabled(fileShareOptions.getByRole('menuitem', { name: 'Share' }))).toBe(true)
     const status = screen.getByRole('status', { name: 'Checking permissions for notes.bin' })
     expect(status.closest('.da-permission-status-slot')).toBeTruthy()
     expect(screen.queryByText('Checking permissions for notes.bin…')).toBeNull()

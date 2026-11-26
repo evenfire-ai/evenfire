@@ -35,6 +35,8 @@ describe('GFS resource action model', () => {
         kind: 'directory',
         uri: resourceUri,
         handlers: allHandlers(),
+        moveApplicable: true,
+        previewable: true,
         canRename: true,
         canMove: true,
         canCreateFolder: true,
@@ -50,6 +52,8 @@ describe('GFS resource action model', () => {
         kind: 'file',
         uri: resourceUri,
         handlers: allHandlers(),
+        moveApplicable: true,
+        previewable: true,
         canRename: true,
         canMove: true,
         canShare: true,
@@ -114,6 +118,8 @@ describe('GFS resource action model', () => {
         'copy-content': handler(),
         delete: handler(),
       },
+      moveApplicable: true,
+      previewable: true,
       canRename: false,
       canMove: true,
       canCreateFolder: true,
@@ -126,7 +132,14 @@ describe('GFS resource action model', () => {
     })
     const actions = getGfsMenuActions(descriptors)
 
-    expect(actions.map(action => action.id)).toEqual(['copy-link', 'move', 'copy-content'])
+    expect(actions.map(action => action.id)).toEqual([
+      'share',
+      'copy-link',
+      'rename',
+      'move',
+      'copy-content',
+      'delete',
+    ])
     expect(descriptors.find(action => action.id === 'refresh')).toMatchObject({
       menu: false,
       disabled: true,
@@ -136,7 +149,11 @@ describe('GFS resource action model', () => {
     expect(actions.find(action => action.id === 'copy-content')).toMatchObject({
       disabled: true,
     })
-    expect(actions.some(action => action.id === 'delete')).toBe(false)
+    expect(actions.find(action => action.id === 'copy-content')?.disabledReason).toBeUndefined()
+    expect(actions.find(action => action.id === 'delete')).toMatchObject({
+      disabled: true,
+      disabledReason: "Delete isn't available",
+    })
 
     const target = document.createElement('div')
     document.body.appendChild(target)
@@ -170,6 +187,8 @@ describe('GFS resource action model', () => {
       kind: 'file',
       uri: resourceUri,
       handlers: { replace },
+      moveApplicable: false,
+      previewable: false,
       canReplace: true,
     })
     const menuAction = getGfsMenuActions(actions).find(action => action.id === 'replace')
@@ -179,5 +198,140 @@ describe('GFS resource action model', () => {
     expect(requestFileSelection).toHaveBeenCalledOnce()
     menuAction?.run(file)
     expect(replace).toHaveBeenCalledWith(file)
+  })
+
+  it('offers an applicable action it may not run, disabled with a neutral reason', () => {
+    const handlers = allHandlers()
+    const folder = buildGfsResourceActions({
+      kind: 'directory',
+      uri: resourceUri,
+      handlers,
+      moveApplicable: true,
+      previewable: false,
+      canOpenFolder: true,
+    })
+    const byId = Object.fromEntries(folder.map(action => [action.id, action]))
+    expect(getGfsMenuActions(folder).map(action => action.id)).toEqual([
+      'share',
+      'copy-link',
+      'open-folder',
+      'rename',
+      'move',
+      'new-folder',
+      'upload-file',
+      'download-zip',
+      'delete',
+    ])
+    expect(
+      ['share', 'rename', 'move', 'new-folder', 'upload-file', 'download-zip', 'delete'].map(id => [
+        id,
+        byId[id]?.disabled,
+        byId[id]?.disabledReason,
+      ])
+    ).toEqual([
+      ['share', true, "Share isn't available"],
+      ['rename', true, "Rename isn't available"],
+      ['move', true, "Move to isn't available"],
+      ['new-folder', true, "New folder isn't available"],
+      ['upload-file', true, "Upload file isn't available"],
+      ['download-zip', true, "Download as zip isn't available"],
+      ['delete', true, "Delete isn't available"],
+    ])
+    expect(byId['copy-link']).toMatchObject({ disabled: false })
+    expect(byId['open-folder']).toMatchObject({ disabled: false })
+    expect(byId['copy-link']?.disabledReason).toBeUndefined()
+  })
+
+  it('never reaches the handler of a disabled action', () => {
+    const handlers = allHandlers()
+    const actions = buildGfsResourceActions({
+      kind: 'file',
+      uri: resourceUri,
+      handlers,
+      moveApplicable: true,
+      previewable: true,
+      canRename: true,
+      mutating: true,
+    })
+    for (const action of actions) action.run()
+    // Not permitted, or permitted but held back by the in-flight change.
+    for (const id of ['share', 'rename', 'move', 'preview', 'download', 'replace', 'delete']) {
+      expect(handlers[id as keyof typeof handlers]).not.toHaveBeenCalled()
+    }
+    expect(handlers['copy-link']).toHaveBeenCalledTimes(1)
+  })
+
+  it('names the missing read access on read actions of an unreadable resource', () => {
+    const file = buildGfsResourceActions({
+      kind: 'file',
+      uri: resourceUri,
+      handlers: allHandlers(),
+      moveApplicable: false,
+      previewable: true,
+      readable: false,
+    })
+    const folder = buildGfsResourceActions({
+      kind: 'directory',
+      uri: resourceUri,
+      handlers: allHandlers(),
+      moveApplicable: false,
+      previewable: false,
+      readable: false,
+    })
+    const reason = (actions: typeof file, id: string) =>
+      actions.find(action => action.id === id)?.disabledReason
+    expect(reason(file, 'preview')).toBe("You don't have read access to this file")
+    expect(reason(file, 'download')).toBe("You don't have read access to this file")
+    expect(reason(folder, 'download-zip')).toBe("You don't have read access to this folder")
+    // Only reads name the read access; the rest keep the neutral reason.
+    expect(reason(file, 'rename')).toBe("Rename isn't available")
+  })
+
+  it('gives the permission reason when an action is also held back by an in-flight change', () => {
+    const actions = buildGfsResourceActions({
+      kind: 'file',
+      uri: resourceUri,
+      handlers: allHandlers(),
+      moveApplicable: true,
+      previewable: false,
+      canRename: true,
+      canDelete: false,
+      mutating: true,
+    })
+    expect(actions.find(action => action.id === 'delete')).toMatchObject({
+      disabled: true,
+      disabledReason: "Delete isn't available",
+    })
+    const rename = actions.find(action => action.id === 'rename')
+    expect(rename?.disabled).toBe(true)
+    expect(rename?.disabledReason).toBeUndefined()
+  })
+
+  it('leaves out what does not apply, whatever the permissions', () => {
+    const file = buildGfsResourceActions({
+      kind: 'file',
+      uri: resourceUri,
+      handlers: allHandlers(),
+      moveApplicable: false,
+      previewable: false,
+      canMove: true,
+      canPreview: true,
+      canCreateFolder: true,
+      canUpload: true,
+      canDownloadZip: true,
+      canOpenFolder: true,
+    })
+    const ids = file.map(action => action.id)
+    for (const id of [
+      'move',
+      'preview',
+      'new-folder',
+      'upload-file',
+      'download-zip',
+      'open-folder',
+    ]) {
+      expect(ids).not.toContain(id)
+    }
+    expect(ids).toContain('download')
   })
 })

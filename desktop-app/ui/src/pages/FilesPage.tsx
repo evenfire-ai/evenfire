@@ -2341,6 +2341,7 @@ export function FilesPage({
           canDelete: canDeleteCurrent,
           canMove: canMoveCurrent,
           previewable: currentPreviewAvailable,
+          parentResourceId: current.parentResourceId,
           mutating: ctrl.mutating,
           refreshing: refreshingCurrent,
           handlers: {
@@ -2400,6 +2401,7 @@ export function FilesPage({
           uri: resource.gfsUri,
           readable: resource.readable,
           previewable: isGfsPreviewFile(resource.name),
+          parentResourceId: resource.parentResourceId,
           availability,
           mutating: ctrl.mutating,
           handlers: {

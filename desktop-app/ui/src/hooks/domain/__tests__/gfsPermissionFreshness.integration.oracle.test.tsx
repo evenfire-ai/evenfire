@@ -105,6 +105,8 @@ function PermissionActionProbe() {
         const actions = buildGfsResourceActions({
           kind: item.kind,
           uri: item.gfsUri,
+          moveApplicable: true,
+          previewable: true,
           handlers: { rename },
           canRename: Boolean(ready && affordances?.held.includes('write')),
         })

@@ -1,4 +1,5 @@
-import type { GfsResourceActionId } from './gfsResourceActions'
+import { unavailableReason } from '@constants/gfsActionCopy'
+import type { GfsResourceActionHandler, GfsResourceActionId } from './gfsResourceActions'
 import { gfsActionNeedsAffordances } from './gfsRowActionAvailability'
 
 /**
@@ -8,9 +9,14 @@ import { gfsActionNeedsAffordances } from './gfsRowActionAvailability'
 export type GfsResourceMenuPermissionGateStatus = 'pending' | 'ok' | 'error'
 
 export type GfsPermissionGatedMenuAction = {
+  label: string
   submenu?: boolean
   disabled?: boolean
+  disabledReason?: string
+  run?: GfsResourceActionHandler
 }
+
+const noop: GfsResourceActionHandler = () => {}
 
 export function withPermissionGate<A extends GfsPermissionGatedMenuAction>(
   action: A,
@@ -18,7 +24,13 @@ export function withPermissionGate<A extends GfsPermissionGatedMenuAction>(
   permissionStatus: GfsResourceMenuPermissionGateStatus | undefined
 ): A {
   if (permissionStatus === undefined || permissionStatus === 'ok' || action.submenu) return action
+  if (!gfsActionNeedsAffordances(actionId)) return action
   // Unresolved or failed bits keep the item visible but inert, so the menu
   // never offers an action the target may not allow.
-  return gfsActionNeedsAffordances(actionId) ? { ...action, disabled: true } : action
+  return {
+    ...action,
+    disabled: true,
+    disabledReason: action.disabledReason ?? unavailableReason(action.label),
+    ...(action.run ? { run: noop } : {}),
+  }
 }

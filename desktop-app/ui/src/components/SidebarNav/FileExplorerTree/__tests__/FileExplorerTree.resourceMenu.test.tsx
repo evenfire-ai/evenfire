@@ -25,6 +25,7 @@ import {
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { GfsDragSessionProvider } from '@/gfs/dragSession'
 import { FileExplorerTree } from '..'
+import { isMenuItemEnabled } from '../../../../test/gfsMenuItemState'
 
 const authFor = (teamId: string, sessionGeneration = 7) =>
   ({
@@ -139,6 +140,17 @@ function menuItem(menu: HTMLElement, name: string) {
   return within(menu).queryByRole('menuitem', { name }) as HTMLButtonElement | null
 }
 
+/**
+ * How an item is offered: left out, runnable, greyed out with a reason
+ * (`aria-disabled`), or natively disabled while a change is in flight.
+ */
+function itemState(menu: HTMLElement, name: string) {
+  const item = menuItem(menu, name)
+  if (!item) return 'absent'
+  if (item.getAttribute('aria-disabled') === 'true') return 'unavailable'
+  return item.disabled ? 'busy' : 'enabled'
+}
+
 beforeEach(() => {
   overlayHistory.length = 0
   previewsOpened.length = 0
@@ -181,11 +193,11 @@ describe('FileExplorerTree row resource menu', () => {
     })
     const menuA = await screen.findByRole('menu', { name: 'Actions for a.txt' })
     // Built optimistically: listed, but inert until the bits settle.
-    expect(menuItem(menuA, 'Rename')?.disabled).toBe(true)
-    expect(menuItem(menuA, 'Delete')?.disabled).toBe(true)
-    expect(menuItem(menuA, 'Move to')?.disabled).toBe(true)
-    expect(menuItem(menuA, 'Download')?.disabled).toBe(false)
-    expect(menuItem(menuA, 'Preview')?.disabled).toBe(false)
+    expect(itemState(menuA, 'Rename')).toBe('unavailable')
+    expect(itemState(menuA, 'Delete')).toBe('unavailable')
+    expect(itemState(menuA, 'Move to')).toBe('unavailable')
+    expect(itemState(menuA, 'Download')).toBe('enabled')
+    expect(itemState(menuA, 'Preview')).toBe('enabled')
 
     // A second opening on another row before the first one's bits land.
     fireEvent.contextMenu(screen.getByRole('button', { name: 'b.bin' }), {
@@ -198,14 +210,14 @@ describe('FileExplorerTree row resource menu', () => {
     await bits.release('file-a', ['read', 'write', 'delete', 'manage_acl'])
     await bits.release('folder-d', ['read'])
     // a.txt's late write bit never reaches b.bin's menu.
-    expect(menuItem(menuB, 'Rename')?.disabled).toBe(true)
-    expect(menuItem(menuB, 'Delete')?.disabled).toBe(true)
+    expect(itemState(menuB, 'Rename')).toBe('unavailable')
+    expect(itemState(menuB, 'Delete')).toBe('unavailable')
 
     await bits.release('file-b', ['read'])
-    await waitFor(() => expect(menuItem(menuB, 'Rename')).toBeNull())
-    expect(menuItem(menuB, 'Delete')).toBeNull()
-    expect(menuItem(menuB, 'Move to')).toBeNull()
-    expect(menuItem(menuB, 'Download')?.disabled).toBe(false)
+    await waitFor(() => expect(itemState(menuB, 'Rename')).toBe('unavailable'))
+    expect(itemState(menuB, 'Delete')).toBe('unavailable')
+    expect(itemState(menuB, 'Move to')).toBe('unavailable')
+    expect(itemState(menuB, 'Download')).toBe('enabled')
     // Two openings, two rows and one parent they share: within K1's two per opening.
     expect(bits.affordances).toHaveBeenCalledTimes(3)
   })
@@ -235,9 +247,9 @@ describe('FileExplorerTree row resource menu', () => {
     renderShell()
     fireEvent.click(await screen.findByRole('button', { name: 'Expand Docs' }))
     const menu = await openMenuOn('a.txt')
-    await waitFor(() => expect(menuItem(menu, 'Rename')?.disabled).toBe(false))
-    expect(menuItem(menu, 'Move to')).toBeNull()
-    expect(menuItem(menu, 'Delete')).toBeNull()
+    await waitFor(() => expect(itemState(menu, 'Rename')).toBe('enabled'))
+    expect(itemState(menu, 'Move to')).toBe('unavailable')
+    expect(itemState(menu, 'Delete')).toBe('unavailable')
   })
 
   it('keeps the shared rate-limit pause for a reopening after a 429', async () => {
@@ -264,11 +276,11 @@ describe('FileExplorerTree row resource menu', () => {
     const menu = await openMenuOn('a.txt')
     await waitFor(() => expect(affordances).toHaveBeenCalledTimes(2))
     // A failed row read keeps every bit-dependent item inert.
-    await waitFor(() => expect(menuItem(menu, 'Rename')?.disabled).toBe(true))
+    await waitFor(() => expect(itemState(menu, 'Rename')).toBe('unavailable'))
     fireEvent.keyDown(menu, { key: 'Escape' })
 
     const reopened = await openMenuOn('a.txt')
-    await waitFor(() => expect(menuItem(reopened, 'Rename')?.disabled).toBe(true))
+    await waitFor(() => expect(itemState(reopened, 'Rename')).toBe('unavailable'))
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 20))
     })
@@ -284,8 +296,8 @@ describe('FileExplorerTree row resource menu', () => {
     await bits.release('file-a', ['read', 'write'])
     await bits.release('folder-d', ['read', 'write', 'delete'])
     const menu = screen.getByRole('menu', { name: 'Actions for a.txt' })
-    await waitFor(() => expect(menuItem(menu, 'Rename')?.disabled).toBe(false))
-    expect(menuItem(menu, 'Move to')?.disabled).toBe(false)
+    await waitFor(() => expect(itemState(menu, 'Rename')).toBe('enabled'))
+    expect(itemState(menu, 'Move to')).toBe('enabled')
     fireEvent.keyDown(menu, { key: 'Escape' })
     expect(screen.queryByRole('menu', { name: 'Actions for a.txt' })).toBeNull()
     bits.affordances.mockClear()
@@ -295,7 +307,7 @@ describe('FileExplorerTree row resource menu', () => {
       shiftKey: true,
     })
     const reopened = await screen.findByRole('menu', { name: 'Actions for a.txt' })
-    await waitFor(() => expect(menuItem(reopened, 'Rename')?.disabled).toBe(false))
+    await waitFor(() => expect(itemState(reopened, 'Rename')).toBe('enabled'))
     expect(bits.affordances).not.toHaveBeenCalled()
   })
 
@@ -308,7 +320,7 @@ describe('FileExplorerTree row resource menu', () => {
     await bits.release('file-a', ['read', 'write'])
     await bits.release('folder-d', ['read'])
     const menu = screen.getByRole('menu', { name: 'Actions for a.txt' })
-    await waitFor(() => expect(menuItem(menu, 'Rename')?.disabled).toBe(false))
+    await waitFor(() => expect(itemState(menu, 'Rename')).toBe('enabled'))
     expect(overlayHistory.at(-1)).toBe(true)
     overlayHistory.length = 0
 
@@ -338,9 +350,9 @@ describe('FileExplorerTree row resource menu: bits and session', () => {
     })
     renderShell()
     const menu = await openMenuOn('shared.txt')
-    await waitFor(() => expect(menuItem(menu, 'Download')).not.toBeNull())
-    await waitFor(() => expect(menuItem(menu, 'Rename')).toBeNull())
-    expect(menuItem(menu, 'Delete')).toBeNull()
+    await waitFor(() => expect(itemState(menu, 'Download')).toBe('enabled'))
+    await waitFor(() => expect(itemState(menu, 'Rename')).toBe('unavailable'))
+    expect(itemState(menu, 'Delete')).toBe('unavailable')
     expect(vi.mocked(window.clerum.gfs.affordances)).not.toHaveBeenCalled()
   })
 
@@ -405,12 +417,12 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
     let chosen = false
     const { switchTeam } = renderShell(() => {
       const rename = document.querySelector<HTMLButtonElement>('[data-gfs-action="rename"]')
-      if (!rename || rename.disabled) return
+      if (!isMenuItemEnabled(rename)) return
       chosen = true
-      rename.click()
+      rename!.click()
     })
     const menu = await openMenuOn('shared.txt')
-    await waitFor(() => expect(menuItem(menu, 'Rename')?.disabled).toBe(false))
+    await waitFor(() => expect(itemState(menu, 'Rename')).toBe('enabled'))
 
     act(() => switchTeam('team-2'))
     await act(async () => {
@@ -495,12 +507,12 @@ describe('FileExplorerTree row resource menu: stale openings', () => {
     let chosen = false
     const { queryClient, switchGeneration } = renderShell(() => {
       const rename = document.querySelector<HTMLButtonElement>('[data-gfs-action="rename"]')
-      if (!rename || rename.disabled) return
+      if (!isMenuItemEnabled(rename)) return
       chosen = true
-      rename.click()
+      rename!.click()
     })
     const menu = await openMenuOn('shared.txt')
-    await waitFor(() => expect(menuItem(menu, 'Rename')?.disabled).toBe(false))
+    await waitFor(() => expect(itemState(menu, 'Rename')).toBe('enabled'))
     // The next generation is already active, so only the menu's own check can refuse.
     const scope = gfsSessionScope(authFor('team-1', 8))!
     queryClient.setQueryData(desktopQueryKeys.gfsAccessState(scope, 8), 'active')
@@ -630,18 +642,18 @@ describe('FileExplorerTree forest-root resource menu', () => {
     fireEvent.contextMenu(row, { clientX: 10, clientY: 10 })
     const menu = screen.getByRole('menu', { name: 'Actions for shared.txt' })
     const firstPaint = {
-      rename: menuItem(menu, 'Rename')?.disabled,
-      delete: menuItem(menu, 'Delete')?.disabled,
+      rename: itemState(menu, 'Rename'),
+      delete: itemState(menu, 'Delete'),
     }
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 0))
     })
 
     // The listing grants write and not delete; no parent means no Move.
-    expect(firstPaint).toEqual({ rename: false, delete: undefined })
+    expect(firstPaint).toEqual({ rename: 'enabled', delete: 'unavailable' })
     expect({
-      rename: menuItem(menu, 'Rename')?.disabled,
-      delete: menuItem(menu, 'Delete')?.disabled,
+      rename: itemState(menu, 'Rename'),
+      delete: itemState(menu, 'Delete'),
     }).toEqual(firstPaint)
     expect(affordances).not.toHaveBeenCalled()
   })
@@ -673,7 +685,7 @@ describe('FileExplorerTree row resource menu focus', () => {
     const menu = await screen.findByRole('menu', { name: 'Actions for report.txt' })
     const move = await waitFor(() => {
       const found = menuItem(menu, 'Move to')
-      expect(found?.disabled).toBe(false)
+      expect(isMenuItemEnabled(found)).toBe(true)
       return found!
     })
     move.focus()
@@ -722,7 +734,7 @@ describe('FileExplorerTree row resource menu focus', () => {
       }
       const item = await waitFor(() => {
         const found = menuItem(list, label)
-        expect(found?.disabled).toBe(false)
+        expect(isMenuItemEnabled(found)).toBe(true)
         return found!
       })
       item.focus()
@@ -784,7 +796,7 @@ describe('FileExplorerTree drag during a host Move', () => {
     const row = await screen.findByRole('button', { name: 'report.txt' })
     fireEvent.keyDown(row, { key: 'F10', shiftKey: true })
     const menu = await screen.findByRole('menu', { name: 'Actions for report.txt' })
-    await waitFor(() => expect(menuItem(menu, 'Move to')?.disabled).toBe(false))
+    await waitFor(() => expect(itemState(menu, 'Move to')).toBe('enabled'))
     fireEvent.click(menuItem(menu, 'Move to')!)
     const dialog = await screen.findByRole('dialog', { name: 'Move file report.txt' })
     fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
