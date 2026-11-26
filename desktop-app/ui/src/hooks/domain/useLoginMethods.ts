@@ -23,12 +23,12 @@ const NO_SEND = 0
  * its generation is below the applied answer's, or equal to it and its read was sent before the
  * applied answer's read. This order covers every answer main resolves with, `unreachable` too:
  * main returns a network failure, a timeout or a 5xx as an answer, not a rejection (round-3
- * review minor 2). A rejected read carries no generation, so it is ordered by when it was sent: it shows
- * the unreachable state only if no read sent after it in the epoch has applied an answer. The
- * reverse is not symmetric, on purpose: an answer of the same epoch that passes the order above
- * still replaces an earlier rejection, whichever of the two reads was sent first. The helper
- * reads the model again when the call settles, success or failure, so the screen never stays on
- * `loading` (L7). The login screen sends its own reads; nothing reads on mount.
+ * review minor 2). A rejected read carries no generation, so it is ordered by when it was sent:
+ * it shows the unreachable state only if no read sent after it in the epoch has applied an
+ * answer. The reverse is not symmetric, on purpose: an answer of the same epoch that passes the
+ * order above still replaces an earlier rejection, whichever of the two reads was sent first.
+ * The helper reads the model again when the call settles, success or failure, so the screen
+ * never stays on `loading` (L7). The login screen sends its own reads; nothing reads on mount.
  */
 export function useLoginMethods({
   refreshRuntimeConfigState,

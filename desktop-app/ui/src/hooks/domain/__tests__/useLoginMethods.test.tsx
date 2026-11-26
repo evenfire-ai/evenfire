@@ -158,7 +158,8 @@ describe('useLoginMethods: scenarios', () => {
     act(() => hook.result.current.refresh())
     act(() => hook.result.current.refresh())
     await act(async () => main.read(0).resolve({ model: modelOf('password'), generation: 4 }))
-    // No bump between the reads: the later answer is the server's newer word (S5 refined).
+    // No bump between the reads, and the second read was sent after the first: its answer is the
+    // server's newer word, so it applies (S5 refined).
     await act(async () => main.read(1).resolve({ model: modelOf('oidc-only'), generation: 4 }))
 
     expect(hook.result.current.model).toEqual(modelOf('oidc-only'))
