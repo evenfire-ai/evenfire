@@ -262,12 +262,18 @@ export function isHeldEdgeAssertionNearExpiry(
  * form (no direct-run binding) with the caller's RPC token.
  *
  * - A held assertion without a readable `exp` throws.
- * - Every refusal of the control-api call (a denial, a 401 or 409 rejection,
- *   or an unavailable authority: timeout, network failure, another status, a
- *   body that is not a connection, no edge assertion) is returned for the route
- *   to answer as it answers that refusal at its first resolve. None of them is
- *   wake-eligible: a control-api failure must not be read as the Host being
- *   down.
+ * - Every refusal of the control-api call is returned for the route to answer
+ *   as it answers that refusal at its first resolve:
+ *   - a denial: 403, 404, or a 2xx JSON body that is not this user's
+ *     connection to this Host (another `userId` or `hostRef`, no url or an
+ *     empty one, or a JSON value that is neither an object nor `null`;
+ *     `controlApiRestService.ts` reads `parsed.userId` first);
+ *   - a rejection: 401 or 409;
+ *   - an unavailable authority: timeout, network failure, another status, a
+ *     2xx body that is not JSON (empty included) or is JSON `null`, no edge
+ *     assertion.
+ *   None of them is wake-eligible: a control-api failure must not be read as
+ *   the Host being down.
  * - A connection whose URL differs from the first resolve throws.
  *
  * On success it rewrites the assertion header in place, synchronously after the
