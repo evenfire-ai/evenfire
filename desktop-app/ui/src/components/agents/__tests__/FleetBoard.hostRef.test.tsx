@@ -3,7 +3,12 @@ import type { PropsWithChildren, ReactElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext } from '@contexts/AuthContext'
 import type { AuthContextValue } from '@contexts/AuthContext.types'
-import { type RenderOptions, cleanup, render as testingLibraryRender } from '@testing-library/react'
+import {
+  type RenderOptions,
+  cleanup,
+  fireEvent,
+  render as testingLibraryRender,
+} from '@testing-library/react'
 import { fleetRowHostRefs } from '../../../../../test/e2e-playwright/helpers/fleetRowHostRefs'
 import { FleetBoard } from '../FleetBoard'
 
@@ -21,9 +26,15 @@ function render(ui: ReactElement, options?: RenderOptions) {
 // Both row shapes are rendered here: one whose display name differs from its
 // hostRef, and one whose display name equals it.
 
+const state = vi.hoisted(() => ({
+  refs: ['chatllm-stateless', 'researcher'],
+  display: { 'chatllm-stateless': 'chatLLM', researcher: 'researcher' } as Record<string, string>,
+  open: vi.fn(),
+}))
+
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
-    handleOpenAgentWorkspace: vi.fn(),
+    handleOpenAgentWorkspace: state.open,
     handleSelectChatAgent: vi.fn(),
     selectedAgent: null,
   }),
@@ -36,8 +47,8 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
 }))
 vi.mock('@hooks/domain/useAgentsDataController', () => ({
   useAgentsDataController: () => ({
-    agentNames: ['chatllm-stateless', 'researcher'],
-    agentDisplayByName: { 'chatllm-stateless': 'chatLLM', researcher: 'researcher' },
+    agentNames: state.refs,
+    agentDisplayByName: state.display,
     userAgentNames: ['chatllm-stateless', 'researcher'],
     teamAgentNames: [],
   }),
@@ -61,6 +72,36 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
 describe('fleetRowHostRefs on rendered FleetBoard rows', () => {
   afterEach(() => {
     cleanup()
+    state.display = { 'chatllm-stateless': 'chatLLM', researcher: 'researcher' }
+    state.refs = ['chatllm-stateless', 'researcher']
+    state.open.mockClear()
+  })
+
+  it('disambiguates names and preserves navigation after a catalog refresh', () => {
+    state.display = { 'chatllm-stateless': 'Support', researcher: 'Support' }
+    const view = render(<FleetBoard />)
+    const rows = () => Array.from(view.container.querySelectorAll('.agents-table-row-clickable'))
+    expect(rows().map(row => row.querySelector('strong')?.textContent)).toEqual([
+      'Support (chatllm-stateless)',
+      'Support (researcher)',
+    ])
+    rows().forEach(row => fireEvent.click(row))
+    expect(state.open.mock.calls).toEqual([
+      ['chatllm-stateless', 'mcp-servers'],
+      ['researcher', 'mcp-servers'],
+    ])
+    state.display = { 'chatllm-stateless': 'Renamed', researcher: 'Support' }
+    view.rerender(<FleetBoard />)
+    expect(rows().map(row => row.querySelector('strong')?.textContent)).toEqual([
+      'Renamed',
+      'Support',
+    ])
+    expect(fleetRowHostRefs(rows())).toEqual(['chatllm-stateless', 'researcher'])
+    rows().forEach(row => fireEvent.keyDown(row, { key: 'Enter' }))
+    expect(state.open.mock.calls.slice(2)).toEqual([
+      ['chatllm-stateless', 'mcp-servers'],
+      ['researcher', 'mcp-servers'],
+    ])
   })
 
   it('reads the hostRef of a row whose display name differs and of one whose display name equals it', () => {

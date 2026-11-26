@@ -14,6 +14,7 @@ const sidebarNavChatState = vi.hoisted(() => ({
     remote?: boolean
   }>,
   agentDisplayByName: {} as Record<string, string>,
+  select: vi.fn(),
 }))
 
 // SidebarNav pulls from four contexts. Mock each module so we only render
@@ -46,7 +47,7 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     selectedAgent: null,
-    handleSelectChatAgent: vi.fn(),
+    handleSelectChatAgent: sidebarNavChatState.select,
   }),
 }))
 // The real hook reads the access catalog through TanStack Query.
@@ -409,6 +410,46 @@ describe('SidebarNav logo', () => {
     if (producer === 'app') expect(onOpenSandboxUiApp).toHaveBeenCalledWith(app)
     if (producer === 'folder') expect(onOpenFilesSection).toHaveBeenCalledOnce()
     if (producer === 'preview') expect(onOpenPreviewSection).toHaveBeenCalledOnce()
+  })
+
+  it('disambiguates duplicate agent and session names and retains identity on refresh', () => {
+    sidebarNavChatState.latestChatSessions = [
+      { agentRef: 'support', id: 'chat-1', title: 'Task' },
+      { agentRef: 'support-prod', id: 'chat-2', title: 'Task' },
+      { agentRef: 'support', id: 'chat-3', title: 'Task' },
+    ]
+    sidebarNavChatState.agentDisplayByName = { support: 'Support', 'support-prod': 'Support' }
+    const view = render(<SidebarNav {...baseProps()} />)
+    for (const name of [
+      'Task · Support (support) · chat-1',
+      'Task · Support (support-prod)',
+      'Task · Support (support) · chat-3',
+    ]) {
+      fireEvent.click(screen.getByRole('button', { name: `Open ${name}` }))
+    }
+    expect(
+      sidebarNavChatState.select.mock.calls.map(([ref, options]) => [ref, options.chatId])
+    ).toEqual([
+      ['support', 'chat-1'],
+      ['support-prod', 'chat-2'],
+      ['support', 'chat-3'],
+    ])
+    sidebarNavChatState.agentDisplayByName = { support: 'Renamed', 'support-prod': 'Production' }
+    view.rerender(<SidebarNav {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open Task · Renamed · chat-3' }))
+    expect(sidebarNavChatState.select).toHaveBeenLastCalledWith(
+      'support',
+      expect.objectContaining({ chatId: 'chat-3' })
+    )
+    expect(
+      screen
+        .getAllByTestId('latest-session-row')
+        .map(row => [row.getAttribute('data-agent-ref'), row.getAttribute('data-chat-id')])
+    ).toEqual([
+      ['support', 'chat-1'],
+      ['support-prod', 'chat-2'],
+      ['support', 'chat-3'],
+    ])
   })
 
   it('labels a session row with the agent display name, falling back to its ref', () => {

@@ -16,6 +16,7 @@ import { IconAgents } from '@components/SidebarNav/icons'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
+import { agentDisplayLabels } from '@lib/agentDisplayLabels'
 import { clickableRowProps } from '../../lib/clickableRowProps'
 import {
   formatMcpServerAcronym,
@@ -144,6 +145,11 @@ export function FleetBoard() {
     return [...new Set(agentNames.map(agentName => agentName.trim()).filter(Boolean))]
   }, [agentNames])
 
+  const displayLabels = useMemo(
+    () => agentDisplayLabels(allFleetAgentNames, agentDisplayByName),
+    [allFleetAgentNames, agentDisplayByName]
+  )
+
   const agentFleetRows = useMemo(
     () =>
       [...allFleetAgentNames]
@@ -171,9 +177,8 @@ export function FleetBoard() {
                 ? 'No mapped connectors'
                 : 'Mapping unavailable'
           // Visible name = agent `spec.host` display name; total over catalog
-          // agents at the producer, so the identifier is only a fallback
-          // (Decision #6 parity with the rest of the desktop surfaces).
-          const display = agentDisplayByName[agent] ?? agent
+          // agents at the producer, with identity added for collisions.
+          const display = displayLabels[agent]
           return {
             agent,
             display,
@@ -189,7 +194,7 @@ export function FleetBoard() {
           }
         }),
     [
-      agentDisplayByName,
+      displayLabels,
       agentLastActiveByAgent,
       agentMcpServerCountByAgent,
       agentMcpServersByAgent,
@@ -248,8 +253,7 @@ export function FleetBoard() {
                 </thead>
                 <tbody>
                   {filteredFleetRows.map(row => (
-                    // Only the display name is rendered as copy; the identifier
-                    // stays on the row for e2e (fleetRowHostRefs reads it).
+                    // Stable identity is independent of the catalog display label.
                     <tr
                       key={row.agent}
                       className="da-table__row--clickable agents-table-row-clickable"
