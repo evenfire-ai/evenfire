@@ -52,8 +52,8 @@
  * "Unsaved changes" decides nothing: the suite keeps its own dirty flag from
  * the rows it set.
  *
- * **Runs (Ruling 53).** `APPROVAL_MODEL_RUNS` generated runs (default 100)
- * follow the fixed `EXAMPLES`. `APPROVAL_MODEL_SEED` sets the seed, which is
+ * **Runs (Ruling 53).** `APPROVAL_MODEL_RUNS` generated runs (default 75, see
+ * Budget) follow the fixed `EXAMPLES`. `APPROVAL_MODEL_SEED` sets the seed, which is
  * logged; `APPROVAL_MODEL_PATH` with `APPROVAL_MODEL_REPLAY` replays a reported
  * failure (its `path` and its commands' `replayPath`);
  * `APPROVAL_MODEL_NO_SHRINK=1` reports the first failure unshrunk (mutant
@@ -160,17 +160,18 @@ vi.mock('../../lib/hostApprovalSave', async importOriginal => {
 
 // ── Budget (Ruling 53) ──────────────────────────────────────────────────────
 
-// N = 100: the 100 runs and the 16 examples take about 18-22 s alone and 59.5 s
-// inside the whole control-ui run (9 workers, vitest's default for 10 cores),
-// on an Apple M4 with Node 24.
-const NUM_RUNS = Number(process.env.APPROVAL_MODEL_RUNS ?? 100)
+// N = 75, below the spec's 100 (Ruling 53: the largest N under 60 s inside the
+// whole control-ui run). On an Apple M4 with Node 24 (9 workers), N = 100 took
+// 54-78 s there, over 60 s in 7 of 9 runs, and 17-23 s alone; N = 75 took
+// 41-44 s. APPROVAL_MODEL_RUNS=100 runs the spec's N.
+const NUM_RUNS = Number(process.env.APPROVAL_MODEL_RUNS ?? 75)
 const MAX_COMMANDS = 60
 /**
- * The per-test timeout, per run: about twice the 0.51 s a run takes inside
- * the whole control-ui run (59.5 s / 116 runs). About 122 s at N = 100, and
+ * The per-test timeout, per run: about twice the slowest a run took inside the
+ * whole control-ui run (0.68 s: 78.4 s / 116 runs). About 123 s at N = 75, and
  * it grows with APPROVAL_MODEL_RUNS.
  */
-const TIMEOUT_MS_PER_RUN = 1_050
+const TIMEOUT_MS_PER_RUN = 1_350
 
 // ── Agents, and what marks each one's data (S5) ─────────────────────────────
 
