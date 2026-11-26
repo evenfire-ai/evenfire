@@ -367,8 +367,10 @@ describe('V1 wake-and-hold re-resolve outcomes (model-based)', () => {
     vi.spyOn(console, 'info').mockImplementation(() => undefined)
     vi.spyOn(console, 'debug').mockImplementation(() => undefined)
     let runs = 0
-    // Requests per terminal kind across runs: the generated sequences reach a
-    // refusal and a Host still down after the retry, not only 200.
+    // Requests per terminal kind across runs (refused, hostWaking, ok, exclusive):
+    // the generated sequences reach a refusal and a Host still down after the
+    // retry, not only 200. serviceCredential counts the refusals that are
+    // control-api's gate refusing rpc-proxy's service credential.
     const reached = { refused: 0, hostWaking: 0, ok: 0, serviceCredential: 0 }
 
     await fc.assert(
@@ -499,9 +501,10 @@ describe('V1 wake-and-hold re-resolve outcomes (model-based)', () => {
           const { token, state } = results[index]!
           const expected = expectedOutcome(model, index)
           if (expected.refused) reached.refused++
-          if (model.reResolve[index]![0] === 'service_credential') reached.serviceCredential++
           else if (expected.status === 200) reached.ok++
           else reached.hostWaking++
+          // A subset of `refused`: control-api's gate refusing rpc-proxy's own service credential.
+          if (model.reResolve[index]![0] === 'service_credential') reached.serviceCredential++
           const calls = hostCalls.get(requestId)!
           const tokenAssertions = issued.get(token)!
           // Witness: the first forward failed and the retry re-resolved.
