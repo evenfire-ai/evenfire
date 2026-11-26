@@ -167,9 +167,10 @@ vi.mock('../../lib/hostApprovalSave', async importOriginal => {
 const NUM_RUNS = Number(process.env.APPROVAL_MODEL_RUNS ?? 75)
 const MAX_COMMANDS = 60
 /**
- * The per-test timeout, per run: about twice the slowest a run took inside the
- * whole control-ui run (0.68 s: 78.4 s / 116 runs). About 124 s at N = 75, and
- * it grows with APPROVAL_MODEL_RUNS.
+ * The per-test timeout, per run: about twice the slowest mean time per run
+ * measured inside the whole control-ui run (0.68 s: 78.4 s over 116 runs;
+ * single runs there took up to 2.5 s). About 124 s at N = 75, and it grows
+ * with APPROVAL_MODEL_RUNS.
  */
 const TIMEOUT_MS_PER_RUN = 1_350
 
