@@ -502,6 +502,24 @@ describe('AuthPage: the login screen from main’s model (design §10.1)', () =>
     }
   })
 
+  // R-40 (final review FR-T2): these screens show no form, so no failed password login can offer
+  // "Switch to … & retry". The environment dock is how the person reaches another environment.
+  it.each([
+    ['unreachable', UNREACHABLE],
+    ['misconfigured', MISCONFIGURED],
+  ] as const)('R-40 keeps the environment dock usable on the %s screen', (kind, model) => {
+    expect(model.kind, `main's model is ${kind}`).toBe(kind)
+    renderAuthPage({ loginScreen: model })
+
+    expect(
+      screen.queryByRole('button', { name: 'Retry' }),
+      'the error screen shows, with Retry'
+    ).not.toBeNull()
+    const dock = screen.queryByRole('button', { name: 'Open environment selector' })
+    expect(dock, 'the environment dock is offered').not.toBeNull()
+    expect((dock as HTMLButtonElement).disabled, 'the environment dock is usable').toBe(false)
+  })
+
   // A binding change in flight sets `busy`, and the auth flows that run one set the raw
   // `authTransitioning` (completing desktop setup sets both).
   it.each(['busy', 'authTransitioning'] as const)(
