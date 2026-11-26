@@ -2744,6 +2744,36 @@ export class AppService {
   }
 
   /**
+   * The snapshot (V14), once the deadline is applied (D12, A3-67): a waiting attempt past its
+   * wall-clock deadline ends `timed_out` here, and that end is pushed as any other is (D6). An
+   * `ended` outcome stays until the renderer acknowledges it, however often it is read (D13). The
+   * snapshot carries the attempt id, the phase and the closed outcome and reason, nothing else
+   * (D18).
+   */
+  getBrowserSignInState(): BrowserSignInSnapshot {
+    return this.browserSignIn.snapshot()
+  }
+
+  /**
+   * The renderer's acknowledgement of an outcome it has shown (D13): `ended` for `attemptId`
+   * becomes `idle` for it, which is pushed. An acknowledgement for any other id, such as an older
+   * attempt's, is ignored (A3-54). It does not apply the deadline (A3-67). Returns the snapshot.
+   */
+  acknowledgeBrowserSignInResult(attemptId: number): BrowserSignInSnapshot {
+    return this.browserSignIn.acknowledge(attemptId)
+  }
+
+  /**
+   * The deadline check for a resume or an unlock-screen (D12), where a sleep may have kept the
+   * deadline timer from firing: a waiting attempt past its wall-clock deadline ends `timed_out`,
+   * and that end is pushed (deferred, D6), so a renderer that reads nothing still learns of it
+   * (A3-26). `main.ts`'s power monitor does not call it yet.
+   */
+  checkBrowserSignInDeadline(): void {
+    this.browserSignIn.checkDeadline()
+  }
+
+  /**
    * A `desktop-login` link from main's handler (D8, D9). The sync pre-match parses it with PR 2's
    * parser and matches its state against the waiting attempt, with the deadline applied; any
    * other link is dropped with no log, push or window. A match queues the acceptance op in the

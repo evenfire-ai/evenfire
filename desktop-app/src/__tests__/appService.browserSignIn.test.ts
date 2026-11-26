@@ -203,7 +203,7 @@ const bumpEvents = {
     id: 'E15',
     label: 'E15 session restore (getSessionState)',
     check: () => true,
-    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4052-4057`): it
+    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4082-4087`): it
     // never decides an expectation here. `storedA` holds while signed out on A only before the
     // first restore on A (a kept token at start), and that restore succeeds. Every later
     // `storedA` comes from a sign-in on A, and every way back to signed out (logout, or a change
@@ -2452,5 +2452,157 @@ describe('redeeming: Cancel, a new start and the interactive login count', () =>
     expect(harness.secretsSeen).toContain(`${LINK_HANDLING_FAILED} Error`)
     expect(endStatesOf(harness, first.attemptId)).toEqual(['failed'])
     expect(snapshotsOf(harness, attemptId)).toEqual([{ attemptId, phase: 'waiting' }])
+  })
+})
+
+const PUSH_FAILED = '[AppService] Browser sign-in state push failed'
+const SIXTEEN_MINUTES_MS = 16 * 60 * 1000
+
+/** The recorded 403's end state: `refused`, with the reason the edge recorded (D17). */
+function recordedRefusal(): BrowserSignInEnd {
+  const { reason } = readEdgeRecord(REDEEM_REFUSED).body as { reason: 'account_disabled' }
+  return { outcome: 'refused', reason }
+}
+
+describe('browser sign-in state reads, acknowledgement and the resume check', () => {
+  it('G2-6b signs out even when the push target throws', async () => {
+    const failure = new Error('fake push target failure')
+    const pushTarget = vi.fn<(snapshot: BrowserSignInSnapshot) => void>()
+    const harness = await createBrowserSignInHarness({
+      linksAvailable: true,
+      onBrowserSignInChanged: pushTarget,
+    })
+    const { service } = harness
+    const { attemptId } = await startAttempt(harness)
+    await harness.drain()
+    expect(pushTarget.mock.calls).toEqual([[{ attemptId, phase: 'waiting' }]])
+    // The harness's spy on `console.warn`: its calls from here on are logout's and its push's.
+    const warn = vi.spyOn(console, 'warn')
+    const warnedBefore = warn.mock.calls.length
+    const before = service.getSessionGeneration()
+    const logged = harness.bumpLog.length
+    // From here on the push target throws. Logout's first advance, the first statement of its
+    // owner op, ends the waiting attempt `replaced` (D6).
+    pushTarget.mockImplementation(() => {
+      throw failure
+    })
+
+    await expect(service.logout()).resolves.toBe(before + 2)
+    await harness.drain()
+
+    expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
+    expect(harness.bumpLog.slice(logged).map(record => record.value)).toEqual([
+      before + 1,
+      before + 2,
+    ])
+    // The end reached the push target, which threw; the snapshot stays for the next read (D13).
+    const replaced = { attemptId, phase: 'ended', outcome: 'replaced' }
+    expect(pushTarget.mock.calls.slice(1)).toEqual([[replaced]])
+    expect(pushTarget.mock.results.at(-1)?.type).toBe('throw')
+    expect(service.getBrowserSignInState()).toEqual(replaced)
+    expect(warn.mock.calls.slice(warnedBefore)).toEqual([[PUSH_FAILED, failure]])
+  })
+
+  it('G2-12a ends an overdue attempt on resume, and pushes it', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, clock } = harness
+    const { attemptId } = await startAttempt(harness)
+    await harness.drain()
+    const pushesBefore = harness.pushes.length
+    // A sleep the deadline timer did not count: the wall clock is 16 minutes on, the timer is
+    // still armed, and nothing has read the state.
+    clock.advance(SIXTEEN_MINUTES_MS, 'wallOnly')
+    expect(clock.pendingTimers()).toBe(1)
+
+    service.checkBrowserSignInDeadline()
+    // The push is deferred (D6).
+    expect(harness.pushes).toHaveLength(pushesBefore)
+    await harness.drain()
+
+    expect(harness.pushes.slice(pushesBefore).map(record => record.value)).toEqual([
+      { attemptId, phase: 'ended', outcome: 'timed_out' },
+    ])
+    expect(clock.pendingTimers()).toBe(0)
+  })
+
+  it('G2-13a keeps the outcome until it is acknowledged', async () => {
+    const harness = await createBrowserSignInHarness({
+      linksAvailable: true,
+      withoutPushTarget: true,
+    })
+    const { service, envs } = harness
+    harness.routes[REDEEM_ROUTE] = () => edgeResponse(readEdgeRecord(REDEEM_REFUSED))
+    const { attemptId, state } = await startAttempt(harness)
+
+    // No window takes the end (A3-52): the redeem is refused while nothing is pushed.
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    await harness.drain()
+    expect(redeemFetches(harness)).toHaveLength(1)
+
+    // Reading does not acknowledge: every read returns the outcome until then (D13).
+    const outcome = { attemptId, phase: 'ended', ...recordedRefusal() }
+    expect(service.getBrowserSignInState()).toEqual(outcome)
+    expect(service.getBrowserSignInState()).toEqual(outcome)
+
+    expect(service.acknowledgeBrowserSignInResult(attemptId)).toEqual({ attemptId, phase: 'idle' })
+    expect(service.getBrowserSignInState()).toEqual({ attemptId, phase: 'idle' })
+  })
+
+  it('G2-13b ignores an acknowledgement for an older attempt', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, clock } = harness
+    const first = await startAttempt(harness)
+    expect(service.cancelBrowserSignIn()).toEqual({
+      attemptId: first.attemptId,
+      phase: 'ended',
+      outcome: 'cancelled',
+    })
+    const second = await startAttempt(harness)
+    // The second attempt's deadline timer ends it.
+    clock.advance(BROWSER_SIGN_IN_DEADLINE_MS, 'timers')
+    await harness.drain()
+    const secondOutcome = { attemptId: second.attemptId, phase: 'ended', outcome: 'timed_out' }
+    const pushesBefore = harness.pushes.length
+
+    // The first outcome's acknowledgement arrives after the second attempt has ended (A3-54).
+    expect(service.acknowledgeBrowserSignInResult(first.attemptId)).toEqual(secondOutcome)
+    expect(service.getBrowserSignInState()).toEqual(secondOutcome)
+    await harness.drain()
+    expect(harness.pushes).toHaveLength(pushesBefore)
+
+    // The second attempt's own acknowledgement clears it, with one push.
+    const idle = { attemptId: second.attemptId, phase: 'idle' }
+    expect(service.acknowledgeBrowserSignInResult(second.attemptId)).toEqual(idle)
+    expect(service.getBrowserSignInState()).toEqual(idle)
+    await harness.drain()
+    expect(harness.pushes.slice(pushesBefore).map(record => record.value)).toEqual([idle])
+  })
+
+  it('ends an overdue attempt at a state read', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, clock } = harness
+    const { attemptId } = await startAttempt(harness)
+    await harness.drain()
+    const generation = service.getSessionGeneration()
+    const logged = harness.bumpLog.length
+    const pushesBefore = harness.pushes.length
+
+    // A3-67: before the deadline a read changes nothing.
+    clock.advance(BROWSER_SIGN_IN_DEADLINE_MS - 1_000, 'wallOnly')
+    expect(service.getBrowserSignInState()).toEqual({ attemptId, phase: 'waiting' })
+    // At the deadline on the wall clock, with the timer not yet fired, the read ends it.
+    clock.advance(1_000, 'wallOnly')
+    expect(clock.pendingTimers()).toBe(1)
+    const timedOut = { attemptId, phase: 'ended', outcome: 'timed_out' }
+    expect(service.getBrowserSignInState()).toEqual(timedOut)
+    await harness.drain()
+
+    expect(harness.pushes.slice(pushesBefore).map(record => record.value)).toEqual([timedOut])
+    expect(clock.pendingTimers()).toBe(0)
+    // Neither the reads nor the acknowledgement touch the generation or the session.
+    expect(service.acknowledgeBrowserSignInResult(attemptId)).toEqual({ attemptId, phase: 'idle' })
+    expect(service.getSessionGeneration()).toBe(generation)
+    expect(harness.bumpLog).toHaveLength(logged)
+    expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
   })
 })

@@ -19,7 +19,8 @@ import { type EdgeRecordKey, edgeResponse, readEdgeRecord } from './edgeContract
  * mocked at `fetch` only, so the real `AuthClient` and `requestJson` run. The service gets the
  * test-only generation observer (feeding `bumpLog`), a `FakeBrowserSignInClock` and the links
  * option through its constructor, as `main.ts` never does. Each snapshot the service pushes
- * through `onBrowserSignInChanged` lands in `pushes`.
+ * through `onBrowserSignInChanged` lands in `pushes`, unless the harness is built without a push
+ * target.
  */
 
 /** One counter is shared by every recorder, so records of different kinds can be ordered. */
@@ -110,7 +111,7 @@ export class FakeBrowserSignInClock implements BrowserSignInClock {
  * user, wherever it comes from. So any later bind of that user consumes a pending hold: the
  * team-switch `/me` refresh in `commitSessionToken` (`appService.ts:1340`), the team-scope
  * commit after discovery in `runWithTeamContextInTeamQueue` (`:1489`), the rebind after a
- * failed hop restore (`:1592`) and `refreshAccessCatalog` (`:4592`). Set a chat-store hold only
+ * failed hop restore (`:1592`) and `refreshAccessCatalog` (`:4622`). Set a chat-store hold only
  * when the bind it names is the next bind of that user.
  */
 export type HoldPoint =
@@ -211,6 +212,16 @@ export type BrowserSignInHarnessOptions = Readonly<{
    * service's guard around its observer.
    */
   onSessionGenerationAdvanced?: (value: number) => void
+  /**
+   * Called with each snapshot the service pushes, after `pushes` records it. A throw from it
+   * reaches the attempt store's guard around its push (D6).
+   */
+  onBrowserSignInChanged?: (snapshot: BrowserSignInSnapshot) => void
+  /**
+   * Builds the service with no `onBrowserSignInChanged`, as when no window takes the pushes
+   * (D13): nothing is pushed, so `pushes` stays empty.
+   */
+  withoutPushTarget?: boolean
 }>
 
 /**
@@ -670,10 +681,13 @@ export async function createBrowserSignInHarness(
     tokenStore: tokenStore as unknown as TokenStore,
     browserSignInLinksAvailable: options.linksAvailable ?? false,
     browserSignInClock: clock,
-    onBrowserSignInChanged: snapshot => {
-      pushes.push({ seq: nextSeq(), value: snapshot })
-      secretsSeen.push(JSON.stringify(snapshot))
-    },
+    onBrowserSignInChanged: options.withoutPushTarget
+      ? undefined
+      : snapshot => {
+          pushes.push({ seq: nextSeq(), value: snapshot })
+          secretsSeen.push(JSON.stringify(snapshot))
+          options.onBrowserSignInChanged?.(snapshot)
+        },
     onSessionGenerationAdvanced: value => {
       bumpLog.push({ seq: nextSeq(), value })
       options.onSessionGenerationAdvanced?.(value)
