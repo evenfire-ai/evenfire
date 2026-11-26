@@ -273,10 +273,12 @@ export class CronScheduler extends EventEmitter {
       if (!job.enabled) return
       this.executeJob(job)
 
-      // Schedule next run — advance "from" by 60s to avoid re-firing
-      // within the same cron minute window (setTimeout can fire slightly early).
-      const afterExecution = new Date(Date.now() + 60_000)
-      job.nextRun = parseNextRun(job.schedule, afterExecution) ?? undefined
+      // The next run is the first occurrence strictly after the one that just
+      // fired (cron-parser's next() excludes `currentDate`). runAt covers a timer
+      // that fires slightly early; Date.now() covers a late fire, so missed
+      // occurrences are not replayed.
+      const from = new Date(Math.max(Date.now(), runAt))
+      job.nextRun = parseNextRun(job.schedule, from) ?? undefined
       if (job.nextRun && job.enabled) {
         this.scheduleJob(job)
       }

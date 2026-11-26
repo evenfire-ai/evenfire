@@ -543,17 +543,19 @@ describe('CronScheduler — Schedule validation', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Double-fire prevention (BUG: setTimeout fires slightly early)
+// Next run after a fire: every occurrence once, early and late timers
 // ---------------------------------------------------------------------------
 
-describe('CronScheduler — no double-fire after execution', () => {
+describe('CronScheduler — next run after a fire', () => {
   let scheduler: CronScheduler
-  let queue: MessageQueue
+  let fired: string[]
 
   beforeEach(() => {
     vi.useFakeTimers()
-    queue = createMockQueue()
-    scheduler = new CronScheduler(queue)
+    vi.setSystemTime(new Date('2026-11-26T12:00:30.000Z'))
+    scheduler = new CronScheduler(createMockQueue())
+    fired = []
+    scheduler.on('cron:triggered', () => fired.push(new Date().toISOString()))
   })
 
   afterEach(() => {
@@ -561,29 +563,43 @@ describe('CronScheduler — no double-fire after execution', () => {
     vi.useRealTimers()
   })
 
-  it('should not re-execute within the same cron minute window', () => {
-    // Use */1 pattern (every minute) — easier to test with fake timers.
-    // The bug: after executeJob, parseNextRun(schedule) can return a time
-    // in the same minute window, causing immediate re-fire (delay = 0s).
-    // The fix: pass a "from" date 60s in the future to skip the current window.
+  it('runs an every-minute schedule in every minute', () => {
     scheduler.start()
-    const job = scheduler.createJob('once-test', '*/1 * * * *', 'task')
-    expect(job).not.toBeNull()
+    const job = scheduler.createJob('every-minute', '*/1 * * * *', 'task')!
+    vi.advanceTimersByTime(270_500) // to 12:05:00.500
+    expect(fired).toEqual([
+      '2026-11-26T12:01:00.000Z',
+      '2026-11-26T12:02:00.000Z',
+      '2026-11-26T12:03:00.000Z',
+      '2026-11-26T12:04:00.000Z',
+      '2026-11-26T12:05:00.000Z',
+    ])
+    expect(job.nextRun!.toISOString()).toBe('2026-11-26T12:06:00.000Z')
+  })
 
-    // The job's nextRun should be within the next minute
-    const delay = job!.nextRun!.getTime() - Date.now()
-    expect(delay).toBeGreaterThan(0)
-    expect(delay).toBeLessThanOrEqual(60_000)
+  it('does not run twice in one minute when the timer fires before the scheduled time', () => {
+    scheduler.start()
+    const job = scheduler.createJob('every-minute', '*/1 * * * *', 'task')! // due 12:01:00.000, in 30 s
+    // setSystemTime moves pending timers with the clock: the timer still fires
+    // 30 s from now, when Date.now() reads 12:00:59.990 (10 ms before runAt).
+    vi.setSystemTime(new Date('2026-11-26T12:00:29.990Z'))
+    vi.advanceTimersByTime(30_000) // fires at 12:00:59.990
+    vi.advanceTimersByTime(1_000) // 12:01:00.990
+    expect(fired).toEqual(['2026-11-26T12:00:59.990Z'])
+    expect(job.nextRun!.toISOString()).toBe('2026-11-26T12:02:00.000Z')
+    vi.advanceTimersByTime(59_010) // liveness: the next minute does run
+    expect(fired).toEqual(['2026-11-26T12:00:59.990Z', '2026-11-26T12:02:00.000Z'])
+  })
 
-    // Fire the first execution
-    vi.advanceTimersByTime(delay + 100)
-    const callCount1 = (queue.enqueue as ReturnType<typeof vi.fn>).mock.calls.length
-    expect(callCount1).toBe(1)
-
-    // After the fix, next run should be ≥60s away (not 0s)
-    expect(job!.nextRun).toBeDefined()
-    const nextDelay = job!.nextRun!.getTime() - Date.now()
-    expect(nextDelay).toBeGreaterThan(30_000) // at least 30s, not 0
+  it('does not replay the minutes a late timer missed', () => {
+    scheduler.start()
+    const job = scheduler.createJob('every-minute', '*/1 * * * *', 'task')! // due 12:01:00.000, in 30 s
+    vi.setSystemTime(new Date('2026-11-26T12:05:00.000Z')) // the timer now fires at 12:05:30, 4.5 min late
+    vi.advanceTimersByTime(30_000)
+    expect(fired).toEqual(['2026-11-26T12:05:30.000Z'])
+    expect(job.nextRun!.toISOString()).toBe('2026-11-26T12:06:00.000Z')
+    vi.advanceTimersByTime(30_000) // liveness
+    expect(fired).toEqual(['2026-11-26T12:05:30.000Z', '2026-11-26T12:06:00.000Z'])
   })
 })
 
