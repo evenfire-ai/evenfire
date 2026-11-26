@@ -219,10 +219,37 @@ const ESCAPED_IN_SUMMARY = /[\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069
  * The escapes parse back to the same strings.
  */
 function encode(value: unknown): string {
-  return JSON.stringify(value).replace(
-    ESCAPED_IN_SUMMARY,
-    char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
-  )
+  return JSON.stringify(value).replace(ESCAPED_IN_SUMMARY, unicodeEscape)
+}
+
+function unicodeEscape(char: string): string {
+  return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+}
+
+/**
+ * A string as the log line shows it: the same characters as `encode` escapes,
+ * written as `\uXXXX` text (the logger's JSON would otherwise carry them raw).
+ */
+function lineText(text: string): string {
+  return text.replace(ESCAPED_IN_SUMMARY, unicodeEscape)
+}
+
+function lineLeaf(value: Leaf): Leaf {
+  return typeof value === 'string' ? lineText(value) : value
+}
+
+/** The change with every string made safe to show in the line. */
+function lineSafe(change: HostApprovalChange): HostApprovalChange {
+  return {
+    ...change,
+    fields: Object.fromEntries(
+      Object.entries(change.fields).map(([key, entry]) => [
+        lineText(key),
+        { old: lineLeaf(entry.old), new: lineLeaf(entry.new) },
+      ])
+    ),
+    tools: change.tools.map(entry => ({ ...entry, name: lineText(entry.name) })),
+  }
 }
 
 /**
@@ -295,6 +322,7 @@ export function logHostApprovalChange(input: {
   operationId: string | null
   via: 'host_put' | 'host_create'
 }): void {
+  const change = lineSafe(input.change)
   rootLogger.child({ module: 'host-approval-audit' }).info(
     {
       event: 'host_approval_changed',
@@ -303,12 +331,12 @@ export function logHostApprovalChange(input: {
       operatorSub: input.operatorSub,
       operationId: input.operationId,
       via: input.via,
-      fields: input.change.fields,
-      tools: input.change.tools,
-      toolsTruncated: input.change.toolsTruncated,
-      approvers: input.change.approvers,
-      blockRemoved: input.change.blockRemoved,
-      inheritedBefore: input.change.inheritedBefore,
+      fields: change.fields,
+      tools: change.tools,
+      toolsTruncated: change.toolsTruncated,
+      approvers: change.approvers,
+      blockRemoved: change.blockRemoved,
+      inheritedBefore: change.inheritedBefore,
     },
     'Host approval settings changed'
   )

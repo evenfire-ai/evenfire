@@ -328,6 +328,50 @@ describe('buildHostApprovalChange', () => {
       expect(change?.toolsTruncated).toBe(0)
     })
 
+    it('M2: the line shows bidi and C1 characters in string values as \\uXXXX text', () => {
+      const lines: string[] = []
+      const logger = pino(
+        { redact: { paths: [...TOKEN_LEAK_REDACT_PATHS], remove: true } },
+        new Writable({
+          write(chunk, _encoding, done) {
+            lines.push(String(chunk))
+            done()
+          },
+        })
+      )
+      const spy = vi.spyOn(rootLogger, 'child').mockReturnValue(logger as never)
+      try {
+        const change = buildHostApprovalChange({
+          before: block({ shellClassifierModel: 'plain', tools: {} }),
+          after: block({
+            shellClassifierModel: 'model\u202e\u0085',
+            tools: { 'shell\u202eexe': false, shell_exec: false },
+          }),
+        })
+        logHostApprovalChange({
+          change: change as NonNullable<typeof change>,
+          host: 'foo',
+          namespace: 'ns',
+          operatorSub: null,
+          operationId: null,
+          via: 'host_put',
+        })
+      } finally {
+        spy.mockRestore()
+      }
+      expect(lines).toHaveLength(1)
+      // eslint-disable-next-line no-misleading-character-class
+      expect(/[\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(lines[0] as string)).toBe(
+        false
+      )
+      const logged = JSON.parse(lines[0] as string) as {
+        fields: { shellClassifierModel: { new: string } }
+        tools: Array<{ name: string }>
+      }
+      expect(logged.fields.shellClassifierModel.new).toBe('model\\u202e\\u0085')
+      expect(logged.tools.map(entry => entry.name)).toEqual(['shell_exec', 'shell\\u202eexe'])
+    })
+
     it('L1: the root logger redaction keeps tools named like a redacted key', async () => {
       const lines: string[] = []
       const logger = pino(
