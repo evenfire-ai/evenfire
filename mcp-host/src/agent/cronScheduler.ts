@@ -154,7 +154,8 @@ export class CronScheduler extends EventEmitter {
 
   /**
    * Fills the in-memory map from the durable store. Does not arm timers.
-   * Invalid rows are persisted disabled, including when provider identity is still set.
+   * Invalid rows, and enabled rows when schedules are forbidden, are persisted
+   * disabled before the caller starts timers.
    */
   async loadFromStore(): Promise<void> {
     if (!this.store || this.terminal) return
@@ -176,6 +177,22 @@ export class CronScheduler extends EventEmitter {
         this.invalidJobIds.delete(job.id)
       }
       this.jobs.set(job.id, job)
+    }
+    if (this.allowEnabledJobs || this.terminal) return
+    for (const job of this.jobs.values()) {
+      if (this.terminal) return
+      if (!job.enabled) continue
+      const wrote = await this.retryBusy(() => this.store!.setSchedule(job.id, false, null), job.id)
+      if (!wrote) {
+        if (this.terminal) return
+        throw new Error('cron stateless disable failed')
+      }
+      job.enabled = false
+      job.nextRun = undefined
+      logger.info(
+        { jobId: job.id, name: job.name, component: 'Cron' },
+        'Stateless policy disabled schedule'
+      )
     }
   }
 
