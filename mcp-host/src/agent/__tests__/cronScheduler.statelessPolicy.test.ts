@@ -14,6 +14,7 @@ describe('CronScheduler — stateless cron policy', () => {
   const originalAllow = process.env[STATELESS_ALLOW_CRON_MANAGE_ENV]
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
     if (originalLifecycle === undefined) delete process.env[STATELESS_LIFECYCLE_ENV]
     else process.env[STATELESS_LIFECYCLE_ENV] = originalLifecycle
@@ -29,17 +30,28 @@ describe('CronScheduler — stateless cron policy', () => {
     expect(scheduler.hasEnabledJobs()).toBe(false)
   })
 
-  it('disables imported enabled schedules before start can program timers', () => {
-    const source = new CronScheduler(createQueue())
-    source.createJob('daily', '0 0 * * *', 'do it')
+  it('never runs a schedule created under the policy, while an allowed scheduler does', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-26T12:00:30.000Z'))
+    const queue = createQueue()
+    const createTask = vi.spyOn(queue, 'createTaskFromCron')
+    const runsOf = (jobId: string) => createTask.mock.calls.filter(([id]) => id === jobId).length
+    const blocked = new CronScheduler(queue, { allowEnabledJobs: false })
+    const allowed = new CronScheduler(queue, { allowEnabledJobs: true })
+    const job = blocked.createJob('blocked', '*/1 * * * *', 'blocked task')!
+    expect(blocked.enableJob(job.id)).toBe(false)
+    const witness = allowed.createJob('control', '*/1 * * * *', 'control task')!
+    blocked.start()
+    allowed.start()
 
-    const scheduler = new CronScheduler(createQueue(), { allowEnabledJobs: false })
-    expect(scheduler.importJobs(source.exportJobs())).toBe(1)
-    scheduler.start()
+    vi.advanceTimersByTime(31_000) // 12:01:01
 
-    expect(scheduler.getAllJobs()).toHaveLength(1)
-    expect(scheduler.getAllJobs()[0].enabled).toBe(false)
-    expect(scheduler.hasEnabledJobs()).toBe(false)
+    expect({ blocked: runsOf(job.id), control: runsOf(witness.id) }).toEqual({
+      blocked: 0,
+      control: 1,
+    })
+    blocked.stop()
+    allowed.stop()
   })
 
   it('rejects re-enable attempts when enabled schedules are forbidden', () => {

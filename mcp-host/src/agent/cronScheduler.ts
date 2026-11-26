@@ -35,9 +35,6 @@ export class CronScheduler extends EventEmitter {
     this.isRunning = true
 
     for (const job of this.jobs.values()) {
-      if (!this.allowEnabledJobs && job.enabled) {
-        this.disableJobForPolicy(job)
-      }
       if (job.enabled) {
         this.scheduleJob(job)
       }
@@ -126,7 +123,7 @@ export class CronScheduler extends EventEmitter {
     if (!job) return false
 
     if (!this.allowEnabledJobs) {
-      this.disableJobForPolicy(job)
+      logger.info({ component: 'Cron', jobId, jobName: job.name }, 'Policy kept job disabled')
       return false
     }
 
@@ -177,19 +174,6 @@ export class CronScheduler extends EventEmitter {
 
     this.emit('cron:deleted', job)
     return true
-  }
-
-  private disableJobForPolicy(job: CronJob): void {
-    job.enabled = false
-    const timer = this.timers.get(job.id)
-    if (timer) {
-      clearTimeout(timer)
-      this.timers.delete(job.id)
-    }
-    logger.info(
-      { component: 'Cron', jobId: job.id, jobName: job.name },
-      'Stateless policy disabled schedule'
-    )
   }
 
   updateJob(
@@ -300,49 +284,5 @@ export class CronScheduler extends EventEmitter {
 
     this.emit('cron:triggered', { job, task })
     return task
-  }
-
-  exportJobs(): string {
-    const jobs = Array.from(this.jobs.values()).map(job => ({
-      ...job,
-      lastRun: job.lastRun?.toISOString(),
-      nextRun: job.nextRun?.toISOString(),
-      createdAt: job.createdAt.toISOString(),
-    }))
-    return JSON.stringify(jobs, null, 2)
-  }
-
-  importJobs(json: string): number {
-    try {
-      const jobs = JSON.parse(json) as CronJob[]
-      let imported = 0
-
-      for (const jobData of jobs) {
-        const job: CronJob = {
-          ...jobData,
-          lastRun: jobData.lastRun ? new Date(jobData.lastRun) : undefined,
-          nextRun: jobData.nextRun ? new Date(jobData.nextRun) : undefined,
-          createdAt: new Date(jobData.createdAt),
-        }
-
-        job.nextRun = parseNextRun(job.schedule) ?? undefined
-
-        if (!this.allowEnabledJobs && job.enabled) {
-          this.disableJobForPolicy(job)
-        }
-
-        this.jobs.set(job.id, job)
-        if (this.isRunning && job.enabled) {
-          this.scheduleJob(job)
-        }
-        imported++
-      }
-
-      logger.info({ component: 'Cron', imported }, 'Imported jobs')
-      return imported
-    } catch (error) {
-      logger.error({ component: 'Cron', error }, 'Failed to import jobs')
-      return 0
-    }
   }
 }

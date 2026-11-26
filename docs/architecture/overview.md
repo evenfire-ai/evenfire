@@ -817,7 +817,6 @@ Supports scheduled LLM tasks via cron expressions (`minute hour day month weekda
 - Parses: `*`, specific values, `*/N` step patterns
 - Creates tasks and enqueues them to the message queue
 - Jobs can be created, enabled, disabled, deleted, and manually triggered
-- Import/export to JSON for persistence
 
 ### Message Response Flow
 
