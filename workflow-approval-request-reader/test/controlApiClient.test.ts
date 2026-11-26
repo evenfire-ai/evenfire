@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ReaderConfig } from '../src/config.js'
 import {
   canApprove,
   resolveCommunicationChannelRef,
   sendTeamsTargetMessage,
+  verifySlackTargetSignature,
 } from '../src/controlApiClient.js'
-import type { ReaderConfig } from '../src/config.js'
 
 const cfg = (overrides: Partial<ReaderConfig> = {}): ReaderConfig =>
   ({
@@ -190,9 +191,53 @@ describe('sendTeamsTargetMessage', () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(
-      sendTeamsTargetMessage(cfg({ controlApiToken: '' }), message)
-    ).resolves.toEqual({ ok: false, status: 503, error: 'control_api_not_configured' })
+    await expect(sendTeamsTargetMessage(cfg({ controlApiToken: '' }), message)).resolves.toEqual({
+      ok: false,
+      status: 503,
+      error: 'control_api_not_configured',
+    })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('verifySlackTargetSignature', () => {
+  it('propagates botUserId when supplied by control-api', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          hostRef: 'host-1',
+          communicationChannelRef: 'channels/slack-app',
+          providerWorkspaceId: 'T123',
+          replyOnlyWhenMentioned: true,
+          replyInThreads: false,
+          botUserId: 'UBOT123',
+          channelName: 'slack-app',
+          channelNamespace: 'channels',
+        }),
+      })
+    )
+
+    const result = await verifySlackTargetSignature(cfg(), {
+      targetId: 'slack:t1',
+      timestamp: '1710000000',
+      signature: 'v0=abc',
+      rawBody: Buffer.from('{}'),
+    })
+
+    expect(result).toEqual({
+      ok: true,
+      hostRef: 'host-1',
+      communicationChannelRef: 'channels/slack-app',
+      providerWorkspaceId: 'T123',
+      replyOnlyWhenMentioned: true,
+      replyInThreads: false,
+      botUserId: 'UBOT123',
+      channelName: 'slack-app',
+      channelNamespace: 'channels',
+    })
   })
 })
