@@ -12,6 +12,7 @@ import {
   serializeApprovalChangeSummary,
 } from '../src/services/hostApprovalAudit.js'
 import { MCP_HOST_NATIVE_TOOL_NAMES } from '../src/services/mcpHostNativeToolNames.js'
+import { runWithAdministrativeRequestContext } from '../src/services/tracing/adminOperationContext.js'
 import { TOKEN_LEAK_REDACT_PATHS } from '../src/utils/log/redact.js'
 
 const block = (approval?: Record<string, unknown>): Record<string, unknown> | undefined => approval
@@ -396,10 +397,10 @@ describe('buildHostApprovalChange', () => {
           blockRemoved: false,
           inheritedBefore: false,
         }
-        const text = serializeApprovalChangeSummary(change, {
-          isNative: () => true,
-          host: 'foo',
-        })
+        const text = runWithAdministrativeRequestContext(
+          { operatorSub: 'operator-fixture', requestId: 'request-fixture-1' },
+          () => serializeApprovalChangeSummary(change, { isNative: () => true, host: 'foo' })
+        )
         expect(text.length).toBeLessThanOrEqual(4096)
         const parsed = JSON.parse(text) as {
           truncated: boolean
@@ -416,6 +417,7 @@ describe('buildHostApprovalChange', () => {
         expect(payload).toMatchObject({
           event: 'host_approval_summary_oversize',
           host: 'foo',
+          requestId: 'request-fixture-1',
           nativeToolsTruncated: parsed.nativeToolsTruncated,
         })
         expect(typeof payload.length).toBe('number')

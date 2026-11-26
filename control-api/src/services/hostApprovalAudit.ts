@@ -18,6 +18,7 @@
 import { rootLogger } from '../observability/logger.js'
 import { approvalBlocksEqual } from './hostApprovalRules.js'
 import { isMcpHostNativeToolName } from './mcpHostNativeToolNames.js'
+import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
 
 /**
  * A per-tool override map may be large; the line lists every changed mcp-host
@@ -388,6 +389,7 @@ export function serializeApprovalChangeSummary(
     {
       event: 'host_approval_summary_oversize',
       host: options.host ?? null,
+      requestId: currentAdministrativeRequestContext()?.requestId ?? null,
       length: tier3.length,
       limit: MAX_APPROVAL_CHANGE_SUMMARY_LENGTH,
       nativeToolsTruncated: natives.length - kept,
