@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { HOST_EDGE_RPC_PROXY_ROUTE_SCOPES } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
@@ -8,7 +9,11 @@ import {
   requireRpcAuth,
 } from '../middleware/auth.js'
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
-import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
+import {
+  isHostAccessDenied,
+  respondControlApiAuthorityUnavailable,
+  respondHostAccessDenied,
+} from '../services/hostAccessDenial.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
 
 const activeStreamCountsByUser = new Map<string, number>()
@@ -87,7 +92,9 @@ export function createRpcHostActivityStreamRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/activity/stream',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:activity:read'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/activity/stream']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -281,6 +288,7 @@ export function createRpcHostActivityStreamRouter(): Router {
       } catch (error) {
         if (res.destroyed || res.writableEnded) return
         if (!res.headersSent) {
+          if (respondControlApiAuthorityUnavailable(res, error)) return
           res.status(500).json({ error: 'Internal Server Error' })
           return
         }

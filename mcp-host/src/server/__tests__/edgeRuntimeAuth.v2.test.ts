@@ -7,13 +7,14 @@ import { resolve } from 'node:path'
 import request from 'supertest'
 import {
   type ActionOperationId,
-  RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER,
+  HOST_EDGE_ASSERTION_HEADER,
   type TrustedEdgeActionContextV2,
   actionOperationScope,
   canonicalResourceIdentity,
   hashActionTarget,
   validateActionOperationTarget,
 } from '@clerum/action-context-contracts'
+import { signHostEdgeTestAssertion } from '../../__tests__/rpcProxyEdgeTestHeaders'
 import {
   legacyMcpHostConsumer,
   legacyRpcProxyHostProducer,
@@ -22,7 +23,6 @@ import {
 const userId = '11111111-1111-4111-8111-111111111111'
 const sid = '22222222-2222-4222-8222-222222222222'
 const delegationJti = '33333333-3333-4333-8333-333333333333'
-const rpcProxyEdgeToken = 'dev-rpc-proxy-mcp-host-edge-token'
 type RpcProxyAction = {
   trustedEdgeHeader: string
   checkpoint: {
@@ -185,7 +185,6 @@ beforeAll(async () => {
   // failing module itself.
   await Promise.allSettled([
     import(`${process.cwd()}/../rpc-proxy/src/actionAuthorityV2.ts`),
-    import(`${process.cwd()}/../rpc-proxy/src/services/mcpProxyService.ts`),
     import('../edgeRuntimeAuth'),
     import('../routes'),
     import('./testHelpers'),
@@ -244,7 +243,12 @@ describe('runtimeEdgeGuard v2', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.doMock('../../config', () => ({
-      config: { hostName: 'chatllm', namespace: 'mcp-host', rpcProxyEdgeToken },
+      config: {
+        hostName: 'chatllm',
+        namespace: 'mcp-host',
+        authJwtPublicKey: process.env.CLERUM_AUTH_JWT_PUBLIC_KEY,
+        authJwtIssuer: 'control-api',
+      },
     }))
   })
 
@@ -270,63 +274,82 @@ describe('runtimeEdgeGuard v2', () => {
       },
     } as unknown as ExpressResponse
     let continued = false
-    runtimeEdgeGuard(['rpc-proxy', 'channel-reader'], operations)(req, res, () => {
-      continued = true
-    })
+    runtimeEdgeGuard(['rpc-proxy', 'channel-reader'], operations, 'host:message:invoke')(
+      req,
+      res,
+      () => {
+        continued = true
+      }
+    )
     return {
       status: continued ? 200 : response.status,
       body: continued ? getRuntimeCallerContext(req) : response.body,
     }
   }
 
-  it('consumes the real rpc-proxy producer and exposes only trusted v2 identity', async () => {
-    const authorizedActionV2 = await realRpcProxyAction()
-    const header = authorizedActionV2.trustedEdgeHeader
-    const { resolveHostConnectionForUser } = (await import(
-      `${process.cwd()}/../rpc-proxy/src/services/mcpProxyService.ts`
-    )) as {
-      resolveHostConnectionForUser: (
-        userId: string,
-        hostRef: string,
-        rpcAccessToken: string,
-        edgeContext: {
-          authorizedActionV2: RpcProxyAction
-        }
-      ) => Promise<{ headers: Record<string, string> } | null>
+  const MISSING = { error: 'Missing runtime edge assertion' }
+  const INVALID = { error: 'Invalid runtime edge assertion' }
+
+  function v1Assertion(sub = userId): string {
+    return signHostEdgeTestAssertion({ sub, host: 'mcp-host/chatllm' })
+  }
+
+  function v2Assertion(): string {
+    return signHostEdgeTestAssertion({
+      sub: userId,
+      host: 'mcp-host/chatllm',
+      v: 2,
+      claims: { teamId: undefined, scopes: undefined },
+    })
+  }
+
+  /** The V1 request rpc-proxy forwards: clear headers plus the edge assertion. */
+  function v1Headers(hostRef = 'chatllm'): Record<string, string> {
+    return {
+      ...legacyRpcProxyHostProducer({ userId, hostRef }),
+      [HOST_EDGE_ASSERTION_HEADER]: v1Assertion(),
     }
-    const connection = await resolveHostConnectionForUser(userId, 'chatllm', 'unused-user-token', {
-      authorizedActionV2,
-    })
-    expect(connection?.headers).toMatchObject({
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-      'x-service-token': 'rpc-proxy',
+  }
+
+  function v2EnvelopeHeaders(hostRef: string, actionContext: string): Record<string, string> {
+    return {
       'x-clerum-edge-caller': 'rpc-proxy',
+      'x-clerum-edge-host-ref': hostRef,
+      'x-clerum-edge-action-context': actionContext,
+    }
+  }
+
+  it('refuses the real rpc-proxy V2 producer until the Host accepts V2 assertions', async () => {
+    // The envelope comes from the real rpc-proxy producer. The headers are the
+    // V2 headers rpc-proxy forwards with it, so the refusal is the Host's own.
+    const authorizedActionV2 = await realRpcProxyAction()
+    const envelope = v2EnvelopeHeaders('chatllm', authorizedActionV2.trustedEdgeHeader)
+    expect(await runRuntimeGuard(['chat.message.invoke'], envelope)).toEqual({
+      status: 401,
+      body: MISSING,
     })
-    expect(connection?.headers.authorization).toBeUndefined()
-    const response = await runRuntimeGuard(['chat.message.invoke'], connection!.headers)
-    expect(response.status).toBe(200)
-    expect(response.body).toMatchObject({
-      caller: 'rpc-proxy',
-      userId,
-      actionContextV2: {
-        version: 2,
-        userId,
-        operationId: 'chat.message.invoke',
-        pathKind: 'direct',
-        effectiveTeamId: null,
-      },
-    })
-    expect(response.body).not.toHaveProperty('teamId')
-    const decoded = JSON.parse(Buffer.from(header, 'base64url').toString('utf8')) as Record<
-      string,
-      unknown
-    >
+    expect(
+      await runRuntimeGuard(['chat.message.invoke'], {
+        ...envelope,
+        [HOST_EDGE_ASSERTION_HEADER]: v2Assertion(),
+      })
+    ).toEqual({ status: 401, body: INVALID })
+
+    // Liveness witness: the guard admits the V1 request for the same user.
+    const v1 = await runRuntimeGuard(['chat.message.invoke'], v1Headers())
+    expect(v1.status).toBe(200)
+    expect(v1.body).toMatchObject({ caller: 'rpc-proxy', userId })
+    expect(v1.body).not.toHaveProperty('actionContextV2')
+
+    const decoded = JSON.parse(
+      Buffer.from(authorizedActionV2.trustedEdgeHeader, 'base64url').toString('utf8')
+    ) as Record<string, unknown>
     expect(decoded).not.toHaveProperty('hostMessageAdmission')
     expect(decoded).not.toHaveProperty('hostMessageAdmissionReceipt')
     expect(decoded).not.toHaveProperty('sendNonce')
   })
 
-  it('carries a real session.read edge envelope into the session-search consumer', async () => {
+  it('refuses a real session.read edge envelope before the session-search consumer', async () => {
     const header = await rpcProxyHeaderFor({
       operationId: 'session.read',
       resourceType: 'runtime_session',
@@ -336,45 +359,58 @@ describe('runtimeEdgeGuard v2', () => {
     const { handleSessionSearchRoute } = await import('../routes')
     const { makeHandlers } = await import('./testHelpers')
     const sessionSearchHandler = vi.fn().mockResolvedValue({ results: [], total: 0 })
+    const guard = runtimeEdgeGuard(['rpc-proxy'], ['session.read'], 'host:session:read')
     const app = express()
-    app.get('/search', runtimeEdgeGuard(['rpc-proxy'], ['session.read']), async (req, res) => {
+    app.get('/search', guard, async (req, res) => {
       await handleSessionSearchRoute(req, res, makeHandlers({ sessionSearchHandler }))
     })
+    const probe = vi.fn()
+    app.get('/probe', guard, (_req, res) => {
+      probe()
+      res.status(200).json({ ok: true })
+    })
 
-    const response = await request(app)
-      .get('/search?q=budget')
-      .set('x-clerum-edge-caller', 'rpc-proxy')
-      .set(RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER, rpcProxyEdgeToken)
-      .set('x-service-token', 'rpc-proxy')
-      .set('x-clerum-edge-host-ref', 'chatllm')
-      .set('x-clerum-edge-action-context', header)
+    for (const assertion of [undefined, v2Assertion()]) {
+      const response = await request(app)
+        .get('/search?q=budget')
+        .set({
+          ...v2EnvelopeHeaders('chatllm', header),
+          ...(assertion ? { [HOST_EDGE_ASSERTION_HEADER]: assertion } : {}),
+        })
+      expect(response.status).toBe(401)
+      expect(response.body).toEqual(assertion ? INVALID : MISSING)
+    }
+    expect(sessionSearchHandler).not.toHaveBeenCalled()
 
-    expect(response.status).toBe(200)
-    expect(sessionSearchHandler).toHaveBeenCalledWith(
-      expect.objectContaining({ userSub: userId, query: 'budget' })
-    )
+    // Liveness witness: the same guard admits a V1 request with its assertion.
+    const v1 = await request(app)
+      .get('/probe')
+      .set({
+        ...v1Headers(),
+        [HOST_EDGE_ASSERTION_HEADER]: signHostEdgeTestAssertion({
+          sub: userId,
+          host: 'mcp-host/chatllm',
+          scopes: ['host:session:read'],
+        }),
+      })
+    expect(v1.status).toBe(200)
+    expect(probe).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects operation substitution and mixed legacy authority headers', async () => {
+  it('refuses operation substitution and mixed legacy authority headers', async () => {
     const header = await realRpcProxyHeader()
     const mismatch = await runRuntimeGuard(['task.read'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-      'x-service-token': 'rpc-proxy',
-      'x-clerum-edge-host-ref': 'chatllm',
-      'x-clerum-edge-action-context': header,
+      ...v2EnvelopeHeaders('chatllm', header),
+      [HOST_EDGE_ASSERTION_HEADER]: v2Assertion(),
     })
-    expect(mismatch.status).toBe(403)
+    expect(mismatch).toEqual({ status: 401, body: INVALID })
 
     const mixed = await runRuntimeGuard(['chat.message.invoke'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-      'x-service-token': 'rpc-proxy',
-      'x-clerum-edge-host-ref': 'chatllm',
+      ...v2EnvelopeHeaders('chatllm', header),
       'x-clerum-edge-user-id': 'attacker',
-      'x-clerum-edge-action-context': header,
+      [HOST_EDGE_ASSERTION_HEADER]: v1Assertion('attacker'),
     })
-    expect(mixed.status).toBe(401)
+    expect(mixed).toEqual({ status: 401, body: { error: 'Missing runtime edge caller context' } })
   })
 
   it('rejects target/hash substitution in an otherwise valid envelope', async () => {
@@ -386,14 +422,14 @@ describe('runtimeEdgeGuard v2', () => {
       JSON.stringify({ ...decoded, target: { ...decoded.target, channelId: 'other-host' } }),
       'utf8'
     ).toString('base64url')
-    const response = await runRuntimeGuard(['chat.message.invoke'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-      'x-service-token': 'rpc-proxy',
-      'x-clerum-edge-host-ref': 'chatllm',
-      'x-clerum-edge-action-context': substituted,
+    const response = await runRuntimeGuard(
+      ['chat.message.invoke'],
+      v2EnvelopeHeaders('chatllm', substituted)
+    )
+    expect(response).toEqual({
+      status: 401,
+      body: { error: 'Missing runtime edge caller context' },
     })
-    expect(response.status).toBe(401)
   })
 
   it('rejects unknown authority fields in the producer-built envelope', async () => {
@@ -406,181 +442,37 @@ describe('runtimeEdgeGuard v2', () => {
       JSON.stringify({ ...decoded, hostMessageAdmissionReceipt: 'not-for-downstream' }),
       'utf8'
     ).toString('base64url')
-    const response = await runRuntimeGuard(['chat.message.invoke'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-      'x-service-token': 'rpc-proxy',
-      'x-clerum-edge-host-ref': 'chatllm',
-      'x-clerum-edge-action-context': extended,
+    const response = await runRuntimeGuard(
+      ['chat.message.invoke'],
+      v2EnvelopeHeaders('chatllm', extended)
+    )
+    expect(response).toEqual({
+      status: 401,
+      body: { error: 'Missing runtime edge caller context' },
     })
-    expect(response.status).toBe(401)
   })
 
-  it('keeps legacy caller context separate from V2 authority authentication', async () => {
-    const legacy = await runRuntimeGuard(['chat.message.invoke'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      'x-clerum-edge-user-id': userId,
-      'x-clerum-edge-host-ref': 'chatllm',
-    })
+  it('keeps legacy caller context separate from V2 authority', async () => {
+    const legacy = await runRuntimeGuard(['chat.message.invoke'], v1Headers())
     expect(legacy.status).toBe(200)
     expect(legacy.body).toMatchObject({ caller: 'rpc-proxy', userId })
     expect(legacy.body).not.toHaveProperty('actionContextV2')
 
     const forgedV2 = await runRuntimeGuard(['chat.message.invoke'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      'x-clerum-edge-user-id': userId,
-      'x-clerum-edge-host-ref': 'chatllm',
+      ...v1Headers(),
       'x-clerum-edge-action-context': await realRpcProxyHeader(),
     })
-    expect(forgedV2.status).toBe(401)
-  })
-
-  it('does not let a credential header alone activate V2', async () => {
-    const response = await runRuntimeGuard(['chat.message.invoke'], {
-      ...legacyRpcProxyHostProducer({ userId, hostRef: 'chatllm' }),
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-      'x-service-token': 'rpc-proxy',
+    expect(forgedV2).toEqual({
+      status: 401,
+      body: { error: 'Missing runtime edge caller context' },
     })
-    expect(response.status).toBe(200)
-    expect(response.body).not.toHaveProperty('actionContextV2')
   })
 
-  it('rejects the rpc-proxy marker with a wrong service token', async () => {
-    const actionContext = await realRpcProxyHeader()
-    const response = await runRuntimeGuard(['chat.message.invoke'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      'x-clerum-edge-user-id': userId,
-      'x-clerum-edge-host-ref': 'chatllm',
-      'x-clerum-edge-action-context': actionContext,
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: 'wrong-edge-token',
-      'x-service-token': 'rpc-proxy',
-    })
-
-    expect(response.status).toBe(401)
-  })
-
-  it('keeps legacy mode available but fails V2 closed without configured credential', async () => {
-    const { config: runtimeConfig } = await import('../../config')
-    const configuredToken = runtimeConfig.rpcProxyEdgeToken
-    ;(runtimeConfig as { rpcProxyEdgeToken: string }).rpcProxyEdgeToken = ''
-
-    try {
-      const legacy = await runRuntimeGuard(['chat.message.invoke'], {
-        'x-clerum-edge-caller': 'rpc-proxy',
-        'x-clerum-edge-user-id': userId,
-        'x-clerum-edge-host-ref': 'chatllm',
-      })
-      expect(legacy.status).toBe(200)
-
-      const v2 = await runRuntimeGuard(['chat.message.invoke'], {
-        'x-clerum-edge-caller': 'rpc-proxy',
-        'x-clerum-edge-user-id': userId,
-        'x-clerum-edge-host-ref': 'chatllm',
-        'x-service-token': 'rpc-proxy',
-        'x-clerum-edge-action-context': await realRpcProxyHeader(),
-      })
-      expect(v2.status).toBe(401)
-    } finally {
-      ;(runtimeConfig as { rpcProxyEdgeToken: string }).rpcProxyEdgeToken = configuredToken
-    }
-  })
-
-  it('rejects a valid edge credential paired with the wrong service marker', async () => {
-    const actionContext = await realRpcProxyHeader()
-    const response = await runRuntimeGuard(['chat.message.invoke'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      'x-clerum-edge-host-ref': 'chatllm',
-      'x-clerum-edge-action-context': actionContext,
-      'x-service-token': 'workflow-approval-request-reader',
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-    })
-
-    expect(response.status).toBe(401)
-  })
-
-  it('rejects a correctly authenticated request bound to a different Host', async () => {
-    const header = await realRpcProxyHeader()
-    const response = await runRuntimeGuard(['chat.message.invoke'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      'x-clerum-edge-host-ref': 'another-host',
-      'x-service-token': 'rpc-proxy',
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-      'x-clerum-edge-action-context': header,
-    })
-
-    expect(response.status).toBe(403)
-  })
-
-  function v2EnvelopeHeaders(hostRef: string, actionContext: string): Record<string, string> {
-    return {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      'x-clerum-edge-host-ref': hostRef,
-      'x-service-token': 'rpc-proxy',
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-      'x-clerum-edge-action-context': actionContext,
-    }
-  }
-
-  it('rejects a V2 envelope bound to another Host name with the action host mismatch', async () => {
-    const header = await realRpcProxyHeader()
-    // Liveness witness: the receiving Host as configured admits the envelope.
-    const admitted = await runRuntimeGuard(
-      ['chat.message.invoke'],
-      v2EnvelopeHeaders('chatllm', header)
-    )
-    expect(admitted.status).toBe(200)
-    expect(admitted.body).toMatchObject({
-      actionContextV2: { target: { hostRef: 'mcp-host/chatllm' } },
-    })
-
-    const { config: runtimeConfig } = await import('../../config')
-    const configuredHostName = runtimeConfig.hostName
-    ;(runtimeConfig as { hostName: string }).hostName = 'other-host'
-    try {
-      // The legacy header names the receiving Host, so only the V2 target
-      // binding can reject this request.
-      const rejected = await runRuntimeGuard(
-        ['chat.message.invoke'],
-        v2EnvelopeHeaders('other-host', header)
-      )
-      expect(rejected).toEqual({
-        status: 403,
-        body: { error: 'Runtime edge action host mismatch' },
-      })
-    } finally {
-      ;(runtimeConfig as { hostName: string }).hostName = configuredHostName
-    }
-  })
-
-  it('rejects a V2 envelope bound to another namespace with the action host mismatch', async () => {
-    const header = await realRpcProxyHeader()
-    // Liveness witness: the receiving Host as configured admits the envelope.
-    const admitted = await runRuntimeGuard(
-      ['chat.message.invoke'],
-      v2EnvelopeHeaders('chatllm', header)
-    )
-    expect(admitted.status).toBe(200)
-    expect(admitted.body).toMatchObject({
-      actionContextV2: { target: { hostRef: 'mcp-host/chatllm' } },
-    })
-
-    const { config: runtimeConfig } = await import('../../config')
-    const configuredNamespace = runtimeConfig.namespace
-    ;(runtimeConfig as { namespace: string }).namespace = 'other-namespace'
-    try {
-      // Same Host name, other namespace: the legacy check compares the name
-      // only, so only the V2 target binding sees the namespace.
-      const rejected = await runRuntimeGuard(
-        ['chat.message.invoke'],
-        v2EnvelopeHeaders('chatllm', header)
-      )
-      expect(rejected).toEqual({
-        status: 403,
-        body: { error: 'Runtime edge action host mismatch' },
-      })
-    } finally {
-      ;(runtimeConfig as { namespace: string }).namespace = configuredNamespace
-    }
+  it('keeps the Host name check on a V1 request with a valid assertion', async () => {
+    const response = await runRuntimeGuard(['chat.message.invoke'], v1Headers('another-host'))
+    expect(response).toEqual({ status: 403, body: { error: 'Runtime edge host mismatch' } })
+    // Liveness witness: the same request naming the receiving Host is admitted.
+    expect((await runRuntimeGuard(['chat.message.invoke'], v1Headers())).status).toBe(200)
   })
 
   it('rejects a producer-built V2 envelope at and after its expiresAt', async () => {
@@ -595,14 +487,19 @@ describe('runtimeEdgeGuard v2', () => {
     expect(Number.isFinite(expiresAtMs)).toBe(true)
     const headers = v2EnvelopeHeaders('chatllm', header)
 
-    // Liveness witness: with the real clock the guard admits the envelope.
-    const current = await runRuntimeGuard(['chat.message.invoke'], headers)
-    expect(current.status).toBe(200)
-    expect(current.body).toMatchObject({ actionContextV2: { expiresAt } })
+    // Liveness witness: before expiresAt the envelope parses, so the guard
+    // reaches the assertion check, which refuses a V2 request without one.
+    expect(await runRuntimeGuard(['chat.message.invoke'], headers)).toEqual({
+      status: 401,
+      body: MISSING,
+    })
 
     const clock = vi.spyOn(Date, 'now')
     clock.mockReturnValue(expiresAtMs - 1)
-    expect((await runRuntimeGuard(['chat.message.invoke'], headers)).status).toBe(200)
+    expect(await runRuntimeGuard(['chat.message.invoke'], headers)).toEqual({
+      status: 401,
+      body: MISSING,
+    })
 
     clock.mockReturnValue(expiresAtMs)
     expect(await runRuntimeGuard(['chat.message.invoke'], headers)).toEqual({
@@ -617,35 +514,11 @@ describe('runtimeEdgeGuard v2', () => {
     })
   })
 
-  it('proves the old/new producer-consumer compatibility matrix from source fixtures', async () => {
+  it('proves the old/new rpc-proxy and Host compatibility matrix', async () => {
+    // Old rpc-proxy: clear headers only (frozen fixture). New rpc-proxy: the
+    // same clear headers plus the edge assertion control-api signed.
     const oldProxyHeaders = legacyRpcProxyHostProducer({ userId, hostRef: 'chatllm' })
-    const newProxyHeaders = await (async () => {
-      const { resolveHostConnectionForUser } = (await import(
-        `${process.cwd()}/../rpc-proxy/src/services/mcpProxyService.ts`
-      )) as {
-        resolveHostConnectionForUser: (
-          userId: string,
-          hostRef: string,
-          rpcAccessToken: string
-        ) => Promise<{ headers: Record<string, string> } | null>
-      }
-      vi.stubGlobal(
-        'fetch',
-        vi.fn().mockResolvedValue(
-          new globalThis.Response(
-            JSON.stringify({
-              userId,
-              hostRef: 'chatllm',
-              url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-            }),
-            { status: 200, headers: { 'content-type': 'application/json' } }
-          )
-        )
-      )
-      const connection = await resolveHostConnectionForUser(userId, 'chatllm', 'unused-token')
-      expect(connection?.headers.authorization).toBeUndefined()
-      return connection!.headers
-    })()
+    const newProxyHeaders = v1Headers()
     const oldHost = legacyMcpHostConsumer()
     const newHost = (headers: Record<string, string>) => runRuntimeGuard(['task.read'], headers)
 
@@ -656,67 +529,56 @@ describe('runtimeEdgeGuard v2', () => {
       200
     )
     expect((await newHost(newProxyHeaders)).status).toBe(200)
-    expect((await newHost(oldProxyHeaders)).status).toBe(200)
+    expect(await newHost(oldProxyHeaders)).toEqual({ status: 401, body: MISSING })
   })
 
   it('rejects V2 authority injected into otherwise legacy caller context', async () => {
     const actionContextV2 = await realRpcProxyHeader()
     const injectedLegacyHeaders = {
-      ...legacyRpcProxyHostProducer({ userId, hostRef: 'chatllm' }),
+      ...v1Headers(),
       'x-clerum-edge-action-context': actionContextV2,
     }
     const response = await runRuntimeGuard(['chat.message.invoke'], injectedLegacyHeaders)
     expect(response.status).toBe(401)
   })
 
-  it('rejects Authorization-only credentials and credentials asserted by another caller', async () => {
+  it('rejects Authorization and V2 authority asserted by another caller', async () => {
     const actionContext = await realRpcProxyHeader()
-    const authorizationOnly = await runRuntimeGuard(['task.read'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      'x-clerum-edge-host-ref': 'chatllm',
-      'x-clerum-edge-user-id': userId,
-      'x-service-token': 'rpc-proxy',
-      'x-clerum-edge-action-context': actionContext,
-      authorization: `Bearer ${rpcProxyEdgeToken}`,
+    const authorization = await runRuntimeGuard(['task.read'], {
+      ...v1Headers(),
+      authorization: 'Bearer unrelated-token',
     })
-    expect(authorizationOnly.status).toBe(401)
+    expect(authorization).toEqual({
+      status: 401,
+      body: { error: 'Authorization is not accepted on this direct mcp-host runtime route' },
+    })
 
     const otherCaller = await runRuntimeGuard(['task.read'], {
       'x-clerum-edge-caller': 'workflow-approval-request-reader',
       'x-clerum-edge-host-ref': 'chatllm',
-      'x-service-token': 'rpc-proxy',
       'x-clerum-edge-action-context': actionContext,
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
+      [HOST_EDGE_ASSERTION_HEADER]: v2Assertion(),
     })
-    expect(otherCaller.status).toBe(401)
-  })
-
-  it('rejects Authorization even when the dedicated RPC Proxy credential is valid', async () => {
-    const actionContext = await realRpcProxyHeader()
-    const response = await runRuntimeGuard(['task.read'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      'x-clerum-edge-host-ref': 'chatllm',
-      'x-clerum-edge-user-id': userId,
-      'x-service-token': 'rpc-proxy',
-      [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: rpcProxyEdgeToken,
-      'x-clerum-edge-action-context': actionContext,
-      authorization: 'Bearer unrelated-token',
+    expect(otherCaller).toEqual({
+      status: 401,
+      body: { error: 'Missing authenticated rpc-proxy service context' },
     })
-
-    expect(response.status).toBe(401)
+    // Liveness witness: the same guard admits the V1 request.
+    expect((await runRuntimeGuard(['task.read'], v1Headers())).status).toBe(200)
   })
 
   it('rejects standalone V2 authority headers on the legacy path', async () => {
     const response = await runRuntimeGuard(['task.read'], {
-      'x-clerum-edge-caller': 'rpc-proxy',
-      'x-clerum-edge-host-ref': 'chatllm',
-      'x-clerum-edge-user-id': userId,
+      ...v1Headers(),
       'x-clerum-edge-access-path-id': `ap1_${'b'.repeat(43)}`,
     })
-    expect(response.status).toBe(401)
+    expect(response).toEqual({
+      status: 401,
+      body: { error: 'Unsupported runtime V2 authority header' },
+    })
   })
 
-  it('keeps the independent channel-reader caller path working without RPC Proxy auth', async () => {
+  it('keeps the independent channel-reader caller path working without an assertion', async () => {
     const response = await runRuntimeGuard(['chat.message.invoke'], {
       'x-clerum-edge-caller': 'channel-reader',
       'x-clerum-edge-host-ref': 'chatllm',

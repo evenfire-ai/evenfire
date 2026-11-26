@@ -4,17 +4,20 @@ import type { AddressInfo } from 'node:net'
 import { resolve } from 'node:path'
 import {
   type ActionOperationId,
+  HOST_EDGE_ASSERTION_HEADER,
   actionOperationScope,
   canonicalResourceIdentity,
   hashActionTarget,
   validateActionOperationTarget,
 } from '@clerum/action-context-contracts'
-import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
+import {
+  signHostEdgeTestAssertion,
+  withRpcProxyEdgeTestAuthentication,
+} from './rpcProxyEdgeTestHeaders'
 
-// The approve and deny mounts in `server.ts` pass `['task.manage']` as the V2
-// operation allowlist of `runtimeEdgeGuard`. These tests drive a real
-// `RPCServer` with envelopes built by the real rpc-proxy producer, so the
-// allowlist is read from the mounts themselves, not from an ad-hoc app.
+// These tests drive a real `RPCServer` with envelopes built by the real
+// rpc-proxy producer, so the verdicts are read from the approve and deny
+// mounts themselves, not from an ad-hoc app.
 
 const userId = '11111111-1111-4111-8111-111111111111'
 const sid = '22222222-2222-4222-8222-222222222222'
@@ -51,12 +54,7 @@ const denyInput: RpcProxyActionInput = {
   resourceType: 'runtime_session',
   target: { hostRef: 'mcp-host/chatllm', taskId, action: 'deny', approvalRequestId },
 }
-const sessionReadInput: RpcProxyActionInput = {
-  operationId: 'session.read',
-  resourceType: 'runtime_session',
-  target: { hostRef: 'mcp-host/chatllm' },
-}
-const producerInputs: readonly RpcProxyActionInput[] = [approveInput, denyInput, sessionReadInput]
+const producerInputs: readonly RpcProxyActionInput[] = [approveInput, denyInput]
 // One child limit per input, plus 120 s for the imports the hook awaits.
 const PRODUCER_SETUP_TIMEOUT_MS = producerInputs.length * PRODUCER_CHILD_TIMEOUT_MS + 120_000
 const producerStdout = new Map<string, SetupOutcome<string>>()
@@ -226,31 +224,60 @@ async function withServer(
 function postDecision(
   baseUrl: string,
   route: 'approve' | 'deny',
-  actionContext: string
+  edgeHeaders: Record<string, string>
 ): Promise<Response> {
   // The body rpc-proxy relays to the Host for each route.
   const body: Record<string, unknown> = { userId, taskId, requestId: approvalRequestId }
   if (route === 'approve') body.alwaysApprove = false
   return fetch(`${baseUrl}/v1/runtime/approvals/${route}`, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...withRpcProxyEdgeTestAuthentication({
-        'x-clerum-edge-caller': 'rpc-proxy',
-        'x-clerum-edge-host-ref': 'chatllm',
-        'x-clerum-edge-action-context': actionContext,
-      }),
-    },
+    headers: { 'content-type': 'application/json', ...edgeHeaders },
     body: JSON.stringify(body),
   })
 }
 
+function v2Headers(actionContext: string, assertion?: string): Record<string, string> {
+  return {
+    'x-clerum-edge-caller': 'rpc-proxy',
+    'x-clerum-edge-host-ref': 'chatllm',
+    'x-clerum-edge-action-context': actionContext,
+    ...(assertion ? { [HOST_EDGE_ASSERTION_HEADER]: assertion } : {}),
+  }
+}
+
+/** The V1 request rpc-proxy forwards today, with its signed edge assertion. */
+function v1Headers(): Record<string, string> {
+  return withRpcProxyEdgeTestAuthentication({
+    'x-clerum-edge-caller': 'rpc-proxy',
+    'x-clerum-edge-host-ref': 'chatllm',
+    'x-clerum-edge-user-id': userId,
+  })
+}
+
+// The Host accepts only V1 edge assertions until it compares V2 assertion
+// claims with the trusted action context, so every producer-built V2 envelope
+// is refused on these mounts, with or without an assertion.
 describe('mounted approval routes with V2 authority', () => {
-  it('admits a producer-built task.manage approve envelope on the approve mount', async () => {
+  it('refuses a producer-built task.manage envelope without an edge assertion', async () => {
     await withServer(async (baseUrl, onApproval) => {
-      const response = await postDecision(baseUrl, 'approve', await rpcProxyHeaderFor(approveInput))
-      expect(response.status).toBe(200)
-      expect(await response.json()).toEqual({ success: true })
+      for (const [route, input] of [
+        ['approve', approveInput],
+        ['deny', denyInput],
+      ] as const) {
+        const response = await postDecision(
+          baseUrl,
+          route,
+          v2Headers(await rpcProxyHeaderFor(input))
+        )
+        expect(response.status).toBe(401)
+        expect(await response.json()).toEqual({ error: 'Missing runtime edge assertion' })
+      }
+      expect(onApproval).not.toHaveBeenCalled()
+
+      // Liveness witness: the same server admits the V1 request rpc-proxy
+      // forwards, so the refusals above came from the guard.
+      const admitted = await postDecision(baseUrl, 'approve', v1Headers())
+      expect(admitted.status).toBe(200)
       expect(onApproval).toHaveBeenCalledTimes(1)
       expect(onApproval).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -264,43 +291,35 @@ describe('mounted approval routes with V2 authority', () => {
     })
   })
 
-  it('admits a producer-built task.manage deny envelope on the deny mount', async () => {
+  it('refuses a producer-built envelope paired with a V1 or a V2 edge assertion', async () => {
     await withServer(async (baseUrl, onApproval) => {
-      const response = await postDecision(baseUrl, 'deny', await rpcProxyHeaderFor(denyInput))
-      expect(response.status).toBe(200)
-      expect(await response.json()).toEqual({ success: true })
-      expect(onApproval).toHaveBeenCalledTimes(1)
-      expect(onApproval).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userId,
-          requestId: approvalRequestId,
-          approved: false,
-          channelType: 'rpc',
-          channelId: 'chatllm',
-        })
-      )
-    })
-  })
-
-  it('rejects another V2 operation on the approve and deny mounts', async () => {
-    await withServer(async (baseUrl, onApproval) => {
+      const v1Assertion = v1Headers()[HOST_EDGE_ASSERTION_HEADER]
+      const v2Assertion = signHostEdgeTestAssertion({
+        sub: userId,
+        host: 'mcp-host/chatllm',
+        v: 2,
+        claims: { teamId: undefined, scopes: undefined },
+      })
       for (const route of ['approve', 'deny'] as const) {
-        const response = await postDecision(
-          baseUrl,
-          route,
-          await rpcProxyHeaderFor(sessionReadInput)
-        )
-        expect(response.status).toBe(403)
-        expect(await response.json()).toEqual({ error: 'Runtime edge operation mismatch' })
+        for (const assertion of [v1Assertion, v2Assertion]) {
+          const response = await postDecision(
+            baseUrl,
+            route,
+            v2Headers(
+              await rpcProxyHeaderFor(route === 'approve' ? approveInput : denyInput),
+              assertion
+            )
+          )
+          expect(response.status).toBe(401)
+          expect(await response.json()).toEqual({ error: 'Invalid runtime edge assertion' })
+        }
       }
       expect(onApproval).not.toHaveBeenCalled()
 
-      // Liveness witness: the same server admits the matching task.manage
-      // envelope, so the rejections above came from the guard, not from a
-      // server that never reaches the handler.
-      const admitted = await postDecision(baseUrl, 'approve', await rpcProxyHeaderFor(approveInput))
+      const admitted = await postDecision(baseUrl, 'deny', v1Headers())
       expect(admitted.status).toBe(200)
       expect(onApproval).toHaveBeenCalledTimes(1)
+      expect(onApproval).toHaveBeenCalledWith(expect.objectContaining({ approved: false }))
     })
   })
 })
