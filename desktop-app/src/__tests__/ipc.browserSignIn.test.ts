@@ -10,7 +10,7 @@ import type { BrowserSignInSnapshot, LoginMethodsAnswer } from '../types.js'
 /**
  * The browser sign-in IPC surface (design §10.1, §13): five invoke channels and one event, each
  * handler behind `assertTrustedSender`, the preload members that reach them, and none of the
- * service's test-only seams.
+ * service's test-only seams, there or in `main.ts`.
  */
 
 type Handler = (event: unknown, payload?: unknown) => Promise<unknown>
@@ -240,13 +240,19 @@ describe('browser sign-in preload members', () => {
 })
 
 describe('browser sign-in test-only seams', () => {
-  it('none is reachable through ipc.ts or preload.ts', async () => {
-    const sources = ['ipc.ts', 'preload.ts'].map(file => ({
+  it('none is reachable through ipc.ts, preload.ts or main.ts', async () => {
+    // `main.ts` builds the running app's `AppService`, so a seam option would be passed there.
+    const sources = [
+      { file: 'ipc.ts', marker: 'acknowledgeBrowserSignInResult' },
+      { file: 'preload.ts', marker: 'acknowledgeBrowserSignInResult' },
+      { file: 'main.ts', marker: 'browserSignInLinksAvailable' },
+    ].map(({ file, marker }) => ({
       file,
+      marker,
       text: readFileSync(join(__dirname, '..', file), 'utf8'),
     }))
-    // The scan reads the files that carry the browser sign-in surface.
-    for (const { text } of sources) expect(text).toContain('acknowledgeBrowserSignInResult')
+    // The scan reads the files that carry the browser sign-in surface: each names its marker.
+    for (const { file, marker, text } of sources) expect(text, file).toContain(marker)
     for (const { file, text } of sources) {
       for (const seam of TEST_ONLY_SEAMS) expect(text, `${file} names ${seam}`).not.toContain(seam)
     }
