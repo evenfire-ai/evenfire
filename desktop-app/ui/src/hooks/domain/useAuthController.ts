@@ -173,6 +173,15 @@ export function useAuthController({
    * A browser sign-in that redeems blocks every other auth action (D14). It is read from the
    * hook's ref, so it holds before React commits the view (V32, A3-55). It is never written to
    * `authTransitioningRef`, which other flows' `finally` blocks clear (X3).
+   *
+   * The environment changes outside a desktop-environment link (save from the add form, select,
+   * the backend switch, delete and clear) return at once while it holds, with no call to main
+   * and no epoch move (Task 14a review I-1). Main does not refuse them while an attempt
+   * redeems. One that moves the binding advances the generation, so main discards the redeem's
+   * answer and ends the sign-in `replaced`, which shows nothing (decision 5). Delete and clear
+   * are refused even when they would not move it, so all five behave alike. The page also
+   * disables those controls; reading the ref here covers a click that lands before that state
+   * commits. Nothing is shown: the sign-in's own outcome follows.
    */
   const browserSignInBlocksAuthActions = browserSignIn.isRedeeming
 
@@ -316,6 +325,8 @@ export function useAuthController({
   const handleSwitchLoginBackend = async () => {
     const hint = backendSwitchHint
     if (!hint) return
+    // Before the hint is cleared, so the switch stays offered (I-1).
+    if (browserSignInBlocksAuthActions()) return
     setBackendSwitchHint(null)
     const state = await handleSelectRuntimeConfig(hint.targetOptionId)
     if (!state) return
@@ -361,6 +372,9 @@ export function useAuthController({
     nextConfig?: DesktopRuntimeConfig,
     expectedSessionGeneration?: number
   ): Promise<DesktopRuntimeConfigState | null> => {
+    // A link's save carries a generation: its confirm checks the blocker, and main refuses it
+    // while an attempt redeems (D11). The add form's save does not (I-1).
+    if (expectedSessionGeneration === undefined && browserSignInBlocksAuthActions()) return null
     try {
       setBusy(true)
       const name = (nextConfig?.appName ?? runtimeConfigSetupName).trim()
@@ -427,6 +441,7 @@ export function useAuthController({
   }
 
   const handleDeleteRuntimeConfig = async (optionId: string) => {
+    if (browserSignInBlocksAuthActions()) return
     try {
       setBusy(true)
       // During npm-run-dev, Vite can hot-reload renderer code while Electron is
@@ -459,6 +474,7 @@ export function useAuthController({
 
   const handleSelectRuntimeConfig = useCallback(
     async (optionId: string): Promise<DesktopRuntimeConfigState | null> => {
+      if (browserSignInBlocksAuthActions()) return null
       try {
         setBusy(true)
         setBackendSwitchHint(null)
@@ -476,7 +492,7 @@ export function useAuthController({
         setBusy(false)
       }
     },
-    [applySelectedRuntimeConfigState, runBindingChange, setStatus]
+    [applySelectedRuntimeConfigState, browserSignInBlocksAuthActions, runBindingChange, setStatus]
   )
 
   const handleSelectRuntimeConfigForHandoff = useCallback(
@@ -562,6 +578,7 @@ export function useAuthController({
   ])
 
   const handleClearRuntimeConfigSelection = async (): Promise<DesktopRuntimeConfigState | null> => {
+    if (browserSignInBlocksAuthActions()) return null
     try {
       setBusy(true)
       const state = await runBindingChange(() => window.clerum.auth.clearRuntimeConfigSelection())

@@ -599,6 +599,87 @@ async function finishRedeem(harness: BrowserSignInHarness, redeem: { release(): 
   await harness.drain()
 }
 
+/** What main has bound: the active option and the saved options, from its own state. */
+function bindingOf(harness: BrowserSignInHarness) {
+  const state = harness.service.getRuntimeConfigState()
+  return { activeOptionId: state.activeOptionId, optionIds: state.options.map(option => option.id) }
+}
+
+type EnvironmentChangeRow = Readonly<{
+  handler: string
+  /** The preload function the handler reaches main through. */
+  call:
+    | 'saveRuntimeConfig'
+    | 'selectRuntimeConfig'
+    | 'deleteRuntimeConfig'
+    | 'clearRuntimeConfigSelection'
+  /** Sets what the screen holds before the call, if anything; run before each attempt. */
+  prepare?: (page: PageMount, harness: BrowserSignInHarness) => Promise<void>
+  run: (page: PageMount, harness: BrowserSignInHarness) => Promise<unknown>
+  /** What the screen still shows after a refused call, besides the unchanged binding. */
+  afterRefusal?: (page: PageMount) => void
+}>
+
+/**
+ * The environment changes the sign-in page and the dock offer outside a desktop-environment link
+ * (Task 14a review I-1). Main does not refuse them while an attempt redeems.
+ */
+const ENVIRONMENT_CHANGE_ROWS: readonly EnvironmentChangeRow[] = [
+  {
+    handler: 'handleSaveRuntimeConfig',
+    call: 'saveRuntimeConfig',
+    // The add-environment form (`AuthPage/index.tsx:63-69`).
+    prepare: async page => {
+      act(() => {
+        page.controller().setRuntimeConfigSetupName('Environment D')
+        page.controller().setRuntimeConfigSetupExternalRestApiBaseUrl('https://api-d.example.test')
+        page.controller().setRuntimeConfigSetupRpcProxyBaseUrl('https://rpc-d.example.test')
+      })
+    },
+    run: page => page.controller().handleSaveRuntimeConfig(),
+  },
+  {
+    handler: 'handleSelectRuntimeConfig',
+    call: 'selectRuntimeConfig',
+    run: (page, harness) => page.controller().handleSelectRuntimeConfig(harness.envs.B.optionId),
+  },
+  {
+    handler: 'handleSwitchLoginBackend',
+    call: 'selectRuntimeConfig',
+    // Main's own hint: Localhost answers the harness's health route, and the active environment
+    // refuses the connection, as in `appService.diagnoseLoginBackend.test.ts`.
+    prepare: async (page, harness) => {
+      const localhost = harness.service
+        .getRuntimeConfigState()
+        .options.find(option => option.source === 'localhost')
+      if (!localhost) throw new Error('main lists no Localhost option')
+      const localhostOrigin = new URL(localhost.externalRestApiBaseUrl).origin
+      const healthy = harness.routes['GET /health']
+      if (!healthy) throw new Error('the harness has no health route')
+      harness.routes['GET /health'] = request => {
+        if (new URL(request.url).origin === localhostOrigin) return healthy(request)
+        throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
+      }
+      const hint = await harness.service.diagnoseLoginBackend()
+      if (!hint) throw new Error('main offered no backend switch')
+      act(() => page.controller().setBackendSwitchHint(hint))
+    },
+    run: page => page.controller().handleSwitchLoginBackend(),
+    afterRefusal: page =>
+      expect(page.controller().backendSwitchHint, 'the switch is still offered').not.toBeNull(),
+  },
+  {
+    handler: 'handleDeleteRuntimeConfig',
+    call: 'deleteRuntimeConfig',
+    run: (page, harness) => page.controller().handleDeleteRuntimeConfig(harness.envs.C.optionId),
+  },
+  {
+    handler: 'handleClearRuntimeConfigSelection',
+    call: 'clearRuntimeConfigSelection',
+    run: page => page.controller().handleClearRuntimeConfigSelection(),
+  },
+]
+
 type StartGuardRow = Readonly<{
   flag: 'booting' | 'busy' | 'authTransitioning'
   /** Sets the flag through the flow that owns it; the returned function ends that flow. */
@@ -830,6 +911,54 @@ describe('useAuthController: the auth gates and a browser sign-in (D14)', () => 
       expect(bridge.auth.startBrowserSignIn, 'start reaches main afterwards').toHaveBeenCalledTimes(
         1
       )
+    }
+  )
+
+  it.each(ENVIRONMENT_CHANGE_ROWS.map(row => [row.handler, row] as const))(
+    'I-1 refuses %s while redeeming, and lets it reach main while waiting',
+    async (_handler, row) => {
+      const { harness, bridge } = await createSignInMain()
+      const page = await mountAuthPage(bridge)
+      const reachesMain = bridge.auth[row.call]
+
+      // Main redeems an attempt, and the renderer has its push.
+      const { redeem } = await redeemInMain(harness)
+      await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('redeeming'))
+      await row.prepare?.(page, harness)
+      const binding = bindingOf(harness)
+      const bumps = harness.bumpLog.length
+      const reads = bridge.auth.getLoginMethods.mock.calls.length
+
+      await act(async () => {
+        await row.run(page, harness)
+      })
+      expect(
+        reachesMain,
+        `${row.handler} does not reach main while redeeming`
+      ).not.toHaveBeenCalled()
+      expect(bindingOf(harness), 'the binding is unchanged').toEqual(binding)
+      expect(harness.bumpLog.length, 'the generation did not advance').toBe(bumps)
+      expect(
+        bridge.auth.getLoginMethods.mock.calls.length,
+        'no binding change re-read the model'
+      ).toBe(reads)
+      expect(page.controller().browserSignIn.phase, 'the attempt still redeems').toBe('redeeming')
+      row.afterRefusal?.(page)
+
+      // The redeem gets no answer; main ends the attempt and the renderer returns to idle.
+      redeem.release(new Error('fake network failure'))
+      await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('idle'))
+
+      // Positive control: a waiting attempt does not stop the same call (D14, decision 9).
+      await act(async () => {
+        await page.controller().handleStartBrowserSignIn()
+      })
+      expect(page.controller().browserSignIn.phase, 'a new attempt waits').toBe('waiting')
+      await row.prepare?.(page, harness)
+      await act(async () => {
+        await row.run(page, harness)
+      })
+      expect(reachesMain, `${row.handler} reaches main while waiting`).toHaveBeenCalledTimes(1)
     }
   )
 })
