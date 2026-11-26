@@ -22,6 +22,7 @@
  * per Host for the whole page, so it keeps the running switches here (spec
  * §6.3 step 1); its caller owns the report (step 7).
  */
+import { HOST_RELOAD_TO_SAVE_MESSAGE } from '@constants/hostDetails'
 import { type HostResource, REQUEST_TIMED_OUT_MESSAGE, apiSend, getHost } from './api'
 import {
   type EffectiveApproval,
@@ -91,8 +92,6 @@ export const APPROVAL_CREATED_ELSEWHERE_MESSAGE =
   "This agent's approval settings were just created elsewhere. Reload to see them."
 const MAYBE_MESSAGE = 'The save may not have applied. Reload to check.'
 const GAVE_UP_MESSAGE = 'The agent kept changing while saving. Try again.'
-/** Spec §6.5's refusal for a save that has no version to send. */
-const RELOAD_TO_SAVE_MESSAGE = 'Reload the page to save'
 
 /** Spec §6.4 step 9, for `{ kind: 'not_stored' }`; the caller shows what is live after it. */
 export function notStoredMessage(fields: readonly string[]): string {
@@ -377,7 +376,7 @@ export async function saveTools(input: ToolsSaveInput): Promise<ToolsSaveOutcome
 
     // Step 7: never a PUT without the version of this read.
     const version = versionOf(fresh)
-    if (version === undefined) return { kind: 'error', message: RELOAD_TO_SAVE_MESSAGE }
+    if (version === undefined) return { kind: 'error', message: HOST_RELOAD_TO_SAVE_MESSAGE }
     const spec = isPlainObject(fresh.spec) ? fresh.spec : {}
     const put = await timed(clock, PER_TOOL_REQUEST_TIMEOUT_MS, signal =>
       apiSend(
@@ -615,7 +614,7 @@ async function offSwitchAttempt(run: OffSwitchRun): Promise<OffSwitchOutcome | O
 
   // Step 4: the fresh spec with `modeCeiling: manual`, never without this read's version.
   const version = versionOf(fresh)
-  if (version === undefined) return offSwitchFailed(run, RELOAD_TO_SAVE_MESSAGE)
+  if (version === undefined) return offSwitchFailed(run, HOST_RELOAD_TO_SAVE_MESSAGE)
   const spec = isPlainObject(fresh.spec) ? fresh.spec : {}
   const put = await timed(clock, OFF_SWITCH_REQUEST_TIMEOUT_MS, signal =>
     apiSend(
