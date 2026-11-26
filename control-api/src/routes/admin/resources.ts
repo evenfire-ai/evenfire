@@ -1204,11 +1204,6 @@ export function createAdminResourcesRouter(
           res.status(409).json({ error: 'conflict', reason: 'resource_changed' })
           return
         }
-        // Version rule (spec §6.8): the same refusal on the ratchet-read PUT path.
-        if (err instanceof ApprovalRequiresVersionError) {
-          res.status(409).json({ error: 'conflict', reason: 'approval_requires_version' })
-          return
-        }
         throw err
       }
     })
