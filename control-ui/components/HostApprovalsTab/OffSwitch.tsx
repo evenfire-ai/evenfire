@@ -67,10 +67,15 @@ function SavedMessage({ outcome }: SavedResultProps) {
 
 /**
  * Step 7's manifest addition, worded as the manifest banner (spec §6.7,
- * Ruling 47), from the switch's own read or write.
+ * Ruling 47), from the switch's own read before its write, or its write's
+ * answer.
  */
 function ManifestWarning({ outcome }: SavedResultProps) {
-  const manifest = manifestSignal(outcome.stored)
+  // The answer's own signal first (it can show values); else the one the
+  // switch's read showed before its write, which the write may have removed.
+  const after = manifestSignal(outcome.stored)
+  const manifest =
+    after.managed || outcome.kind !== 'saved' ? after : (outcome.manifestBefore ?? after)
   if (!manifest.managed) return null
   return (
     <p className="cu-host-approvals-tab__switch-manifest">{manifestWarningText(manifest.values)}</p>

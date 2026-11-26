@@ -30,6 +30,7 @@ import {
   toolsEqual,
 } from './approvalEffective'
 import { type LooseningItem, looseningItems, looseningItemsConfirmed } from './approvalLoosening'
+import { type ManifestSignal, manifestSignal } from './hostManifestSignal'
 
 export type ApprovalClock = {
   now(): number
@@ -456,6 +457,10 @@ const NO_HOST_MESSAGE = 'Control API answered without a Host.'
  * - `saved`: the ceiling is Manual now, and this run wrote it, or may have.
  *   `stored` is the PUT's answer, or, after a PUT whose answer was lost or a
  *   5xx, the run's next read once it shows Manual (T4u).
+ *   `manifestBefore` is set only when one of the run's own reads, before its
+ *   write, showed a manifest managing `spec.approval`: the apiserver moves a
+ *   field's ownership to the manager whose Update changed it, so the answer
+ *   can show no Apply ownership after the switch's own write.
  * - `already`: the run's read found the ceiling Manual (an absent or invalid
  *   ceiling included), and no attempt of this run may have written. `stored`
  *   is that read. `inherited` is true when the Host has no `spec.approval`
@@ -470,7 +475,7 @@ const NO_HOST_MESSAGE = 'Control API answered without a Host.'
  *   no version. `fallback` is the how-to's kubectl command (step 6).
  */
 export type OffSwitchOutcome =
-  | { kind: 'saved'; stored: HostResource }
+  | { kind: 'saved'; stored: HostResource; manifestBefore?: ManifestSignal }
   | { kind: 'already'; stored: HostResource; inherited: boolean }
   | { kind: 'failed'; message: string; fallback: string }
 
@@ -486,6 +491,8 @@ type OffSwitchRun = {
   callerNamespace?: string
   /** A PUT of this run may have been applied: it was sent, and its answer was lost or a 5xx. */
   mayHaveWritten: boolean
+  /** The first manifest signal one of this run's reads showed, if any. */
+  manifestBefore?: ManifestSignal
 }
 
 /**
@@ -562,6 +569,9 @@ async function runOffSwitch(
   const run: OffSwitchRun = { host, clock, callerNamespace, mayHaveWritten: false }
   for (let retry = 1; ; retry += 1) {
     const result = await offSwitchAttempt(run)
+    if (result.kind === 'saved' && run.manifestBefore) {
+      return { ...result, manifestBefore: run.manifestBefore }
+    }
     if (result.kind !== 'retry') return result
     // Step 4: no new attempt starts later than 20 s after the call. A
     // Retry-After that ends past that leaves no attempt to make.
@@ -602,6 +612,9 @@ async function offSwitchAttempt(run: OffSwitchRun): Promise<OffSwitchOutcome | O
   if (!isHostObject(fresh)) return { kind: 'retry', message: NO_HOST_MESSAGE, retryAfterMs: 0 }
   run.namespace = namespaceOf(fresh) ?? run.namespace
   const block = approvalBlockOf(fresh)
+  // Before any write of this attempt: the signal the write itself may remove.
+  const signal = manifestSignal(fresh)
+  if (signal.managed && !run.manifestBefore) run.manifestBefore = signal
 
   // Step 3. Only a run that sent nothing that may have landed says "already".
   if (ceilingIsManual(block)) {

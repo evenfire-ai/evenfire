@@ -628,6 +628,45 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       }
     )
 
+    it("security m-4: the warning comes from the switch's own read when the answer shows no Apply ownership", async () => {
+      // The apiserver moves a field's ownership to the manager whose Update
+      // changed it, so control-api's replace can take `f:approval` from the
+      // Apply entry. The answer here is the recorded Control UI-edited Host
+      // (its managedFields hold Update entries only), at Manual.
+      const fake = createFakeControlApi({
+        hosts: { foo: fooFrom('host-server-side-applied') },
+        crd: 'current',
+        versionRule: true,
+      })
+      const tab = renderApprovalsTab({ fake, host: 'foo' })
+      await approvalSettingsDriver()
+      const put = fake.hold({ method: 'PUT', path: FOO })
+      await clickSetToManual()
+      await act(async () => {
+        await put.arrived
+      })
+      const edited = fooFrom('host-control-ui-edited')
+      await act(async () => {
+        put.respondWith(200, {
+          ...edited,
+          spec: {
+            ...edited.spec,
+            approval: {
+              ...(edited.spec.approval as Record<string, unknown>),
+              modeCeiling: 'manual',
+            },
+          },
+        })
+      })
+      await waitFor(() => expect(offSwitchResult()).not.toBeNull())
+
+      expect(resultParagraphs()).toEqual([
+        manualMessage({ already: false, skip: NO_SKIP }),
+        MANIFEST_WARNING_NO_VALUES,
+      ])
+      tab.unmount()
+    })
+
     it('T28 partner: a Host edited through the Control UI gets no manifest warning', async () => {
       const fake = createFakeControlApi({
         hosts: { foo: fooFrom('host-control-ui-edited') },
