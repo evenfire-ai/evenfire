@@ -21,9 +21,26 @@ export type LogicalSessionCheckpointAuthority = Readonly<{
   sessionVersion: number
 }>
 
+/**
+ * Continuation of a workflow run the user already started: authority is
+ * anchored on the user and their live grants, not on a login session. The
+ * snapshot answers `sessionLive` from `users.lifecycle_state` alone, uses a
+ * constant `sessionRevision`, and reads no `external_user_sessions` row. `sid`
+ * and `sessionVersion` are the stored binding's values; they are echoed in the
+ * attribution and never compared with a session row.
+ */
+export type UserGrantContinuationAuthority = Readonly<{
+  contract: 'v2'
+  authorityMode: 'user_grant_continuation'
+  userId: string
+  sid: string
+  sessionVersion: number
+}>
+
 export type AccessAuthoritySession =
   | ExternalSessionAuthorityContext
   | LogicalSessionCheckpointAuthority
+  | UserGrantContinuationAuthority
 
 export function parseAuthorizationMemberships(value: unknown): AuthorizationMembershipRevision[] {
   if (!Array.isArray(value)) return []
@@ -48,6 +65,12 @@ export async function loadPrincipalAuthoritySnapshot(input: {
   budget: AccessExecutionBudget
   session: AccessAuthoritySession
 }): Promise<PrincipalAuthoritySnapshot | null> {
+  const session = input.session
+  const userAnchored =
+    'authorityMode' in session && session.authorityMode === 'user_grant_continuation'
+  // The user-anchored mode passes no session coordinates, so the session
+  // subqueries below match no `external_user_sessions` row for it.
+  const sessionAnchoredV2 = session.contract === 'v2' && !userAnchored ? session : null
   const result = await query(
     input.db,
     input.budget,
@@ -60,6 +83,7 @@ export async function loadPrincipalAuthoritySnapshot(input: {
      SELECT u.id AS user_id,
             CASE
               WHEN u.lifecycle_state <> 'active' THEN FALSE
+              WHEN $7::boolean THEN TRUE
               WHEN $2::text = 'v2' THEN EXISTS (
                 SELECT 1
                   FROM external_user_sessions s
@@ -81,6 +105,7 @@ export async function loadPrincipalAuthoritySnapshot(input: {
               ELSE FALSE
             END AS session_live,
             CASE
+              WHEN $7::boolean THEN 'user_grant_continuation'
               WHEN $2::text = 'v2' THEN COALESCE((
                 SELECT s.session_version::text || ':' || s.current_jti::text || ':' ||
                        COALESCE(s.revoked_at::text, '') || ':' || s.absolute_expires_at::text
@@ -106,13 +131,11 @@ export async function loadPrincipalAuthoritySnapshot(input: {
     [
       input.session.userId,
       input.session.contract,
-      input.session.contract === 'v2' ? input.session.sid : null,
-      input.session.contract === 'v2' && !('authorityMode' in input.session)
-        ? input.session.jti
-        : null,
-      input.session.contract === 'v2' ? input.session.sessionVersion : null,
-      'authorityMode' in input.session &&
-        input.session.authorityMode === 'logical_session_checkpoint',
+      sessionAnchoredV2?.sid ?? null,
+      sessionAnchoredV2 && !('authorityMode' in sessionAnchoredV2) ? sessionAnchoredV2.jti : null,
+      sessionAnchoredV2?.sessionVersion ?? null,
+      'authorityMode' in session && session.authorityMode === 'logical_session_checkpoint',
+      userAnchored,
     ]
   )
   const row = result.rows[0] as Record<string, unknown> | undefined
