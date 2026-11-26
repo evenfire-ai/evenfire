@@ -1571,52 +1571,34 @@ function ownedKeys(w: World, owner: Owner): Set<string> {
   return keys
 }
 
-/** S1: no lost update. */
+/**
+ * S1: no lost update. An accepted Control UI approval write changes only the
+ * keys it owns (ownedKeys); every other key keeps the value the store held,
+ * which is the last value another writer (or the CRD's default) gave it.
+ */
 function checkS1(w: World): void {
   for (const agent of AGENTS) {
-    const expected = leaves(w.seeds[agent].spec)
-    const lastOwner = new Map<string, 'other' | 'cui'>()
-    const cuiAfter = new Map<string, boolean>()
+    // Keys another writer set since the seed: where a stale write would show.
+    const setByOthers = new Set<string>()
     for (const event of w.timeline.filter(item => item.agent === agent)) {
       const before = leaves(event.before.spec)
       const after = leaves(event.after.spec)
       const changed = changedKeys(before, after)
       const cui =
         event.kind === 'request' && (event.owner?.kind === 'save' || event.owner?.kind === 'switch')
-      if (cui) {
-        const owned = ownedKeys(w, event.owner as Owner)
-        for (const key of changed) {
-          if (!owned.has(key)) {
-            flag(
-              w,
-              'S1',
-              `${event.owner?.kind} #${event.owner?.id} changed ${agent}'s ${key}, which it does not own: ${before.get(key)} → ${after.get(key)}`
-            )
-          }
-          expected.set(key, after.get(key) as string)
-          if (after.get(key) === undefined) expected.delete(key)
-          lastOwner.set(key, 'cui')
-        }
-        for (const key of lastOwner.keys())
-          if (lastOwner.get(key) === 'other') cuiAfter.set(key, true)
-      } else {
-        for (const key of changed) {
-          if (after.has(key)) expected.set(key, after.get(key) as string)
-          else expected.delete(key)
-          lastOwner.set(key, 'other')
-          cuiAfter.delete(key)
-        }
+      if (!cui) {
+        for (const key of changed) setByOthers.add(key)
+        continue
       }
-    }
-    const final = leaves(w.fake.stored(agent).spec)
-    for (const key of new Set([...expected.keys(), ...final.keys()])) {
-      if (lastOwner.get(key) === 'cui') continue
-      if (cuiAfter.get(key)) count(w.stats, 'checks', 'S1')
-      if (expected.get(key) !== final.get(key)) {
+      const owned = ownedKeys(w, event.owner as Owner)
+      // Non-vacuous: keys another writer set that this write does not own.
+      count(w.stats, 'checks', 'S1', [...setByOthers].filter(key => !owned.has(key)).length)
+      for (const key of changed) {
+        if (owned.has(key)) continue
         flag(
           w,
           'S1',
-          `${agent}'s ${key} is ${final.get(key)}, but its last writer set ${expected.get(key)}`
+          `${event.owner?.kind} #${event.owner?.id} changed ${agent}'s ${key}, which it does not own: ${before.get(key)} → ${after.get(key)}`
         )
       }
     }
