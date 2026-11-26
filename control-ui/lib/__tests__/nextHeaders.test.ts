@@ -41,9 +41,19 @@ describe('next.config headers', () => {
   // send-response). The proxy under /control-api/ forwards upstream headers,
   // so a CSP or X-Frame-Options from control-api must not be suppressed.
   it.each(['/control-api/', '/control-api/api/v1/admin/hosts/foo'])(
-    'leaves the proxied path %s out of the frame rule',
+    'no header rule that matches the proxied path %s sets a frame header, whatever its value',
     async pathname => {
-      expect(await frameRulesFor(pathname)).toEqual([])
+      const rules = (await nextConfig.headers?.()) ?? []
+      // The positive partner: the rules are real and match pages.
+      expect(
+        rules.some(rule => getPathMatch(rule.source, { strict: false })('/agents') !== false)
+      ).toBe(true)
+      const matching = rules.filter(
+        rule => getPathMatch(rule.source, { strict: false })(pathname) !== false
+      )
+      const names = matching.flatMap(rule => rule.headers.map(header => header.key.toLowerCase()))
+      expect(names).not.toContain('content-security-policy')
+      expect(names).not.toContain('x-frame-options')
     }
   )
 })
